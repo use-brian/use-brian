@@ -1,0 +1,27 @@
+{
+  "ref": "refs/heads/dependabot/npm_and_yarn/lodash-4.17.21",
+  "before": "3333333333333333333333333333333333333333",
+  "after": "4444444444444444444444444444444444444444",
+  "repository": {
+    "id": 1,
+    "full_name": "acme/widget",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "dependabot[bot]",
+    "type": "Bot"
+  },
+  "head_commit": {
+    "id": "4444444444444444444444444444444444444444",
+    "timestamp": "2026-05-14T12:00:00Z",
+    "author": { "name": "dependabot[bot]", "email": "dependabot@github.com" }
+  },
+  "commits": [
+    {
+      "id": "4444444444444444444444444444444444444444",
+      "added": [],
+      "removed": [],
+      "modified": ["package-lock.json"]
+    }
+  ]
+}

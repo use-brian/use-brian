@@ -1,0 +1,48 @@
+/**
+ * Open standalone entry for the sidanclaw HTTP API (`@sidanclaw/api-open`).
+ *
+ * This is the single-player, one-key local product entrypoint. It imports ZERO
+ * closed code: no `@sidanclaw/api-platform`, no `@sidanclaw/shared-server`, no
+ * `getEnv()`. It reads the handful of values the open composition needs straight
+ * from `process.env` (with local defaults), then calls `bootOpenApi()` with no
+ * ports — every closed seam falls back to its safe default (allow-all credit
+ * gate, no-op usage recorder, inert feed hooks, no-op episode ingest). The brain
+ * still dreams (consolidation runs on the local timer); billing, connectors,
+ * feed-distribution, and the messaging channels are simply absent.
+ *
+ * See docs/plans/oss-local-brain-wedge.md §12.7 (one-command parity boot).
+ */
+
+import dotenv from 'dotenv'
+import { bootOpenApi, type OpenApiEnv } from '@sidanclaw/api/boot.js'
+
+dotenv.config()
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY
+if (!GEMINI_API_KEY) {
+  console.error('[api-open] GEMINI_API_KEY is required. Set it and restart.')
+  process.exit(1)
+}
+
+// JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
+// fall back to a process-local random one (sessions don't survive a restart,
+// which is fine for a single-process dev boot).
+const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).randomUUID()
+
+const env: OpenApiEnv = {
+  GEMINI_API_KEY,
+  JWT_SECRET,
+  NODE_ENV: process.env.NODE_ENV || 'development',
+  API_URL: process.env.API_URL || 'http://localhost:4000',
+  APP_URL: process.env.APP_URL || 'http://localhost:3003',
+  PORT: process.env.PORT,
+  VOICE_TRANSCRIPTION_ENABLED: process.env.VOICE_TRANSCRIPTION_ENABLED === 'true',
+  VOICE_TRANSCRIPTION_MODEL: process.env.VOICE_TRANSCRIPTION_MODEL,
+  FALLBACK_PROVIDER_ENABLED: process.env.FALLBACK_PROVIDER_ENABLED === 'true',
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+  GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
+  SKILLS_AUTO_GEN_ENABLED: process.env.SKILLS_AUTO_GEN_ENABLED === 'true',
+}
+
+const { start } = await bootOpenApi({ env, runWorkers: true })
+await start()

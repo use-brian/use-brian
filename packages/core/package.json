@@ -1,0 +1,37 @@
+{
+  "name": "@sidanclaw/core",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && rm -rf dist/skills/builtin && (test -d src/skills/builtin && cp -r src/skills/builtin dist/skills/builtin || true)",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "smoke": "tsx scripts/smoke.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.98.0",
+    "@mozilla/readability": "^0.5.0",
+    "@sidanclaw/shared": "workspace:*",
+    "@sidanclaw/sidanclaw-kb": "workspace:*",
+    "docx": "^9.7.1",
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
+    "linkedom": "^0.18.0",
+    "mammoth": "^1.12.0",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "yjs": "13.6.31",
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/turndown": "^5.0.6",
+    "dotenv": "^16",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

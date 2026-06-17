@@ -1,0 +1,18 @@
+{
+  "action": "published",
+  "security_advisory": {
+    "ghsa_id": "GHSA-xxxx-yyyy-zzzz",
+    "summary": "Critical vulnerability in widget",
+    "severity": "high",
+    "published_at": "2026-05-14T13:00:00Z"
+  },
+  "repository": {
+    "id": 1,
+    "full_name": "acme/widget",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "github",
+    "type": "Bot"
+  }
+}

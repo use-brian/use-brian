@@ -1,0 +1,7 @@
+export type { KnowledgeStoreInterface, KnowledgeSearchResult, KnowledgeEntryDetail } from './types.js'
+export { computeSimilarity } from './similarity.js'
+export { createKnowledgeSyncWorker } from './sync-worker.js'
+export type { SyncGitHubApi, SyncStore, SyncCredentials, SyncSource, SyncEvent } from './sync-worker.js'
+export { parseMarkdownFile, normalisePath } from './parser.js'
+export type { ParsedEntry } from './parser.js'
+export { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'

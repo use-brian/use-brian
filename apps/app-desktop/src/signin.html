@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Self-contained landing: inline styles/script only, plus the brand mark
+         as a data: URI (no remote/file loads). `img-src data:` is the only
+         addition to the strict baseline. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"
+    />
+    <title>sidanclaw</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+          sans-serif;
+        background: #f7f7f5;
+        color: #37352f;
+        -webkit-user-select: none;
+        user-select: none;
+        /* Frameless (hiddenInset) window: the whole landing is a drag handle so
+           the user can move the window; the button opts out below. */
+        -webkit-app-region: drag;
+        overflow: hidden;
+      }
+      /* Sidanclaw's signature cyan glow over the surface. */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        background: radial-gradient(
+            circle at 50% 28%,
+            rgba(52, 211, 255, 0.1) 0%,
+            rgba(52, 211, 255, 0) 60%
+          ),
+          radial-gradient(
+            circle at 82% 84%,
+            rgba(52, 211, 255, 0.06) 0%,
+            transparent 50%
+          );
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #0b1020;
+          color: #e9e9e7;
+        }
+        body::before {
+          background: radial-gradient(
+              circle at 50% 28%,
+              rgba(52, 211, 255, 0.18) 0%,
+              rgba(11, 16, 32, 0) 60%
+            ),
+            radial-gradient(
+              circle at 82% 84%,
+              rgba(52, 211, 255, 0.08) 0%,
+              transparent 50%
+            );
+        }
+      }
+      .card {
+        position: relative;
+        text-align: center;
+        max-width: 320px;
+        padding: 32px;
+      }
+      .mark {
+        display: block;
+        width: 64px;
+        height: 64px;
+        border-radius: 16px;
+        margin: 0 auto 22px;
+        box-shadow: 0 8px 30px -10px rgba(52, 211, 255, 0.55);
+        outline: 1px solid rgba(52, 211, 255, 0.3);
+      }
+      h1 {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        margin: 0 0 8px;
+      }
+      p {
+        font-size: 14px;
+        opacity: 0.65;
+        margin: 0 0 24px;
+        line-height: 1.55;
+      }
+      /* The CTA mirrors the app's FANCY primary treatment (see globals.css
+         `--btn-image` / `--btn-glow`): a 135deg gradient within the signature
+         cyan family, a glassy inset top highlight, and a layered cyan glow that
+         lets the button float off the surface. A flat single-colour fill is the
+         "Notion-default" treatment and reads dated next to the glowing mark. */
+      button {
+        font: inherit;
+        font-weight: 600;
+        font-size: 14px;
+        letter-spacing: 0.01em;
+        color: #04131c;
+        background: linear-gradient(135deg, #5fe2ff 0%, #34d3ff 48%, #17bdec 100%);
+        border: 0;
+        border-radius: 12px;
+        padding: 12px 30px;
+        cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45),
+          0 1px 2px rgba(4, 19, 28, 0.18),
+          0 8px 20px -8px rgba(52, 211, 255, 0.55),
+          0 16px 40px -16px rgba(52, 211, 255, 0.45);
+        transition: box-shadow 0.2s ease, transform 0.12s ease, filter 0.2s ease;
+        /* Stay clickable inside the draggable surface. */
+        -webkit-app-region: no-drag;
+      }
+      button:hover {
+        filter: brightness(1.04);
+        transform: translateY(-1px);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55),
+          0 1px 2px rgba(4, 19, 28, 0.2),
+          0 10px 26px -8px rgba(52, 211, 255, 0.7),
+          0 22px 50px -18px rgba(52, 211, 255, 0.55);
+      }
+      button:active {
+        transform: translateY(0) scale(0.985);
+        filter: brightness(0.98);
+      }
+      #signing {
+        display: none;
+      }
+      body.signing #signin {
+        display: none;
+      }
+      body.signing #signing {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img
+        class="mark"
+        alt="Sidanclaw"
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAJoElEQVR4nO3dsYoiaRhAUV3EQIwKH8B0w8XI9w+MZMJJfQAxkkld6BfYXqbH6vrvOUmFfvV/0F7Kgl5vd9NrBQCk/DX3AADA+wkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIGgz9wDwGfvD0UGxCM/7be4R4FMEAIvxuFxXo5rOp4+rexxjj7AEfgIAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAELTe7qbX3EPAf9kfjg6JRXjeb3OPAJ8iAAbgyxF4J5Ezhs3cA/A1HpfrsEc5nU8fV/e4bPY41h5ZPu8AAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAhab3fTa+4h+D37w9ERAm/zvN+c9gCGDwBfjgD8X89A5GxWAY/LdTWq6Xz6uLrHZbPHMdjjWHscnXcAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAghL/DZC23T9/v+Vzfv34+ZbPqbJH+FqeAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABA0GbuAeBP+/Xjp0MegD3C1/IEAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAEDQerubXquB7Q/HuUcAYGGe99tqdJ4AAEDQZhXwuFxXo5rOp4+re1w2exyDPY61x9F5AgAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgaL3dTa/VwPaH49wjALAwz/ttNbrhA6BA5ADvVPhyLNjMPQBf43G5DnuU0/n0cXWPy2aPY+2R5fMOAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAICg9XY3veYegt+zPxwdIfA2z/vNaQ9AALAIhcgp/FG1R/g+NnMPAJ/1uFyHPazpfFpV2CN8D94BAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABC0mXsA+KzpfHJYA7BH+B7W2930mnsIAOC9/AQAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAFj1/AuUCJSpn1bklAAAAABJRU5ErkJggg=="
+      />
+      <h1>sidanclaw</h1>
+      <div id="signin">
+        <p>You're signed out. Sign in to open your workspace.</p>
+        <button id="signin-btn" type="button">Sign In</button>
+      </div>
+      <div id="signing">
+        <p>Opening your browser to sign in. Come back here once you're done.</p>
+        <button id="retry-btn" type="button">Open browser again</button>
+      </div>
+    </div>
+    <script>
+      function go() {
+        document.body.classList.add("signing");
+        if (window.sidanclawDesktop && window.sidanclawDesktop.signIn) {
+          window.sidanclawDesktop.signIn();
+        }
+      }
+      document.getElementById("signin-btn").addEventListener("click", go);
+      document.getElementById("retry-btn").addEventListener("click", go);
+    </script>
+  </body>
+</html>

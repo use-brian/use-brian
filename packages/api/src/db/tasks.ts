@@ -1,0 +1,460 @@
+import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
+import { buildAccessPredicate } from './access-predicate.js'
+import { assertAuthorshipPresent } from './authorship-guard.js'
+import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
+import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
+
+const FULL_SELECT = `
+  id, workspace_id as "workspaceId", title, status,
+  assignee_id as "assigneeId", due, tags,
+  parent_id as "parentId", external_ref as "externalRef", attributes,
+  created_at as "createdAt", updated_at as "updatedAt"
+`
+
+const COMPACT_SELECT = `
+  id, workspace_id as "workspaceId", title, status,
+  assignee_id as "assigneeId", due, tags,
+  parent_id as "parentId", attributes, updated_at as "updatedAt"
+`
+
+type TaskRow = {
+  id: string
+  workspaceId: string
+  title: string
+  status: TaskRecordStatus
+  assigneeId: string | null
+  due: Date | null
+  tags: string[]
+  parentId: string | null
+  externalRef: Record<string, unknown>
+  attributes: Record<string, unknown>
+  createdAt: Date
+  updatedAt: Date
+}
+
+type CompactRow = {
+  id: string
+  workspaceId: string
+  title: string
+  status: TaskRecordStatus
+  assigneeId: string | null
+  due: Date | null
+  tags: string[]
+  parentId: string | null
+  attributes: Record<string, unknown>
+  updatedAt: Date
+}
+
+function toRecord(row: TaskRow): TaskRecord {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    title: row.title,
+    status: row.status,
+    assigneeId: row.assigneeId,
+    due: row.due,
+    tags: row.tags,
+    parentId: row.parentId,
+    externalRef: row.externalRef ?? {},
+    attributes: row.attributes ?? {},
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function toListRow(row: CompactRow): TaskListRow {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    title: row.title,
+    status: row.status,
+    assigneeId: row.assigneeId,
+    due: row.due,
+    tags: row.tags,
+    parentId: row.parentId,
+    attributes: row.attributes ?? {},
+    updatedAt: row.updatedAt,
+  }
+}
+
+/**
+ * Create a task.
+ *
+ * WU-1.7 edge hook: when `params.linkedEntityIds` is non-empty AND an
+ * `entityLinks` store is passed, a `task → entity` `mentioned` edge is
+ * emitted per id, fire-and-forget, after the task row is written. Edge
+ * failures never affect the task save (see `edge-hooks.ts`). Both
+ * arguments are optional so existing call sites keep compiling unchanged.
+ */
+export async function createTask(
+  userId: string,
+  params: {
+    workspaceId: string
+    title: string
+    status?: TaskRecordStatus
+    assigneeId?: string | null
+    due?: Date | null
+    tags?: string[]
+    parentId?: string | null
+    externalRef?: Record<string, unknown>
+    /** User-configurable per-task JSONB — sprint estimation / ordering /
+     *  velocity keys per `decisions-log.md` 2026-05-14. Defaults to `{}`. */
+    attributes?: Record<string, unknown>
+    /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
+    compartments?: string[]
+    /** Task ids this task depends on — each becomes a task→task
+     *  `depends_on` edge (fire-and-forget; v1 append-only). */
+    dependsOn?: readonly string[]
+    /** Entity ids this task references — each gets a `mentioned` edge
+     *  (WU-1.7). Optional; empty/absent means no edge emission. */
+    linkedEntityIds?: readonly string[]
+  },
+  entityLinks?: EntityLinksStore,
+): Promise<TaskRecord> {
+  // WU-4.5 — authorship NOT NULL enforcement at the store layer. The
+  // `userId` argument is both the RLS actor and the row author; without
+  // it the row would land with a NULL `created_by_user_id` (mig 128
+  // leaves the column nullable; the guard, not the schema, enforces).
+  // Other universal columns (sensitivity, source, valid_from) take
+  // their schema defaults from migration 128.
+  assertAuthorshipPresent('createTask', userId)
+  const result = await queryWithRLS<TaskRow>(
+    userId,
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING ${FULL_SELECT}`,
+    [
+      params.workspaceId,
+      params.title,
+      params.status ?? 'todo',
+      params.assigneeId ?? null,
+      params.due ?? null,
+      params.tags ?? [],
+      params.parentId ?? null,
+      JSON.stringify(params.externalRef ?? {}),
+      JSON.stringify(params.attributes ?? {}),
+      userId,
+      params.compartments ?? [],
+    ],
+  )
+  const task = toRecord(result.rows[0])
+
+  // Fire-and-forget `mentioned` edges — `void`, never awaited, never
+  // able to throw into the task save.
+  if (entityLinks && params.linkedEntityIds && params.linkedEntityIds.length > 0) {
+    void emitMentionedEdges(entityLinks, userId, {
+      sourceKind: 'task',
+      sourceId: task.id,
+      entityIds: params.linkedEntityIds,
+      workspaceId: task.workspaceId,
+      source: 'user',
+      userId,
+    })
+  }
+  // Fire-and-forget `depends_on` edges from this task → each
+  // depended-on task. v1 append-only — never removes existing edges.
+  if (entityLinks && params.dependsOn && params.dependsOn.length > 0) {
+    void emitDependsOnEdges(entityLinks, userId, {
+      sourceTaskId: task.id,
+      dependsOnTaskIds: params.dependsOn,
+      workspaceId: task.workspaceId,
+      source: 'user',
+      userId,
+    })
+  }
+  return task
+}
+
+export async function getTaskById(ctx: AccessContext, id: string): Promise<TaskRecord | null> {
+  // Universal access projection (WU-4.2b) + `valid_to IS NULL` to hide
+  // superseded versions. History via `getTaskHistory`.
+  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const result = await queryWithRLS<TaskRow>(
+    ctx.userId,
+    `SELECT ${FULL_SELECT} FROM tasks
+     WHERE ${ap.sql}
+       AND id = $${ap.nextIdx} AND valid_to IS NULL`,
+    [...ap.params, id],
+  )
+  if (result.rows.length === 0) return null
+  return toRecord(result.rows[0])
+}
+
+export async function listTasks(ctx: AccessContext, filters: TaskListFilters): Promise<TaskListRow[]> {
+  // `valid_to IS NULL` filter hides superseded versions. Index
+  // `idx_tasks_valid` (migration 128) covers this predicate.
+  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const wheres: string[] = [ap.sql, 'valid_to IS NULL']
+  const values: unknown[] = [...ap.params]
+  let idx = ap.nextIdx
+
+  if (filters.assigneeId) {
+    wheres.push(`assignee_id = $${idx}`)
+    values.push(filters.assigneeId)
+    idx++
+  }
+  if (filters.status) {
+    if (Array.isArray(filters.status)) {
+      wheres.push(`status = ANY($${idx})`)
+      values.push(filters.status)
+    } else {
+      wheres.push(`status = $${idx}`)
+      values.push(filters.status)
+    }
+    idx++
+  } else if (!filters.includeArchived) {
+    wheres.push(`status <> 'archived'`)
+  }
+  if (filters.dueBefore) {
+    wheres.push(`due IS NOT NULL AND due < $${idx}`)
+    values.push(filters.dueBefore)
+    idx++
+  }
+  if (filters.dueAfter) {
+    wheres.push(`due IS NOT NULL AND due > $${idx}`)
+    values.push(filters.dueAfter)
+    idx++
+  }
+  if (filters.tag) {
+    wheres.push(`$${idx} = ANY(tags)`)
+    values.push(filters.tag)
+    idx++
+  }
+  if (filters.parentId) {
+    wheres.push(`parent_id = $${idx}`)
+    values.push(filters.parentId)
+    idx++
+  }
+
+  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
+  values.push(limit)
+
+  const result = await queryGated<CompactRow>(
+    ctx,
+    `SELECT ${COMPACT_SELECT} FROM tasks
+     WHERE ${wheres.join(' AND ')}
+     ORDER BY updated_at DESC
+     LIMIT $${idx}`,
+    values,
+  )
+  return result.rows.map(toListRow)
+}
+
+type OldTaskRow = {
+  workspace_id: string
+  title: string
+  status: TaskRecordStatus
+  assignee_id: string | null
+  due: Date | null
+  tags: string[]
+  parent_id: string | null
+  external_ref: Record<string, unknown>
+  attributes: Record<string, unknown>
+  sensitivity: string
+  user_id: string | null
+  assistant_id: string | null
+  source: string
+  source_episode_id: string | null
+}
+
+/**
+ * Bi-temporal supersession update.
+ *
+ * Each `updateTask` call closes the prior row (`valid_to = now()`,
+ * `superseded_by = <new_id>`) and inserts a new row carrying the merged
+ * field values plus all carried-forward universal columns. The new row
+ * has a new id — callers consume `result.id` instead of holding onto the
+ * input id. See `docs/plans/company-brain/data-model.md` §"Bi-temporal
+ * validity" and `corrections.md` §D.7.
+ *
+ * Wrapped in BEGIN/COMMIT so the SELECT old + INSERT new + close old +
+ * repoint active children sequence is atomic and the per-statement
+ * triggers see a consistent state (notably the `parent_id` workspace-match
+ * trigger, which fires on the children repoint and validates against the
+ * newly inserted row).
+ *
+ * Empty `fields` is treated as a no-op — returns the current active row
+ * without a supersession write. Tool-layer also guards this; the DB-layer
+ * check is defense-in-depth.
+ */
+export async function updateTask(
+  userId: string,
+  id: string,
+  fields: TaskUpdateFields,
+  entityLinks?: EntityLinksStore,
+): Promise<TaskRecord | null> {
+  if (Object.keys(fields).length === 0) {
+    // No-op short-circuit — read the current row without per-viewer
+    // projection (this is the write path; RLS is the workspace gate).
+    const result = await queryWithRLS<TaskRow>(
+      userId,
+      `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+      [id],
+    )
+    return result.rows.length === 0 ? null : toRecord(result.rows[0])
+  }
+
+  const client = await getAppPool().connect()
+  try {
+    await client.query('BEGIN')
+    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+    try {
+      const oldRes = await client.query<OldTaskRow>(
+        `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
+                sensitivity, user_id, assistant_id, source, source_episode_id
+         FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+        [id],
+      )
+      if (oldRes.rows.length === 0) {
+        await client.query('ROLLBACK')
+        return null
+      }
+      const old = oldRes.rows[0]
+
+      const newTitle = fields.title !== undefined ? fields.title : old.title
+      const newStatus = fields.status !== undefined ? fields.status : old.status
+      const newAssigneeId = fields.assigneeId !== undefined ? fields.assigneeId : old.assignee_id
+      const newDue = fields.due !== undefined ? fields.due : old.due
+      const newTags = fields.tags !== undefined ? fields.tags : old.tags
+      const newParentId = fields.parentId !== undefined ? fields.parentId : old.parent_id
+      const newExternalRef = fields.externalRef !== undefined ? fields.externalRef : (old.external_ref ?? {})
+      const newAttributes = fields.attributes !== undefined ? fields.attributes : (old.attributes ?? {})
+
+      const insertRes = await client.query<TaskRow>(
+        `INSERT INTO tasks (
+           workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
+           sensitivity, user_id, assistant_id, source, source_episode_id,
+           created_by_user_id, valid_from, valid_to, superseded_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
+                 $10, $11, $12, $13, $14,
+                 $15, now(), NULL, NULL)
+         RETURNING ${FULL_SELECT}`,
+        [
+          old.workspace_id,
+          newTitle,
+          newStatus,
+          newAssigneeId,
+          newDue,
+          newTags,
+          newParentId,
+          JSON.stringify(newExternalRef),
+          JSON.stringify(newAttributes),
+          old.sensitivity,
+          old.user_id,
+          old.assistant_id,
+          old.source,
+          old.source_episode_id,
+          userId,
+        ],
+      )
+      const newRow = insertRes.rows[0]
+
+      await client.query(
+        `UPDATE tasks SET valid_to = now(), superseded_by = $1
+         WHERE id = $2 AND valid_to IS NULL`,
+        [newRow.id, id],
+      )
+
+      // Repoint active children to the new parent so the active sub-task
+      // tree stays coherent. The parent-workspace-match trigger fires on
+      // each child here and sees the just-inserted new row (same
+      // transaction, so visible to subsequent statements) and validates
+      // against its workspace_id, which carried forward from `old`.
+      await client.query(
+        `UPDATE tasks SET parent_id = $1
+         WHERE parent_id = $2 AND valid_to IS NULL`,
+        [newRow.id, id],
+      )
+
+      await client.query('COMMIT')
+      const newTask = toRecord(newRow)
+
+      // Fire-and-forget `depends_on` edges from the new (active) task
+      // id → each depended-on target. v1 append-only — does not remove
+      // or rewrite edges pointing at the pre-supersession id.
+      if (entityLinks && fields.dependsOn && fields.dependsOn.length > 0) {
+        void emitDependsOnEdges(entityLinks, userId, {
+          sourceTaskId: newTask.id,
+          dependsOnTaskIds: fields.dependsOn,
+          workspaceId: newTask.workspaceId,
+          source: 'user',
+          userId,
+        })
+      }
+      return newTask
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    }
+  } finally {
+    await rollbackAndRelease(client)
+  }
+}
+
+/**
+ * Walk the full bi-temporal version chain for a task, in `valid_from`
+ * order. Returns every row in the chain (including superseded ones)
+ * regardless of which id in the chain the caller knew about. Empty array
+ * if the id is unknown or RLS-hidden.
+ *
+ * Implementation walks `superseded_by` both directions from the start id
+ * — forward (older→newer) following the pointer, backward (newer→older)
+ * matching on rows whose `superseded_by` equals the current id. `UNION`
+ * deduplicates the meet point.
+ *
+ * DB-layer helper only — not exposed via `TaskStore`. WU-6.9 will wire a
+ * unified `getRowHistory` surface across primitives.
+ */
+/**
+ * System-level lookup of the active task row by id (no RLS, no
+ * `AccessContext`). Returns the post-supersession active row, or null
+ * if no such id exists or the task has been fully retracted.
+ *
+ * Used by the commitment-lifecycle worker — it runs without a
+ * per-user session and needs to read task state when resolving
+ * `commitment:sprint_variance` memories. The cross-workspace exposure
+ * is intentional and bounded: the worker is system-trusted, and the
+ * memory it is resolving already carries the workspace context.
+ */
+export async function getTaskByIdSystem(id: string): Promise<TaskRecord | null> {
+  const result = await query<TaskRow>(
+    `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+    [id],
+  )
+  if (result.rows.length === 0) return null
+  return toRecord(result.rows[0])
+}
+
+export async function getTaskHistory(ctx: AccessContext, id: string): Promise<TaskRecord[]> {
+  // D.7 invariant: every row in a supersession chain shares the same
+  // universal-column tuple (workspace_id, user_id, assistant_id,
+  // sensitivity). Apply the universal access predicate to the anchor
+  // only; the recursive step inherits visibility implicitly.
+  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const result = await queryWithRLS<TaskRow>(
+    ctx.userId,
+    `WITH RECURSIVE chain AS (
+       SELECT id, workspace_id, title, status, assignee_id, due, tags,
+              parent_id, external_ref, attributes, created_at, updated_at,
+              valid_from, valid_to, superseded_by
+       FROM tasks
+       WHERE ${ap.sql} AND id = $${ap.nextIdx}
+       UNION
+       SELECT t.id, t.workspace_id, t.title, t.status, t.assignee_id, t.due, t.tags,
+              t.parent_id, t.external_ref, t.attributes, t.created_at, t.updated_at,
+              t.valid_from, t.valid_to, t.superseded_by
+       FROM tasks t, chain c
+       WHERE t.id = c.superseded_by OR t.superseded_by = c.id
+     )
+     SELECT
+       id, workspace_id as "workspaceId", title, status,
+       assignee_id as "assigneeId", due, tags,
+       parent_id as "parentId", external_ref as "externalRef", attributes,
+       created_at as "createdAt", updated_at as "updatedAt"
+     FROM chain
+     ORDER BY valid_from ASC`,
+    [...ap.params, id],
+  )
+  return result.rows.map(toRecord)
+}

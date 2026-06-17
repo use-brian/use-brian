@@ -1,0 +1,20 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 7,
+    "title": "Bug: thing breaks",
+    "body": "Reproduction steps.",
+    "html_url": "https://github.com/acme/widget/issues/7",
+    "created_at": "2026-05-14T11:00:00Z",
+    "updated_at": "2026-05-14T11:00:00Z"
+  },
+  "repository": {
+    "id": 1,
+    "full_name": "acme/widget",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "carol",
+    "type": "User"
+  }
+}

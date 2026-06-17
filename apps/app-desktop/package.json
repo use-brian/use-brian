@@ -1,0 +1,30 @@
+{
+  "name": "@sidanclaw/app-desktop",
+  "productName": "sidanclaw",
+  "version": "0.0.4",
+  "description": "sidanclaw — saved table + board views over your tasks, CRM, and workflow runs.",
+  "author": "SIDAN Lab",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "copy:assets": "node scripts/copy-static.mjs",
+    "build": "tsc && pnpm run copy:assets",
+    "dev": "tsc && pnpm run copy:assets && electron dist/main.js",
+    "start": "electron dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "pnpm run build && electron-builder --mac",
+    "package:win": "pnpm run build && electron-builder --win --x64 --publish never"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
+  }
+}

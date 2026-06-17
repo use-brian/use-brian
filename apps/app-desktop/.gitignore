@@ -1,0 +1,6 @@
+# Build output — compiled main process, packaged apps, and the bundled renderer
+# (the Vite SPA of app-web, built via `pnpm --filter app-web build:desktop`).
+dist/
+release/
+renderer/
+node_modules/

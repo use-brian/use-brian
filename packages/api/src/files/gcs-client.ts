@@ -1,0 +1,162 @@
+/**
+ * GCS-backed blob storage for the workspace filesystem primitive
+ * (company-brain §10, Q3 Phase A).
+ *
+ * Owns the bytes layer: write/read/delete/append against
+ * `gs://<bucket>/<workspace_id>/<file_id>`. The structural / discovery
+ * layer (path, title, summary, tags, search_vector) lives in the
+ * `workspace_files` table and is the responsibility of
+ * `packages/api/src/db/workspace-files-store.ts`. The file API
+ * (`files-api.ts`) stitches the two together.
+ *
+ * Auth: Application Default Credentials. On Cloud Run the service
+ * account identity is used automatically; for local dev run
+ * `gcloud auth application-default login`. No credentials file is read.
+ *
+ * The client is a thin wrapper around the SDK — a `GcsFilesClient`
+ * interface lets tests substitute an in-memory fake (see
+ * `packages/api/src/files/__tests__/files-api.test.ts`). Never hit a
+ * real bucket from tests.
+ */
+
+import { Storage, type Bucket } from '@google-cloud/storage'
+
+export type GcsObjectMetadata = {
+  workspaceId: string
+  createdByUserId?: string
+  createdByAssistantId?: string
+  mime: string
+}
+
+export type GcsBlob = {
+  bytes: Buffer
+  mime: string
+  metadata: GcsObjectMetadata
+}
+
+export type GcsFilesClient = {
+  /**
+   * Write a blob with workspace-scoped custom metadata. Overwrites any
+   * existing object at the same key. The caller is responsible for
+   * ordering the GCS write before the DB insert (see `files-api.ts`).
+   */
+  writeBlob(key: string, bytes: Buffer, metadata: GcsObjectMetadata): Promise<void>
+
+  /**
+   * Read-modify-write append. Pulls the existing object, concatenates,
+   * writes back. v1 uses a simple round-trip; if append-heavy workloads
+   * become real, swap to GCS compose API on a future ticket.
+   */
+  appendBlob(key: string, bytes: Buffer): Promise<void>
+
+  /** Returns null if the object does not exist (404). */
+  readBlob(key: string): Promise<GcsBlob | null>
+
+  /** Idempotent — silent no-op on 404. */
+  deleteBlob(key: string): Promise<void>
+
+  /** V4 signed read URL. ttlSec defaults to 1h. */
+  signedReadUrl(key: string, ttlSec?: number): Promise<string>
+}
+
+export type GcsClientOptions = {
+  bucket: string
+  projectId?: string
+}
+
+export function createGcsFilesClient({ bucket: bucketName, projectId }: GcsClientOptions): GcsFilesClient {
+  const storage = new Storage(projectId ? { projectId } : undefined)
+  const bucket: Bucket = storage.bucket(bucketName)
+
+  return {
+    async writeBlob(key, bytes, metadata) {
+      await bucket.file(key).save(bytes, {
+        contentType: metadata.mime,
+        metadata: {
+          contentType: metadata.mime,
+          metadata: {
+            'workspace-id': metadata.workspaceId,
+            ...(metadata.createdByUserId ? { 'created-by-user-id': metadata.createdByUserId } : {}),
+            ...(metadata.createdByAssistantId ? { 'created-by-assistant-id': metadata.createdByAssistantId } : {}),
+            mime: metadata.mime,
+          },
+        },
+      })
+    },
+
+    async appendBlob(key, bytes) {
+      const existing = await this.readBlob(key)
+      if (!existing) {
+        throw new Error(`gcs: cannot append — blob not found at ${key}`)
+      }
+      const combined = Buffer.concat([existing.bytes, bytes])
+      await bucket.file(key).save(combined, {
+        contentType: existing.mime,
+        metadata: {
+          contentType: existing.mime,
+          metadata: {
+            'workspace-id': existing.metadata.workspaceId,
+            ...(existing.metadata.createdByUserId ? { 'created-by-user-id': existing.metadata.createdByUserId } : {}),
+            ...(existing.metadata.createdByAssistantId ? { 'created-by-assistant-id': existing.metadata.createdByAssistantId } : {}),
+            mime: existing.mime,
+          },
+        },
+      })
+    },
+
+    async readBlob(key) {
+      try {
+        const file = bucket.file(key)
+        const [contents] = await file.download()
+        const [meta] = await file.getMetadata()
+        const custom = (meta.metadata ?? {}) as Record<string, string | undefined>
+        const mime = (typeof meta.contentType === 'string' && meta.contentType) || custom.mime || 'application/octet-stream'
+        return {
+          bytes: contents,
+          mime,
+          metadata: {
+            workspaceId: custom['workspace-id'] ?? '',
+            createdByUserId: custom['created-by-user-id'],
+            createdByAssistantId: custom['created-by-assistant-id'],
+            mime,
+          },
+        }
+      } catch (err: unknown) {
+        if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 404) {
+          return null
+        }
+        throw err
+      }
+    },
+
+    async deleteBlob(key) {
+      try {
+        await bucket.file(key).delete()
+      } catch (err: unknown) {
+        if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 404) {
+          return
+        }
+        throw err
+      }
+    },
+
+    async signedReadUrl(key, ttlSec = 3600) {
+      const [url] = await bucket.file(key).getSignedUrl({
+        version: 'v4',
+        action: 'read',
+        expires: Date.now() + ttlSec * 1000,
+      })
+      return url
+    },
+  }
+}
+
+/** Object key format: `<workspace_id>/<file_id>`. */
+export function buildStorageKey(workspaceId: string, fileId: string): string {
+  return `${workspaceId}/${fileId}`
+}
+
+/** `gs://bucket/<workspace_id>/<file_id>` URI for the workspace_files.storage_uri column. */
+export function buildStorageUri(bucket: string, workspaceId: string, fileId: string): string {
+  return `gs://${bucket}/${buildStorageKey(workspaceId, fileId)}`
+}

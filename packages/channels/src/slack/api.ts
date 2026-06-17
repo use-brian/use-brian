@@ -1,0 +1,217 @@
+/**
+ * Lightweight Slack Web API client using fetch.
+ */
+
+export type SlackOutboundAudit = {
+  kind: 'post_message' | 'update_message'
+  /** Slack channel id ('C…' public, 'G…' private, 'D…' DM, 'I…' IM). */
+  channel: string
+  /** Outbound message text (chunked at the caller). */
+  text: string
+  /** thread_ts for chat.postMessage; the prior message ts for chat.update. */
+  ts?: string
+  /** Result from Slack — the new message ts when applicable. */
+  externalTs?: string | null
+  status: 'executed' | 'failed'
+  error?: string
+}
+
+export type SlackApiOptions = {
+  botToken: string
+  /**
+   * Optional async hook invoked after every outbound Slack write
+   * (`chat.postMessage`, `chat.update`). When set, the Slack route
+   * uses it to emit a `connector_action` Episode + audit row per
+   * `docs/architecture/integrations/connector-actions.md`. Errors
+   * thrown by the hook are caught + logged — audit failures must not
+   * crash the user-facing send. Skipped for status/typing/reaction
+   * calls (they aren't user-visible writes).
+   *
+   * TODO: migrate Slack to the unified `connector_instance` substrate
+   * (`docs/plans/company-brain/connector-actions.md` → "Slack write
+   * actions"). Until then this hook is the temp path — audit emission
+   * happens at the bot-socket boundary rather than the tool boundary.
+   */
+  onOutboundAudit?: (event: SlackOutboundAudit) => Promise<void>
+}
+
+export function createSlackApi(options: SlackApiOptions) {
+  const base = 'https://slack.com/api'
+  const onOutboundAudit = options.onOutboundAudit
+
+  async function call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
+    const res = await fetch(`${base}/${method}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${options.botToken}`,
+      },
+      body: params ? JSON.stringify(params) : undefined,
+    })
+
+    const data = await res.json() as { ok: boolean; error?: string } & T
+    if (!data.ok) {
+      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
+    }
+    return data
+  }
+
+  /**
+   * Form-encoded variant — `files.getUploadURLExternal` is one of the Slack
+   * methods that rejects a JSON body (`invalid_arguments`); it requires
+   * `application/x-www-form-urlencoded`.
+   */
+  async function callForm<T>(method: string, params: Record<string, string>): Promise<T> {
+    const res = await fetch(`${base}/${method}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: `Bearer ${options.botToken}`,
+      },
+      body: new URLSearchParams(params).toString(),
+    })
+
+    const data = await res.json() as { ok: boolean; error?: string } & T
+    if (!data.ok) {
+      throw new Error(`Slack API ${method}: ${data.error ?? 'unknown error'}`)
+    }
+    return data
+  }
+
+  async function safeAudit(event: SlackOutboundAudit): Promise<void> {
+    if (!onOutboundAudit) return
+    try {
+      await onOutboundAudit(event)
+    } catch (err) {
+      // Audit failure NEVER affects the send — the slack message has
+      // already been delivered (or the failure has already propagated).
+      console.warn(
+        '[slack/api] outbound audit hook failed (suppressed):',
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+
+  return {
+    postMessage: async (channel: string, text: string, opts?: { threadTs?: string; mrkdwn?: boolean }) => {
+      try {
+        const result = await call<{ ts: string; channel: string }>('chat.postMessage', {
+          channel,
+          text,
+          mrkdwn: opts?.mrkdwn ?? true,
+          thread_ts: opts?.threadTs,
+        })
+        await safeAudit({
+          kind: 'post_message',
+          channel,
+          text,
+          ts: opts?.threadTs,
+          externalTs: result.ts,
+          status: 'executed',
+        })
+        return result
+      } catch (err) {
+        await safeAudit({
+          kind: 'post_message',
+          channel,
+          text,
+          ts: opts?.threadTs,
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+    },
+
+    updateMessage: async (channel: string, ts: string, text: string, opts?: { mrkdwn?: boolean }) => {
+      try {
+        const result = await call<{ ts: string }>('chat.update', {
+          channel,
+          ts,
+          text,
+          mrkdwn: opts?.mrkdwn ?? true,
+        })
+        await safeAudit({
+          kind: 'update_message',
+          channel,
+          text,
+          ts,
+          externalTs: result.ts,
+          status: 'executed',
+        })
+        return result
+      } catch (err) {
+        await safeAudit({
+          kind: 'update_message',
+          channel,
+          text,
+          ts,
+          status: 'failed',
+          error: err instanceof Error ? err.message : String(err),
+        })
+        throw err
+      }
+    },
+
+    authTest: () => call<{ user_id: string; bot_id: string; team: string }>('auth.test'),
+
+    addReaction: (channel: string, timestamp: string, name: string) =>
+      call<{}>('reactions.add', { channel, timestamp, name }),
+
+    removeReaction: (channel: string, timestamp: string, name: string) =>
+      call<{}>('reactions.remove', { channel, timestamp, name }),
+
+    /** Set the native "thinking" status in a Slack Assistants thread. */
+    setAssistantStatus: (channelId: string, threadTs: string, status: string) =>
+      call<{}>('assistant.threads.setStatus', { channel_id: channelId, thread_ts: threadTs, status }),
+
+    /** Clear the native thinking status (set empty string). */
+    clearAssistantStatus: (channelId: string, threadTs: string) =>
+      call<{}>('assistant.threads.setStatus', { channel_id: channelId, thread_ts: threadTs, status: '' }),
+
+    /** Fetch recent messages from a channel. Requires channels:history scope. */
+    conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
+      call<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(
+        'conversations.history',
+        { channel, limit: opts?.limit ?? 20, latest: opts?.latest },
+      ),
+
+    // ── File upload (external upload flow) ─────────────────────────
+    // The three-step replacement for the deprecated `files.upload`:
+    // getUploadURLExternal → POST bytes to the returned URL →
+    // completeUploadExternal. Requires the `files:write` scope on the
+    // BYO app. See adapter-pattern.md → "Outbound documents".
+
+    /** Step 1: mint a one-time upload URL for a file of `length` bytes. */
+    getUploadURLExternal: (filename: string, length: number) =>
+      callForm<{ upload_url: string; file_id: string }>('files.getUploadURLExternal', {
+        filename,
+        length: String(length),
+      }),
+
+    /** Step 2: POST the raw bytes to the minted URL (not a Web API method — no envelope). */
+    uploadToExternalURL: async (uploadUrl: string, data: Uint8Array): Promise<void> => {
+      const res = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: data,
+      })
+      if (!res.ok) {
+        throw new Error(`Slack file upload: HTTP ${res.status}`)
+      }
+    },
+
+    /** Step 3: finalize and share the upload into a channel/thread. */
+    completeUploadExternal: (
+      files: Array<{ id: string; title?: string }>,
+      opts?: { channelId?: string; threadTs?: string },
+    ) =>
+      call<{ files: Array<{ id: string }> }>('files.completeUploadExternal', {
+        files,
+        channel_id: opts?.channelId,
+        thread_ts: opts?.threadTs,
+      }),
+  }
+}
+
+export type SlackApi = ReturnType<typeof createSlackApi>

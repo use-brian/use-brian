@@ -1,0 +1,2184 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* App UI font stack (legacy variable name — the old layout shipped Google's
+     RocknRoll_One under it; no Google Font is loaded now). The NATIVE OS UI font
+     leads (SF Pro on macOS / Segoe UI on Windows / system-ui elsewhere) so Latin
+     text reads like a native app — Notion-style — with REAL weights instead of
+     PingFang's synthesised faux-bold. Per-glyph fallback then hands CJK glyphs
+     (absent from SF Pro) to PingFang TC / JhengHei / Noto Sans TC, so Chinese +
+     Japanese still render correctly. This was previously PingFang-first, which
+     made Latin UI text render in PingFang's heavier Median master (font-weight
+     450 rounds up to PingFang's 500) and look off; leading with the OS font fixes
+     both the style and the weight. */
+  --font-rocknroll: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif;
+  /* Heading / title display face — same stack as the body so headings, page
+     titles, and editor H1–H4 stay in one type system. (Aliased; both lead with
+     the OS UI font, which also gives Latin headings genuine heavy weights.) */
+  --font-display: var(--font-rocknroll);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-rocknroll);
+  --font-heading: var(--font-rocknroll);
+  --font-mono: var(--font-jetbrains-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
+
+/* ============================================================================
+   PALETTE SYSTEM
+   The DEFAULT palette is EXACT NOTION (warm grey + Notion blue) — the bare
+   `:root` / `.dark` below. The only other palette is `custom`: a workspace-
+   shared, AI-generated theme whose tokens are injected as a <style> at runtime
+   (see lib/theme.tsx), keyed to `data-palette="custom"` on <html>. The visual
+   TREATMENTS (button fill, active-row pill, sidebar wash, text selection) are
+   token-driven (--btn-*, --nav-active-*, --sidebar-surface-image, --selection-2)
+   so Notion renders FLAT/authentic while `custom` renders the fancy gradient +
+   glow versions — see the treatment rules near `.doc-btn-glow`.
+   Palettes: notion (default) · custom (AI-generated).
+   ============================================================================ */
+
+/* ── Notion (default) — light. Authentic Notion: white page, warm-grey sidebar
+   #F7F7F5, warm-black #37352F text, Notion blue #2383E2. ── */
+:root {
+  --background: #FFFFFF;
+  --foreground: #37352F;
+  --card: #FFFFFF;
+  --card-foreground: #37352F;
+  --popover: #FFFFFF;
+  --popover-foreground: #37352F;
+  --primary: #2383E2;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F1F1EF;
+  --secondary-foreground: #37352F;
+  --muted: #F7F6F3;
+  --muted-foreground: #787774;
+  --accent: #EFEFEE;
+  --accent-foreground: #37352F;
+  /* `--accent-2` = the duotone companion. For Notion it equals `--primary`, so
+     gradients/selection collapse to a single Notion blue (no second hue). */
+  --accent-2: #2383E2;
+  --destructive: #EB5757;
+  --border: #EDEDEC;
+  --input: #EDEDEC;
+  --ring: #2383E2;
+  --radius: 0.75rem;
+  /* Notion-style reading measure for non-full-width doc pages (~720px).
+     Applied via `.doc-page-content` in @layer components. Palette-agnostic. */
+  --doc-content-width: 45rem;
+  --sidebar: #F7F7F5;
+  --sidebar-foreground: #37352F;
+  --sidebar-primary: #2383E2;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #EAEAE8;
+  --sidebar-accent-foreground: #37352F;
+  --sidebar-border: #E9E9E7;
+  --sidebar-ring: #2383E2;
+
+  /* Treatment tokens — DEFAULT = flat (Notion). Brand palettes override below.
+     Notion's active row is a flat grey, its buttons are flat blue, no glow. */
+  --btn-image: none;
+  --btn-glow: 0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent);
+  --btn-glow-hover: 0 2px 4px color-mix(in oklab, var(--foreground) 16%, transparent);
+  /* Active/selected pill — intentionally a touch STRONGER than the hover wash
+     (`--sidebar-accent`). A faint grey reads fine as a transient hover, but as an
+     always-on selected pill it blends into the sidebar, so the active nav item /
+     page row looks un-highlighted. Token-relative (mix the accent toward the
+     foreground) so it adapts to light + dark; the custom palette overrides this
+     with its gradient below. */
+  --nav-active-bg: color-mix(in srgb, var(--sidebar-accent) 90%, var(--sidebar-foreground) 10%);
+  --nav-active-fg: var(--sidebar-accent-foreground);
+  --nav-active-glow: none;
+  --sidebar-surface-image: none;
+  --selection-2: var(--primary);
+}
+
+/* ── Notion (default) — dark. #191919 page, #202020 sidebar, 81%-white text. ──
+   Brand blue is RETUNED for dark (NOT the light-page #2383E2): that saturated
+   blue is both off-cohesion against the warm-grey dark surfaces and misses WCAG
+   AA on them — white-on-#2383E2 ≈ 3.9:1 (the user-message bubble + CTA labels)
+   and #2383E2-as-text ≈ 4.0:1 on #252525 (the "Thinking…"/tool-timeline accents).
+   We use Notion's OWN dark-mode blue #529CCA, which reads ~5:1 as accent
+   text/icons on these surfaces, and flip --primary-foreground to a deep navy so
+   every `bg-primary` fill (Send, FAB, CTAs) stays AA-legible as dark-ink-on-soft-
+   blue. --accent-2 tracks --primary (Notion's duotone collapses to one hue), and
+   --ring / --sidebar-primary / --sidebar-ring move with it. Light keeps the
+   authentic #2383E2 (see :root). ── */
+.dark {
+  --background: #191919;
+  --foreground: #D4D4D4;
+  --card: #1F1F1F;
+  --card-foreground: #D4D4D4;
+  --popover: #252525;
+  --popover-foreground: #D4D4D4;
+  --primary: #529CCA;
+  --primary-foreground: #0A1A24;
+  --secondary: #2F2F2F;
+  --secondary-foreground: #D4D4D4;
+  --muted: #2F2F2F;
+  --muted-foreground: #979797;
+  --accent: #2F2F2F;
+  --accent-foreground: #D4D4D4;
+  --accent-2: #529CCA;
+  --destructive: #EB5757;
+  --border: #2F2F2F;
+  --input: #2F2F2F;
+  --ring: #529CCA;
+  --sidebar: #202020;
+  --sidebar-foreground: #D4D4D4;
+  --sidebar-primary: #529CCA;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #2F2F2F;
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: #2F2F2F;
+  --sidebar-ring: #529CCA;
+}
+
+/* The `custom` palette — an AI-generated theme whose core tokens are injected as
+   a <style> at runtime (see lib/theme.tsx) — opts into the FANCY treatments
+   (gradient fill + layered glow + duotone selection + sidebar wash), keyed off
+   its own core tokens so they render in its hues. Notion (the default :root
+   above) keeps the flat treatments. */
+[data-palette="custom"] {
+  --btn-image: linear-gradient(135deg, var(--primary), var(--accent-2));
+  --btn-glow:
+    inset 0 1px 0 color-mix(in oklab, white 22%, transparent),
+    0 1px 2px color-mix(in oklab, var(--foreground) 9%, transparent),
+    0 6px 18px -6px color-mix(in oklab, var(--ring) 45%, transparent),
+    0 10px 30px -12px color-mix(in oklab, var(--accent-2) 50%, transparent);
+  --btn-glow-hover:
+    inset 0 1px 0 color-mix(in oklab, white 28%, transparent),
+    0 1px 2px color-mix(in oklab, var(--foreground) 11%, transparent),
+    0 9px 24px -6px color-mix(in oklab, var(--ring) 60%, transparent),
+    0 14px 38px -12px color-mix(in oklab, var(--accent-2) 65%, transparent);
+  --nav-active-bg: linear-gradient(135deg, var(--primary), var(--accent-2));
+  --nav-active-fg: var(--primary-foreground);
+  --nav-active-glow:
+    0 1px 2px color-mix(in oklab, var(--foreground) 12%, transparent),
+    0 6px 16px -8px color-mix(in oklab, var(--accent-2) 60%, transparent);
+  --sidebar-surface-image: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--primary) 7%, var(--sidebar)) 0%,
+    var(--sidebar) 30%
+  );
+  --selection-2: var(--accent-2);
+}
+
+/* Block-action "Color" palette — the ONLY place these hues live. The shared
+   schema stores named ids ('blue', 'red', …) on the block's color/bgColor
+   attrs; this maps them to theme-aware values. Notion-parity hues (design may
+   tune later — a one-file change). */
+:root {
+  --doc-color-gray: #787774;   --doc-bg-gray: #F1F1EF;
+  --doc-color-brown: #976D57;  --doc-bg-brown: #F4EEEE;
+  --doc-color-orange: #CC772F; --doc-bg-orange: #FAEBDD;
+  --doc-color-yellow: #C29243; --doc-bg-yellow: #FBF3DB;
+  --doc-color-green: #548164;  --doc-bg-green: #EDF3EC;
+  --doc-color-blue: #487CA5;   --doc-bg-blue: #E7F3F8;
+  --doc-color-purple: #8A67AB; --doc-bg-purple: #F4F0F7;
+  --doc-color-pink: #B35488;   --doc-bg-pink: #F9EEF3;
+  --doc-color-red: #C4554D;    --doc-bg-red: #FBE4E4;
+}
+.dark {
+  --doc-color-gray: #9B9B9B;   --doc-bg-gray: #2F2F2F;
+  --doc-color-brown: #BA856F;  --doc-bg-brown: #2E2724;
+  --doc-color-orange: #D9904C; --doc-bg-orange: #36291F;
+  --doc-color-yellow: #D9B85E; --doc-bg-yellow: #372E1E;
+  --doc-color-green: #6FA383;  --doc-bg-green: #1F2D23;
+  --doc-color-blue: #6B9FC9;   --doc-bg-blue: #1A2B33;
+  --doc-color-purple: #A98CC9; --doc-bg-purple: #272030;
+  --doc-color-pink: #CF77A6;   --doc-bg-pink: #311F29;
+  --doc-color-red: #DF7E78;    --doc-bg-red: #36211F;
+}
+
+/* Brain entity-type palette — hue ENCODES the nature of the node so that
+   "closer in nature ⇒ closer in colour". Laid out as a value chain around the
+   wheel: ACTORS (cool) knowledge·company·person·skill → the DEAL bridge (green
+   = money) → ARTIFACTS (warm) project·product·repository, with connector/other
+   desaturated outside the semantic band. Palette-AGNOSTIC on purpose: these are
+   data-viz hues, not brand chrome, so the `custom` theme does NOT recolour them
+   (no `[data-palette]` override). Mirrors `lib/brain-colors.ts` (the SSR
+   fallback); the graph reads these at runtime so dark gets its own values. */
+:root {
+  --entity-knowledge: #7C5CD9;
+  --entity-company: #3B6FE0;
+  --entity-person: #0E9FB2;
+  --entity-skill: #2EA34F;
+  --entity-deal: #0E7C52;
+  --entity-project: #C7891B;
+  --entity-product: #E06A24;
+  --entity-repository: #D83C2E;
+  --entity-memory: #9D8FB8;
+  --entity-connector: #5E7CA6;
+  --entity-other: #64748B;
+}
+.dark {
+  /* Brightened ~12% in lightness so each hue reads as a saturated dot on the
+     #191919 / #1F1F1F surfaces; same hue order as light. */
+  --entity-knowledge: #9B82F0;
+  --entity-company: #5B8BF5;
+  --entity-person: #22BACE;
+  --entity-skill: #4CC06A;
+  --entity-deal: #2BA177;
+  --entity-project: #E6A93C;
+  --entity-product: #F58A44;
+  --entity-repository: #F0584A;
+  --entity-memory: #B4A7CE;
+  --entity-connector: #84A0CC;
+  --entity-other: #94A0B2;
+}
+
+/* Brain graph canvas — its own theme-ADAPTIVE token set, separate from the
+   page tokens so the canvas can be art-directed without recoloring the app.
+   BOTH themes anchor --graph-bg to the PAGE background (resolves through
+   var() in getComputedStyle, so the canvas tracks dark mode and custom
+   palettes for free) — a hue-shifted ground next to the neutral chrome
+   read as a foreign surface in either theme. The support tokens
+   (fg/muted/border) are near-neutral, tuned for canvas reading rather
+   than page text; --graph-entity-*: the light set mirrors :root
+   --entity-* (lib/brain-colors.ts BRAIN_ENTITY_COLORS), the dark set is
+   the vivid .dark palette (BRAIN_ENTITY_COLORS_VIVID) — keep all of them
+   in sync. The canvas-side tokens (fg/muted/border + entities) must stay
+   6-digit hex — the canvas color math (withAlpha/shadeHex) degrades on
+   any other format (--graph-bg resolves to the page background's hex).
+   Overlay tokens are CSS-only and may be rgba. Spec:
+   docs/architecture/brain/graph-view.md → "Theme". */
+:root {
+  --graph-bg: var(--background);
+  --graph-fg: #1F2737;
+  --graph-muted: #6B7691;
+  --graph-border: #D7DDEA;
+  --graph-overlay: rgba(255, 255, 255, 0.82);
+  --graph-overlay-fg: #4A5468;
+  --graph-overlay-border: rgba(31, 39, 55, 0.12);
+  --graph-overlay-active: rgba(99, 113, 178, 0.16);
+  --graph-entity-knowledge: #7C5CD9;
+  --graph-entity-company: #3B6FE0;
+  --graph-entity-person: #0E9FB2;
+  --graph-entity-skill: #2EA34F;
+  --graph-entity-deal: #0E7C52;
+  --graph-entity-project: #C7891B;
+  --graph-entity-product: #E06A24;
+  --graph-entity-repository: #D83C2E;
+  --graph-entity-memory: #9D8FB8;
+  --graph-entity-connector: #5E7CA6;
+  --graph-entity-other: #64748B;
+}
+.dark {
+  --graph-bg: var(--background);
+  --graph-fg: #E6E6EA;
+  --graph-muted: #8A8A92;
+  --graph-border: #3E3E46;
+  --graph-overlay: rgba(25, 25, 28, 0.8);
+  --graph-overlay-fg: #BFBFC7;
+  --graph-overlay-border: rgba(190, 190, 205, 0.14);
+  --graph-overlay-active: rgba(255, 255, 255, 0.1);
+  --graph-entity-knowledge: #9B82F0;
+  --graph-entity-company: #5B8BF5;
+  --graph-entity-person: #22BACE;
+  --graph-entity-skill: #4CC06A;
+  --graph-entity-deal: #2BA177;
+  --graph-entity-project: #E6A93C;
+  --graph-entity-product: #F58A44;
+  --graph-entity-repository: #F0584A;
+  --graph-entity-memory: #B4A7CE;
+  --graph-entity-connector: #84A0CC;
+  --graph-entity-other: #94A0B2;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-rocknroll), system-ui, sans-serif;
+    /* Body weight 450 (a hair above Regular), NOT a literal 400. Measured
+       against a Notion screenshot, Notion's body ink-density matches ~450 here,
+       not a true Regular — and because the doc surface defaults to LIGHT mode
+       while the Notion reference is dark, our text needs the extra +50 to read
+       at the same weight (light-on-dark blooms heavier; dark-on-light renders
+       thinner at the same nominal weight, made thinner still by the
+       `-webkit-font-smoothing: antialiased` below). A literal 400 measured
+       visibly lighter than Notion ("too thin"), so this stays at 450. */
+    font-weight: 450;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-rocknroll), system-ui, sans-serif;
+  }
+  code, pre, kbd {
+    font-family: var(--font-jetbrains-mono), ui-monospace, monospace;
+  }
+  html {
+    @apply font-sans;
+    scroll-behavior: smooth;
+  }
+
+  /* Interactive elements get a pointer by default. shadcn Tailwind
+     v4 ships without the implicit `cursor: pointer` on <button>, so we
+     reinstate it across native interactives. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label[for],
+  summary,
+  select:not(:disabled),
+  input[type="checkbox"]:not(:disabled),
+  input[type="radio"]:not(:disabled),
+  input[type="submit"]:not(:disabled),
+  input[type="button"]:not(:disabled),
+  input[type="reset"]:not(:disabled),
+  input[type="file"]:not(:disabled)::file-selector-button,
+  input[type="range"]:not(:disabled) {
+    cursor: pointer;
+  }
+  button:disabled,
+  [aria-disabled="true"],
+  [data-disabled="true"] {
+    cursor: not-allowed;
+  }
+
+  /* Text selection — a duotone BLEND (one solid colour; ::selection can't take a
+     gradient): mix `--primary` with `--selection-2`, then 42% alpha so it reads
+     as a tint. `--selection-2` is the brand's second hue on the slate / indigo /
+     emerald / sunset palettes and EQUALS `--primary` on Notion, so it collapses to
+     a single Notion-blue selection there. */
+  ::selection {
+    background-color: color-mix(
+      in srgb,
+      color-mix(in oklab, var(--primary) 62%, var(--selection-2)) 42%,
+      transparent
+    );
+    color: var(--foreground);
+  }
+  /* Dark mode: `--foreground` is a light grey (#D4D4D4), and the 42% tint above
+     composites to a mid-tone blue over the dark surface — so light-grey text on
+     it lands at ~3.6:1 and selected text reads washed out (the light-mode pairing
+     of DARK foreground on a LIGHT tint doesn't invert cleanly). Keep the same
+     background tint (highlight prominence then matches light mode) and brighten
+     just the selected text toward white to clear WCAG AA (~4.9:1). Derived from
+     `--foreground` so the custom dark palette keeps its hue. */
+  .dark ::selection {
+    color: color-mix(in srgb, var(--foreground) 25%, white);
+  }
+
+  /* Custom scrollbar — slim, primary-tinted, not in your face. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted-foreground) 22%, transparent);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+    transition: background-color 200ms ease;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+    background-clip: content-box;
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--muted-foreground) 30%, transparent)
+      transparent;
+  }
+
+  /* Fluid focus ring instead of jarring solid outline. Applies to every
+     focusable element, so a STANDALONE control (a lone input/textarea/button
+     that is its own bordered box) frames itself correctly.
+
+     COMPOSITE FIELD CONVENTION: when a bordered box groups an inner control
+     WITH sibling controls (e.g. a comment composer = textarea + attach/mention/
+     send buttons in one box), the ring belongs on the BOX, not the inner
+     control. The box draws it with `focus-within:border-ring
+     focus-within:ring-2 focus-within:ring-ring/35`, and each inner focusable
+     element opts OUT of this global ring with `focus-visible:shadow-none`.
+     References: page-comments.tsx, comment-thread-body.tsx, and the
+     ChatComposer usage in empty-page-landing.tsx. */
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in srgb, var(--ring) 65%, transparent);
+    border-radius: inherit;
+    transition: box-shadow 150ms ease;
+  }
+
+  /* The doc editor is a page-sized `contenteditable`; Chromium matches
+     it as `:focus-visible` the moment you click in, so the global ring
+     above would frame the entire page. Notion strips the focus outline off
+     its editable body for exactly this reason — the caret (and a
+     selected-block fill, when present) is the only "you are here" cue.
+     Suppress the ring on the editor surface only; discrete controls keep
+     theirs. */
+  .doc-collab-editor .ProseMirror:focus-visible,
+  .doc-collab-editor .ProseMirror:focus {
+    outline: none;
+    box-shadow: none;
+  }
+
+  /* ── Doc editor block typography + vertical rhythm ──────────────
+     The live editor is a single ProseMirror doc built from StarterKit
+     nodes. Tailwind Preflight resets h1–h6 to `font-size/weight: inherit`,
+     so WITHOUT these rules a heading renders identically to a paragraph —
+     "Turn into → Heading 2" (and AI-authored headings) appear to do
+     nothing. These scope a Notion-like type scale + block spacing to the
+     doc editing/reading surface only. The page headline is owned
+     separately by `page-title.tsx`, so in-body headings sit just beneath
+     it. */
+  .doc-collab-editor .ProseMirror {
+    font-size: 16px;
+    /* Notion's body leading. Measured from Notion: same-list items render at
+       a uniform 24px pitch = 1.5 × 16px with no inter-item spacing. (Was 1.7,
+       which made every body line + list row ~3px too tall.) */
+    line-height: 1.5;
+    /* Left gutter that hosts the hover drag handle (drag-handle.tsx). The
+       handle is a sibling element the plugin hides the moment the cursor
+       leaves `.ProseMirror` for any non-handle element — so it must live
+       OVER `.ProseMirror`'s own box, not in a foreign margin, or moving
+       toward it crosses dead space and it vanishes before you can grab it.
+       `padding-left` opens the gutter inside the editor box; the matching
+       negative `margin-left` reclaims it from the page column so body text
+       stays visually flush with the title (no indent). The column is
+       full-width, so there's no centering to fight. */
+    padding-left: 2rem;
+    margin-left: -2rem;
+    /* Tail breathing room (Notion-style). Without it the last block sits
+       flush against the scroll container's bottom edge, so a page can't
+       scroll past its final line — the tail is hard to read and there's no
+       slack to click below the last block. A viewport-relative pad lets the
+       last line scroll up toward the middle. It only adds a scroll region
+       once real content already fills the pane, so short pages stay put.
+       Living on `.ProseMirror` (not the outer scroller) keeps the empty
+       area clickable to place the caret at the document end. */
+    padding-bottom: 30vh;
+  }
+  /* Drop-target affordance — `doc-media-paste.ts` toggles `.doc-drag-over` on
+     the editor DOM while a FILE drag hovers it (block-reorder drags never set
+     it). A soft inset brand ring + wash says "drop to upload"; on drop, an
+     empty media block inserts and uploads its bytes in place. */
+  .doc-collab-editor .ProseMirror.doc-drag-over {
+    border-radius: 0.5rem;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--primary) 55%, transparent);
+    background-color: color-mix(in srgb, var(--primary) 6%, transparent);
+    transition:
+      box-shadow 120ms ease,
+      background-color 120ms ease;
+  }
+  /* NO `> :first-child { margin-top: 0 }` reset. Notion gives the first body
+     block its full top margin too — a leading H1 sits ~40px below the page
+     title, not flush against it. Paragraphs carry no top margin (padding only),
+     so a first paragraph still hugs the title; only a first heading opens the
+     gap, which is exactly Notion's behaviour. The heading margin-top collapses
+     through `.ProseMirror` with the title's `mb-2`, landing the gap between
+     title and first block where it belongs. */
+  /* Headings — Notion's vertical rhythm, re-derived from a non-circular scale
+     (body 16px ink = 24px ours / 13px Notion → Notion screenshot dpr ≈ 1.08).
+     Measured target pitches (heading-ink-top → next-ink-top, css px):
+     First→H1 ≈ 80, H1→H2 ≈ 76, H2→H3 ≈ 62, H3→H4 ≈ 56, H4→text ≈ 41.
+     Notion's heading gaps are LARGE; the earlier 1.5/1.25/0.875rem values were
+     ~15px too tight at every level. `margin-bottom: 0.75rem` reproduces the
+     wide heading→body gap (collapses under the next heading's bigger top
+     margin, so heading→heading stays governed by margin-top). `padding: 3px 0`
+     is the shared block rhythm; line-height 1.3 is Notion's heading leading.
+     Sizes sit one notch (+0.125rem) above the Notion-exact scale by design —
+     larger headings were a deliberate preference: H1 1.75 / H2 1.5 / H3 1.25 /
+     H4 1.125rem. The per-level toggle-chevron font-sizes (further below) mirror
+     these and MUST move with them.
+     All four levels render in `--font-display` (OS UI font first) so their
+     weights below are REAL, not PingFang faux-bold — see the var's note. */
+  .doc-collab-editor .ProseMirror :is(h1, h2, h3, h4) {
+    font-family: var(--font-display);
+    /* Notion sets headings at NEUTRAL tracking — no negative letter-spacing. We
+       previously tightened to −0.015em for an Apple/Linear display look, but that
+       reads tighter/techier than Notion; matched to Notion here so headings sit
+       like the reference doc. (SF Pro's Semibold is a real master, so the weights
+       below are genuine, not faux-bold — see `--font-display`.) */
+    letter-spacing: normal;
+  }
+  /* Heading weight = Notion's SEMIBOLD (600) at every level — the screenshot's
+     lighter headings, not the earlier 800/700 extra-bold. */
+  .doc-collab-editor .ProseMirror h1 {
+    font-size: 1.75rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 2.5rem 0 0.75rem;
+    padding: 3px 0;
+  }
+  .doc-collab-editor .ProseMirror h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 2rem 0 0.75rem;
+    padding: 3px 0;
+  }
+  .doc-collab-editor .ProseMirror h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 1.75rem 0 0.75rem;
+    padding: 3px 0;
+  }
+  .doc-collab-editor .ProseMirror h4 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    line-height: 1.3;
+    margin: 1.5rem 0 0.75rem;
+    padding: 3px 0;
+  }
+  /* Public / published read-only page body (read-only-page-blocks.tsx). The
+     renderer emits semantic tags with no per-tag classes, so without this the
+     Tailwind preflight reset collapses every heading to body size ("formatting
+     gone"). Mirrors the editor's display scale so a shared page reads like the
+     authored one. Spacing is driven here (the container dropped `space-y`). */
+  /* Inter-block rhythm. Applied to the body AND to each toggle body, so blocks
+     nested under a `<details>` get the SAME gaps as top-level ones. The editor
+     gets this for free — its per-block margins (`.ProseMirror h2`, `… p`) apply
+     to every descendant, including inside a toggle. The read-only renderer drives
+     spacing from the container instead, so a direct-child-only `> * + *` never
+     reaches into `.doc-toggle-body`: nested headings/paragraphs would collapse
+     together (no heading gap, no paragraph breathing room). The `.doc-toggle-body`
+     selector uses a descendant combinator, so toggles nested in toggles inherit
+     the rhythm at every depth too. */
+  .doc-public-body > * + *,
+  .doc-public-body .doc-toggle-body > * + * {
+    margin-top: 0.5rem;
+  }
+  .doc-public-body > :first-child {
+    margin-top: 0;
+  }
+  .doc-public-body :is(h1, h2, h3, h4) {
+    font-family: var(--font-display);
+    /* Neutral tracking + semibold weight, mirroring the editor (Notion match). */
+    letter-spacing: normal;
+    line-height: 1.3;
+  }
+  /* Headings get the wider pre-heading gap whether at the top level or nested in
+     a toggle body — matches the editor, where a body heading keeps its full
+     `margin-top` (only the toggle SUMMARY line is zeroed, never the body blocks). */
+  .doc-public-body > :is(h1, h2, h3, h4),
+  .doc-public-body .doc-toggle-body > :is(h1, h2, h3, h4) {
+    margin-top: 1.75rem;
+  }
+  .doc-public-body h1 {
+    font-size: 1.75rem;
+    font-weight: 600;
+  }
+  .doc-public-body h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+  .doc-public-body h3 {
+    font-size: 1.25rem;
+    font-weight: 600;
+  }
+  .doc-public-body h4 {
+    font-size: 1.125rem;
+    font-weight: 600;
+  }
+  /* Lists — markers + nesting cycle like the editor (and Notion): bullets
+     ● disc → ○ circle → ▪ square, numbers 1. → a. → i., repeating every 3 levels.
+     Mirrors the editor's DRAWN-marker treatment exactly (see the `.ProseMirror`
+     note) so a shared / published page reads pixel-identical to the authored one:
+     bullets are pseudo-elements (Notion-sized 7px disc, ~7px from the margin,
+     ~16px gap, ~30px text indent); numbers stay native to preserve sequencing.
+     `li > p { margin: 0 }` keeps each row tight (the row content is a paragraph
+     node). */
+  .doc-public-body ul:not([data-type="taskList"]),
+  .doc-public-body ol {
+    /* Notion's ~30px text indent + ~30px-per-level staircase — matches the
+       editor's `padding-left` so a shared list (and a list nested in a toggle
+       body) lands at the same depth as the authored page. */
+    padding-left: 30px;
+    list-style: none;
+    margin: 0;
+  }
+  .doc-public-body li {
+    margin: 0;
+    position: relative;
+  }
+  .doc-public-body li > p {
+    /* Same 3px row padding as the editor (`.ProseMirror li > p`) → ~30px row
+       pitch, matching paragraph pitch, instead of packing rows at line-height. */
+    margin: 0;
+    padding: 3px 0;
+  }
+  /* Drawn bullet markers (depth-cycled by specificity), identical to the editor. */
+  .doc-public-body ul:not([data-type="taskList"]) > li::before {
+    content: "";
+    position: absolute;
+    box-sizing: border-box;
+    left: -23px;
+    /* Centre the disc on the first LINE BOX (not the ink-centre of the glyphs).
+       0.75em + the 7px disc lands ~1px above the text's x-height centre — exactly
+       where Notion sits its marker. An earlier 0.5em (tuned against short test
+       words, whose caps bias the ink-centre high) read visibly high on real
+       wrapped rows. */
+    top: 0.75em;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .doc-public-body ul ul > li::before,
+  .doc-public-body ul ul ul ul ul > li::before,
+  .doc-public-body ul ul ul ul ul ul ul ul > li::before {
+    background: transparent;
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+  }
+  .doc-public-body ul ul ul > li::before,
+  .doc-public-body ul ul ul ul ul ul > li::before,
+  .doc-public-body ul ul ul ul ul ul ul ul ul > li::before {
+    background: currentColor;
+    border: none;
+    border-radius: 0;
+    width: 6px;
+    height: 6px;
+  }
+  .doc-public-body ul ul ul ul > li::before,
+  .doc-public-body ul ul ul ul ul ul ul > li::before {
+    background: currentColor;
+    border: none;
+    border-radius: 50%;
+    width: 7px;
+    height: 7px;
+  }
+  /* Numbered lists keep native counters (preserve sequencing + start). */
+  .doc-public-body ol { list-style-type: decimal; }
+  .doc-public-body ol ol { list-style-type: lower-alpha; }
+  .doc-public-body ol ol ol { list-style-type: lower-roman; }
+  .doc-public-body ol ol ol ol { list-style-type: decimal; }
+  /* Toggle (details/summary) — clickable disclosure with a rotating triangle.
+     The summary content renders inline (the first paragraph), so the triangle +
+     label sit on one line; hover gives a clear "this is clickable" affordance. */
+  .doc-public-body details > summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.375rem;
+    cursor: pointer;
+    list-style: none;
+    border-radius: 0.25rem;
+    padding: 1px 4px;
+    margin-left: -4px;
+  }
+  .doc-public-body details > summary::-webkit-details-marker {
+    display: none;
+  }
+  .doc-public-body details > summary::before {
+    content: "";
+    flex-shrink: 0;
+    margin-top: 0.45em;
+    border-style: solid;
+    border-width: 0.3em 0 0.3em 0.45em;
+    border-color: transparent transparent transparent currentColor;
+    color: var(--muted-foreground);
+    transition: transform 0.15s ease;
+  }
+  .doc-public-body details[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .doc-public-body details > summary:hover {
+    background: var(--muted);
+  }
+  .doc-public-body .doc-toggle-body {
+    padding-left: 1.25rem;
+  }
+  /* Simple table (read-only / public) — mirrors the editor grid above. */
+  .doc-public-body .doc-public-table {
+    border-collapse: collapse;
+    width: auto;
+    max-width: 100%;
+    margin: 0.5rem 0;
+  }
+  .doc-public-body .doc-public-table td,
+  .doc-public-body .doc-public-table th {
+    border: 1px solid var(--border);
+    padding: 0.375rem 0.625rem;
+    vertical-align: top;
+    text-align: left;
+  }
+  .doc-public-body .doc-public-table th {
+    background: var(--muted);
+    font-weight: 600;
+  }
+  .doc-public-body .doc-public-table :is(td, th) > p {
+    margin: 0;
+  }
+  /* Divider — Notion-style spacing + a draggable hit area. StarterKit's
+     horizontalRule renders a bare `<hr>` (no class). We paint the 1px rule into
+     a content-box-clipped, vertically-padded box so it sits CENTRED in a
+     ~17px-tall element: the padding does double duty as Notion's airy space
+     around the line AND as a real row for the hover drag handle to land on — a
+     browser-default ~2px <hr> is too thin for the handle's cursor-row scan to
+     ever hit, which is why the divider used to be undraggable. `margin` adds the
+     outer breathing room between the divider and its neighbours.
+     `gripReferenceRect` (block-drag-handle.ts) special-cases <hr> so the grip
+     centres on the rule, not on a text first-line band that would float below. */
+  .doc-collab-editor .ProseMirror hr {
+    box-sizing: content-box;
+    height: 1px;
+    margin: 0.75rem 0;
+    padding: 0.5rem 0;
+    border: none;
+    background-color: var(--border);
+    background-clip: content-box;
+    cursor: grab;
+  }
+  /* The page title (page-title.tsx) shares the heading display face so the
+     headline and an in-body H1 beneath it read as one type system. It renders at
+     `font-bold` (700) — Notion's page-title weight, a notch above the semibold
+     body headings — as a REAL weight on SF Pro, not faux-bold. */
+  .doc-page-title {
+    font-family: var(--font-display);
+    /* Notion's title uses neutral tracking; no negative letter-spacing. */
+    letter-spacing: normal;
+  }
+  /* Every text block gets 3px top + 3px bottom padding (non-collapsing), so
+     adjacent paragraphs sit ~6px apart on top of the 1.5 leading → ~30px row
+     pitch. Notion uses the same 3px block padding. */
+  .doc-collab-editor .ProseMirror p {
+    margin: 0;
+    padding: 3px 0;
+  }
+  /* Empty-line placeholder (Tiptap `@tiptap/extension-placeholder`): paints the
+     "Press 'space' for AI or '/' for commands" hint as a non-selectable
+     pseudo-element on the current empty node. `showOnlyCurrent` limits it to the
+     line the cursor is on; the AI hint lives on empty paragraphs, a quieter cue
+     on empty headings. See `doc-placeholder.ts`. */
+  .doc-collab-editor .ProseMirror .is-empty::before {
+    content: attr(data-placeholder);
+    float: left;
+    height: 0;
+    pointer-events: none;
+    color: var(--muted-foreground);
+    opacity: 0.45;
+  }
+  .doc-collab-editor .ProseMirror ul:not([data-type="taskList"]),
+  .doc-collab-editor .ProseMirror ol {
+    /* Per-level nesting indent, PIXEL-MATCHED to Notion. Notion indents a list
+       row's text ~30px from the content margin and adds ~30px per nest level —
+       NOT the old 3rem (48px) "Notion-plus" staircase, which sat ~60% wider and
+       pushed every bullet far inboard. Verified by measuring a Notion screenshot
+       against a headless render (disc 7px, marker ~7px from margin, ~16px gap,
+       text indent ~30px). */
+    padding-left: 30px;
+    /* NO wrapper margin — a list's vertical rhythm comes ENTIRELY from its rows
+       (`li > p` carries the 3px block padding → ~30px row pitch). This makes the
+       line spacing **invariant to wrapper grouping**: a "flat" bullet renders the
+       same whether it lives in one `<ul>` or in several adjacent one-item `<ul>`s
+       (the AI write path / a drag-drop can produce either), and a sub-bullet is
+       set apart by its indent + marker, not a different pitch. The old `0.5rem`
+       outer margin made the gap depend on how rows were grouped into wrappers, so
+       a drag / Tab / Shift-Tab that merged, nested, or lifted a bullet shifted the
+       spacing of UNRELATED bullets around it (each regrouped wrapper added/removed
+       its own margin). Depth-invariant row padding can't: no structural edit
+       changes any row's pitch. Separation from a preceding heading is owned by the
+       heading's own `margin-bottom`, so it's unaffected too. */
+    margin: 0;
+  }
+  /* Bulleted markers are DRAWN as pseudo-elements (not native `list-style`) so
+     the disc SIZE, its distance from the margin, and the marker→text gap match
+     Notion to the pixel — Notion enlarges its bullet past the browser-default
+     ~5px disc to ~7px. Measured Notion geometry (CSS px): disc 7px, left edge
+     ~7px from the text margin, ~16px gap before the text, text indent ~30px.
+     Pseudo-elements only → zero doc-model/CRDT impact (the same "CSS-only list
+     styling" contract as the old native markers; the drag-handle grip still
+     anchors to the `<ul>`/`<ol>` left edge, left of the drawn disc). Shapes
+     cycle by depth ● disc → ○ circle → ▪ square every three levels: each deeper
+     level carries one more `ul` type selector, so the cycle is driven purely by
+     specificity (the deepest matching rule wins, no per-level reset needed for
+     the shared props). Task lists are excluded via `:not([data-type="taskList"])`
+     — their checkbox owns the leading column. */
+  .doc-collab-editor .ProseMirror ul:not([data-type="taskList"]) {
+    list-style: none;
+  }
+  .doc-collab-editor .ProseMirror ul:not([data-type="taskList"]) > li::before {
+    content: "";
+    position: absolute;
+    box-sizing: border-box;
+    left: -23px;
+    /* Centre the disc on the first LINE BOX (not the ink-centre of the glyphs).
+       0.75em + the 7px disc lands ~1px above the text's x-height centre — exactly
+       where Notion sits its marker. An earlier 0.5em (tuned against short test
+       words, whose caps bias the ink-centre high) read visibly high on real
+       wrapped rows. */
+    top: 0.75em;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  /* depth 2 / 5 / 8 — hollow circle */
+  .doc-collab-editor .ProseMirror ul ul:not([data-type="taskList"]) > li::before,
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before,
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before {
+    background: transparent;
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+  }
+  /* depth 3 / 6 / 9 — filled square */
+  .doc-collab-editor .ProseMirror ul ul ul:not([data-type="taskList"]) > li::before,
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before,
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before {
+    background: currentColor;
+    border: none;
+    border-radius: 0;
+    width: 6px;
+    height: 6px;
+  }
+  /* depth 4 / 7 — reset to filled disc */
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before,
+  .doc-collab-editor
+    .ProseMirror
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul
+    ul:not([data-type="taskList"])
+    > li::before {
+    background: currentColor;
+    border: none;
+    border-radius: 50%;
+    width: 7px;
+    height: 7px;
+  }
+  /* Numbered lists keep NATIVE counters (decimal → lower-alpha → lower-roman,
+     cycling every three levels) — native numbering preserves `<ol start>` and
+     item `value`, which custom CSS counters can't read; the same `padding-left`
+     above lands their text at the SAME ~30px indent as the bullets. */
+  .doc-collab-editor .ProseMirror ol { list-style-type: decimal; }
+  .doc-collab-editor .ProseMirror ol ol { list-style-type: lower-alpha; }
+  .doc-collab-editor .ProseMirror ol ol ol { list-style-type: lower-roman; }
+  .doc-collab-editor .ProseMirror ol ol ol ol { list-style-type: decimal; }
+  .doc-collab-editor .ProseMirror ol ol ol ol ol { list-style-type: lower-alpha; }
+  .doc-collab-editor .ProseMirror ol ol ol ol ol ol { list-style-type: lower-roman; }
+  /* List rows carry the SAME 3px block padding as free paragraphs — Notion
+     does NOT pack list items at pure line-height. Measured Notion list pitch
+     is ~30px (1.5 × 16 + 3px top + 3px bottom), identical to its paragraph
+     pitch. The item `<li>` is the positioning context for the drawn marker
+     (`position: relative`) and stays margin-0; the padding lives on its inner
+     `<p>` so the marker centres on the first text line. */
+  .doc-collab-editor .ProseMirror li {
+    margin: 0;
+    position: relative;
+  }
+  .doc-collab-editor .ProseMirror li > p {
+    margin: 0;
+    padding: 3px 0;
+  }
+  /* Task list (to-do): no marker — the checkbox owns the leading column. */
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] {
+    list-style: none;
+    padding-left: 0.25rem;
+  }
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  .doc-collab-editor .ProseMirror blockquote {
+    border-left: 3px solid var(--border);
+    padding-left: 0.875rem;
+    color: var(--muted-foreground);
+    font-style: italic;
+    /* Its inner `p` already carries the 3px block padding; the 0.5rem margin
+       gives the quote the same wider separation Notion uses for set-apart
+       blocks (≈ 14px above/below). */
+    margin: 0.5rem 0;
+  }
+  .doc-collab-editor .ProseMirror :not(pre) > code {
+    font-size: 0.875em;
+    background: var(--muted);
+    padding: 0.1em 0.35em;
+    border-radius: 0.25rem;
+  }
+  .doc-collab-editor .ProseMirror pre {
+    background: var(--muted);
+    border-radius: 0.5rem;
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 0;
+    overflow-x: auto;
+  }
+  /* ── Simple table (native `/table` block) ───────────────────────────
+     Notion-style grid: thin theme-token borders, a faint header tint, and
+     comfortable cell padding. Cells are `paragraph+`, so their inner `<p>`
+     margins collapse. `tableEditing` paints `.selectedCell` on a cell
+     selection; the overlay tints it with the brand colour. */
+  .doc-collab-editor .ProseMirror table {
+    border-collapse: collapse;
+    width: auto;
+    max-width: 100%;
+    margin: 0.75rem 0;
+    overflow: hidden;
+  }
+  .doc-collab-editor .ProseMirror table td,
+  .doc-collab-editor .ProseMirror table th {
+    border: 1px solid var(--border);
+    padding: 0.375rem 0.625rem;
+    vertical-align: top;
+    min-width: 5rem;
+    position: relative;
+  }
+  .doc-collab-editor .ProseMirror table th {
+    background: var(--muted);
+    font-weight: 600;
+    text-align: left;
+  }
+  .doc-collab-editor .ProseMirror table :is(td, th) > p {
+    margin: 0;
+  }
+  .doc-collab-editor .ProseMirror table .selectedCell::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
+    pointer-events: none;
+  }
+  /* Hover control bar (`table-view.tsx`): add/delete row+column + header
+     toggle. Hidden until the table is hovered/focused, pinned above it. */
+  .doc-collab-editor .ProseMirror .doc-table-controls {
+    position: absolute;
+    top: -1.9rem;
+    right: 0;
+    display: flex;
+    gap: 0.25rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.12s ease;
+    z-index: 2;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-block:hover .doc-table-controls,
+  .doc-collab-editor .ProseMirror .doc-table-block:focus-within .doc-table-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-control {
+    font-size: 0.72rem;
+    line-height: 1;
+    padding: 0.25rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 0.3rem;
+    background: var(--background);
+    color: var(--muted-foreground);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .doc-collab-editor .ProseMirror .doc-table-control:hover {
+    background: var(--muted);
+    color: var(--foreground);
+  }
+  /* Node-view blocks (callout / toggle / data+chart embed) carry tight
+     Tailwind `my-1`/`my-2` margins; give them consistent breathing room
+     in the editor rhythm. Higher specificity overrides the utility class. */
+  .doc-collab-editor .ProseMirror .doc-callout,
+  .doc-collab-editor .ProseMirror .doc-toggle,
+  .doc-collab-editor .ProseMirror .doc-embed {
+    margin-top: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  /* ── Toggle (disclosure) ────────────────────────────────────────────
+     Notion-style collapsible: the chevron sits in the left gutter, content
+     flows to its right. Collapsed (`data-open="false"`) keeps only the first
+     child — the summary line — visible; the rest stay in the doc (so the CRDT
+     round-trips) but hide via CSS. `open` persists on the node attr; the
+     node-view (`toggle-view.tsx`) flips it and rotates the chevron. */
+  .doc-collab-editor .ProseMirror .doc-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.25rem;
+  }
+  /* The triangle tracks the summary text: it's sized in `em`, and the node-view
+     stamps `data-summary` (`p`/`h1`..`h4`) so each heading level sets the
+     marker's `font-size` to that heading's size — bigger text → bigger triangle.
+     The marker is a filled (`fill`-only) triangle, so it reads solid at every
+     size with no per-level stroke tuning. `margin-top` centres it on that line:
+     marker centre = `marginTop + height/2`, set equal to `lineHeight/2` (all in
+     `em`), so `marginTop = (lineHeight − 1.2em)/2`. */
+  .doc-collab-editor .ProseMirror .doc-toggle-chevron {
+    flex: 0 0 auto;
+    font-size: 1rem;
+    margin-top: 0.15em; /* body line-height 1.5 → (1.5 − 1.2)/2 */
+    display: inline-flex;
+    height: 1.2em;
+    width: 1.2em;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.25rem;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease;
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle-chevron:hover {
+    background: var(--muted);
+    color: var(--foreground);
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle-chevron svg {
+    width: 0.72em;
+    height: 0.72em;
+    transition: transform 120ms ease;
+  }
+  .doc-collab-editor
+    .ProseMirror
+    .doc-toggle[data-open="true"]
+    .doc-toggle-chevron
+    svg {
+    transform: rotate(90deg);
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle[data-summary="h1"] .doc-toggle-chevron {
+    font-size: 1.75rem;
+    margin-top: 0.05em; /* heading line-height 1.3 → (1.3 − 1.2)/2 */
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle[data-summary="h2"] .doc-toggle-chevron {
+    font-size: 1.5rem;
+    margin-top: 0.05em; /* heading line-height 1.3 → (1.3 − 1.2)/2 */
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle[data-summary="h3"] .doc-toggle-chevron {
+    font-size: 1.25rem;
+    margin-top: 0.05em; /* heading line-height 1.3 → (1.3 − 1.2)/2 */
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle[data-summary="h4"] .doc-toggle-chevron {
+    font-size: 1.125rem;
+    margin-top: 0.05em; /* heading line-height 1.3 → (1.3 − 1.2)/2 */
+  }
+  /* The column wrapper holds the editable content plus the (non-editable)
+     empty-state row below it; it is the flex child, so the content column
+     still sits one indent right of the chevron. */
+  .doc-collab-editor .ProseMirror .doc-toggle-col {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle-content {
+    min-width: 0;
+  }
+  /* Notion's "Empty toggle" row — shown only while an OPEN toggle has no
+     body; clicking creates the first child block. */
+  .doc-collab-editor .ProseMirror .doc-toggle-empty {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 2px 0.25rem;
+    border-radius: 0.25rem;
+    font-size: 0.875rem;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    transition: background 120ms ease;
+  }
+  .doc-collab-editor .ProseMirror .doc-toggle-empty:hover {
+    background: var(--muted);
+  }
+  /* The body already sits in the flex content column — offset right of the
+     chevron by one indent — so child blocks need NO extra left margin: a
+     nested toggle's chevron lands exactly one indent right of its parent's,
+     Notion-style. (An earlier `margin-left` here double-indented them.) The
+     summary line gets its top margin zeroed so a HEADING summary isn't pushed
+     below the chevron — headings carry a block `margin-top` that the
+     page-level `> :first-child` reset can't reach inside the toggle's content
+     wrapper. The `> * >` pierces @tiptap/react's internal
+     `[data-node-view-content-react]` wrapper (the real blocks are grandchildren
+     of `.doc-toggle-content`). */
+  .doc-collab-editor .ProseMirror .doc-toggle-content > * > :first-child {
+    /* Top padding zeroed too: the block's new `3px` padding-top (and any
+       heading `margin-top`) would otherwise drop the summary text ~3px below
+       the chevron, which centres against a line starting at the box top. */
+    margin-top: 0;
+    padding-top: 0;
+  }
+  /* Nested node-view blocks (a toggle/callout/embed dragged or Tabbed INTO a
+     toggle) must not keep the top-level 0.75rem "breathing room" margin — that
+     gap is for separating top-level blocks. Inside a parent the child sits at
+     the normal child rhythm so it hugs the summary (Notion-style: a nested
+     toggle reads as a child of its parent, not a block floating a full gap
+     below it). Without this, Tab-to-nest left the block looking detached /
+     vertically displaced from where a child belongs. Text blocks keep their
+     own margins; only the node-view blocks that carry the loose 0.75rem are
+     normalised. */
+  .doc-collab-editor .ProseMirror .doc-toggle-content > * > .doc-toggle:not(:first-child),
+  .doc-collab-editor .ProseMirror .doc-toggle-content > * > .doc-callout:not(:first-child),
+  .doc-collab-editor .ProseMirror .doc-toggle-content > * > .doc-embed:not(:first-child) {
+    margin-top: 0.125rem;
+  }
+  /* Collapsed: hide the nested children, keep the summary. */
+  .doc-collab-editor
+    .ProseMirror
+    .doc-toggle[data-open="false"]
+    .doc-toggle-content
+    > *
+    > *:not(:first-child) {
+    display: none;
+  }
+
+  /* ── Drag handle (top-level block reorder) ─────────────────────────
+     The `⋮⋮` grip is tippy-positioned in the left gutter beside the
+     hovered block (see drag-handle.tsx). The wrapper element is the
+     draggable surface, so the grab cursor lives there. */
+  .doc-drag-handle {
+    cursor: grab;
+    z-index: 20;
+  }
+  .doc-drag-handle:active {
+    cursor: grabbing;
+  }
+  /* ── Drop indicator + selected-block fill (Notion-style block DnD) ───
+     StarterKit's Dropcursor paints the drop-target bar, but the plugin
+     classes its element `prosemirror-dropcursor-block` / `-inline`
+     (lowercase) — the old `.ProseMirror-dropcursor` selector never matched,
+     so the bar silently fell back to its inline `currentColor` 1px hairline.
+     Target the REAL classes: a brand-accent, rounded, Notion-weight bar. The
+     block variant's width already tracks the adjacent block's box, so it
+     indents to nesting depth when you drop into a toggle/callout and lands
+     flush under the target. */
+  .doc-collab-editor .prosemirror-dropcursor-block,
+  .doc-collab-editor .prosemirror-dropcursor-inline {
+    /* Mostly translucent so the bar reads as a soft guide, not a hard rule. */
+    background-color: color-mix(in oklab, var(--primary) 30%, transparent) !important;
+    border-radius: 9999px;
+  }
+  .doc-collab-editor .prosemirror-dropcursor-block {
+    /* Thicken the hairline to a visible bar; the negative margin recenters it
+       on the gap (the plugin positions `top` for a 1px line). */
+    height: 3px !important;
+    margin-top: -1px;
+  }
+  /* The dragged / selected block. prosemirror-view's default is a harsh
+     `outline: 2px solid #8cf` — the stray light-blue rectangle that framed a
+     whole toggle mid-drag. Swap it for Notion's soft rounded fill (the
+     "selected-block fill" the editor's focus-ring rule above anticipates). */
+  .doc-collab-editor .ProseMirror-selectednode {
+    outline: none;
+    border-radius: 6px;
+    background-color: color-mix(in oklab, var(--primary) 9%, transparent);
+    box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--primary) 30%, transparent);
+  }
+
+  /* ── Multi-block area selection (NodeRange) ─────────────────────────
+     Notion-style drag across block boundaries selects whole blocks. The
+     `NodeRange` extension (`doc-schema.ts`) decorates each block in the range
+     with `.ProseMirror-selectednoderange` (both as a live drag PREVIEW and once
+     the `NodeRangeSelection` lands); ProseMirror's native drag then moves the
+     whole selection. Each block gets a translucent `--primary` band — they abut
+     into one continuous selected region, and the band reads in both themes. The
+     native text `::selection` blue is suppressed WITHIN selected blocks (scoped
+     here, not editor-wide, so a normal text selection elsewhere is untouched)
+     so only the block bands show, not a doubled text highlight. */
+  .doc-collab-editor .ProseMirror-selectednoderange {
+    background-color: color-mix(in oklab, var(--primary) 16%, transparent);
+    border-radius: 4px;
+  }
+  .doc-collab-editor .ProseMirror-selectednoderange ::selection,
+  .doc-collab-editor .ProseMirror-selectednoderange::selection {
+    background: transparent;
+  }
+  /* CHROME-10 — the single block whose action menu (⋮⋮) is open gets the same
+     translucent full-width band as an area selection, so it's clear which block
+     the menu acts on. Applied as a view-only DOM class by `drag-handle.tsx`
+     (never a ProseMirror selection, so it doesn't sync through Yjs). */
+  .doc-collab-editor .doc-block-selected {
+    background-color: color-mix(in oklab, var(--primary) 16%, transparent);
+    border-radius: 4px;
+  }
+  /* During an AREA (range) select, a node-view block (toggle / callout / embed)
+     must match a plain block — just the flat band, NO single-node selection ring.
+     ProseMirror's node-view machinery stamps `.ProseMirror-selectednode` on EVERY
+     node-view inside the range (plain text blocks aren't node-views, so they
+     escape it), which (a) framed a selected toggle differently from every other
+     block — the band PLUS the box-shadow ring (`.ProseMirror-selectednode` above)
+     — and (b) drew a boxed ring around a NESTED toggle that carries no band of its
+     own (the inner box). Strip the ring wherever it lands on, or inside, a range
+     selection. A genuine lone `.ProseMirror-selectednode` (click-to-select one
+     block) is untouched — matching here needs both classes or a selected-range
+     ancestor. The container keeps its band (only the ring's box-shadow is killed);
+     the nested node-view is flattened entirely so the parent band shows through. */
+  .doc-collab-editor .ProseMirror-selectednoderange.ProseMirror-selectednode {
+    box-shadow: none;
+    border-radius: 4px; /* the band's radius, not the 6px ring */
+  }
+  .doc-collab-editor .ProseMirror-selectednoderange .ProseMirror-selectednode {
+    box-shadow: none;
+    background-color: transparent;
+    border-radius: 0;
+  }
+  /* The live drag marquee (`BlockAreaSelect.paintMarquee`). A fixed-position box
+     swept from the drag origin to the cursor — the immediate, continuous fill
+     of the area being selected WHILE dragging (the NodeRange bands above only
+     tint blocks once the Y-band lands on them; over empty space this is the only
+     feedback). Mounted on <body>, so it's NOT scoped under `.doc-collab-editor`
+     — the `--primary` token resolves from `:root`/`.dark`. On-brand BLUE: a
+     translucent `--primary` fill with NO border — a borderless soft band matching
+     the NodeRange block tint, so the sweep reads as one continuous wash rather
+     than a hard-outlined box (an earlier version framed the area in a solid 1px
+     `--primary` outline). z-index sits above the z-40 sidebar / z-50 chrome.
+     pointer-events:none so it never eats the drag it's drawing. */
+  .doc-area-select-rect {
+    position: fixed;
+    z-index: 60;
+    pointer-events: none;
+    background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+    border-radius: 2px;
+  }
+
+  /* ── Block color (the block-action menu's "Color") ──────────────────
+     Named-id attrs (data-color / data-bg) → theme palette, scoped to the
+     editor body. The menu's swatches tint themselves with the same
+     --doc-color-* / --doc-bg-* tokens (inline), so preview == result. */
+  .doc-collab-editor .ProseMirror [data-color="gray"]   { color: var(--doc-color-gray); }
+  .doc-collab-editor .ProseMirror [data-color="brown"]  { color: var(--doc-color-brown); }
+  .doc-collab-editor .ProseMirror [data-color="orange"] { color: var(--doc-color-orange); }
+  .doc-collab-editor .ProseMirror [data-color="yellow"] { color: var(--doc-color-yellow); }
+  .doc-collab-editor .ProseMirror [data-color="green"]  { color: var(--doc-color-green); }
+  .doc-collab-editor .ProseMirror [data-color="blue"]   { color: var(--doc-color-blue); }
+  .doc-collab-editor .ProseMirror [data-color="purple"] { color: var(--doc-color-purple); }
+  .doc-collab-editor .ProseMirror [data-color="pink"]   { color: var(--doc-color-pink); }
+  .doc-collab-editor .ProseMirror [data-color="red"]    { color: var(--doc-color-red); }
+  .doc-collab-editor .ProseMirror [data-bg="gray"],
+  .doc-collab-editor .ProseMirror [data-bg="brown"],
+  .doc-collab-editor .ProseMirror [data-bg="orange"],
+  .doc-collab-editor .ProseMirror [data-bg="yellow"],
+  .doc-collab-editor .ProseMirror [data-bg="green"],
+  .doc-collab-editor .ProseMirror [data-bg="blue"],
+  .doc-collab-editor .ProseMirror [data-bg="purple"],
+  .doc-collab-editor .ProseMirror [data-bg="pink"],
+  .doc-collab-editor .ProseMirror [data-bg="red"] {
+    border-radius: 0.25rem;
+    padding: 0.05em 0.3em;
+  }
+  .doc-collab-editor .ProseMirror [data-bg="gray"]   { background-color: var(--doc-bg-gray); }
+  .doc-collab-editor .ProseMirror [data-bg="brown"]  { background-color: var(--doc-bg-brown); }
+  .doc-collab-editor .ProseMirror [data-bg="orange"] { background-color: var(--doc-bg-orange); }
+  .doc-collab-editor .ProseMirror [data-bg="yellow"] { background-color: var(--doc-bg-yellow); }
+  .doc-collab-editor .ProseMirror [data-bg="green"]  { background-color: var(--doc-bg-green); }
+  .doc-collab-editor .ProseMirror [data-bg="blue"]   { background-color: var(--doc-bg-blue); }
+  .doc-collab-editor .ProseMirror [data-bg="purple"] { background-color: var(--doc-bg-purple); }
+  .doc-collab-editor .ProseMirror [data-bg="pink"]   { background-color: var(--doc-bg-pink); }
+  .doc-collab-editor .ProseMirror [data-bg="red"]    { background-color: var(--doc-bg-red); }
+}
+
+/* Deep-link target flash — "Copy link to block" scroll lands here. A brief
+   primary ring + faint tint that fades over ~1.5s. Top-level so the @keyframes
+   is global; dark-aware via the --primary token. */
+.doc-collab-editor .ProseMirror .doc-block-target {
+  border-radius: 4px;
+  animation: doc-block-target-fade 1500ms ease-out forwards;
+}
+@keyframes doc-block-target-fade {
+  from {
+    box-shadow: 0 0 0 2px var(--primary);
+    background-color: color-mix(in oklab, var(--primary) 14%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 2px transparent;
+    background-color: transparent;
+  }
+}
+
+@layer components {
+  /* Primary (filled) buttons. Treatment is token-driven so it adapts per palette
+     (see the PALETTE SYSTEM block): `--btn-image` paints a gradient fill on the
+     brand palettes and is `none` on Notion (so the flat `bg-primary` shows), and
+     `--btn-glow` / `--btn-glow-hover` carry the layered coloured glow on brand
+     palettes vs a subtle neutral shadow on Notion. Animates via the Button base's
+     `transition-all`. Applied through the Button `default` variant in
+     `components/ui/button.tsx`. */
+  .doc-btn-glow {
+    background-image: var(--btn-image, none);
+    box-shadow: var(--btn-glow);
+  }
+  .doc-btn-glow:hover {
+    box-shadow: var(--btn-glow-hover, var(--btn-glow));
+  }
+
+  /* Constrained, centered reading column for non-full-width doc pages.
+     Wraps the page body (title + editor) so it reads at a comfortable measure
+     (~720px); the full-width mode swaps this for `w-full` in doc-shell.tsx.
+     The outer page padding (px-4 / md:px-10 / lg:px-16) keeps gutters on both
+     sides in both modes. */
+  .doc-page-content {
+    margin-inline: auto;
+    width: 100%;
+    max-width: var(--doc-content-width);
+  }
+}
+
+@layer utilities {
+  /* Page-mount enter animations — keep durations tight so nothing
+     feels laggy. */
+  @keyframes fb-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes fb-rise-in {
+    from { opacity: 0; transform: translate3d(0, 6px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+  @keyframes fb-pop-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to { opacity: 1; transform: scale(1); }
+  }
+  @keyframes fb-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  @keyframes fb-pulse-soft {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+  /* Auto-title hint — a calm "breathing" the placeholder title + icon use to
+     signal the page is about to name itself from its content. Slower and
+     deeper than `pulse-soft` so it reads as "coming", not "loading". */
+  @keyframes fb-draft-hint {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.42; }
+  }
+  @keyframes fb-rise-out {
+    from { opacity: 1; transform: translate3d(0, 0, 0); }
+    to { opacity: 0; transform: translate3d(0, -4px, 0); }
+  }
+  @keyframes fb-vt-from-right {
+    from { opacity: 0; transform: translate3d(20px, 0, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+  @keyframes fb-vt-to-left {
+    from { opacity: 1; transform: translate3d(0, 0, 0); }
+    to { opacity: 0; transform: translate3d(-20px, 0, 0); }
+  }
+
+  .animate-fade-in { animation: fb-fade-in 240ms ease-out both; }
+  .animate-rise-in { animation: fb-rise-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-rise-out { animation: fb-rise-out 180ms ease-in both; }
+  .animate-pop-in  { animation: fb-pop-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-pulse-soft { animation: fb-pulse-soft 1.6s ease-in-out infinite; }
+  .animate-draft-hint { animation: fb-draft-hint 2.4s ease-in-out infinite; }
+
+  /* Stagger helper — mount lists with .animate-stagger > * and the
+     children inherit a small per-index delay. */
+  .animate-stagger > * {
+    animation: fb-rise-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .animate-stagger > *:nth-child(1) { animation-delay: 20ms; }
+  .animate-stagger > *:nth-child(2) { animation-delay: 60ms; }
+  .animate-stagger > *:nth-child(3) { animation-delay: 100ms; }
+  .animate-stagger > *:nth-child(4) { animation-delay: 140ms; }
+  .animate-stagger > *:nth-child(5) { animation-delay: 180ms; }
+  .animate-stagger > *:nth-child(6) { animation-delay: 220ms; }
+  .animate-stagger > *:nth-child(7) { animation-delay: 260ms; }
+  .animate-stagger > *:nth-child(8) { animation-delay: 300ms; }
+  .animate-stagger > *:nth-child(n+9) { animation-delay: 340ms; }
+
+  /* Skeleton — neutral block with a slow shimmer sweep. Pair with a
+     concrete width/height. */
+  .skeleton {
+    position: relative;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--muted-foreground) 12%, transparent);
+    border-radius: var(--radius-sm, 0.5rem);
+  }
+  .skeleton::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--muted-foreground) 8%, transparent) 50%,
+      transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: fb-shimmer 1.4s linear infinite;
+  }
+
+  /* Global navigation progress bar — a thin top-of-viewport sliver that animates
+     while an App Router navigation is in flight (components/route-progress.tsx).
+     The desktop shell has no browser chrome / tab spinner, so this is the only
+     "navigation in flight" signal on a click. Decorative (aria-hidden); fades in/
+     out via opacity, indeterminate `route-progress-slide` comet while active.
+     z-index clears the sidebar (z-40) + chrome (z-50/60). [COMP:app-web/route-progress] */
+  @keyframes route-progress-slide {
+    0% { background-position: -40% 0; }
+    100% { background-position: 140% 0; }
+  }
+  .route-progress {
+    position: fixed;
+    inset: 0 0 auto 0;
+    height: 2px;
+    z-index: 100;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 220ms ease-out;
+  }
+  .route-progress[data-active="true"] {
+    opacity: 1;
+  }
+  .route-progress__bar {
+    position: absolute;
+    inset: 0;
+    background-image: linear-gradient(
+      90deg,
+      transparent 0%,
+      color-mix(in srgb, var(--primary) 30%, transparent) 30%,
+      var(--primary) 50%,
+      color-mix(in srgb, var(--primary) 30%, transparent) 70%,
+      transparent 100%
+    );
+    background-size: 45% 100%;
+    background-repeat: no-repeat;
+    animation: route-progress-slide 1.1s ease-in-out infinite;
+  }
+
+  /* Subtle hover-lift for cards. Use `.hover-lift` on the trigger. */
+  .hover-lift {
+    transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 220ms ease,
+      background-color 220ms ease,
+      box-shadow 220ms ease;
+  }
+  .hover-lift:hover {
+    transform: translate3d(0, -1px, 0);
+    box-shadow: 0 6px 22px -12px color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+
+  /* Press-down feedback for primary buttons. */
+  .press {
+    transition: transform 120ms ease, background-color 180ms ease,
+      border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+  }
+  .press:active:not(:disabled) {
+    transform: translate3d(0, 1px, 0) scale(0.985);
+  }
+
+  /* Hairline divider that picks up the primary tint on dark mode. */
+  .hairline {
+    background: linear-gradient(
+      90deg,
+      transparent,
+      color-mix(in srgb, var(--border) 80%, transparent),
+      transparent
+    );
+  }
+
+  /* ── Spoiler ──────────────────────────────────────────────────────
+     Threads-style click-to-reveal blur. Zero chrome — no chip,
+     background, padding, or hover tint — so the spoiler sits in the
+     paragraph flow occupying exactly the same horizontal space the
+     unblurred text would. The blur is the entire affordance: a
+     blurred run inside otherwise-readable copy is unmistakably a
+     spoiler, and `cursor: pointer` confirms it's tappable.
+
+     `filter: blur` requires a block-ish box, so we can't apply it to
+     a single inline span without breaking line-wrap for long
+     spoilers. The React component (`splitForBlur`) splits the text
+     into chunks — whole words for ASCII letter/digit runs, per
+     code-point for CJK / punctuation — and wraps each chunk in
+     `.spoiler-glyph` (`display: inline-block`). Whitespace is
+     emitted as plain text between chunks so the browser's
+     line-breaker sees natural word-boundary opportunities.
+
+     Reveal toggles `data-revealed="true"` on the host; CSS
+     transitions the per-glyph blur to zero so the unmask reads as a
+     soft fade rather than a snap. */
+
+  .spoiler {
+    /* Inherit text styling so the spoiler reads as redacted prose,
+       not a UI control awkwardly embedded in a sentence. */
+    font: inherit;
+    color: inherit;
+    line-height: inherit;
+    letter-spacing: inherit;
+    text-align: inherit;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .spoiler[data-revealed="true"] {
+    cursor: text;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
+  .spoiler-glyph {
+    display: inline-block;
+    /* 4px scrambles Latin and CJK strokes equally well — at 3px
+       Chinese radicals still leak through. The blur bleeds slightly
+       past the bounding box, which is what sells the "this is
+       genuinely hidden" affordance; layout is unaffected because
+       browsers render filter overflow without reflowing. */
+    filter: blur(4px);
+    transition: filter 360ms cubic-bezier(0.22, 1, 0.36, 1);
+    will-change: filter;
+  }
+  .spoiler[data-revealed="true"] .spoiler-glyph {
+    filter: none;
+    will-change: auto;
+  }
+}
+
+/* ── View Transitions API ────────────────────────────────────────
+   Triggered by `startViewTransition()` calls in TransitionLink (see
+   `lib/transition-link.tsx`). The browser snapshots the page before/
+   after the route swap and crossfades between them. We override the
+   default 250ms hard crossfade with a softer fade + tiny upward
+   nudge so the new page feels like it eases into place rather than
+   snapping. Forward navigation (drafts → session) uses the default
+   names; the back link reverses the direction by setting
+   `[data-vt-back="true"]` on <html> for one frame.
+
+   Falls back to a normal Next.js navigation in browsers without
+   View Transitions support (Safari < 18.2, older Firefox). */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 320ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  animation-name: fb-fade-out-tiny;
+  animation-duration: 180ms;
+}
+
+::view-transition-new(root) {
+  animation-name: fb-fade-in-tiny;
+}
+
+@keyframes fb-fade-out-tiny {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to   { opacity: 0; transform: translate3d(0, -4px, 0); }
+}
+
+@keyframes fb-fade-in-tiny {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* Reverse direction when navigating back. */
+html[data-vt-back="true"]::view-transition-old(root) {
+  animation-name: fb-fade-out-back;
+}
+html[data-vt-back="true"]::view-transition-new(root) {
+  animation-name: fb-fade-in-back;
+}
+
+@keyframes fb-fade-out-back {
+  from { opacity: 1; transform: translate3d(0, 0, 0); }
+  to   { opacity: 0; transform: translate3d(0, 4px, 0); }
+}
+
+@keyframes fb-fade-in-back {
+  from { opacity: 0; transform: translate3d(0, -6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* The working claw — ambient assistant-run presence. The claw paces the lower
+   band (`claw-pace`, container-relative `left`), faces its travel direction
+   (`claw-face`, flips at each turn), and waddles as it walks (`claw-waddle`).
+   Pace + face share the same 16s period so the flip lands at the turn. See
+   `assistant-run-claw.tsx`. */
+@keyframes claw-pace {
+  0%   { left: 6%; }
+  50%  { left: 78%; }
+  100% { left: 6%; }
+}
+@keyframes claw-face {
+  0%, 49.9%  { transform: scaleX(1); }
+  50%, 100%  { transform: scaleX(-1); }
+}
+@keyframes claw-waddle {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25%      { transform: translateY(-2px) rotate(-3deg); }
+  50%      { transform: translateY(0) rotate(0deg); }
+  75%      { transform: translateY(-2px) rotate(3deg); }
+}
+@keyframes claw-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.claw-pace { animation: claw-pace 16s ease-in-out infinite; }
+.claw-face { animation: claw-face 16s step-end infinite; }
+.claw-waddle { animation: claw-waddle 0.5s ease-in-out infinite; }
+.claw-fade-in { animation: claw-fade-in 400ms ease-out both; }
+.claw-blink { animation: fb-pulse-soft 1.6s ease-in-out infinite; }
+
+/* Inline "Generating…" rolling feed (`ai-generating-decoration.ts`). A
+   fixed-height masked viewport under the header: the last few build-event
+   lines, newest brightest at the bottom. Each new line grows in from the
+   bottom (height 0 → one line) so the stack slides up smoothly and the oldest
+   rolls under the top fade. The height caps at the viewport, so content below
+   the indicator settles once and never jitters as lines roll. */
+.doc-ai-feed {
+  --doc-ai-line-h: 1.45rem;
+  display: none;
+  margin-top: 0.5rem;
+  /* ~4 lines tall; the oldest visible row sits under the top fade. */
+  max-height: calc(var(--doc-ai-line-h) * 4);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgba(0, 0, 0, 0.2) 16%,
+    #000 46%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    rgba(0, 0, 0, 0.2) 16%,
+    #000 46%
+  );
+}
+.doc-ai-feed.is-active {
+  display: block;
+}
+.doc-ai-feed-list {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.doc-ai-feed-line {
+  height: var(--doc-ai-line-h);
+  line-height: var(--doc-ai-line-h);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.72rem;
+  color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
+  animation: doc-ai-feed-line-in 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.doc-ai-feed-line.is-reasoning {
+  font-style: italic;
+  color: color-mix(in srgb, var(--muted-foreground) 62%, transparent);
+}
+.doc-ai-feed-line.is-newest {
+  color: var(--foreground);
+}
+.doc-ai-feed-line.is-reasoning.is-newest {
+  color: var(--muted-foreground);
+}
+@keyframes doc-ai-feed-line-in {
+  from {
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    max-height: var(--doc-ai-line-h);
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-rise-in,
+  .animate-rise-out,
+  .animate-pop-in,
+  .animate-pulse-soft,
+  .animate-draft-hint,
+  .animate-stagger > *,
+  .doc-ai-feed-line,
+  .claw-pace,
+  .claw-face,
+  .claw-waddle,
+  .claw-fade-in,
+  .claw-blink,
+  .skeleton::after,
+  .route-progress__bar,
+  .hover-lift,
+  .spoiler,
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
+    transition: none !important;
+  }
+  /* With the comet sweep disabled, keep the bar a visible static fill so it
+     still reads as "navigation in flight". */
+  .route-progress__bar {
+    background-image: none;
+    background-color: var(--primary);
+  }
+}
+
+/* Sidebar rail surface — the `--sidebar` token PLUS `--sidebar-surface-image`, a
+   faint brand wash that fades in from the top edge for subtle depth on the brand
+   palettes (it is `none` on Notion → a flat rail). Unlayered so it composes with
+   the token base. Applied on the <aside> in doc-sidebar.tsx. */
+.doc-sidebar-surface {
+  background-color: var(--sidebar);
+  background-image: var(--sidebar-surface-image, none);
+}
+
+/* Active sidebar page row — the "you are here" pill. Treatment is token-driven
+   (see the PALETTE SYSTEM block): `--nav-active-bg` is a cyan/indigo→violet
+   gradient on the brand palettes and a flat grey (`--sidebar-accent`) on Notion;
+   `--nav-active-fg` is the readable text colour for each (so it can't vanish on a
+   bright dark-mode primary); `--nav-active-glow` is a soft brand lift on brand
+   palettes and `none` on Notion. TOP-LEVEL (unlayered) on purpose — these rules
+   must beat the Tailwind utility classes on the row's child buttons
+   (`text-muted-foreground`, `hover:bg-muted`), which a `@layer components` rule
+   would lose to. Children (title, icon glyph, …/+ buttons, chevron) inherit
+   `--nav-active-fg`; the action buttons (icon/…/+/chevron) get a translucent-fg
+   hover so they stay legible, but the title button (`.doc-nav-title`) is
+   excluded — it spans the whole row as the nav target, so a hover chip behind its
+   text read as a stray inner-hover rectangle. The row pill is its hover feedback.
+   Applied as `.doc-nav-active` in doc-sidebar-row.tsx, sidebar-tree-node.tsx,
+   and doc-sidebar.tsx. */
+.doc-nav-active {
+  background: var(--nav-active-bg);
+  color: var(--nav-active-fg);
+  box-shadow: var(--nav-active-glow, none);
+}
+.doc-nav-active span {
+  color: inherit;
+}
+.doc-nav-active button,
+.doc-nav-active svg {
+  color: var(--nav-active-fg);
+}
+.doc-nav-active button:not(.doc-nav-title):hover {
+  background-color: color-mix(in srgb, var(--nav-active-fg) 18%, transparent);
+}
+
+/* ── App chrome is not text-selectable ─────────────────────────────────────
+   The chrome (top bar, page header, sidebar) is app furniture, not document
+   content — selecting its labels / tabs / breadcrumbs is never intentional and
+   reads as a glitch (Notion's web app suppresses it the same way). This is true
+   on the web AND in the desktop shell, so it is NOT gated on `is-canvas-desktop`.
+   The page BODY (anything outside [data-doc-chrome] and the sidebar) stays
+   selectable, and editable fields inside the chrome (the sidebar search box, an
+   inline title rename) get selection back so the caret + typing work. */
+[data-doc-chrome],
+.doc-sidebar-surface {
+  -webkit-user-select: none;
+  user-select: none;
+}
+[data-doc-chrome] :is(input, textarea, [contenteditable]),
+.doc-sidebar-surface :is(input, textarea, [contenteditable]) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ── Desktop shell (Electron — apps/app-desktop) ────────────────────────
+   The shell loads app-web inside a frameless `titleBarStyle: "hiddenInset"`
+   BrowserWindow, so the macOS traffic-light buttons float over the top-left of
+   our own content and no part of the window is draggable. `is-canvas-desktop`
+   is added to <html> when `window.sidanclawDesktop` exists (doc-shell.tsx
+   effect, plus the layout.tsx before-paint script for prod no-flash), so none
+   of this touches the browser build. Two things only the shell needs:
+
+   (1) Clear the traffic lights WITHOUT an empty title-bar band — keep the
+       lights INLINE on the existing top row (Notion/Linear/Slack-mac style) by
+       indenting only that row's content past them. No vertical push, so nothing
+       drops and there is no dead strip above the tabs.
+   (2) The app chrome is an OS window-drag handle (`-webkit-app-region: drag`);
+       every interactive descendant (and the tab chips, via data-no-drag) opts
+       back out so clicks/typing still work. */
+.is-canvas-desktop {
+  /* Horizontal space the macOS traffic lights occupy in the top-left corner.
+     Three ~12px buttons span ~x=14..66; 4.75rem (76px) clears them with a small
+     gap. The sidebar's first row is indented by this so the lights share it. */
+  --doc-titlebar-lights: 4.75rem;
+}
+/* Windows keeps a standard OS frame (apps/app-desktop branches `titleBarStyle`
+   to macOS only), so there are no traffic lights to clear — zero the inset. Every
+   consumer below reads `--doc-titlebar-lights`, so this one override neutralizes
+   the sidebar/topbar/mobile-menu indents at once. Set from the desktop preload's
+   `platform` (layout.tsx pre-paint + doc-shell.tsx effect). */
+.is-canvas-desktop-win {
+  --doc-titlebar-lights: 0rem;
+}
+
+/* (1) The sidebar's top row (workspace switcher) is indented past the lights,
+   leaving them sitting on that row's left. The tab bar needs nothing while the
+   sidebar is open — it starts right of the sidebar, clear of the lights. */
+.is-canvas-desktop [data-doc-sidebar-head] {
+  padding-left: var(--doc-titlebar-lights);
+}
+/* When the sidebar is collapsed the tab bar slides to the window's left edge,
+   under the lights — so THEN (and only then) it takes the same clearance.
+   Two selector shapes for the same rule: the doc shell sets the collapsed flag
+   on an ancestor (`doc-shell.tsx`), while bars OUTSIDE the doc shell (the
+   Brain topbar, `brain-topbar.tsx`) carry it on themselves. */
+.is-canvas-desktop [data-sidebar-collapsed="true"] [data-doc-topbar],
+.is-canvas-desktop [data-doc-topbar][data-sidebar-collapsed="true"] {
+  padding-left: var(--doc-titlebar-lights);
+}
+
+/* (2) Window drag. Chrome bars are drag handles; interactive descendants (and
+   anything tagged data-no-drag) opt out so they still take clicks/focus/input.
+   PITFALL: Chromium disables `-webkit-app-region: drag` for the ENTIRE subtree if
+   any ANCESTOR of the drag element carries a non-`none` transform/translate/scale/
+   rotate (it becomes a paint-property node the OS drag region can't cross). So no
+   ancestor of a `[data-doc-chrome]` element may set one — note Tailwind v4 emits
+   `translate-x-0` as `translate: 0 0`, which counts. The sidebar wrapper therefore
+   uses `md:translate-none`, not `md:translate-x-0` (workspace-chrome.tsx). If a
+   chrome bar stops dragging the window, look up its ancestor chain for a transform. */
+.is-canvas-desktop [data-doc-chrome] {
+  -webkit-app-region: drag;
+}
+.is-canvas-desktop [data-doc-chrome] :is(
+    button,
+    a,
+    input,
+    textarea,
+    select,
+    label,
+    [role="button"],
+    [role="menuitem"],
+    [contenteditable],
+    [data-no-drag]
+  ) {
+  -webkit-app-region: no-drag;
+}
+
+/* A narrow desktop window falls into the mobile layout (its sidebar is a drawer
+   opened from this floating hamburger). Shift it right to clear the lights, and
+   keep it clickable rather than a drag handle. */
+.is-canvas-desktop [data-doc-mobile-menu] {
+  left: calc(0.5rem + var(--doc-titlebar-lights));
+  -webkit-app-region: no-drag;
+}
+
+/* Inline link mark — `.doc-link`, stamped by the shared schema's Link
+   extension (`@sidanclaw/doc-model`), the legacy per-block editors, and the
+   read-only/public renderer, so resting + hover states match across surfaces.
+   Notion's treatment: a link keeps the ink colour of its surrounding text and
+   reads as a link via a muted underline that strengthens on hover — NOT the
+   brand blue. Derived from `currentColor`, so it tracks block colours, custom
+   palettes, and dark mode for free. */
+.doc-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.2em;
+  text-decoration-color: color-mix(in srgb, currentColor 38%, transparent);
+  transition:
+    text-decoration-color 100ms ease,
+    background 100ms ease;
+  cursor: pointer;
+  /* Notion's hover wash spans wrapped lines as one continuous swatch. */
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.doc-link:hover {
+  text-decoration-color: color-mix(in srgb, currentColor 75%, transparent);
+  background: color-mix(in srgb, currentColor 7%, transparent);
+}
+
+/* Doc comments (chat-as-threads) — highlight + gutter badge.
+   Painted by comment-decorations.ts. `.doc-comment-mark` is the static
+   fallback for the read-only/copy-paste path; the live highlight is the
+   decoration class. See docs/architecture/features/doc-comments.md. */
+/* Notion's commented text: a clean warm-yellow highlight, no underline,
+   cloned across line breaks so a multi-line run reads as one swatch. */
+.doc-comment-hl,
+.doc-comment-mark {
+  background: rgb(255 212 105 / 0.42);
+  border-radius: 1px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+.doc-comment-hl:hover,
+.doc-comment-mark:hover {
+  background: rgb(255 200 70 / 0.55);
+}
+.dark .doc-comment-hl,
+.dark .doc-comment-mark {
+  background: rgb(255 206 84 / 0.26);
+}
+.dark .doc-comment-hl:hover,
+.dark .doc-comment-mark:hover {
+  background: rgb(255 206 84 / 0.36);
+}
+/* Textless block anchor (an embed atom — chart / image / data / file / … — or
+   an empty block): a faint left-rail tint over the whole block. A block WITH
+   text instead paints the inline `.doc-comment-hl` swatch over its text, so
+   this whole-block fill is reserved for blocks that have no inline content. */
+.doc-comment-block-hl {
+  background: rgb(255 212 105 / 0.1);
+  box-shadow: inset 2px 0 0 rgb(245 200 60 / 0.85);
+  border-radius: 2px;
+  transition: background 80ms ease;
+}
+/* The bright "active" swatch — shown when a thread is open (`is-active-thread`,
+   set by the decoration layer / draft) OR while it's HOVERED (`is-thread-hover`,
+   set by the linked-hover controller in comment-hover.ts). Listed after the
+   `:hover` rules above so it wins for the run under the pointer too: hovering
+   ANY run, the gutter badge, or the margin card lights every run of the thread
+   together, Notion-style. */
+.doc-comment-hl.is-active-thread,
+.doc-comment-hl.is-thread-hover,
+.doc-comment-block-hl.is-active-thread,
+.doc-comment-block-hl.is-thread-hover {
+  background: rgb(255 200 70 / 0.6);
+}
+.dark .doc-comment-hl.is-active-thread,
+.dark .doc-comment-hl.is-thread-hover,
+.dark .doc-comment-block-hl.is-active-thread,
+.dark .doc-comment-block-hl.is-thread-hover {
+  background: rgb(255 206 84 / 0.5);
+}
+/* The reverse leg of the linked hover: hovering a run also emphasises its card,
+   so the pairing reads both ways. The editor rail card and the share-view card
+   both carry `data-thread-id`, so both pick up `is-thread-hover`. */
+.doc-rail-card.is-thread-hover,
+.doc-share-comment-card.is-thread-hover {
+  border-color: color-mix(in srgb, rgb(245 200 60) 55%, transparent);
+}
+
+/* Gutter badge: a quiet count chip in the right margin (Notion-style) — a
+   small speech-bubble glyph + the count; muted, darkens on hover. */
+.doc-comment-badge {
+  position: absolute;
+  right: -1.9rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1875rem;
+  padding: 0.0625rem 0.3125rem;
+  height: 1.375rem;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1;
+  border-radius: 0.375rem;
+  color: var(--muted-foreground, rgb(0 0 0 / 0.55));
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background 80ms ease,
+    color 80ms ease;
+}
+.doc-comment-badge:hover {
+  background: var(--accent, rgb(0 0 0 / 0.06));
+  color: var(--foreground, rgb(0 0 0 / 0.85));
+}
+.doc-comment-badge svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+/* When the comment rail is reserved (wide screens, page has inline comments),
+   the gutter badge is redundant with — and collides against — the rail card in
+   the same right-of-content strip, so hide it (the card is the indicator,
+   Notion-style). Below `xl` no gutter is reserved and the badge stays. The
+   highlighted text remains the in-doc click target either way. */
+@media (min-width: 1280px) {
+  [data-comment-gutter] .doc-comment-badge {
+    display: none;
+  }
+}
+
+/* On phones the page gutter (--doc-pad-x) collapses to ~20px — narrower than
+   the badge's -1.9rem reach — so the chip would poke past the viewport and trip
+   a horizontal scroll (the "slight horizontal overflow" report). Tuck it to the
+   content edge there; the page scroll container (data-doc-scroll) also clips
+   the x-axis as a backstop. */
+@media (max-width: 767px) {
+  .doc-comment-badge {
+    right: -0.25rem;
+  }
+}
+
+/* Modern "floating" comment card — depth from a layered, directional shadow
+   (Linear/Vercel premium look) with a clean hairline border. Plain `rgb()` with
+   alpha (NOT color-mix) so there's no solid-colour fallback path: every browser
+   gets the real, soft shadow. Light uses slate-tinted shadows; dark uses deeper
+   black + a light hairline so the lift still reads on the dark surface. */
+.doc-comment-card {
+  background: var(--background);
+  border: 1px solid rgb(15 23 42 / 0.10);
+  box-shadow:
+    0 1px 3px rgb(15 23 42 / 0.06),
+    0 8px 20px -4px rgb(15 23 42 / 0.10),
+    0 22px 48px -12px rgb(15 23 42 / 0.13);
+  transition: box-shadow 180ms ease, transform 180ms ease;
+}
+.dark .doc-comment-card {
+  border-color: rgb(255 255 255 / 0.10);
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.4),
+    0 8px 20px -4px rgb(0 0 0 / 0.5),
+    0 22px 48px -12px rgb(0 0 0 / 0.5);
+}
+/* Collapsed cards are clickable — a gentle hover lift. */
+button.doc-comment-card:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 2px 6px rgb(15 23 42 / 0.08),
+    0 12px 28px -4px rgb(15 23 42 / 0.14),
+    0 30px 60px -14px rgb(15 23 42 / 0.16);
+}
+.dark button.doc-comment-card:hover {
+  box-shadow:
+    0 2px 6px rgb(0 0 0 / 0.45),
+    0 12px 28px -4px rgb(0 0 0 / 0.55),
+    0 30px 60px -14px rgb(0 0 0 / 0.55);
+}
+
+/* Comment rail card — the right-margin thread card in BOTH states (collapsed
+   preview + expanded thread). Flat (no shadow, unlike the floating popover
+   above): a 2px resting-grey border that turns brand-blue only while the card
+   holds focus. The focus state is CSS `:focus-within`, NOT a JS flag, so the
+   blue clears the instant focus leaves — including across the collapsed↔expanded
+   swap, where a JS flag had no blur to react to and stuck blue.
+   The expand/collapse SIZE change is tweened in JS (RailCard, via the Web
+   Animations API on `height`) rather than CSS, because the height is content-
+   driven (and grows again when the thread's messages load in) — a keyframe
+   can't target an unknown height. See comment-rail.tsx. */
+.doc-rail-card {
+  background: var(--background);
+  border: 2px solid color-mix(in srgb, var(--muted-foreground) 16%, transparent);
+  transition: border-color 160ms ease;
+}
+.doc-rail-card:focus-within {
+  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+
+/* ── Markdown prose styling for chat / comment messages ──────────
+   Ported verbatim from apps/web's globals.css so the doc chat
+   (FloatingChat) and the in-doc comment threads (CommentThreadBody)
+   render the assistant's markdown — bold, lists, inline code, links —
+   identically to the main app. Tailwind Preflight strips list bullets
+   and paragraph margins, so without these rules the `.chat-markdown`
+   wrapper those components already reference is a no-op. Theme-token
+   colours keep it correct in app-web's light-default + dark themes. */
+.chat-markdown p { margin: 0.375rem 0; font-weight: 450; }
+.chat-markdown p:first-child { margin-top: 0; }
+.chat-markdown p:last-child { margin-bottom: 0; }
+.chat-markdown ul, .chat-markdown ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.chat-markdown li { margin: 0.25rem 0; font-weight: 450; }
+.chat-markdown ul { list-style-type: disc; }
+.chat-markdown ol { list-style-type: decimal; }
+.chat-markdown strong { font-weight: 650; color: var(--foreground); }
+.chat-markdown em { font-style: italic; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 {
+  font-weight: 650; margin: 0.75rem 0 0.375rem;
+  font-family: var(--font-rocknroll), ui-sans-serif, system-ui, sans-serif;
+  color: var(--foreground);
+}
+.chat-markdown h1 { font-size: 1.25em; }
+.chat-markdown h2 { font-size: 1.125em; }
+.chat-markdown h3 { font-size: 1em; }
+.chat-markdown code {
+  font-size: 0.85em; padding: 0.15em 0.35em;
+  background: var(--muted); border-radius: 0.25rem;
+  font-family: var(--font-jetbrains-mono), monospace;
+}
+.chat-markdown pre {
+  margin: 0.5rem 0; padding: 0.75rem 1rem;
+  background: var(--muted); border-radius: 0.5rem;
+  overflow-x: auto; font-size: 0.85em;
+}
+.chat-markdown pre code {
+  padding: 0; background: none; border-radius: 0;
+}
+.chat-markdown a {
+  color: var(--primary); text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-markdown blockquote {
+  border-left: 3px solid var(--border); padding-left: 0.75rem;
+  margin: 0.5rem 0; color: var(--muted-foreground);
+}
+/* GFM tables (remark-gfm consumers — the brain entry reader). Preflight
+   leaves <table> unstyled, so without these a synced KB spec's tables
+   render as a borderless text blob. Token-driven, wrapped scroll on
+   overflow via the display:block table. */
+.chat-markdown table {
+  display: block; overflow-x: auto;
+  margin: 0.75rem 0; border-collapse: collapse;
+  font-size: 0.875em; line-height: 1.45;
+}
+.chat-markdown th, .chat-markdown td {
+  border: 1px solid var(--border);
+  padding: 0.375rem 0.625rem;
+  text-align: left; vertical-align: top;
+}
+.chat-markdown th {
+  background: var(--muted); font-weight: 600;
+  color: var(--foreground);
+}
+.chat-markdown tr:nth-child(even) td { background: color-mix(in srgb, var(--muted) 35%, transparent); }

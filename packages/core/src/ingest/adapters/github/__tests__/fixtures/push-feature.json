@@ -1,0 +1,27 @@
+{
+  "ref": "refs/heads/feat/awesome",
+  "before": "1111111111111111111111111111111111111111",
+  "after": "2222222222222222222222222222222222222222",
+  "repository": {
+    "id": 1,
+    "full_name": "acme/widget",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "bob",
+    "type": "User"
+  },
+  "head_commit": {
+    "id": "2222222222222222222222222222222222222222",
+    "timestamp": "2026-05-14T11:00:00Z",
+    "author": { "name": "Bob", "email": "bob@acme.com" }
+  },
+  "commits": [
+    {
+      "id": "2222222222222222222222222222222222222222",
+      "added": [],
+      "removed": [],
+      "modified": ["src/feature.ts"]
+    }
+  ]
+}

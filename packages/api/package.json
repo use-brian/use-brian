@@ -1,0 +1,49 @@
+{
+  "name": "@sidanclaw/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    "./*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "migrate": "tsx scripts/migrate.ts",
+    "migrate:doc-ydoc": "tsx scripts/migrate-doc-to-ydoc.ts",
+    "token-report": "tsx scripts/token-report.ts"
+  },
+  "dependencies": {
+    "@google-cloud/storage": "^7.15.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@sidanclaw/doc-model": "workspace:*",
+    "@sidanclaw/channels": "workspace:*",
+    "@sidanclaw/core": "workspace:*",
+    "@sidanclaw/shared": "workspace:*",
+    "dotenv": "^16",
+    "express": "^5",
+    "multer": "^2.1.1",
+    "nodemailer": "^8.0.9",
+    "pg": "^8",
+    "stripe": "^22.0.0",
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "@types/express": "^5",
+    "@types/multer": "^2.1.0",
+    "@types/node": "^20.19.39",
+    "@types/nodemailer": "^8.0.0",
+    "@types/pg": "^8",
+    "@types/supertest": "^7.2.0",
+    "supertest": "^7.2.2",
+    "tsx": "^4",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

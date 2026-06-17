@@ -1,0 +1,10 @@
+{
+  "//": "Typecheck for the desktop Vite SPA (Approach B). The SPA is a separate build target, excluded from the Next tsconfig (its own Window globals + entry would otherwise clash with the app's). Run: tsc -p tsconfig.desktop.json --noEmit.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "//include": "Includes src/ (not just desktop/) so TipTap's command augmentations register — they only load when the editor extension modules are in the compilation, exactly as the Next tsconfig sees them. app.tsx no longer redeclares the sidanclawDesktop global, so there's no Window clash with src/lib/desktop-auth-source.",
+  "include": ["next-env.d.ts", "src", "desktop", "vite.desktop.config.ts"],
+  "exclude": ["node_modules"]
+}

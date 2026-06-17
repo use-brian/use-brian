@@ -1,0 +1,17 @@
+/*
+ * Desktop SPA stylesheet entry (Approach B).
+ *
+ * Re-uses app-web's real `globals.css` (Tailwind v4 setup + design tokens),
+ * but the Vite build's `root` is `desktop/`, so Tailwind's automatic source
+ * detection never scans the app-web component tree → utility classes the
+ * components use (`flex`, `bg-background`, …) wouldn't be generated and the app
+ * renders unstyled. The `@source` directives below point Tailwind at the app
+ * source and the shared UI packages whose components ship Tailwind classes.
+ * (The Next build auto-detects these, so globals.css itself stays untouched.)
+ */
+@import "../src/app/globals.css";
+
+@source "../src/**/*.{ts,tsx}";
+@source "../../../packages/chat-ui/src/**/*.{ts,tsx}";
+@source "../../../packages/views-renderer/src/**/*.{ts,tsx}";
+@source "../../../packages/doc-model/src/**/*.{ts,tsx}";

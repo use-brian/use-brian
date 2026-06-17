@@ -1,0 +1,40 @@
+{
+  "name": "@sidanclaw/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./builtin-connectors": {
+      "types": "./dist/builtin-connectors.d.ts",
+      "default": "./dist/builtin-connectors.js"
+    },
+    "./connector-registry": {
+      "types": "./dist/connector-registry.d.ts",
+      "default": "./dist/connector-registry.js"
+    },
+    "./mini-apps": {
+      "types": "./dist/mini-apps.d.ts",
+      "default": "./dist/mini-apps.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@sidanclaw/views-renderer",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@sidanclaw/core": "workspace:*",
+    "@tanstack/react-table": "^8.21",
+    "@dnd-kit/core": "^6.3",
+    "@dnd-kit/sortable": "^10.0",
+    "@dnd-kit/utilities": "^3.2",
+    "@mermaid-js/layout-elk": "^0.2.1",
+    "mermaid": "^11.4.1",
+    "recharts": "^2.15.0"
+  },
+  "peerDependencies": {
+    "react": "^19",
+    "react-dom": "^19"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

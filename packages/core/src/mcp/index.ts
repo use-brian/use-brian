@@ -1,0 +1,8 @@
+export { classifyTool, defaultPolicy } from './classifier.js'
+export type { ToolClassification } from './classifier.js'
+export type { McpToolSetting, McpSettingsStore, McpServerConfig, McpToolInfo, ConfirmationDecision, ToolConfirmationRequest, AwaitingApprovalEvent, ConfirmationResolver } from './types.js'
+export { AUTO_PROMOTE_THRESHOLD, createConfirmationResolver } from './types.js'
+export { wrapMcpTools } from './connector.js'
+export { createMcpGateway } from './gateway.js'
+export { buildToolIndex, createMcpSearchTools } from './tool-search.js'
+export type { McpToolIndex, ToolSource, RemoteSource, LocalSource } from './tool-search.js'

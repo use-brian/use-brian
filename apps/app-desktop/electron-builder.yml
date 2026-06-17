@@ -1,0 +1,103 @@
+appId: ai.sidan.desktop
+productName: sidanclaw
+# Stable, version-less artifact filenames so the marketing hero CTA can link a
+# fixed "latest" URL (see apps/web/src/lib/desktop-download.ts and
+# docs/architecture/features/app-desktop.md → "Distribution & download").
+artifactName: sidanclaw.${ext}
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - "!dist/__tests__/**"
+  # The bundled renderer (Phase 4). Today this is the Phase 0 connectivity spike;
+  # the Approach-B Vite SPA build emits to the same path. Loaded via loadFile only
+  # when SIDANCLAW_BUNDLED=1, so packaging it is inert for the thin-shell build.
+  - renderer/**
+  - package.json
+mac:
+  category: public.app-category.productivity
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization is ON. The packaging machine/CI must supply the credentials via
+  # environment (electron-builder reads them automatically — never commit them):
+  #   CSC_LINK                     base64 (or path) of the Developer ID Application .p12
+  #   CSC_KEY_PASSWORD             the .p12 export password
+  #   APPLE_ID                     Apple Developer account email
+  #   APPLE_APP_SPECIFIC_PASSWORD  app-specific password (appleid.apple.com)
+  #   APPLE_TEAM_ID                the 10-char Apple Developer Team ID
+  # Without a signing identity present, `electron-builder --mac` produces an
+  # unsigned build and skips notarization (fine for local dev); with them it
+  # signs + notarizes + staples. See docs/architecture/features/app-desktop.md
+  # → "Build, sign, ship (macOS)".
+  notarize: true
+# The mounted-DMG install window — branded so first contact is on-brand, not the
+# bare electron-builder default. The artwork lives in buildResources (`build/`):
+#   background.tiff   HiDPI 1x+2x backdrop (660x420) — dark navy + cyan brand glow,
+#                     wordmark, and a pixel-block arrow that echoes the app mark.
+#                     Regenerate with `apps/app-desktop/build/make-dmg-art.py`.
+#   icon.png          the rounded-squircle app icon (Finder draws it on the left).
+# `contents` x/y are icon CENTRES in window space (origin top-left); they line up
+# with the backdrop's icon wells, and Finder renders the "sidanclaw" / "Applications"
+# labels just below them. Finder owns the label COLOR (it follows the viewer's
+# Light/Dark appearance — a DMG can't force it), so the backdrop carries slate
+# legibility plates behind both label slots tuned to read in either mode. Keep
+# window == background dimensions.
+dmg:
+  title: Install sidanclaw
+  background: build/background.tiff
+  iconSize: 120
+  window:
+    width: 660
+    height: 420
+  contents:
+    - x: 175
+      y: 240
+      type: file
+    - x: 485
+      y: 240
+      type: link
+      path: /Applications
+# ── Windows (Tier 1, ship-fast) ─────────────────────────────────────────────
+# Produces an NSIS installer (sidanclaw.exe, via the stable artifactName above).
+# electron-builder auto-generates the Windows .ico from build/icon.png (1024x1024),
+# exactly as it derives the mac .icns — so no separate icon asset is needed.
+#
+# Code signing is DEFERRED: with no signing config present, electron-builder emits
+# an UNSIGNED installer (Windows SmartScreen then shows "unknown publisher"). That
+# is fine for VM QA and a click-through beta, and mirrors how the mac block produces
+# an unsigned build when the Apple certs are absent. When the Windows cert lands
+# (Azure Trusted Signing or SSL.com eSigner), wire signing in the release workflow /
+# here. The `protocols:` block below already registers `sidanclaw://` on Windows —
+# the NSIS installer writes the registry keys. See
+# docs/architecture/features/app-desktop.md → "Build, sign, ship (Windows)".
+win:
+  target:
+    - nsis
+nsis:
+  # Assisted installer (not one-click), per-user so first run never needs admin/UAC.
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+# Where `electron-builder --publish always` uploads artifacts. The marketing CTA
+# links the "latest" GitHub Release asset, which must be public-readable for an
+# unauthenticated download. Because GitHub release assets inherit the repo's
+# visibility, this points at a DEDICATED PUBLIC releases repo (`sidanclaw-desktop`)
+# so the private monorepo source stays private. electron-builder uploads to a
+# *draft* release (assets land hidden); `scripts/package-desktop.sh --publish`
+# then un-drafts it + marks it latest so `releases/latest/download` resolves.
+# Needs GH_TOKEN with contents:write on the releases repo. See "Distribution &
+# download" in the spec.
+publish:
+  provider: github
+  owner: sidanclaw
+  repo: sidanclaw-desktop
+protocols:
+  - name: sidanclaw
+    schemes:
+      - sidanclaw

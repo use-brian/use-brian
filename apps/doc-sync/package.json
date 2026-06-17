@@ -1,0 +1,33 @@
+{
+  "name": "@sidanclaw/doc-sync",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch --include ../../packages/api/src --include ../../packages/core/src --include ../../packages/shared/src --include ../../packages/doc-model/src src/index.ts",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hocuspocus/server": "^4.1.0",
+    "@sidanclaw/api": "workspace:*",
+    "@sidanclaw/doc-model": "workspace:*",
+    "@sidanclaw/core": "workspace:*",
+    "@sidanclaw/shared": "workspace:*",
+    "dotenv": "^16",
+    "express": "^5",
+    "ws": "^8.21.0",
+    "yjs": "13.6.31"
+  },
+  "devDependencies": {
+    "@types/express": "^5",
+    "@types/node": "^20.19.39",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

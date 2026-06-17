@@ -1,0 +1,1049 @@
+"use client";
+
+/**
+ * Doc centre pane + chat — the `/p` surface body.
+ *
+ *   ┌─ (sidebar lives in WorkspaceChrome) ─┬─ Active page (PageHeader + Editor) ─┐
+ *   │  hoisted up to the workspace layout   │  Empty selection state OR loaded   │
+ *   └───────────────────────────────────────┴────────────────────────────────────┘
+ *
+ * THE HOIST (docs/plans/doc-web-app-consolidation.md §4). The sidebar +
+ * inbox flyout used to live HERE, which made them doc-only chrome. They are
+ * now hoisted into `WorkspaceChrome` (mounted by `/w/[workspaceId]/layout.tsx`),
+ * so the sidebar is PERSISTENT across every surface. The sidebar data + the
+ * page-mutation handlers live in the sibling `DocSidebarDataProvider`; this
+ * shell reads them through `useSidebarData()` and registers an
+ * `ActivePageBridge` so those handlers can keep the centre pane in sync
+ * (optimistic `setActiveView`, tab-history scrub) while it's mounted.
+ *
+ * What this shell still owns (the centre pane, soft-nav-critical — UNCHANGED):
+ *  - The active view's metadata (`activeView`) + the live Yjs `collab` keyed on
+ *    the URL page id, dialed in parallel with the metadata fetch.
+ *  - The tab strip + per-tab browse history (`doc-tabs.ts`) and the two
+ *    URL↔tabs reconciliation effects that make `/p/<pageId>` switching a soft
+ *    swap (no remount, no list flash — see `p/layout.tsx`).
+ *  - The draft landing / build flow, the floating + mobile chat docks.
+ *
+ * Selecting a sidebar row writes the canonical `/p/<pageId>` URL (the chrome
+ * does the `router.push`); the URL→tabs effect below adopts it into the active
+ * tab. (Writing the legacy `/doc?viewId=` URL would hit the proxy's 301 →
+ * `/p/<id>` and bounce through a full reload — the "draft won't open" bug.)
+ *
+ * Spec: docs/plans/a2ui-notion-feel.md § Phase 1 → Full-screen UI;
+ *       docs/plans/doc-web-app-consolidation.md §4.
+ *
+ * [COMP:app-web/views-shell]
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { docPagePath, isCaptureRequest, pageIdFromPathname } from "@/lib/doc-page-url";
+import {
+  activePageId,
+  back,
+  blankActiveTab,
+  canGoBack,
+  canGoForward,
+  closeTab,
+  dropPage,
+  forward,
+  initTabs,
+  newTab,
+  openPage,
+  switchTab,
+  tabPageId,
+  type TabsState,
+} from "@/lib/doc-tabs";
+import {
+  createDraft,
+  derivePageIcon,
+  getView,
+  setViewClearance,
+  setViewFullWidth,
+  type NameOrigin,
+  type ViewMetadata,
+} from "@/lib/api/views";
+import { getUserInfo } from "@/lib/user";
+import { buildBreadcrumb } from "@/lib/sidebar-tree";
+import { useT, format } from "@/lib/i18n/client";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import { useSidebarData, type ActivePageBridge } from "./doc-sidebar-data";
+import { DocTopBar, type TabView } from "./doc-topbar";
+import { PageHeader } from "./page-header";
+import { PageTitle } from "./page-title";
+import { CollabPageEditor } from "./collab-page-editor";
+import { commentGutterWidth } from "./comment-rail";
+import { useCollabProvider } from "@/lib/collab/use-collab-provider";
+import { usePublishPresenceActivity } from "@/lib/collab/use-presence";
+import { useAssistantRun } from "@/lib/collab/use-assistant-run";
+import { AssistantRunClaw } from "./assistant-run-claw";
+import { isYFragmentEmpty } from "@/lib/collab/doc-empty";
+import { FRAGMENT_FIELD } from "@sidanclaw/doc-model";
+import { EmptyPageLanding } from "./empty-page-landing";
+import { SuggestedView } from "./suggested-view";
+import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
+import { docChatRelay } from "@/lib/doc-chat-relay";
+import { isAuthRedirectInFlight } from "@/lib/auth-fetch";
+import {
+  clearPendingBuild,
+  stashPendingBuild,
+  takePendingBuild,
+} from "@/lib/pending-build";
+import { PageBuildIndicator } from "./page-build-indicator";
+import { subscribeBuildActivity } from "@/lib/build-activity";
+import { offlineWrite } from "@/lib/offline/offline-writes";
+import { useIsOffline, usePendingWrites } from "@/lib/offline/use-offline-sync";
+
+type ShellProps = {
+  workspaceId: string;
+  /**
+   * Optional default doc assistant ID, forwarded to the centre-pane
+   * `<CollabPageEditor>` for its on-page build / run affordances. The chat
+   * dock is no longer mounted here — it lives once in `WorkspaceChrome` and
+   * resolves the primary assistant itself.
+   */
+  assistantId?: string;
+};
+
+export function DocShell({ workspaceId, assistantId }: ShellProps) {
+  // `assistantId` is forwarded to `<CollabPageEditor>` (the centre pane). The
+  // assistant chat dock is mounted in `WorkspaceChrome`, not here.
+  const t = useT().docPage;
+  const workspace = useWorkspaceContext();
+  const router = useRouter();
+  const pathname = usePathname();
+  // The active page id is the canonical `/p/<pageId>` path segment — NOT a
+  // `?viewId=` query. The shell is mounted at `/w/<id>/p`, and the proxy
+  // 301-redirects the legacy `/doc?viewId=` form to `/p/<id>`, so writing
+  // a query URL would bounce through a hard redirect and drop the selection.
+  const urlViewId = pageIdFromPathname(pathname);
+
+  // Sidebar lists + page-mutation handlers live in the hoisted provider
+  // (`DocSidebarDataProvider`, mounted by the workspace layout). The centre
+  // pane reads the lists for the breadcrumb / tab labels / landing cards, and
+  // routes its own mutations (build / start-blank / auto-title) through the
+  // shared `reloadSidebar` + `recordPrune` so the sidebar stays in step.
+  const sidebar = useSidebarData();
+  const {
+    saved,
+    drafts,
+    landingCards,
+    reloadSidebar,
+    pushRecent,
+    recordPrune,
+    setTopError: setSidebarTopError,
+    registerActivePageBridge,
+    sidebarCollapsed,
+    setSidebarCollapsed,
+    studioSetupIncomplete,
+  } = sidebar;
+
+  const [activeView, setActiveView] = useState<ViewMetadata | null>(null);
+  // Latest `activeView`, read by the active-page bridge's `getActiveView` so the
+  // provider's handlers see the live open page without re-registering the bridge.
+  const activeViewRef = useRef<ViewMetadata | null>(null);
+  activeViewRef.current = activeView;
+  // One Yjs/Hocuspocus connection for the active page, owned here at the shell
+  // level (lifted out of CollabPageEditor) and passed to the editor. Keyed on
+  // the URL page id — known the instant a sidebar row is clicked — NOT on
+  // `activeView?.id`, which only resolves after the `getView` metadata fetch.
+  // Keying on the URL dials the socket in PARALLEL with that fetch (the new
+  // page's body starts syncing while its metadata loads) instead of serializing
+  // behind it; the hook reconnects on change and holds no socket when null (the
+  // empty-selection state).
+  const collab = useCollabProvider(urlViewId);
+
+  // Publish this tab's "actively viewing" flag into awareness so peers dim our
+  // face-pile avatar when we background the tab / switch apps. One mount per
+  // provider, beside the provider it writes to.
+  usePublishPresenceActivity(collab.provider);
+
+  // Live "an assistant is working on this page" state (any member, any channel),
+  // read off the same awareness as the face-pile. Drives the ambient working
+  // claw + status pill, and the chat composer's double-text guard below.
+  const assistantRun = useAssistantRun(collab.provider);
+
+  // App-level offline state for the bundled desktop app, read from the global
+  // signal (the single driver lives in WorkspaceChrome). No-op on web/thin shell.
+  const offline = useIsOffline();
+  const pendingWrites = usePendingWrites();
+
+  // Whether the active page's body is empty, recomputed live off the synced Yjs
+  // doc. Gates the draft landing (alongside the placeholder title): a fresh
+  // draft is the "what do you want to see?" surface only while it has no content
+  // — the instant a build (the landing prompt, or a corner-chat turn) adds a
+  // block, the editor takes over, so nothing is ever stranded behind the prompt.
+  const [docEmpty, setDocEmpty] = useState(false);
+  useEffect(() => {
+    const doc = collab.doc;
+    if (!doc || !collab.synced) {
+      setDocEmpty(false);
+      return;
+    }
+    const frag = doc.getXmlFragment(FRAGMENT_FIELD);
+    const recompute = () => setDocEmpty(isYFragmentEmpty(frag));
+    recompute();
+    frag.observeDeep(recompute);
+    return () => frag.unobserveDeep(recompute);
+  }, [collab.doc, collab.synced]);
+
+  // The just-created draft (set by "+ New draft" / add-child). It forces the
+  // landing through the create → navigate → sync window — before `pageView`
+  // resolves (`getView` round-trip) and before the doc syncs — so opening a new
+  // draft paints the prompt instantly instead of flashing the editor skeleton +
+  // comment band. We do NOT optimistically set `activeView` for this: that would
+  // mismatch the lagging URL (`activeView` = new id, `urlViewId` = old page) and
+  // blink the previous page under a skeleton. Cleared the moment the draft syncs,
+  // from which point the normal placeholder + `docEmpty` gate takes over.
+  const [newDraftId, setNewDraftId] = useState<string | null>(null);
+  useEffect(() => {
+    if (newDraftId && newDraftId === urlViewId && collab.synced) {
+      setNewDraftId(null);
+    }
+  }, [newDraftId, urlViewId, collab.synced]);
+
+  // Drafts the user chose to write by hand — the landing's "Start with a blank
+  // page" escape hatch. Membership forces the editor (not the prompt) for that
+  // page even while it's still an empty placeholder, so an explicit "skip AI"
+  // choice isn't undone by the placeholder gate. A Set so reopening one of these
+  // still-empty drafts doesn't bounce back to the landing, and so multiple
+  // blanked drafts coexist across a session.
+  const [blankDraftIds, setBlankDraftIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+
+  // Metadata for the page the URL currently points at, or null during the brief
+  // window after a switch while its `getView` is still in flight. The centre
+  // pane renders a chrome skeleton over the already-syncing editor in that
+  // window rather than tearing the whole pane down — so switching drafts no
+  // longer flashes an empty "Loading…" pane or rebuilds the editor from blank.
+  const pageView = activeView && activeView.id === urlViewId ? activeView : null;
+
+  // Local user identity for the collaboration cursor + presence avatar.
+  const user = useMemo(() => {
+    const info = getUserInfo();
+    return {
+      id: info?.id ?? "me",
+      name: info?.name?.trim() || info?.email || "You",
+      avatarUrl: info?.avatarUrl,
+    };
+  }, []);
+
+  // Desktop sidebar collapse (`sidebarCollapsed` / `setSidebarCollapsed`) lives
+  // in the hoisted provider — the sidebar it sizes is now in `WorkspaceChrome`,
+  // but the toggle button stays in this shell's top bar (Row 1). The inbox
+  // flyout is likewise owned by the provider + rendered by `WorkspaceChrome`.
+
+  // ── Tab strip + per-tab browse history — the top "layer" (Row 1) ──────
+  // The active tab's current page is the source of truth for which page is
+  // shown; it is mirrored into the `/p/<pageId>` URL by the sync effect below,
+  // and the existing pathname-keyed fetch loads the body. Seeded once from the
+  // URL; session-scoped (survives soft nav, resets on reload). `doc-tabs.ts`.
+  const [tabsState, setTabsState] = useState<TabsState>(() =>
+    initTabs(urlViewId),
+  );
+  const tabsActivePage = activePageId(tabsState);
+  const tabsActivePageRef = useRef(tabsActivePage);
+  tabsActivePageRef.current = tabsActivePage;
+  // Latest pathname, read by the tabs → URL effect for COMPARISON only (never
+  // as a trigger — see below). Updated every render so the effect sees the
+  // committed URL when it runs.
+  const pathnameRef = useRef(pathname);
+  pathnameRef.current = pathname;
+
+  // tabs → URL: mirror the active tab's current page into the canonical path.
+  // Triggered ONLY by the active page (the tab side owns this direction); it
+  // reads `pathname` through a ref purely to no-op once they already match.
+  //
+  // `pathname` must NOT be a dependency. If it were, an EXTERNAL url change —
+  // the editor's "/"→Page `router.push`, floating-chat's `router.replace`, a
+  // deep link, browser back/forward — would re-fire this effect in the render
+  // where `urlViewId` has advanced but `tabsActivePage` still lags by one
+  // commit. It would then `router.replace` the URL back to the stale active
+  // page, while the URL → tabs effect simultaneously adopts the new id, leaving
+  // the two a half-step out of phase forever: the page and its child page
+  // ping-pong endlessly. Reacting to the active page alone lets the URL → tabs
+  // effect own external changes and this effect own tab-driven ones; both guard
+  // on equality, so they converge.
+  useEffect(() => {
+    const target = docPagePath(workspaceId, tabsActivePage);
+    if (pathnameRef.current !== target) router.replace(target);
+  }, [tabsActivePage, workspaceId, router]);
+
+  // URL → tabs: reconcile a path change from OUTSIDE the tab actions — a
+  // chat-created draft auto-navigation (`floating-chat` calls `router.replace`
+  // directly), a page link, a deep link followed in-session. Reacting to
+  // `urlViewId` alone (latest active page read via the ref) keeps a tab
+  // switch's not-yet-synced URL from being mistaken for an external change;
+  // both effects guard on equality, so they converge with no ping-pong.
+  useEffect(() => {
+    if (urlViewId === tabsActivePageRef.current) return;
+    setTabsState((s) => (urlViewId ? openPage(s, urlViewId) : blankActiveTab(s)));
+  }, [urlViewId]);
+
+  const [activeError, setActiveError] = useState<string | null>(null);
+  // Centre-pane errors (build / full-width / clearance) route through the
+  // provider's single `topError` channel so there's one banner; `setTopError`
+  // here is the provider's setter (aliased `setSidebarTopError` above).
+  const setTopError = setSidebarTopError;
+  const topError = sidebar.topError;
+
+  // Recents + `reloadSidebar` + `pushRecent` are owned by the hoisted provider;
+  // this shell consumes them (destructured above).
+
+  // Reflect a server-side title/icon change into the open page without a
+  // refetch for the active view. Two producers route here:
+  //
+  //   1. **Auto-title** (migration 218) — the editor's `onAutoTitled` and the
+  //      AI auto-title SSE. The name settles to `'auto'` and the *suggested*
+  //      icon is adopted only when the page still has none (`v.icon ?? icon`),
+  //      mirroring the server's `COALESCE(icon, …)` so a user-chosen emoji is
+  //      never clobbered.
+  //   2. **Explicit `setTitle`/`setIcon`** via `patchPage` — arrives with
+  //      `overwrite: true` + the authoritative `nameOrigin`, so the committed
+  //      icon is applied directly (including a `null` that *clears* it; the
+  //      COALESCE guard would wrongly keep the stale emoji).
+  //
+  // `reloadSidebar` then refreshes the sidebar rows, breadcrumb, and inactive
+  // tabs to the server's committed values (those surfaces read the fetched
+  // list, not `activeView`).
+  const applyAutoTitle = useCallback(
+    (
+      id: string,
+      title: string,
+      icon: string | null,
+      opts?: { nameOrigin?: NameOrigin; overwrite?: boolean },
+    ) => {
+      setActiveView((v) =>
+        v && v.id === id
+          ? {
+              ...v,
+              name: title,
+              nameOrigin: opts?.nameOrigin ?? "auto",
+              icon: opts?.overwrite ? icon : v.icon ?? icon,
+            }
+          : v,
+      );
+      reloadSidebar();
+    },
+    [reloadSidebar],
+  );
+
+  // (The `doc:draft-created` → `reloadSidebar` bridge now lives in the
+  // hoisted provider, beside the list fetch it refreshes.)
+
+  // Title/icon stream bridge: floating-chat relays the `doc_title_update`
+  // SSE as a `doc:title-updated` window event. Two producers feed it — the
+  // post-turn AI auto-title (migration 218; suggested icon, COALESCE) and an
+  // explicit `setTitle`/`setIcon` `patchPage` (authoritative, `overwrite`).
+  // Apply both to the open page so the change is visible without a refetch.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          pageId?: string;
+          title?: string;
+          icon?: string | null;
+          nameOrigin?: NameOrigin;
+          overwrite?: boolean;
+        }>
+      ).detail;
+      if (!detail?.pageId || !detail.title) return;
+      applyAutoTitle(detail.pageId, detail.title, detail.icon ?? null, {
+        nameOrigin: detail.nameOrigin,
+        overwrite: detail.overwrite,
+      });
+    };
+    window.addEventListener("doc:title-updated", handler);
+    return () => window.removeEventListener("doc:title-updated", handler);
+  }, [applyAutoTitle]);
+
+  // Chat-seed bridge moved up to `WorkspaceChrome` with the dock — the doc
+  // landing's chatter still fires the same `doc:chat-seed` event
+  // (`requestChatSeed`, below); the chrome subscribes and routes it. The dock
+  // lives above this shell now, so the routing must too.
+
+  // Page-collab guard relay. The "another member is running on this page"
+  // warning needs the page's Yjs provider (`assistantRun`), which only exists
+  // here. The dock reads it from the module-level relay (it can't be passed
+  // down — the dock is an ANCESTOR now). Publish on change; clear on unmount
+  // (leaving `/p`) so the banner never lingers on a non-doc surface. See
+  // lib/doc-chat-relay.ts.
+  const docOthersRun =
+    assistantRun && user && assistantRun.actor.id !== user.id
+      ? assistantRun
+      : null;
+  useEffect(() => {
+    docChatRelay.setOthersRun(docOthersRun);
+    return () => docChatRelay.setOthersRun(null);
+  }, [docOthersRun]);
+
+  // ── Page-body build indicator ─────────────────────────────────────────
+  // A landing prompt pre-creates a draft and runs the build with the corner
+  // chat collapsed; the page body fills via Yjs. To make that work visible
+  // *on the page*, the editor renders `<PageBuildIndicator>` (under the page
+  // comment composer) whenever `buildingPageId` is the active page — the
+  // indicator pulls the live detail (tool timeline + streaming text) off the
+  // build-activity bus itself, so the shell only owns *visibility*, not the
+  // per-token content. We subscribe here purely to clear `buildingPageId`
+  // when the turn finishes: wait until we've actually seen it stream (so the
+  // pre-stream tick doesn't clear early), then drop the banner when it stops.
+  const [buildingPageId, setBuildingPageId] = useState<string | null>(null);
+  const buildingPageIdRef = useRef<string | null>(null);
+  buildingPageIdRef.current = buildingPageId;
+  // Whether the active page has an inline comment anchor (reported by the
+  // editor). When it does — and the page is the constrained reading column on a
+  // wide viewport — the content shifts left to reserve a right gutter so the
+  // comment rail can dock beside it (Notion-style). See comment-rail.tsx.
+  const [pageHasComments, setPageHasComments] = useState(false);
+  // Track viewport width so the reserved comment gutter scales with it. Applied
+  // as an INLINE padding (not a Tailwind class) so React Fast-Refresh delivers
+  // it even when the dev server's CSS hot-reload is stale.
+  const [viewportWidth, setViewportWidth] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onResize = () => setViewportWidth(window.innerWidth);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const commentGutter =
+    pageHasComments && pageView && !pageView.fullWidth
+      ? commentGutterWidth(viewportWidth)
+      : 0;
+  // A brand-new, untouched draft (placeholder title) that isn't mid-build shows
+  // the same "What do you want to see?" prompt as a blank tab — an empty draft
+  // and an empty tab are the same "haven't decided what this page is" state,
+  // except the draft already has an id, so a submit builds *into* it (no comment
+  // band, no bare editor). Once a build starts (`buildingPageId`) or the page
+  // auto/user-titles, the editor takes over so the construction streams onto it.
+  //
+  // Emptiness: while the doc is still syncing a placeholder draft is *presumed
+  // empty* (a freshly-created one is — this is what kills the open-flicker where
+  // the title + comment band + editor skeleton flashed before the prompt). The
+  // instant it syncs, the real `docEmpty` check takes over, so a placeholder page
+  // that somehow has content (e.g. a build whose auto-title failed) is never
+  // stranded behind the prompt — it just resolves to the editor a frame later.
+  //
+  // The `newDraftId` latch covers the earlier window still: right after "+ New
+  // draft", `pageView` is null (its `getView` is in flight), so the placeholder
+  // gate can't fire yet — the latch forces the landing until the draft syncs. A
+  // running build always wins (the editor must show the stream).
+  // "Start with a blank page" wins over every landing trigger: once the user
+  // opts to write the page by hand, the editor must hold even though the draft
+  // is still an empty placeholder (which would otherwise re-assert the prompt).
+  const startedBlank = urlViewId !== null && blankDraftIds.has(urlViewId);
+  const isDraftLanding =
+    !startedBlank &&
+    buildingPageId !== urlViewId &&
+    ((newDraftId !== null && newDraftId === urlViewId) ||
+      (!!pageView &&
+        pageView.nameOrigin === "placeholder" &&
+        (!collab.synced || docEmpty)));
+  const buildStartedRef = useRef(false);
+  useEffect(
+    () =>
+      subscribeBuildActivity((a) => {
+        if (!buildingPageIdRef.current) return;
+        if (a.isStreaming) {
+          buildStartedRef.current = true;
+        } else if (buildStartedRef.current) {
+          buildStartedRef.current = false;
+          setBuildingPageId(null);
+        }
+      }),
+    [],
+  );
+
+  // Latest `handleBuildPage`, for the resume effect to call without taking it
+  // as a dep (its identity changes every render). Assigned during render just
+  // after the function is defined.
+  const buildPageRef = useRef<
+    | ((
+        text: string,
+        opts: {
+          model: ChatSeed["model"];
+          researchMode: boolean;
+          fileIds?: string[];
+        },
+        targetViewId?: string,
+        fromResume?: boolean,
+      ) => void)
+    | null
+  >(null);
+  // One-shot guard so the resume can't re-fire on later renders of this mount.
+  const buildResumedRef = useRef(false);
+
+  // Resume a build interrupted by the auth-refresh redirect. `handleBuildPage`
+  // stashes its intent before the (possibly redirecting) `createDraft`; on the
+  // full-page return we replay it exactly once. `take` is single-consume and
+  // the replay passes `fromResume` (no re-stash), so a still-broken session
+  // can't loop; a short TTL stops a stale prompt resurrecting on a later visit.
+  // See docs/architecture/platform/auth.md → "A sub-app refresh discards
+  // in-flight work".
+  useEffect(() => {
+    if (buildResumedRef.current) return;
+    buildResumedRef.current = true;
+    const pending = takePendingBuild(workspaceId, Date.now());
+    if (!pending) return;
+    buildPageRef.current?.(
+      pending.text,
+      {
+        model: pending.model,
+        researchMode: pending.researchMode,
+        fileIds: pending.fileIds,
+      },
+      pending.targetViewId,
+      true,
+    );
+  }, [workspaceId]);
+
+  // (Both sidebar lists are fetched by the hoisted provider, above this shell;
+  // they survive `/p/<pageId>` soft swaps because the provider lives in the
+  // workspace layout, keyed on the stable route `workspaceId`.)
+
+  // Fetch the active view's metadata + page whenever the URL viewId
+  // changes (or the workspace switches). Also caches each draft's
+  // `autoPruneAt` for sidebar caption rendering — the list endpoint
+  // doesn't ship it.
+  useEffect(() => {
+    if (!urlViewId) {
+      setActiveView(null);
+      setActiveError(null);
+      return;
+    }
+    let cancelled = false;
+    setActiveError(null);
+    getView(urlViewId)
+      .then((meta) => {
+        if (cancelled) return;
+        setActiveView(meta);
+        // Record the open — covers deep links / direct loads that don't
+        // route through `navigateToView` (saved-only filter happens at
+        // render time).
+        pushRecent(meta.id);
+        if (meta.state === "draft") {
+          recordPrune(meta.id, meta.autoPruneAt);
+        }
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setActiveError(message);
+        setActiveView(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [urlViewId, pushRecent, recordPrune]);
+
+  function navigateToView(id: string | null) {
+    // Navigate the ACTIVE tab; the canonical `/p/<id>` URL follows via the
+    // tabs → URL effect (never replaced directly here). A non-null id opens
+    // (pushes) the page into the active tab's history; null blanks that tab
+    // (the breadcrumb's workspace-home crumb).
+    if (id) {
+      pushRecent(id);
+      setTabsState((s) => openPage(s, id));
+    } else {
+      setTabsState(blankActiveTab);
+    }
+  }
+
+  // ── Active-page bridge ─────────────────────────────────────────────────
+  // Register the centre-pane handles the hoisted provider's mutation handlers
+  // call through (optimistic `setActiveView`, tab-history scrub, navigation,
+  // new-draft latch). Stable callbacks, registered for this shell's lifetime;
+  // off `/p` the provider holds no bridge and skips the optimistic part.
+  useEffect(() => {
+    const bridge: ActivePageBridge = {
+      getActiveView: () => activeViewRef.current,
+      setActiveView: (updater) => setActiveView(updater),
+      dropFromTabs: (id) => setTabsState((s) => dropPage(s, id)),
+      navigate: (id) => navigateToView(id),
+      latchNewDraft: (id) => setNewDraftId(id),
+    };
+    return registerActivePageBridge(bridge);
+    // navigateToView is a stable hoisted closure; the bridge reads live state
+    // via refs/setters, so it never needs re-registering.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registerActivePageBridge]);
+
+  // Desktop quick-capture: the desktop shell loads `…/p?capture=1` on the global
+  // hotkey to ask doc to drop the user straight into a fresh blank draft.
+  // Fire the provider's `handleNewDraft` once on mount — it navigates to the new
+  // page's URL (which has no `capture` param), so the request can't re-trigger,
+  // and the ref guards against a double-run within this mount. See
+  // docs/architecture/features/app-desktop.md → "quick-capture.ts".
+  const captureHandledRef = useRef(false);
+  useEffect(() => {
+    if (captureHandledRef.current) return;
+    if (typeof window === "undefined") return;
+    if (!isCaptureRequest(window.location.search)) return;
+    captureHandledRef.current = true;
+    void sidebar.handleNewDraft();
+    // Run once on shell mount; handleNewDraft is a stable provider callback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Desktop shell chrome: tag <html> when running inside the Electron desktop
+  // app (apps/app-desktop), whose preload exposes `window.sidanclawDesktop`.
+  // The `is-canvas-desktop` class gates the desktop-only chrome in globals.css —
+  // a draggable title-bar strip that clears the macOS traffic lights and
+  // non-selectable app chrome. layout.tsx also stamps this before paint (for the
+  // production no-flash path); doing it here too makes it robust to that script
+  // being absent (e.g. a stale dev root layout) and survives hydration. No-op in
+  // a normal browser, where `window.sidanclawDesktop` is undefined.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const desktop = (window as unknown as { sidanclawDesktop?: { platform?: string } })
+      .sidanclawDesktop;
+    if (!desktop) return;
+    document.documentElement.classList.add("is-canvas-desktop");
+    // Windows keeps a standard OS frame (no macOS traffic lights), so zero the
+    // title-bar inset via `is-canvas-desktop-win` — see globals.css.
+    if (desktop.platform === "win32") {
+      document.documentElement.classList.add("is-canvas-desktop-win");
+    }
+  }, []);
+
+  // Landing's "Start with a blank page" on a blank tab (no page open): mint a
+  // draft and open it straight in the editor, skipping the AI prompt. Same
+  // create/navigate as `handleNewDraft`, minus the `newDraftId` latch (which
+  // exists to *hold* the landing) and plus a `blankDraftIds` entry so the
+  // placeholder gate doesn't re-assert the prompt once the draft syncs.
+  async function handleStartBlankNew() {
+    setTopError(null);
+    try {
+      const created = await createDraft({ workspaceId });
+      reloadSidebar();
+      recordPrune(created.id, created.autoPruneAt);
+      setBlankDraftIds((prev) => new Set(prev).add(created.id));
+      navigateToView(created.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.createDraftFailed, { message }));
+    }
+  }
+
+  // Landing's "Start with a blank page" on an already-open empty draft: the
+  // page exists, so just drop its landing. Mark it blank (mounts the editor)
+  // and release the `newDraftId` latch so it can't snap the prompt back.
+  function handleStartBlankDraft(viewId: string) {
+    setNewDraftId((cur) => (cur === viewId ? null : cur));
+    setBlankDraftIds((prev) => new Set(prev).add(viewId));
+  }
+
+  // Default-viewer landing → "build me a page". Unlike the floating dock
+  // (which streams the reply in the corner), this pre-creates the draft and
+  // navigates to it *immediately*, then hands the prompt to the chat anchored
+  // to that page (`docViewId`). The model edits the open page via
+  // `patchPage`, so the construction streams onto the **page body** itself
+  // (live Yjs), with the corner chat left collapsed — the page is the show.
+  // Pre-creating is also why this doesn't depend on a server "page created"
+  // navigation signal: doc's `renderPage` emits none (only `renderView`
+  // does, and that tool is stripped for doc assistants).
+  async function handleBuildPage(
+    text: string,
+    opts: { model: ChatSeed["model"]; researchMode: boolean; fileIds?: string[] },
+    targetViewId?: string,
+    fromResume = false,
+  ) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    setTopError(null);
+    // Stash the intent so it survives the mandatory auth-refresh full-page
+    // redirect: `createDraft` below is an `authFetch` POST, and in production a
+    // 401 bounces the whole browser to sidan.ai and back, reloading this page
+    // and dropping `trimmed` (React state). The resume effect replays it on
+    // return. A replay (`fromResume`) never re-stashes, so a still-broken
+    // session can't loop. See docs/architecture/platform/auth.md → "A sub-app
+    // refresh discards in-flight work".
+    if (!fromResume) {
+      stashPendingBuild({
+        workspaceId,
+        text: trimmed,
+        model: opts.model,
+        researchMode: opts.researchMode,
+        fileIds: opts.fileIds,
+        targetViewId,
+        ts: Date.now(),
+      });
+    }
+    try {
+      // Blank tab → mint a fresh draft and navigate into it. Empty draft (the
+      // draft landing, where the page is already open) → build into THAT page —
+      // it's the same "describe what you want" surface, it just already has an id.
+      let pageId = targetViewId;
+      if (!pageId) {
+        const created = await createDraft({ workspaceId });
+        reloadSidebar();
+        recordPrune(created.id, created.autoPruneAt);
+        navigateToView(created.id);
+        pageId = created.id;
+      }
+      // Surface the build on the page body (indicator) until the turn finishes;
+      // setting `buildingPageId` also swaps the draft landing for the live
+      // editor (see `isDraftLanding`) so the construction streams onto the body.
+      buildStartedRef.current = false;
+      setBuildingPageId(pageId);
+      requestChatSeed({
+        prefill: trimmed,
+        autoSend: true,
+        docViewId: pageId,
+        model: opts.model,
+        researchMode: opts.researchMode,
+        ...(opts.fileIds && opts.fileIds.length > 0
+          ? { fileIds: opts.fileIds }
+          : {}),
+      });
+      // The turn is seeded — intent fulfilled, drop the stash.
+      clearPendingBuild();
+      // Backstop: if the turn never streams (e.g. a rapid second submit hit
+      // the chat while a prior turn was in flight), the stream-end effect
+      // never fires — drop the banner so it can't wedge. No-ops once the
+      // build has actually started (the effect owns clearing from there).
+      window.setTimeout(() => {
+        if (!buildStartedRef.current) {
+          setBuildingPageId((cur) => (cur === pageId ? null : cur));
+        }
+      }, 60_000);
+    } catch (err) {
+      // Keep the stash ONLY when the throw is the auth redirect unloading the
+      // page (so the build replays on return). Any other failure is terminal
+      // here — clear it so a later reload can't silently re-fire the build.
+      if (!isAuthRedirectInFlight()) clearPendingBuild();
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.createDraftFailed, { message }));
+    }
+  }
+
+  // Keep the resume effect (below) pointed at the current `handleBuildPage`
+  // closure without taking it as an effect dep — its identity changes every
+  // render. Assigning a ref during render is the sanctioned "latest callback"
+  // pattern (idempotent, reads no external mutable state).
+  buildPageRef.current = handleBuildPage;
+
+  // Sidebar page mutations (add-child / rename / rename-value / duplicate /
+  // reparent / save / unsave / delete / set-icon) live in the hoisted provider
+  // (`DocSidebarDataProvider`). This shell consumes the ones its centre-pane
+  // chrome raises (PageHeader / PageTitle): `handleRenameValue`,
+  // `handleDuplicate`, `handleSetIcon` — destructured below.
+  const {
+    handleRenameValue,
+    handleDuplicate,
+    handleSetIcon,
+  } = sidebar;
+
+  // Flip a page's Notion-style "Full width" mode. Optimistic: patch the active
+  // view immediately so the body re-measures without waiting on the network,
+  // then commit the write and reconcile with the server's authoritative
+  // metadata. On failure, roll the optimistic change back and surface the
+  // error (mirrors handleSetIcon's error handling — no silent catch).
+  async function handleToggleFullWidth(id: string, next: boolean) {
+    setTopError(null);
+    const previous = activeView;
+    if (activeView?.id === id) {
+      setActiveView((v) => (v && v.id === id ? { ...v, fullWidth: next } : v));
+    }
+    try {
+      // Optimistic state is already applied above; offline this queues for replay
+      // (no throw → no rollback), online it calls the API + reconciles.
+      await offlineWrite({
+        kind: "view.fullWidth",
+        coalesceKey: `view.fullWidth:${id}`,
+        payload: { id, fullWidth: next },
+        exec: () => setViewFullWidth(id, next),
+        onResult: (updated) => {
+          if (activeView?.id === id) setActiveView(updated);
+        },
+      });
+    } catch (err) {
+      if (previous?.id === id) setActiveView(previous);
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.fullWidthUpdateFailed, { message }));
+    }
+  }
+
+  // Page-level clearance (migration 212). Same optimistic-then-reconcile shape
+  // as full-width. The server rejects a value above the member's own clearance
+  // (403) — caught here, rolled back, surfaced. Declassify is confirmed in the
+  // pill before this runs.
+  async function handleChangeClearance(
+    id: string,
+    next: "public" | "internal" | "confidential",
+  ) {
+    setTopError(null);
+    const previous = activeView;
+    if (activeView?.id === id) {
+      setActiveView((v) => (v && v.id === id ? { ...v, clearance: next } : v));
+    }
+    try {
+      await offlineWrite({
+        kind: "view.clearance",
+        coalesceKey: `view.clearance:${id}`,
+        payload: { id, clearance: next },
+        exec: () => setViewClearance(id, next),
+        onResult: (updated) => {
+          if (activeView?.id === id) setActiveView(updated);
+        },
+      });
+    } catch (err) {
+      if (previous?.id === id) setActiveView(previous);
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.clearanceUpdateFailed, { message }));
+    }
+  }
+
+  function handleActiveDeletedFromHeader() {
+    if (activeView) setTabsState((s) => dropPage(s, activeView.id));
+    setActiveView(null);
+    reloadSidebar();
+  }
+
+  const allRows = useMemo(() => [...saved, ...drafts], [saved, drafts]);
+
+  // Recents + the landing cards (recents-or-freshest-saved) are owned by the
+  // hoisted provider; the centre-pane landing reads `landingCards` from it.
+
+  // Ancestor breadcrumb for the active page. Built from the combined
+  // row list so a draft sub-page under a saved parent still resolves
+  // its chain.
+  const breadcrumb = useMemo(
+    () => buildBreadcrumb(allRows, activeView?.id ?? null),
+    [allRows, activeView],
+  );
+
+  // Resolve each open tab to its display label/icon for the top-layer strip.
+  // The active tab prefers the freshest `activeView` metadata; the others read
+  // the sidebar row list; a blank tab resolves to null → a "New tab" chip.
+  const tabViews = useMemo<TabView[]>(() => {
+    const byId = new Map(allRows.map((r) => [r.id, r] as const));
+    return tabsState.tabs.map((tab) => {
+      const pageId = tabPageId(tab);
+      const meta =
+        pageId && activeView?.id === pageId
+          ? activeView
+          : pageId
+            ? byId.get(pageId)
+            : undefined;
+      return {
+        key: tab.key,
+        pageId,
+        isActive: tab.key === tabsState.activeKey,
+        title: meta?.name ?? null,
+        icon: meta?.icon ?? null,
+        entity: meta?.entity,
+        viewType: meta?.viewType,
+        nameOrigin: meta?.nameOrigin,
+      };
+    });
+  }, [tabsState, allRows, activeView]);
+
+  return (
+    <div
+      // data-sidebar-collapsed: in the desktop shell, when the sidebar is
+      // collapsed the tab bar slides under the macOS traffic lights, so
+      // globals.css gives it left clearance only in that state. (The sidebar
+      // itself + inbox flyout + mobile hamburger now live in `WorkspaceChrome`,
+      // hoisted to the workspace layout; this shell renders only the centre
+      // pane + chat docks.)
+      data-sidebar-collapsed={sidebarCollapsed ? "true" : "false"}
+      className="relative flex h-full w-full overflow-hidden"
+    >
+      {/* Bundled-desktop offline indicator (gated; never shows on web/thin). */}
+      {offline && (
+        <div className="pointer-events-none fixed bottom-3 left-3 z-50 rounded-full border border-amber-300/40 bg-amber-100/90 px-3 py-1 text-[11px] font-medium text-amber-900 shadow-sm dark:border-amber-700/40 dark:bg-amber-950/80 dark:text-amber-200">
+          {pendingWrites > 0
+            ? format(t.offlinePending, { count: pendingWrites })
+            : t.offline}
+        </div>
+      )}
+      <main className="relative flex h-full min-w-0 flex-1 flex-col bg-background">
+        {/* Ambient "the assistant is working on this page" claw + status pill,
+            behind the editor content. Visible only while a run is active. */}
+        <AssistantRunClaw run={assistantRun} />
+        {/* Top "layer" (Row 1) — PERSISTENT across every state (loaded page,
+            blank tab, empty selection, error): sidebar toggle, browse-history
+            arrows, and the open-tab strip. The breadcrumb + action navbar
+            (Row 2, PageHeader) sits BELOW it, only when a page is loaded. */}
+        <DocTopBar
+          tabs={tabViews}
+          canBack={canGoBack(tabsState)}
+          canForward={canGoForward(tabsState)}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+          onBack={() => setTabsState(back)}
+          onForward={() => setTabsState(forward)}
+          onSwitchTab={(key) => setTabsState((s) => switchTab(s, key))}
+          onCloseTab={(key) => setTabsState((s) => closeTab(s, key))}
+          onNewTab={() => setTabsState(newTab)}
+        />
+        {topError && (
+          <div className="border-b border-destructive/40 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+            {topError}
+          </div>
+        )}
+        {!urlViewId && !activeError && (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* Home IS the assistant's full-width "Suggested for you" surface;
+                its slim build bar (onBuild) keeps the type-a-prompt page-build
+                flow that the old centered hero used to own. PREVIEW/MOCK
+                (see docs/plans/home-dock.md + suggested-view.tsx). */}
+            <SuggestedView
+              workspaceId={workspaceId}
+              assistantId={assistantId}
+              userName={user.name}
+              onBuild={(text) =>
+                handleBuildPage(text, {
+                  model: "pro",
+                  researchMode: false,
+                  fileIds: [],
+                })
+              }
+            />
+          </div>
+        )}
+        {activeError && (
+          <div className="m-6 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {activeError}
+          </div>
+        )}
+        {urlViewId && !activeError && (
+          <>
+            {/* Row 2 chrome. `pageView` is the loaded metadata for THIS url; while
+                it's still in flight (the brief post-switch window) we paint a
+                height-matched skeleton instead of the real navbar — the editor
+                below stays mounted and keeps syncing, so a switch never tears the
+                whole centre pane down or flashes an empty "Loading…" state. */}
+            {pageView ? (
+              <PageHeader
+                view={pageView}
+                breadcrumb={breadcrumb}
+                provider={collab.provider}
+                status={collab.status}
+                synced={collab.synced}
+                onNavigate={navigateToView}
+                onMutated={(next) => {
+                  setActiveView(next);
+                  if (next.state === "draft") {
+                    recordPrune(next.id, next.autoPruneAt);
+                  }
+                  reloadSidebar();
+                }}
+                onDeleted={handleActiveDeletedFromHeader}
+                onRenameValue={handleRenameValue}
+                onDuplicate={handleDuplicate}
+                fullWidth={pageView.fullWidth}
+                onToggleFullWidth={(next) =>
+                  handleToggleFullWidth(pageView.id, next)
+                }
+                memberClearance={workspace.clearance}
+                onChangeClearance={(next) =>
+                  handleChangeClearance(pageView.id, next)
+                }
+                assistantId={assistantId}
+                currentUser={user}
+              />
+            ) : (
+              <div
+                data-doc-chrome
+                aria-hidden
+                className="flex h-12 items-center border-b border-border pl-3 pr-2 md:pl-4 md:pr-3"
+              >
+                <div className="h-4 w-40 animate-pulse rounded bg-muted" />
+              </div>
+            )}
+            {isDraftLanding ? (
+              // Empty, untouched draft → the blank-tab "What do you want to
+              // see?" prompt instead of a title + comment band + bare editor.
+              // A submit builds into THIS draft (`urlViewId`); the moment the
+              // build starts, `isDraftLanding` flips false and the editor below
+              // mounts so the construction streams onto the page body.
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <EmptyPageLanding
+                  workspaceId={workspaceId}
+                  cards={landingCards}
+                  onOpenCard={navigateToView}
+                  onSubmitPrompt={(text, opts) =>
+                    handleBuildPage(text, opts, urlViewId)
+                  }
+                  onStartBlank={() => handleStartBlankDraft(urlViewId)}
+                />
+              </div>
+            ) : (
+              <div
+                data-comment-gutter={commentGutter > 0 ? "" : undefined}
+                style={
+                  commentGutter > 0 ? { paddingRight: commentGutter } : undefined
+                }
+                className="flex-1 min-h-0 overflow-y-auto overflow-x-clip px-4 py-4 transition-[padding] duration-200 md:px-10 md:py-6 lg:px-16"
+              >
+                {/* Page-width wrapper. Default (false) is a centered constrained
+                    reading column (~720px via `.doc-page-content`); `true` is
+                    the full pane width. The outer px-4 / md:px-10 / lg:px-16
+                    padding above keeps gutters on both sides in both modes (so
+                    full-width pages and moderate-width panes don't bleed to the
+                    edge); the top bar stays full-bleed.
+                    When the page has inline comments, `xl:pr` reserves a right
+                    gutter (on wide screens) so the content shifts left and the
+                    comment rail docks beside it. */}
+                <div
+                  className={
+                    pageView?.fullWidth ? "w-full" : "doc-page-content"
+                  }
+                >
+                  {/* The big editable title lives in the body (Notion-style),
+                      since the navbar now shows the breadcrumb, not the title.
+                      A skeleton title holds the same vertical space while the
+                      page metadata resolves, so the body doesn't jump. */}
+                  {pageView ? (
+                    <PageTitle
+                      name={pageView.name}
+                      icon={pageView.icon}
+                      fallback={derivePageIcon({
+                        entity: pageView.entity,
+                        viewType: pageView.viewType,
+                        nameOrigin: pageView.nameOrigin,
+                      })}
+                      isPlaceholder={pageView.nameOrigin === "placeholder"}
+                      canEdit
+                      onRename={(name) => handleRenameValue(pageView.id, name)}
+                      onSetIcon={(icon) => handleSetIcon(pageView.id, icon)}
+                    />
+                  ) : (
+                    <div className="mb-4 flex flex-col gap-1" aria-hidden>
+                      <div className="size-12" />
+                      <div className="h-9 w-2/3 animate-pulse rounded bg-muted md:h-10" />
+                    </div>
+                  )}
+                  <CollabPageEditor
+                    collab={collab}
+                    canEdit
+                    user={user}
+                    viewId={urlViewId}
+                    nameOrigin={pageView?.nameOrigin}
+                    onAutoTitled={(title, icon) =>
+                      applyAutoTitle(urlViewId, title, icon)
+                    }
+                    assistantId={assistantId}
+                    buildSlot={
+                      buildingPageId === urlViewId ? <PageBuildIndicator /> : null
+                    }
+                    onCommentsPresenceChange={setPageHasComments}
+                  />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+      {/* The assistant chat dock is no longer mounted here — it lives once in
+          `WorkspaceChrome` (the persistent workspace layout) so a turn keeps
+          streaming across tab switches and the conversation is unified. This
+          shell only publishes the page-collab guard into `docChatRelay`
+          (above) for the hoisted dock to read. */}
+    </div>
+  );
+}

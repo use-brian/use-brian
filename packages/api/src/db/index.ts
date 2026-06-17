@@ -1,0 +1,7 @@
+export { getPool, query, queryWithRLS } from './client.js'
+export { findOrCreateUser, findUserById, getDefaultAssistant } from './users.js'
+export type { User } from './users.js'
+export { findOrCreateSession, updateSessionStatus, updateSessionTitle, renameSession, countSessionTurns, getSessionMessages, addSessionMessage, truncateMessagesFrom } from './sessions.js'
+export type { Session, SessionMessage } from './sessions.js'
+export { createMemory, updateMemory, getMemoryById, searchMemories, getIdentityMemories, getMemoryIndex, getMemoryIndexRanked, trackRecall, trackRecallOutcome, getSoul } from './memories.js'
+export type { Memory } from './memories.js'

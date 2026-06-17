@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sidanclaw</title>
+    <!--
+      Runtime config + process.env shim for the bundled file:// SPA. Runs as a
+      classic (non-module) script in <head>, so it executes BEFORE the deferred
+      module bundle — app-web's lib code reads `process.env.NEXT_PUBLIC_*` at
+      module-init, and there is no Next env injection on file://. The Electron
+      shell passes the backend via `?api=` on the loadFile URL.
+    -->
+    <script>
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var api =
+          params.get("api") ||
+          (window.__DOC_CONFIG__ && window.__DOC_CONFIG__.apiUrl) ||
+          "http://localhost:4000";
+        window.__DOC_CONFIG__ = Object.assign(
+          { apiUrl: api },
+          window.__DOC_CONFIG__,
+        );
+        window.process = window.process || { env: {} };
+        window.process.env.NEXT_PUBLIC_API_URL = api;
+        window.process.env.NODE_ENV = "production";
+        // Stamp the desktop-shell class before paint (the preload sets
+        // window.sidanclawDesktop before page scripts) so globals.css's
+        // `is-canvas-desktop` chrome (draggable title-bar strip clearing the
+        // macOS traffic lights) applies — same effect as the Next root layout's
+        // DESKTOP_SHELL_PREPAINT_SCRIPT.
+        try {
+          if (window.sidanclawDesktop) {
+            document.documentElement.classList.add("is-canvas-desktop");
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

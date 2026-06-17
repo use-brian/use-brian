@@ -1,0 +1,23 @@
+{
+  "name": "@sidanclaw/channels",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
+  },
+  "dependencies": {
+    "@sidanclaw/shared": "workspace:*",
+    "zod": "^3.24"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

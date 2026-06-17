@@ -1,0 +1,27 @@
+{
+  "ref": "refs/heads/main",
+  "before": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "after": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "repository": {
+    "id": 1,
+    "full_name": "acme/widget",
+    "default_branch": "main"
+  },
+  "sender": {
+    "login": "alice",
+    "type": "User"
+  },
+  "head_commit": {
+    "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "timestamp": "2026-05-14T10:00:00Z",
+    "author": { "name": "Alice", "email": "alice@acme.com" }
+  },
+  "commits": [
+    {
+      "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "added": ["docs/new.md"],
+      "removed": [],
+      "modified": ["src/index.ts", "README.md"]
+    }
+  ]
+}

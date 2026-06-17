@@ -1,0 +1,42 @@
+{
+  "name": "@sidanclaw/sidanclaw-kb",
+  "version": "0.1.0",
+  "description": "Parser, wikilink resolver, and lint checks for sidanclaw knowledge bases. Shared between the API sync worker and the public CLI.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "kb": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sidanclaw/sidanclaw",
+    "directory": "packages/sidanclaw-kb"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}
