@@ -1,9 +1,11 @@
 # Build + test the open core on every PR and on pushes to main/develop, so
 # contributor changes are validated before they land. Mirrors the local gate:
-# install -> typecheck -> build -> unit tests -> smoke. Integration tests
-# (test:integration) are intentionally skipped here -- they require provider API
-# keys and self-skip when the key env var is absent, so they add nothing on a
-# secret-less CI runner.
+# install -> build -> typecheck -> unit tests -> smoke. Build runs BEFORE
+# typecheck because some packages' script-level typechecks (e.g. core's
+# scripts/tsconfig.json eval scripts) reference the package's own built dist;
+# typechecking before build trips TS6305. Integration tests (test:integration)
+# are intentionally skipped here -- they require provider API keys and self-skip
+# when the key env var is absent, so they add nothing on a secret-less runner.
 name: CI
 
 on:
@@ -37,11 +39,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Build
         run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Unit tests
         run: pnpm test
