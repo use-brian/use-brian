@@ -14,8 +14,7 @@
  * That's fine for public articles; NOT fine for URLs that encode state
  * (auth tokens, signed share links, internal documents). Sensitive URLs
  * are filtered out up-front via `canHandle` — they skip Jina entirely and
- * fall through to `fetch-raw.ts`. OpenClaw uses Firecrawl for this role;
- * the pattern is interchangeable.
+ * fall through to `fetch-raw.ts`.
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'

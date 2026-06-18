@@ -741,7 +741,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
     },
 
     async recordInvocation(skillId) {
-      // Hermes-style: stale → active synchronously. Archived is NOT
+      // Stale → active synchronously. Archived is NOT
       // auto-reactivated (S12 invariant 1).
       await query(
         `UPDATE workspace_skills
@@ -764,8 +764,8 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
 
     async acquireReviewLease(skillId, leaseHolder, leaseMinutes) {
       // CAS — only set the lease when no live holder remains. Re-acquisition
-      // by the same caller extends the lease (matches Hermes "the curator
-      // can renew its own lease" behaviour).
+      // by the same caller extends the lease (the curator can renew its own
+      // lease).
       const result = await query<{ id: string }>(
         `UPDATE workspace_skills
          SET review_lease_held_by = $1,

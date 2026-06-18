@@ -1,10 +1,9 @@
 /**
  * useSkill tool — the model calls this to activate a skill.
  *
- * Mirrors Claude Code's Skill tool pattern: the model sees a compact listing
- * in the system prompt, then invokes this tool by skill ID to load the full
- * prompt content. The content is returned as the tool result — the model
- * reads it and follows the instructions.
+ * The model sees a compact listing in the system prompt, then invokes this
+ * tool by skill ID to load the full prompt content. The content is returned
+ * as the tool result — the model reads it and follows the instructions.
  *
  * The optional `recordInvocation` callback fires on successful resolution
  * (skill found and content returned). It is the CL-8 invocation hook —

@@ -20,6 +20,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
 import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
@@ -84,9 +85,19 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-plan",
   "ws-usage",
 ];
+// The OSS single-player edition has no billing: drop the Plan + Usage sections
+// entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
+// pitch instead of the live members manager. Hosted keeps the full list above.
+const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
+  "ws-general",
+  "ws-members",
+  "ws-llm-key",
+];
 
 export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
   const t = useT();
+  const oss = isOssEdition();
+  const workspaceSections = oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
   const [section, setSection] = useState<SettingsSection>(initialSection);
   // Track previous open/initialSection so we can reset `section` when the
   // modal transitions from closed→open or initialSection changes while
@@ -148,12 +159,14 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
           >
             <SectionGroup
               label={t.chrome.settingsModal.workspace.section}
-              sections={WORKSPACE_SECTIONS}
+              sections={workspaceSections}
               active={section}
               onSelect={setSection}
               labels={{
                 "ws-general": t.chrome.settingsModal.workspace.general,
-                "ws-members": t.chrome.settingsModal.workspace.members,
+                "ws-members": oss
+                  ? t.chrome.settingsModal.upgrade.teammatesNav
+                  : t.chrome.settingsModal.workspace.members,
                 "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
                 "ws-plan": t.chrome.settingsModal.workspace.plan,
                 "ws-usage": t.chrome.settingsModal.workspace.usage,
@@ -266,18 +279,45 @@ function SectionBody({
     case "ws-general":
       return <WorkspaceGeneralSection onWorkspaceDeleted={onClose} />;
     case "ws-members":
-      return <WorkspaceMembersSection />;
+      // OSS is single-player: teammates are a hosted-cloud feature, so the
+      // Members section pitches the upgrade instead of the live manager.
+      return isOssEdition() ? <HostedUpgradeSection /> : <WorkspaceMembersSection />;
     case "ws-llm-key":
       return <WorkspaceLlmKeySection />;
     case "ws-plan":
       // Billing is per-workspace — the "Plan" section IS the billing
       // surface (plan tier, payment method, invoices, upgrade/cancel).
-      return <BillingSection />;
+      // OSS has no billing; defensively pitch the upgrade in case something
+      // dispatches openWorkspaceSettings('ws-plan') directly (the nav hides it).
+      return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-usage":
       // Usage is per-workspace (migration 143) — the monthly credit
-      // allowance + reset date for the active workspace.
-      return <UsageSection />;
+      // allowance + reset date for the active workspace. OSS has no billing;
+      // defensive upgrade pitch (the nav hides this section in OSS).
+      return isOssEdition() ? <HostedUpgradeSection /> : <UsageSection />;
   }
+}
+
+function HostedUpgradeSection() {
+  const t = useT();
+  return (
+    <div className="space-y-6">
+      <h2 className="text-lg font-semibold">{t.chrome.settingsModal.upgrade.heading}</h2>
+      <div className="border-t border-border pt-6 space-y-4">
+        <p className="text-sm text-muted-foreground max-w-prose">
+          {t.chrome.settingsModal.upgrade.body}
+        </p>
+        <a
+          href={HOSTED_UPGRADE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          {t.chrome.settingsModal.upgrade.cta}
+        </a>
+      </div>
+    </div>
+  );
 }
 
 function NotificationsSection() {

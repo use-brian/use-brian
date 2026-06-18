@@ -35,9 +35,6 @@ type TelegramMessage = {
 // `message_thread_id`. To make each topic its own conversation (own session,
 // memory scope, chat lock), we embed the topic id into `channelId` as
 // `"<chatId>:topic:<topicId>"` on inbound. Outbound calls parse it back.
-//
-// Golden reference: openclaw/extensions/telegram/src/{topic-conversation.ts,
-// bot/helpers.ts, bot/delivery.send.ts}.
 
 const TELEGRAM_GENERAL_TOPIC_ID = 1
 const TOPIC_CHANNEL_ID_PATTERN = /^(-?\d+):topic:(\d+)$/
@@ -60,8 +57,6 @@ export function parseTopicChannelId(channelId: string): {
  * Telegram rejects `message_thread_id=1` (the General topic) on outbound sends,
  * so we strip it. The General topic is still represented with `:topic:1` in the
  * session key so partitioning stays uniform across forum topics.
- *
- * Mirrors openclaw/extensions/telegram/src/bot/helpers.ts → buildTelegramThreadParams.
  */
 function outboundThreadId(tid: number | undefined): number | undefined {
   if (tid == null) return undefined
@@ -278,8 +273,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
    * Download a Telegram voice note by `file_id` and return `{ buffer, mime }`.
    *
    * Telegram voice notes are always OGG/Opus — `mime` falls back to
-   * `audio/ogg; codecs=opus` when `getFile` doesn't include metadata
-   * (matches OpenClaw `extensions/whatsapp/src/inbound/media.ts:27-28`).
+   * `audio/ogg; codecs=opus` when `getFile` doesn't include metadata.
    *
    * Intended for the voice-transcription preflight in `routes/telegram.ts`.
    * See `docs/architecture/media/transcription.md`.
@@ -529,8 +523,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
 
   /**
    * Send a text message, retrying once without `message_thread_id` when the
-   * topic was deleted between inbound and outbound. Mirrors OpenClaw's
-   * sendTelegramWithThreadFallback (bot/delivery.send.ts:40-77).
+   * topic was deleted between inbound and outbound.
    */
   async function sendMessageWithThreadFallback(
     api: TelegramApi,

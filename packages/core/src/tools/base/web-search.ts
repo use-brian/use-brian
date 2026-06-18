@@ -13,8 +13,7 @@ import { flatSearchCostUsd } from '../../billing/search-provider-rates.js'
  *
  * Provider order: Brave → Serper → Tavily → DuckDuckGo.
  *
- * - Brave is first because it's fast, commerce-aware, and cheap. Validated
- *   against OpenClaw (their autoDetectOrder is also 10 → first).
+ * - Brave is first because it's fast, commerce-aware, and cheap.
  * - Serper (Google SERP) is second because Google indexes commercial sites
  *   better than anything else — the motivating bug was "flight prices" which
  *   Brave/Tavily mis-indexed and Google gets right.

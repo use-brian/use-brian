@@ -8,8 +8,7 @@
  * The module never reads env directly (per packages/core/CLAUDE.md) — the
  * caller passes `apiKey` from `env.GEMINI_API_KEY`.
  *
- * Pattern reference: OpenClaw `extensions/qqbot/src/stt.ts:49-82` — the
- * one-provider channel-local pattern, not the framework registry pattern.
+ * Uses the one-provider, channel-local pattern, not a framework registry.
  *
  * Returns token usage so the caller can attribute it as an `overhead:*` row
  * in `usage_tracking`.

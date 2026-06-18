@@ -3128,7 +3128,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       //     workers research, results injected into system prompt.
       //   Pro/Max: full coordinator mode — strip research tools from the main
       //     model, let it delegate via spawnWorker with Phase 4b drain.
-      //     Structurally prevents re-searching (Claude Code pattern).
+      //     Structurally prevents re-searching.
       //
       // Research mode forces coordinator regardless of the classifier — the
       // user explicitly asked for deep research, so we skip the splitter
@@ -3405,7 +3405,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // When preflight has already researched: also strip research tools —
       // the context is injected, main agent should synthesize not re-research.
       // If it genuinely needs more info, it can still use spawnWorker.
-      // Matches Claude Code's coordinator: only delegation + memory tools.
+      // The coordinator gets only delegation + memory tools.
       // No research tools (structurally forces delegation), no task/notes
       // (coordinator shouldn't do bookkeeping — workers are the tasks).
       //
@@ -3605,8 +3605,8 @@ export function chatRoutes(options: WebChatOptions): Router {
         for (let turnIdx = 0; turnIdx < pendingAssistantTurns.length; turnIdx++) {
           const turn = pendingAssistantTurns[turnIdx]
           // Pure empty response (safety filter / MAX_TOKENS with zero
-          // content). Nothing to persist for this turn — matches claude-code
-          // where the loop just exits without appending a blank message.
+          // content). Nothing to persist for this turn — the loop just exits
+          // without appending a blank message.
           if (turn.content.length === 0) continue
 
           // `app` assistants (doc / feed) author their own soul and are

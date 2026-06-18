@@ -770,9 +770,7 @@ describe('[COMP:channels/telegram] sendMessage truncation marker', () => {
 
 // ── Forum-topic support ───────────────────────────────────────
 //
-// Golden reference: openclaw/extensions/telegram/src/{topic-conversation.ts,
-// bot/helpers.ts, bot/delivery.send.ts}. See
-// docs/architecture/channels/adapter-pattern.md → "Telegram forum topics".
+// See docs/architecture/channels/adapter-pattern.md → "Telegram forum topics".
 
 describe('[COMP:channels/telegram] parseTopicChannelId', () => {
   it('unpacks topic-qualified channel ids', () => {

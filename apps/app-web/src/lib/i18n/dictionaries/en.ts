@@ -1574,6 +1574,12 @@ export const en = {
         notificationsComingSoon: "Granular notification preferences aren't configurable yet. You'll be able to pick channels and quiet hours from here soon.",
         noActiveWorkspace: "Select a workspace to manage its settings.",
       },
+      upgrade: {
+        teammatesNav: "Teammates",
+        heading: "Bring your team",
+        body: "Teammates, shared brains, and billing live in the hosted cloud edition. Upgrade to invite people and collaborate. Your existing brain comes with you, with no re-entry.",
+        cta: "Upgrade to hosted",
+      },
     },
     provenanceSheet: {
       title: "Source",
@@ -2845,7 +2851,7 @@ export const en = {
     },
     sectionDescriptions: {
       assistants: "The AI personalities you've configured.",
-      miniApps: "Installable surfaces (Feed for socials) that plug into your brain.",
+      miniApps: "Installable surfaces that plug into your brain.",
       connectors: "External sources your brain reads from.",
       programmaticAccess: "MCP keys for external AI clients (Claude, Cursor, ChatGPT) to read from and write to your brain.",
       skills: "Reusable behaviours your assistants can apply.",

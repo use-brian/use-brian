@@ -16,8 +16,8 @@ remain anonymous.
 
 ## Scope
 
-This repository is the **open core** (`sidanclaw`) — the single-player local
-brain: engine, brain/dreaming, canvas, and frontend, run locally on a model key.
+This repository is the **open core** (`sidanclaw`): the single-player local
+brain (engine, brain/dreaming, canvas, and frontend), run locally on a model key.
 The hosted multi-tenant platform is a separate, closed codebase; vulnerabilities
 specific to the hosted service should still be reported through the channels
 above and we will route them.

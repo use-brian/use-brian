@@ -2,7 +2,7 @@
  * Cost tracking and model pricing.
  *
  * Tracks per-turn costs using API-reported token usage.
- * Pricing is per million tokens, same formula as Claude Code.
+ * Pricing is per million tokens.
  */
 
 import type { TokenUsage } from '../providers/types.js'

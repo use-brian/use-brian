@@ -6,7 +6,6 @@
  * `LLMProvider` interface — sidanclaw's chat stack is Gemini-only today.
  *
  * Spec: docs/architecture/integrations/xai.md.
- * Pattern ported from openclaw/extensions/xai/src/responses-tool-shared.ts.
  */
 
 export const XAI_RESPONSES_ENDPOINT = 'https://api.x.ai/v1/responses'
@@ -143,7 +142,7 @@ export type XaiExtractedText = {
 
 /**
  * Walk the Responses-shape output for the first text block with annotations,
- * collect URL citations. Mirrors openclaw/extensions/xai/src/responses-tool-shared.ts.
+ * collect URL citations.
  *
  * Falls back to the top-level `output_text` / `citations` fields so legacy
  * response shapes still work.

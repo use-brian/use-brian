@@ -3,7 +3,7 @@
  *
  * Workers run restricted query loops (read-only tools, cheap model, max 10 turns).
  * Results are delivered via a notification queue that the main query loop drains
- * between turns — matching the Claude Code coordinator pattern.
+ * between turns.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -145,10 +145,10 @@ Rules:
  * user has explicitly asked for thoroughness, so we mandate the search →
  * read → cite chain that webSearch's own tool description already documents.
  *
- * Philosophy ported from Claude Code's worker pattern: depth comes from
- * structurally-required tool sequences ("you MUST call urlReader") and
- * multi-angle fallback ("if first query is thin, try 2 more"), not from
- * aspirational language that the model can ignore. Production trace
+ * Philosophy: depth comes from structurally-required tool sequences
+ * ("you MUST call urlReader") and multi-angle fallback ("if first query is
+ * thin, try 2 more"), not from aspirational language that the model can
+ * ignore. Production trace
  * confirmed workers under the prior prompt called webSearch once and
  * exited — never urlReader — so the prompt is now phrased as enforcement,
  * not encouragement.
@@ -773,7 +773,7 @@ INVALID — urlReader was required by protocol but not called. Search snippets a
      *
      * Research mode sets this to 10 so the coordinator can fan out broadly
      * on the initial wave and refill the pool after Phase 4b drains workers
-     * between waves — matching Claude Code's "concurrent agents" model.
+     * between waves.
      */
     setMaxConcurrent(n: number | null) {
       maxConcurrent = n

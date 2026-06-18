@@ -11,9 +11,8 @@
  * results are untrusted external content and must match the trust class of
  * MCP results (see docs/historical/old-security-model.md).
  *
- * Pattern mirrors openclaw/src/agents/tools/web-search.ts: one file per
- * provider, a thin composer, no hidden coupling. Adding a new provider is
- * a new file + one entry in the array.
+ * Pattern: one file per provider, a thin composer, no hidden coupling.
+ * Adding a new provider is a new file + one entry in the array.
  */
 
 import { sanitizeDeep } from '../../security/sanitize.js'

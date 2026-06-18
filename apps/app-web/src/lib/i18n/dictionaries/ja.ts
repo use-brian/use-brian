@@ -1407,6 +1407,12 @@ export const ja: Dictionary = {
         notificationsComingSoon: "詳細な通知設定はまだ利用できません。チャネルや通知オフ時間をここから選べるようになる予定です。",
         noActiveWorkspace: "設定するワークスペースを選択してください。",
       },
+      upgrade: {
+        teammatesNav: "チームメンバー",
+        heading: "チームを招待",
+        body: "チームメンバー、共有ブレイン、課金はホスト版クラウドエディションの機能です。アップグレードすると、メンバーを招待して共同作業ができます。今のブレインはそのまま引き継がれ、再入力は不要です。",
+        cta: "ホスト版にアップグレード",
+      },
     },
     provenanceSheet: {
       title: "出典",
@@ -2667,7 +2673,7 @@ export const ja: Dictionary = {
     },
     sectionDescriptions: {
       assistants: "設定済みの AI パーソナリティ。",
-      miniApps: "ブレインに差し込める機能カタログ。フィード（SNS運用）。",
+      miniApps: "ブレインに差し込める機能カタログ。",
       connectors: "ブレインが読み込む外部ソース。",
       programmaticAccess: "Claude、Cursor、ChatGPT などの外部 AI クライアントがブレインへ読み書きするための MCP キー。",
       skills: "アシスタントが再利用できる振る舞い。",

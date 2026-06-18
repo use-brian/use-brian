@@ -210,14 +210,14 @@ export function _resetBuiltinCache(): void {
  * Captures the kind and the file name. Whitespace inside the braces is
  * tolerated; the inner colon is the discriminator.
  *
- * Names are intentionally permissive — file paths in Hermes carry slashes
+ * Names are intentionally permissive — file paths carry slashes
  * and dots; the validator at write time rejects newlines and `}`. The runtime
  * resolver does an exact match against the `(skill_id, kind, name)` UNIQUE
  * key, so any disallowed character will simply miss and render the
  * "missing" comment.
  *
  * Spec: `docs/architecture/engine/skill-system.md` →
- *   "Support files — DB-backed Hermes adaptation".
+ *   "Support files — DB-backed adaptation".
  *
  * [COMP:skills/pointer-expansion]
  */

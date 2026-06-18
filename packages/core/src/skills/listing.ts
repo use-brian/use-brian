@@ -2,8 +2,7 @@
  * Budget-aware skill listing formatter.
  *
  * Produces a compact "- id: description" listing for injection into the
- * system prompt. Mirrors Claude Code's formatCommandsWithinBudget() pattern:
- * entries are capped at 250 chars, total listing at ~1000 tokens.
+ * system prompt. Entries are capped at 250 chars, total listing at ~1000 tokens.
  *
  * [COMP:skills/listing]
  */

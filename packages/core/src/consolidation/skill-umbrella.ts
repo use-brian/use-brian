@@ -12,7 +12,7 @@
  * non-archived skills AND workspace_age >= 21 days. Below either
  * threshold: skip.
  *
- * Hermes-faithful curator semantics:
+ * Curator semantics:
  *  - archive-only, never auto-delete
  *  - `absorbed_into` mandatory (drives in-flight reference migration)
  *  - pinned exempt
@@ -214,9 +214,8 @@ const MIN_CLUSTER_SIZE = 2
 
 // ── Prompt (PROCEDURAL_UMBRELLA_PROMPT) ──────────────────────────
 //
-// Adapted from Hermes's `CURATOR_REVIEW_PROMPT` (run_agent.py ~L3982).
-// Preserves the umbrella-class framing, three-move taxonomy, and the
-// explicit anti-patterns. JSON output for clean Zod parsing.
+// Uses umbrella-class framing, a three-move taxonomy, and explicit
+// anti-patterns. JSON output for clean Zod parsing.
 
 const PROCEDURAL_UMBRELLA_PROMPT = `You are the skill curator. A cluster of narrow auto-generated skills was detected. Decide one of three moves:
 

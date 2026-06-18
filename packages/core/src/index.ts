@@ -33,7 +33,6 @@ export * from './inter-assistant/index.js'
 export * from './a2a/index.js'
 export * from './authorization/index.js'
 export * from './control-plane/index.js'
-export * from './feed/index.js'
 export * from './doc/index.js'
 export * from './home/index.js'
 

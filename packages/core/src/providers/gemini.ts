@@ -3,8 +3,8 @@
  *
  * The official @google/generative-ai SDK strips `thoughtSignature` from
  * response parts, which Gemini 3.x models require for multi-turn function
- * calling. Following OpenClaw's proven approach, we hit the REST API and
- * preserve raw response parts (including thoughtSignature) in session history.
+ * calling. We hit the REST API and preserve raw response parts (including
+ * thoughtSignature) in session history.
  */
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
 

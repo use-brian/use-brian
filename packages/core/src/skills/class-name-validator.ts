@@ -1,7 +1,7 @@
 /**
  * Class-level naming validator (S10).
  *
- * Hermes invariant: an auto-generated umbrella skill must describe a *class*
+ * Invariant: an auto-generated umbrella skill must describe a *class*
  * of tasks, not a transient session artefact. The curator agent has a
  * tendency to name a new umbrella after the bug it just helped debug, the PR
  * it just touched, or the literal error string the user pasted in. That

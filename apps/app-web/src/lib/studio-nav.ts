@@ -12,13 +12,21 @@
  */
 
 import type { useT } from "@/lib/i18n/client";
+import { isOssEdition } from "@/lib/edition";
 
 export type StudioSectionKey =
   keyof ReturnType<typeof useT>["studioPage"]["sections"];
 export type StudioGroupKey =
   keyof ReturnType<typeof useT>["studioPage"]["groups"];
 
-export type StudioSection = { key: StudioSectionKey; segment: string };
+/** `hostedOnly` sections are dropped from the nav in the OSS edition (see
+ *  `visibleStudioGroups`). Mini-apps is the only one today: its sole installable
+ *  mini-apps are Feed (hosted-only) and Doc (hidden), so OSS has nothing here. */
+export type StudioSection = {
+  key: StudioSectionKey;
+  segment: string;
+  hostedOnly?: boolean;
+};
 export type StudioGroup = { key: StudioGroupKey; sections: readonly StudioSection[] };
 
 /**
@@ -41,7 +49,7 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
     sections: [
       { key: "assistants", segment: "assistants" },
       { key: "channels", segment: "channels" },
-      { key: "miniApps", segment: "mini-apps" },
+      { key: "miniApps", segment: "mini-apps", hostedOnly: true },
     ],
   },
   {
@@ -51,6 +59,21 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
     ],
   },
 ] as const;
+
+/**
+ * The Studio groups visible in the current edition. Hosted gets the full
+ * `STUDIO_GROUPS` unchanged; the OSS edition drops every `hostedOnly` section
+ * (and any group thereby left empty). `STUDIO_GROUPS` itself stays the static
+ * source of truth — callers iterate this instead so the nav reflects the
+ * edition. The two nav surfaces (sidebar panel + mobile strip) both call it.
+ */
+export function visibleStudioGroups(): readonly StudioGroup[] {
+  if (!isOssEdition()) return STUDIO_GROUPS;
+  return STUDIO_GROUPS.map((g) => ({
+    ...g,
+    sections: g.sections.filter((s) => !s.hostedOnly),
+  })).filter((g) => g.sections.length > 0);
+}
 
 /**
  * Resolve the active Studio section from a pathname

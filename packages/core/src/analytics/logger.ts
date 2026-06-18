@@ -1,7 +1,7 @@
 /**
  * Type-safe analytics logger.
  *
- * Follows Claude Code's pattern: only numbers and booleans accepted as metadata values.
+ * Only numbers and booleans are accepted as metadata values.
  * Strings require explicit sanitization to prevent accidental PII leaks.
  * Events are fire-and-forget — never block the main request path.
  */

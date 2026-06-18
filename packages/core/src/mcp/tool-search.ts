@@ -7,9 +7,8 @@
  *   mcp_search  — keyword search across all connectors' tools
  *   mcp_call    — proxy a call to any discovered tool
  *
- * This is the same pattern Claude Code (tool_search_tool_bm25), Warp
- * (search subagent), and Speakeasy (progressive discovery) converged on,
- * adapted for Gemini which lacks native tool_reference blocks.
+ * A progressive-discovery pattern adapted for Gemini, which lacks native
+ * tool_reference blocks.
  *
  * Token cost: ~300 tokens (2 tool definitions) regardless of connector count.
  *
@@ -394,7 +393,7 @@ export function createMcpSearchTools(params: {
       const toolKey = `${server}:${tool}`
 
       // Fast-reject tools already blocked in this session — no need
-      // to re-evaluate policy. Follows Claude Code's deny-first pattern.
+      // to re-evaluate policy (deny-first).
       if (blockedTools.has(toolKey)) {
         return {
           data: `ERROR: "${tool}" is blocked for this session. Capability unavailable.`,
@@ -496,7 +495,7 @@ async function dispatchRemote(params: {
   }
 
   // ── Confirmation gate for 'ask' policy ──────────────────────
-  // Following Claude Code's pattern: 'ask' = pause, show user the
+  // 'ask' = pause, show user the
   // tool details, wait for decision. Uses confirmationResolver and
   // notifyConfirmationRequired from ToolContext (threaded from query
   // loop → tool executor → execute()). Decisions persist for the

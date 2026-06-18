@@ -14,9 +14,8 @@
  * same untrusted-external-content trust class as search results and MCP
  * output (see docs/historical/old-security-model.md).
  *
- * Pattern mirrors openclaw/src/agents/tools/web-fetch.ts — their Readability
- * → Firecrawl fallback is our Readability → Jina → raw fallback. Firecrawl
- * is a drop-in add post-MVP (same HTTP-proxy interface as Jina).
+ * The stack is Readability → Jina → raw fallback. Firecrawl is a drop-in
+ * add post-MVP (same HTTP-proxy interface as Jina).
  */
 
 import { sanitizeDeep } from '../../security/sanitize.js'

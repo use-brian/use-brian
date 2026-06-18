@@ -22,9 +22,7 @@
  *    past session was persisted corrupt (e.g. by code written before this
  *    fix), the next request will still succeed.
  *
- * Inspired by claude-code's `yieldMissingToolResultBlocks` (query.ts:123)
- * and `ensureToolResultPairing` (messages.ts:5133). See
- * `docs/architecture/engine/query-loop.md` for the invariant write-up.
+ * See `docs/architecture/engine/query-loop.md` for the invariant write-up.
  */
 
 import type { ContentBlock, Message } from '../providers/types.js'

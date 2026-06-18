@@ -111,12 +111,11 @@ const PLAN_SCHEMA = z.object({
 // ── Prompts ───────────────────────────────────────────────────────
 
 /**
- * The review prompt. Cloud-adapted from Hermes' `_SKILL_REVIEW_PROMPT`
- * (strict adherence to Hermes principles per the spec; cloud adaptations
- * only where DB vs filesystem / multi-tenant vs single-user diverge). The
- * preference order, anti-patterns, and class-level naming rules are the
- * load-bearing parts — they keep the curator from minting session-artifact
- * skills (`fix-the-thing-today`) instead of durable class-level ones.
+ * The review prompt. Cloud-adapted for DB vs filesystem / multi-tenant vs
+ * single-user. The preference order, anti-patterns, and class-level naming
+ * rules are the load-bearing parts — they keep the curator from minting
+ * session-artifact skills (`fix-the-thing-today`) instead of durable
+ * class-level ones.
  */
 export const SKILL_REVIEW_SYSTEM_PROMPT = `You are the background skill curator for a company-brain assistant. After every few turns of a real conversation you review what happened and decide whether the workspace's reusable skills should change. Skills are markdown playbooks the assistant loads on demand; good ones encode durable, reusable know-how about how this company works.
 

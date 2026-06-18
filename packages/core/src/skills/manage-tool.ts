@@ -25,8 +25,7 @@
  *     (`kind='staged_skill_creation'`)
  *
  * Spec: `docs/architecture/engine/skill-system.md` →
- *   "Skill auto-generation — cloud-adapted strict Hermes" → "Approval
- *   routing — by skill authorship".
+ *   "Skill auto-generation" → "Approval routing — by skill authorship".
  *
  * [COMP:skills/manage-tool]
  */
@@ -366,7 +365,7 @@ async function runPatch(
   if (skill.source === 'auto-generated') {
     if (skill.writeOrigin !== 'background_review') {
       // Defensive: source/write_origin can drift if a manual UPDATE bypasses
-      // the application stamping. The Hermes invariant is that the curator
+      // the application stamping. The invariant is that the curator
       // only ever touches background_review-origin rows.
       return {
         error: `Skill ${rowId} has source='auto-generated' but write_origin='${skill.writeOrigin}'; cannot patch.`,

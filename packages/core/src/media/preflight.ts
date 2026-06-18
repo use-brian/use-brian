@@ -1,15 +1,14 @@
 /**
  * Audio preflight — transcribe the first audio attachment, if any.
  *
- * Semantics match OpenClaw `src/media-understanding/audio-preflight.ts:18-82`:
+ * Semantics:
  *   - `enabled === false` → return undefined (kill switch).
  *   - Empty attachments → undefined.
  *   - Find first `!alreadyTranscribed` with `audio/*` mime. None → undefined.
  *   - Call transcribeAudio; on success flip `alreadyTranscribed` and return.
  *   - On any throw → log and return undefined. Never re-throw.
- *     (Matches audio-preflight.ts:75-81 — the silent-fail behavior is
- *     deliberate: a failed transcription should degrade to empty text,
- *     never block the whole message.)
+ *     (The silent-fail behavior is deliberate: a failed transcription should
+ *     degrade to empty text, never block the whole message.)
  */
 import { transcribeAudio, type TranscribeResult } from './transcribe.js'
 import type { MediaAttachment } from './types.js'

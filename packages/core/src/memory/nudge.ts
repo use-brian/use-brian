@@ -5,7 +5,6 @@
  * If any were found with results, makes one cheap Standard-tier call to judge
  * whether each recalled memory was actually used in the assistant's response.
  *
- * Inspired by Hermes Agent's intra-session nudge pattern.
  * See docs/architecture/context-engine/memory-consolidation.md for the full design.
  */
 

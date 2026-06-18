@@ -44,8 +44,6 @@ export class TelegramApiError extends Error {
  * Matches Telegram's "message thread not found" response. Raised when a topic
  * was deleted between an inbound update and our outbound call. The adapter
  * uses this to retry once without `message_thread_id`.
- *
- * Mirrors openclaw/extensions/telegram/src/bot/delivery.send.ts → isTelegramThreadNotFoundError.
  */
 export function isTelegramThreadNotFoundError(err: unknown): boolean {
   if (!(err instanceof TelegramApiError)) return false

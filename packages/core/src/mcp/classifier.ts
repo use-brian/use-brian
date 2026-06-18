@@ -2,7 +2,7 @@
  * MCP tool classification.
  *
  * Keyword heuristic that classifies external tools as read/write/destructive.
- * ~10 lines regex, following Claude Code's fail-closed pattern.
+ * ~10 lines regex, fail-closed.
  */
 
 export type ToolClassification = 'read' | 'write' | 'destructive' | 'unknown'

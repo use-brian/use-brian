@@ -1,5 +1,5 @@
 /**
- * Workspace skill files store — DB-backed analog of Hermes's
+ * Workspace skill files store — DB-backed analog of a
  * `references/templates/scripts/` subdirectory layout.
  *
  * Backs the V2 skill auto-generation pointer-expansion contract

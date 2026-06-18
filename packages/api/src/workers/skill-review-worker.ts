@@ -1,5 +1,5 @@
 /**
- * Skill review worker — V2 cloud-adapted strict Hermes (WS-B).
+ * Skill review worker — V2 (WS-B).
  *
  * Per active session every N turns (default 10), forks a background-review
  * agent that:

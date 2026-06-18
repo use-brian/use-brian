@@ -2,8 +2,7 @@
  * In-memory fetch result cache with 15-minute TTL.
  *
  * Module-level `Map` keyed by normalized URL. Short-circuits the fetch
- * provider stack on hit. Mirrors OpenClaw's `FETCH_CACHE` in
- * openclaw/src/agents/tools/web-fetch.ts:46 — same pattern, same TTL.
+ * provider stack on hit.
  *
  * This is the fast, primary dedup layer. The DB-backed CacheStore
  * (`tool_result_cache` table, 24h TTL) is a write-through layer added

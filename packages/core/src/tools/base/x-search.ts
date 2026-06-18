@@ -17,9 +17,6 @@ import {
  *
  * Registered in `createBaseTools()` only when `XAI_API_KEY` is set —
  * fail-closed. See docs/architecture/integrations/xai.md.
- *
- * Pattern ported from openclaw/extensions/xai/x-search.ts. Cache key and
- * body shape match OpenClaw so the two implementations stay comparable.
  */
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/

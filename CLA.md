@@ -1,12 +1,5 @@
 # Contributor License Agreement
 
-> **Note (for the project, not the signer):** this is a working CLA based on the
-> widely-used individual/entity CLA pattern (Apache ICLA lineage) and must be
-> reviewed by counsel before the public launch. It grants a broad **license**
-> (not a copyright assignment), which is what powers the AGPLv3 + commercial
-> dual-license (see `CONTRIBUTING.md`). Tracked under the §8 licensing pass of
-> `docs/plans/oss-local-brain-wedge.md`.
-
 By signing this Contributor License Agreement ("Agreement") you accept and agree
 to the following terms for your past, present, and future Contributions
 submitted to the sidanclaw project ("Project"). Except for the license granted

@@ -1398,6 +1398,12 @@ export const zh: Dictionary = {
         notificationsComingSoon: "詳細的通知偏好設定尚未開放。你很快就能在這裡選擇管道與勿擾時段。",
         noActiveWorkspace: "選擇一個工作空間以管理其設定。",
       },
+      upgrade: {
+        teammatesNav: "團隊成員",
+        heading: "邀請你的團隊",
+        body: "團隊成員、共享大腦與計費屬於託管雲端版功能。升級即可邀請成員協作，你現有的大腦會一併帶過去，無需重新輸入。",
+        cta: "升級到託管版",
+      },
     },
     provenanceSheet: {
       title: "來源",
@@ -2648,7 +2654,7 @@ export const zh: Dictionary = {
     },
     sectionDescriptions: {
       assistants: "你已設定的 AI 個性。",
-      miniApps: "可安裝在大腦上的功能模組：Feed 經營社群。",
+      miniApps: "可安裝在大腦上的功能模組。",
       connectors: "你的大腦讀取的外部來源。",
       programmaticAccess: "給 Claude、Cursor、ChatGPT 等外部 AI 用戶端讀寫大腦的 MCP 金鑰。",
       skills: "助理可套用的可重複使用行為。",

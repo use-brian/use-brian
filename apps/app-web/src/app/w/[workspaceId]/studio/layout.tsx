@@ -34,7 +34,7 @@ import { cn } from "@/lib/utils";
 import { ScrollableNav } from "@/components/scrollable-nav";
 import { StudioTopbar } from "@/components/studio/studio-topbar";
 import { useWorkspaceFetch } from "@/contexts/workspace-context";
-import { STUDIO_GROUPS } from "@/lib/studio-nav";
+import { visibleStudioGroups } from "@/lib/studio-nav";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -65,7 +65,7 @@ export default function StudioLayout({ children }: { children: React.ReactNode }
       <div className="md:hidden border-b border-border px-4 pb-2 pt-1">
         <ScrollableNav>
           <nav aria-label={t.studioPage.sectionsAriaLabel} className="flex items-center gap-0.5">
-            {STUDIO_GROUPS.map((g, gi) => (
+            {visibleStudioGroups().map((g, gi) => (
               <div key={g.key} className="flex items-center gap-0.5">
                 {gi > 0 && <span className="text-muted-foreground/30 px-1.5">·</span>}
                 <span className="text-[11px] uppercase tracking-wide text-muted-foreground/70 px-1.5 select-none">

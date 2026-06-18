@@ -7,8 +7,8 @@
  *      ~/.sidanclaw/config.json (nothing else is required).
  *   2. build the workspace packages (turbo-cached; the apps run from source via
  *      tsx / next dev).
- *   3. start the embedded PGLite brain server (pg-wire socket on :5432) and wait
- *      until it accepts connections — it migrates open-schema-v1 on first boot.
+ *   3. start the embedded PGLite brain server (pg-wire socket on :54329) and wait
+ *      until it accepts connections - it migrates open-schema-v1 on first boot.
  *   4. start the api (:4000), the doc-sync sidecar (:8080) and app-web (:3003),
  *      all pointed at the socket via DATABASE_URL; single-process event buses.
  *   5. open the browser straight into an authenticated session (dev-login
@@ -58,6 +58,11 @@ const env = {
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
   SIDANCLAW_SINGLE_PROCESS: '1',
+  // This is the single-player open edition: app-web hides hosted-only surfaces
+  // (billing, teammates) and shows the upgrade affordance instead. The flag
+  // defaults to the full hosted edition when unset, so only the local launcher
+  // opts into 'oss'.
+  NEXT_PUBLIC_SIDANCLAW_EDITION: 'oss',
   API_URL: `http://localhost:${PORTS.api}`,
   APP_URL: `http://localhost:${PORTS.appWeb}`,
   NEXT_PUBLIC_API_URL: `http://localhost:${PORTS.api}`,

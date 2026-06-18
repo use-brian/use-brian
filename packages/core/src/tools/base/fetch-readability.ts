@@ -2,21 +2,18 @@
  * Local Mozilla Readability extraction — primary fetch provider.
  *
  * Fetches the URL directly, parses the HTML with `linkedom` (10x faster and
- * half the memory of jsdom — matches OpenClaw's production choice in
- * openclaw/src/agents/tools/web-fetch-utils.ts), runs @mozilla/readability,
+ * half the memory of jsdom), runs @mozilla/readability,
  * and returns the extracted article body + title.
  *
  * Handles ~80% of article/blog sites. No network hop beyond the target URL
  * itself — no privacy leak through a third party.
  *
  * Lazy-loaded deps: both libraries are imported dynamically on first use so
- * the cost is paid only when the tool actually runs. Matches OpenClaw's
- * `loadReadabilityDeps()` pattern.
+ * the cost is paid only when the tool actually runs.
  *
  * Cheap HTML nesting depth guard catches pathological "<div><div>..." input
  * before handing it to linkedom (which would OOM on attacker-controlled
- * deep nesting). Same heuristic as OpenClaw's
- * `exceedsEstimatedHtmlNestingDepth`.
+ * deep nesting).
  */
 
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
@@ -134,8 +131,6 @@ export const readabilityProvider: FetchProvider = {
  * Cheap heuristic to skip Readability+DOM parsing on pathological HTML
  * (deep nesting causes stack/memory blowups). Not an HTML parser — tuned
  * to catch attacker-controlled "<div><div>..." cases.
- *
- * Ported from openclaw/src/agents/tools/web-fetch-utils.ts.
  */
 function exceedsEstimatedHtmlNestingDepth(html: string, maxDepth: number): boolean {
   const voidTags = new Set([

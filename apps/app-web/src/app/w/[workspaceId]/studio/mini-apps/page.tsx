@@ -47,6 +47,7 @@ import {
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
+import { isOssEdition } from "@/lib/edition";
 
 const FEED_APP_URL =
   process.env.NEXT_PUBLIC_FEED_URL ?? "https://feed.sidan.ai";
@@ -62,9 +63,18 @@ const TRIAL_CONTACT_EMAIL = "contact@sidan.io";
 // registry for order/status/icon and looks up copy by id.
 
 // Mini-apps the Studio store hides. `views` (Doc) is the surface app-web
-// itself renders, so a card linking back to /doc would be circular — see the
+// itself renders, so a card linking back to /doc would be circular - see the
 // header note. The id stays in the shared registry for the apps/web surfaces.
-const STUDIO_HIDDEN_MINI_APPS = new Set<MiniAppId>(["views"]);
+// In the OSS edition the gallery also hides `distribution` (Feed) - Feed is a
+// hosted-only mini-app. This is belt-and-suspenders: the whole Mini-apps
+// section is nav-hidden in OSS (`visibleStudioGroups`), so the gallery is
+// already unreachable there, but the filter keeps the page coherent if reached
+// directly by URL.
+function studioHiddenMiniApps(): Set<MiniAppId> {
+  const hidden = new Set<MiniAppId>(["views"]);
+  if (isOssEdition()) hidden.add("distribution");
+  return hidden;
+}
 
 const ICON_BY_NAME: Record<string, React.ComponentType<{ className?: string }>> = {
   Megaphone,
@@ -99,10 +109,11 @@ export default function StudioMiniAppsPage() {
 
 function Gallery({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
+  const hidden = studioHiddenMiniApps();
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-      {MINI_APPS.filter((app) => !STUDIO_HIDDEN_MINI_APPS.has(app.id)).map((app) => (
+      {MINI_APPS.filter((app) => !hidden.has(app.id)).map((app) => (
         <Card
           key={app.id}
           app={app}
