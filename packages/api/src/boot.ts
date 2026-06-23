@@ -70,6 +70,7 @@ import {
   createEntityKindClassifier,
   createCircuitBreaker,
   createKnowledgeSyncWorker,
+  type SyncCredentials,
   type ExecutorDeps as WorkflowExecutorDeps,
   type LLMProvider,
   type Tool,
@@ -367,6 +368,19 @@ export interface OpenApiPorts {
   pendingClassificationStore?: PendingClassificationStore
   /** Google-Drive knowledge-file store; absent → gdrive files unavailable to chat/workflow. */
   gdriveFilesStore?: GDriveFilesStore
+  /**
+   * Builds the closed GitHub-PAT resolver for the knowledge sync worker over
+   * boot's connector stores (the same stores the knowledge route resolves edit
+   * proposals through). Open default: unset → the worker ticks but every GitHub
+   * source fails resolution with a clear "not configured" error rather than
+   * syncing.
+   */
+  buildSyncCredentials?: (deps: {
+    connectorInstanceStore: ReturnType<typeof createConnectorInstanceStore>
+    connectorGrantStore: Awaited<
+      ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
+    >
+  }) => SyncCredentials
 
   // ── Direct file ingest — open default: unset (no /api/files/ingest) ──
   /**
@@ -2402,8 +2416,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) embeddingWorker.start()
 
   // ── Knowledge sync worker ──
-  // The sync-credential provider is closed; without it the worker still ticks
-  // but resolves no PAT credentials (no GitHub source syncs locally).
+  // The sync-credential provider is closed (api-platform) and arrives via the
+  // `syncCredentials` port. When absent (open standalone build), fall back to a
+  // stub that fails resolution with a clear message — the worker still ticks but
+  // no GitHub source syncs.
+  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+    connectorInstanceStore,
+    connectorGrantStore,
+  }) ?? {
+    getPat: async () => {
+      throw new Error('GitHub knowledge sync is not configured in this build')
+    },
+  }
   const knowledgeSyncWorker = createKnowledgeSyncWorker({
     store: knowledgeStore as never,
     api: {
@@ -2415,7 +2439,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       },
       compareCommits,
     },
-    credentials: { resolve: async () => null } as never,
+    credentials: syncCredentials,
     intervalMs: 15 * 60 * 1000,
     onEvent: (event) => {
       console.log(`[knowledge-sync] ${event.type}: ${event.repo}`, event)
