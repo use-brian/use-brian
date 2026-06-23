@@ -542,6 +542,14 @@ export async function findOrCreateChannelForWorkspaceConnect(params: {
    * (Settings tab → Channel Models) — migration 197.
    */
   defaultAssistantId?: string | null
+  /**
+   * Override the new channel's `enabled_capabilities`. Defaults to the full
+   * supported set for the type (`CHANNEL_CAPABILITIES`). WhatsApp ingest
+   * connects with `['ingest']` only so the dormant responder (`chat` /
+   * `broadcast`) never fires for a read-only Bring-Your-Own-Number channel —
+   * see docs/architecture/channels/whatsapp.md.
+   */
+  enabledCapabilities?: ChannelCapability[]
 }): Promise<{ channelId: string; reused: boolean }> {
   const client = await getPool().connect()
   try {
@@ -579,7 +587,12 @@ export async function findOrCreateChannelForWorkspaceConnect(params: {
       `INSERT INTO channels (workspace_id, channel_type, enabled_capabilities, display_name)
        VALUES ($1, $2, $3, $4)
        RETURNING id`,
-      [params.workspaceId, params.channelType, CHANNEL_CAPABILITIES[params.channelType], displayName],
+      [
+        params.workspaceId,
+        params.channelType,
+        params.enabledCapabilities ?? CHANNEL_CAPABILITIES[params.channelType],
+        displayName,
+      ],
     )
     const channelId = created.rows[0].id
 

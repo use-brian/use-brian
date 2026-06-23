@@ -33,6 +33,7 @@ import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { IngestRuleEditor, type EditableRule } from "@/components/ingest/rule-editor";
+import { WhatsappIngestPanel } from "@/components/ingest/whatsapp-panel";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -523,6 +524,11 @@ export default function StudioIngestRulesPage() {
       <section className="border border-dashed border-border rounded-md bg-muted/30 p-4 text-xs text-muted-foreground leading-relaxed">
         {copy.statusNote}
       </section>
+
+      {/* WhatsApp Bring-Your-Own-Number: read-only group ingest. Its own
+          connect (QR) + per-group enable flow, distinct from the dynamic
+          OAuth-connector sources below. [COMP:app-web/studio-whatsapp-ingest] */}
+      {workspaceId && <WhatsappIngestPanel workspaceId={workspaceId} />}
 
       {toggleError && (
         <div className="text-xs text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
