@@ -56,6 +56,10 @@ import {
   normalizeMarkdownBlocks,
   pageToMarkdown,
   rankPagesByTitle,
+  listPageTemplates,
+  instantiatePageTemplate,
+  pageTemplateIds,
+  withFreshBlockIds,
 } from '@sidanclaw/core'
 import type {
   BindingConfig,
@@ -73,6 +77,7 @@ import type {
 import { query } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
+import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
@@ -183,18 +188,29 @@ export type BrainFileTools = {
  * resolved (owner, primary-assistant) principal — and `editPage` reuses the
  * very CAS + undo-capture path the chat editor's `patchPage` uses.
  *
- *   - `savedViewStore` — `list` (title search) + `remove` (RLS delete; the
- *     `saved_views` FK cascade drops nested child pages, per migration 210).
+ *   - `savedViewStore` — `list` (title search + `listPages` enumeration) +
+ *     `remove` (RLS delete; the `saved_views` FK cascade drops nested child
+ *     pages, per migration 210) + `createDraft` (the `createPage` seam).
  *   - `docPageStore`   — `getVersionedPage` (RLS read → markdown / access
  *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
  */
 export type BrainDocTools = {
   savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft'>
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
+  /**
+   * Custom page templates (migration 281). When wired, `listPageTemplates`
+   * also surfaces the workspace's custom templates and `createPageFromTemplate`
+   * resolves a custom template id (a uuid) to its stored blocks. Optional — a
+   * deploy without the store still serves the built-in catalog.
+   */
+  pageTemplateStore?: Pick<PageTemplateStore, 'list' | 'getById'>
 }
 
 /** Cap on `readPage` title-search matches surfaced to the agent. */
 const READ_PAGE_MAX_MATCHES = 10
+/** `listPages`: default row count, and the hard cap a caller can request. */
+const LIST_PAGES_DEFAULT = 50
+const LIST_PAGES_MAX = 200
 /** Cap on a page's Markdown body so one huge page can't blow the MCP reply. */
 const READ_PAGE_MARKDOWN_CAP = 16_000
 /** Cap on `editPage` content so a single edit can't balloon the page row. */
@@ -317,6 +333,8 @@ const READ_TOOL_NAMES = new Set<string>([
   'fileSearch',
   // Doc pages (read) — present only when docTools are wired
   'readPage',
+  'listPages',
+  'listPageTemplates',
 ])
 
 function text(body: string, isError = false): CallToolResult {
@@ -343,12 +361,20 @@ function capPageMarkdown(md: string): string {
  * Reuse, not reinvention:
  *   - `readPage`   → `rankPagesByTitle` (the `findPage` matcher) + `pageToMarkdown`
  *                    (the `exportPage` / `findPage` page-to-Markdown path).
+ *   - `listPages`  → the same RLS-scoped `savedViewStore.list`, filtered by an
+ *                    optional case-insensitive `titlePrefix` and recency-ranked.
  *   - `editPage`   → builds an `Op[]` and runs it through `applyOps` +
  *                    `docPageStore.applyPatch` — the same validated CAS +
  *                    `last_undo` capture the chat editor's `patchPage` uses.
  *   - `deletePage` → confirms RLS-scoped access via `getVersionedPage`, then
  *                    `savedViewStore.remove` (RLS `DELETE`; the `saved_views`
  *                    FK cascade drops nested child pages per migration 210).
+ *   - `listPageTemplates` (read) + `createPageFromTemplate` (write) → the
+ *                    shared Notion-style template catalog (`@sidanclaw/core`
+ *                    `listPageTemplates` / `instantiatePageTemplate`). The
+ *                    create path reuses the same `createDraft` seam as
+ *                    `createPage`, seeding the page with the template's blocks
+ *                    + icon. See docs/architecture/features/doc-templates.md.
  *
  * Spec pointer (file is OSS, not present in this repo):
  * docs/architecture/integrations/mcp.md → brain MCP page tools.
@@ -357,8 +383,16 @@ function buildDocPageTools(
   docTools: BrainDocTools,
   resolveCtx: () => Promise<ToolContext | { error: string }>,
   workspaceId: string,
-): { readPage: BrainTool; editPage: BrainTool; deletePage: BrainTool; createPage: BrainTool } {
-  const { savedViewStore, docPageStore } = docTools
+): {
+  readPage: BrainTool
+  listPages: BrainTool
+  editPage: BrainTool
+  deletePage: BrainTool
+  createPage: BrainTool
+  listPageTemplates: BrainTool
+  createPageFromTemplate: BrainTool
+} {
+  const { savedViewStore, docPageStore, pageTemplateStore } = docTools
 
   const readPage: BrainTool = {
     name: 'readPage',
@@ -422,6 +456,65 @@ function buildDocPageTools(
       return text(
         `${matches.length} pages match "${title}". Re-call readPage with the right pageId:\n${list}`,
       )
+    },
+  }
+
+  // ── listPages ─────────────────────────────────────────────────
+  //
+  // Enumerate workspace doc pages as `{ pageId, title }` rows — the page
+  // analog of `fileSearch`, and the companion `readPage` lacks (it finds at
+  // most one page, by title). Reuses the same RLS-scoped `savedViewStore.list`
+  // read `readPage`'s title search rides. Saved views carry no tag column, so
+  // grouping is by a shared `titlePrefix` (case-insensitive) the caller stamps
+  // on related pages — that is how a programmatic writer (e.g. a tool that
+  // persists its own plan/record pages) lists just its own. Ids + titles only;
+  // call `readPage` with a `pageId` for content.
+  const listPages: BrainTool = {
+    name: 'listPages',
+    description:
+      'List workspace doc pages as `{ pageId, title }` rows, most-recently-updated ' +
+      'first. Optional `titlePrefix` returns only pages whose title starts with it ' +
+      '(case-insensitive) — stamp a shared prefix on related pages to group them. ' +
+      `Optional \`limit\` caps the rows (default ${LIST_PAGES_DEFAULT}, max ${LIST_PAGES_MAX}). ` +
+      'Returns ids + titles only; call `readPage` with a `pageId` for full content. ' +
+      "Scoped to the key's workspace and clearance.",
+    inputSchema: {
+      titlePrefix: z
+        .string()
+        .min(1)
+        .max(256)
+        .optional()
+        .describe('Only pages whose title starts with this text (case-insensitive).'),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(LIST_PAGES_MAX)
+        .optional()
+        .describe(`Max rows to return (default ${LIST_PAGES_DEFAULT}).`),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const prefix = typeof args.titlePrefix === 'string' ? args.titlePrefix.trim().toLowerCase() : ''
+      const rawLimit =
+        typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.floor(args.limit) : LIST_PAGES_DEFAULT
+      const limit = Math.min(Math.max(rawLimit, 1), LIST_PAGES_MAX)
+
+      // Same RLS-scoped list readPage's title search uses; ranking here is
+      // recency (updatedAt desc) rather than title closeness.
+      const rows = await savedViewStore.list({ userId: ctx.userId, workspaceId, state: 'all' })
+      const matched = (prefix ? rows.filter((r) => (r.name ?? '').toLowerCase().startsWith(prefix)) : rows)
+        .slice()
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+        .slice(0, limit)
+      if (matched.length === 0) {
+        return text(
+          prefix ? `No pages whose title starts with "${args.titlePrefix}".` : 'No pages in this workspace.',
+        )
+      }
+      const list = matched.map((r) => `- ${r.name} (pageId: ${r.id})`).join('\n')
+      return text(`${matched.length} page(s):\n${list}`)
     },
   }
 
@@ -635,7 +728,140 @@ function buildDocPageTools(
     },
   }
 
-  return { readPage, editPage, deletePage, createPage }
+  // ── listPageTemplates ─────────────────────────────────────────
+  //
+  // A read tool surfacing the shared Notion-style template catalog
+  // (`@sidanclaw/core` `listPageTemplates`) — the same registry the editor
+  // slash menu reads. Catalog-only (no bodies), so the agent can pick a
+  // `templateId` to pass to `createPageFromTemplate`. Workspace-independent
+  // (the catalog is a code constant), but it still resolves the principal so a
+  // `read`-scope key behaves identically to every other read tool.
+  const listPageTemplatesTool: BrainTool = {
+    name: 'listPageTemplates',
+    description:
+      'List the available doc-page templates (Notion-style starters like ' +
+      'meeting notes, weekly review, project plan). Returns each template as ' +
+      '`{ id, name, description, icon, category }`. Pick an `id` and pass it ' +
+      'to `createPageFromTemplate` to create a pre-structured page.',
+    inputSchema: {},
+    async handler() {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const builtin = listPageTemplates().map(
+        (r) => `- ${r.icon} ${r.name} (id: ${r.id}, category: ${r.category}): ${r.description}`,
+      )
+      // Workspace custom templates (migration 281), when the store is wired.
+      let custom: string[] = []
+      if (pageTemplateStore) {
+        const rows = await pageTemplateStore.list(ctx.userId, workspaceId)
+        custom = rows.map(
+          (r) =>
+            `- ${r.icon ?? '📄'} ${r.name} (id: ${r.id}, category: ${r.category}, custom)` +
+            (r.description ? `: ${r.description}` : ''),
+        )
+      }
+      const all = [...builtin, ...custom]
+      return text(`${all.length} page templates:\n${all.join('\n')}`)
+    },
+  }
+
+  // ── createPageFromTemplate ────────────────────────────────────
+  //
+  // A write tool that creates a NEW page seeded from a template. Reuses the
+  // shared `instantiatePageTemplate` (markdown→blocks via the same path
+  // `createPage` runs) and the same `savedViewStore.createDraft` seam — so a
+  // template-born page is identical to one authored in-app, with the template's
+  // emoji as the page icon. `title` overrides the template's suggested title.
+  const createPageFromTemplate: BrainTool = {
+    name: 'createPageFromTemplate',
+    description:
+      'Create a NEW workspace doc page pre-filled from a template. Call ' +
+      '`listPageTemplates` first to get a `templateId`. The page is seeded with ' +
+      "the template's structure (headings, lists, checklists, tables) and its " +
+      'icon; date placeholders resolve to today. Pass `title` to override the ' +
+      "template's suggested title. Returns the new `pageId`. Scoped to the " +
+      "key's workspace.",
+    inputSchema: {
+      templateId: z
+        .string()
+        .min(1)
+        .max(128)
+        .describe('The template id from `listPageTemplates` (e.g. "meeting-notes").'),
+      title: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Optional title override. Omit to use the template's suggested title."),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const templateId = typeof args.templateId === 'string' ? args.templateId.trim() : ''
+      if (!templateId) return text('Provide a `templateId` (see listPageTemplates).', true)
+      const titleOverride =
+        typeof args.title === 'string' && args.title.trim() ? args.title.trim() : undefined
+
+      // Built-in slug → instantiate the Markdown catalog. Otherwise fall back
+      // to a workspace CUSTOM template (a uuid) resolved from the store, whose
+      // stored blocks get fresh ids so they never collide with an existing page.
+      let resolved: { title: string; icon: string | null; blocks: Block[] } | null = null
+      const instance = instantiatePageTemplate(templateId, { titleOverride })
+      if (instance) {
+        resolved = { title: instance.title, icon: instance.icon, blocks: instance.blocks }
+      } else if (pageTemplateStore) {
+        const custom = await pageTemplateStore.getById(ctx.userId, templateId)
+        if (custom) {
+          resolved = {
+            title: titleOverride ?? custom.name,
+            icon: custom.icon,
+            blocks: withFreshBlockIds(custom.blocks, () => randomUUID()),
+          }
+        }
+      }
+      if (!resolved) {
+        return text(
+          `Unknown template: ${templateId}. Call listPageTemplates for valid ids ` +
+            `(built-in: ${pageTemplateIds().join(', ')}; custom templates list there too).`,
+          true,
+        )
+      }
+
+      // Same default binding placeholder + createDraft seam as `createPage`
+      // (the block list is the authoritative content).
+      const binding = { entity: 'tasks', viewType: 'table' } as BindingConfig
+      try {
+        const draft = await savedViewStore.createDraft({
+          userId: ctx.userId,
+          workspaceId,
+          name: resolved.title,
+          nameOrigin: 'user',
+          icon: resolved.icon,
+          entity: 'tasks',
+          viewType: 'table',
+          binding,
+          page: { blocks: resolved.blocks },
+        })
+        return text(
+          `Created page "${resolved.title}" from template "${templateId}" (pageId: ${draft.id}). ` +
+            'Use editPage to add more, or readPage to read it back.',
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to create the page: ${msg}`, true)
+      }
+    },
+  }
+
+  return {
+    readPage,
+    listPages,
+    editPage,
+    deletePage,
+    createPage,
+    listPageTemplates: listPageTemplatesTool,
+    createPageFromTemplate,
+  }
 }
 
 /**
@@ -983,7 +1209,9 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'getDeal' || t.name === 'listDeals',
     ),
     ...fileBridges.filter((t) => t.name === 'fileRead' || t.name === 'fileSearch'),
-    ...(docPageTools ? [docPageTools.readPage] : []),
+    ...(docPageTools
+      ? [docPageTools.readPage, docPageTools.listPages, docPageTools.listPageTemplates]
+      : []),
     ...agentReadBridges,
     // Writes
     saveMemory,
@@ -1004,7 +1232,14 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'fileSetMeta' || t.name === 'fileDelete' ||
       t.name === 'saveFileBytes' || t.name === 'saveFileToBrain',
     ),
-    ...(docPageTools ? [docPageTools.editPage, docPageTools.deletePage, docPageTools.createPage] : []),
+    ...(docPageTools
+      ? [
+          docPageTools.editPage,
+          docPageTools.deletePage,
+          docPageTools.createPage,
+          docPageTools.createPageFromTemplate,
+        ]
+      : []),
     ...agentWriteBridges,
   ]
   return opts.scope === 'read'

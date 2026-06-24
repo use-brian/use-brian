@@ -58,8 +58,13 @@ import {
   createDraft,
   derivePageIcon,
   getView,
+  deleteView,
   setViewClearance,
   setViewFullWidth,
+  listCustomPageTemplates,
+  getCustomPageTemplate,
+  deleteCustomPageTemplate,
+  createCustomPageTemplate,
   type NameOrigin,
   type ViewMetadata,
 } from "@/lib/api/views";
@@ -78,8 +83,16 @@ import { usePublishPresenceActivity } from "@/lib/collab/use-presence";
 import { useAssistantRun } from "@/lib/collab/use-assistant-run";
 import { AssistantRunClaw } from "./assistant-run-claw";
 import { isYFragmentEmpty } from "@/lib/collab/doc-empty";
-import { FRAGMENT_FIELD } from "@sidanclaw/doc-model";
+import {
+  FRAGMENT_FIELD,
+  instantiatePageTemplate,
+  withFreshBlockIds,
+  yDocToSnapshot,
+  type CustomPageTemplateSummary,
+} from "@sidanclaw/doc-model";
 import { EmptyPageLanding } from "./empty-page-landing";
+import { TemplateGallery } from "./template-gallery";
+import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
 import { SuggestedView } from "./suggested-view";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
@@ -397,6 +410,24 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // wide viewport — the content shifts left to reserve a right gutter so the
   // comment rail can dock beside it (Notion-style). See comment-rail.tsx.
   const [pageHasComments, setPageHasComments] = useState(false);
+
+  // ── Custom page templates (migration 281) ────────────────────────────
+  // The save-as-template dialog target (page id + prefill), the landing
+  // "Start from a template" gallery, its loaded custom rows, and the id of a
+  // transient draft being authored "from scratch" as a template (drives the
+  // Finish/Discard banner).
+  const [saveTemplateFor, setSaveTemplateFor] = useState<{
+    pageId: string;
+    name: string;
+    icon: string | null;
+    /** When true, the page is a throwaway authoring draft removed after save. */
+    transient: boolean;
+  } | null>(null);
+  const [landingGalleryOpen, setLandingGalleryOpen] = useState(false);
+  const [landingCustomTemplates, setLandingCustomTemplates] = useState<
+    CustomPageTemplateSummary[]
+  >([]);
+  const [templateAuthoringId, setTemplateAuthoringId] = useState<string | null>(null);
   // Track viewport width so the reserved comment gutter scales with it. Applied
   // as an INLINE padding (not a Tailwind class) so React Fast-Refresh delivers
   // it even when the dev server's CSS hot-reload is stale.
@@ -626,6 +657,116 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       setTopError(format(t.createDraftFailed, { message }));
     }
   }
+
+  // ── Custom templates ────────────────────────────────────────────────
+
+  // Open the save-as-template dialog for a page, prefilled from its title/icon.
+  async function handleSaveAsTemplate(pageId: string, transient = false) {
+    try {
+      const view = await getView(pageId);
+      setSaveTemplateFor({ pageId, name: view.name, icon: view.icon, transient });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.createDraftFailed, { message }));
+    }
+  }
+
+  // Persist the dialog: snapshot the source page's current blocks into a custom
+  // template. A transient authoring draft is removed once the template is saved.
+  async function submitSaveTemplate(input: SaveAsTemplateInput) {
+    const target = saveTemplateFor;
+    if (!target) return;
+    // Snapshot the LIVE blocks from the Yjs doc, not the REST `saved_views.page`
+    // snapshot (which lags the collaborative doc and is empty for a fresh page).
+    // The save target is always the currently-open page, so `collab.doc` is its
+    // doc. Fall back to the persisted page only when the doc isn't ready.
+    const blocks =
+      collab.doc && target.pageId === urlViewId
+        ? yDocToSnapshot(collab.doc).page.blocks
+        : ((await getView(target.pageId)).page?.blocks ?? []);
+    if (blocks.length === 0) {
+      // Nothing to save — surface a friendly error in the dialog (the server's
+      // min(1) check is the backstop) instead of a raw 400.
+      throw new Error(t.saveTemplateDialog.emptyError);
+    }
+    // The client `Block` is a narrow local shape; the server re-validates the
+    // snapshot with the canonical block schema, so the cast is safe.
+    await createCustomPageTemplate(workspaceId, { ...input, blocks: blocks as never });
+    setSaveTemplateFor(null);
+    if (target.transient) {
+      setTemplateAuthoringId((cur) => (cur === target.pageId ? null : cur));
+      await deleteView(target.pageId).catch(() => {});
+      reloadSidebar();
+      navigateToView(null);
+    }
+  }
+
+  // "New template" → author from scratch: mint a blank draft, mark it as the
+  // authoring target (drives the Finish/Discard banner), and open it.
+  async function handleNewTemplate() {
+    setTopError(null);
+    try {
+      const created = await createDraft({ workspaceId, name: t.newTemplateTitle });
+      reloadSidebar();
+      recordPrune(created.id, created.autoPruneAt);
+      setBlankDraftIds((prev) => new Set(prev).add(created.id));
+      setTemplateAuthoringId(created.id);
+      navigateToView(created.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.createDraftFailed, { message }));
+    }
+  }
+
+  // Discard a from-scratch authoring draft without saving it as a template.
+  async function discardTemplateAuthoring(pageId: string) {
+    setTemplateAuthoringId((cur) => (cur === pageId ? null : cur));
+    await deleteView(pageId).catch(() => {});
+    reloadSidebar();
+    navigateToView(null);
+  }
+
+  // Create a brand-new page seeded from a template (the landing "Start from a
+  // template" pick). Built-in → instantiate Markdown; custom → fetch blocks +
+  // fresh ids. Then navigate to the new page.
+  async function seedPageFromTemplate(
+    source: { kind: "builtin"; id: string } | { kind: "custom"; id: string },
+  ) {
+    setLandingGalleryOpen(false);
+    try {
+      let blocks;
+      if (source.kind === "builtin") {
+        const instance = instantiatePageTemplate(source.id, { genId: () => crypto.randomUUID() });
+        blocks = instance?.blocks ?? [];
+      } else {
+        const tpl = await getCustomPageTemplate(workspaceId, source.id);
+        blocks = withFreshBlockIds(tpl.blocks, () => crypto.randomUUID());
+      }
+      if (blocks.length === 0) {
+        await handleStartBlankNew();
+        return;
+      }
+      const created = await createDraft({
+        workspaceId,
+        blocks: blocks as never,
+      });
+      reloadSidebar();
+      recordPrune(created.id, created.autoPruneAt);
+      setBlankDraftIds((prev) => new Set(prev).add(created.id));
+      navigateToView(created.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setTopError(format(t.createDraftFailed, { message }));
+    }
+  }
+
+  // Load custom templates when the landing gallery opens.
+  useEffect(() => {
+    if (!landingGalleryOpen) return;
+    void listCustomPageTemplates(workspaceId)
+      .then(setLandingCustomTemplates)
+      .catch(() => setLandingCustomTemplates([]));
+  }, [landingGalleryOpen, workspaceId]);
 
   // Landing's "Start with a blank page" on an already-open empty draft: the
   // page exists, so just drop its landing. Mark it blank (mounts the editor)
@@ -935,6 +1076,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 onDeleted={handleActiveDeletedFromHeader}
                 onRenameValue={handleRenameValue}
                 onDuplicate={handleDuplicate}
+                onSaveAsTemplate={(id) => void handleSaveAsTemplate(id)}
                 fullWidth={pageView.fullWidth}
                 onToggleFullWidth={(next) =>
                   handleToggleFullWidth(pageView.id, next)
@@ -970,6 +1112,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     handleBuildPage(text, opts, urlViewId)
                   }
                   onStartBlank={() => handleStartBlankDraft(urlViewId)}
+                  onStartFromTemplate={() => setLandingGalleryOpen(true)}
                 />
               </div>
             ) : (
@@ -998,6 +1141,27 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       since the navbar now shows the breadcrumb, not the title.
                       A skeleton title holds the same vertical space while the
                       page metadata resolves, so the body doesn't jump. */}
+                  {pageView && templateAuthoringId === pageView.id ? (
+                    <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+                      <span className="text-foreground">{t.templateAuthoringBanner}</span>
+                      <span className="flex shrink-0 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleSaveAsTemplate(pageView.id, true)}
+                          className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                        >
+                          {t.templateAuthoringFinish}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void discardTemplateAuthoring(pageView.id)}
+                          className="rounded-md px-2.5 py-1 text-xs font-medium text-muted-foreground hover:bg-muted/60"
+                        >
+                          {t.templateAuthoringDiscard}
+                        </button>
+                      </span>
+                    </div>
+                  ) : null}
                   {pageView ? (
                     <PageTitle
                       name={pageView.name}
@@ -1032,6 +1196,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                       buildingPageId === urlViewId ? <PageBuildIndicator /> : null
                     }
                     onCommentsPresenceChange={setPageHasComments}
+                    onNewTemplate={() => void handleNewTemplate()}
                   />
                 </div>
               </div>
@@ -1044,6 +1209,39 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           streaming across tab switches and the conversation is unified. This
           shell only publishes the page-collab guard into `docChatRelay`
           (above) for the hoisted dock to read. */}
+
+      {/* Landing "Start from a template" picker — seeds a brand-new page from
+          the chosen built-in or custom template. */}
+      {landingGalleryOpen ? (
+        <TemplateGallery
+          customTemplates={landingCustomTemplates}
+          onPick={(id) => void seedPageFromTemplate({ kind: "builtin", id })}
+          onPickCustom={(id) => void seedPageFromTemplate({ kind: "custom", id })}
+          onDeleteCustom={(id) => {
+            void deleteCustomPageTemplate(workspaceId, id).then(() =>
+              listCustomPageTemplates(workspaceId)
+                .then(setLandingCustomTemplates)
+                .catch(() => {}),
+            );
+          }}
+          onNewTemplate={() => {
+            setLandingGalleryOpen(false);
+            void handleNewTemplate();
+          }}
+          onClose={() => setLandingGalleryOpen(false)}
+        />
+      ) : null}
+
+      {/* Save-as-template metadata dialog (⋯ menu + the authoring banner's
+          Finish step). The block snapshot is read in `submitSaveTemplate`. */}
+      {saveTemplateFor ? (
+        <SaveAsTemplateDialog
+          initialName={saveTemplateFor.name}
+          initialIcon={saveTemplateFor.icon}
+          onSubmit={submitSaveTemplate}
+          onClose={() => setSaveTemplateFor(null)}
+        />
+      ) : null}
     </div>
   );
 }

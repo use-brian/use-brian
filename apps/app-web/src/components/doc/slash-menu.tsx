@@ -61,6 +61,7 @@ import {
   Heading3,
   Heading4,
   Image as ImageIcon,
+  LayoutTemplate,
   Link2,
   List,
   ListOrdered,
@@ -165,11 +166,13 @@ export type SlashMenuBlockKind =
   | "chart"
   | "diagram"
   // Async/picker kinds — handled by the editor's slash `onSelect` (they need
-  // workspace context + the router / a page picker), not the synchronous
-  // `executeSlashItem` chain. `child_page` mints a new nested page; `link_to_page`
-  // points at an existing one.
+  // workspace context + the router / a page picker / the template gallery), not
+  // the synchronous `executeSlashItem` chain. `child_page` mints a new nested
+  // page; `link_to_page` points at an existing one; `template` opens the page
+  // template gallery and inserts the chosen starter's blocks at the caret.
   | "child_page"
-  | "link_to_page";
+  | "link_to_page"
+  | "template";
 
 /**
  * English fallback labels — used only when the popup is rendered outside
@@ -189,6 +192,7 @@ export const FALLBACK_LABELS = {
   to_do: "To-do list",
   toggle: "Toggle list",
   page: "Page",
+  template: "Template",
   callout: "Callout",
   quote: "Quote",
   table: "Table",
@@ -215,13 +219,13 @@ export const FALLBACK_CATEGORY_LABELS: Record<SlashMenuCategory, string> = {
 // ── Catalogue ──────────────────────────────────────────────────────────
 
 /**
- * The slash-menu catalogue. 24 items across three populated categories,
+ * The slash-menu catalogue. 25 items across three populated categories,
  * ordered + labelled to mirror Notion's `/` menu 1:1
  * (`docs/plans/doc-notion-clone.md` §5):
  *
- *   - Basic (16): Text, Heading 1–4, Bulleted/Numbered/To-do/Toggle list,
- *     Page, Callout, Quote, Table (the native simple table), Divider,
- *     Link to page, Code
+ *   - Basic (17): Text, Heading 1–4, Bulleted/Numbered/To-do/Toggle list,
+ *     Page, Template (the page template gallery), Callout, Quote, Table (the
+ *     native simple table), Divider, Link to page, Code
  *   - Media (5): Image, Video, Audio, File, Bookmark
  *   - Database (3): Table view (the bound `data` database), Chart, Diagram
  *
@@ -323,6 +327,14 @@ export const SLASH_MENU_ITEMS: readonly SlashMenuItem[] = [
     aliases: ["page", "sub-page", "subpage", "child"],
     icon: FileText,
     blockKind: "child_page",
+  },
+  {
+    id: "template",
+    labelKey: "template",
+    category: "basic",
+    aliases: ["template", "starter", "preset", "boilerplate", "gallery"],
+    icon: LayoutTemplate,
+    blockKind: "template",
   },
   {
     id: "callout",

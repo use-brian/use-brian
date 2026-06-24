@@ -172,10 +172,10 @@ describe("[COMP:app-web/slash-execute] executeSlashItem", () => {
     expect(payload.content[0].content[0].content[0].type).toBe("paragraph");
   });
 
-  it("is a no-op for the editor-handled Page / Link-to-page items", () => {
-    // `child_page` (Page) + `link_to_page` are intercepted by the editor's slash
-    // `onSelect` — `executeSlashItem` runs no chain and returns false.
-    for (const id of ["page", "link_to_page"]) {
+  it("is a no-op for the editor-handled Page / Link-to-page / Template items", () => {
+    // `child_page` (Page), `link_to_page`, and `template` are intercepted by the
+    // editor's slash `onSelect` — `executeSlashItem` runs no chain, returns false.
+    for (const id of ["page", "link_to_page", "template"]) {
       const { editor, calls } = makeEditor();
       const ok = executeSlashItem(editor, itemFor(id));
       expect(ok).toBe(false);
@@ -185,8 +185,12 @@ describe("[COMP:app-web/slash-execute] executeSlashItem", () => {
 
   it("runs a single command for every synchronous catalogue item", () => {
     for (const item of SLASH_MENU_ITEMS) {
-      // Page / Link-to-page are async/picker actions handled by the editor.
-      if (item.blockKind === "child_page" || item.blockKind === "link_to_page") {
+      // Page / Link-to-page / Template are async/picker actions handled by the editor.
+      if (
+        item.blockKind === "child_page" ||
+        item.blockKind === "link_to_page" ||
+        item.blockKind === "template"
+      ) {
         continue;
       }
       const { editor, calls } = makeEditor();

@@ -69,8 +69,10 @@ import {
   savedViewCreateInputSchema,
   savedViewUpdateInputSchema,
   viewEntitySchema,
+  customTemplateCreateInputSchema,
 } from '@sidanclaw/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import type { PageGrantStore } from '../db/page-grant-store.js'
 import type { WorkspaceGroupStore } from '../db/workspace-group-store.js'
@@ -163,6 +165,14 @@ export type ViewsRouteOptions = {
    * route. See docs/plans/canvas-brain-distillation.md.
    */
   ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
+  /**
+   * Custom page templates (migration 281). When wired, the four
+   * `/workspaces/:wid/page-templates*` routes are live — workspace-shared,
+   * user-authored templates that the gallery merges with the built-in
+   * `PAGE_TEMPLATES` catalog. Optional: when absent the routes return 503.
+   * See docs/architecture/features/doc-templates.md -> "Custom templates".
+   */
+  pageTemplateStore?: PageTemplateStore
 }
 
 /**
@@ -284,6 +294,62 @@ function pageOf(view: SavedView): Page {
 
 export function viewsRoutes(opts: ViewsRouteOptions): Router {
   const router = Router()
+
+  // ── Custom page templates (migration 281) ────────────────────────────
+  // Workspace-shared, user-authored templates. The gallery merges these with
+  // the built-in PAGE_TEMPLATES catalog; both authoring paths ("Save as
+  // template" and "New template") POST a block snapshot. Optional store: when
+  // unwired the four routes return 503. See doc-templates.md -> "Custom templates".
+
+  // GET /workspaces/:workspaceId/page-templates — list custom templates (summaries)
+  router.get('/workspaces/:workspaceId/page-templates', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageTemplateStore) return res.status(503).json({ error: 'Custom templates not configured' })
+    const workspaceId = req.params.workspaceId
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) return notMember(res)
+    const templates = await opts.pageTemplateStore.list(userId, workspaceId)
+    res.json({ templates })
+  })
+
+  // GET /workspaces/:workspaceId/page-templates/:id — one template, with blocks
+  router.get('/workspaces/:workspaceId/page-templates/:id', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageTemplateStore) return res.status(503).json({ error: 'Custom templates not configured' })
+    const role = await opts.workspaceStore.getRole(userId, req.params.workspaceId)
+    if (!role) return notMember(res)
+    const template = await opts.pageTemplateStore.getById(userId, req.params.id)
+    if (!template || template.workspaceId !== req.params.workspaceId) return notFound(res, 'Template not found')
+    res.json({ template })
+  })
+
+  // POST /workspaces/:workspaceId/page-templates — create (both authoring paths)
+  router.post('/workspaces/:workspaceId/page-templates', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageTemplateStore) return res.status(503).json({ error: 'Custom templates not configured' })
+    const workspaceId = req.params.workspaceId
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) return notMember(res)
+    const parsed = customTemplateCreateInputSchema.safeParse(req.body)
+    if (!parsed.success) return badRequest(res, `Invalid template: ${parsed.error.message}`)
+    const template = await opts.pageTemplateStore.create(userId, { workspaceId, ...parsed.data })
+    res.status(201).json({ template })
+  })
+
+  // DELETE /workspaces/:workspaceId/page-templates/:id
+  router.delete('/workspaces/:workspaceId/page-templates/:id', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageTemplateStore) return res.status(503).json({ error: 'Custom templates not configured' })
+    const role = await opts.workspaceStore.getRole(userId, req.params.workspaceId)
+    if (!role) return notMember(res)
+    const removed = await opts.pageTemplateStore.remove(userId, req.params.id)
+    if (!removed) return notFound(res, 'Template not found')
+    res.json({ ok: true })
+  })
 
   // ── Saved-views CRUD (legacy single-binding paths) ───────────────────
 
@@ -975,6 +1041,20 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       name?: string
       binding?: unknown
       nestParentId?: unknown
+      blocks?: unknown
+    }
+
+    // Optional block seed (migration 281) — "Start from a template" creates the
+    // draft pre-filled with a template's blocks instead of an empty page. Same
+    // shape the store's `createDraft({ page })` accepts (and the MCP
+    // `createPageFromTemplate` uses). Absent → emptyPage.
+    let seededPage: Page | undefined
+    if (body.blocks !== undefined) {
+      const parsedPage = pageSchema.safeParse({ blocks: body.blocks })
+      if (!parsedPage.success) {
+        return badRequest(res, parsedPage.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '))
+      }
+      seededPage = parsedPage.data
     }
 
     let binding: BindingConfig = { entity: 'tasks', viewType: 'table' }
@@ -1012,7 +1092,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       entity: binding.entity === 'custom' ? 'tasks' : binding.entity,
       viewType: binding.viewType,
       binding,
-      page: emptyPage,
+      page: seededPage ?? emptyPage,
       nestParentId,
     })
     res.status(201).json(viewMetadata(created))

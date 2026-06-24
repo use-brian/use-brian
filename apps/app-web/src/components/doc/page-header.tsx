@@ -77,6 +77,9 @@ type PageHeaderProps = {
   /** Commit a new title directly — drives the breadcrumb's inline rename. */
   onRenameValue: (id: string, name: string) => void;
   onDuplicate: (id: string) => void;
+  /** Snapshot this page's current content as a reusable custom template (the
+   *  ⋯ menu "Save as template"). When absent the item is hidden. */
+  onSaveAsTemplate?: (id: string) => void;
   /** Current Notion-style page-width mode (false = constrained column). */
   fullWidth: boolean;
   /** Flip the page-width mode (per-page, persisted). Lives in the ⋯ menu. */
@@ -117,6 +120,7 @@ export function PageHeader({
   onDeleted,
   onRenameValue,
   onDuplicate,
+  onSaveAsTemplate,
   fullWidth,
   onToggleFullWidth,
   memberClearance,
@@ -362,6 +366,11 @@ export function PageHeader({
               <DropdownMenuItem onClick={() => onDuplicate(view.id)}>
                 {t.sidebarRowDuplicate}
               </DropdownMenuItem>
+              {onSaveAsTemplate ? (
+                <DropdownMenuItem onClick={() => onSaveAsTemplate(view.id)}>
+                  {t.saveAsTemplate}
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem onClick={() => void handleCopyLink()}>
                 {t.headerCopyLink}
               </DropdownMenuItem>

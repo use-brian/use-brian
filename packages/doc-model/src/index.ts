@@ -41,6 +41,42 @@ export {
 // without pulling the core barrel.
 export { markdownToBlocks } from '@sidanclaw/core/dist/doc/markdown.js'
 
+// Page templates — re-exported from core's `dist/doc/templates.js` leaf, which
+// imports only the fs-free `markdown.js` + `blocks.js` leaves (no barrel, no
+// `skills/loader`/`fs`), so the browser editor's "/template" gallery
+// (`apps/app-web` `template-gallery.tsx`) can list + instantiate templates
+// without pulling the core barrel. Same source of truth the brain-MCP
+// `listPageTemplates` / `createPageFromTemplate` tools read.
+// See docs/architecture/features/doc-templates.md.
+export {
+  type PageTemplate,
+  type PageTemplateSummary,
+  type PageTemplateCategory,
+  type InstantiatedTemplate,
+  type TemplateVars,
+  PAGE_TEMPLATES,
+  listPageTemplates,
+  getPageTemplate,
+  pageTemplateIds,
+  instantiatePageTemplate,
+} from '@sidanclaw/core/dist/doc/templates.js'
+
+// Custom (user-authored, workspace-shared) page templates — re-exported from
+// core's fs-free `dist/doc/custom-template-types.js` leaf (imports only `zod`
+// + the `blocks.js` schema leaf). The gallery / editor consume the types +
+// `withFreshBlockIds` (mints fresh ids when a stored-blocks template is
+// inserted/seeded). See docs/architecture/features/doc-templates.md ->
+// "Custom templates".
+export {
+  type CustomPageTemplate,
+  type CustomPageTemplateSummary,
+  type CustomTemplateCreateInput,
+  PAGE_TEMPLATE_CATEGORIES,
+  pageTemplateCategorySchema,
+  customTemplateCreateInputSchema,
+  withFreshBlockIds,
+} from '@sidanclaw/core/dist/doc/custom-template-types.js'
+
 export {
   pageToYDoc,
   pageToYDocUpdate,

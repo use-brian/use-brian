@@ -98,10 +98,15 @@ function tableNode(
 export function executeSlashItem(editor: Editor, item: SlashMenuItem): boolean {
   const action = slashActionFor(item.blockKind);
 
-  // child_page / link_to_page are handled by the editor's slash `onSelect` (it
-  // owns the workspace context, router, and page picker these need). Reaching
-  // here means a caller bypassed that intercept — no synchronous chain to run.
-  if (action.command === "createChildPage" || action.command === "linkToPage") {
+  // child_page / link_to_page / template are handled by the editor's slash
+  // `onSelect` (it owns the workspace context, router, page picker, and template
+  // gallery these need). Reaching here means a caller bypassed that intercept —
+  // no synchronous chain to run.
+  if (
+    action.command === "createChildPage" ||
+    action.command === "linkToPage" ||
+    action.command === "openTemplateGallery"
+  ) {
     return false;
   }
 

@@ -39,7 +39,15 @@
  */
 
 import { useRef, useState } from "react";
-import { ArrowUp, ArrowUpRight, Clock3, Paperclip, PencilLine, Sparkles } from "lucide-react";
+import {
+  ArrowUp,
+  ArrowUpRight,
+  Clock3,
+  LayoutTemplate,
+  Paperclip,
+  PencilLine,
+  Sparkles,
+} from "lucide-react";
 import { ChatComposer } from "@sidanclaw/chat-ui";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
@@ -82,6 +90,8 @@ type Props = {
    * Fired by the "Start with a blank page" button below the composer.
    */
   onStartBlank: () => void;
+  /** Open the template gallery to seed a new page from a template. */
+  onStartFromTemplate?: () => void;
   /**
    * Cold-start signal: zero connected connectors (≈ setup incomplete), or
    * `null`/`false` once set up. When `true`, the home landing renders the
@@ -99,6 +109,7 @@ export function EmptyPageLanding({
   onOpenCard,
   onSubmitPrompt,
   onStartBlank,
+  onStartFromTemplate,
   studioSetupIncomplete,
 }: Props) {
   const t = useT().docPage;
@@ -311,6 +322,17 @@ export function EmptyPageLanding({
         >
           <PencilLine className="size-3.5" aria-hidden />
           {t.landing.startBlank}
+        </button>
+        <button
+          type="button"
+          onClick={onStartFromTemplate}
+          className={cn(
+            "press mt-2 inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium",
+            "text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+          )}
+        >
+          <LayoutTemplate className="size-3.5" aria-hidden />
+          {t.landing.startFromTemplate}
         </button>
       </section>
 

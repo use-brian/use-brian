@@ -35,9 +35,11 @@ export type SlashAction =
   | { command: 'insertEmbed'; block: EmbedKind }
   // Async / picker actions — `executeSlashItem` is a no-op for these; the
   // editor's slash `onSelect` (in `collab-page-editor`) intercepts them
-  // because they need workspace context + the router + a page picker.
+  // because they need workspace context + the router + a page picker / the
+  // template gallery.
   | { command: 'createChildPage' }
   | { command: 'linkToPage' }
+  | { command: 'openTemplateGallery' }
 
 /** Every slash kind, for exhaustiveness checks + tests. */
 export const ALL_SLASH_KINDS: readonly SlashMenuBlockKind[] = [
@@ -62,6 +64,7 @@ export const ALL_SLASH_KINDS: readonly SlashMenuBlockKind[] = [
   'diagram',
   'child_page',
   'link_to_page',
+  'template',
 ]
 
 export function slashActionFor(kind: SlashMenuBlockKind): SlashAction {
@@ -101,5 +104,7 @@ export function slashActionFor(kind: SlashMenuBlockKind): SlashAction {
       return { command: 'createChildPage' }
     case 'link_to_page':
       return { command: 'linkToPage' }
+    case 'template':
+      return { command: 'openTemplateGallery' }
   }
 }

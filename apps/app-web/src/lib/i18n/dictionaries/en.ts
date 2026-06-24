@@ -528,6 +528,7 @@ export const en = {
       // an empty page and write it yourself, no AI prompt. Sits under the
       // composer as a quiet text button.
       startBlank: "Start with a blank page",
+      startFromTemplate: "Start from a template",
       // Starter prompts — one tap mints a draft for that prompt. Keep each
       // short enough to read as a chip and to stand alone as a request.
       suggestions: [
@@ -897,6 +898,7 @@ export const en = {
         to_do: "To-do list",
         toggle: "Toggle list",
         page: "Page",
+        template: "Template",
         callout: "Callout",
         quote: "Quote",
         table: "Table",
@@ -917,6 +919,47 @@ export const en = {
       filteredResults: "Filtered results",
       closeMenu: "Close menu",
       esc: "esc",
+    },
+    // Page template gallery: opened by the "/template" slash item, inserts a
+    // starter layout's blocks at the caret.
+    templateGallery: {
+      title: "Pick a template",
+      searchPlaceholder: "Search templates",
+      empty: "No templates match.",
+      ariaLabel: "Page templates",
+      myTemplates: "My templates",
+      newTemplate: "New template",
+      deleteTemplate: "Delete template",
+      deleteConfirmTitle: "Delete template?",
+      deleteConfirm: 'Delete the "{name}" template? This cannot be undone.',
+      deleteConfirmAction: "Delete",
+      cancel: "Cancel",
+      categories: {
+        meeting: "Meetings",
+        planning: "Planning",
+        personal: "Personal",
+        knowledge: "Knowledge",
+        team: "Team",
+      },
+    },
+    // ⋯ menu "Save as template" label + the from-scratch authoring banner.
+    saveAsTemplate: "Save as template",
+    newTemplateTitle: "Untitled template",
+    templateAuthoringBanner: "You are authoring a template.",
+    templateAuthoringFinish: "Finish template",
+    templateAuthoringDiscard: "Discard",
+    // Save-as-template metadata dialog.
+    saveTemplateDialog: {
+      title: "Save as template",
+      nameLabel: "Name",
+      namePlaceholder: "Template name",
+      descriptionLabel: "Description",
+      descriptionPlaceholder: "What is this template for?",
+      categoryLabel: "Category",
+      save: "Save template",
+      saving: "Saving...",
+      cancel: "Cancel",
+      emptyError: "Add some content to the page before saving it as a template.",
     },
     // Empty-line affordances: the "Press 'space' for AI or '/' for commands"
     // placeholder on an empty paragraph, and the quieter empty-heading hint.

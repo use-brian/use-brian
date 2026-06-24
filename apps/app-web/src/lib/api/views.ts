@@ -21,6 +21,11 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import type { ViewPayload } from "@sidanclaw/views-renderer";
+import type {
+  CustomPageTemplate,
+  CustomPageTemplateSummary,
+  CustomTemplateCreateInput,
+} from "@sidanclaw/doc-model";
 import {
   Briefcase,
   Building2,
@@ -526,6 +531,53 @@ export async function getViewPayload(viewId: string): Promise<ViewPayload> {
   return json<ViewPayload>(res);
 }
 
+// ── Custom page templates (migration 281) ─────────────────────────────
+//
+// Workspace-shared, user-authored templates. Distinct from the built-in
+// `listPageTemplates()` catalog (`@sidanclaw/doc-model`, no args) — these are
+// fetched per workspace. The gallery merges both.
+
+export async function listCustomPageTemplates(
+  workspaceId: string,
+): Promise<CustomPageTemplateSummary[]> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates`);
+  const body = await json<{ templates: CustomPageTemplateSummary[] }>(res);
+  return body.templates;
+}
+
+export async function getCustomPageTemplate(
+  workspaceId: string,
+  id: string,
+): Promise<CustomPageTemplate> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates/${id}`);
+  const body = await json<{ template: CustomPageTemplate }>(res);
+  return body.template;
+}
+
+export async function createCustomPageTemplate(
+  workspaceId: string,
+  input: CustomTemplateCreateInput,
+): Promise<CustomPageTemplate> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/page-templates`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = await json<{ template: CustomPageTemplate }>(res);
+  return body.template;
+}
+
+export async function deleteCustomPageTemplate(
+  workspaceId: string,
+  id: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/page-templates/${id}`,
+    { method: "DELETE" },
+  );
+  await json<{ ok: true }>(res);
+}
+
 // ── Page sharing (migration 249) ──────────────────────────────────────
 
 export type PageGrant = {
@@ -837,6 +889,11 @@ export async function createDraft(params: {
    * root-level draft.
    */
   nestParentId?: string | null;
+  /**
+   * Optional block seed (migration 281) — "Start from a template" creates the
+   * draft pre-filled with a template's blocks. Omit for an empty page.
+   */
+  blocks?: Block[];
 }): Promise<ViewMetadata> {
   const res = await authFetch(
     `${API_URL}/api/workspaces/${params.workspaceId}/views/draft`,
@@ -847,6 +904,7 @@ export async function createDraft(params: {
         ...(params.name ? { name: params.name } : {}),
         ...(params.binding ? { binding: params.binding } : {}),
         ...(params.nestParentId ? { nestParentId: params.nestParentId } : {}),
+        ...(params.blocks ? { blocks: params.blocks } : {}),
       }),
     },
   );

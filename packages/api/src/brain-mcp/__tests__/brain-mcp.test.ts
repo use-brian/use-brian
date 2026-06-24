@@ -780,7 +780,7 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
   })
 })
 
-describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage / createPage)', () => {
+describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages / editPage / deletePage / createPage / templates)', () => {
   // A minimal page row the doc-page store stub returns. One heading block is
   // enough for the Markdown export + the delete/edit access-confirm read.
   const SAMPLE_PAGE = {
@@ -817,8 +817,12 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
     remove: (...args: unknown[]) => Promise<boolean>
     createDraft: (...args: unknown[]) => Promise<{ id: string }>
+    // Custom page templates (migration 281) — wired only when provided so the
+    // existing tests still exercise the built-in-only catalog.
+    templateList: (...args: unknown[]) => Promise<unknown[]>
+    templateGetById: (...args: unknown[]) => Promise<unknown>
   }> = {}): BrainDocTools {
-    return {
+    const tools: BrainDocTools = {
       savedViewStore: {
         list: vi.fn(overrides.list ?? (async () => [listRow('Worker Maintenance Log', 'p1')])),
         remove: vi.fn(overrides.remove ?? (async () => true)),
@@ -829,6 +833,13 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
         applyPatch: vi.fn(overrides.applyPatch ?? (async () => ({ newVersion: 4 }))),
       } as unknown as BrainDocTools['docPageStore'],
     }
+    if (overrides.templateList || overrides.templateGetById) {
+      tools.pageTemplateStore = {
+        list: vi.fn(overrides.templateList ?? (async () => [])),
+        getById: vi.fn(overrides.templateGetById ?? (async () => null)),
+      } as unknown as NonNullable<BrainDocTools['pageTemplateStore']>
+    }
+    return tools
   }
 
   const BASE = {
@@ -918,6 +929,56 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     expect(docTools.docPageStore.getVersionedPage).not.toHaveBeenCalled()
   })
 
+  it('listPages is exposed on a read key', () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    expect(tools.map((t) => t.name)).toContain('listPages')
+  })
+
+  it('listPages returns every page as a { pageId, title } row, newest first', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        { ...listRow('Older', 'p-old'), updatedAt: new Date('2026-01-01T00:00:00Z') },
+        { ...listRow('Newer', 'p-new'), updatedAt: new Date('2026-02-01T00:00:00Z') },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('Newer')
+    expect(body).toContain('p-new')
+    expect(body).toContain('p-old')
+    // Recency order: the newer page is listed before the older one.
+    expect(body.indexOf('p-new')).toBeLessThan(body.indexOf('p-old'))
+  })
+
+  it('listPages filters by a case-insensitive titlePrefix', async () => {
+    const docTools = docToolsStub({
+      list: async () => [
+        listRow('sidanCode plan: alpha', 'pa'),
+        listRow('sidanCode plan: beta', 'pb'),
+        listRow('Unrelated page', 'pu'),
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'SIDANCODE PLAN:' })
+    const body = textBody(result)
+    expect(body).toContain('pa')
+    expect(body).toContain('pb')
+    expect(body).not.toContain('pu')
+  })
+
+  it('listPages reports an empty result for a prefix that matches nothing', async () => {
+    const docTools = docToolsStub({ list: async () => [listRow('Something else', 'px')] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const listPages = tools.find((t) => t.name === 'listPages')!
+    const result = await listPages.handler({ titlePrefix: 'no-such-prefix' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toMatch(/no pages/i)
+  })
+
   it('editPage append confirms access then applies a CAS patch', async () => {
     const docTools = docToolsStub()
     const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
@@ -973,5 +1034,117 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     const result = await deletePage.handler({ pageId: 'nope' })
     expect(result.isError).toBe(true)
     expect(docTools.savedViewStore.remove).not.toHaveBeenCalled()
+  })
+
+  // ── template tools ────────────────────────────────────────────
+
+  it('listPageTemplates is a read tool; createPageFromTemplate is read_write only', () => {
+    const readNames = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(readNames).toContain('listPageTemplates')
+    expect(readNames).not.toContain('createPageFromTemplate')
+
+    const rwNames = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(rwNames).toContain('listPageTemplates')
+    expect(rwNames).toContain('createPageFromTemplate')
+  })
+
+  it('the template tools are omitted when no docTools are wired', () => {
+    const names = buildBrainTools({ ...BASE, scope: 'read_write' }).map((t) => t.name)
+    expect(names).not.toContain('listPageTemplates')
+    expect(names).not.toContain('createPageFromTemplate')
+  })
+
+  it('listPageTemplates returns the catalog with ids', async () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const result = await tool.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('meeting-notes')
+    expect(body).toMatch(/page templates/i)
+  })
+
+  it('createPageFromTemplate seeds a page (with icon) via createDraft', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'meeting-notes' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('new-page-1')
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    // Template icon + non-empty seeded blocks reach the store.
+    expect(arg.icon).toBe('📝')
+    expect(arg.page.blocks.length).toBeGreaterThan(0)
+  })
+
+  it('createPageFromTemplate honors a title override', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    await tool.handler({ templateId: 'standup', title: 'Monday sync' })
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Monday sync')
+  })
+
+  it('createPageFromTemplate rejects an unknown templateId without writing', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'no-such-template' })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('listPageTemplates appends workspace custom templates when the store is wired', async () => {
+    const docTools = docToolsStub({
+      templateList: async () => [
+        {
+          id: 'ct-uuid-1',
+          name: 'Sprint plan',
+          description: 'two-week sprint',
+          icon: '🏃',
+          category: 'planning',
+        },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const body = textBody(await tool.handler({}))
+    expect(body).toContain('meeting-notes') // built-in still present
+    expect(body).toContain('ct-uuid-1') // custom appended
+    expect(body).toMatch(/custom/i)
+  })
+
+  it('createPageFromTemplate resolves a custom template id via the store (fresh ids)', async () => {
+    const docTools = docToolsStub({
+      templateGetById: async () => ({
+        id: 'ct-uuid-1',
+        workspaceId: 'ws',
+        createdBy: 'u',
+        name: 'Sprint plan',
+        description: null,
+        icon: '🏃',
+        category: 'planning',
+        blocks: [{ kind: 'heading', id: 'orig-block', level: 1, text: 'Sprint' }],
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+      }),
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'ct-uuid-1' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Sprint plan')
+    expect(arg.icon).toBe('🏃')
+    // Block ids are re-minted, so the stored 'orig-block' id never reaches the page.
+    expect(arg.page.blocks).toHaveLength(1)
+    expect(arg.page.blocks[0].id).not.toBe('orig-block')
   })
 })
