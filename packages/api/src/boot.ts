@@ -194,6 +194,7 @@ import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
+import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
 import { createDbDocThemesStore } from './db/doc-themes-store.js'
 import { createDbDocPageStore } from './db/doc-page-store.js'
@@ -599,6 +600,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
   const savedViewStore = createDbSavedViewStore()
+  const pageTemplateStore = createDbPageTemplateStore()
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
   const pageGrantStore = createDbPageGrantStore()
@@ -1681,7 +1683,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // saved-views + doc-page stores the chat doc tools use, so a brain-key page
     // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
     // in-app edit. See packages/api/src/brain-mcp/tools.ts → buildDocPageTools.
-    docTools: { savedViewStore, docPageStore: createDbDocPageStore() },
+    docTools: { savedViewStore, docPageStore: createDbDocPageStore(), pageTemplateStore },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
@@ -1968,6 +1970,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
     savedViewStore,
+    pageTemplateStore,
     pageGrantStore,
     workspaceGroupStore,
     analytics,

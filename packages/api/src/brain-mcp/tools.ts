@@ -59,6 +59,7 @@ import {
   listPageTemplates,
   instantiatePageTemplate,
   pageTemplateIds,
+  withFreshBlockIds,
 } from '@sidanclaw/core'
 import type {
   BindingConfig,
@@ -74,6 +75,7 @@ import type {
 } from '@sidanclaw/core'
 import { query } from '../db/client.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
+import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { BRAIN_WRITE_TOOL_SIGNALS, notifyBrainChange } from '../brain-stream/notify.js'
@@ -193,6 +195,13 @@ export type BrainFileTools = {
 export type BrainDocTools = {
   savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft'>
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
+  /**
+   * Custom page templates (migration 281). When wired, `listPageTemplates`
+   * also surfaces the workspace's custom templates and `createPageFromTemplate`
+   * resolves a custom template id (a uuid) to its stored blocks. Optional — a
+   * deploy without the store still serves the built-in catalog.
+   */
+  pageTemplateStore?: Pick<PageTemplateStore, 'list' | 'getById'>
 }
 
 /** Cap on `readPage` title-search matches surfaced to the agent. */
@@ -372,7 +381,7 @@ function buildDocPageTools(
   listPageTemplates: BrainTool
   createPageFromTemplate: BrainTool
 } {
-  const { savedViewStore, docPageStore } = docTools
+  const { savedViewStore, docPageStore, pageTemplateStore } = docTools
 
   const readPage: BrainTool = {
     name: 'readPage',
@@ -727,11 +736,21 @@ function buildDocPageTools(
     async handler() {
       const ctx = await resolveCtx()
       if ('error' in ctx) return text(ctx.error, true)
-      const rows = listPageTemplates()
-      const list = rows
-        .map((r) => `- ${r.icon} ${r.name} (id: ${r.id}, category: ${r.category}) — ${r.description}`)
-        .join('\n')
-      return text(`${rows.length} page templates:\n${list}`)
+      const builtin = listPageTemplates().map(
+        (r) => `- ${r.icon} ${r.name} (id: ${r.id}, category: ${r.category}): ${r.description}`,
+      )
+      // Workspace custom templates (migration 281), when the store is wired.
+      let custom: string[] = []
+      if (pageTemplateStore) {
+        const rows = await pageTemplateStore.list(ctx.userId, workspaceId)
+        custom = rows.map(
+          (r) =>
+            `- ${r.icon ?? '📄'} ${r.name} (id: ${r.id}, category: ${r.category}, custom)` +
+            (r.description ? `: ${r.description}` : ''),
+        )
+      }
+      const all = [...builtin, ...custom]
+      return text(`${all.length} page templates:\n${all.join('\n')}`)
     },
   }
 
@@ -772,11 +791,27 @@ function buildDocPageTools(
       const titleOverride =
         typeof args.title === 'string' && args.title.trim() ? args.title.trim() : undefined
 
+      // Built-in slug → instantiate the Markdown catalog. Otherwise fall back
+      // to a workspace CUSTOM template (a uuid) resolved from the store, whose
+      // stored blocks get fresh ids so they never collide with an existing page.
+      let resolved: { title: string; icon: string | null; blocks: Block[] } | null = null
       const instance = instantiatePageTemplate(templateId, { titleOverride })
-      if (!instance) {
+      if (instance) {
+        resolved = { title: instance.title, icon: instance.icon, blocks: instance.blocks }
+      } else if (pageTemplateStore) {
+        const custom = await pageTemplateStore.getById(ctx.userId, templateId)
+        if (custom) {
+          resolved = {
+            title: titleOverride ?? custom.name,
+            icon: custom.icon,
+            blocks: withFreshBlockIds(custom.blocks, () => randomUUID()),
+          }
+        }
+      }
+      if (!resolved) {
         return text(
           `Unknown template: ${templateId}. Call listPageTemplates for valid ids ` +
-            `(${pageTemplateIds().join(', ')}).`,
+            `(built-in: ${pageTemplateIds().join(', ')}; custom templates list there too).`,
           true,
         )
       }
@@ -788,16 +823,16 @@ function buildDocPageTools(
         const draft = await savedViewStore.createDraft({
           userId: ctx.userId,
           workspaceId,
-          name: instance.title,
+          name: resolved.title,
           nameOrigin: 'user',
-          icon: instance.icon,
+          icon: resolved.icon,
           entity: 'tasks',
           viewType: 'table',
           binding,
-          page: { blocks: instance.blocks },
+          page: { blocks: resolved.blocks },
         })
         return text(
-          `Created page "${instance.title}" from template "${templateId}" (pageId: ${draft.id}). ` +
+          `Created page "${resolved.title}" from template "${templateId}" (pageId: ${draft.id}). ` +
             'Use editPage to add more, or readPage to read it back.',
         )
       } catch (err) {

@@ -61,6 +61,22 @@ export {
   instantiatePageTemplate,
 } from '@sidanclaw/core/dist/doc/templates.js'
 
+// Custom (user-authored, workspace-shared) page templates — re-exported from
+// core's fs-free `dist/doc/custom-template-types.js` leaf (imports only `zod`
+// + the `blocks.js` schema leaf). The gallery / editor consume the types +
+// `withFreshBlockIds` (mints fresh ids when a stored-blocks template is
+// inserted/seeded). See docs/architecture/features/doc-templates.md ->
+// "Custom templates".
+export {
+  type CustomPageTemplate,
+  type CustomPageTemplateSummary,
+  type CustomTemplateCreateInput,
+  PAGE_TEMPLATE_CATEGORIES,
+  pageTemplateCategorySchema,
+  customTemplateCreateInputSchema,
+  withFreshBlockIds,
+} from '@sidanclaw/core/dist/doc/custom-template-types.js'
+
 export {
   pageToYDoc,
   pageToYDocUpdate,

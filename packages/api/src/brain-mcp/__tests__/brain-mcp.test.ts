@@ -816,8 +816,12 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
     remove: (...args: unknown[]) => Promise<boolean>
     createDraft: (...args: unknown[]) => Promise<{ id: string }>
+    // Custom page templates (migration 281) — wired only when provided so the
+    // existing tests still exercise the built-in-only catalog.
+    templateList: (...args: unknown[]) => Promise<unknown[]>
+    templateGetById: (...args: unknown[]) => Promise<unknown>
   }> = {}): BrainDocTools {
-    return {
+    const tools: BrainDocTools = {
       savedViewStore: {
         list: vi.fn(overrides.list ?? (async () => [listRow('Worker Maintenance Log', 'p1')])),
         remove: vi.fn(overrides.remove ?? (async () => true)),
@@ -828,6 +832,13 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
         applyPatch: vi.fn(overrides.applyPatch ?? (async () => ({ newVersion: 4 }))),
       } as unknown as BrainDocTools['docPageStore'],
     }
+    if (overrides.templateList || overrides.templateGetById) {
+      tools.pageTemplateStore = {
+        list: vi.fn(overrides.templateList ?? (async () => [])),
+        getById: vi.fn(overrides.templateGetById ?? (async () => null)),
+      } as unknown as NonNullable<BrainDocTools['pageTemplateStore']>
+    }
+    return tools
   }
 
   const BASE = {
@@ -1086,5 +1097,53 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     const result = await tool.handler({ templateId: 'no-such-template' })
     expect(result.isError).toBe(true)
     expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
+  })
+
+  it('listPageTemplates appends workspace custom templates when the store is wired', async () => {
+    const docTools = docToolsStub({
+      templateList: async () => [
+        {
+          id: 'ct-uuid-1',
+          name: 'Sprint plan',
+          description: 'two-week sprint',
+          icon: '🏃',
+          category: 'planning',
+        },
+      ],
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const body = textBody(await tool.handler({}))
+    expect(body).toContain('meeting-notes') // built-in still present
+    expect(body).toContain('ct-uuid-1') // custom appended
+    expect(body).toMatch(/custom/i)
+  })
+
+  it('createPageFromTemplate resolves a custom template id via the store (fresh ids)', async () => {
+    const docTools = docToolsStub({
+      templateGetById: async () => ({
+        id: 'ct-uuid-1',
+        workspaceId: 'ws',
+        createdBy: 'u',
+        name: 'Sprint plan',
+        description: null,
+        icon: '🏃',
+        category: 'planning',
+        blocks: [{ kind: 'heading', id: 'orig-block', level: 1, text: 'Sprint' }],
+        createdAt: '2026-01-01T00:00:00Z',
+        updatedAt: '2026-01-01T00:00:00Z',
+      }),
+    })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'ct-uuid-1' })
+    expect(result.isError).toBeFalsy()
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Sprint plan')
+    expect(arg.icon).toBe('🏃')
+    // Block ids are re-minted, so the stored 'orig-block' id never reaches the page.
+    expect(arg.page.blocks).toHaveLength(1)
+    expect(arg.page.blocks[0].id).not.toBe('orig-block')
   })
 })

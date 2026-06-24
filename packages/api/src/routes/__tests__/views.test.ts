@@ -144,6 +144,8 @@ function makeApp(opts: {
   stores?: Partial<Stores>
   /** Auto-title endpoint deps (migration 218). Omit → endpoint returns 503. */
   autoTitle?: { provider?: unknown; docPageStore?: unknown }
+  /** Custom page templates store (migration 281). Omit → routes return 503. */
+  pageTemplateStore?: unknown
 }): { app: express.Express; stores: Stores } {
   const resolvedRole = 'role' in opts ? opts.role ?? null : 'member'
   const stores: Stores = {
@@ -173,6 +175,9 @@ function makeApp(opts: {
       ...(opts.autoTitle?.docPageStore
         ? { docPageStore: opts.autoTitle.docPageStore as never }
         : {}),
+      ...(opts.pageTemplateStore
+        ? { pageTemplateStore: opts.pageTemplateStore as never }
+        : {}),
     }),
   )
   return { app, stores }
@@ -193,6 +198,74 @@ describe('[COMP:api/views-routes] auth', () => {
     const { app } = makeApp({ userId: USER_ID, role: null })
     const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/saved-views`)
     expect(res.status).toBe(403)
+  })
+})
+
+describe('[COMP:api/views-routes] custom page templates', () => {
+  function fakePageTemplateStore() {
+    return { list: vi.fn(), getById: vi.fn(), create: vi.fn(), remove: vi.fn() }
+  }
+  const TEMPLATE_ID = '00000000-0000-0000-0000-0000000000aa'
+  const VALID_BODY = {
+    name: 'Sprint plan',
+    category: 'planning',
+    blocks: [{ kind: 'heading', id: 'b1', level: 1, text: 'Sprint' }],
+  }
+
+  it('returns 503 when the store is not wired', async () => {
+    const { app } = makeApp({ userId: USER_ID })
+    const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/page-templates`)
+    expect(res.status).toBe(503)
+  })
+
+  it('GET list returns the workspace custom templates for a member', async () => {
+    const store = fakePageTemplateStore()
+    store.list.mockResolvedValue([{ id: TEMPLATE_ID, name: 'Sprint plan' }])
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/page-templates`)
+    expect(res.status).toBe(200)
+    expect(res.body.templates).toHaveLength(1)
+    expect(store.list).toHaveBeenCalledWith(USER_ID, WORKSPACE_ID)
+  })
+
+  it('GET list is 403 for a non-member', async () => {
+    const { app } = makeApp({ userId: USER_ID, role: null, pageTemplateStore: fakePageTemplateStore() })
+    const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/page-templates`)
+    expect(res.status).toBe(403)
+  })
+
+  it('POST create persists a valid template (save-as-template / from-scratch share this route)', async () => {
+    const store = fakePageTemplateStore()
+    store.create.mockResolvedValue({ id: TEMPLATE_ID, ...VALID_BODY })
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const res = await request(app)
+      .post(`/api/workspaces/${WORKSPACE_ID}/page-templates`)
+      .send(VALID_BODY)
+    expect(res.status).toBe(201)
+    expect(store.create).toHaveBeenCalledWith(
+      USER_ID,
+      expect.objectContaining({ workspaceId: WORKSPACE_ID, name: 'Sprint plan', category: 'planning' }),
+    )
+  })
+
+  it('POST create rejects an invalid body (bad category) without writing', async () => {
+    const store = fakePageTemplateStore()
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const res = await request(app)
+      .post(`/api/workspaces/${WORKSPACE_ID}/page-templates`)
+      .send({ ...VALID_BODY, category: 'nonsense' })
+    expect(res.status).toBe(400)
+    expect(store.create).not.toHaveBeenCalled()
+  })
+
+  it('DELETE returns 404 when the template is missing', async () => {
+    const store = fakePageTemplateStore()
+    store.remove.mockResolvedValue(false)
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const res = await request(app).delete(
+      `/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`,
+    )
+    expect(res.status).toBe(404)
   })
 })
 

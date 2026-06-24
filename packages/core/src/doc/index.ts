@@ -42,6 +42,11 @@ export * from './convert/to-docx.js'
 // menu and the brain-MCP template tools. See doc-templates.md.
 export * from './templates.js'
 
+// Custom (user-authored, workspace-shared) page templates — pure types +
+// validation + the block-id refresh helper. Persistence lives in the api
+// package; this leaf stays DB-free. See doc-templates.md -> "Custom templates".
+export * from './custom-template-types.js'
+
 // Phase 1 chat tools
 export * from './tools.js'
 
