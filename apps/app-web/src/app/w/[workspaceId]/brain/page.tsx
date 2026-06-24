@@ -357,11 +357,23 @@ function BrainPageInner() {
   };
 
   const loading = rows === null;
+  // The graph is a SEPARATE data source from the `/list` rows: `/list` searches
+  // the CRM (contact/company/deal) + memory/file/task scopes, while the graph
+  // surfaces knowledge-graph ENTITIES (person/company/project/… in `entities`).
+  // A workspace can have graph entities but zero list rows — so "pristine" must
+  // consider BOTH, else a brain with only entity nodes (e.g. one extracted
+  // person) renders the empty nudge and hides the populated graph. Treat the
+  // graph as still-loading (null) as "not yet empty" to avoid a nudge flash
+  // before it arrives.
+  const graphLoading = graph === null;
+  const graphHasNodes = (graph?.nodes.length ?? 0) > 0;
   // The pristine nudge counts skills too — a workspace whose only brain
   // content is a skill isn't pristine.
   const showNoData =
     !loading &&
+    !graphLoading &&
     rows.length === 0 &&
+    !graphHasNodes &&
     (skills?.length ?? 0) === 0 &&
     !search &&
     primitives.length === 0 &&
