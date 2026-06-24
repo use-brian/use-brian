@@ -1,7 +1,10 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+// `||` not `??`: an empty-string NEXT_PUBLIC_API_URL (e.g. inlined as "" by the
+// bundler when unset at build) must also fall back, else this server-side fetch
+// gets the relative "/api/workspaces" and throws ERR_INVALID_URL.
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 type Team = { id: string; name: string };
 

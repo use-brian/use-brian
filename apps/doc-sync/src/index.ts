@@ -407,6 +407,13 @@ httpServer.on('upgrade', (request, socket, head) => {
 
 httpServer.listen(PORT, () => {
   console.log(`[doc-sync] listening on :${PORT}`)
+  // One-time signal so a silent auto-ingest is diagnosable: env unset here means
+  // the enqueue never fires (distinct from a per-page toggle being off).
+  console.log(
+    API_INTERNAL_URL && DOC_SYNC_SECRET
+      ? `[doc-sync] auto brain-ingest ENABLED → ${API_INTERNAL_URL}/internal/ingest-page`
+      : '[doc-sync] auto brain-ingest DISABLED (API_INTERNAL_URL / DOC_SYNC_SECRET unset)',
+  )
 })
 
 // Graceful shutdown: flush pending debounced stores so a redeploy on the

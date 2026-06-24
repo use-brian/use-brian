@@ -81,18 +81,31 @@ export async function runIngestPage(
   deps: IngestPageDeps,
 ): Promise<IngestPageOutcome> {
   if (!deps.brainEpisodeIngestor) {
+    console.warn(`[ingest-page] ${args.pageId}: skipped — brain episode ingestor not wired (no Pipeline B)`)
     return { ok: false, reason: 'ingestor_unavailable' }
   }
 
   // RLS-scoped read of the page metadata (workspace, owner, clearance, version)
   // + the live merged page blocks (prefers the Yjs snapshot via getVersionedPage).
   const view = await deps.savedViewStore.getById(args.userId, args.pageId)
-  if (!view) return { ok: false, reason: 'page_not_found' }
+  if (!view) {
+    console.warn(`[ingest-page] ${args.pageId}: skipped — page not found for user ${args.userId}`)
+    return { ok: false, reason: 'page_not_found' }
+  }
   const read = await deps.docPageStore.getVersionedPage(args.userId, args.pageId)
-  if (!read) return { ok: false, reason: 'page_not_found' }
+  if (!read) {
+    console.warn(`[ingest-page] ${args.pageId}: skipped — versioned page body not found`)
+    return { ok: false, reason: 'page_not_found' }
+  }
 
   const assistantId = await deps.resolvePrimaryAssistant(view.workspaceId)
-  if (!assistantId) return { ok: false, reason: 'ingestor_unavailable' }
+  if (!assistantId) {
+    console.warn(
+      `[ingest-page] ${args.pageId}: skipped — no primary assistant in workspace ${view.workspaceId}`,
+    )
+    return { ok: false, reason: 'ingestor_unavailable' }
+  }
+  console.log(`[ingest-page] ${args.pageId}: distilling to brain (workspace ${view.workspaceId})`)
 
   const ingestor = deps.brainEpisodeIngestor
   const episodeSensitivity = episodeSensitivityFromClearance(view.clearance)
@@ -152,6 +165,11 @@ export async function runIngestPage(
     if (result.ingested) {
       // Stamp the dedup/cooldown anchors so the next save can short-circuit.
       await deps.savedViewStore.markBrainIngestedSystem(args.pageId, result.contentHash)
+      console.log(
+        `[ingest-page] ${args.pageId}: ingested ${result.sectionsProcessed} section(s), ${result.chunksUpserted} chunk(s) → brain (hash ${result.contentHash.slice(0, 8)})`,
+      )
+    } else {
+      console.log(`[ingest-page] ${args.pageId}: no-op — authored content unchanged since last ingest`)
     }
     return { ok: true, result }
   } catch (err) {

@@ -96,8 +96,9 @@ export async function maybeEnqueueBrainIngest(params: {
     }
 
     // Fire-and-forget POST. A non-2xx / network error is swallowed (logged) so
-    // the snapshot write is never affected.
-    await doFetch(`${config.apiBaseUrl.replace(/\/+$/, '')}/internal/ingest-page`, {
+    // the snapshot write is never affected. We DO log the response status so an
+    // auth (403) / routing (404 — route not mounted) failure is visible.
+    const res = await doFetch(`${config.apiBaseUrl.replace(/\/+$/, '')}/internal/ingest-page`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -105,6 +106,7 @@ export async function maybeEnqueueBrainIngest(params: {
       },
       body: JSON.stringify({ pageId }),
     })
+    console.log(`[doc-sync] brain-ingest enqueued for ${pageId} → POST /internal/ingest-page ${res.status}`)
     return 'enqueued'
   } catch (err) {
     console.error(

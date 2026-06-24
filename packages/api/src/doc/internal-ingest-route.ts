@@ -80,9 +80,11 @@ export function internalIngestRoutes(opts: InternalIngestRouteOptions): Router {
     const state = await opts.savedViewStore.getBrainSyncStateSystem(pageId)
     if (!state) {
       // Page gone — ack so doc-sync never retries a dead page.
+      console.warn(`[internal-ingest] ${pageId}: skipped — page not found`)
       return res.status(200).json({ skipped: 'not_found' })
     }
     if (!state.brainSyncEnabled) {
+      console.log(`[internal-ingest] ${pageId}: skipped — "Sync to brain" toggle is off`)
       return res.status(200).json({ skipped: 'disabled' })
     }
     // Cooldown gate — collapse a save burst into at most one ingest.
@@ -90,8 +92,10 @@ export function internalIngestRoutes(opts: InternalIngestRouteOptions): Router {
       state.brainLastIngestAt &&
       now() - state.brainLastIngestAt.getTime() < INGEST_COOLDOWN_MS
     ) {
+      console.log(`[internal-ingest] ${pageId}: skipped — cooldown (last ingest <5min ago)`)
       return res.status(200).json({ skipped: 'cooldown' })
     }
+    console.log(`[internal-ingest] ${pageId}: queued background ingest`)
 
     // Background runner. The runner's own content-hash skip is the third gate
     // (an unchanged authored layer re-ingests nothing). Acked immediately — a
