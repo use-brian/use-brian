@@ -779,7 +779,7 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
   })
 })
 
-describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage / createPage)', () => {
+describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage / createPage / templates)', () => {
   // A minimal page row the doc-page store stub returns. One heading block is
   // enough for the Markdown export + the delete/edit access-confirm read.
   const SAMPLE_PAGE = {
@@ -972,5 +972,69 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     const result = await deletePage.handler({ pageId: 'nope' })
     expect(result.isError).toBe(true)
     expect(docTools.savedViewStore.remove).not.toHaveBeenCalled()
+  })
+
+  // ── template tools ────────────────────────────────────────────
+
+  it('listPageTemplates is a read tool; createPageFromTemplate is read_write only', () => {
+    const readNames = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(readNames).toContain('listPageTemplates')
+    expect(readNames).not.toContain('createPageFromTemplate')
+
+    const rwNames = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(rwNames).toContain('listPageTemplates')
+    expect(rwNames).toContain('createPageFromTemplate')
+  })
+
+  it('the template tools are omitted when no docTools are wired', () => {
+    const names = buildBrainTools({ ...BASE, scope: 'read_write' }).map((t) => t.name)
+    expect(names).not.toContain('listPageTemplates')
+    expect(names).not.toContain('createPageFromTemplate')
+  })
+
+  it('listPageTemplates returns the catalog with ids', async () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
+    const tool = tools.find((t) => t.name === 'listPageTemplates')!
+    const result = await tool.handler({})
+    expect(result.isError).toBeFalsy()
+    const body = textBody(result)
+    expect(body).toContain('meeting-notes')
+    expect(body).toMatch(/page templates/i)
+  })
+
+  it('createPageFromTemplate seeds a page (with icon) via createDraft', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'meeting-notes' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('new-page-1')
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    // Template icon + non-empty seeded blocks reach the store.
+    expect(arg.icon).toBe('📝')
+    expect(arg.page.blocks.length).toBeGreaterThan(0)
+  })
+
+  it('createPageFromTemplate honors a title override', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    await tool.handler({ templateId: 'standup', title: 'Monday sync' })
+    const arg = (docTools.savedViewStore.createDraft as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(arg.name).toBe('Monday sync')
+  })
+
+  it('createPageFromTemplate rejects an unknown templateId without writing', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageFromTemplate')!
+    const result = await tool.handler({ templateId: 'no-such-template' })
+    expect(result.isError).toBe(true)
+    expect(docTools.savedViewStore.createDraft).not.toHaveBeenCalled()
   })
 })
