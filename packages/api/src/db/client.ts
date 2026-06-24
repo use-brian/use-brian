@@ -30,6 +30,46 @@ const POOL_MAX = resolvePoolMax(process.env.PG_POOL_MAX)
 const POOL_OPTS = { max: POOL_MAX, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 }
 
 /**
+ * Single-connection mode for the embedded PGLite brain (the OSS local default).
+ *
+ * PGLite is ONE in-process WASM instance with a single backend session shared
+ * across every wire connection. node-postgres drives each parameterized query
+ * through the session's UNNAMED prepared statement (Parse→Bind→Execute), so two
+ * concurrent connections clobber that one slot — surfacing as 26000 "unnamed
+ * prepared statement does not exist" and 08P01 "bind ... requires N". With the
+ * default two pools at `max:4` the api opens up to 8 connections, and the home
+ * dock / workers fan out enough concurrent reads to hit it constantly.
+ *
+ * When the launcher boots the embedded brain it sets `PG_SINGLE_CONNECTION=1`;
+ * we then route BOTH pool getters at a single `max:1` pool so all DB access
+ * serializes. PGLite already serializes every query on its one connection (see
+ * oss-local-brain-wedge.md §12.4 "collapse client.ts to one connection" + §198
+ * single-writer), so this costs no throughput — it only removes the clobber.
+ *
+ * Hosted (two-role, `DATABASE_URL_APP` set) and the local-Postgres-container
+ * escape hatch leave this unset and keep the full two-pool / multi-connection
+ * behavior — a real Postgres isolates the unnamed statement per connection and
+ * has no such contention.
+ */
+const SINGLE_CONNECTION = process.env.PG_SINGLE_CONNECTION === '1'
+
+/**
+ * Attach a pool-level `error` listener. `pg.Pool` re-emits a connection-level
+ * `error` (a backend that dies, or a protocol desync) on the Pool itself; with
+ * NO listener, Node treats it as an unhandled `'error'` event and crashes the
+ * process. This bit the embedded PGLite single-connection mode: a query against
+ * a missing relation (e.g. the closed `connector_instance` table) makes the
+ * PGLiteSocketServer send an unexpected `commandComplete`, which pg surfaces as
+ * a fatal Client error and took the whole api down. Logging it keeps the pool
+ * alive — the bad client is discarded and the next checkout reconnects.
+ */
+function attachPoolErrorHandler(pool: pg.Pool, label: string): void {
+  pool.on('error', (err) => {
+    console.error(`[db] idle client error on ${label} pool (recovered, not fatal):`, err.message)
+  })
+}
+
+/**
  * The **system pool** — connects as the table OWNER (`DATABASE_URL`). With
  * `FORCE ROW LEVEL SECURITY` dropped (migration 269), the owner **bypasses RLS
  * entirely**, so this pool is the system-access path: bare `query()`, the
@@ -44,7 +84,16 @@ const POOL_OPTS = { max: POOL_MAX, idleTimeoutMillis: 30_000, connectionTimeoutM
  */
 export function getPool(): pg.Pool {
   if (!systemPool) {
-    systemPool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ...POOL_OPTS })
+    const max = SINGLE_CONNECTION ? 1 : POOL_MAX
+    systemPool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ...POOL_OPTS, max })
+    attachPoolErrorHandler(systemPool, 'system')
+    // No app.current_user_id sentinel seed here — this is the table OWNER
+    // connection, and no table sets FORCE ROW LEVEL SECURITY, so the owner
+    // bypasses RLS: the `current_setting('app.current_user_id')::uuid` casts in
+    // the policies are never evaluated, so the `''` revert that the seed guards
+    // against on the app_user pool cannot throw 22P02 here. (Seeding it via a
+    // fire-and-forget connect handler also raced the first query on the single
+    // connection, tripping pg's "already executing a query" deprecation.)
   }
   return systemPool
 }
@@ -64,6 +113,11 @@ export function getPool(): pg.Pool {
  * docs/architecture/platform/database-schema.md → "Two-role rollout".
  */
 export function getAppPool(): pg.Pool {
+  // Single-connection mode (embedded PGLite): collapse onto the one system pool
+  // so every query serializes through a single wire connection. RLS is retained
+  // single-role (owner connection), satisfied by the auto-provisioned
+  // workspace + membership — see oss-local-brain-wedge.md §12.4.
+  if (SINGLE_CONNECTION) return getPool()
   if (!appPool) {
     const appUrl = process.env.DATABASE_URL_APP
     if (!appUrl) {
@@ -74,6 +128,7 @@ export function getAppPool(): pg.Pool {
       )
     }
     appPool = new pg.Pool({ connectionString: appUrl ?? process.env.DATABASE_URL, ...POOL_OPTS })
+    attachPoolErrorHandler(appPool, 'app')
     // Seed the nil-UUID sentinel for app.current_user_id on every app-pool
     // connection. On this Postgres, `SET LOCAL` of a custom `app.*` GUC reverts
     // to '' (empty string), not NULL, when the connection has no session-level
