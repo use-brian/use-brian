@@ -40,6 +40,11 @@ export const EMBEDDED_PRIMITIVES = [
   'kb_chunks',
   'workspace_files',
   'episodes',
+  // Long-recording transcript segments (recording-to-brain). Carries a real
+  // VECTOR(768) column; the worker drains it like kb_chunks via the
+  // PRIMITIVE_CONFIGS entry in embedding-store.ts. See
+  // docs/plans/recording-to-brain.md.
+  'transcript_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]

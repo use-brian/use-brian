@@ -7,7 +7,7 @@ export type {
   RequireMentionConfig,
   ChatSeenEvent,
 } from './adapter.js'
-export { createTelegramApi, TelegramApiError, isTelegramThreadNotFoundError } from './api.js'
+export { createTelegramApi, TelegramApiError, isTelegramThreadNotFoundError, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from './api.js'
 export type { TelegramApi } from './api.js'
 export { createTelegramWebhookHandler, verifyTelegramWebhook } from './webhook.js'
 export { escapeHtml, markdownToTelegramHTML, stripMarkdown } from './markdown.js'

@@ -17,6 +17,7 @@ import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-bad
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorActionGrants } from "@/components/connectors/connector-action-grants";
+import { RecordingUploadButton } from "@/components/recordings/recording-upload-button";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
@@ -392,6 +393,13 @@ function BrainTab({ assistantId, workspaceId }: { assistantId: string; workspace
           </button>
         ))}
       </div>
+
+      {workspaceId ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
+          <p className="text-sm text-muted-foreground">{t.recordings.uploadHint}</p>
+          <RecordingUploadButton workspaceId={workspaceId} assistantId={assistantId} />
+        </div>
+      ) : null}
 
       {subTab === "memory" ? (
         <MemoryTab assistantId={assistantId} workspaceId={workspaceId} />

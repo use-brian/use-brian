@@ -3751,6 +3751,24 @@ export const en = {
       acknowledgeWaiting: "Copy the key first",
     },
   },
+  recordings: {
+    uploadHint:
+      "Hand this assistant a call recording: it transcribes the whole thing, files the key facts to the brain, and for a sales call pulls out the people, company, and next steps.",
+    uploadButton: "Upload recording",
+    uploading: "Uploading...",
+    processing: "Transcribing and filing to the brain...",
+    confirmTitle: "Transcribe this recording?",
+    confirmBody:
+      "This {minutes}-minute recording will cost about {credits} credits to transcribe and index. Transcribe it?",
+    confirmFree: "This recording is short, so transcribing it is included. Transcribe it?",
+    confirmAction: "Transcribe",
+    done: "Recording transcribed and filed to the brain.",
+    partialDone: "Recording transcribed (partial). Filed what we could; you were not charged.",
+    salesDetected: "Detected a sales call: extracted the people, company, and next steps.",
+    tooLong: "That recording is too long. Recordings over 3 hours are not supported yet; split the file.",
+    cannotReadDuration: "We could not read that recording's length. Re-export the file and try again.",
+    failed: "We could not process that recording. Please try again.",
+  },
 };
 
 /**

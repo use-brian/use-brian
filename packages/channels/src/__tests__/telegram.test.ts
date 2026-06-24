@@ -290,6 +290,73 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
     expect(msg!.mediaName).toBe('invoice.pdf')
   })
 
+  // Audio tracks ("as audio", music-note UI) were previously unhandled and
+  // silently dropped. Regression for the "1h45m recording" footgun —
+  // see docs/plans/recording-to-brain.md Phase 1.
+  it('parses an audio track (msg.audio) with duration, size, and name', () => {
+    const update = {
+      update_id: 51,
+      message: {
+        message_id: 150,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: 42, type: 'private' },
+        date: 1700000000,
+        audio: {
+          file_id: 'audio_id',
+          mime_type: 'audio/mp4',
+          file_name: 'The ground recording.m4a',
+          duration: 6197,
+          file_size: 60_000_000,
+        },
+      },
+    }
+
+    const msg = adapter.parseIncoming(update)
+    expect(msg).not.toBeNull()
+    expect(msg!.mediaType).toBe('audio')
+    expect(msg!.mediaUrl).toBe('audio_id')
+    expect(msg!.mediaMime).toBe('audio/mp4')
+    expect(msg!.mediaName).toBe('The ground recording.m4a')
+    expect(msg!.mediaDurationSec).toBe(6197)
+    expect(msg!.mediaSizeBytes).toBe(60_000_000)
+  })
+
+  it('derives an audio name from performer/title when file_name is absent', () => {
+    const update = {
+      update_id: 52,
+      message: {
+        message_id: 151,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: 42, type: 'private' },
+        date: 1700000000,
+        audio: { file_id: 'a2', duration: 30, performer: 'Acme', title: 'Q3 call' },
+      },
+    }
+
+    const msg = adapter.parseIncoming(update)
+    expect(msg!.mediaType).toBe('audio')
+    expect(msg!.mediaName).toBe('Acme - Q3 call')
+    expect(msg!.mediaMime).toBe('audio/mpeg') // default when payload omits mime
+  })
+
+  it('captures voice-note duration and size for surcharge routing', () => {
+    const update = {
+      update_id: 53,
+      message: {
+        message_id: 152,
+        from: { id: 42, first_name: 'Alice' },
+        chat: { id: 42, type: 'private' },
+        date: 1700000000,
+        voice: { file_id: 'v1', duration: 12, file_size: 40000 },
+      },
+    }
+
+    const msg = adapter.parseIncoming(update)
+    expect(msg!.mediaType).toBe('voice')
+    expect(msg!.mediaDurationSec).toBe(12)
+    expect(msg!.mediaSizeBytes).toBe(40000)
+  })
+
   it('drops group @mentions when botUsername is missing (regression for BYO bot silence)', () => {
     // Repro: BYO Telegram bot in a supergroup forum topic. The user writes
     // `@gm_bro_bot hello` which Telegram tags as a mention entity — but if

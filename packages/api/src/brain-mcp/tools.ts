@@ -68,8 +68,10 @@ import type {
   Sensitivity,
   Tool,
   ToolContext,
+  Embedder,
 } from '@sidanclaw/core'
 import { query } from '../db/client.js'
+import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import type { BrainKeyScope } from '../db/brain-keys-store.js'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -257,6 +259,13 @@ type BuildOpts = {
   crmTools: BrainCrmTools
   retrievalTools: BrainRetrievalTools
   /**
+   * Query embedder for the dedicated `searchRecording` tool's vector arm
+   * (recording-to-brain). Optional — without it, recording retrieval degrades
+   * to keyword (ILIKE) search, which still works (and works before a
+   * recording's segments are embedded). See db/retrieval-store.ts → searchRecording.
+   */
+  embedder?: Pick<Embedder, 'embed'>
+  /**
    * Workspace filesystem tools. Optional — omitted on deployments without a
    * blob client, where the file primitive has no backing store. When absent,
    * `buildBrainTools` exposes no file tools.
@@ -287,6 +296,8 @@ type BuildOpts = {
 const READ_TOOL_NAMES = new Set<string>([
   // Unified read
   'searchBrain',
+  // Scoped single-recording retrieval (recording-to-brain)
+  'searchRecording',
   // Deprecated read alias
   'searchKnowledge',
   // Entity read + edge discovery
@@ -645,6 +656,61 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       "to the key's ceiling, scoped to the key's workspace.",
   })
 
+  // ── Scoped recording retrieval: searchRecording (recording-to-brain).
+  // Hand-rolled (not bridged) — it routes into the dedicated `searchRecording`
+  // scope handler, which is intentionally NOT in KNOWN_SCOPES so an unscoped
+  // searchBrain never floods on a recording's 70-110 segments. Vector + ILIKE
+  // fused, scoped to one recording, through queryWithRLS + the access predicate.
+  const searchRecordingTool: BrainTool = {
+    name: 'searchRecording',
+    description:
+      'Retrieve passages from ONE transcribed recording, scoped to that recording only ' +
+      '(never the whole company brain). Pass the recording Episode id as `recordingId` plus a `query`; ' +
+      'returns the most relevant segments with `start_ms` timestamps and `speaker`, so you can cite the ' +
+      'exact moment ("around 47:12, Priya said ..."). For a summarize/overview intent that spans many ' +
+      'segments, page sequential windows with `fromIndex`/`toIndex` instead of relying on top-K. ' +
+      'Never returns the whole transcript at once.',
+    inputSchema: {
+      recordingId: z.string().uuid(),
+      query: z.string().default(''),
+      topK: z.number().int().min(1).max(20).optional(),
+      fromIndex: z.number().int().min(0).optional(),
+      toIndex: z.number().int().min(0).optional(),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const recordingId = String(args.recordingId ?? '')
+      if (!recordingId) return text('recordingId is required', true)
+      if (!ctx.workspaceId) return text('No workspace is bound to this call.', true)
+      const actor = {
+        workspaceId: ctx.workspaceId,
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        assistantKind: ctx.assistantKind ?? 'standard',
+        clearance: ctx.clearance,
+        compartments: ctx.compartments,
+      }
+      try {
+        let hits: RecordingSegmentHit[]
+        if (typeof args.fromIndex === 'number') {
+          const from = args.fromIndex
+          const to = typeof args.toIndex === 'number' ? args.toIndex : from + 9
+          hits = await readRecordingRange(actor, { recordingId, fromIndex: from, toIndex: to })
+        } else {
+          hits = await searchRecordingFn(
+            actor,
+            { recordingId, query: String(args.query ?? ''), topK: typeof args.topK === 'number' ? args.topK : undefined },
+            opts.embedder ? { embedder: opts.embedder } : undefined,
+          )
+        }
+        return text(JSON.stringify(hits, null, 2))
+      } catch (err) {
+        return text(`searchRecording failed: ${err instanceof Error ? err.message : String(err)}`, true)
+      }
+    },
+  }
+
   // ── Entity read + edge discovery: getEntity (bridged from createRetrievalTools.getEntity).
   // The one read path that surfaces an entity's existing edges + resolves its
   // underlying entity UUID — the prerequisite for writing an edge via a save
@@ -906,6 +972,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
   const all: BrainTool[] = [
     // Reads
     searchBrain,
+    searchRecordingTool,
     searchKnowledge,
     getEntity,
     getMemory,

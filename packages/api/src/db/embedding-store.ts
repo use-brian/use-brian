@@ -78,6 +78,13 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     table: 'workspace_files',
     textExpr: "coalesce(title, name) || coalesce(E'\\n' || summary, '')",
   },
+  // recording transcript segments — the packed segment text is the embed unit.
+  // The store stamps embedding=NULL on insert; the worker drains these rows
+  // exactly like kb_chunks. See docs/plans/recording-to-brain.md.
+  transcript_segment: {
+    table: 'transcript_segments',
+    textExpr: 'segment_text',
+  },
 }
 
 function sha256(text: string): string {

@@ -57,6 +57,15 @@ export type GcsFilesClient = {
 
   /** V4 signed read URL. ttlSec defaults to 1h. */
   signedReadUrl(key: string, ttlSec?: number): Promise<string>
+
+  /**
+   * V4 signed WRITE (PUT) URL for direct-to-GCS upload — the client PUTs the
+   * bytes straight to GCS so a large recording (100s of MB) never streams
+   * through the API process. ttlSec defaults to 1h. Used by the recording
+   * upload flow (recording-to-brain). The PUT request must use the same
+   * `contentType` if one is bound here.
+   */
+  signedWriteUrl(key: string, opts?: { contentType?: string; ttlSec?: number }): Promise<string>
 }
 
 export type GcsClientOptions = {
@@ -145,6 +154,16 @@ export function createGcsFilesClient({ bucket: bucketName, projectId }: GcsClien
         version: 'v4',
         action: 'read',
         expires: Date.now() + ttlSec * 1000,
+      })
+      return url
+    },
+
+    async signedWriteUrl(key, opts) {
+      const [url] = await bucket.file(key).getSignedUrl({
+        version: 'v4',
+        action: 'write',
+        expires: Date.now() + (opts?.ttlSec ?? 3600) * 1000,
+        ...(opts?.contentType ? { contentType: opts.contentType } : {}),
       })
       return url
     },

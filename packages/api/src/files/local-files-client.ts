@@ -63,6 +63,12 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
       // doc-block preview path, which is GCS-only anyway.
       return `file://${blobPath(key)}`
     },
+
+    async signedWriteUrl(key) {
+      // No signed PUT locally — the recording upload flow is GCS-only. Returned
+      // for interface parity; a local caller should writeBlob directly instead.
+      return `file://${blobPath(key)}`
+    },
   }
 
   return client

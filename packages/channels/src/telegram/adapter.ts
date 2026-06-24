@@ -15,9 +15,12 @@ type TelegramMessage = {
   text?: string
   caption?: string
   photo?: Array<{ file_id: string }>
-  document?: { file_id: string; mime_type?: string; file_name?: string }
-  voice?: { file_id: string }
-  video?: { file_id: string; mime_type?: string }
+  document?: { file_id: string; mime_type?: string; file_name?: string; file_size?: number }
+  voice?: { file_id: string; duration?: number; file_size?: number }
+  // Audio track sent "as audio" (music-note UI) — a recorded call/meeting/song.
+  // Distinct from a voice note (`voice`); Telegram carries duration + size + tags.
+  audio?: { file_id: string; mime_type?: string; file_name?: string; duration?: number; performer?: string; title?: string; file_size?: number }
+  video?: { file_id: string; mime_type?: string; duration?: number; file_size?: number }
   media_group_id?: string
   reply_to_message?: { message_id: number; from?: { id: number; is_bot?: boolean }; text?: string }
   message_thread_id?: number
@@ -386,6 +389,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     let mediaType: IncomingMessage['mediaType']
     let mediaMime: string | undefined
     let mediaName: string | undefined
+    let mediaDurationSec: number | undefined
+    let mediaSizeBytes: number | undefined
     if (msg.photo?.length) {
       mediaUrl = msg.photo[msg.photo.length - 1].file_id
       mediaType = 'photo'
@@ -397,13 +402,29 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaType = 'document'
       mediaMime = msg.document.mime_type
       mediaName = msg.document.file_name
+      mediaSizeBytes = msg.document.file_size
+    } else if (msg.audio) {
+      // Audio track ("as audio", music-note UI). Previously unhandled — the
+      // message fell through to `return null` and was silently dropped (the
+      // "1h45m recording" footgun). See docs/plans/recording-to-brain.md Phase 1.
+      mediaUrl = msg.audio.file_id
+      mediaType = 'audio'
+      mediaMime = msg.audio.mime_type ?? 'audio/mpeg'
+      const tagName = [msg.audio.performer, msg.audio.title].filter(Boolean).join(' - ')
+      mediaName = msg.audio.file_name ?? (tagName.length > 0 ? tagName : undefined)
+      mediaDurationSec = msg.audio.duration
+      mediaSizeBytes = msg.audio.file_size
     } else if (msg.voice) {
       mediaUrl = msg.voice.file_id
       mediaType = 'voice'
+      mediaDurationSec = msg.voice.duration
+      mediaSizeBytes = msg.voice.file_size
     } else if (msg.video) {
       mediaUrl = msg.video.file_id
       mediaType = 'video'
       mediaMime = msg.video.mime_type ?? 'video/mp4'
+      mediaDurationSec = msg.video.duration
+      mediaSizeBytes = msg.video.file_size
     }
 
     // Must have text or media
@@ -432,6 +453,8 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaType,
       mediaMime,
       mediaName,
+      mediaDurationSec,
+      mediaSizeBytes,
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
       isMentioned: mentioned || replyToBot,

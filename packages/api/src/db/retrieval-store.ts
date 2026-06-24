@@ -1732,6 +1732,163 @@ export async function search(
   }
 }
 
+// ── searchRecording() — dedicated single-recording scoped retrieval ──
+//
+// A long recording's transcript lives in `transcript_segments` (migration 280)
+// and is retrieved ONLY through this dedicated handler — never via
+// search()/KNOWN_SCOPES, so an unscoped searchBrain never floods on a
+// recording's 70-110 segments. Vector + ILIKE arms fused, scoped to ONE
+// recording_id, through queryWithRLS + the shared visibility/access predicate
+// (so the sensitivity ladder + visibility double are enforced, not just
+// workspace RLS). MMR is disabled — for a single recording, ordered coverage
+// beats diversity. See docs/plans/recording-to-brain.md §"Segmentation & Indexing".
+
+export type RecordingSegmentHit = {
+  segment_index: number
+  start_ms: number
+  end_ms: number
+  speaker: string | null
+  segment_text: string
+}
+
+const RECORDING_TOPK_DEFAULT = 8
+const RECORDING_TOPK_MAX = 20
+
+type RecordingRow = {
+  segment_index: number
+  start_ms: string | number
+  end_ms: string | number
+  speaker: string | null
+  segment_text: string
+  distance?: number | null
+}
+
+function toRecordingHit(r: RecordingRow): RecordingSegmentHit {
+  return {
+    segment_index: Number(r.segment_index),
+    start_ms: Number(r.start_ms),
+    end_ms: Number(r.end_ms),
+    speaker: r.speaker,
+    segment_text: r.segment_text,
+  }
+}
+
+export async function searchRecording(
+  actor: RetrievalActor,
+  input: { recordingId: string; query: string; topK?: number },
+  deps?: RetrievalStoreDeps,
+): Promise<RecordingSegmentHit[]> {
+  const topK = Math.min(Math.max(input.topK ?? RECORDING_TOPK_DEFAULT, 1), RECORDING_TOPK_MAX)
+  const query = input.query.trim()
+
+  // Vector arm — soft-fails to [] (no embedder, empty query, embed error) so we
+  // degrade to the ILIKE arm; works before embeddings land or if the embedder
+  // is down (mirrors embedAndSearchVector).
+  const vectorHits: Array<RecordingSegmentHit & { distance: number }> = []
+  if (deps?.embedder && query.length > 0) {
+    try {
+      const [embedding] = await deps.embedder.embed([query])
+      if (embedding && embedding.length > 0) {
+        const values: unknown[] = []
+        const visibility = visibilityPredicate(actor, undefined, values, { tableAlias: 'ts' })
+        values.push(input.recordingId)
+        const ridIdx = values.length
+        values.push(toVectorLiteral(embedding))
+        const vecIdx = values.length
+        values.push(topK)
+        const limIdx = values.length
+        const res = await queryWithRLS<RecordingRow>(
+          actor.userId,
+          `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text,
+                  ts.embedding <=> $${vecIdx}::vector AS distance
+             FROM transcript_segments ts
+            WHERE ${visibility}
+              AND ts.recording_id = $${ridIdx}
+              AND ts.embedding IS NOT NULL
+            ORDER BY ts.embedding <=> $${vecIdx}::vector
+            LIMIT $${limIdx}`,
+          values,
+        )
+        for (const r of res.rows) {
+          vectorHits.push({ ...toRecordingHit(r), distance: Number(r.distance ?? Infinity) })
+        }
+      }
+    } catch (err) {
+      console.warn(
+        '[searchRecording] vector arm failed; ILIKE-only:',
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+
+  // ILIKE arm — immediate (no embeddings needed). Empty query matches every
+  // segment in the recording (ordered browse).
+  const ftsValues: unknown[] = []
+  const ftsVisibility = visibilityPredicate(actor, undefined, ftsValues, { tableAlias: 'ts' })
+  ftsValues.push(input.recordingId)
+  const fRidIdx = ftsValues.length
+  ftsValues.push(`%${query}%`)
+  const likeIdx = ftsValues.length
+  ftsValues.push(topK)
+  const fLimIdx = ftsValues.length
+  const ftsRes = await queryWithRLS<RecordingRow>(
+    actor.userId,
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+       FROM transcript_segments ts
+      WHERE ${ftsVisibility}
+        AND ts.recording_id = $${fRidIdx}
+        AND ts.segment_text ILIKE $${likeIdx}
+      ORDER BY ts.segment_index
+      LIMIT $${fLimIdx}`,
+    ftsValues,
+  )
+
+  // Fuse: dedupe by segment_index; vector hits (ordered by distance) first,
+  // then ILIKE-only hits by segment_index (distance = Infinity). MMR disabled.
+  const byIndex = new Map<number, RecordingSegmentHit & { distance: number }>()
+  for (const v of vectorHits) byIndex.set(v.segment_index, v)
+  for (const r of ftsRes.rows) {
+    const hit = toRecordingHit(r)
+    if (!byIndex.has(hit.segment_index)) byIndex.set(hit.segment_index, { ...hit, distance: Infinity })
+  }
+  return [...byIndex.values()]
+    .sort((a, b) => a.distance - b.distance || a.segment_index - b.segment_index)
+    .slice(0, topK)
+    .map(({ distance: _distance, ...hit }) => hit)
+}
+
+/**
+ * Non-vector ordered read of a `segment_index` range, for whole-section recall
+ * (summarize/overview intents page sequential windows rather than rely on
+ * top-K). Each call is independently bounded by the caller's tool-result cap.
+ */
+export async function readRecordingRange(
+  actor: RetrievalActor,
+  input: { recordingId: string; fromIndex: number; toIndex: number },
+): Promise<RecordingSegmentHit[]> {
+  const from = Math.max(0, Math.floor(input.fromIndex))
+  const to = Math.max(from, Math.floor(input.toIndex))
+  const values: unknown[] = []
+  const visibility = visibilityPredicate(actor, undefined, values, { tableAlias: 'ts' })
+  values.push(input.recordingId)
+  const ridIdx = values.length
+  values.push(from)
+  const fromIdx = values.length
+  values.push(to)
+  const toIdx = values.length
+  const res = await queryWithRLS<RecordingRow>(
+    actor.userId,
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+       FROM transcript_segments ts
+      WHERE ${visibility}
+        AND ts.recording_id = $${ridIdx}
+        AND ts.segment_index BETWEEN $${fromIdx} AND $${toIdx}
+      ORDER BY ts.segment_index`,
+    values,
+  )
+  return res.rows.map(toRecordingHit)
+}
+
 // ── recentEpisodes() ────────────────────────────────────────────────
 
 export async function recentEpisodes(

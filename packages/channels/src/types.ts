@@ -20,11 +20,15 @@ export type IncomingMessage = {
   messageId?: string
   text: string
   mediaUrl?: string
-  mediaType?: 'photo' | 'document' | 'voice' | 'video'
+  mediaType?: 'photo' | 'document' | 'voice' | 'audio' | 'video'
   /** Mime hint when known from the webhook payload (e.g. Telegram document.mime_type). */
   mediaMime?: string
   /** Original file name when known from the webhook payload (e.g. Telegram document.file_name). */
   mediaName?: string
+  /** Audio/video duration in seconds when the webhook payload carries it (voice/audio/video). Drives the recording duration surcharge. */
+  mediaDurationSec?: number
+  /** File size in bytes when the webhook payload carries it. Used to refuse files over the channel's download limit before attempting a doomed download. */
+  mediaSizeBytes?: number
   files?: IncomingFile[]
   replyToMessageId?: string
   isEdit?: boolean

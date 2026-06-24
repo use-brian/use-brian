@@ -3548,4 +3548,21 @@ export const zh: Dictionary = {
       acknowledgeWaiting: "請先複製金鑰",
     },
   },
+  recordings: {
+    uploadHint:
+      "把通話錄音交給這個助理：它會完整轉錄、把重點歸檔到大腦，若是銷售通話還會擷取聯絡人、公司與後續任務。",
+    uploadButton: "上傳錄音",
+    uploading: "上傳中...",
+    processing: "正在轉錄並歸檔到大腦...",
+    confirmTitle: "要轉錄這段錄音嗎？",
+    confirmBody: "這段 {minutes} 分鐘的錄音轉錄並建立索引大約需要 {credits} 個積分。要轉錄嗎？",
+    confirmFree: "這段錄音較短，轉錄已包含在內。要轉錄嗎？",
+    confirmAction: "轉錄",
+    done: "錄音已轉錄並歸檔到大腦。",
+    partialDone: "錄音已轉錄（部分）。已盡可能歸檔；未向你收費。",
+    salesDetected: "偵測到銷售通話：已擷取聯絡人、公司與後續任務。",
+    tooLong: "該錄音過長。暫不支援超過 3 小時的錄音；請拆分檔案。",
+    cannotReadDuration: "無法讀取該錄音的長度。請重新匯出檔案後再試。",
+    failed: "無法處理該錄音。請重試。",
+  },
 };

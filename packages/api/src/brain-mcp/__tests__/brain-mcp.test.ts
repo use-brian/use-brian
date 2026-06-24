@@ -166,6 +166,7 @@ const READ_TOOL_NAMES = [
   'listTasks',
   'searchBrain',
   'searchKnowledge',
+  'searchRecording',
 ] as const
 
 const WRITE_TOOL_NAMES = [

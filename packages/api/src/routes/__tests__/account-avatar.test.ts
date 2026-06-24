@@ -71,6 +71,9 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
     async signedReadUrl(key) {
       return `https://signed.example/${key}`
     },
+    async signedWriteUrl(key) {
+      return `https://signed.example/${key}?upload=1`
+    },
   }
 }
 
