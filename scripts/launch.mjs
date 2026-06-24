@@ -21,10 +21,11 @@
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { homedir, platform, userInfo } from 'node:os'
+import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { createInterface } from 'node:readline/promises'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -177,6 +178,33 @@ function openBrowser(url) {
   const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open'
   spawn(cmd, [url], { stdio: 'ignore', detached: true }).unref()
 }
+// Next 16 defaults to Turbopack, which HARD-REQUIRES the native @next/swc
+// binding for this platform (it crashes on boot with "native bindings are not
+// available" when only the WASM fallback loaded). That happens when node_modules
+// was populated on a different OS/arch and copied over (e.g. a Linux-built tree
+// synced to a Mac) rather than freshly `pnpm install`ed here. Detect the missing
+// native binding and fall back to Next's webpack mode, which runs on the WASM
+// swc bindings. A healthy install keeps Turbopack. Override with SIDANCLAW_WEBPACK.
+function nextHasNativeSwc() {
+  const a = arch()
+  const p = platform()
+  const pkgs =
+    p === 'linux' ? [`@next/swc-linux-${a}-gnu`, `@next/swc-linux-${a}-musl`]
+    : p === 'win32' ? [`@next/swc-win32-${a}-msvc`]
+    : [`@next/swc-${p}-${a}`]
+  try {
+    // pnpm nests the @next/swc-* optional deps under `next`, not where app-web
+    // can reach them — resolve relative to next's own package, not app-web's.
+    const appReq = createRequire(join(ROOT, 'apps/app-web/package.json'))
+    const nextReq = createRequire(appReq.resolve('next/package.json'))
+    return pkgs.some((pkg) => {
+      try { nextReq.resolve(`${pkg}/package.json`); return true } catch { return false }
+    })
+  } catch {
+    // Can't even resolve `next` — don't second-guess; keep the default (Turbopack).
+    return true
+  }
+}
 let shuttingDown = false
 function shutdown(code = 0) {
   if (shuttingDown) return
@@ -205,7 +233,13 @@ console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ..
 run('api', 'pnpm', ['--filter', '@sidanclaw/api-open', 'exec', 'tsx', 'src/index.ts'])
 run('doc-sync', 'pnpm', ['--filter', '@sidanclaw/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
-run('app-web', 'pnpm', ['--filter', 'app-web', 'dev'])
+const forceWebpack = process.env.SIDANCLAW_WEBPACK === '1' || !nextHasNativeSwc()
+if (forceWebpack) {
+  console.log('[launch] native @next/swc binding for this platform not found — starting app-web with webpack (run `pnpm install` to restore Turbopack).')
+  run('app-web', 'pnpm', ['--filter', 'app-web', 'exec', 'next', 'dev', '--webpack', '--port', String(PORTS.appWeb)])
+} else {
+  run('app-web', 'pnpm', ['--filter', 'app-web', 'dev'])
+}
 
 // Wait for BOTH the api (:4000) and app-web (:3003) before opening the browser.
 // The entry URL immediately proxies to the api's /auth/local-session, and the
