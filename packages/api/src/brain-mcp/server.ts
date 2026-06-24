@@ -28,6 +28,7 @@ import {
   buildBrainTools,
   resolveAgentGate,
   type BrainCrmTools,
+  type BrainDocTools,
   type BrainFileTools,
   type BrainMemoryTools,
   type BrainRetrievalTools,
@@ -59,6 +60,13 @@ type Options = {
    * surface. `saveFileToBrain` (byte upload) is not part of this set.
    */
   fileTools?: BrainFileTools
+  /**
+   * Doc-page tools (`readPage` / `editPage` / `deletePage`). Optional — only
+   * deployments that build the doc stores pass it; a doc-less deploy omits the
+   * page surface. `readPage` rides both key scopes, `editPage` / `deletePage`
+   * require a `read_write` key. See `BrainDocTools`.
+   */
+  docTools?: BrainDocTools
   /**
    * Programmatic ingest entry to Pipeline B. When wired, the `ingestToBrain`
    * tool decomposes content into entities / edges / memories / tasks instead of
@@ -111,6 +119,7 @@ export function brainMcpRoutes(opts: Options): Router {
       crmTools: opts.crmTools,
       retrievalTools: opts.retrievalTools,
       fileTools: opts.fileTools,
+      docTools: opts.docTools,
       ingest: opts.ingest,
       agentTools: opts.agentTools,
       agentWritesEnabled,

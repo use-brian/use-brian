@@ -1662,6 +1662,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmTools,
     retrievalTools: brainRetrievalTools,
     fileTools: brainFileTools ?? undefined,
+    // Doc-page tools (readPage / editPage / deletePage) reuse the same RLS-gated
+    // saved-views + doc-page stores the chat doc tools use, so a brain-key page
+    // op runs the identical SQL (CAS + undo for edits, cascade delete) as an
+    // in-app edit. See packages/api/src/brain-mcp/tools.ts → buildDocPageTools.
+    docTools: { savedViewStore, docPageStore: createDbDocPageStore() },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
   }))
