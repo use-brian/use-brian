@@ -779,7 +779,7 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
   })
 })
 
-describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage)', () => {
+describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / deletePage / createPage)', () => {
   // A minimal page row the doc-page store stub returns. One heading block is
   // enough for the Markdown export + the delete/edit access-confirm read.
   const SAMPLE_PAGE = {
@@ -815,11 +815,13 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     list: (...args: unknown[]) => Promise<ReturnType<typeof listRow>[]>
     applyPatch: (...args: unknown[]) => Promise<{ newVersion: number } | null>
     remove: (...args: unknown[]) => Promise<boolean>
+    createDraft: (...args: unknown[]) => Promise<{ id: string }>
   }> = {}): BrainDocTools {
     return {
       savedViewStore: {
         list: vi.fn(overrides.list ?? (async () => [listRow('Worker Maintenance Log', 'p1')])),
         remove: vi.fn(overrides.remove ?? (async () => true)),
+        createDraft: vi.fn(overrides.createDraft ?? (async () => ({ id: 'new-page-1' }))),
       } as unknown as BrainDocTools['savedViewStore'],
       docPageStore: {
         getVersionedPage: vi.fn(overrides.getVersionedPage ?? (async () => SAMPLE_PAGE)),
@@ -835,26 +837,45 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / editPage / 
     ...ALL_STUBS,
   } as const
 
-  it('readPage is exposed on a read key; editPage/deletePage are NOT', () => {
+  it('readPage is exposed on a read key; editPage/deletePage/createPage are NOT', () => {
     const tools = buildBrainTools({ ...BASE, scope: 'read', docTools: docToolsStub() })
     const names = tools.map((t) => t.name)
     expect(names).toContain('readPage')
     expect(names).not.toContain('editPage')
     expect(names).not.toContain('deletePage')
+    expect(names).not.toContain('createPage')
   })
 
-  it('editPage and deletePage appear only on a read_write key', () => {
+  it('editPage, deletePage and createPage appear only on a read_write key', () => {
     const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() })
     const names = tools.map((t) => t.name)
     expect(names).toContain('readPage')
     expect(names).toContain('editPage')
     expect(names).toContain('deletePage')
+    expect(names).toContain('createPage')
   })
 
   it('omits the whole page surface when no docTools are wired', () => {
     const tools = buildBrainTools({ ...BASE, scope: 'read_write' })
     const names = tools.map((t) => t.name)
-    for (const n of ['readPage', 'editPage', 'deletePage']) expect(names).not.toContain(n)
+    for (const n of ['readPage', 'editPage', 'deletePage', 'createPage']) expect(names).not.toContain(n)
+  })
+
+  it('createPage mints a new page via createDraft and returns its id', async () => {
+    const docTools = docToolsStub()
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: 'Launch checklist', content: '## Step 1\nShip it.' })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('new-page-1')
+    expect(docTools.savedViewStore.createDraft).toHaveBeenCalledTimes(1)
+  })
+
+  it('createPage rejects an empty title', async () => {
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() })
+    const createPage = tools.find((t) => t.name === 'createPage')!
+    const result = await createPage.handler({ title: '   ' })
+    expect(result.isError).toBe(true)
   })
 
   it('readPage by id returns the page as Markdown', async () => {

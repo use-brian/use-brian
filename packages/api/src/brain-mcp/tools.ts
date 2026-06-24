@@ -58,6 +58,8 @@ import {
   rankPagesByTitle,
 } from '@sidanclaw/core'
 import type {
+  BindingConfig,
+  Block,
   DocPageStore,
   Op,
   Page,
@@ -185,7 +187,7 @@ export type BrainFileTools = {
  *     confirm) + `applyPatch` (atomic version CAS + `last_undo` capture).
  */
 export type BrainDocTools = {
-  savedViewStore: Pick<SavedViewStore, 'list' | 'remove'>
+  savedViewStore: Pick<SavedViewStore, 'list' | 'remove' | 'createDraft'>
   docPageStore: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
 }
 
@@ -344,7 +346,7 @@ function buildDocPageTools(
   docTools: BrainDocTools,
   resolveCtx: () => Promise<ToolContext | { error: string }>,
   workspaceId: string,
-): { readPage: BrainTool; editPage: BrainTool; deletePage: BrainTool } {
+): { readPage: BrainTool; editPage: BrainTool; deletePage: BrainTool; createPage: BrainTool } {
   const { savedViewStore, docPageStore } = docTools
 
   const readPage: BrainTool = {
@@ -552,7 +554,77 @@ function buildDocPageTools(
     },
   }
 
-  return { readPage, editPage, deletePage }
+  // ── createPage ────────────────────────────────────────────────
+  //
+  // The only create path on this surface — `editPage` requires an existing
+  // `pageId` and refuses to mint one. Persists through the same
+  // `savedViewStore.createDraft` seam the chat `renderPage` tool uses (RLS
+  // keyed on the resolved principal), so a brain-key page is born identical
+  // to one authored in-app. Markdown body is parsed with the same
+  // `markdownToBlocks` + `normalizeMarkdownBlocks` expansion `editPage` runs.
+  const createPage: BrainTool = {
+    name: 'createPage',
+    description:
+      'Create a NEW workspace doc page from a `title` and optional Markdown ' +
+      '`content`. Returns the new `pageId` — use `editPage` to add more or ' +
+      '`readPage` to read it back. This is the only way to create a page; ' +
+      "`editPage` only edits existing pages. Scoped to the key's workspace.",
+    inputSchema: {
+      title: z
+        .string()
+        .min(1)
+        .max(200)
+        .describe('Title for the new page.'),
+      content: z
+        .string()
+        .max(MAX_EDIT_CHARS)
+        .optional()
+        .describe('Optional Markdown body. Omit to create an empty page.'),
+    },
+    async handler(args) {
+      const ctx = await resolveCtx()
+      if ('error' in ctx) return text(ctx.error, true)
+      const title = typeof args.title === 'string' ? args.title.trim() : ''
+      if (!title) return text('Provide a `title` for the new page.', true)
+      const content = typeof args.content === 'string' ? args.content : ''
+
+      // Build the initial block list from the Markdown body (same expansion
+      // the chat path + `editPage` apply). An empty body still needs one
+      // block so the page is well-formed.
+      const blocks: Block[] = content.trim()
+        ? normalizeMarkdownBlocks(markdownToBlocks(content))
+        : []
+      if (blocks.length === 0) {
+        blocks.push({ kind: 'text', id: randomUUID(), text: '' })
+      }
+
+      // Prose page: the legacy `entity` / `viewType` columns are placeholders
+      // (the block list is the authoritative content), mirroring `renderPage`'s
+      // non-data default binding.
+      const binding = { entity: 'tasks', viewType: 'table' } as BindingConfig
+      try {
+        const draft = await savedViewStore.createDraft({
+          userId: ctx.userId,
+          workspaceId,
+          name: title,
+          nameOrigin: 'user',
+          icon: null,
+          entity: 'tasks',
+          viewType: 'table',
+          binding,
+          page: { blocks },
+        })
+        return text(
+          `Created page "${title}" (pageId: ${draft.id}). Use editPage to add more, or readPage to read it back.`,
+        )
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return text(`Failed to create the page: ${msg}`, true)
+      }
+    },
+  }
+
+  return { readPage, editPage, deletePage, createPage }
 }
 
 /**
@@ -865,7 +937,7 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
       t.name === 'fileSetMeta' || t.name === 'fileDelete' ||
       t.name === 'saveFileBytes' || t.name === 'saveFileToBrain',
     ),
-    ...(docPageTools ? [docPageTools.editPage, docPageTools.deletePage] : []),
+    ...(docPageTools ? [docPageTools.editPage, docPageTools.deletePage, docPageTools.createPage] : []),
     ...agentWriteBridges,
   ]
   return opts.scope === 'read'
