@@ -1684,6 +1684,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     docTools: { savedViewStore, docPageStore: createDbDocPageStore() },
     ingest: brainEpisodeIngestor,
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
+    // Powers the searchRecording tool's vector arm (recording-to-brain).
+    embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
   }))
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))

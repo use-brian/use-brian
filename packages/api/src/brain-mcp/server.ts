@@ -19,7 +19,7 @@
 import { Router } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import type { Tool } from '@sidanclaw/core'
+import type { Tool, Embedder } from '@sidanclaw/core'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -83,6 +83,12 @@ type Options = {
    * holds the `configure` capability (`resolveAgentGate`).
    */
   agentTools?: { reads: Map<string, Tool>; writes: Map<string, Tool> }
+  /**
+   * Query embedder for the `searchRecording` tool's vector arm
+   * (recording-to-brain). Optional — without it, recording retrieval degrades
+   * to keyword (ILIKE) search. The same embedder that powers `retrievalTools`.
+   */
+  embedder?: Pick<Embedder, 'embed'>
 }
 
 export function brainMcpRoutes(opts: Options): Router {
@@ -123,6 +129,7 @@ export function brainMcpRoutes(opts: Options): Router {
       ingest: opts.ingest,
       agentTools: opts.agentTools,
       agentWritesEnabled,
+      embedder: opts.embedder,
     })) {
       server.registerTool(
         tool.name,
