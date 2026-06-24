@@ -50,10 +50,14 @@ function makeApp(userId?: string) {
     createUserInstance: vi.fn().mockResolvedValue(instance()),
     update: vi.fn().mockResolvedValue(instance()),
     deleteInstance: vi.fn().mockResolvedValue(true),
+    getConfig: vi.fn().mockResolvedValue({}),
+    setConfig: vi.fn().mockResolvedValue(undefined),
   }
   const connectorStore = {
     setConnected: m.setConnected,
     delete: m.deleteConnector,
+    getConfig: m.getConfig,
+    setConfig: m.setConfig,
   } as unknown as ConnectorStore
   const connectorInstanceStore = {
     listForUser: m.listForUser,
@@ -138,6 +142,39 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
 
     const unknown = await request(app).post('/api/connectors/directory/bogus/add')
     expect(unknown.status).toBe(404)
+  })
+
+  it('GET /:provider/tools returns the built-in tool catalog (was "No tools found")', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).get('/api/connectors/github/tools')
+    expect(res.status).toBe(200)
+    expect(res.body.serverName).toBe('GitHub')
+    expect(Array.isArray(res.body.tools)).toBe(true)
+    expect(res.body.tools.length).toBeGreaterThan(0)
+    expect(res.body.tools[0]).toMatchObject({
+      name: expect.any(String),
+      classification: expect.any(String),
+      policy: expect.stringMatching(/allow|ask|block/),
+    })
+  })
+
+  it('GET /:provider/tools is empty for a connector with no catalog', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).get('/api/connectors/files/tools')
+    expect(res.status).toBe(200)
+    expect(res.body.tools).toEqual([])
+  })
+
+  it('GET + PATCH /:provider/config round-trips through the store', async () => {
+    const { app, getConfig, setConfig } = makeApp('u1')
+    getConfig.mockResolvedValue({ sendUpdates: 'all' })
+    const get = await request(app).get('/api/connectors/gcal/config')
+    expect(get.status).toBe(200)
+    expect(get.body.config).toEqual({ sendUpdates: 'all' })
+
+    const patch = await request(app).patch('/api/connectors/gcal/config').send({ sendUpdates: 'none' })
+    expect(patch.status).toBe(200)
+    expect(setConfig).toHaveBeenCalledWith('u1', 'gcal', { sendUpdates: 'none' })
   })
 
   it('POST /instances/:id/connect flips a specific instance online', async () => {

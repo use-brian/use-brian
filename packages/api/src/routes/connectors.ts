@@ -10,6 +10,9 @@
  *   GET    /api/connectors                          — the unified connector list
  *   GET    /api/connectors/directory                — the "browse to add" catalog
  *   POST   /api/connectors/directory/:id/add        — add an official connector
+ *   GET    /api/connectors/:provider/tools          — the connector's tool catalog
+ *   GET    /api/connectors/:provider/config         — the connector's JSON config
+ *   PATCH  /api/connectors/:provider/config         — merge into the JSON config
  *   POST   /api/connectors/:provider/store-credentials — persist an OAuth/PAT grant
  *   POST   /api/connectors/:provider/connect        — mark the primary instance connected
  *   POST   /api/connectors/instances/:id/connect    — mark a specific instance connected
@@ -48,7 +51,7 @@
  */
 
 import { Router } from 'express'
-import { OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
+import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
 
@@ -228,6 +231,55 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     } catch (err) {
       console.error('[connectors] directory add failed:', err)
       res.status(500).json({ error: 'Failed to add connector' })
+    }
+  })
+
+  // ── GET /:provider/tools — the connector's tool catalog ──────
+  // Built-in connectors expose a fixed tool set (OFFICIAL_CONNECTOR_TOOLS). The
+  // Studio "Tools" tab renders this; an empty/absent response is what showed
+  // "No tools found" after connecting. Policy is the registry default — the
+  // per-assistant L2 override store is out of scope for the open route.
+  router.get('/:provider/tools', (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const entry = OFFICIAL_BY_ID.get(req.params.provider)
+    const catalog = OFFICIAL_CONNECTOR_TOOLS[req.params.provider] ?? []
+    res.json({
+      serverName: entry?.name ?? req.params.provider,
+      tools: catalog.map((t) => ({
+        name: t.name,
+        description: t.description,
+        classification: t.classification,
+        policy: t.defaultPolicy,
+      })),
+    })
+  })
+
+  // ── GET /:provider/config — the connector's JSON config ──────
+  router.get('/:provider/config', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const config = await connectorStore.getConfig(userId, req.params.provider)
+      res.json({ config })
+    } catch (err) {
+      console.error('[connectors] get config failed:', err)
+      res.status(500).json({ error: 'Failed to load config' })
+    }
+  })
+
+  // ── PATCH /:provider/config — merge into the JSON config ─────
+  router.patch('/:provider/config', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const patch = (req.body ?? {}) as Record<string, unknown>
+    try {
+      await connectorStore.setConfig(userId, req.params.provider, patch)
+      const config = await connectorStore.getConfig(userId, req.params.provider)
+      res.json({ config })
+    } catch (err) {
+      console.error('[connectors] set config failed:', err)
+      res.status(500).json({ error: 'Failed to save config' })
     }
   })
 
