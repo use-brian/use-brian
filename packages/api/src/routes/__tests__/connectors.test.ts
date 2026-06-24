@@ -84,23 +84,68 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(res.status).toBe(401)
   })
 
-  it('GET / maps instances to the connector row shape', async () => {
+  it('GET / merges built-in placeholders with the caller instances', async () => {
     const { app, listForUser } = makeApp('u1')
     listForUser.mockResolvedValue([
       instance({ provider: 'gcal', label: 'Work cal', connectedEmail: 'a@b.com' }),
     ])
     const res = await request(app).get('/api/connectors')
     expect(res.status).toBe(200)
-    expect(res.body.connectors).toEqual([
-      expect.objectContaining({
-        id: 'gcal',
-        connectorId: 'gcal',
-        connectorInstanceId: IID,
-        label: 'Work cal',
-        connected: true,
-        connectedEmail: 'a@b.com',
-      }),
-    ])
+    const rows = res.body.connectors as Array<Record<string, unknown>>
+
+    // The connected gcal instance is a real row (has a connectorInstanceId).
+    const gcal = rows.find((r) => r.id === 'gcal')
+    expect(gcal).toMatchObject({
+      connectorInstanceId: IID,
+      label: 'Work cal',
+      connected: true,
+      connectedEmail: 'a@b.com',
+    })
+
+    // github has no instance → it appears as a never-connected placeholder so
+    // the page's "available" group is not empty on a fresh account.
+    const github = rows.find((r) => r.id === 'github')
+    expect(github).toMatchObject({ isPlaceholder: true, connected: false })
+    expect(github?.connectorInstanceId).toBeUndefined()
+  })
+
+  it('GET /directory lists the official catalog with added/connected flags', async () => {
+    const { app, listForUser } = makeApp('u1')
+    listForUser.mockResolvedValue([instance({ provider: 'github', connected: true })])
+    const res = await request(app).get('/api/connectors/directory')
+    expect(res.status).toBe(200)
+    const dir = res.body.directory as Array<Record<string, unknown>>
+    expect(dir.find((d) => d.id === 'github')).toMatchObject({ added: true, connected: true })
+    expect(dir.find((d) => d.id === 'notion')).toMatchObject({ added: false, connected: false })
+  })
+
+  it('POST /directory/:id/add creates a disconnected instance when none exists', async () => {
+    const { app, listByUser, createUserInstance } = makeApp('u1')
+    listByUser.mockResolvedValue([])
+    const res = await request(app).post('/api/connectors/directory/notion/add')
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: 'notion', connected: false }),
+    )
+  })
+
+  it('POST /directory/:id/add is idempotent and 404s an unknown connector', async () => {
+    const { app, listByUser, createUserInstance } = makeApp('u1')
+    listByUser.mockResolvedValue([instance({ provider: 'github' })])
+    const ok = await request(app).post('/api/connectors/directory/github/add')
+    expect(ok.status).toBe(200)
+    expect(createUserInstance).not.toHaveBeenCalled()
+
+    const unknown = await request(app).post('/api/connectors/directory/bogus/add')
+    expect(unknown.status).toBe(404)
+  })
+
+  it('POST /instances/:id/connect flips a specific instance online', async () => {
+    const { app, update } = makeApp('u1')
+    update.mockResolvedValue(instance({ connected: true }))
+    const res = await request(app).post(`/api/connectors/instances/${IID}/connect`)
+    expect(res.status).toBe(200)
+    expect(update).toHaveBeenCalledWith('u1', IID, { connected: true })
   })
 
   it('store-credentials rejects an unsupported provider', async () => {

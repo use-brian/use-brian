@@ -2,44 +2,76 @@
  * Built-in connector lifecycle routes — `/api/connectors`.
  *
  * The OSS-open half of the connector surface. The hosted edition mounts a
- * richer closed `/api/connectors` route (custom MCP CRUD, directory browse,
- * Google Drive authorized-files, per-assistant tool policy); this open module
- * implements only the built-in OAuth/PAT connector lifecycle that the open
- * `apps/app-web` OAuth callbacks and Studio → Connectors page already drive:
+ * richer closed `/api/connectors` route (custom MCP CRUD, Google Drive
+ * authorized-files, per-assistant tool policy); this open module implements the
+ * built-in OAuth/PAT connector lifecycle that the open `apps/app-web` OAuth
+ * callbacks and Studio → Connectors page drive:
  *
- *   GET    /api/connectors                         — list the caller's connectors
+ *   GET    /api/connectors                          — the unified connector list
+ *   GET    /api/connectors/directory                — the "browse to add" catalog
+ *   POST   /api/connectors/directory/:id/add        — add an official connector
  *   POST   /api/connectors/:provider/store-credentials — persist an OAuth/PAT grant
- *   POST   /api/connectors/:provider/disconnect    — flip the primary instance offline
- *   PATCH  /api/connectors/instances/:id           — rename a connector instance
- *   DELETE /api/connectors/instances/:id           — delete a specific instance
- *   DELETE /api/connectors/:provider               — delete the primary instance
+ *   POST   /api/connectors/:provider/connect        — mark the primary instance connected
+ *   POST   /api/connectors/instances/:id/connect    — mark a specific instance connected
+ *   POST   /api/connectors/:provider/disconnect     — flip the primary instance offline
+ *   PATCH  /api/connectors/instances/:id            — rename a connector instance
+ *   DELETE /api/connectors/instances/:id            — delete a specific instance
+ *   DELETE /api/connectors/:provider                — delete the primary instance
  *
- * Mounted behind `requireAuth`, so `req.userId` is always set. All persistence
- * goes through the RLS-gated `connectorInstanceStore` / `connectorStore`, which
- * encrypt the per-user OAuth refresh-token / PAT into `connector_instance.
- * credentials` under `CHANNEL_CREDENTIAL_KEY`. The injected token is read back
- * by `mcp/inject.ts` (`readRefreshToken` / `getPat` both read
- * `credentials.client_secret`), which is why every provider stores its secret
- * as the `client_secret` of an `oauth`-typed blob.
+ * THE LIST MUST INCLUDE NEVER-CONNECTED BUILT-IN PLACEHOLDERS. The Studio page
+ * (`connector-groups.ts`) buckets every official connector with no instance into
+ * the "available" group — that is the bare "Connect" affordance. A list of only
+ * the user's existing `connector_instance` rows shows nothing on a fresh account
+ * ("No connectors available"). So `GET /` merges `OFFICIAL_CONNECTORS` (the
+ * drift-safe registry — never a hardcoded slug list, per CLAUDE.md) with the
+ * caller's instances: a placeholder per unconnected official connector, plus a
+ * row per real instance.
  *
- * The supported provider set is derived from `OFFICIAL_CONNECTORS` (never a
- * hardcoded slug list — see CLAUDE.md "all built-ins" drift anti-pattern).
- * `auth_type: 'none'` connectors (e.g. Workspace Files) are first-party and
- * carry no external credential, so they are rejected here.
+ * Persistence goes through the RLS-gated `connectorInstanceStore` /
+ * `connectorStore`, which encrypt the per-user OAuth refresh-token / PAT into
+ * `connector_instance.credentials` under `CHANNEL_CREDENTIAL_KEY`. The injected
+ * token is read back by `mcp/inject.ts` (`readRefreshToken` / `getPat` both read
+ * `credentials.client_secret`), so every provider stores its secret as the
+ * `client_secret` of an `oauth`-typed blob.
+ *
+ * Google / Notion / Fathom additionally need their OAuth *app* credentials: the
+ * server-side secret via `~/.sidanclaw/connectors.config.json` (or `*_CLIENT_*`
+ * env) for the callback's token exchange, and the public client id via
+ * `NEXT_PUBLIC_*_CLIENT_ID` for app-web's client-side authorize redirect. GitHub
+ * is PAT-only and needs neither.
  *
  * Out of scope for the open edition (handled by the closed route): custom MCP
- * connectors (`/custom`), the connector directory (`/directory`), Google Drive
- * authorized-files (`/gdrive/*`), and per-assistant tool policy (`/tools`).
+ * connectors (`/custom`), Google Drive authorized-files (`/gdrive/*`), and
+ * per-assistant tool policy (`/tools`).
  *
  * Component tag: [COMP:api/connectors-route].
  */
 
 import { Router } from 'express'
-import { OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
+import { OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
-import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
+import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const OFFICIAL_BY_ID = new Map<string, ConnectorEntry>(OFFICIAL_CONNECTORS.map((c) => [c.id, c]))
+
+type ConnectorRowOut = {
+  id: string
+  connectorInstanceId?: string
+  name: string
+  label?: string
+  isPrimary?: boolean
+  addable?: boolean
+  isPlaceholder?: boolean
+  description?: string
+  connected: boolean
+  custom?: boolean
+  url?: string
+  oauthRequired?: boolean
+  category?: 'official' | 'community'
+  connectedEmail?: string
+}
 
 type ConnectorRouteOptions = {
   connectorStore: ConnectorStore
@@ -47,8 +79,8 @@ type ConnectorRouteOptions = {
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
-function credentialedConnector(provider: string) {
-  const entry = OFFICIAL_CONNECTORS.find((c) => c.id === provider)
+function credentialedConnector(provider: string): ConnectorEntry | null {
+  const entry = OFFICIAL_BY_ID.get(provider)
   if (!entry || entry.auth_type === 'none') return null
   return entry
 }
@@ -64,35 +96,138 @@ function credentialsFor(secret: string): ConnectorCredentials {
   return { type: 'oauth', client_id: '', client_secret: secret }
 }
 
+/** A never-connected built-in: the bare "Connect" affordance in the list. */
+function placeholderRow(entry: ConnectorEntry): ConnectorRowOut {
+  return {
+    id: entry.id,
+    name: entry.name,
+    description: entry.description,
+    connected: false,
+    custom: false,
+    isPlaceholder: true,
+    isPrimary: true,
+    addable: entry.auth_type !== 'none',
+    oauthRequired: entry.oauth_required,
+    category: entry.category,
+  }
+}
+
+/** A real connector_instance row, projected to the page's connector shape. */
+function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowOut {
+  const entry = OFFICIAL_BY_ID.get(inst.provider)
+  return {
+    id: inst.provider,
+    connectorInstanceId: inst.id,
+    name: entry?.name ?? inst.label,
+    label: inst.label,
+    isPrimary,
+    addable: entry ? entry.auth_type !== 'none' : false,
+    description: entry?.description,
+    connected: inst.connected,
+    custom: inst.custom,
+    url: inst.url ?? undefined,
+    oauthRequired: entry?.oauth_required,
+    category: entry ? entry.category : 'community',
+    connectedEmail: inst.connectedEmail ?? undefined,
+  }
+}
+
 export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   const { connectorStore, connectorInstanceStore } = opts
   const router = Router()
 
-  // ── GET / — list the caller's connectors ─────────────────────
+  /** Group the caller's instances by provider, each list oldest-first. */
+  async function instancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
+    const instances = await connectorInstanceStore.listForUser(userId)
+    const byProvider = new Map<string, ConnectorInstance[]>()
+    for (const inst of instances) {
+      const list = byProvider.get(inst.provider) ?? []
+      list.push(inst)
+      byProvider.set(inst.provider, list)
+    }
+    for (const list of byProvider.values()) {
+      list.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    }
+    return byProvider
+  }
+
+  // ── GET / — the unified connector list (placeholders + instances) ──
   router.get('/', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const instances = await connectorInstanceStore.listForUser(userId)
-      res.json({
-        connectors: instances.map((i) => ({
-          id: i.provider,
-          connectorId: i.provider,
-          connectorInstanceId: i.id,
-          scope: i.scope,
-          name: i.label,
-          label: i.label,
-          connected: i.connected,
-          custom: i.custom,
-          url: i.url,
-          connectedEmail: i.connectedEmail,
-          credentialsType: i.credentialsType,
-          sensitivity: i.sensitivity,
-        })),
-      })
+      const byProvider = await instancesByProvider(userId)
+      const rows: ConnectorRowOut[] = []
+
+      // Every official connector: real instances if connected/added, else the
+      // never-connected placeholder.
+      for (const entry of OFFICIAL_CONNECTORS) {
+        const insts = byProvider.get(entry.id)
+        if (!insts || insts.length === 0) {
+          rows.push(placeholderRow(entry))
+        } else {
+          insts.forEach((inst, i) => rows.push(instanceRow(inst, i === 0)))
+        }
+      }
+      // Plus any non-official instances (custom MCP rows created elsewhere).
+      for (const [provider, insts] of byProvider) {
+        if (OFFICIAL_BY_ID.has(provider)) continue
+        insts.forEach((inst, i) => rows.push(instanceRow(inst, i === 0)))
+      }
+
+      res.json({ connectors: rows })
     } catch (err) {
       console.error('[connectors] list failed:', err)
       res.status(500).json({ error: 'Failed to list connectors' })
+    }
+  })
+
+  // ── GET /directory — the "browse to add" catalog ─────────────
+  router.get('/directory', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const byProvider = await instancesByProvider(userId)
+      const directory = OFFICIAL_CONNECTORS.map((entry) => {
+        const insts = byProvider.get(entry.id) ?? []
+        return {
+          ...entry,
+          added: insts.length > 0,
+          connected: insts.some((i) => i.connected),
+          addable: entry.auth_type !== 'none',
+        }
+      })
+      res.json({ directory })
+    } catch (err) {
+      console.error('[connectors] directory failed:', err)
+      res.status(500).json({ error: 'Failed to load directory' })
+    }
+  })
+
+  // ── POST /directory/:id/add — add an official connector ──────
+  // Idempotent: surfaces the connector in the user's list by ensuring an
+  // instance row exists (disconnected until the user completes OAuth / PAT).
+  // Official built-ins already render as placeholders, so this is a no-op
+  // success when an instance is already present.
+  router.post('/directory/:id/add', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const entry = OFFICIAL_BY_ID.get(req.params.id)
+    if (!entry) { res.status(404).json({ error: `Unknown connector: ${req.params.id}` }); return }
+    try {
+      const existing = (await connectorInstanceStore.listByUser(userId, userId))
+        .find((i) => i.provider === entry.id)
+      if (existing) { res.json({ ok: true, connectorInstanceId: existing.id }); return }
+      const created = await connectorInstanceStore.createUserInstance({
+        userId,
+        provider: entry.id,
+        label: entry.name,
+        connected: false,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      console.error('[connectors] directory add failed:', err)
+      res.status(500).json({ error: 'Failed to add connector' })
     }
   })
 
@@ -204,6 +339,38 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       }
       console.error('[connectors] store-credentials failed:', err)
       res.status(500).json({ error: 'Failed to store credentials' })
+    }
+  })
+
+  // ── POST /instances/:id/connect — mark a specific instance connected ──
+  router.post('/instances/:id/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { id } = req.params
+    if (!UUID_RE.test(id)) { res.status(400).json({ error: 'Invalid instance id' }); return }
+    try {
+      const updated = await connectorInstanceStore.update(userId, id, { connected: true })
+      if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      res.json({ ok: true, connectorInstanceId: updated.id })
+    } catch (err) {
+      console.error('[connectors] instance connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect' })
+    }
+  })
+
+  // ── POST /:provider/connect — mark the primary instance connected ──
+  // For built-ins this is the non-OAuth/reconnect path; OAuth connectors go
+  // through store-credentials after the client-side authorize redirect.
+  router.post('/:provider/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const row = await connectorStore.setConnected(userId, req.params.provider, true)
+      if (!row) { res.status(404).json({ error: 'Connector not found (connect it first)' }); return }
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect' })
     }
   })
 
