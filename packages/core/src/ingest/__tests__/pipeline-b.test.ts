@@ -736,6 +736,35 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(result.sensitivity?.drifted).toBe(false)
   })
 
+  it('does not truncate a 32k-token (~128 KB) listener window at extraction (CONTENT_CHAR_LIMIT)', async () => {
+    // A raw aggregated WhatsApp window near the 32k-token early-flush bound —
+    // larger than the old 16 KB cap, within the raised 128 KB one. The whole
+    // window must reach the extraction prompt, untruncated.
+    const line = 'Alice: ship the release before Friday and ping Bob\n'
+    const big = line.repeat(2000)
+    expect(big.length).toBeGreaterThan(16 * 1024)
+    expect(big.length).toBeLessThanOrEqual(128 * 1024)
+
+    const calls: Array<{ messages: Array<{ role: string; content: string }> }> = []
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      async *stream(req: { messages: Array<{ role: string; content: string }> }) {
+        calls.push(req)
+        yield { type: 'text_delta', text: JSON.stringify({ summary: '', entities: [], edges: [], memories: [], tags: [] }) } as StreamChunk
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 10, outputTokens: 5 } } as StreamChunk
+      },
+    } as unknown as LLMProvider
+
+    const deps = makeDeps({ provider })
+    await processEpisode(baseEpisode({ sourceKind: 'channel_window' }), big, deps)
+
+    const prompt = calls[0]!.messages[0]!.content
+    // The whole window is embedded verbatim and carries no truncation marker.
+    expect(prompt).toContain(big)
+    expect(prompt).not.toContain('…')
+  })
+
   it('takes the digest branch for platform_engagement_digest — writes engagement memories + edges, bypasses the LLM', async () => {
     const memories = spyMemories()
     const links = spyLinks()

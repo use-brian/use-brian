@@ -339,7 +339,17 @@ type ExtractedEdge = z.infer<typeof extractedEdgeSchema>
 type ExtractedMemory = z.infer<typeof extractedMemorySchema>
 type ExtractedTask = z.infer<typeof extractedTaskSchema>
 
-const CONTENT_CHAR_LIMIT = 16 * 1024
+// Extraction content cap. Raised from 16 KB to ~128 KB (~32k tokens at
+// ~4 chars/token) so a fully-accumulated WhatsApp listener window — bounded by
+// the 32k-token early flush in `appendBatchEvent` — is extracted WITHOUT
+// truncation. The two are coupled: this cap must stay ≥ the early-flush bound
+// in tokens or a bounded window is silently truncated again at extraction.
+// Shared across every source; other sources rarely exceed the old 16 KB, so
+// the only material effect is that long single-source content (e.g. a Fathom
+// transcript) is now extracted whole instead of clipped. See
+// docs/architecture/brain/ingest-pipeline.md → "Batch flush — cron backstop
+// + size trigger".
+const CONTENT_CHAR_LIMIT = 128 * 1024
 
 const SYSTEM_PROMPT =
   'You are the extraction step of a knowledge-management pipeline. ' +
