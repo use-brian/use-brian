@@ -343,6 +343,26 @@ export function resolveStopReason(finishReason: StopReason, hasToolCalls: boolea
   return finishReason
 }
 
+/**
+ * Strip a leaked turn role-label token from the start of a Gemini turn's text.
+ *
+ * Gemini's chat format labels the assistant turn with the role token `model`
+ * (the counterpart to OpenAI's `assistant`). Occasionally — observed ~1 turn in
+ * 120 days of production, typically on a post-tool-call continuation — gemini-3.x
+ * echoes that label as the first text part of the turn, so the reply begins with
+ * a literal `model\n` glued ahead of the real body in a single `part.text`. That
+ * token then streams to the user and, on the stateful session path, gets
+ * accumulated into persisted history (so it also re-enters context next turn).
+ *
+ * Apply this to the FIRST text part of a turn only. Matching is deliberately
+ * narrow — the exact role token alone on the opening line — so a legitimate reply
+ * that merely discusses "models" is never touched. Returns the text unchanged
+ * when no leading token is present.
+ */
+export function stripLeadingRoleToken(firstTurnText: string): string {
+  return firstTurnText.replace(/^model\r?\n/, '')
+}
+
 // ── SSE streaming via REST API ─────────────────────────────────
 
 async function* streamGeminiSSE(
@@ -533,6 +553,7 @@ async function* convertStreamChunks(
   let hasToolCalls = false
   let hasAnyContent = false
   let chunkCount = 0
+  let firstTextSeen = false  // strip a leaked `model\n` role token from the turn's first text part
 
   for await (const data of sseStream) {
     chunkCount++
@@ -562,7 +583,12 @@ async function* convertStreamChunks(
         // think. Body is never persisted (stateless path keeps no history).
         if (part.text) yield { chunk: { type: 'thinking_delta', text: part.text } }
       } else if (part.text) {
-        yield { chunk: { type: 'text_delta', text: part.text } }
+        let text = part.text
+        if (!firstTextSeen) {
+          firstTextSeen = true
+          text = stripLeadingRoleToken(text)
+        }
+        if (text) yield { chunk: { type: 'text_delta', text } }
       }
       if (part.functionCall) {
         hasToolCalls = true
@@ -690,6 +716,7 @@ export function createGeminiProvider(apiKey: string): LLMProvider {
           let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }
           let hasToolCalls = false
           let modelRole: string | undefined
+          let firstTextSeen = false  // strip a leaked `model\n` role token from the turn's first text part
           // Accumulated model-turn parts in arrival order. Consecutive text and
           // thought deltas are merged into one part each so the assembled turn
           // mirrors the non-streaming `generateContent` shape exactly.
@@ -722,12 +749,19 @@ export function createGeminiProvider(apiKey: string): LLMProvider {
                   })
                 }
               } else if (part.text) {
-                yield { type: 'text_delta', text: part.text }
-                const tail = accumulatedParts[accumulatedParts.length - 1]
-                if (tail && tail.text !== undefined && !tail.thought && !tail.functionCall) {
-                  tail.text += part.text
-                } else {
-                  accumulatedParts.push({ text: part.text })
+                let text = part.text
+                if (!firstTextSeen) {
+                  firstTextSeen = true
+                  text = stripLeadingRoleToken(text)
+                }
+                if (text) {
+                  yield { type: 'text_delta', text }
+                  const tail = accumulatedParts[accumulatedParts.length - 1]
+                  if (tail && tail.text !== undefined && !tail.thought && !tail.functionCall) {
+                    tail.text += text
+                  } else {
+                    accumulatedParts.push({ text })
+                  }
                 }
               }
               if (part.functionCall) {

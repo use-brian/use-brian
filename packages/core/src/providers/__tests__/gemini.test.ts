@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { normalizeGeminiContents, resolveGeminiThinkingLevel, resolveStopReason, stripNonInputParts } from '../gemini.js'
+import { normalizeGeminiContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
 
 type GeminiContent = Parameters<typeof normalizeGeminiContents>[0][number]
 
@@ -214,5 +214,35 @@ describe('[COMP:providers/gemini-input-parts] stripNonInputParts', () => {
       { role: 'model' as const, parts: [{ text: 'a' }] },
     ]
     expect(stripNonInputParts(clean)).toEqual(clean)
+  })
+})
+
+describe('[COMP:providers/gemini-role-leak] stripLeadingRoleToken', () => {
+  it('strips a leaked `model\\n` role token glued ahead of the body (the prod shape)', () => {
+    // Real captured leak: session_messages.content[0].text began with "model\n…".
+    expect(stripLeadingRoleToken('model\n我目前嘅資料庫暫時未有佢嘅電郵。')).toBe(
+      '我目前嘅資料庫暫時未有佢嘅電郵。',
+    )
+  })
+
+  it('tolerates a CRLF after the token', () => {
+    expect(stripLeadingRoleToken('model\r\nHello')).toBe('Hello')
+  })
+
+  it('reduces a bare role-token-only first part to empty (caller drops the empty delta)', () => {
+    expect(stripLeadingRoleToken('model\n')).toBe('')
+  })
+
+  it('leaves a legitimate reply that merely discusses models untouched', () => {
+    expect(stripLeadingRoleToken('The model you picked is gemini-3.5-flash.')).toBe(
+      'The model you picked is gemini-3.5-flash.',
+    )
+    // Mid-text or non-leading occurrences are never matched.
+    expect(stripLeadingRoleToken('Your model\nis ready.')).toBe('Your model\nis ready.')
+  })
+
+  it('does not strip the word when it is not on its own opening line', () => {
+    expect(stripLeadingRoleToken('model is a noun')).toBe('model is a noun')
+    expect(stripLeadingRoleToken('models\nare plural')).toBe('models\nare plural')
   })
 })
