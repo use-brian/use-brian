@@ -1,6 +1,10 @@
-// ⚠️ STALE — The WhatsApp channel is deprecated and unmaintained as of 2026-06-02.
-// It is no longer surfaced in the web UI and must not be extended. It is kept only
-// so any pre-existing integration keeps functioning. See docs/architecture/channels/whatsapp.md (Status: Stale).
+// NOTE — The *legacy shared official responder* is deprecated (2026-06-02), but
+// this adapter is ACTIVE: the Bring-Your-Own-Number path uses it for read-only
+// group ingest AND, on `'chat'`-capability channels, for the full-assistant bot
+// reply (`sendMessage` / `sendTypingIndicator`). See
+// docs/architecture/channels/whatsapp.md → "BYON bot mode" (Status: ACTIVE).
+// Don't re-add legacy-responder-only affordances (reaction feedback, the
+// channel_message_id round-trip) — those stay unwired for WhatsApp.
 /**
  * WhatsApp remote channel adapter.
  *
