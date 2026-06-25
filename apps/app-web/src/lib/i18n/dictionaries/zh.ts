@@ -2798,7 +2798,6 @@ export const zh: Dictionary = {
         enableAction: "啟用",
         disableAction: "停用",
         routingLabel: "路由",
-        routingRealtime: "即時",
         routingScheduled: "每日摘要",
         dialogTitle: "連結你的 WhatsApp 號碼",
         dialogHint: "在手機上開啟 WhatsApp，前往「已連結的裝置」並掃描此代碼。你的號碼會保持安靜，永遠不會發送任何訊息。",

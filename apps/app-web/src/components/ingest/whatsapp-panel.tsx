@@ -27,13 +27,6 @@ import { Dialog } from "@base-ui/react/dialog";
 import { QRCodeSVG } from "qrcode.react";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   connectWhatsappIngest,
   disableWhatsappGroup,
   enableWhatsappGroup,
@@ -225,7 +218,7 @@ export function WhatsappIngestPanel({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-// ── One seen group: enable toggle + routing picker ──────────────
+// ── One seen group: enable toggle (routing is digest-only — no picker) ──────
 function GroupRow({
   group,
   copy,
@@ -263,23 +256,21 @@ function GroupRow({
         {error && <div className="text-[10px] text-destructive">{copy.groupError}</div>}
       </div>
 
+      {/* Routing is digest-only: realtime (per-message extraction) is disabled
+          to cap token cost, so there's no picker — enabled groups always run on
+          the weekday digest. See docs/architecture/channels/whatsapp.md →
+          "Routing (digest-only)". */}
       {group.enabled && (
-        <Select
-          value={group.routing ?? "realtime"}
-          onValueChange={(v) => setEnabled(true, v as WhatsappGroupRouting)}
+        <span
+          className="text-[10px] text-muted-foreground shrink-0"
+          aria-label={copy.routingLabel}
         >
-          <SelectTrigger size="sm" className="text-xs w-[7.5rem]" aria-label={copy.routingLabel}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value="realtime">{copy.routingRealtime}</SelectItem>
-            <SelectItem value="scheduled">{copy.routingScheduled}</SelectItem>
-          </SelectContent>
-        </Select>
+          {copy.routingScheduled}
+        </span>
       )}
 
       <button
-        onClick={() => setEnabled(!group.enabled, group.routing ?? "realtime")}
+        onClick={() => setEnabled(!group.enabled, "scheduled")}
         disabled={busy}
         className={cn(
           "text-xs font-medium px-3 py-1.5 rounded-lg shrink-0 transition-colors disabled:opacity-40",

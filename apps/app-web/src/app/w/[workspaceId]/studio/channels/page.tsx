@@ -2016,25 +2016,18 @@ function WhatsappGroupRow({
       >
         {group.title ?? wa.untitledGroup}
       </span>
+      {/* Routing is digest-only: realtime (per-message extraction) is disabled
+          to cap token cost, so there's no picker — enabled groups always run on
+          the weekday digest. See docs/architecture/channels/whatsapp.md →
+          "Routing (digest-only)". */}
       {group.enabled && (
-        <Select
-          value={group.routing ?? "realtime"}
-          onValueChange={(v) => {
-            if (v) void setEnabled(true, v as WhatsappGroupRouting);
-          }}
-        >
-          <SelectTrigger size="sm" className="w-[7.5rem] text-xs">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value="realtime">{wa.routingRealtime}</SelectItem>
-            <SelectItem value="scheduled">{wa.routingScheduled}</SelectItem>
-          </SelectContent>
-        </Select>
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {wa.routingScheduled}
+        </span>
       )}
       <button
         type="button"
-        onClick={() => void setEnabled(!group.enabled, group.routing ?? "realtime")}
+        onClick={() => void setEnabled(!group.enabled, "scheduled")}
         disabled={busy}
         className={
           "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +

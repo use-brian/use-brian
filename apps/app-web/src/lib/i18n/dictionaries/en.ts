@@ -2995,7 +2995,6 @@ export const en = {
         enableAction: "Enable",
         disableAction: "Disable",
         routingLabel: "Routing",
-        routingRealtime: "Real-time",
         routingScheduled: "Daily digest",
         dialogTitle: "Link your WhatsApp number",
         dialogHint: "Open WhatsApp on your phone, go to Linked Devices, and scan this code to link your number.",

@@ -2817,7 +2817,6 @@ export const ja: Dictionary = {
         enableAction: "有効化",
         disableAction: "無効化",
         routingLabel: "ルーティング",
-        routingRealtime: "リアルタイム",
         routingScheduled: "毎日のダイジェスト",
         dialogTitle: "WhatsApp 番号をリンク",
         dialogHint: "スマホで WhatsApp を開き、リンク済みデバイスからこのコードをスキャンしてください。番号は送信を行わず、静かに動作します。",
