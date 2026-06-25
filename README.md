@@ -34,26 +34,10 @@ record. You stay on the decisions. It handles the rest.
   conditions and approvals. Set the rule once, it runs without you.
 - **Docs.** A collaborative canvas where the work lands and the agent writes back.
   Notion-style, synced on your machine.
-
-## And it dreams
-
-A vector database remembers what you said. sidanclaw decides what it meant, throws
-out the duplicates, and writes down who you are. One is storage. The other sleeps
-on it.
-
-While you are away it **dreams**: a background loop (Light / REM / Deep)
-consolidates what it learned, collapses duplicate memories, and rewrites a
-**SOUL**, an evolving portrait of how you think, work, and decide. Feed it a week
-of notes, and by day seven it knows you reschedule anything before 10am and trust
-a draft more than a meeting. The better it knows you, the closer the rest it does
-gets to the call you would have made yourself.
-
-Yes, it dreams about you. We sat with how that sounds. It still ships on by
-default.
-
-<div align="center">
-<img src="assets/soul-diff.png" alt="The SOUL rewriting itself after a week of notes" width="780" />
-</div>
+- **Dreams.** While you are away it consolidates what it learned and rewrites a
+  **SOUL**: an evolving portrait of how you think, work, and decide. The better it
+  knows you, the closer the rest lands to your own call. Yes, about you. On by
+  default.
 
 ## Quick start
 
@@ -70,14 +54,34 @@ pnpm dev                    # api + canvas sidecar + web app, opens your browser
 
 That is it. There is no step three. The store defaults to an embedded PGLite
 database under `~/.sidanclaw/`; point `DATABASE_URL` at a local Postgres if you
-prefer a container. Optional capability keys (web search, X search, model
-fallback) and self-host overrides live in [`.env.example`](./.env.example).
+prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
 
 ### Your data stays yours
 
 **0** external services. **1** model key. The brain, the store, and the canvas
 all stay local; the only outbound call sidanclaw makes is to the Gemini API with
 your own key. Nothing else about your work leaves your machine.
+
+## More keys, more reach
+
+That one Gemini key is the floor, not the ceiling. Each key below is optional, and
+each is a service you choose to talk to, so nothing turns on by itself. Drop them
+into `.env` or `~/.sidanclaw/`.
+
+| Capability | Key(s) to set | What you get |
+|---|---|---|
+| Web search | `BRAVE_SEARCH_API_KEY`, `TAVILY_API_KEY`, or `SERPER_API_KEY` | Upgrade the search tool past the free DuckDuckGo fallback (Brave, Tavily tuned for AI, or Serper Google results) |
+| Page fetches | `JINA_API_KEY` | Cleaner page reads via Jina Reader (works keyless at lower limits) |
+| Read X / Twitter | `TWITTER_BEARER_TOKEN` | Read x.com permalinks through the official X API v2 |
+| X search | `XAI_API_KEY` | Fall back to xAI Grok and enable the `xSearch` tool (profiles, search, non-permalink URLs) |
+| Model fallback | `FALLBACK_PROVIDER_ENABLED=true` + `ANTHROPIC_API_KEY` | Keep running if Gemini is unavailable |
+| Google connector | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Calendar, Gmail, and Drive via your own OAuth app |
+| Notion connector | `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` | Notion via your own OAuth app |
+| Fathom connector | `FATHOM_CLIENT_ID` / `FATHOM_CLIENT_SECRET` | Fathom via your own OAuth app |
+| GitHub connector | Personal Access Token (entered in the UI) | GitHub, no env key needed |
+
+Connector client id / secret can also live in `~/.sidanclaw/connectors.config.json`.
+Every key is documented in [`.env.example`](./.env.example).
 
 ## What's in the box
 
@@ -96,21 +100,6 @@ sidanclaw is single-player by design, like most of your actual work. When you ad
 a teammate, the app offers a one-click migration to the hosted version, no
 re-entry. The paywall is a capability (a shared, always-on team graph that cannot
 exist single-player), never a nag.
-
-## Troubleshooting
-
-A clean first boot is a little chatty. Two log lines are expected and safe to
-ignore:
-
-- **`[registry] No community connectors (sidanclaw-tools not present)`** (and the
-  matching skills line). The optional community registry lives in a separate
-  `sidanclaw-tools` submodule a default clone does not pull. Run
-  `git submodule update --init sidanclaw-tools` if you want it; otherwise the
-  built-in official connectors are all you need.
-- **`bind message supplies 2 parameters, but prepared statement "" requires 1`**
-  from a consolidation tick: a known quirk of the embedded PGLite store on one
-  query. Non-fatal, retries automatically. Point `DATABASE_URL` at a local
-  Postgres to avoid it entirely.
 
 ## License
 
