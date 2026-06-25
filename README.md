@@ -62,6 +62,37 @@ prefer a container. Self-host overrides live in [`.env.example`](./.env.example)
 all stay local; the only outbound call sidanclaw makes is to the Gemini API with
 your own key. Nothing else about your work leaves your machine.
 
+## How you use it
+
+`pnpm dev` opens the app with a chat dock on every screen. That is the main way
+in. Talk to it in plain language; it remembers, and it acts. Three things to try
+in the first five minutes:
+
+1. **Tell it something.** "We are going with Postgres over Mongo, mostly for the
+   JSON support, Raph pushed for it." It files the decision, the reason, and who
+   was involved into the brain. No forms.
+2. **Ask it to do something.** "Draft a changelog note for that decision and save
+   it as a doc." It writes to the canvas and runs your connected tools, asking
+   first before anything that sends or changes data.
+3. **Set a rule once.** "Every Monday at 9am, summarize last week's decisions."
+   That becomes a workflow that runs on a schedule without you.
+
+Out of the box it can remember, search the web, and manage your tasks and docs.
+Connectors like Gmail, Calendar, and Notion switch on when you add their keys.
+The brain is the point: the more you drop in, the sharper the rest gets.
+
+### What it asks before doing
+
+You make the calls, so it governs every tool by what that tool does, fail-closed:
+
+- **Reads run on their own** (search, list, fetch). Looking things up is free.
+- **Writes ask first** (send, create, update), until you tell it "always" for one.
+- **Destructive actions stay blocked** (delete, revoke, cancel) until you turn
+  them on per tool.
+
+A fresh install reads and drafts freely, but it cannot send an email or delete an
+event without you. You set the policy per tool in the app.
+
 ## More keys, more reach
 
 That one Gemini key is the floor, not the ceiling. Each key below is optional, and
