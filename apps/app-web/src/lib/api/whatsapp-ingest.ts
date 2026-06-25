@@ -93,6 +93,93 @@ export async function disableWhatsappGroup(
   }
 }
 
+// ── Bot ('chat' capability) config ──────────────────────────────
+// The bot replies when triggered; distinct from the read-only listener above.
+// Backend: packages/api-platform/src/routes/whatsapp-ingest-admin.ts (Phase 6).
+
+export type WhatsappBotSendScope = "dm" | "dm_and_groups";
+
+/** A reply trigger — a `routing_mode='reply'` rule. */
+export type WhatsappBotTrigger = {
+  id: string;
+  filterType: string;
+  filterParams: Record<string, unknown>;
+};
+
+export type WhatsappBotConfig = {
+  connected: boolean;
+  chatEnabled: boolean;
+  sendScope: WhatsappBotSendScope;
+  triggers: WhatsappBotTrigger[];
+};
+
+/** Fetch the bot config (chat enabled + send scope + reply triggers). */
+export async function getWhatsappBot(workspaceId: string): Promise<WhatsappBotConfig> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot`,
+  );
+  if (!res.ok) throw new Error(`Failed to load WhatsApp bot (${res.status})`);
+  return (await res.json()) as WhatsappBotConfig;
+}
+
+/** Enable replies: add the `chat` capability + set the send scope. */
+export async function enableWhatsappBot(
+  workspaceId: string,
+  sendScope: WhatsappBotSendScope,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/enable`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sendScope }),
+    },
+  );
+  if (!res.ok) throw new Error(`Enable replies failed (${res.status})`);
+}
+
+/** Disable replies: remove the `chat` capability. */
+export async function disableWhatsappBot(workspaceId: string): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/disable`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`Disable replies failed (${res.status})`);
+}
+
+/** Add a reply trigger (`is_mention` / `keyword_match` / `is_dm` / `always`). */
+export async function addWhatsappBotTrigger(
+  workspaceId: string,
+  filterType: string,
+  filterParams: Record<string, unknown> = {},
+): Promise<WhatsappBotTrigger> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/triggers`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filterType, filterParams }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Add trigger failed (${res.status})`);
+  }
+  return (await res.json()) as WhatsappBotTrigger;
+}
+
+/** Remove a reply trigger. */
+export async function deleteWhatsappBotTrigger(
+  workspaceId: string,
+  ruleId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/bot/triggers/${encodeURIComponent(ruleId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(`Remove trigger failed (${res.status})`);
+}
+
 /** Events surfaced by the connect SSE stream. */
 export type WhatsappConnectHandlers = {
   /** A fresh QR string to render and scan (re-emitted as it rotates). */

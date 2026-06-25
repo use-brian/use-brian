@@ -29,12 +29,28 @@
  * [COMP:app-web/studio-channels]
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { authFetch } from "@/lib/auth-fetch";
 import { buildManifest } from "@/components/slack-setup-inline";
+import { QRCodeSVG } from "qrcode.react";
+import {
+  connectWhatsappIngest,
+  getWhatsappIngest,
+  enableWhatsappGroup,
+  disableWhatsappGroup,
+  getWhatsappBot,
+  enableWhatsappBot,
+  disableWhatsappBot,
+  addWhatsappBotTrigger,
+  deleteWhatsappBotTrigger,
+  type WhatsappGroup,
+  type WhatsappGroupRouting,
+  type WhatsappBotConfig,
+  type WhatsappBotSendScope,
+} from "@/lib/api/whatsapp-ingest";
 import {
   API_URL,
   listChannels,
@@ -563,6 +579,13 @@ function ChannelCard({
           />
         )}
 
+      {/* WhatsApp config — connection state (surfaces a phone-side logout) +
+          per-group ingest list + the replies (bot) section, like the other
+          channels' config sections. */}
+      {channel.channelType === "whatsapp" && (
+        <WhatsappCardSection workspaceId={workspaceId} />
+      )}
+
       <div className="flex flex-col gap-2 border-t border-border pt-3">
         <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
           {t.studioPage.channels.routingTitle}
@@ -619,11 +642,16 @@ function ChannelCard({
               ))}
             </SelectContent>
           </Select>
-          <SurfaceInput
-            channel={channel}
-            value={attachSurface}
-            onChange={setAttachSurface}
-          />
+          {/* Surface routing is for multi-conversation channels (Slack channels,
+              Telegram chats/topics). A WhatsApp number has one conversation
+              stream, so it just gets the default assistant. */}
+          {channel.channelType !== "whatsapp" && (
+            <SurfaceInput
+              channel={channel}
+              value={attachSurface}
+              onChange={setAttachSurface}
+            />
+          )}
           <button
             type="button"
             onClick={() => void onAttach()}
@@ -1294,7 +1322,28 @@ function AddChannelForm({
 }) {
   const t = useT();
   const add = t.studioPage.channels.add;
-  const [platform, setPlatform] = useState<"slack" | "telegram" | "discord">("slack");
+  const [platform, setPlatform] = useState<
+    "slack" | "telegram" | "discord" | "whatsapp"
+  >("slack");
+
+  // WhatsApp pairs via QR (no token submit). After the connect stream reports
+  // `connected`, the integration row lands shortly after — poll the channel
+  // list until the WhatsApp channel appears, then surface it like the others.
+  const handleWhatsappConnected = useCallback(async () => {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      try {
+        const chans = await listChannels(workspaceId);
+        const wa = chans.find((c) => c.channelType === "whatsapp");
+        if (wa) {
+          await onCreated(wa);
+          return;
+        }
+      } catch {
+        // transient — keep polling
+      }
+      await new Promise((r) => setTimeout(r, 700));
+    }
+  }, [workspaceId, onCreated]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<
@@ -1405,7 +1454,7 @@ function AddChannelForm({
         ? tgBotToken.length > 0
         : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -1445,7 +1494,7 @@ function AddChannelForm({
       </div>
 
       <div className="flex gap-1 border-b border-border">
-        {(["slack", "telegram", "discord"] as const).map((p) => (
+        {(["slack", "telegram", "discord", "whatsapp"] as const).map((p) => (
           <button
             key={p}
             type="button"
@@ -1463,7 +1512,12 @@ function AddChannelForm({
         ))}
       </div>
 
-      {platform === "slack" ? (
+      {platform === "whatsapp" ? (
+        <WhatsappConnectTab
+          workspaceId={workspaceId}
+          onConnected={handleWhatsappConnected}
+        />
+      ) : platform === "slack" ? (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground">{add.slackHint}</p>
 
@@ -1591,34 +1645,36 @@ function AddChannelForm({
         </div>
       )}
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
-        <Select
-          value={defaultAssistantId || "__none__"}
-          onValueChange={(v) =>
-            setDefaultAssistantId(v && v !== "__none__" ? v : "")
-          }
-          items={defaultAssistantItems}
-          disabled={submitting || !!success}
-        >
-          <SelectTrigger size="sm" className="text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
-            {assistants.map((a) => (
-              <SelectItem key={a.id} value={a.id}>
-                {a.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <span className="text-xs text-muted-foreground">
-          {add.defaultAssistantHint}
-        </span>
-      </label>
+      {platform !== "whatsapp" && (
+        <label className="flex flex-col gap-1">
+          <span className="text-xs font-medium">{add.defaultAssistantLabel}</span>
+          <Select
+            value={defaultAssistantId || "__none__"}
+            onValueChange={(v) =>
+              setDefaultAssistantId(v && v !== "__none__" ? v : "")
+            }
+            items={defaultAssistantItems}
+            disabled={submitting || !!success}
+          >
+            <SelectTrigger size="sm" className="text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">{add.defaultAssistantNone}</SelectItem>
+              {assistants.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <span className="text-xs text-muted-foreground">
+            {add.defaultAssistantHint}
+          </span>
+        </label>
+      )}
 
-      {!success && (
+      {platform !== "whatsapp" && !success && (
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -1714,5 +1770,533 @@ function AddChannelForm({
         </div>
       )}
     </div>
+  );
+}
+
+/** WhatsApp QR pairing phases — inline in the Add-a-channel form. */
+type WaConnectPhase =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "qr"; value: string }
+  | { kind: "expired" }
+  | { kind: "error"; message: string }
+  | { kind: "connected"; number: string };
+
+/**
+ * WhatsApp connect tab — the 4th "Add a channel" tab. Unlike the token-based
+ * Slack/Telegram/Discord tabs, WhatsApp pairs a real number via a live QR
+ * stream (POST-returning-SSE), so the QR renders inline here. On `connected`
+ * the parent polls the channel list so the new WhatsApp channel surfaces like
+ * the others. Reuses the `studioPage.ingestRules.whatsapp.*` copy.
+ */
+function WhatsappConnectTab({
+  workspaceId,
+  onConnected,
+}: {
+  workspaceId: string;
+  onConnected: () => void;
+}) {
+  const t = useT();
+  const wa = t.studioPage.ingestRules.whatsapp;
+  const [phase, setPhase] = useState<WaConnectPhase>({ kind: "idle" });
+  const abortRef = useRef<AbortController | null>(null);
+
+  const start = useCallback(() => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setPhase({ kind: "loading" });
+    connectWhatsappIngest(
+      workspaceId,
+      {
+        onQr: (value) => setPhase({ kind: "qr", value }),
+        onConnected: (number) => {
+          controller.abort();
+          setPhase({ kind: "connected", number });
+          onConnected();
+        },
+        onTimeout: () => setPhase({ kind: "expired" }),
+        onError: (message) => setPhase({ kind: "error", message }),
+      },
+      controller.signal,
+    ).catch((e: unknown) => {
+      if (!controller.signal.aborted)
+        setPhase({ kind: "error", message: (e as Error).message });
+    });
+  }, [workspaceId, onConnected]);
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">{wa.subtitle}</p>
+
+      {phase.kind === "qr" ? (
+        <div className="flex flex-col items-center gap-2 self-center py-2">
+          <div className="rounded-lg bg-white p-3">
+            <QRCodeSVG value={phase.value} size={208} />
+          </div>
+          <p className="max-w-xs text-center text-xs text-muted-foreground">
+            {wa.dialogHint}
+          </p>
+        </div>
+      ) : phase.kind === "loading" ? (
+        <p className="py-4 text-center text-sm text-muted-foreground">
+          {wa.dialogLoading}
+        </p>
+      ) : phase.kind === "connected" ? (
+        <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+          {wa.connectedAs.replace("{number}", phase.number)}
+        </p>
+      ) : phase.kind === "expired" || phase.kind === "error" ? (
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-destructive">
+            {phase.kind === "expired" ? wa.dialogExpired : wa.dialogError}
+          </span>
+          <button
+            type="button"
+            onClick={start}
+            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          >
+            {wa.dialogRetry}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={start}
+          className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+        >
+          {wa.connectAction}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * WhatsApp per-group ingest manager — rendered on the WhatsApp channel card.
+ * A connected number's enable-able groups come from `seenChats` (no roster
+ * endpoint for a companion device), so this lists the observed groups with an
+ * enable/disable + routing (realtime / daily digest) control each.
+ */
+function WhatsappGroupManager({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const wa = t.studioPage.ingestRules.whatsapp;
+  const [groups, setGroups] = useState<WhatsappGroup[] | null>(null);
+  const [query, setQuery] = useState("");
+
+  const load = useCallback(() => {
+    getWhatsappIngest(workspaceId)
+      .then((s) => setGroups(s.groups))
+      .catch(() => setGroups([]));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // A personal number can be in hundreds of groups. The API returns them
+  // enabled-and-recently-active first, so capping the initial render shows the
+  // ones that matter; a search finds any other by name.
+  const CAP = 12;
+  const all = groups ?? [];
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? all.filter((g) => (g.title ?? "").toLowerCase().includes(q))
+    : all;
+  const shown = q ? matches : matches.slice(0, CAP);
+  const more = matches.length - shown.length;
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border pt-3">
+      <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+        {wa.groupsTitle}
+      </div>
+      {all.length > CAP && (
+        <div className="relative">
+          <svg
+            aria-hidden
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <path d="m21 21-4.3-4.3" />
+          </svg>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={wa.groupSearchPlaceholder}
+            className="w-full rounded-md border border-border bg-background py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus:border-primary/40 focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+        </div>
+      )}
+      {groups === null ? (
+        <p className="text-xs text-muted-foreground">{wa.working}</p>
+      ) : all.length === 0 ? (
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {wa.groupsEmpty}
+        </p>
+      ) : shown.length === 0 ? (
+        <p className="text-xs text-muted-foreground">{wa.groupsNoMatch}</p>
+      ) : (
+        <>
+          <ul className="flex flex-col gap-2">
+            {shown.map((g) => (
+              <WhatsappGroupRow
+                key={g.chatJid}
+                group={g}
+                workspaceId={workspaceId}
+                onChange={load}
+              />
+            ))}
+          </ul>
+          {more > 0 && (
+            <p className="text-[11px] text-muted-foreground">
+              {format(wa.groupsMoreHint, { n: more })}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function WhatsappGroupRow({
+  group,
+  workspaceId,
+  onChange,
+}: {
+  group: WhatsappGroup;
+  workspaceId: string;
+  onChange: () => void;
+}) {
+  const t = useT();
+  const wa = t.studioPage.ingestRules.whatsapp;
+  const [busy, setBusy] = useState(false);
+
+  async function setEnabled(enabled: boolean, routing: WhatsappGroupRouting) {
+    setBusy(true);
+    try {
+      if (enabled) await enableWhatsappGroup(workspaceId, group.chatJid, routing);
+      else await disableWhatsappGroup(workspaceId, group.chatJid);
+      onChange();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li
+      className={
+        "flex items-center gap-2.5 rounded-md border px-3 py-2 transition-colors " +
+        (group.enabled
+          ? "border-emerald-500/40 bg-emerald-500/10"
+          : "border-border bg-card")
+      }
+    >
+      <span
+        aria-hidden
+        className={
+          "size-2 shrink-0 rounded-full " +
+          (group.enabled ? "bg-emerald-500" : "bg-muted-foreground/30")
+        }
+      />
+      <span
+        className={
+          "min-w-0 flex-1 truncate text-xs " +
+          (group.enabled ? "font-semibold" : "font-medium text-muted-foreground")
+        }
+      >
+        {group.title ?? wa.untitledGroup}
+      </span>
+      {group.enabled && (
+        <Select
+          value={group.routing ?? "realtime"}
+          onValueChange={(v) => {
+            if (v) void setEnabled(true, v as WhatsappGroupRouting);
+          }}
+        >
+          <SelectTrigger size="sm" className="w-[7.5rem] text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent align="end">
+            <SelectItem value="realtime">{wa.routingRealtime}</SelectItem>
+            <SelectItem value="scheduled">{wa.routingScheduled}</SelectItem>
+          </SelectContent>
+        </Select>
+      )}
+      <button
+        type="button"
+        onClick={() => void setEnabled(!group.enabled, group.routing ?? "realtime")}
+        disabled={busy}
+        className={
+          "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +
+          (group.enabled
+            ? "border border-border text-muted-foreground hover:text-destructive"
+            : "bg-primary text-primary-foreground hover:bg-primary/90")
+        }
+      >
+        {busy ? wa.working : group.enabled ? wa.disableAction : wa.enableAction}
+      </button>
+    </li>
+  );
+}
+
+/**
+ * WhatsApp replies (bot) config — rendered on the WhatsApp channel card under
+ * the group list. Toggles the `chat` capability, sets the send scope (DM-only
+ * by default; groups gated), and manages the reply triggers (mention / keyword
+ * / DM / always). Backed by the bot endpoints in whatsapp-ingest-admin.ts.
+ * Personal-number caveat: replying into groups sends from the user's own
+ * number, so groups are opt-in and surfaced with a warning.
+ */
+function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const bot = t.studioPage.ingestRules.whatsapp.bot;
+  const [config, setConfig] = useState<WhatsappBotConfig | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(false);
+  const [newType, setNewType] = useState("is_dm");
+  const [keywords, setKeywords] = useState("");
+
+  const load = useCallback(() => {
+    getWhatsappBot(workspaceId)
+      .then(setConfig)
+      .catch(() => setConfig(null));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function run(fn: () => Promise<unknown>) {
+    setBusy(true);
+    setError(false);
+    try {
+      await fn();
+      load();
+    } catch {
+      setError(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const triggerLabel = (ft: string): string =>
+    ft === "is_dm"
+      ? bot.triggerIsDm
+      : ft === "is_mention"
+        ? bot.triggerIsMention
+        : ft === "keyword_match"
+          ? bot.triggerKeyword
+          : ft === "always"
+            ? bot.triggerAlways
+            : ft;
+
+  const chatEnabled = config?.chatEnabled ?? false;
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-border pt-3">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {bot.title}
+        </div>
+        <button
+          type="button"
+          disabled={busy || !config?.connected}
+          onClick={() =>
+            void run(() =>
+              chatEnabled
+                ? disableWhatsappBot(workspaceId)
+                : enableWhatsappBot(workspaceId, "dm"),
+            )
+          }
+          className={
+            "shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50 " +
+            (chatEnabled
+              ? "border border-border text-muted-foreground hover:text-destructive"
+              : "bg-primary text-primary-foreground hover:bg-primary/90")
+          }
+        >
+          {chatEnabled ? bot.disable : bot.enable}
+        </button>
+      </div>
+
+      {!chatEnabled ? (
+        <p className="text-xs text-muted-foreground">{bot.off}</p>
+      ) : (
+        config && (
+          <>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-muted-foreground">{bot.scopeLabel}</span>
+              <Select
+                value={config.sendScope}
+                disabled={busy}
+                onValueChange={(v) => {
+                  if (v) void run(() => enableWhatsappBot(workspaceId, v as WhatsappBotSendScope));
+                }}
+              >
+                <SelectTrigger size="sm" className="min-w-[13rem] text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="dm">{bot.scopeDm}</SelectItem>
+                  <SelectItem value="dm_and_groups">{bot.scopeGroups}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {config.sendScope === "dm_and_groups" && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                {bot.groupWarning}
+              </p>
+            )}
+
+            <div className="mt-1 text-xs font-medium text-muted-foreground">
+              {bot.triggersTitle}
+            </div>
+            {config.triggers.length === 0 ? (
+              <p className="text-xs text-muted-foreground">{bot.triggersEmpty}</p>
+            ) : (
+              <ul className="flex flex-col gap-1">
+                {config.triggers.map((tr) => {
+                  const kw = (tr.filterParams as { keywords?: unknown }).keywords;
+                  return (
+                    <li key={tr.id} className="flex items-center gap-2 text-xs">
+                      <span className="font-medium">{triggerLabel(tr.filterType)}</span>
+                      {tr.filterType === "keyword_match" && Array.isArray(kw) && (
+                        <span className="font-mono text-muted-foreground">
+                          {(kw as string[]).join(", ")}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void run(() => deleteWhatsappBotTrigger(workspaceId, tr.id))
+                        }
+                        className="ml-auto text-muted-foreground hover:text-destructive disabled:opacity-50"
+                      >
+                        {bot.remove}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <Select value={newType} onValueChange={(v) => v && setNewType(v)}>
+                <SelectTrigger size="sm" className="min-w-[11rem] text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="is_dm">{bot.triggerIsDm}</SelectItem>
+                  <SelectItem value="is_mention">{bot.triggerIsMention}</SelectItem>
+                  <SelectItem value="keyword_match">{bot.triggerKeyword}</SelectItem>
+                  <SelectItem value="always">{bot.triggerAlways}</SelectItem>
+                </SelectContent>
+              </Select>
+              {newType === "keyword_match" && (
+                <input
+                  type="text"
+                  value={keywords}
+                  onChange={(e) => setKeywords(e.target.value)}
+                  placeholder={bot.keywordsPlaceholder}
+                  className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs"
+                />
+              )}
+              <button
+                type="button"
+                disabled={busy || (newType === "keyword_match" && !keywords.trim())}
+                onClick={() =>
+                  void run(() =>
+                    addWhatsappBotTrigger(
+                      workspaceId,
+                      newType,
+                      newType === "keyword_match"
+                        ? {
+                            keywords: keywords
+                              .split(",")
+                              .map((s) => s.trim())
+                              .filter(Boolean),
+                          }
+                        : {},
+                    ),
+                  )
+                }
+                className="rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground disabled:opacity-50"
+              >
+                {bot.add}
+              </button>
+            </div>
+          </>
+        )
+      )}
+
+      {error && <p className="text-xs text-destructive">{bot.error}</p>}
+    </div>
+  );
+}
+
+/**
+ * WhatsApp card config wrapper. Surfaces the live connection state so a
+ * phone-side logout (device unlinked in the WhatsApp app → the integration
+ * flips to `revoked` server-side) shows a reconnect prompt instead of stale
+ * controls. Re-checks on focus / visibility / a light interval — the old
+ * standalone panel did this; the channel card otherwise only loads on mount.
+ * When connected, renders the group ingest list + the replies (bot) section.
+ */
+function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const wa = t.studioPage.ingestRules.whatsapp;
+  const [connected, setConnected] = useState<boolean | null>(null);
+
+  const refresh = useCallback(() => {
+    getWhatsappIngest(workspaceId)
+      .then((s) => setConnected(s.connected))
+      .catch(() => setConnected(false));
+  }, [workspaceId]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", onVisible);
+    document.addEventListener("visibilitychange", onVisible);
+    const id = window.setInterval(refresh, 30_000);
+    return () => {
+      window.removeEventListener("focus", onVisible);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.clearInterval(id);
+    };
+  }, [refresh]);
+
+  if (connected === false) {
+    return (
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          {wa.disconnectedNote}
+        </p>
+        <WhatsappConnectTab workspaceId={workspaceId} onConnected={refresh} />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <WhatsappGroupManager workspaceId={workspaceId} />
+      <WhatsappRepliesSection workspaceId={workspaceId} />
+    </>
   );
 }

@@ -320,11 +320,20 @@ export async function listChannelAssistants(
  * Attach an assistant to a channel for chat routing. `externalSurfaceId`
  * omitted / null makes it the channel's default assistant. RLS gates the
  * insert; the `channel_assistants_workspace_match` trigger rejects an
- * assistant from a different workspace than the channel. The partial unique
- * indexes reject a second default, or a second mapping for the same surface.
+ * assistant from a different workspace than the channel.
+ *
+ * Idempotent: the two partial unique indexes (`idx_channel_assistants_default`
+ * on the channel's lone default, `idx_channel_assistants_surface` on each
+ * surface mapping) make a second insert for the same slot collide. We upsert
+ * instead — re-attaching the current default is a no-op success, and attaching
+ * a different assistant re-points the existing routing row in place rather than
+ * throwing a duplicate-key error. The conflict target switches on whether this
+ * is the default slot (surface IS NULL) or a surface mapping, since the two
+ * indexes carry different predicates.
  *
  * `modelAlias` seeds the per-routing model tier (migration 197). When the
- * caller omits it, the column default ('pro', migration 234) is used.
+ * caller omits it, the column default ('pro', migration 234) is used and an
+ * upsert leaves any existing alias untouched.
  */
 export async function attachAssistant(
   userId: string,
@@ -335,13 +344,20 @@ export async function attachAssistant(
     modelAlias?: ChannelModelAlias
   },
 ): Promise<ChannelAssistant> {
+  const surface = params.externalSurfaceId ?? null
+  const conflictTarget =
+    surface === null
+      ? '(channel_id) WHERE external_surface_id IS NULL'
+      : '(channel_id, external_surface_id) WHERE external_surface_id IS NOT NULL'
   if (params.modelAlias) {
     const result = await queryWithRLS<ChannelAssistant>(
       userId,
       `INSERT INTO channel_assistants (channel_id, assistant_id, external_surface_id, model_alias)
        VALUES ($1, $2, $3, $4)
+       ON CONFLICT ${conflictTarget}
+       DO UPDATE SET assistant_id = EXCLUDED.assistant_id, model_alias = EXCLUDED.model_alias
        RETURNING ${CHANNEL_ASSISTANT_COLS}`,
-      [params.channelId, params.assistantId, params.externalSurfaceId ?? null, params.modelAlias],
+      [params.channelId, params.assistantId, surface, params.modelAlias],
     )
     return result.rows[0]
   }
@@ -349,8 +365,10 @@ export async function attachAssistant(
     userId,
     `INSERT INTO channel_assistants (channel_id, assistant_id, external_surface_id)
      VALUES ($1, $2, $3)
+     ON CONFLICT ${conflictTarget}
+     DO UPDATE SET assistant_id = EXCLUDED.assistant_id
      RETURNING ${CHANNEL_ASSISTANT_COLS}`,
-    [params.channelId, params.assistantId, params.externalSurfaceId ?? null],
+    [params.channelId, params.assistantId, surface],
   )
   return result.rows[0]
 }
