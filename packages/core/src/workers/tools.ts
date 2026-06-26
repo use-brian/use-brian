@@ -14,7 +14,16 @@ export function createWorkerTools(manager: WorkerManager): {
     name: 'spawnWorker',
     description: 'Spawn a parallel research worker. Use for complex tasks needing 3+ independent lookups. Workers run in parallel using a fast, cheap model. Write self-contained prompts — workers cannot see this conversation. In research mode the worker pool is capped at 10 concurrent workers; if you try to spawn when full, this tool returns an error and you should wait for some to complete before spawning more.',
     inputSchema: z.object({
-      description: z.string().max(80).describe('Short task label shown in the UI (≤80 chars). Describe THIS worker\'s task specifically — e.g. "Research Acme Corp on row 5", not persona preamble like "You are a researcher". One line, no period.'),
+      // `description` is a cosmetic UI label (the `worker_start` payload).
+      // It is TRUNCATED to 80 chars, not rejected — the model routinely
+      // writes a ~100-char label for a research task, and a hard `.max(80)`
+      // used to fail the whole spawnWorker call ("description: String must
+      // contain at most 80 character(s)"). When that fired on a coordinator
+      // research turn no worker spawned, the turn produced no visible text,
+      // and the channel surfaced the canned "couldn't generate a reply"
+      // banner (prod incident 2026-06-26, session 2d29043f). A display label
+      // overflowing its width must never break a research dispatch.
+      description: z.string().describe('Short task label shown in the UI (kept to 80 chars; a longer label is trimmed to fit). Describe THIS worker\'s task specifically — e.g. "Research Acme Corp on row 5", not persona preamble like "You are a researcher". One line, no period.').transform((s) => s.slice(0, 80)),
       prompt: z.string().describe('Self-contained research prompt. Include exactly what to search and what format to return results in.'),
     }),
     isReadOnly: false,

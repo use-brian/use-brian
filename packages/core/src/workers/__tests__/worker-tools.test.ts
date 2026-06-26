@@ -90,6 +90,35 @@ describe('[COMP:workers/tools] spawnWorker', () => {
     expect(manager.spawned[0].description).toBe('Research row 5: Acme Corp')
   })
 
+  it('truncates an over-length description instead of hard-failing the spawn', () => {
+    // Regression — prod incident 2026-06-26, session 2d29043f (Telegram).
+    // `description` is a cosmetic UI label. It used to be z.string().max(80),
+    // so a research request where the model wrote a 100-char label hard-failed
+    // Zod validation ("description: String must contain at most 80
+    // character(s)"). Both parallel spawnWorker calls errored, no worker
+    // spawned, the coordinator turn went empty, and the channel surfaced the
+    // canned "I couldn't generate a reply" banner. The label now truncates so
+    // an over-length label never breaks the dispatch. The executor parses tool
+    // input via `inputSchema.parse` (tool-executor.ts), which runs the
+    // transform — so we assert at the schema layer where the bug lived.
+    const { spawnWorker } = createWorkerTools(makeFakeManager())
+    const longLabel =
+      'Research the key business metrics and growth indicators that VCs prioritize when evaluating scale'
+    expect(longLabel.length).toBeGreaterThan(80)
+    const parsed = spawnWorker.inputSchema.parse({ description: longLabel, prompt: 'Search the web.' })
+    expect(parsed.description).toBe(longLabel.slice(0, 80))
+    expect(parsed.description.length).toBe(80)
+  })
+
+  it('forwards the truncated label through to the manager (parse → execute)', async () => {
+    const manager = makeFakeManager()
+    const { spawnWorker } = createWorkerTools(manager)
+    const input = spawnWorker.inputSchema.parse({ description: 'A'.repeat(100), prompt: 'task' })
+    const result = await spawnWorker.execute(input, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(manager.spawned[0].description).toBe('A'.repeat(80))
+  })
+
   it('is NOT read-only (workers have side effects)', () => {
     const { spawnWorker } = createWorkerTools(makeFakeManager())
     expect(spawnWorker.isReadOnly).toBe(false)
