@@ -11,9 +11,12 @@
  *   - connectors → `ingest/workflow-trigger.ts` (the ingest engine `onEvent`
  *     seam — GitHub, Fathom, Gmail, Calendar);
  *   - channels   → the channel webhook (`packages/api/.../routes/slack.ts`).
+ *   - pages      → `workflow/page-event-trigger.ts` (the saved-views store
+ *     write path — a doc page created / updated / moved under a watched
+ *     parent).
  * Each producer normalizes its native event into a `DispatchEvent`; the
- * dispatcher never knows whether an event came from a poller or a webhook.
- * Connectors and channels are equal first-class event sources.
+ * dispatcher never knows whether an event came from a poller, a webhook, or a
+ * page write. Connectors, channels, and pages are equal first-class sources.
  *
  * Design — ports over imports. `packages/core` stays pg-free; the API
  * package fulfils `findEventTriggeredWorkflows` (a workspace-scoped read of
@@ -51,7 +54,11 @@ export type DispatchEvent = {
   text: string | null
   /** Event actor id — matched by `EventMatch.fromActors`. */
   actorId: string | null
-  /** Sub-channel within the source (Slack channel, GitHub repo) — `inChannels`. */
+  /**
+   * Sub-channel within the source (Slack channel, GitHub repo) — matched by
+   * `EventMatch.inChannels`. For a `page` source this carries the lifecycle
+   * action (`created` | `updated` | `moved`).
+   */
   channelId: string | null
   /** Entities the event mentions — matched by `EventMatch.mentions`. */
   mentions: string[]
@@ -101,13 +108,18 @@ export type WorkflowEventInput = {
   trigger: {
     /** Which kind of source fired the run. */
     sourceType: EventSourceRef['type']
-    /** Provider / channel type — 'github' | 'fathom' | 'slack' | … */
+    /** Provider / channel type — 'github' | 'fathom' | 'slack' | 'page' | … */
     provider: string
     /** Set when `sourceType='connector'`. */
     connectorInstanceId?: string
     /** Set when `sourceType='channel'`. */
     channelIntegrationId?: string
-    /** Sub-channel (Slack channel id, GitHub repo), or null. */
+    /** Set when `sourceType='page'` — the watched page id. */
+    pageId?: string
+    /**
+     * Sub-channel (Slack channel id, GitHub repo), or null. For a `page`
+     * source this is the lifecycle action (`created` | `updated` | `moved`).
+     */
     channelId: string | null
     /** Event actor id, or null. */
     actorId: string | null
@@ -148,6 +160,9 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
   }
   if (event.type === 'channel' && ref.type === 'channel') {
     return event.channelIntegrationId === ref.channelIntegrationId
+  }
+  if (event.type === 'page' && ref.type === 'page') {
+    return event.pageId === ref.pageId
   }
   return false
 }
@@ -194,22 +209,34 @@ export function matchesEvent(
 
 /** Build the `workflow_runs.input` payload for an event-triggered run. */
 function buildInput(event: DispatchEvent): WorkflowEventInput {
-  const trigger: WorkflowEventInput['trigger'] =
-    event.source.type === 'connector'
-      ? {
-          sourceType: 'connector',
-          provider: event.source.provider,
-          connectorInstanceId: event.source.connectorInstanceId,
-          channelId: event.channelId,
-          actorId: event.actorId,
-        }
-      : {
-          sourceType: 'channel',
-          provider: event.source.channel,
-          channelIntegrationId: event.source.channelIntegrationId,
-          channelId: event.channelId,
-          actorId: event.actorId,
-        }
+  const src = event.source
+  let trigger: WorkflowEventInput['trigger']
+  if (src.type === 'connector') {
+    trigger = {
+      sourceType: 'connector',
+      provider: src.provider,
+      connectorInstanceId: src.connectorInstanceId,
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else if (src.type === 'channel') {
+    trigger = {
+      sourceType: 'channel',
+      provider: src.channel,
+      channelIntegrationId: src.channelIntegrationId,
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'page',
+      provider: 'page',
+      pageId: src.pageId,
+      // For a page source `channelId` is the lifecycle action.
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  }
   return { trigger, event: event.payload }
 }
 

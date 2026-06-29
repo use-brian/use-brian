@@ -436,6 +436,29 @@ describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(true)
   })
 
+  it('accepts a page event source filtered by lifecycle action', () => {
+    const trigger = {
+      kind: 'event',
+      event: {
+        sources: [
+          {
+            source: { type: 'page', pageId: '11111111-1111-1111-1111-111111111111' },
+            match: { inChannels: ['created'] },
+          },
+        ],
+      },
+    }
+    expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(true)
+  })
+
+  it('rejects a page source whose pageId is not a uuid', () => {
+    const trigger = {
+      kind: 'event',
+      event: { sources: [{ source: { type: 'page', pageId: 'root' } }] },
+    }
+    expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)
+  })
+
   it('rejects an event trigger with an empty sources list', () => {
     const trigger = { kind: 'event', event: { sources: [] } }
     expect(WorkflowTriggerSchema.safeParse(trigger).success).toBe(false)

@@ -91,6 +91,15 @@ export {
 } from './event-trigger.js'
 
 export {
+  PAGE_LIFECYCLE_ACTIONS,
+  PAGE_EVENT_ROOT,
+  pageLifecycleToDispatchEvent,
+  createPageLifecycleTrigger,
+  type PageLifecycleAction,
+  type PageLifecycleEvent,
+} from './page-event-trigger.js'
+
+export {
   CRON_TURN_FRAMING,
   REMINDER_WORKFLOW_DESCRIPTION,
   frameSchedulerPrompt,

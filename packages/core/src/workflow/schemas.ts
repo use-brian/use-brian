@@ -359,9 +359,10 @@ export const STEP_TYPE_VALUES = WORKFLOW_STEP_TYPES
  *   for this workflow. The slug + HMAC secret live in dedicated columns
  *   (`webhook_slug`, `webhook_secret`) so they can be rotated independently.
  * - `event` — fired when an event arrives on any subscribed source whose
- *   optional `match` filter passes. Sources are connector instances and/or
- *   channel integrations — both first-class. `createWorkflowEventDispatcher`
- *   dispatches. See workflow-builder.md §Event trigger.
+ *   optional `match` filter passes. Sources are connector instances, channel
+ *   integrations, and/or doc-page subtrees — all first-class.
+ *   `createWorkflowEventDispatcher` dispatches. See workflow-builder.md
+ *   §Event trigger.
  */
 const triggerScheduleSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('once'), datetime: z.string() }),
@@ -391,6 +392,14 @@ const eventSourceRefSchema = z.discriminatedUnion('type', [
     type: z.literal('channel'),
     channelIntegrationId: z.string().min(1).max(128),
     channel: z.string().min(1).max(64),
+  }),
+  z.object({
+    type: z.literal('page'),
+    // The watched page id. Fires when a page is created/moved directly under it,
+    // or when it is itself updated. The lifecycle action is matched via
+    // `inChannels`, not encoded here — `pageId` is the source identity. uuid-only
+    // by design (the `PAGE_EVENT_ROOT` sentinel is not a valid subscription).
+    pageId: z.string().uuid(),
   }),
 ])
 
