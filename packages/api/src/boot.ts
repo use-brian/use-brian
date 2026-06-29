@@ -131,6 +131,7 @@ import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } fro
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
+import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
 import { createDbAssistantConnectorGrantsStore } from './db/assistant-connector-grants-store.js'
 import { createDbSkillStore, createDbWorkspaceSkillStore, type WorkspaceSkill } from './db/skill-store.js'
@@ -801,6 +802,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
+
+  // ── KB sync-credential resolver ──
+  // Resolves the GitHub PAT a synced knowledge source operates through, by
+  // `(workspaceId, connectorInstanceId)`. The platform passes a closed factory
+  // via `ports.buildSyncCredentials`; the open build falls back to a resolver
+  // over the same connector stores (available in OSS since migration
+  // 280_oss_connectors). Both the edit-proposal routes and the sync worker use
+  // this single instance. See build-sync-credentials.ts.
+  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
+    connectorInstanceStore,
+    connectorGrantStore,
+  }) ?? buildOpenSyncCredentials({ connectorInstanceStore, connectorGrantStore })
 
   const workspaceDirectoryStore: WorkspaceDirectoryStore = {
     async listMembers(userId, workspaceId) {
@@ -2064,12 +2077,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
   }))
 
-  // workspace-scoped knowledge route needs the closed sync-credential provider;
-  // when absent (open) it mounts without the edit-proposal PAT resolution.
+  // workspace-scoped knowledge route resolves edit-proposal PATs through the
+  // same `syncCredentials` resolver the sync worker uses.
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
     connectorInstanceStore,
     connectorGrantStore,
+    syncCredentials,
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
   }))
 
@@ -2497,18 +2511,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (runWorkers) embeddingWorker.start()
 
   // ── Knowledge sync worker ──
-  // The sync-credential provider is closed (api-platform) and arrives via the
-  // `syncCredentials` port. When absent (open standalone build), fall back to a
-  // stub that fails resolution with a clear message — the worker still ticks but
-  // no GitHub source syncs.
-  const syncCredentials: SyncCredentials = ports.buildSyncCredentials?.({
-    connectorInstanceStore,
-    connectorGrantStore,
-  }) ?? {
-    getPat: async () => {
-      throw new Error('GitHub knowledge sync is not configured in this build')
-    },
-  }
+  // Uses the `syncCredentials` resolver built once above (platform closed
+  // factory, or the open resolver over the connector stores).
   const knowledgeSyncWorker = createKnowledgeSyncWorker({
     store: knowledgeStore as never,
     api: {
