@@ -108,6 +108,7 @@ export {
   type SavedViewUpdateFields,
   type SavedViewStore,
   type CreateDraftInput,
+  type PageWriteActor,
 } from './types.js'
 
 export {

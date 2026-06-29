@@ -308,6 +308,8 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
             const draft = await deps.savedViewStore.createDraft({
               userId: context.userId,
               workspaceId: context.workspaceId!,
+              // Assistant-authored — see PageWriteActor (page self-loop guard).
+              writtenBy: 'system',
               name: draftName,
               // Legacy `saved_views.entity` is the closed 5-enum; a custom
               // binding defaults it to 'tasks' (block binding is authoritative).
@@ -598,6 +600,8 @@ export function createRenderChartTool(deps: ViewToolDeps): Tool {
           const draft = await deps.savedViewStore.createDraft({
             userId: context.userId,
             workspaceId: context.workspaceId!,
+            // Assistant-authored — see PageWriteActor (page self-loop guard).
+            writtenBy: 'system',
             name: draftName,
             entity: binding.entity,
             viewType: 'table',
@@ -682,6 +686,8 @@ export function createSaveViewTool(deps: ViewToolDeps): Tool {
         const created = await deps.savedViewStore.create({
           userId: context.userId,
           workspaceId: context.workspaceId!,
+          // Assistant-authored — see PageWriteActor (page self-loop guard).
+          writtenBy: 'system',
           name: input.name,
           description: input.description ?? null,
           binding: parsed.data as BindingConfig,

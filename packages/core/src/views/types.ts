@@ -462,7 +462,25 @@ export type CreateDraftInput = {
    * Omitted / null on every non-workflow path.
    */
   anchorKey?: string | null
+  /** See {@link PageWriteActor}. Defaults to `'user'`. */
+  writtenBy?: PageWriteActor
 }
+
+/**
+ * Who produced a page write, for the workflow `page` event source's self-loop
+ * guard (the page analog of a channel's bot-author flag). A write reaches the
+ * dispatcher as `isBot = writtenBy === 'system'`, and a `page`-source
+ * subscription only fires on a `'system'` write when it set `match.fromBots`.
+ *
+ *  - `'user'` (default) — a human edit through the doc-editor REST routes.
+ *  - `'system'` — any automated / assistant write: a workflow step's page
+ *    anchor (`createAnchorPage`), the assistant doc tools (`createSubPage` /
+ *    `patchPage` / `renderPage`), or an external agent via brain-MCP. This is
+ *    what stops a workflow that writes a page under a page it watches from
+ *    re-triggering itself. See docs/architecture/features/workflow.md → "Page
+ *    event source".
+ */
+export type PageWriteActor = 'user' | 'system'
 
 // ── Store interface ───────────────────────────────────────────────────
 
@@ -473,6 +491,8 @@ export type SavedViewStore = {
     name: string
     description?: string | null
     binding: BindingConfig
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor
   }): Promise<SavedView>
 
   /**
@@ -487,6 +507,8 @@ export type SavedViewStore = {
     userId: string,
     id: string,
     fields: SavedViewUpdateFields,
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor,
   ): Promise<SavedView | null>
 
   /**
@@ -585,6 +607,8 @@ export type SavedViewStore = {
     id: string,
     newNestParentId: string | null,
     position: number,
+    /** See {@link PageWriteActor}. Defaults to `'user'`. */
+    writtenBy?: PageWriteActor,
   ): Promise<boolean>
 
   /**

@@ -594,6 +594,10 @@ export function createRenderPageTool(deps: DocToolDeps): Tool {
         const draft = await deps.savedViewStore.createDraft({
           userId: context.userId,
           workspaceId: context.workspaceId!,
+          // Assistant-authored page write — marks the page event bot-authored
+          // so a watching workflow doesn't loop on its own output (the page
+          // self-loop guard). See views/types.ts → PageWriteActor.
+          writtenBy: 'system',
           name,
           nameOrigin,
           // Explicit page emoji, if the model chose one. `null`/omitted leaves
@@ -867,7 +871,8 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
         }
         if (Object.keys(fields).length === 0) return
         try {
-          await deps.savedViewStore.update(context.userId, input.pageId, fields)
+          // Assistant-authored metadata edit — bot-authored page event.
+          await deps.savedViewStore.update(context.userId, input.pageId, fields, 'system')
         } catch (metaErr) {
           console.warn('[patchPage] page-metadata persist failed:', metaErr)
         }
@@ -1631,6 +1636,8 @@ export function createImportToPageTool(deps: DocToolDeps): Tool {
       const draft = await deps.savedViewStore.createDraft({
         userId: context.userId,
         workspaceId: context.workspaceId!,
+        // Assistant-authored — see PageWriteActor (page self-loop guard).
+        writtenBy: 'system',
         name: baseName,
         nameOrigin: 'user',
         entity: 'tasks',
@@ -1718,6 +1725,8 @@ export function createCreateSubPageTool(deps: DocToolDeps): Tool {
         const draft = await deps.savedViewStore.createDraft({
           userId: context.userId,
           workspaceId: context.workspaceId!,
+          // Assistant-authored — see PageWriteActor (page self-loop guard).
+          writtenBy: 'system',
           name: title,
           // A sub-page is always created with an explicit title → deliberate,
           // so it's frozen against auto-title from birth.
