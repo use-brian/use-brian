@@ -59,6 +59,7 @@ import { Breadcrumb } from "./breadcrumb";
 import { CollabStatusIndicator } from "./error-states";
 import { PresenceAvatars } from "./presence-avatars";
 import { ScheduleBadge } from "./schedule-badge";
+import { PageWorkflowRuns } from "./page-workflow-runs";
 import { CommentHistory } from "./comment-history";
 import { ShareDialog } from "./share-dialog";
 
@@ -315,6 +316,10 @@ export function PageHeader({
           {view.scheduledJobs && view.scheduledJobs.length > 0 && (
             <ScheduleBadge jobs={view.scheduledJobs} />
           )}
+
+          {/* Workflow runs this page triggered (migration 282) — self-fetches
+              and renders nothing unless the page has fired a run. */}
+          <PageWorkflowRuns pageId={view.id} workspaceId={view.workspaceId} />
 
           <PresenceAvatars users={presence} />
 

@@ -639,6 +639,14 @@ export const zh: Dictionary = {
     cadenceUnknown: "已排程",
     // 星期簡稱，索引 0＝週日 … 6＝週六（週期顯示用）。
     scheduleDays: ["日", "一", "二", "三", "四", "五", "六"],
+    workflowRuns: {
+      badge: "工作流程",
+      badgeAria: "此頁面觸發的工作流程",
+      title: "已觸發的工作流程",
+      hint: "此頁面啟動的工作流程。開啟即可查看完整執行記錄。",
+      started: "開始於 {when}",
+      viewRun: "查看執行",
+    },
     presenceGroupAria: "正在檢視此頁面的成員",
     presenceSelf: "{name}（你）",
     presenceOverflow: "其他 {count} 人",

@@ -648,6 +648,14 @@ export const ja: Dictionary = {
     cadenceUnknown: "スケジュール済み",
     // 曜日の短縮ラベル。0＝日曜〜6＝土曜（週次の周期表示）。
     scheduleDays: ["日", "月", "火", "水", "木", "金", "土"],
+    workflowRuns: {
+      badge: "ワークフロー",
+      badgeAria: "このページが起動したワークフロー",
+      title: "起動したワークフロー",
+      hint: "このページが開始したワークフローです。実行の詳細は開いて確認できます。",
+      started: "開始 {when}",
+      viewRun: "実行を表示",
+    },
     presenceGroupAria: "このページを開いているメンバー",
     presenceSelf: "{name}（あなた）",
     presenceOverflow: "他{count}人",

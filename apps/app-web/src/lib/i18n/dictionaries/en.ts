@@ -731,6 +731,15 @@ export const en = {
     cadenceUnknown: "Scheduled",
     // Short weekday labels, indexed 0 = Sunday … 6 = Saturday (weekly cadence).
     scheduleDays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    // Workflow-runs chip (migration 282) — the workflows this page triggered.
+    workflowRuns: {
+      badge: "Workflows",
+      badgeAria: "Workflows this page triggered",
+      title: "Triggered workflows",
+      hint: "Workflows this page started. Open one for its full run.",
+      started: "Started {when}",
+      viewRun: "View run",
+    },
     // Live presence face-pile (collaborators on the page right now)
     presenceGroupAria: "People on this page",
     presenceSelf: "{name} (you)",

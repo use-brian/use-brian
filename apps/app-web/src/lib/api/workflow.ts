@@ -374,6 +374,35 @@ export async function listWorkflowRuns(
   return Array.isArray(data.runs) ? data.runs : [];
 }
 
+/**
+ * One run a doc page triggered, for the page-header feedback chip. Keyed on the
+ * CHANGED page (`workflow_runs.trigger_page_id`). `outcomeSummary` is present
+ * once the run terminates. Mirrors the server `PageWorkflowRunSummary`.
+ */
+export type PageWorkflowRunSummary = {
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  status: WorkflowRunSummary["status"];
+  startedAt: string;
+  finishedAt: string | null;
+  outcomeSummary: string | null;
+};
+
+/** List the workflow runs a doc page triggered, newest first. */
+export async function listPageWorkflowRuns(
+  pageId: string,
+  limit = 20,
+): Promise<PageWorkflowRunSummary[]> {
+  const q = new URLSearchParams({ limit: String(limit) });
+  const res = await authFetch(
+    `${API_URL}/api/pages/${encodeURIComponent(pageId)}/workflow-runs?${q.toString()}`,
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as { runs?: PageWorkflowRunSummary[] };
+  return Array.isArray(data.runs) ? data.runs : [];
+}
+
 export async function getWorkflowRun(
   workflowId: string,
   runId: string,
