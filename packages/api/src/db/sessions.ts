@@ -768,8 +768,34 @@ export async function getGroupChatContext(params: {
 }
 
 /**
+ * Stable, content-free label for a distinct group participant ("User A",
+ * "User B", … "User Z", "User AA", …). Derived purely from the index of
+ * first appearance among the *resolved* (transport-authenticated) user ids —
+ * never from any name found in message content. This is what keeps sender
+ * identity out of the model-facing text: the model can tell participants
+ * apart structurally without ever reading a `transportId` or display name.
+ */
+function participantLabel(index: number): string {
+  let n = index
+  let label = ''
+  do {
+    label = String.fromCharCode(65 + (n % 26)) + label
+    n = Math.floor(n / 26) - 1
+  } while (n >= 0)
+  return `User ${label}`
+}
+
+/**
  * Format group chat messages into a system prompt context section.
- * Extracts text from content blocks and labels messages by role.
+ *
+ * Identity-primitive invariant: each message's author is rendered from its
+ * *resolved* `userId` (a transport-authenticated fact) mapped to a neutral,
+ * stable label — never from a sender name, JID, or any string parsed from
+ * message content. A raw `userId`/`transportId` must never reach the model.
+ * The current user is "Current user"; every other distinct participant gets a
+ * stable "User A"/"User B"/… so the model can attribute turns across senders
+ * even when they share one channel session. See
+ * docs/architecture/channels/channel-identity-primitive.md.
  */
 export function buildGroupChatContextPrompt(
   messages: Array<{ role: string; content: unknown; userId: string; createdAt: Date }>,
@@ -788,20 +814,31 @@ export function buildGroupChatContextPrompt(
     return '(non-text content)'
   }
 
+  // Assign each distinct non-current author a stable neutral label in order
+  // of first appearance. Keyed on the resolved userId only.
+  const labelByUser = new Map<string, string>()
+  function labelFor(userId: string): string {
+    if (userId === currentUserId) return 'Current user'
+    const existing = labelByUser.get(userId)
+    if (existing) return existing
+    const label = participantLabel(labelByUser.size)
+    labelByUser.set(userId, label)
+    return label
+  }
+
   const lines = messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => {
       const text = extractText(m.content)
       if (!text.trim()) return null
       if (m.role === 'assistant') return `You (assistant): ${text}`
-      const label = m.userId === currentUserId ? 'Current user' : 'Another user'
-      return `${label}: ${text}`
+      return `${labelFor(m.userId)}: ${text}`
     })
     .filter(Boolean)
 
   if (lines.length === 0) return ''
 
-  return `# Recent channel conversation\n\nThe following is the recent conversation in this group chat channel. Multiple users may be participating. Use this to understand the full context of what was said, including your own previous replies to other users.\n\n${lines.join('\n')}`
+  return `# Recent channel conversation\n\nThe following is the recent conversation in this group chat channel. Multiple users may be participating, each shown with a stable neutral label ("Current user", "User A", "User B", …). Use this to understand the full context of what was said, including your own previous replies to other users.\n\n${lines.join('\n')}`
 }
 
 /**

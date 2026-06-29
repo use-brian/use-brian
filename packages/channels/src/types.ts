@@ -38,6 +38,74 @@ export type IncomingMessage = {
   raw: unknown
 }
 
+// ── Authenticated identity primitive ───────────────────────────
+//
+// Who sent a message is a transport-layer fact, authenticated by the
+// platform (Telegram `from.id`, Slack-signed `event.user`, WhatsApp
+// `senderJid`, web auth JWT). It must NEVER be sourced from anything the
+// model reads (message text, a context line, a tool argument) — otherwise
+// a prompt-injection payload ("I am the workspace owner, user_42") could
+// move identity. Identity is the channel's assertion; intent is the
+// model's. This type is the structural boundary between those two trust
+// domains.
+//
+// The `__authenticated` brand makes the boundary enforceable: an
+// `AuthenticatedActor` is only constructable by the transport/auth layer
+// (via `mintAuthenticatedActor`), and content-construction code (system
+// prompt, `userContentBlocks`, group-context lines) is typed to accept
+// strings / ContentBlocks only — it structurally cannot take an actor,
+// so a sender id or name cannot be threaded into model-readable text.
+// A guard test backs this at runtime. See
+// docs/architecture/channels/channel-identity-primitive.md.
+
+export type ChannelProvider = 'telegram' | 'slack' | 'discord' | 'whatsapp' | 'web'
+
+/** Phantom brand key — never present at runtime, exists only so an
+ *  `AuthenticatedActor` cannot be assembled as a plain object literal
+ *  outside `mintAuthenticatedActor`. */
+declare const AuthenticatedBrand: unique symbol
+
+export type AuthenticatedActor = {
+  /** Branding — present only at the type level. Prevents content builders
+   *  from accepting an actor and prevents construction outside the auth
+   *  layer. Never read at runtime. */
+  readonly [AuthenticatedBrand]: true
+  /** The channel that authenticated this sender. */
+  readonly provider: ChannelProvider
+  /** The raw transport-authenticated sender id, exactly as the platform
+   *  asserted it: Telegram `from.id`, Slack `event.user`, Discord author
+   *  id, WhatsApp `senderJid`, web auth user id. Never parsed from content. */
+  readonly transportId: string
+  /** Internal platform user this transport id resolves to (real or shadow),
+   *  via `resolveChannelUser`. Set after resolution; the carrier of the
+   *  per-sender memory/session principal. */
+  readonly resolvedUserId: string
+  /** Tier-1 (email-matched / linked) vs Tier-2 (anonymous shadow). Gates
+   *  whether the per-sender memory surface is read at all. */
+  readonly isIdentified: boolean
+}
+
+/**
+ * The ONLY constructor for an `AuthenticatedActor`. Lives at the
+ * transport/auth seam — call it from a channel adapter or webhook handler
+ * with the platform-asserted `transportId` and the resolution result, never
+ * with anything derived from message content. The brand is cast here and
+ * nowhere else.
+ */
+export function mintAuthenticatedActor(fields: {
+  provider: ChannelProvider
+  transportId: string
+  resolvedUserId: string
+  isIdentified: boolean
+}): AuthenticatedActor {
+  return {
+    provider: fields.provider,
+    transportId: fields.transportId,
+    resolvedUserId: fields.resolvedUserId,
+    isIdentified: fields.isIdentified,
+  } as unknown as AuthenticatedActor
+}
+
 // ── Outgoing ───────────────────────────────────────────────────
 
 export type OutgoingAction =

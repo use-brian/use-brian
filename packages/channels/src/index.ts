@@ -1,4 +1,5 @@
-export type { ChannelAdapter, IncomingMessage, IncomingFile, OutgoingMessage, OutgoingAction, OutgoingDocument } from './types.js'
+export type { ChannelAdapter, IncomingMessage, IncomingFile, OutgoingMessage, OutgoingAction, OutgoingDocument, AuthenticatedActor, ChannelProvider } from './types.js'
+export { mintAuthenticatedActor } from './types.js'
 export { chunkText } from './chunking.js'
 export { createDedupBuffer } from './dedup.js'
 export * from './telegram/index.js'
