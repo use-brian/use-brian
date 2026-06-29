@@ -194,6 +194,7 @@ import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
+import { publishPageLifecycle } from './page-event-fanout.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -606,7 +607,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowStore = createDbWorkflowStore()
   const workflowRunStore = createDbWorkflowRunStore()
   const pendingApprovalsStore = createPendingApprovalsStore()
-  const savedViewStore = createDbSavedViewStore()
+  // `onPageLifecycle` feeds page create / update / move into the workflow
+  // event-trigger dispatcher (the `page` event source). `publishPageLifecycle`
+  // is a no-op until the dispatcher is bound via `setPageEventDispatcher`
+  // (closed app boot) — see page-event-fanout.ts.
+  const savedViewStore = createDbSavedViewStore({ onPageLifecycle: publishPageLifecycle })
   const pageTemplateStore = createDbPageTemplateStore()
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
@@ -1152,6 +1157,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           nestParentId: nestUnder ?? null,
           originPrompt: originPrompt ?? null,
           anchorKey: anchorKey ?? null,
+          // Workflow-authored anchor page — bot-authored page event so a
+          // workflow watching `nestUnder` doesn't re-trigger on its own anchor.
+          writtenBy: 'system',
         })
         await savedViewStore.setState(userId, draft.id, 'saved')
         return { id: draft.id }

@@ -407,3 +407,69 @@ describe('[COMP:api/saved-views-store] list filters', () => {
     expect(params).toContain('draft')
   })
 })
+
+describe('[COMP:api/saved-views-store] page-lifecycle emit (writtenBy → isSystem)', () => {
+  const ROW = {
+    id: VIEW_ID,
+    workspaceId: WORKSPACE_ID,
+    createdBy: USER_ID,
+    name: 'Spec',
+    nameOrigin: 'user',
+    description: null,
+    icon: null,
+    entity: 'tasks',
+    viewType: 'table',
+    binding: { entity: 'tasks', viewType: 'table' },
+    page: { blocks: [] },
+    state: 'draft',
+    nestParentId: null,
+    position: 0,
+    autoPruneAt: new Date('2026-06-25T00:00:00Z'),
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }
+
+  const draftArgs = {
+    userId: USER_ID,
+    workspaceId: WORKSPACE_ID,
+    name: 'Spec',
+    entity: 'tasks' as const,
+    viewType: 'table' as const,
+    binding: { entity: 'tasks' as const, viewType: 'table' as const },
+    page: { blocks: [] },
+  }
+
+  it('defaults to a human write (isSystem=false) when writtenBy is omitted', async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.createDraft(draftArgs)
+    expect(onPageLifecycle).toHaveBeenCalledTimes(1)
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'created',
+      isSystem: false,
+    })
+  })
+
+  it("marks isSystem=true when writtenBy: 'system' (the page self-loop guard)", async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.createDraft({ ...draftArgs, writtenBy: 'system' })
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'created',
+      isSystem: true,
+    })
+  })
+
+  it("update threads writtenBy: 'system' to the emitted event", async () => {
+    const onPageLifecycle = vi.fn()
+    const s = createDbSavedViewStore({ onPageLifecycle })
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [ROW], rowCount: 1 } as never)
+    await s.update(USER_ID, VIEW_ID, { name: 'Renamed' }, 'system')
+    expect(onPageLifecycle.mock.calls[0][0]).toMatchObject({
+      action: 'updated',
+      isSystem: true,
+    })
+  })
+})

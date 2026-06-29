@@ -22,6 +22,7 @@ import type {
   CreateDraftInput,
   NameOrigin,
   Page,
+  PageLifecycleEvent,
   SavedView,
   SavedViewListFilters,
   SavedViewListRow,
@@ -213,9 +214,33 @@ export function reparentWouldCycle(
 
 // ── Factory ───────────────────────────────────────────────────────────
 
-export function createDbSavedViewStore(): SavedViewStore {
+/** Construction deps for the saved-views store. */
+export type DbSavedViewStoreDeps = {
+  /**
+   * Best-effort page-lifecycle sink — fired after a successful create / update
+   * / move so the workflow event-trigger dispatcher can run `page`-source
+   * workflows. Synchronous and fire-and-forget by contract (the store does not
+   * await it); a thrown error is swallowed so it never fails a page write.
+   * Wired to `publishPageLifecycle` (`../page-event-fanout.ts`) at boot;
+   * absent in tests and open builds with no dispatcher.
+   */
+  onPageLifecycle?: (event: PageLifecycleEvent) => void
+}
+
+export function createDbSavedViewStore(
+  deps: DbSavedViewStoreDeps = {},
+): SavedViewStore {
+  // Best-effort emit — a broken sink must never break a page write.
+  const emitLifecycle = (event: PageLifecycleEvent): void => {
+    if (!deps.onPageLifecycle) return
+    try {
+      deps.onPageLifecycle(event)
+    } catch {
+      // swallow — the page write already succeeded
+    }
+  }
   return {
-    async create({ userId, workspaceId, name, description, binding }) {
+    async create({ userId, workspaceId, name, description, binding, writtenBy }) {
       // Manual /views/new — defaults to 'saved' (the user explicitly
       // created the view through the form). No auto-prune timestamp.
       // Page is seeded as a one-block data page so the new readers can
@@ -248,7 +273,17 @@ export function createDbSavedViewStore(): SavedViewStore {
           JSON.stringify(page),
         ],
       )
-      return rowToFull(result.rows[0])
+      const view = rowToFull(result.rows[0])
+      emitLifecycle({
+        workspaceId: view.workspaceId,
+        pageId: view.id,
+        parentId: view.nestParentId ?? null,
+        title: view.name,
+        actorId: userId,
+        action: 'created',
+        isSystem: writtenBy === 'system',
+      })
+      return view
     },
 
     async getById(userId, id) {
@@ -289,7 +324,7 @@ export function createDbSavedViewStore(): SavedViewStore {
       return result.rows.map(rowToList)
     },
 
-    async update(userId, id, fields: SavedViewUpdateFields) {
+    async update(userId, id, fields: SavedViewUpdateFields, writtenBy) {
       const sets: string[] = []
       const values: unknown[] = []
       let idx = 1
@@ -360,7 +395,22 @@ export function createDbSavedViewStore(): SavedViewStore {
          RETURNING ${FULL_SELECT}`,
         values,
       )
-      return result.rows[0] ? rowToFull(result.rows[0]) : null
+      if (!result.rows[0]) return null
+      const view = rowToFull(result.rows[0])
+      // Real metadata change (rename / icon / clearance / binding / brain-sync).
+      // The no-op early-return above never reaches here, and the guarded
+      // placeholder→auto title transition runs through `setAutoTitle`, not this
+      // path, so the auto-titler never self-fires an `updated` event.
+      emitLifecycle({
+        workspaceId: view.workspaceId,
+        pageId: view.id,
+        parentId: view.nestParentId ?? null,
+        title: view.name,
+        actorId: userId,
+        action: 'updated',
+        isSystem: writtenBy === 'system',
+      })
+      return view
     },
 
     async remove(userId, id) {
@@ -418,7 +468,7 @@ export function createDbSavedViewStore(): SavedViewStore {
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy }) {
       const days = autoPruneDays ?? DEFAULT_DRAFT_TTL_DAYS
       const autoPruneAt = addDays(new Date(), days)
       // Snapshot the genesis prompt (migration 231). Trim + cap so a pasted
@@ -470,7 +520,17 @@ export function createDbSavedViewStore(): SavedViewStore {
           anchorKey ?? null,
         ],
       )
-      return rowToFull(result.rows[0])
+      const view = rowToFull(result.rows[0])
+      emitLifecycle({
+        workspaceId: view.workspaceId,
+        pageId: view.id,
+        parentId: view.nestParentId ?? null,
+        title: view.name,
+        actorId: userId,
+        action: 'created',
+        isSystem: writtenBy === 'system',
+      })
+      return view
     },
 
     async findIdByAnchorKey(userId, workspaceId, anchorKey) {
@@ -511,7 +571,7 @@ export function createDbSavedViewStore(): SavedViewStore {
 
     // ── Doc page-tree (migration 210) ──────────────────────────────
 
-    async reparent(userId, id, newNestParentId, position) {
+    async reparent(userId, id, newNestParentId, position, writtenBy) {
       // 1. Cycle guard. Walk up the ancestor chain from the destination
       //    parent (RLS-scoped reads) and refuse the move if it would form
       //    a loop. Done before opening the write transaction so a rejected
@@ -564,8 +624,8 @@ export function createDbSavedViewStore(): SavedViewStore {
         // capture its workspace so the sibling-set operations stay scoped
         // to one workspace (critical for the root list — `nest_parent_id
         // IS NULL` would otherwise span every workspace the user can see).
-        const found = await client.query<{ workspaceId: string }>(
-          `SELECT workspace_id AS "workspaceId" FROM saved_views WHERE id = $1 FOR UPDATE`,
+        const found = await client.query<{ workspaceId: string; name: string }>(
+          `SELECT workspace_id AS "workspaceId", name FROM saved_views WHERE id = $1 FOR UPDATE`,
           [id],
         )
         if (found.rows.length === 0) {
@@ -573,6 +633,7 @@ export function createDbSavedViewStore(): SavedViewStore {
           return false
         }
         const workspaceId = found.rows[0].workspaceId
+        const movedName = found.rows[0].name
 
         // Open a gap at the requested slot among the destination siblings,
         // then place the moved row there. `nest_parent_id IS NOT DISTINCT
@@ -614,6 +675,17 @@ export function createDbSavedViewStore(): SavedViewStore {
         )
 
         await client.query('COMMIT')
+        // Emit after the move commits — `newNestParentId` is the destination
+        // parent (null = workspace root).
+        emitLifecycle({
+          workspaceId,
+          pageId: id,
+          parentId: newNestParentId,
+          title: movedName,
+          actorId: userId,
+          action: 'moved',
+          isSystem: writtenBy === 'system',
+        })
         return true
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
