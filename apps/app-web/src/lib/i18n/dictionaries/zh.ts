@@ -1992,7 +1992,7 @@ export const zh: Dictionary = {
       // ── 事件觸發 ─────────────────────────────────────────────────
       triggerEvent: "事件發生時",
       triggerEventHint:
-        "當連接器或聊天頻道產生符合條件的事件時執行。",
+        "當連接器、聊天頻道或文件頁面產生符合條件的事件時執行。",
       eventSourcesHeading: "訂閱的來源",
       eventSourceAddBtn: "+ 新增來源",
       eventSourceRemove: "移除來源",
@@ -2001,12 +2001,24 @@ export const zh: Dictionary = {
       eventSourceKindLabel: "來源類型",
       eventSourceKindConnector: "連接器",
       eventSourceKindChannel: "聊天頻道",
+      eventSourceKindPage: "文件頁面",
       eventSourcePickConnector: "選擇連接器",
       eventSourcePickChannel: "選擇頻道",
+      eventSourcePickPage: "選擇要監看的頁面",
       eventSourceNoConnectors:
         "工作空間尚無連接器，請至 Studio → Connectors 新增。",
       eventSourceNoChannels:
         "工作空間尚無啟用中的聊天頻道，請至 Studio → Channels 新增。",
+      eventSourceNoPages:
+        "尚無頁面。請先建立頁面，即可在此監看。",
+      eventPageWatchForLabel: "監看項目",
+      eventPageWatchChildren: "有頁面在此頁面下被建立或移入",
+      eventPageWatchUpdated: "此頁面本身被更新",
+      eventPageChangedByLabel: "變更者（選填）",
+      eventPageChangedByHint:
+        "僅在這些成員進行變更時觸發。留空則任何人皆可。",
+      eventPageChangedByAdd: "新增成員",
+      eventPageChangedByEmpty: "沒有可篩選的工作空間成員。",
       eventSourceNotConnected: "（未連接）",
       eventMatchHeading: "比對條件（選填）",
       eventMatchAllHint:

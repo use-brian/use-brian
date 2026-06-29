@@ -2185,7 +2185,7 @@ export const en = {
       // ── Event trigger UI ─────────────────────────────────────────────
       triggerEvent: "On an event",
       triggerEventHint:
-        "Runs when a connector or chat channel produces a matching event.",
+        "Runs when a connector, chat channel, or doc page produces a matching event.",
       eventSourcesHeading: "Subscribed sources",
       eventSourceAddBtn: "+ Add source",
       eventSourceRemove: "Remove source",
@@ -2193,12 +2193,24 @@ export const en = {
       eventSourceKindLabel: "Source kind",
       eventSourceKindConnector: "Connector",
       eventSourceKindChannel: "Chat channel",
+      eventSourceKindPage: "Doc page",
       eventSourcePickConnector: "Pick a connector",
       eventSourcePickChannel: "Pick a channel",
+      eventSourcePickPage: "Pick a page to watch",
       eventSourceNoConnectors:
         "No workspace connectors yet. Add one in Studio → Connectors.",
       eventSourceNoChannels:
         "No active chat channels yet. Add one in Studio → Channels.",
+      eventSourceNoPages:
+        "No pages yet. Create a page first, then you can watch it here.",
+      eventPageWatchForLabel: "Watch for",
+      eventPageWatchChildren: "A page is created or moved under it",
+      eventPageWatchUpdated: "This page is updated",
+      eventPageChangedByLabel: "Changed by (optional)",
+      eventPageChangedByHint:
+        "Only fire when one of these members made the change. Leave empty for anyone.",
+      eventPageChangedByAdd: "Add a member",
+      eventPageChangedByEmpty: "No workspace members to filter by.",
       eventSourceNotConnected: "(not connected)",
       eventMatchHeading: "Match (optional)",
       eventMatchAllHint:

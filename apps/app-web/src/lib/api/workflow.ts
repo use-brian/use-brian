@@ -53,6 +53,16 @@ export type EventSourceRef =
       channelIntegrationId: string;
       /** Denormalized channel type — 'slack' | 'telegram' | 'whatsapp'. */
       channel: string;
+    }
+  | {
+      type: "page";
+      /**
+       * The watched page (`saved_views.id`). Fires when a page is created or
+       * moved directly under it, or when it is itself updated. The lifecycle
+       * action (`created` | `updated` | `moved`) rides the `match.inChannels`
+       * sub-channel.
+       */
+      pageId: string;
     };
 
 /**
@@ -582,6 +592,61 @@ export type WorkspaceChannelOption = {
   channelType: "slack" | "telegram" | "whatsapp";
   displayName: string;
 };
+
+export type WorkspacePageOption = {
+  /** `saved_views.id` — the parent page a `page` event source watches. */
+  id: string;
+  label: string;
+  /** Page emoji, or null for the derived glyph. */
+  icon: string | null;
+};
+
+/**
+ * The workspace's doc pages, for the `page` event-source parent picker. Thin
+ * reader over the same saved-views list the sidebar tree uses; any page can be
+ * a watched parent (the source fires on its direct children's lifecycle).
+ */
+export async function listWorkspacePageOptions(
+  workspaceId: string,
+): Promise<WorkspacePageOption[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/saved-views?state=all`,
+  );
+  if (!res.ok) return [];
+  type Row = { id: string; name: string; icon: string | null };
+  const data = (await res.json()) as { savedViews?: Row[] } | null;
+  const rows = Array.isArray(data?.savedViews) ? data!.savedViews : [];
+  return rows.map((r) => ({ id: r.id, label: r.name, icon: r.icon ?? null }));
+}
+
+export type WorkspaceMemberOption = {
+  /** `users.id` — the value stored in a page source's `match.fromActors`. */
+  id: string;
+  label: string;
+};
+
+/**
+ * The workspace's members, for the page event-source "Changed by" picker. The
+ * page `actorId` is the workspace user id of whoever wrote the page, so this
+ * lets the builder filter by member NAME while storing the user id. Backed by
+ * the workspace-detail route (`GET /api/workspaces/:id` → `members[]`), the
+ * same source the doc `@`-mention popup uses.
+ */
+export async function listWorkspaceMemberOptions(
+  workspaceId: string,
+): Promise<WorkspaceMemberOption[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}`,
+  );
+  if (!res.ok) return [];
+  type Row = { userId: string; userName: string | null; email: string | null };
+  const data = (await res.json()) as { members?: Row[] } | null;
+  const rows = Array.isArray(data?.members) ? data!.members : [];
+  return rows.map((m) => ({
+    id: m.userId,
+    label: m.userName || m.email || "Member",
+  }));
+}
 
 /**
  * Recent chat destinations the workspace's bots have talked in — backs the

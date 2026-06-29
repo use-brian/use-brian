@@ -26,10 +26,14 @@ import type {
   WorkflowTrigger,
   WorkspaceChannelOption,
   WorkspaceConnectorOption,
+  WorkspaceMemberOption,
+  WorkspacePageOption,
 } from "@/lib/api/workflow";
 import {
   listWorkspaceChannelOptions,
   listWorkspaceConnectorOptions,
+  listWorkspaceMemberOptions,
+  listWorkspacePageOptions,
 } from "@/lib/api/workflow";
 import {
   appendChip,
@@ -62,18 +66,24 @@ export function EventTriggerFields({
   const t = useT();
   const [connectors, setConnectors] = useState<WorkspaceConnectorOption[]>([]);
   const [channels, setChannels] = useState<WorkspaceChannelOption[]>([]);
+  const [pages, setPages] = useState<WorkspacePageOption[]>([]);
+  const [members, setMembers] = useState<WorkspaceMemberOption[]>([]);
 
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
     void (async () => {
-      const [cList, chList] = await Promise.all([
+      const [cList, chList, pgList, mList] = await Promise.all([
         listWorkspaceConnectorOptions(workspaceId),
         listWorkspaceChannelOptions(workspaceId),
+        listWorkspacePageOptions(workspaceId),
+        listWorkspaceMemberOptions(workspaceId),
       ]);
       if (cancelled) return;
       setConnectors(cList);
       setChannels(chList);
+      setPages(pgList);
+      setMembers(mList);
     })();
     return () => {
       cancelled = true;
@@ -156,10 +166,36 @@ export function EventTriggerFields({
                 sub={sub}
                 connectors={connectors}
                 channels={channels}
+                pages={pages}
                 onChange={(next) => updateSource(idx, next)}
                 onRemove={() => removeSource(idx)}
                 disabled={disabled}
               />
+              {sub.source.type === "page" && (
+                <>
+                  <PageWatchFor
+                    match={sub.match ?? {}}
+                    onChange={(next) =>
+                      updateSource(idx, { ...sub, match: next })
+                    }
+                    disabled={disabled}
+                  />
+                  <PageActorPicker
+                    value={sub.match?.fromActors ?? []}
+                    options={members}
+                    onChange={(next) =>
+                      updateSource(idx, {
+                        ...sub,
+                        match: {
+                          ...(sub.match ?? {}),
+                          fromActors: next.length ? next : undefined,
+                        },
+                      })
+                    }
+                    disabled={disabled}
+                  />
+                </>
+              )}
               <MatchEditor
                 match={sub.match ?? {}}
                 onChange={(next) =>
@@ -168,6 +204,13 @@ export function EventTriggerFields({
                     match: anyMatchSet(next) ? next : undefined,
                   })
                 }
+                // For a page source: `inChannels` is owned by the `PageWatchFor`
+                // toggle, `fromActors` by the member-name `PageActorPicker`, and
+                // `mentions` has no page meaning — hide all three so the generic
+                // match form keeps only `keywords` + `fromBots`.
+                hideInChannels={sub.source.type === "page"}
+                hideFromActors={sub.source.type === "page"}
+                hideMentions={sub.source.type === "page"}
                 disabled={disabled}
               />
             </li>
@@ -194,6 +237,7 @@ function SourceRow({
   sub,
   connectors,
   channels,
+  pages,
   onChange,
   onRemove,
   disabled,
@@ -201,6 +245,7 @@ function SourceRow({
   sub: EventSubscription;
   connectors: WorkspaceConnectorOption[];
   channels: WorkspaceChannelOption[];
+  pages: WorkspacePageOption[];
   onChange: (next: EventSubscription) => void;
   onRemove: () => void;
   disabled?: boolean;
@@ -208,8 +253,13 @@ function SourceRow({
   const t = useT();
   const kind = sub.source.type;
 
-  const setKind = (next: "connector" | "channel") => {
+  const setKind = (next: "connector" | "channel" | "page") => {
     if (next === kind) return;
+    // `inChannels` is kind-specific (channel ids for connector/channel, the
+    // lifecycle-action mode for page), so reset it on a kind switch.
+    const carriedMatch = sub.match
+      ? { ...sub.match, inChannels: undefined }
+      : undefined;
     if (next === "connector") {
       const first = connectors.find((c) => c.connected) ?? connectors[0];
       onChange({
@@ -220,9 +270,9 @@ function SourceRow({
               provider: first.provider,
             }
           : { type: "connector", connectorInstanceId: "", provider: "" },
-        match: sub.match,
+        match: carriedMatch,
       });
-    } else {
+    } else if (next === "channel") {
       const first = channels[0];
       onChange({
         source: first
@@ -232,7 +282,15 @@ function SourceRow({
               channel: first.channelType,
             }
           : { type: "channel", channelIntegrationId: "", channel: "" },
-        match: sub.match,
+        match: carriedMatch,
+      });
+    } else {
+      const first = pages[0];
+      onChange({
+        source: { type: "page", pageId: first ? first.id : "" },
+        // Default the page mode to "a page is created or moved under it" (the
+        // headline case); the `PageWatchFor` toggle flips it to "updated".
+        match: { ...carriedMatch, inChannels: ["created", "moved"] },
       });
     }
   };
@@ -255,6 +313,12 @@ function SourceRow({
           disabled={disabled}
           onClick={() => setKind("channel")}
         />
+        <KindPill
+          label={t.workflowPage.builder.eventSourceKindPage}
+          active={kind === "page"}
+          disabled={disabled}
+          onClick={() => setKind("page")}
+        />
         <button
           type="button"
           onClick={onRemove}
@@ -264,7 +328,7 @@ function SourceRow({
           {t.workflowPage.builder.eventSourceRemove}
         </button>
       </div>
-      {kind === "connector" ? (
+      {kind === "connector" && (
         <ConnectorPicker
           value={
             sub.source.type === "connector"
@@ -284,7 +348,8 @@ function SourceRow({
           }
           disabled={disabled}
         />
-      ) : (
+      )}
+      {kind === "channel" && (
         <ChannelPicker
           value={
             sub.source.type === "channel" ? sub.source.channelIntegrationId : ""
@@ -297,6 +362,19 @@ function SourceRow({
                 channelIntegrationId: id,
                 channel,
               },
+              match: sub.match,
+            })
+          }
+          disabled={disabled}
+        />
+      )}
+      {kind === "page" && (
+        <PagePicker
+          value={sub.source.type === "page" ? sub.source.pageId : ""}
+          options={pages}
+          onChange={(id) =>
+            onChange({
+              source: { type: "page", pageId: id },
               match: sub.match,
             })
           }
@@ -355,8 +433,15 @@ function ConnectorPicker({
       </div>
     );
   }
+  // `items` lets base-ui render the selected connector's NAME on the trigger
+  // (otherwise it shows the raw connector_instance id until the dropdown opens).
+  const items = options.map((o) => ({
+    value: o.id,
+    label: `${o.label} (${o.provider})`,
+  }));
   return (
     <Select
+      items={items}
       value={value || undefined}
       onValueChange={(v) => {
         if (!v) return;
@@ -399,8 +484,15 @@ function ChannelPicker({
       </div>
     );
   }
+  // `items` lets base-ui render the selected channel's NAME on the trigger
+  // (otherwise it shows the raw channel_integrations id until the dropdown opens).
+  const items = options.map((o) => ({
+    value: o.id,
+    label: `${o.displayName} (${o.channelType})`,
+  }));
   return (
     <Select
+      items={items}
       value={value || undefined}
       onValueChange={(v) => {
         if (!v) return;
@@ -423,15 +515,238 @@ function ChannelPicker({
   );
 }
 
-// ── Match editor ──────────────────────────────────────────────────────────
+function PagePicker({
+  value,
+  options,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  options: WorkspacePageOption[];
+  onChange: (id: string) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  if (options.length === 0) {
+    return (
+      <div className="text-xs text-amber-700 dark:text-amber-400">
+        {t.workflowPage.builder.eventSourceNoPages}
+      </div>
+    );
+  }
+  // `items` lets base-ui render the selected page's NAME on the trigger even
+  // before the dropdown is first opened (when editing a saved workflow); without
+  // it `SelectValue` falls back to the raw id.
+  const items = options.map((o) => ({
+    value: o.id,
+    label: `${o.icon ? `${o.icon} ` : ""}${o.label}`,
+  }));
+  return (
+    <div className="flex flex-col gap-1">
+      <Select
+        items={items}
+        value={value || undefined}
+        onValueChange={(v) => {
+          if (v) onChange(v);
+        }}
+        disabled={disabled}
+      >
+        <SelectTrigger className="w-full max-w-md text-sm">
+          <SelectValue placeholder={t.workflowPage.builder.eventSourcePickPage} />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((o) => (
+            <SelectItem key={o.id} value={o.id}>
+              {o.icon ? `${o.icon} ` : ""}
+              {o.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
 
-function MatchEditor({
+/**
+ * The two-option "Watch for" toggle on a page source. It owns the lifecycle
+ * action, stored as `match.inChannels`: "a page is created or moved under it"
+ * → `['created', 'moved']`; "this page is updated" → `['updated']`. (The raw
+ * `inChannels` chips are hidden for page sources — this is the only control.)
+ */
+function PageWatchFor({
   match,
   onChange,
   disabled,
 }: {
   match: EventMatch;
   onChange: (next: EventMatch) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const mode: "children" | "updated" = (match.inChannels ?? []).includes(
+    "updated",
+  )
+    ? "updated"
+    : "children";
+  const setMode = (next: "children" | "updated") =>
+    onChange({
+      ...match,
+      inChannels: next === "updated" ? ["updated"] : ["created", "moved"],
+    });
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-muted-foreground">
+        {t.workflowPage.builder.eventPageWatchForLabel}
+      </div>
+      <WatchForOption
+        label={t.workflowPage.builder.eventPageWatchChildren}
+        active={mode === "children"}
+        disabled={disabled}
+        onSelect={() => setMode("children")}
+      />
+      <WatchForOption
+        label={t.workflowPage.builder.eventPageWatchUpdated}
+        active={mode === "updated"}
+        disabled={disabled}
+        onSelect={() => setMode("updated")}
+      />
+    </div>
+  );
+}
+
+/**
+ * "Changed by" picker on a page source — a member-name dropdown that stores the
+ * selected workspace user ids in `match.fromActors`. A page event's `actorId`
+ * is the workspace user id of whoever wrote the page, so this filters by member
+ * NAME while persisting ids (the raw `fromActors` chips, which would need a user
+ * UUID typed by hand, are hidden for page sources).
+ */
+function PageActorPicker({
+  value,
+  options,
+  onChange,
+  disabled,
+}: {
+  value: string[];
+  options: WorkspaceMemberOption[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const labelFor = (id: string) =>
+    options.find((o) => o.id === id)?.label ?? id;
+  // Only members not already chosen are selectable in the dropdown.
+  const remaining = options.filter((o) => !value.includes(o.id));
+  const items = remaining.map((o) => ({ value: o.id, label: o.label }));
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-muted-foreground">
+        {t.workflowPage.builder.eventPageChangedByLabel}
+      </div>
+      <p className="text-[11px] text-muted-foreground/80">
+        {t.workflowPage.builder.eventPageChangedByHint}
+      </p>
+      {value.length > 0 && (
+        <ul className="flex flex-wrap gap-1">
+          {value.map((id) => (
+            <li
+              key={id}
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20"
+            >
+              <span>{labelFor(id)}</span>
+              <button
+                type="button"
+                onClick={() => onChange(value.filter((x) => x !== id))}
+                disabled={disabled}
+                aria-label={t.workflowPage.builder.eventMatchChipRemove}
+                className="text-primary/70 hover:text-primary disabled:opacity-50"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {options.length === 0 ? (
+        <div className="text-xs text-muted-foreground/80 italic">
+          {t.workflowPage.builder.eventPageChangedByEmpty}
+        </div>
+      ) : (
+        remaining.length > 0 && (
+          <Select
+            items={items}
+            // Always reset to placeholder — this is an "add" action, not a
+            // single-value bound select.
+            value={undefined}
+            onValueChange={(v) => {
+              if (v) onChange([...value, v]);
+            }}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-full max-w-md text-sm">
+              <SelectValue
+                placeholder={t.workflowPage.builder.eventPageChangedByAdd}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {remaining.map((o) => (
+                <SelectItem key={o.id} value={o.id}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )
+      )}
+    </div>
+  );
+}
+
+function WatchForOption({
+  label,
+  active,
+  disabled,
+  onSelect,
+}: {
+  label: string;
+  active: boolean;
+  disabled?: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs cursor-pointer">
+      <input
+        type="radio"
+        checked={active}
+        onChange={onSelect}
+        disabled={disabled}
+        className="accent-primary"
+      />
+      <span className={active ? "text-foreground" : "text-muted-foreground"}>
+        {label}
+      </span>
+    </label>
+  );
+}
+
+// ── Match editor ──────────────────────────────────────────────────────────
+
+function MatchEditor({
+  match,
+  onChange,
+  hideInChannels,
+  hideFromActors,
+  hideMentions,
+  disabled,
+}: {
+  match: EventMatch;
+  onChange: (next: EventMatch) => void;
+  /** Hide the `inChannels` chips (page sources drive it via `PageWatchFor`). */
+  hideInChannels?: boolean;
+  /** Hide the `fromActors` chips (page sources drive it via `PageActorPicker`). */
+  hideFromActors?: boolean;
+  /** Hide the `mentions` chips (no meaning for page sources). */
+  hideMentions?: boolean;
   disabled?: boolean;
 }) {
   const t = useT();
@@ -455,36 +770,42 @@ function MatchEditor({
         }
         disabled={disabled}
       />
-      <ChipInput
-        field="fromActors"
-        label={t.workflowPage.builder.eventMatchFromActorsLabel}
-        hint={t.workflowPage.builder.eventMatchFromActorsHint}
-        values={match.fromActors ?? []}
-        onChange={(next) =>
-          onChange({ ...match, fromActors: next.length ? next : undefined })
-        }
-        disabled={disabled}
-      />
-      <ChipInput
-        field="inChannels"
-        label={t.workflowPage.builder.eventMatchInChannelsLabel}
-        hint={t.workflowPage.builder.eventMatchInChannelsHint}
-        values={match.inChannels ?? []}
-        onChange={(next) =>
-          onChange({ ...match, inChannels: next.length ? next : undefined })
-        }
-        disabled={disabled}
-      />
-      <ChipInput
-        field="mentions"
-        label={t.workflowPage.builder.eventMatchMentionsLabel}
-        hint={t.workflowPage.builder.eventMatchMentionsHint}
-        values={match.mentions ?? []}
-        onChange={(next) =>
-          onChange({ ...match, mentions: next.length ? next : undefined })
-        }
-        disabled={disabled}
-      />
+      {!hideFromActors && (
+        <ChipInput
+          field="fromActors"
+          label={t.workflowPage.builder.eventMatchFromActorsLabel}
+          hint={t.workflowPage.builder.eventMatchFromActorsHint}
+          values={match.fromActors ?? []}
+          onChange={(next) =>
+            onChange({ ...match, fromActors: next.length ? next : undefined })
+          }
+          disabled={disabled}
+        />
+      )}
+      {!hideInChannels && (
+        <ChipInput
+          field="inChannels"
+          label={t.workflowPage.builder.eventMatchInChannelsLabel}
+          hint={t.workflowPage.builder.eventMatchInChannelsHint}
+          values={match.inChannels ?? []}
+          onChange={(next) =>
+            onChange({ ...match, inChannels: next.length ? next : undefined })
+          }
+          disabled={disabled}
+        />
+      )}
+      {!hideMentions && (
+        <ChipInput
+          field="mentions"
+          label={t.workflowPage.builder.eventMatchMentionsLabel}
+          hint={t.workflowPage.builder.eventMatchMentionsHint}
+          values={match.mentions ?? []}
+          onChange={(next) =>
+            onChange({ ...match, mentions: next.length ? next : undefined })
+          }
+          disabled={disabled}
+        />
+      )}
       <label className="flex items-start gap-2 text-xs cursor-pointer">
         <input
           type="checkbox"

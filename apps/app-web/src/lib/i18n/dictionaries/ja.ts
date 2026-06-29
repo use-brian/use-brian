@@ -2006,7 +2006,7 @@ export const ja: Dictionary = {
       // ── イベントトリガー ────────────────────────────────────────────
       triggerEvent: "イベント発生時",
       triggerEventHint:
-        "コネクターまたはチャットチャンネルから条件に合うイベントが届いたときに実行します。",
+        "コネクター、チャットチャンネル、またはドキュメントページから条件に合うイベントが届いたときに実行します。",
       eventSourcesHeading: "購読中のソース",
       eventSourceAddBtn: "+ ソースを追加",
       eventSourceRemove: "ソースを削除",
@@ -2015,12 +2015,24 @@ export const ja: Dictionary = {
       eventSourceKindLabel: "ソース種別",
       eventSourceKindConnector: "コネクター",
       eventSourceKindChannel: "チャットチャンネル",
+      eventSourceKindPage: "ドキュメントページ",
       eventSourcePickConnector: "コネクターを選択",
       eventSourcePickChannel: "チャンネルを選択",
+      eventSourcePickPage: "監視するページを選択",
       eventSourceNoConnectors:
         "ワークスペースのコネクターがまだありません。Studio → Connectors から追加してください。",
       eventSourceNoChannels:
         "有効なチャットチャンネルがまだありません。Studio → Channels から追加してください。",
+      eventSourceNoPages:
+        "ページがまだありません。先にページを作成すると、ここで監視できます。",
+      eventPageWatchForLabel: "監視対象",
+      eventPageWatchChildren: "このページの直下にページが作成・移動されたとき",
+      eventPageWatchUpdated: "このページ自体が更新されたとき",
+      eventPageChangedByLabel: "変更者（任意）",
+      eventPageChangedByHint:
+        "これらのメンバーが変更したときのみ起動します。空欄の場合は誰でも対象です。",
+      eventPageChangedByAdd: "メンバーを追加",
+      eventPageChangedByEmpty: "絞り込めるワークスペースメンバーがいません。",
       eventSourceNotConnected: "(未接続)",
       eventMatchHeading: "マッチ条件（任意）",
       eventMatchAllHint:
