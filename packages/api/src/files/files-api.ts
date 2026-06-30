@@ -33,6 +33,55 @@ import { buildStorageKey, buildStorageUri } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 
 /**
+ * Per-workspace resolution of the bytes-layer client. The default
+ * (app-bucket) resolver is byte-identical to the historical singleton; the
+ * bring-your-own-storage overlay supplies a resolver that points a workspace
+ * at its own GCS bucket under its own service-account key. See
+ * docs/plans/byo-google-storage.md and docs/architecture/features/files.md.
+ *
+ * Lives in `packages/api` (not core) because it references `GcsFilesClient`,
+ * which is a bytes-layer type — core depends on api, not the reverse.
+ */
+export type ResolvedFilesClient = {
+  gcs: GcsFilesClient
+  /** Bucket name for `storage_uri` composition on writes. */
+  bucket: string
+  /**
+   * True when this workspace writes to its OWN (BYO) bucket. Lifts the
+   * platform soft quota (their bucket, their bill). Default resolver: false.
+   */
+  byo?: boolean
+}
+
+export type FilesClientResolver = {
+  /** Client + bucket a workspace's NEW writes should target. */
+  forWorkspace(workspaceId: string): Promise<ResolvedFilesClient>
+  /**
+   * Client for an EXISTING file, routed by the bucket recorded in its
+   * `storage_uri` — so files written before a BYO switch still resolve to
+   * the bucket they actually live in. `workspaceId` lets a BYO resolver fetch
+   * the right credentials for that workspace's own bucket.
+   */
+  forUri(workspaceId: string, storageUri: string): Promise<GcsFilesClient>
+}
+
+/**
+ * The historical behavior: one app client + one env bucket for every
+ * workspace. Used directly in open core / OSS and as the fallback the BYO
+ * resolver delegates to when a workspace has no binding.
+ */
+export function createSingletonFilesClientResolver(gcs: GcsFilesClient, bucket: string): FilesClientResolver {
+  return {
+    async forWorkspace() {
+      return { gcs, bucket, byo: false }
+    },
+    async forUri(_workspaceId: string, _storageUri: string) {
+      return gcs
+    },
+  }
+}
+
+/**
  * Build an `AccessContext` from a `FilesContext`. The visibility-double
  * predicate compares `assistant_id` for equality, so callers without an
  * assistant set get the userId echoed in — workspace-shared rows
@@ -108,15 +157,32 @@ function ok<T>(value: T): FilesResult<T> {
 }
 
 export type CreateFilesApiDeps = {
-  gcs: GcsFilesClient
   store: WorkspaceFilesStore
   auditStore: WorkspaceAuditStore
-  /** GCS bucket name for storage_uri composition. */
-  bucket: string
-}
+} & (
+  | {
+      /** Per-workspace bytes-client resolver (BYO-aware). */
+      resolver: FilesClientResolver
+      gcs?: never
+      bucket?: never
+    }
+  | {
+      /**
+       * Legacy single-client form. Internally wrapped in a singleton
+       * resolver — kept so existing call sites and tests pass `{ gcs, bucket }`
+       * unchanged.
+       */
+      gcs: GcsFilesClient
+      /** GCS bucket name for storage_uri composition. */
+      bucket: string
+      resolver?: never
+    }
+)
 
 export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
-  const { gcs, store, auditStore, bucket } = deps
+  const { store, auditStore } = deps
+  const resolver: FilesClientResolver =
+    deps.resolver ?? createSingletonFilesClientResolver(deps.gcs, deps.bucket)
 
   async function resolveByIdOrPath(
     ctx: FilesContext,
@@ -179,14 +245,20 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       return err({ kind: 'conflict', path })
     }
 
-    const currentBytes = await store.sumSizeBytes(ac)
-    if (currentBytes + bytes.length > MAX_BYTES_PER_WORKSPACE) {
-      return err({
-        kind: 'quota_exceeded',
-        currentBytes,
-        limitBytes: MAX_BYTES_PER_WORKSPACE,
-        attemptedBytes: bytes.length,
-      })
+    const { gcs, bucket, byo } = await resolver.forWorkspace(ctx.workspaceId)
+
+    // Soft quota guards bytes that sit in OUR bucket on OUR bill. When a
+    // workspace writes to its own BYO bucket, the cap does not apply.
+    if (!byo) {
+      const currentBytes = await store.sumSizeBytes(ac)
+      if (currentBytes + bytes.length > MAX_BYTES_PER_WORKSPACE) {
+        return err({
+          kind: 'quota_exceeded',
+          currentBytes,
+          limitBytes: MAX_BYTES_PER_WORKSPACE,
+          attemptedBytes: bytes.length,
+        })
+      }
     }
 
     const fileId = randomUUID()
@@ -267,16 +339,20 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
       const addBytes = Buffer.from(content, 'utf-8')
-      const currentBytes = await store.sumSizeBytes(accessCtx(ctx))
-      if (currentBytes + addBytes.length > MAX_BYTES_PER_WORKSPACE) {
-        return err({
-          kind: 'quota_exceeded',
-          currentBytes,
-          limitBytes: MAX_BYTES_PER_WORKSPACE,
-          attemptedBytes: addBytes.length,
-        })
+      const { byo } = await resolver.forWorkspace(ctx.workspaceId)
+      if (!byo) {
+        const currentBytes = await store.sumSizeBytes(accessCtx(ctx))
+        if (currentBytes + addBytes.length > MAX_BYTES_PER_WORKSPACE) {
+          return err({
+            kind: 'quota_exceeded',
+            currentBytes,
+            limitBytes: MAX_BYTES_PER_WORKSPACE,
+            attemptedBytes: addBytes.length,
+          })
+        }
       }
 
+      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
       const storageKey = buildStorageKey(ctx.workspaceId, file.id)
       await gcs.appendBlob(storageKey, addBytes)
 
@@ -307,6 +383,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
+      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
       const blob = await gcs.readBlob(buildStorageKey(ctx.workspaceId, file.id))
       if (!blob) {
         // Row exists but bytes are missing — orphaned row. Surface as
@@ -322,6 +399,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       const file = await resolveByIdOrPath(ctx, idOrPath)
       if (!file) return err({ kind: 'not_found', reference: idOrPath })
 
+      const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
       const blob = await gcs.readBlob(buildStorageKey(ctx.workspaceId, file.id))
       if (!blob) {
         return err({ kind: 'not_found', reference: idOrPath })
@@ -359,6 +437,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       if (!deleted) return err({ kind: 'not_found', reference: idOrPath })
 
       try {
+        const gcs = await resolver.forUri(ctx.workspaceId, file.storageUri)
         await gcs.deleteBlob(buildStorageKey(ctx.workspaceId, file.id))
       } catch (gcsErr) {
         console.warn(

@@ -61,6 +61,8 @@ import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store
 import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
+import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
+import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -86,6 +88,16 @@ type ConnectorRowOut = {
 type ConnectorRouteOptions = {
   connectorStore: ConnectorStore
   connectorInstanceStore: ConnectorInstanceStore
+  /**
+   * Enables the workspace-scoped bring-your-own GCS storage endpoints
+   * (`/gcs/connect`, `/gcs/disconnect`). Omitted → those routes 404.
+   */
+  gcsByo?: {
+    /** True iff the user is owner/admin of the workspace. */
+    requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
+    /** Validate-on-connect override (test seam). Defaults to the real probe. */
+    validate?: typeof validateGcsByoBinding
+  }
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
@@ -150,6 +162,116 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
   // `/custom/:id` paths resolve before the `/:provider` catch-all routes below
   // (otherwise `/custom/:id` would be captured by `DELETE /:provider`).
   router.use(customConnectorRoutes({ connectorStore }))
+
+  // ── Bring-your-own GCS storage (workspace-scoped) ──────────────
+  //
+  // Unlike the rest of this user-scoped router, the `gcs` connector binds at
+  // the WORKSPACE level (storage must outlive any member) and validates the
+  // supplied service-account key against the bucket before persisting.
+  // See docs/plans/byo-google-storage.md.
+
+  /** Parse the SA key (object or JSON string); null on malformed input. */
+  function parseServiceAccountKey(raw: unknown): GcsServiceAccountCredentials | null {
+    let obj: unknown = raw
+    if (typeof raw === 'string') {
+      try { obj = JSON.parse(raw) } catch { return null }
+    }
+    if (!obj || typeof obj !== 'object') return null
+    if (typeof (obj as Record<string, unknown>).client_email !== 'string') return null
+    return obj as GcsServiceAccountCredentials
+  }
+
+  router.post('/gcs/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const gcsByo = opts.gcsByo
+    if (!gcsByo) { res.status(404).json({ error: 'GCS storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string; serviceAccountKey?: unknown; bucket?: string; projectId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const bucket = typeof body.bucket === 'string' ? body.bucket.trim() : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!bucket) { res.status(400).json({ error: 'Missing bucket' }); return }
+
+    if (!(await gcsByo.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    const key = parseServiceAccountKey(body.serviceAccountKey)
+    if (!key) { res.status(400).json({ error: 'Invalid service account key JSON' }); return }
+    const projectId =
+      (typeof body.projectId === 'string' && body.projectId.trim()) ||
+      (typeof key.project_id === 'string' ? key.project_id : undefined) ||
+      undefined
+
+    // Validate-on-connect: prove write/read/delete works before we trust it.
+    const check = await (gcsByo.validate ?? validateGcsByoBinding)({ credentials: key, bucket, projectId })
+    if (!check.ok) {
+      res.status(400).json({ error: 'validation_failed', code: check.code, message: check.message }); return
+    }
+
+    const credentials: ConnectorCredentials = { type: 'gcs', serviceAccountKey: key, bucket, ...(projectId ? { projectId } : {}) }
+    // `disconnectedAt: null` clears any prior soft-disconnect marker on reconnect.
+    const config = { bucket, ...(projectId ? { projectId } : {}), disconnectedAt: null }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (existing) {
+        await connectorInstanceStore.update(userId, existing.id, { connected: true, credentials })
+        await connectorInstanceStore.setConfigSystem(existing.id, config)
+        res.json({ ok: true, connectorInstanceId: existing.id }); return
+      }
+      const created = await connectorInstanceStore.createWorkspaceInstance({
+        workspaceId,
+        provider: 'gcs',
+        label: 'Google Cloud Storage',
+        connected: true,
+        credentials,
+        config,
+        createdBy: userId,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' }); return
+      }
+      console.error('[connectors] gcs connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect GCS storage' })
+    }
+  })
+
+  router.post('/gcs/disconnect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const gcsByo = opts.gcsByo
+    if (!gcsByo) { res.status(404).json({ error: 'GCS storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await gcsByo.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (!existing) { res.json({ ok: true }); return }
+      // Disconnect = drop their key entirely (zero standing access). New writes
+      // revert to the app default bucket and their BYO-bucket files go dormant
+      // (unreadable without the key). We KEEP the workspace_files index rows so
+      // a reconnect (re-supplying the key) revives them. `disconnectedAt` arms
+      // the staleness sweep, which retracts the dormant rows if no reconnect
+      // happens within the grace window. The bucket lives in `config` (non-
+      // secret) so the sweep can target it after the key is gone.
+      await connectorInstanceStore.update(userId, existing.id, { connected: false, credentials: { type: 'none' } })
+      await connectorInstanceStore.setConfigSystem(existing.id, { disconnectedAt: new Date().toISOString() })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] gcs disconnect failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect GCS storage' })
+    }
+  })
 
   /** Group the caller's instances by provider, each list oldest-first. */
   async function instancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {

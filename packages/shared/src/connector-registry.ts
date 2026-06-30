@@ -113,6 +113,19 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     enabled: true,
     tags: ['workspace', 'productivity'],
   },
+  {
+    id: 'gcs',
+    name: 'Google Cloud Storage',
+    description: 'Store your workspace file bytes in your own Google Cloud Storage bucket, under your own key. Your files, your bucket, revocable by you.',
+    category: 'official',
+    // SA-key paste/upload — closest fit in the directory auth enum is api_key
+    // (a pasted secret credential, like the GitHub PAT). The connect UI is a
+    // dedicated form, not the generic PAT input. See docs/plans/byo-google-storage.md.
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['storage', 'google', 'workspace'],
+  },
 ]
 
 // ── Built-in workspace primitives ─────────────────────────────

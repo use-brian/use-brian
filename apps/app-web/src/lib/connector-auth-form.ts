@@ -105,5 +105,10 @@ export function buildCustomConnectorPayload(
       }
       return { ok: false, error: "secretRequired" };
     }
+
+    // `gcs` (and any future first-party credential kind) is not a custom-MCP
+    // auth scheme — it has its own connect form and never reaches here.
+    default:
+      return { ok: false, error: "secretRequired" };
   }
 }

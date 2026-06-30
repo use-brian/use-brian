@@ -151,6 +151,9 @@ export type ConnectorInstanceStore = {
   /** Every connected, ingestion-enabled instance of a provider — drives the Pipeline C pollers. System-level. */
   listIngestEnabledSystem(provider: string): Promise<ConnectorInstance[]>
 
+  /** Every instance of a provider regardless of scope/connected. System-level. Drives the BYO storage staleness sweep. */
+  listByProviderSystem(provider: string): Promise<ConnectorInstance[]>
+
   /** Merge keys into the JSONB config with no acting user — for system workers (ingest pollers). */
   setConfigSystem(id: string, config: Record<string, unknown>): Promise<void>
 
@@ -464,6 +467,16 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       const result = await query<PublicRow>(
         `SELECT ${PUBLIC_COLS} FROM connector_instance
          WHERE provider = $1 AND connected = true AND ingestion_enabled = true
+         ORDER BY created_at ASC`,
+        [provider],
+      )
+      return result.rows
+    },
+
+    async listByProviderSystem(provider) {
+      const result = await query<PublicRow>(
+        `SELECT ${PUBLIC_COLS} FROM connector_instance
+         WHERE provider = $1
          ORDER BY created_at ASC`,
         [provider],
       )

@@ -168,7 +168,9 @@ import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
-import { createFilesApi } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
+import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
   createDbWorkflowStore,
   createDbWorkflowRunStore,
@@ -1516,11 +1518,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     | null = null
   let fileIngestor: unknown = null
   if (filesBlobClient) {
+    // Bring-your-own GCS storage: a workspace with an active `gcs` connector
+    // binding writes its file bytes to its OWN bucket under its OWN key; every
+    // other workspace falls through to the app default bucket (byte-identical
+    // to before). The binding lookup reads the encrypted connector_instance
+    // credential. See docs/plans/byo-google-storage.md.
+    const defaultFilesResolver = createSingletonFilesClientResolver(
+      filesBlobClient,
+      env.GCS_FILES_BUCKET ?? 'local-dev',
+    )
+    const lookupGcsBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
+      // A binding resolves only while we hold the key. Disconnect wipes the key
+      // (credential type 'none'), so a disconnected workspace returns null here
+      // and falls back to the app default bucket for both reads and writes —
+      // its BYO files go dormant until a reconnect re-supplies the key.
+      const inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (!inst) return null
+      const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
+      if (!creds || creds.type !== 'gcs') return null
+      return { credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+    }
     filesApi = createFilesApi({
-      gcs: filesBlobClient,
+      resolver: createCachedByoFilesResolver({ lookup: lookupGcsBinding, fallback: defaultFilesResolver }),
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
-      bucket: env.GCS_FILES_BUCKET ?? 'local-dev',
     })
     const fileTools = createFileTools(filesApi, {
       entityLinks: entityLinksStore,
@@ -1776,6 +1797,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
+      gcsByo: {
+        requireWorkspaceAdmin: async (userId, workspaceId) => {
+          const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+          return m?.role === 'owner' || m?.role === 'admin'
+        },
+      },
     }))
   }
 
@@ -2357,6 +2384,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : undefined,
   })
   if (runWorkers) consolidationWorker.start()
+
+  // ── BYO storage staleness GC (scheduled maintenance, daily) ──
+  // Soft-disconnected GCS bindings keep read access through a grace window;
+  // once past it they are stale — wipe the key + retract the orphaned files.
+  // Runs only where the workspace-files byte layer is active.
+  if (runWorkers && filesBlobClient) {
+    const BYO_STALENESS_INTERVAL_MS = 24 * 60 * 60 * 1000
+    const runByoStalenessSweep = () => {
+      void sweepStaleByoBindings({
+        connectorInstanceStore,
+        workspaceFilesStore,
+        nowMs: Date.now(),
+        log: (m) => console.log(m),
+      }).catch((err) => console.error('[byo-staleness] sweep failed:', err))
+    }
+    const byoStalenessTimer = setInterval(runByoStalenessSweep, BYO_STALENESS_INTERVAL_MS)
+    if (typeof byoStalenessTimer.unref === 'function') byoStalenessTimer.unref()
+  }
 
   // ── Skill-review worker ──
   const SKILL_REVIEW_MODEL = 'gemini-3.1-flash-lite'

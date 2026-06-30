@@ -11,7 +11,7 @@ import type {
 } from '@sidanclaw/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, queryWithRLS, rollbackAndRelease } from './client.js'
+import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDocumentedByEdges } from './edge-hooks.js'
 
 const FULL_SELECT = `
@@ -353,6 +353,29 @@ export async function deleteWorkspaceFile(
     [id, workspaceId],
   )
   return result.rows.length > 0
+}
+
+export async function retractWorkspaceFilesByStorageBucket(
+  workspaceId: string,
+  bucket: string,
+  reason: string,
+): Promise<number> {
+  // System-level (no RLS) — invoked by the BYO storage staleness sweep when a
+  // disconnected binding's bucket goes stale and its key is wiped. Soft-retracts
+  // every current row whose bytes live in `bucket` (now unreadable), closing the
+  // bi-temporal window so all current-version queries (search, L1, getById /
+  // getByPath, sumSize) stop surfacing them. Audit history is preserved.
+  // `^@` is the prefix operator (no LIKE wildcard interpretation of the bucket).
+  const result = await query(
+    `UPDATE workspace_files
+        SET valid_to = now(), retracted_at = now(), retracted_reason = $3
+      WHERE workspace_id = $1
+        AND storage_uri ^@ $2
+        AND valid_to IS NULL
+        AND retracted_at IS NULL`,
+    [workspaceId, `gs://${bucket}/`, reason],
+  )
+  return result.rowCount ?? 0
 }
 
 export async function listWorkspaceFilesByPath(

@@ -12,6 +12,7 @@ import {
   listWorkspaceFilesIndexRanked,
   sumWorkspaceFilesSizeBytes,
   supersedeWorkspaceFile,
+  retractWorkspaceFilesByStorageBucket,
 } from './workspace-files.js'
 
 /**
@@ -62,6 +63,9 @@ export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
     },
     getHistory(ctx, id) {
       return getWorkspaceFileHistory(ctx, id)
+    },
+    retractByStorageBucketSystem(workspaceId, bucket, reason) {
+      return retractWorkspaceFilesByStorageBucket(workspaceId, bucket, reason)
     },
   }
 }

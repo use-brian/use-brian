@@ -9,9 +9,16 @@
  * `packages/api/src/db/workspace-files-store.ts`. The file API
  * (`files-api.ts`) stitches the two together.
  *
- * Auth: Application Default Credentials. On Cloud Run the service
- * account identity is used automatically; for local dev run
+ * Auth: Application Default Credentials by default. On Cloud Run the
+ * service account identity is used automatically; for local dev run
  * `gcloud auth application-default login`. No credentials file is read.
+ *
+ * Bring-your-own storage (BYO): when explicit `credentials` (a customer
+ * service-account key) are passed, the client authenticates *as that SA*
+ * against the customer's own bucket instead of ADC. This is the only
+ * difference between the app-default client and a per-workspace BYO client;
+ * the resolver that decides which to build lives in the (closed) overlay —
+ * see docs/plans/byo-google-storage.md and docs/architecture/features/files.md.
  *
  * The client is a thin wrapper around the SDK — a `GcsFilesClient`
  * interface lets tests substitute an in-memory fake (see
@@ -68,13 +75,34 @@ export type GcsFilesClient = {
   signedWriteUrl(key: string, opts?: { contentType?: string; ttlSec?: number }): Promise<string>
 }
 
+/**
+ * A customer service-account key, parsed from the JSON Google hands out.
+ * Only `client_email` is named statically; the signing secret and the rest
+ * of the key ride along via the index signature and are passed straight to
+ * `new Storage({ credentials })` without ever being referenced by name in
+ * our code (so the secret is never logged or destructured).
+ */
+export type GcsServiceAccountCredentials = {
+  client_email: string
+  project_id?: string
+  [k: string]: unknown
+}
+
 export type GcsClientOptions = {
   bucket: string
   projectId?: string
+  /**
+   * Explicit BYO credentials. When omitted, the client uses Application
+   * Default Credentials (the app's own service account) — unchanged behavior.
+   */
+  credentials?: GcsServiceAccountCredentials
 }
 
-export function createGcsFilesClient({ bucket: bucketName, projectId }: GcsClientOptions): GcsFilesClient {
-  const storage = new Storage(projectId ? { projectId } : undefined)
+export function createGcsFilesClient({ bucket: bucketName, projectId, credentials }: GcsClientOptions): GcsFilesClient {
+  const opts: ConstructorParameters<typeof Storage>[0] = {}
+  if (projectId) opts.projectId = projectId
+  if (credentials) opts.credentials = credentials as unknown as NonNullable<typeof opts.credentials>
+  const storage = new Storage(Object.keys(opts).length > 0 ? opts : undefined)
   const bucket: Bucket = storage.bucket(bucketName)
 
   return {
@@ -178,4 +206,16 @@ export function buildStorageKey(workspaceId: string, fileId: string): string {
 /** `gs://bucket/<workspace_id>/<file_id>` URI for the workspace_files.storage_uri column. */
 export function buildStorageUri(bucket: string, workspaceId: string, fileId: string): string {
   return `gs://${bucket}/${buildStorageKey(workspaceId, fileId)}`
+}
+
+/**
+ * Extract the bucket name from a `gs://<bucket>/<key>` storage URI. Used to
+ * route reads of an existing file to whichever bucket it actually lives in
+ * (a workspace that switched to BYO storage still has older files in the app
+ * default bucket — each file's own `storage_uri` is authoritative).
+ */
+export function parseStorageBucket(storageUri: string): string {
+  const m = /^gs:\/\/([^/]+)\//.exec(storageUri)
+  if (!m) throw new Error(`gcs: cannot parse bucket from storage_uri: ${storageUri}`)
+  return m[1]
 }

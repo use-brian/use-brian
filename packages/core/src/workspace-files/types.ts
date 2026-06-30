@@ -287,4 +287,18 @@ export type WorkspaceFilesStore = {
     ctx: AccessContext,
     id: string,
   ): Promise<WorkspaceFile[]>
+
+  /**
+   * System-level (no RLS) soft-retraction of every current row whose bytes
+   * live in `bucket` (`storage_uri` prefix `gs://<bucket>/`). Used by the
+   * bring-your-own-storage staleness sweep when a disconnected binding's
+   * bucket goes stale and its key is wiped — the bytes are unreadable, so the
+   * index rows are retracted to stop surfacing dead references. Returns the
+   * number of rows retracted.
+   */
+  retractByStorageBucketSystem(
+    workspaceId: string,
+    bucket: string,
+    reason: string,
+  ): Promise<number>
 }

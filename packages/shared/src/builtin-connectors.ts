@@ -24,14 +24,22 @@ export type BuiltinToolClassification = 'read' | 'write' | 'destructive'
 export type BuiltinToolDefaultPolicy = 'allow' | 'ask'
 
 /**
- * Auth schemes a custom MCP connector can use on outbound calls.
- * `oauth` is the legacy client_id/client_secret pair (no runtime header is
- * derived from it — the OAuth client flow is a separate surface); `bearer`
- * sends `Authorization: Bearer <token>`; `custom_header` sends one named
- * header. Shared between the API routes/stores and the app-web connector
- * form. See docs/architecture/integrations/mcp.md → "Custom connector auth".
+ * Discriminators for a connector's encrypted credentials blob (also the
+ * `connector_instance.credentials_type` column value).
+ *
+ * The first four are custom-MCP outbound auth schemes: `oauth` is the legacy
+ * client_id/client_secret pair (no runtime header is derived from it — the
+ * OAuth client flow is a separate surface); `bearer` sends
+ * `Authorization: Bearer <token>`; `custom_header` sends one named header.
+ *
+ * `gcs` is a first-party storage credential — a customer service-account key
+ * for bring-your-own GCS storage. It is NOT an MCP outbound scheme (it never
+ * appears in the custom-connector auth dropdown, which lists an explicit
+ * subset) and derives no outbound header. See
+ * docs/architecture/integrations/mcp.md → "Custom connector auth" and
+ * docs/plans/byo-google-storage.md.
  */
-export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header'] as const
+export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs'] as const
 export type ConnectorAuthType = (typeof CONNECTOR_AUTH_TYPES)[number]
 
 export type BuiltinConnectorTool = {
@@ -142,6 +150,12 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
   ],
+  // Google Cloud Storage (bring-your-own storage) — a credentialed connector
+  // with NO assistant tools. It only rebinds where the Workspace Files bytes
+  // layer writes (see docs/plans/byo-google-storage.md). Present here so it
+  // counts as an official (non-custom-MCP) connector via OFFICIAL_CONNECTOR_IDS;
+  // the empty tool list means it surfaces no governable tools of its own.
+  gcs: [],
 }
 
 /**

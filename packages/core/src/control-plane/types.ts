@@ -36,7 +36,7 @@ export type ControlPlaneConnector = {
   connected: boolean
   /** True when connecting requires a browser OAuth consent a human must click. */
   oauthRequired: boolean
-  authType: 'none' | 'oauth' | 'bearer' | 'custom_header' | 'api_key'
+  authType: 'none' | 'oauth' | 'bearer' | 'custom_header' | 'api_key' | 'gcs'
   scope: 'team-native' | 'team-grant'
   sensitivity: 'public' | 'internal' | 'confidential'
 }

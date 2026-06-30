@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createFilesApi, MAX_BYTES_PER_WORKSPACE } from '../files-api.js'
+import { createFilesApi, MAX_BYTES_PER_WORKSPACE, type FilesClientResolver } from '../files-api.js'
+import { parseStorageBucket } from '../gcs-client.js'
 import type { GcsFilesClient } from '../gcs-client.js'
 import type {
   WorkspaceFile,
@@ -138,6 +139,17 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
     },
     async supersede() { return null },
     async getHistory() { return [] },
+    async retractByStorageBucketSystem(workspaceId, bucket, _reason) {
+      let n = 0
+      for (const r of rows.values()) {
+        if (r.workspaceId === workspaceId && r.storageUri.startsWith(`gs://${bucket}/`) && !r.retractedAt) {
+          r.retractedAt = new Date()
+          r.validTo = new Date()
+          n++
+        }
+      }
+      return n
+    },
   }
 }
 
@@ -396,6 +408,81 @@ describe('[COMP:files/api] createFilesApi.delete', () => {
     expect(gcs.blobs.size).toBe(0)
     expect(store.rows.size).toBe(0)
     expect(audit.events.find((e) => e.eventType === 'file.deleted')).toBeTruthy()
+  })
+})
+
+describe('[COMP:files/byo-resolver] per-workspace client routing', () => {
+  // Two named buckets behind a single resolver: the workspace's CURRENT
+  // target ("byo-bucket") for new writes, and an older "app-bucket" that
+  // pre-BYO files still live in. forUri must route by each file's storage_uri.
+  function makeRoutingHarness() {
+    const appGcs = makeFakeGcs()
+    const byoGcs = makeFakeGcs()
+    const resolver: FilesClientResolver = {
+      async forWorkspace() {
+        return { gcs: byoGcs, bucket: 'byo-bucket', byo: true }
+      },
+      async forUri(_workspaceId, storageUri) {
+        return parseStorageBucket(storageUri) === 'byo-bucket' ? byoGcs : appGcs
+      },
+    }
+    return { appGcs, byoGcs, resolver }
+  }
+
+  it('writes new files to the workspace forWorkspace() bucket', async () => {
+    const { appGcs, byoGcs, resolver } = makeRoutingHarness()
+    const api = createFilesApi({ resolver, store: makeFakeStore(), auditStore: makeFakeAudit() })
+    const result = await api.write(ctx, { path: '/n.md', content: 'hi' })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.storageUri.startsWith('gs://byo-bucket/')).toBe(true)
+    expect(byoGcs.blobs.size).toBe(1)
+    expect(appGcs.blobs.size).toBe(0)
+  })
+
+  it('reads an existing file from the bucket recorded in its storage_uri', async () => {
+    const { appGcs, byoGcs, resolver } = makeRoutingHarness()
+    const store = makeFakeStore()
+    // Simulate a file written BEFORE the BYO switch: bytes in app-bucket, and a
+    // matching index row whose storage_uri points there.
+    const fileId = 'pre-byo-1'
+    await appGcs.writeBlob(`${ctx.workspaceId}/${fileId}`, Buffer.from('legacy'), {
+      workspaceId: ctx.workspaceId,
+      mime: 'text/plain',
+    })
+    await store.create('user_1', {
+      id: fileId,
+      workspaceId: ctx.workspaceId,
+      path: '/legacy.md',
+      parentPath: '/',
+      name: 'legacy.md',
+      mime: 'text/plain',
+      sizeBytes: 6,
+      storageUri: `gs://app-bucket/${ctx.workspaceId}/${fileId}`,
+    })
+    const api = createFilesApi({ resolver, store, auditStore: makeFakeAudit() })
+    const result = await api.read(ctx, '/legacy.md')
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.value.content).toBe('legacy') // came from app-bucket, not byo-bucket
+    expect(byoGcs.blobs.size).toBe(0)
+  })
+
+  it('lifts the soft quota when the workspace is on BYO storage', async () => {
+    const { resolver } = makeRoutingHarness() // forWorkspace().byo === true
+    const store = makeFakeStore()
+    await store.create('user_1', {
+      workspaceId: ctx.workspaceId,
+      path: '/big.bin',
+      parentPath: '/',
+      name: 'big.bin',
+      mime: 'application/octet-stream',
+      sizeBytes: MAX_BYTES_PER_WORKSPACE - 1,
+      storageUri: 'gs://byo-bucket/k',
+    })
+    const api = createFilesApi({ resolver, store, auditStore: makeFakeAudit() })
+    const result = await api.write(ctx, { path: '/more.md', content: 'well over one byte' })
+    expect(result.ok).toBe(true) // no quota_exceeded — cap lifted under BYO
   })
 })
 
