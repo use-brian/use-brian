@@ -21,6 +21,8 @@ import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { ViewListRow } from "@/lib/api/views";
+import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
   DeliverChannelType,
@@ -65,6 +67,12 @@ type Props = {
    */
   pages: ViewListRow[];
   /**
+   * Workspace blueprints (page templates carrying an extraction spec) — backs
+   * the per-step blueprint picker (`BlueprintField`). Empty when the fetch
+   * failed; the field degrades to just the two built-ins.
+   */
+  blueprints: CustomPageTemplateSummary[];
+  /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
    */
@@ -83,6 +91,7 @@ export function StepEditor({
   assistants,
   destinations,
   pages,
+  blueprints,
   steps,
   onChange,
   onMoveUp,
@@ -165,6 +174,7 @@ export function StepEditor({
             assistants={assistants}
             destinations={destinations}
             pages={pages}
+            blueprints={blueprints}
             steps={steps}
             onChange={onChange}
             disabled={disabled}
@@ -207,6 +217,7 @@ function AssistantCallFields({
   assistants,
   destinations,
   pages,
+  blueprints,
   steps,
   onChange,
   disabled,
@@ -216,6 +227,7 @@ function AssistantCallFields({
   assistants: StudioAssistantSummary[];
   destinations: ChannelDestination[];
   pages: ViewListRow[];
+  blueprints: CustomPageTemplateSummary[];
   steps: WorkflowStep[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
@@ -300,6 +312,14 @@ function AssistantCallFields({
         step={step}
         pages={pages}
         steps={steps}
+        onChange={onChange}
+        disabled={disabled}
+        t={t}
+      />
+
+      <BlueprintField
+        step={step}
+        blueprints={blueprints}
         onChange={onChange}
         disabled={disabled}
         t={t}
@@ -670,6 +690,61 @@ function PageAnchorField({
       )}
 
       <div className="text-xs text-muted-foreground">{b.pageAnchorHint}</div>
+    </div>
+  );
+}
+
+/** Sentinel for "no blueprint" — the default; persisted as `blueprintId: undefined`. */
+const NO_BLUEPRINT_VALUE = "__none__";
+
+/**
+ * "Blueprint" subform — picks the synthesis blueprint this step fills (a
+ * workspace blueprint template id). Mirrors `PageAnchorField`
+ * (one `SearchableSelect` over the same blueprint items). Default = none (the
+ * step runs with no blueprint). The executor wiring is built separately; this
+ * only threads `blueprintId` into the saved step config.
+ * Spec: docs/architecture/brain/structural-synthesis.md -> "The three fill modes".
+ */
+function BlueprintField({
+  step,
+  blueprints,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  blueprints: CustomPageTemplateSummary[];
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  const items: SearchableSelectItem[] = [
+    { value: NO_BLUEPRINT_VALUE, label: b.blueprintNone },
+    ...buildBlueprintPickerItems(blueprints),
+  ];
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        {b.blueprintLabel}
+      </label>
+      <SearchableSelect
+        value={step.blueprintId ?? NO_BLUEPRINT_VALUE}
+        onValueChange={(v) =>
+          onChange({
+            ...step,
+            blueprintId: !v || v === NO_BLUEPRINT_VALUE ? undefined : v,
+          })
+        }
+        items={items}
+        placeholder={b.blueprintPlaceholder}
+        searchPlaceholder={b.blueprintSearchPlaceholder}
+        emptyMessage={b.blueprintEmpty}
+        disabled={disabled}
+        className={SELECT_TRIGGER_CLASS}
+      />
+      <div className="text-xs text-muted-foreground">{b.blueprintHint}</div>
     </div>
   );
 }

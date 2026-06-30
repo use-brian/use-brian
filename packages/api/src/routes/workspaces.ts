@@ -22,6 +22,7 @@
  */
 
 import { Router } from 'express'
+import { z } from 'zod'
 import {
   APP_TYPE_IDS,
   defaultClearanceForAppType,
@@ -31,7 +32,11 @@ import {
 import { query, queryWithRLS } from '../db/client.js'
 import { findUserById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
-import { getWorkspacePlan, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import {
+  getWorkspacePlan,
+  getWorkspaceMembershipWithClearanceSystem,
+  InvalidRecordingBlueprintError,
+} from '../db/workspace-store.js'
 import { createConnectionStore } from '../db/connection-store.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
@@ -402,7 +407,16 @@ export function workspaceRoutes({
     }
   })
 
-  // ── PATCH /:workspaceId — update workspace name and/or purpose ─────────
+  // ── PATCH /:workspaceId — update workspace name and/or purpose / default blueprint ──
+
+  // The default recording blueprint (migration 291) is a separate write path
+  // (it routes to `setDefaultRecordingBlueprint`, which validates the template
+  // is a same-workspace blueprint). Validate the field at the boundary with Zod:
+  // a string id sets it, `null` clears it (ingest-only). `undefined` (absent)
+  // leaves it untouched. See docs/plans/workspace-default-recording-blueprint.md §D4.
+  const defaultBlueprintFieldSchema = z.object({
+    defaultRecordingBlueprintId: z.string().uuid().nullable().optional(),
+  })
 
   router.patch('/:workspaceId', async (req, res) => {
     const userId = req.userId
@@ -413,6 +427,14 @@ export function workspaceRoutes({
 
     const { name, purpose } = req.body as { name?: string; purpose?: string }
     const updates: { name?: string; purpose?: string } = {}
+
+    // Default recording blueprint — validated + routed to its own store setter.
+    const blueprintField = defaultBlueprintFieldSchema.safeParse(req.body)
+    if (!blueprintField.success) {
+      res.status(400).json({ error: 'defaultRecordingBlueprintId must be a UUID or null' })
+      return
+    }
+    const hasBlueprintUpdate = 'defaultRecordingBlueprintId' in (req.body ?? {})
 
     if (name !== undefined) {
       if (typeof name !== 'string' || name.trim().length === 0) {
@@ -438,12 +460,42 @@ export function workspaceRoutes({
       updates.purpose = purpose.trim()
     }
 
-    if (Object.keys(updates).length === 0) {
-      res.status(400).json({ error: 'At least one of name or purpose is required' })
+    if (Object.keys(updates).length === 0 && !hasBlueprintUpdate) {
+      res.status(400).json({ error: 'At least one of name, purpose, or defaultRecordingBlueprintId is required' })
       return
     }
 
     try {
+      // Default recording blueprint — separate write path (validates the
+      // template is a same-workspace blueprint; throws → 400). Applied first so
+      // a bad id 400s without a partial name/purpose write landing.
+      if (hasBlueprintUpdate) {
+        try {
+          const updated = await workspaceStore.setDefaultRecordingBlueprint(
+            userId,
+            req.params.workspaceId,
+            blueprintField.data.defaultRecordingBlueprintId ?? null,
+          )
+          if (!updated) { res.status(404).json({ error: 'Workspace not found' }); return }
+          if (auditStore) {
+            void auditStore.append({
+              workspaceId: req.params.workspaceId,
+              actorUserId: userId,
+              eventType: 'workspace.settings_changed',
+              details: { defaultRecordingBlueprintId: blueprintField.data.defaultRecordingBlueprintId ?? null },
+            })
+          }
+          // No name/purpose to apply → return the blueprint-updated row.
+          if (Object.keys(updates).length === 0) { res.json(updated); return }
+        } catch (err) {
+          if (err instanceof InvalidRecordingBlueprintError) {
+            res.status(400).json({ error: err.message })
+            return
+          }
+          throw err
+        }
+      }
+
       const team = await workspaceStore.update(userId, req.params.workspaceId, updates)
       if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }
       // §6 audit: separate event types per field so the timeline can render
@@ -904,7 +956,8 @@ export function workspaceRoutes({
           `INSERT INTO assistant_capabilities
              (assistant_id, capability, granted_by_user_id, reason)
            VALUES ($1, 'tasks', $2, '§17 default-on at standard creation'),
-                  ($1, 'crm',   $2, '§17 default-on at standard creation')`,
+                  ($1, 'crm',   $2, '§17 default-on at standard creation'),
+                  ($1, 'goals', $2, 'goals default-on at standard creation')`,
           [assistantId, userId],
         )
       }

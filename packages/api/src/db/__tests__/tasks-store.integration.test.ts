@@ -455,15 +455,29 @@ describeIf('[COMP:tasks/supersession] tasks bi-temporal supersession (integratio
     expect(oldRaw!.superseded_by).toBeNull()
   })
 
-  it('update returns null for non-existent / already-superseded ids', async () => {
+  it('update forward-resolves an already-superseded id to its live head', async () => {
+    // Regression: an LLM working from a stale `listTasks` snapshot re-uses the
+    // pre-supersession id on its next edit. That id must resolve forward to the
+    // current row rather than 404 (which previously tripped the retry breaker
+    // after the model assigned a task and then touched the same id again).
     const t1 = await store.create({ userId, workspaceId, title: 'v1' })
     const t2 = await store.update(userId, t1.id, { title: 'v2' })
-    // Updating t1 again should fail — t1 is already superseded.
-    const retry = await store.update(userId, t1.id, { title: 'v3' })
-    expect(retry).toBeNull()
-    // t2 still active.
-    const fetched = await store.getById({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' }, t2!.id)
-    expect(fetched!.title).toBe('v2')
+    // Update t1 AGAIN (the stale id) — resolves forward to v2's live row.
+    const t3 = await store.update(userId, t1.id, { title: 'v3' })
+    expect(t3).not.toBeNull()
+    expect(t3!.title).toBe('v3')
+    expect(t3!.id).not.toBe(t2!.id)
+    // The chain is coherent: v2 is now superseded by v3, and only v3 is live.
+    const v2Raw = await rawRow(t2!.id)
+    expect(v2Raw!.valid_to).not.toBeNull()
+    expect(v2Raw!.superseded_by).toBe(t3!.id)
+    const list = await store.list({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' }, {})
+    expect(list.map((r) => r.id)).toEqual([t3!.id])
+  })
+
+  it('update returns null for a genuinely non-existent id', async () => {
+    const ghost = await store.update(userId, '00000000-0000-0000-0000-0000000000ff', { title: 'nope' })
+    expect(ghost).toBeNull()
   })
 
   it('active children are repointed to the new parent atomically', async () => {

@@ -40,6 +40,7 @@ import {
   type ChildPageBlock,
   type ImageBlock,
   type FileBlock,
+  type ExtractionSlotBlock,
 } from "@/lib/api/views";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -49,6 +50,7 @@ import { BlockChildPage } from "../block-child-page";
 import { BlockImage } from "../block-image";
 import { BlockFile } from "../block-file";
 import { BlockBookmark, type BookmarkBlock } from "../block-bookmark";
+import { BlockExtractionSlot } from "../block-extraction-slot";
 import { ZoomableVisual } from "../visual-lightbox";
 import { ViewToolbar, type ViewToolbarValue } from "../view-config/view-toolbar";
 import { applyViewConfig } from "../view-config/apply-view-config";
@@ -595,6 +597,17 @@ function renderEmbed(
       return <FileEmbed block={block} updateBlock={updateBlock} />;
     case "child_page":
       return <ChildPageEmbed block={block} />;
+    case "extraction_slot":
+      // Blueprint-only authoring directive: an editable instruction + output-type
+      // hint. Edits write back through `updateBlock` (the embed's `block` attr →
+      // Yjs), gated read-only on a shared / non-editable page.
+      return (
+        <BlockExtractionSlot
+          block={block as ExtractionSlotBlock}
+          readOnly={!editable}
+          onChange={(patch) => updateBlock({ ...block, ...patch } as Block)}
+        />
+      );
     default:
       return <EmbedFallback kind={block.kind} />;
   }

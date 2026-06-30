@@ -58,6 +58,13 @@ type WebBrainRow = {
   createdByUserId?: string | null
   createdByAssistantId?: string | null
   hasPending?: boolean
+  /**
+   * Task lifecycle status (`todo` | `in_progress` | `blocked` | `done` |
+   * `archived`) — only set on `kind:'tasks'` rows. Drives the Brain list's
+   * status chip + the "Show completed" partition (see the `/list` route's
+   * `taskStatus` param). Absent on every other primitive.
+   */
+  status?: string
 }
 
 type WebEntityRollup = {
@@ -379,6 +386,27 @@ const PRIMITIVE_TO_SCOPE: Partial<Record<BrainPrimitive, string>> = {
   tasks: 'task',
 }
 
+/**
+ * Task statuses the Brain browse surface treats as "completed" — finished
+ * (`done`) and soft-deleted (`archived`). The Brain list hides these by
+ * default (a reading/trust surface leads with live work, mirroring the
+ * entity rollup's `open_tasks` and the `idx_tasks_workspace_active` partial
+ * index); the `taskStatus` param opts them back in. The active statuses
+ * (`todo` / `in_progress` / `blocked`) are everything else.
+ *
+ * This partition lives at the BROWSE layer only — the shared
+ * `searchTasksScope` retrieval primitive still returns every status so chat
+ * recall can answer "did we finish X?". See docs/architecture/features/tasks.md
+ * → "Brain browse surface".
+ */
+const COMPLETED_TASK_STATUSES = new Set(['done', 'archived'])
+
+type TaskStatusFilter = 'active' | 'completed' | 'all'
+
+function parseTaskStatus(raw: unknown): TaskStatusFilter {
+  return raw === 'all' ? 'all' : raw === 'completed' ? 'completed' : 'active'
+}
+
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null
 }
@@ -414,7 +442,13 @@ function projectSearchRow(row: SearchResultRow): WebBrainRow | null {
         sensitivity,
       }
     case 'task':
-      return { id: row.row_id, kind: 'tasks', name: str(row.title) ?? '(task)', sensitivity }
+      return {
+        id: row.row_id,
+        kind: 'tasks',
+        name: str(row.title) ?? '(task)',
+        sensitivity,
+        status: str(row.status) ?? undefined,
+      }
     case 'entity':
       return {
         id: row.row_id,
@@ -551,6 +585,13 @@ export function brainRoutes(deps: {
    * all-scopes call when `kinds` is absent), and projects the
    * heterogeneous result rows into the web `WebBrainRow` shape.
    *
+   * `taskStatus` (tasks only): `active` (DEFAULT — hides `done`/`archived`,
+   * the reading-surface default), `completed` (only `done`/`archived`, backs
+   * the "Show completed" reveal), or `all`. The partition is applied here
+   * post-projection — the shared `searchTasksScope` still returns every
+   * status (chat recall needs finished tasks). See
+   * docs/architecture/features/tasks.md → "Brain browse surface".
+   *
    * V1 deferrals:
    *   - `sessions` — episodes are not a `search()` scope; a `sessions`
    *     filter returns empty. Wiring `recentEpisodes()` is a follow-up.
@@ -658,6 +699,19 @@ export function brainRoutes(deps: {
       console.error('[brain] list fetch failed:', err)
       res.status(500).json({ error: 'Internal error' })
       return
+    }
+
+    // Task completion partition. The Brain leads with live work, so done +
+    // archived tasks drop out by default; `taskStatus=completed` returns only
+    // those (the reveal fetch), `all` keeps everything. Only `kind:'tasks'`
+    // rows carry a status, so this never touches other primitives.
+    const taskStatus = parseTaskStatus(req.query.taskStatus)
+    if (taskStatus !== 'all') {
+      merged = merged.filter((r) => {
+        if (r.kind !== 'tasks') return true
+        const completed = COMPLETED_TASK_STATUSES.has(r.status ?? '')
+        return taskStatus === 'completed' ? completed : !completed
+      })
     }
 
     const results = merged.slice(0, limit)

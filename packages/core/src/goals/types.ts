@@ -1,0 +1,172 @@
+/**
+ * Goal types — the first-class, host-polymorphic, self-terminating Noun.
+ *
+ * See `docs/plans/task-goal-seeker.md` §3.2 (data model) and §4. A goal is
+ * an OPERATIONAL row (mutable status, like `workflow_runs`), NOT a
+ * bi-temporal / MLS brain primitive like `tasks` — so no supersession, no
+ * universal columns. It binds to a host Noun (or itself, when `host` is
+ * null) and drives it to an engine-verifiable `done_when`.
+ *
+ * The core package has no DB dependency; the store impl lives in
+ * `packages/api/src/db/goals-store.ts` and the host adapters are injected.
+ */
+import type { DoneWhenNode } from './done-when.js'
+
+export const GOAL_STATUSES = [
+  'active',
+  'running',
+  'awaiting_approval',
+  'blocked',
+  'done',
+  'abandoned',
+] as const
+export type GoalStatus = (typeof GOAL_STATUSES)[number]
+
+/** Host Noun kinds a goal can drive. `null` host = self-hosted (the goal is
+ *  its own subject; `done_when` is measured over its own sub-goals). The
+ *  union widens additively (page/entity/workflow are wired after task). */
+export const GOAL_HOST_TYPES = ['task', 'page', 'entity', 'workflow'] as const
+export type GoalHostType = (typeof GOAL_HOST_TYPES)[number]
+
+export type GoalHostRef = { type: GoalHostType; id: string }
+/** `null` = self-hosted. */
+export type GoalHost = GoalHostRef | null
+
+/** Hard backstops. `maxSpend` is the load-bearing dollar cap and is gated on
+ *  COGS metering (§4.13); `maxIterations` / `deadline` are cheap
+ *  always-available co-backstops. */
+export type GoalBudget = {
+  maxIterations?: number
+  maxSpend?: number
+  /** ISO-8601 timestamp (jsonb-stored; the engine parses for comparison). */
+  deadline?: string | null
+}
+
+export type GoalPolicy = {
+  /** May the loop act through connectors, or only our own DB? */
+  blastRadius?: 'internal' | 'external'
+  /** `ask` routes external actions through `pending_approvals`. */
+  approval?: 'auto' | 'ask'
+  /** Who receives the message when the goal blocks. */
+  escalateTo?: string | null
+}
+
+/** The declared means each iteration may compose. The iteration itself
+ *  re-runs `workflowId` (the author-defined workflow, §4.9). */
+export type GoalMeans = {
+  workflowId?: string | null
+  blueprintIds?: string[]
+  skillIds?: string[]
+}
+
+/** Agentic-termination verified-done marker (§12): stamped only when the
+ *  adversarial verifier passes a `markGoalComplete` claim. */
+export type GoalCompletionClaim = { because: string; verifiedAt: string }
+
+export type GoalRecord = {
+  id: string
+  workspaceId: string
+  parentGoalId: string | null
+  recipeId: string | null
+  host: GoalHost
+  outcome: string
+  doneWhen: DoneWhenNode
+  means: GoalMeans
+  budget: GoalBudget
+  policy: GoalPolicy
+  status: GoalStatus
+  blockerReason: string | null
+  /** The acting user — host write-back actor + escalation/delivery default
+   *  (the goal speaks as the workspace primary to this user). */
+  createdByUserId: string | null
+  /** Task-autopilot draft gate (`task-goal-autopilot.md` §4): `null` = a draft
+   *  (auto-minted on task create, unconfirmed) — it may NOT act or roll up;
+   *  set once the creator confirms the goal detail. Goals created explicitly
+   *  (the `setGoal` tool) are confirmed at creation. */
+  confirmedAt: Date | null
+  /** Agentic-termination verified-done marker (§12): set ONLY when the
+   *  adversarial verifier passes a `markGoalComplete` claim — the `verify`
+   *  done_when leaf is met iff this is non-null. `null` = not yet verified. */
+  completionClaim: GoalCompletionClaim | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+// --- store ------------------------------------------------------------------
+
+export type GoalCreateParams = {
+  workspaceId: string
+  outcome: string
+  doneWhen: DoneWhenNode
+  /** Default null = self-hosted. */
+  host?: GoalHost
+  parentGoalId?: string | null
+  recipeId?: string | null
+  means?: GoalMeans
+  budget?: GoalBudget
+  policy?: GoalPolicy
+  /** Default 'active'. */
+  status?: GoalStatus
+  createdByUserId?: string | null
+  /** Default `true` (an explicitly-created goal is confirmed). The auto-draft
+   *  hook passes `false` to mint a draft (`confirmed_at` NULL) — see
+   *  `task-goal-autopilot.md` §4. */
+  confirmed?: boolean
+}
+
+export type GoalListFilters = {
+  status?: GoalStatus | GoalStatus[]
+  hostType?: GoalHostType
+  /** Filter to goals bound to a specific host id (e.g. a task's goal). */
+  hostId?: string
+  parentGoalId?: string
+  /** Include done / abandoned goals (default: excluded). */
+  includeTerminal?: boolean
+  limit?: number
+}
+
+/** The goal store. Writes are owner-pool (the route/engine is the authz gate,
+ *  the operational pattern from `workflow_runs`); user reads are RLS-scoped.
+ *  Concrete impl: `packages/api/src/db/goals-store.ts`. */
+export type GoalStore = {
+  create(params: GoalCreateParams): Promise<GoalRecord>
+  /** User-scoped read (RLS by workspace membership). */
+  getById(userId: string, id: string): Promise<GoalRecord | null>
+  /** System read by id (engine path; no user context). */
+  getByIdSystem(id: string): Promise<GoalRecord | null>
+  /** User-scoped workspace listing for the goals board. */
+  list(userId: string, workspaceId: string, filters?: GoalListFilters): Promise<GoalRecord[]>
+  /** System read: goals bound to a given host — the rollup lookup. */
+  listByHostSystem(host: GoalHostRef): Promise<GoalRecord[]>
+  /** System write: set status (+ optional blocker reason). */
+  setStatusSystem(
+    id: string,
+    status: GoalStatus,
+    blockerReason?: string | null,
+  ): Promise<GoalRecord | null>
+  /** System read: count of non-terminal direct sub-goals. Backs self-hosted
+   *  `subtasks` acceptance (met when this reaches 0). */
+  countOpenSubGoalsSystem(id: string): Promise<number>
+}
+
+// --- host adapters (the polymorphic write-back seam, §3.4 / §4.12) ----------
+
+export type GoalHostTerminal = 'done' | 'blocked'
+
+/** One adapter per external host type. Self-hosted goals (host null) are
+ *  handled by the goal store directly (terminal -> the goal's own status,
+ *  acceptance -> its sub-goal tree), so they need no adapter here. */
+export type HostAdapter = {
+  /** Write the goal's terminal state back to the host Noun. */
+  setTerminal(host: GoalHostRef, terminal: GoalHostTerminal, reason: string | null): Promise<void>
+  /** Best-effort per-iteration progress marker on the host (observability). */
+  recordProgress(host: GoalHostRef, iteration: number): Promise<void>
+  /** Backs the `subtasks` done_when leaf: true iff the host has no open children. */
+  acceptanceSource(host: GoalHostRef): Promise<{ subtasksClosed: boolean }>
+}
+
+export type HostStore = {
+  /** Resolve the adapter for a host type. Throws on an unwired type so a
+   *  goal bound to a not-yet-implemented host fails legibly, not silently. */
+  adapterFor(type: GoalHostType): HostAdapter
+}

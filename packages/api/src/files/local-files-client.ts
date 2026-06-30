@@ -11,7 +11,8 @@
  * misconfigured prod fails safe instead of writing to ephemeral disk.
  */
 
-import { promises as fs } from 'node:fs'
+import { promises as fs, createWriteStream } from 'node:fs'
+import { PassThrough, type Writable } from 'node:stream'
 import * as path from 'node:path'
 import type { GcsBlob, GcsFilesClient, GcsObjectMetadata } from './gcs-client.js'
 
@@ -68,6 +69,21 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
       // No signed PUT locally — the recording upload flow is GCS-only. Returned
       // for interface parity; a local caller should writeBlob directly instead.
       return `file://${blobPath(key)}`
+    },
+
+    writeStream(key, opts): Writable {
+      // A PassThrough the caller pipes into; we set up the real file sink (and
+      // meta sidecar) asynchronously and forward into it. Dev/test only.
+      const p = blobPath(key)
+      const pass = new PassThrough()
+      void (async () => {
+        await fs.mkdir(path.dirname(p), { recursive: true })
+        await fs.writeFile(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
+        const out = createWriteStream(p)
+        out.on('error', (e) => pass.destroy(e))
+        pass.pipe(out)
+      })().catch((e) => pass.destroy(e))
+      return pass
     },
   }
 

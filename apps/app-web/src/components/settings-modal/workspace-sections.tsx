@@ -19,7 +19,7 @@
  * re-fetches its list when it opens).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import {
   getLlmKeyStatus,
@@ -28,6 +28,13 @@ import {
   LlmKeyUnavailableError,
   type LlmKeyStatus,
 } from "@/lib/api/llm-keys";
+import {
+  setWorkspaceDefaultBlueprint,
+  WorkspaceApiError,
+} from "@/lib/api/workspaces";
+import { listCustomPageTemplates } from "@/lib/api/views";
+import { buildBlueprintPickerItems } from "@/lib/blueprints";
+import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
 import { getUserInfo } from "@/lib/user";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { canDeleteWorkspace } from "@/lib/workspace-permissions";
@@ -39,12 +46,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  SearchableSelect,
+  type SearchableSelectItem,
+} from "@/components/ui/searchable-select";
 import { Button } from "@/components/ui/button";
 import { AlertDialog } from "@base-ui/react/alert-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+
+/** Sentinel for "ingest only / no default" in the recording-default picker —
+ *  threaded to the backend as `null`. */
+const BLUEPRINT_INGEST_ONLY = "__ingest_only__";
 
 type Member = {
   userId: string;
@@ -80,6 +95,12 @@ type WorkspaceDetail = {
   role: "owner" | "admin" | "member";
   /** Echoed by the detail endpoint (spread of the full workspace row). */
   iconSeed?: number | null;
+  /**
+   * The workspace default recording blueprint (migration 291) — a
+   * `workspace_page_templates` id carrying an `extraction` spec, or `null` for
+   * none (ingest-only). Spread from the full workspace row by the detail route.
+   */
+  defaultRecordingBlueprintId?: string | null;
   members: Member[];
 };
 
@@ -129,12 +150,47 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [purposeSaving, setPurposeSaving] = useState(false);
   const [purposeError, setPurposeError] = useState("");
 
+  // Recording brief default (migration 291). The chosen value is a blueprint
+  // template id, or the ingest-only sentinel. Workspace blueprints are fetched
+  // once; the picker lists them after the sentinel.
+  const [blueprintId, setBlueprintId] = useState<string>(BLUEPRINT_INGEST_ONLY);
+  const [workspaceBlueprints, setWorkspaceBlueprints] = useState<
+    CustomPageTemplateSummary[]
+  >([]);
+  const [blueprintSaving, setBlueprintSaving] = useState(false);
+  const [blueprintError, setBlueprintError] = useState("");
+
   useEffect(() => {
     if (data) {
       setNameInput(data.name);
       setPurposeInput(data.purpose ?? "");
+      setBlueprintId(data.defaultRecordingBlueprintId ?? BLUEPRINT_INGEST_ONLY);
     }
   }, [data]);
+
+  const ctxWorkspaceId = ctx.workspaceId;
+  useEffect(() => {
+    if (!ctxWorkspaceId) return;
+    let cancelled = false;
+    listCustomPageTemplates(ctxWorkspaceId)
+      .then((list) => {
+        if (!cancelled) setWorkspaceBlueprints(list);
+      })
+      .catch(() => {
+        // A roster fetch failure degrades to just the ingest-only item.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ctxWorkspaceId]);
+
+  const blueprintItems = useMemo<SearchableSelectItem[]>(() => {
+    const ingestOnly: SearchableSelectItem = {
+      value: BLUEPRINT_INGEST_ONLY,
+      label: t.recordingDefault.ingestOnly,
+    };
+    return [ingestOnly, ...buildBlueprintPickerItems(workspaceBlueprints)];
+  }, [t, workspaceBlueprints]);
 
   if (loading || !data) {
     return <div className="text-sm text-muted-foreground">{t.workspaceDetailInline.loading}</div>;
@@ -192,6 +248,34 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       setPurposeError(t.workspaceDetailInline.networkError);
     } finally {
       setPurposeSaving(false);
+    }
+  }
+
+  // Persist the recording brief default. The picker change drives this
+  // immediately (no separate save button) — PATCH `{ defaultRecordingBlueprintId }`
+  // with the chosen blueprint id, or `null` for the ingest-only sentinel.
+  async function changeBlueprint(next: string) {
+    if (!data || blueprintSaving) return;
+    const value = next || BLUEPRINT_INGEST_ONLY;
+    const prev = blueprintId;
+    setBlueprintId(value);
+    setBlueprintError("");
+    if (value === (data.defaultRecordingBlueprintId ?? BLUEPRINT_INGEST_ONLY)) return;
+    setBlueprintSaving(true);
+    try {
+      await setWorkspaceDefaultBlueprint(
+        data.id,
+        value === BLUEPRINT_INGEST_ONLY ? null : value,
+      );
+      await refetch();
+    } catch (e) {
+      // Roll the selection back so the picker doesn't lie about persisted state.
+      setBlueprintId(prev);
+      setBlueprintError(
+        e instanceof WorkspaceApiError ? e.message : t.recordingDefault.saveFailed,
+      );
+    } finally {
+      setBlueprintSaving(false);
     }
   }
 
@@ -383,6 +467,32 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           </p>
         )}
       </div>
+
+      {/* Recording brief default (migration 291) — the blueprint every
+          recording auto-uses when no blueprint is explicitly picked. Admins
+          set it; the picker change persists immediately. */}
+      {isAdmin && (
+        <div className="border-t border-border pt-6 space-y-2">
+          <h3 className="text-sm font-medium">{t.recordingDefault.heading}</h3>
+          <p className="text-[12px] text-muted-foreground">
+            {t.recordingDefault.description}
+          </p>
+          <div className="pt-1 max-w-xs">
+            <SearchableSelect
+              value={blueprintId}
+              onValueChange={(v) => void changeBlueprint(v)}
+              items={blueprintItems}
+              disabled={blueprintSaving}
+              aria-label={t.recordingDefault.heading}
+              searchPlaceholder={t.recordingDefault.searchPlaceholder}
+              popupClassName="w-72"
+            />
+          </div>
+          {blueprintError && (
+            <div className="text-[12px] text-red-400">{blueprintError}</div>
+          )}
+        </div>
+      )}
 
       {isOwner && (
         <div className="border-t border-border pt-6">

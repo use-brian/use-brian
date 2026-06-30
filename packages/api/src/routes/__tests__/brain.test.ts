@@ -461,6 +461,42 @@ describe('[COMP:brain/list-http] GET /api/brain/list', () => {
     expect(search.mock.calls[0][1].scope).toBeUndefined()
   })
 
+  // Task completion partition — the Brain leads with live work. By default the
+  // list hides `done` + `archived` tasks; `taskStatus=completed` returns only
+  // those (the "Show completed" reveal); `taskStatus=all` keeps everything.
+  // The status field is projected onto every task row so the UI can chip it.
+  const taskRows = [
+    { primitive: 'task', row_id: 't-open', title: 'Ship pricing', status: 'in_progress', sensitivity: 'internal' },
+    { primitive: 'task', row_id: 't-done', title: 'Wire webhook', status: 'done', sensitivity: 'internal' },
+    { primitive: 'task', row_id: 't-arch', title: 'Old task', status: 'archived', sensitivity: 'internal' },
+  ] as unknown as SearchResultRow[]
+
+  it('hides done + archived tasks by default and projects status', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const res = await request(makeApp(makeEntityStore(null), makeRetrievalStore(taskRows)))
+      .get('/api/brain/list?workspaceId=ws-1&kinds=tasks')
+      .expect(200)
+    expect(res.body.results).toEqual([
+      { id: 't-open', kind: 'tasks', name: 'Ship pricing', sensitivity: 'internal', status: 'in_progress' },
+    ])
+  })
+
+  it('taskStatus=completed returns only done + archived tasks', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const res = await request(makeApp(makeEntityStore(null), makeRetrievalStore(taskRows)))
+      .get('/api/brain/list?workspaceId=ws-1&kinds=tasks&taskStatus=completed')
+      .expect(200)
+    expect(res.body.results.map((r: { id: string }) => r.id)).toEqual(['t-done', 't-arch'])
+  })
+
+  it('taskStatus=all returns every task regardless of status', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const res = await request(makeApp(makeEntityStore(null), makeRetrievalStore(taskRows)))
+      .get('/api/brain/list?workspaceId=ws-1&kinds=tasks&taskStatus=all')
+      .expect(200)
+    expect(res.body.results.map((r: { id: string }) => r.id)).toEqual(['t-open', 't-done', 't-arch'])
+  })
+
   // Bug A — browse "Files" (no search query) showed nothing. The route must
   // still issue a `scope='file'` search with an empty query and project the
   // returned rows as `kind:'files'` (the document-icon path). The empty-query

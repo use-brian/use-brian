@@ -128,6 +128,34 @@ describe('[COMP:doc-model/mapping] block ↔ ProseMirror mapping', () => {
     expect(text).toContain('Name Role')
     expect(text).toContain('Ana Eng')
   })
+
+  it('round-trips an extraction_slot block losslessly through the embed atom', () => {
+    // The blueprint-only `extraction_slot` directive is a non-prose leaf — it
+    // rides the opaque `embed` atom (no dedicated PM node), so its
+    // `instruction` + optional `outputType` must survive untouched, like every
+    // other embed kind. Cover both shapes (with + without `outputType`).
+    const blocks: Block[] = [
+      {
+        kind: 'extraction_slot',
+        id: 'es1',
+        instruction: 'List the open risks',
+        outputType: 'list',
+      } as Block,
+      { kind: 'extraction_slot', id: 'es2', instruction: 'Summarize the meeting' } as Block,
+    ]
+    const doc = blocksToPMDoc(blocks)
+    // Each non-prose directive collapses to one `embed` atom.
+    expect(doc.content.map((n) => n.type)).toEqual(['embed', 'embed'])
+    const out = pmDocToBlocks(doc)
+    expect(out).toEqual(blocks.map(canonicalizeBlock))
+    // The directive payload is preserved verbatim (lossless JSON round-trip).
+    expect(out[0]).toMatchObject({
+      kind: 'extraction_slot',
+      instruction: 'List the open risks',
+      outputType: 'list',
+    })
+    expect('outputType' in (out[1] as object)).toBe(false)
+  })
 })
 
 const rt = (t: string) =>

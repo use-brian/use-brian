@@ -27,6 +27,8 @@
  */
 
 import { Storage, type Bucket } from '@google-cloud/storage'
+import { Readable, Transform, type Writable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 
 export type GcsObjectMetadata = {
   workspaceId: string
@@ -73,6 +75,16 @@ export type GcsFilesClient = {
    * `contentType` if one is bound here.
    */
   signedWriteUrl(key: string, opts?: { contentType?: string; ttlSec?: number }): Promise<string>
+
+  /**
+   * Open a resumable GCS write stream for `key`. Lets a producer (a channel
+   * connector relaying inbound media, the pull-by-URL fetcher) pipe bytes
+   * straight to GCS without ever buffering the whole object in memory — the
+   * space-efficient ingress for large channel media. See
+   * docs/plans/channel-media-ingest.md. Pair with `streamUrlToGcs` for the
+   * pull case.
+   */
+  writeStream(key: string, opts: { mime: string; metadata?: GcsObjectMetadata }): Writable
 }
 
 /**
@@ -195,7 +207,85 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
       })
       return url
     },
+
+    writeStream(key, opts) {
+      return bucket.file(key).createWriteStream({
+        resumable: true,
+        contentType: opts.mime,
+        metadata: {
+          contentType: opts.mime,
+          metadata: {
+            ...(opts.metadata?.workspaceId ? { 'workspace-id': opts.metadata.workspaceId } : {}),
+            ...(opts.metadata?.createdByUserId ? { 'created-by-user-id': opts.metadata.createdByUserId } : {}),
+            ...(opts.metadata?.createdByAssistantId
+              ? { 'created-by-assistant-id': opts.metadata.createdByAssistantId }
+              : {}),
+            mime: opts.mime,
+          },
+        },
+      })
+    },
   }
+}
+
+/** Thrown when an inbound media stream exceeds the byte ceiling. The caller maps
+ *  this to a "too large, use the upload link" reply rather than a 500. */
+export class MediaTooLargeError extends Error {
+  constructor(
+    readonly bytes: number,
+    readonly maxBytes: number,
+  ) {
+    super(`media stream exceeded ${maxBytes} bytes (saw ${bytes})`)
+    this.name = 'MediaTooLargeError'
+  }
+}
+
+/**
+ * Stream a remote URL straight into GCS without ever buffering it — the
+ * space-efficient pull-by-URL ingress for channel media (Slack `url_private`,
+ * Discord CDN, a self-hosted Telegram Bot API file URL, any cloud link). Bytes
+ * flow `fetch(url)` → a byte-counting transform → the GCS write stream, chunk by
+ * chunk; the running counter (and a `content-length` pre-check) abort with
+ * `MediaTooLargeError` past `maxBytes`, so a hostile/oversized source can't blow
+ * memory or storage.
+ *
+ * `openWrite` is injected (returns the destination `Writable`, e.g.
+ * `client.writeStream(key, …)`) so this orchestration unit-tests with an
+ * in-memory collector and a fake fetch — no GCS, no network.
+ */
+export async function streamUrlToGcs(args: {
+  url: string
+  headers?: Record<string, string>
+  openWrite: (mime: string) => Writable
+  maxBytes: number
+  fetchFn?: typeof fetch
+}): Promise<{ bytesWritten: number; mime: string }> {
+  const fetchFn = args.fetchFn ?? fetch
+  const res = await fetchFn(args.url, args.headers ? { headers: args.headers } : {})
+  if (!res.ok || !res.body) {
+    throw new Error(`media fetch failed (HTTP ${res.status})`)
+  }
+  const mime = res.headers.get('content-type') ?? 'application/octet-stream'
+  const declared = Number(res.headers.get('content-length') ?? '0')
+  if (Number.isFinite(declared) && declared > args.maxBytes) {
+    throw new MediaTooLargeError(declared, args.maxBytes)
+  }
+
+  let bytesWritten = 0
+  const counter = new Transform({
+    transform(chunk, _enc, cb) {
+      bytesWritten += chunk.length
+      if (bytesWritten > args.maxBytes) {
+        cb(new MediaTooLargeError(bytesWritten, args.maxBytes))
+        return
+      }
+      cb(null, chunk)
+    },
+  })
+
+  const source = Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0])
+  await pipeline(source, counter, args.openWrite(mime))
+  return { bytesWritten, mime }
 }
 
 /** Object key format: `<workspace_id>/<file_id>`. */

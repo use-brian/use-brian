@@ -54,6 +54,7 @@ import {
 import {
   Brain,
   GitBranch,
+  Target,
   Home,
   Inbox,
   MoreHorizontal,
@@ -461,6 +462,18 @@ export function DocSidebar(props: Props) {
             <GitBranch className="size-[17px] shrink-0" />
             {surfacePill("workflow") ? (
               <span className="whitespace-nowrap">{t.iconWorkflow}</span>
+            ) : null}
+          </Link>
+        </Tooltip>
+        <Tooltip label={t.iconGoals} shortcut="⌘5">
+          <Link
+            href={`/w/${workspaceId}/goals`}
+            aria-label={t.iconGoalsAria}
+            className={navItemCls(surfaceActive("goals"), !utilityPillOpen)}
+          >
+            <Target className="size-[17px] shrink-0" />
+            {surfacePill("goals") ? (
+              <span className="whitespace-nowrap">{t.iconGoals}</span>
             ) : null}
           </Link>
         </Tooltip>

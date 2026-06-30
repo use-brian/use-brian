@@ -115,4 +115,47 @@ describe('[COMP:api/workflow-webhooks-route] POST /workflow-webhooks/:slug', () 
     const res = await post('hook-1', body, sign(body))
     expect(res.body.status).toBe('awaiting_wait')
   })
+
+  // ── trigger.match.condition — server-side event filter ──────────────────
+
+  const matchWorkflow = () =>
+    webhookWorkflow({
+      trigger: {
+        kind: 'webhook',
+        match: { condition: { '==': [{ var: 'input.type' }, 'deal.won'] } },
+      },
+    })
+
+  it('fires the run when trigger.match.condition matches the payload', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(matchWorkflow())
+    runStore.createRun.mockResolvedValueOnce({ id: 'run-1' })
+    mockAdvance.mockResolvedValueOnce({ kind: 'completed', runId: 'run-1' } as never)
+    const body = Buffer.from('{"type":"deal.won"}')
+    const res = await post('hook-1', body, sign(body))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ runId: 'run-1', status: 'completed' })
+    expect(runStore.createRun).toHaveBeenCalledOnce()
+  })
+
+  it('ACKs 200 skipped without a run when the match filter does not pass', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(matchWorkflow())
+    const body = Buffer.from('{"type":"refund.issued"}')
+    const res = await post('hook-1', body, sign(body))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ status: 'skipped', reason: 'no_match' })
+    expect(runStore.createRun).not.toHaveBeenCalled()
+  })
+
+  it('fails closed (200 skipped, no run) when the match condition is malformed', async () => {
+    workflowStore.findByWebhookSlugSystem.mockResolvedValueOnce(
+      webhookWorkflow({
+        trigger: { kind: 'webhook', match: { condition: { not_an_operator: [1, 2] } } },
+      }),
+    )
+    const body = Buffer.from('{"type":"deal.won"}')
+    const res = await post('hook-1', body, sign(body))
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ status: 'skipped', reason: 'filter_error' })
+    expect(runStore.createRun).not.toHaveBeenCalled()
+  })
 })

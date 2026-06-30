@@ -41,6 +41,7 @@ import {
 } from '@sidanclaw/core'
 import { z } from 'zod'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { ValidateDeliveryTarget, PreflightConnectorTool } from '../workflow/dependency-preflight.js'
 
 export type WorkflowsRouteOptions = {
   workflowStore: WorkflowStore
@@ -94,6 +95,21 @@ export type WorkflowsRouteOptions = {
    */
   jobStore?: JobStore
   resolvePrimary?: (workspaceId: string) => Promise<string | null>
+  /**
+   * Authoring-time delivery-target reachability check (fix A) — mirrors the
+   * chat-tool `WorkflowToolDeps.validateDeliveryTarget`. When wired, a
+   * POST/PATCH with an unreachable `assistant_call.deliver` target (e.g. a
+   * Slack channel the bot can't post to) is rejected 400 instead of persisted.
+   * Absent → skipped; the executor's best-effort soft-fail stays the guard.
+   */
+  validateDeliveryTarget?: ValidateDeliveryTarget
+  /**
+   * Authoring-time connector preflight (fix B) — mirrors the chat-tool
+   * `WorkflowToolDeps.preflightConnectorTool`. Rejects a workflow whose step
+   * references a built-in connector tool whose connector is disconnected or
+   * whose token is revoked. Absent → skipped.
+   */
+  preflightConnectorTool?: PreflightConnectorTool
 }
 
 export type WorkflowAuditDelta =
@@ -209,6 +225,81 @@ async function pageAnchorIssues(
       }
     }
   }
+  return issues
+}
+
+/**
+ * External-dependency authoring checks for the REST path — delivery-target
+ * reachability (fix A) + connector preflight (fix B). The web builder sets
+ * `assistant_call.deliver` per-step directly (no trigger.delivery sugar), so a
+ * step's own target is what we validate. Returns issues in the same
+ * `{ path, message }` shape `validationError` emits. Skipped when the
+ * corresponding validator isn't wired. Never blocks on a probe throw.
+ */
+async function dependencyIssues(
+  definition: WorkflowDefinition,
+  ctx: { userId: string; workspaceId: string },
+  opts: WorkflowsRouteOptions,
+): Promise<Array<{ path: Array<string | number>; message: string }>> {
+  const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const issues: Array<{ path: Array<string | number>; message: string }> = []
+
+  if (opts.validateDeliveryTarget) {
+    for (const [i, step] of definition.steps.entries()) {
+      if (step.type !== 'assistant_call' || !step.deliver || step.deliver.channelType === 'web') continue
+      // The integration is attached to the delivering assistant — the step's
+      // concrete target, or the workspace primary for the 'primary' sentinel.
+      const assistantId = UUID_SHAPE.test(step.target.assistantId)
+        ? step.target.assistantId
+        : opts.resolvePrimary
+          ? await opts.resolvePrimary(ctx.workspaceId)
+          : null
+      if (!assistantId) continue
+      try {
+        const res = await opts.validateDeliveryTarget({
+          assistantId,
+          channelType: step.deliver.channelType,
+          channelId: step.deliver.channelId,
+        })
+        if (!res.ok) {
+          issues.push({
+            path: ['definition', 'steps', i, 'deliver', 'channelId'],
+            message: `${step.deliver.channelType} channel not reachable: ${res.reason ?? 'channel check failed'}`,
+          })
+        }
+      } catch (err) {
+        console.warn('[workflows] delivery validator threw:', err)
+      }
+    }
+  }
+
+  if (opts.preflightConnectorTool) {
+    const probed = new Set<string>()
+    for (const [i, step] of definition.steps.entries()) {
+      const names =
+        step.type === 'tool_call'
+          ? [step.toolName]
+          : step.type === 'assistant_call' && step.tools
+            ? step.tools
+            : []
+      for (const tn of names) {
+        if (probed.has(tn)) continue
+        probed.add(tn)
+        try {
+          const res = await opts.preflightConnectorTool({ userId: ctx.userId, toolName: tn })
+          if (res && !res.ok) {
+            issues.push({
+              path: ['definition', 'steps', i],
+              message: `${res.provider} tool "${tn}" not usable: ${res.reason ?? 'connection check failed'}`,
+            })
+          }
+        } catch (err) {
+          console.warn('[workflows] connector preflight threw:', err)
+        }
+      }
+    }
+  }
+
   return issues
 }
 
@@ -351,16 +442,24 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       return validationError(res, 'definition', definitionParsed.error)
     }
 
-    // Page-anchor existence + workspace checks (mirrors the chat-tool path).
-    const anchorIssues = await pageAnchorIssues(
-      definitionParsed.data,
-      { userId, workspaceId: parsed.data.workspaceId },
-      opts.savedViewStore,
-    )
-    if (anchorIssues.length > 0) {
+    // Page-anchor + external-dependency checks (mirrors the chat-tool path):
+    // delivery-target reachability (fix A) + connector preflight (fix B).
+    const createIssues = [
+      ...(await pageAnchorIssues(
+        definitionParsed.data,
+        { userId, workspaceId: parsed.data.workspaceId },
+        opts.savedViewStore,
+      )),
+      ...(await dependencyIssues(
+        definitionParsed.data,
+        { userId, workspaceId: parsed.data.workspaceId },
+        opts,
+      )),
+    ]
+    if (createIssues.length > 0) {
       return void res.status(400).json({
-        error: anchorIssues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
-        issues: anchorIssues,
+        error: createIssues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        issues: createIssues,
       })
     }
 
@@ -440,15 +539,22 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       if (!definitionParsed.success) {
         return validationError(res, 'definition', definitionParsed.error)
       }
-      const anchorIssues = await pageAnchorIssues(
-        definitionParsed.data,
-        { userId, workspaceId: existing.workspaceId },
-        opts.savedViewStore,
-      )
-      if (anchorIssues.length > 0) {
+      const editIssues = [
+        ...(await pageAnchorIssues(
+          definitionParsed.data,
+          { userId, workspaceId: existing.workspaceId },
+          opts.savedViewStore,
+        )),
+        ...(await dependencyIssues(
+          definitionParsed.data,
+          { userId, workspaceId: existing.workspaceId },
+          opts,
+        )),
+      ]
+      if (editIssues.length > 0) {
         return void res.status(400).json({
-          error: anchorIssues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
-          issues: anchorIssues,
+          error: editIssues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+          issues: editIssues,
         })
       }
       fields.definition = definitionParsed.data

@@ -67,7 +67,7 @@ import {
   getSessionMessages,
   truncateMessagesFrom,
 } from '../db/sessions.js'
-import type { ContentBlock } from '@sidanclaw/core'
+import type { ContentBlock, EngineHooks } from '@sidanclaw/core'
 import { sanitizeDeliveryText } from '@sidanclaw/shared'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { resolveModel } from '../model-resolution.js'
@@ -122,6 +122,12 @@ export type PublicApiRouteOptions = {
    * with web chat; see docs/plans/agent-facing-capability-surface.md §11.2.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+  /**
+   * Tool-use interception port (remote MCP only), forwarded to
+   * `injectMcpTools`. Open default = unset. See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
   /**
    * Optional. When supplied, mounts POST /claim-shadow — partner-mediated
    * shadow account merge. See docs/architecture/features/shadow-claim.md.
@@ -458,6 +464,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         userTimezone: owner.timezone ?? undefined,
         tools: baseTools,
         stores: options,
+        engineHooks: options.engineHooks,
       })
 
       // Strip confirmation-required tools AFTER injection — MCP injectors

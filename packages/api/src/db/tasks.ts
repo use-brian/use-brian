@@ -102,6 +102,13 @@ export async function createTask(
     attributes?: Record<string, unknown>
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    /**
+     * Fresh-insert `source`. Default `'user'` (interactive chat / API writes;
+     * matches the mig-128 DB default). The structural-synthesis engine passes
+     * `'extracted'` so synthesis-captured tasks surface in Brain Reviews
+     * (`?includeExtracted=true`).
+     */
+    source?: 'user' | 'extracted'
     /** Task ids this task depends on — each becomes a task→task
      *  `depends_on` edge (fire-and-forget; v1 append-only). */
     dependsOn?: readonly string[]
@@ -120,8 +127,8 @@ export async function createTask(
   assertAuthorshipPresent('createTask', userId)
   const result = await queryWithRLS<TaskRow>(
     userId,
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -135,6 +142,7 @@ export async function createTask(
       JSON.stringify(params.attributes ?? {}),
       userId,
       params.compartments ?? [],
+      params.source ?? 'user',
     ],
   )
   const task = toRecord(result.rows[0])
@@ -258,14 +266,33 @@ type OldTaskRow = {
 }
 
 /**
+ * Forward-resolve a (possibly superseded) task id to its live head by
+ * walking `superseded_by`. A bi-temporal edit rotates the id, so a caller
+ * holding a pre-supersession id (e.g. an LLM working from a stale
+ * `listTasks` snapshot) would otherwise 404 on its next edit. Append the
+ * resolving SELECT, e.g. `SELECT id FROM chain WHERE valid_to IS NULL`.
+ * Subject to the caller's RLS (the anchor row must be visible).
+ */
+const LIVE_TASK_ID_CTE = `WITH RECURSIVE chain AS (
+  SELECT id, superseded_by, valid_to FROM tasks WHERE id = $1
+  UNION ALL
+  SELECT t.id, t.superseded_by, t.valid_to
+  FROM tasks t JOIN chain c ON t.id = c.superseded_by
+)`
+
+/**
  * Bi-temporal supersession update.
  *
  * Each `updateTask` call closes the prior row (`valid_to = now()`,
  * `superseded_by = <new_id>`) and inserts a new row carrying the merged
  * field values plus all carried-forward universal columns. The new row
  * has a new id — callers consume `result.id` instead of holding onto the
- * input id. See `docs/plans/company-brain/data-model.md` §"Bi-temporal
- * validity" and `corrections.md` §D.7.
+ * input id. A superseded input id is forward-resolved to its live head
+ * first (`LIVE_TASK_ID_CTE`), so a caller that still holds a pre-supersession
+ * id (an LLM working from a stale `listTasks` snapshot) patches the current
+ * row instead of getting a spurious not-found. See
+ * `docs/architecture/brain/data-model.md` §"Bi-temporal validity" and
+ * `corrections.md` §D.7.
  *
  * Wrapped in BEGIN/COMMIT so the SELECT old + INSERT new + close old +
  * repoint active children sequence is atomic and the per-statement
@@ -286,9 +313,13 @@ export async function updateTask(
   if (Object.keys(fields).length === 0) {
     // No-op short-circuit — read the current row without per-viewer
     // projection (this is the write path; RLS is the workspace gate).
+    // Forward-resolve a superseded input id to its live head so a stale id
+    // round-trips to the current row (see header).
     const result = await queryWithRLS<TaskRow>(
       userId,
-      `SELECT ${FULL_SELECT} FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+      `${LIVE_TASK_ID_CTE}
+       SELECT ${FULL_SELECT} FROM tasks
+       WHERE id = (SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1)`,
       [id],
     )
     return result.rows.length === 0 ? null : toRecord(result.rows[0])
@@ -299,11 +330,25 @@ export async function updateTask(
     await client.query('BEGIN')
     await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
     try {
+      // Forward-resolve a superseded input id to its live head (see header)
+      // so a caller holding a pre-supersession id patches the current row
+      // instead of getting a spurious not-found. A genuinely unknown id (or a
+      // chain with no live row) resolves to nothing → not-found, as before.
+      const liveRes = await client.query<{ id: string }>(
+        `${LIVE_TASK_ID_CTE} SELECT id FROM chain WHERE valid_to IS NULL LIMIT 1`,
+        [id],
+      )
+      if (liveRes.rows.length === 0) {
+        await client.query('ROLLBACK')
+        return null
+      }
+      const liveId = liveRes.rows[0].id
+
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, user_id, assistant_id, source, source_episode_id
          FROM tasks WHERE id = $1 AND valid_to IS NULL`,
-        [id],
+        [liveId],
       )
       if (oldRes.rows.length === 0) {
         await client.query('ROLLBACK')
@@ -353,7 +398,7 @@ export async function updateTask(
       await client.query(
         `UPDATE tasks SET valid_to = now(), superseded_by = $1
          WHERE id = $2 AND valid_to IS NULL`,
-        [newRow.id, id],
+        [newRow.id, liveId],
       )
 
       // Repoint active children to the new parent so the active sub-task
@@ -364,7 +409,17 @@ export async function updateTask(
       await client.query(
         `UPDATE tasks SET parent_id = $1
          WHERE parent_id = $2 AND valid_to IS NULL`,
-        [newRow.id, id],
+        [newRow.id, liveId],
+      )
+
+      // Repoint any goal hosted on this task to the new id (mirrors the
+      // child repoint above). A task's auto-drafted goal binds by host_id;
+      // supersession would otherwise orphan it, so host_id always tracks the
+      // live task id. No-op (0 rows) when the task has no hosted goal.
+      await client.query(
+        `UPDATE goals SET host_id = $1
+         WHERE host_type = 'task' AND host_id = $2`,
+        [newRow.id, liveId],
       )
 
       await client.query('COMMIT')

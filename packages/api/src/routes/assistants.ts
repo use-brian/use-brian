@@ -456,7 +456,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   // See docs/plans/company-brain.md §17 and
   // docs/architecture/features/tasks.md / crm.md "Primitive access control".
 
-  const PRIMITIVE_CAPABILITIES = ['tasks', 'crm'] as const
+  const PRIMITIVE_CAPABILITIES = ['tasks', 'crm', 'goals'] as const
   type PrimitiveCapability = (typeof PRIMITIVE_CAPABILITIES)[number]
   // Admin-gated named capabilities toggleable on this surface. `configure`
   // unlocks Tier-2 control-plane write tools for agents acting as this

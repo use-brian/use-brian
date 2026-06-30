@@ -68,6 +68,7 @@ import {
   Minus,
   Paperclip,
   Quote,
+  Sparkles,
   SquareCheck,
   Table,
   Type,
@@ -165,6 +166,9 @@ export type SlashMenuBlockKind =
   | "data"
   | "chart"
   | "diagram"
+  // Blueprint authoring directive ("/extract") — a non-prose `extraction_slot`
+  // embed carrying a section's extraction instruction. Inserted like any embed.
+  | "extraction_slot"
   // Async/picker kinds — handled by the editor's slash `onSelect` (they need
   // workspace context + the router / a page picker / the template gallery), not
   // the synchronous `executeSlashItem` chain. `child_page` mints a new nested
@@ -207,6 +211,7 @@ export const FALLBACK_LABELS = {
   bookmark: "Bookmark",
   chart: "Chart",
   diagram: "Diagram",
+  extraction_slot: "Extraction slot",
 } as const;
 
 export const FALLBACK_CATEGORY_LABELS: Record<SlashMenuCategory, string> = {
@@ -451,6 +456,14 @@ export const SLASH_MENU_ITEMS: readonly SlashMenuItem[] = [
     aliases: ["diagram", "graph", "flowchart", "mermaid", "mindmap", "sequence", "org chart"],
     icon: Workflow,
     blockKind: "diagram",
+  },
+  {
+    id: "extraction_slot",
+    labelKey: "extraction_slot",
+    category: "database",
+    aliases: ["extract", "extraction slot", "blueprint", "synthesis", "directive", "section"],
+    icon: Sparkles,
+    blockKind: "extraction_slot",
   },
 ];
 

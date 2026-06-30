@@ -30,6 +30,7 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { jsonSchemaFromZod } from '../engine/query-loop.js'
+import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
 // ── Source types ──────────────────────────────────────────────
@@ -44,7 +45,7 @@ export type RemoteSource = {
   kind: 'remote'
   server: McpServerConfig
   serverUrl: string
-  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>) => Promise<unknown>
+  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
 }
 
 /**
@@ -297,9 +298,16 @@ export function createMcpSearchTools(params: {
    * no per-entry `callMcpTool` was provided at index-build time (every
    * remote entry today carries one, so this is a fallback for safety).
    */
-  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>) => Promise<unknown>
+  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
+  /**
+   * Optional tool-use interception (remote MCP only). `preToolUse` fires
+   * right before the wire call (inject/overwrite headers, rewrite args, or
+   * block); `postToolUse` observes the result. Unset in the open build.
+   * See `docs/architecture/engine/tool-hooks.md`.
+   */
+  hooks?: EngineHooks
 }): Tool[] {
-  const { index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool } = params
+  const { index, settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks } = params
 
   // ── Lookup: server:toolName → IndexedTool ─────────────────────
   const entryByKey = new Map<string, IndexedTool>()
@@ -429,6 +437,7 @@ export function createMcpSearchTools(params: {
         appLevelAssistantId,
         userId,
         callMcpTool,
+        hooks,
       })
     },
   })
@@ -451,12 +460,13 @@ async function dispatchRemote(params: {
   assistantId: string
   appLevelAssistantId?: string
   userId: string
-  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>) => Promise<unknown>
+  callMcpTool: (serverUrl: string, toolName: string, input: Record<string, unknown>, headerOverrides?: Record<string, string>) => Promise<unknown>
+  hooks?: EngineHooks
 }) {
   const {
     entry, server, tool, toolKey, args, context,
     blockedTools, allowedTools,
-    settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool,
+    settingsStore, assistantId, appLevelAssistantId, userId, callMcpTool, hooks,
   } = params
 
   // Check classification + policy (strictest of L1 app-level + L2 assistant-level)
@@ -573,8 +583,53 @@ async function dispatchRemote(params: {
     }
   }
 
+  // ── Preflight hook (remote MCP only) ────────────────────────
+  // Fires AFTER the policy/confirmation gate, immediately before the wire
+  // call — so it sees only authorized calls and can still inject/overwrite
+  // outbound headers, rewrite args, or block. Fail-closed: a throwing
+  // preToolUse skips the call (a gate that errors must not fail open). The
+  // override (if any) is the only thing that threads a 4th arg into
+  // callMcpTool, so the no-hook path stays a 3-arg call byte-for-byte.
+  // See docs/architecture/engine/tool-hooks.md.
+  let effInput = args
+  let headerOverride: Record<string, string> | undefined
+  if (hooks?.preToolUse) {
+    let directive: PreToolUseDirective | void
+    try {
+      directive = await hooks.preToolUse({
+        source: 'remote_mcp',
+        serverUrl: entry.serverUrl,
+        serverName: server,
+        toolName: tool,
+        input: args,
+        userId,
+        assistantId,
+        sessionId: context.sessionId,
+        workspaceId: context.workspaceId,
+      })
+    } catch (err) {
+      return {
+        data: `ERROR: preflight hook errored for "${tool}"; call not executed: ${err instanceof Error ? err.message : String(err)}`,
+        isError: true,
+      }
+    }
+    if (directive?.action === 'block') {
+      return {
+        data: `ERROR: "${tool}" was blocked by a preflight hook: ${directive.reason}`,
+        isError: true,
+      }
+    }
+    if (directive?.action === 'modify') {
+      if (directive.input) effInput = directive.input
+      if (directive.headers) headerOverride = directive.headers
+    }
+  }
+
+  const startedAt = Date.now()
   try {
-    const result = await callMcpTool(entry.serverUrl, tool, args)
+    const result = headerOverride
+      ? await callMcpTool(entry.serverUrl, tool, effInput, headerOverride)
+      : await callMcpTool(entry.serverUrl, tool, effInput)
 
     // Track usage
     settingsStore.recordUsage({
@@ -583,6 +638,27 @@ async function dispatchRemote(params: {
       toolName: tool,
       allowed: true,
     }).catch((err) => console.debug('MCP usage tracking failed:', err))
+
+    // Post-call observation hook. Swallow its errors — the call already ran.
+    if (hooks?.postToolUse) {
+      try {
+        await hooks.postToolUse({
+          source: 'remote_mcp',
+          serverUrl: entry.serverUrl,
+          serverName: server,
+          toolName: tool,
+          input: effInput,
+          userId,
+          assistantId,
+          sessionId: context.sessionId,
+          workspaceId: context.workspaceId,
+          result: { data: result, isError: false },
+          elapsedMs: Date.now() - startedAt,
+        })
+      } catch (err) {
+        console.warn(`[mcp_call:dispatchRemote] postToolUse hook failed for ${tool}:`, err)
+      }
+    }
 
     return { data: result }
   } catch (err) {

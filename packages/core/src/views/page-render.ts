@@ -210,6 +210,7 @@ export async function renderBlock(block: Block, deps: BindingDeps): Promise<A2UI
     case 'toggle':
     case 'table':
     case 'child_page':
+    case 'extraction_slot':
       // Doc-native blocks have no A2UI widget mapping — chat-inline /
       // non-doc consumers show a muted placeholder; the full block UI
       // lives in app-web's block-*.tsx. Keeps the exhaustive switch total.
@@ -239,6 +240,7 @@ function renderDocNativePlaceholder(
       | 'toggle'
       | 'table'
       | 'child_page'
+      | 'extraction_slot'
   } & Record<string, unknown>,
 ): A2UIWidget {
   return {

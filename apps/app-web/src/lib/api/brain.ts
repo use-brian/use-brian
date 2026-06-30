@@ -76,7 +76,19 @@ export type BrainRow = {
   createdByUserId?: string | null;
   createdByAssistantId?: string | null;
   hasPending?: boolean;
+  /** Task lifecycle status — only present on `kind:'tasks'` rows. One of
+   *  `todo` | `in_progress` | `blocked` | `done` | `archived`. Drives the
+   *  grouped view's status chip + the completed-task partition. */
+  status?: string;
 };
+
+/**
+ * Brain list task partition. `active` (DEFAULT) hides done/archived tasks so
+ * the Brain leads with live work; `completed` returns only done/archived (the
+ * "Show completed" reveal); `all` returns every status. Tasks-only — ignored
+ * by every other primitive. See packages/api/src/routes/brain.ts `/list`.
+ */
+export type TaskStatusFilter = "active" | "completed" | "all";
 
 export type EntityRollup = {
   id: string;
@@ -126,6 +138,9 @@ export type BrainListParams = {
   search?: string;
   viewpointAssistantId?: string | null;
   pendingOnly?: boolean;
+  /** Task completion partition (tasks-only). Omitted ⇒ server default
+   *  `active` (done/archived hidden). See {@link TaskStatusFilter}. */
+  taskStatus?: TaskStatusFilter;
   cursor?: string;
   limit?: number;
 };
@@ -149,6 +164,7 @@ export async function listBrain(
   if (params.viewpointAssistantId)
     q.set("assistantId", params.viewpointAssistantId);
   if (params.pendingOnly) q.set("pending", "true");
+  if (params.taskStatus) q.set("taskStatus", params.taskStatus);
   if (params.cursor) q.set("cursor", params.cursor);
   if (params.limit) q.set("limit", String(params.limit));
   if (params.primitives?.length) q.set("kinds", params.primitives.join(","));

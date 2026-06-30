@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { Writable } from 'node:stream'
 import { createFilesApi, MAX_BYTES_PER_WORKSPACE, type FilesClientResolver } from '../files-api.js'
 import { parseStorageBucket } from '../gcs-client.js'
 import type { GcsFilesClient } from '../gcs-client.js'
@@ -41,6 +42,20 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
     },
     async signedWriteUrl(key) {
       return `https://signed.example/${key}?upload=1`
+    },
+    writeStream(key, opts) {
+      const chunks: Buffer[] = []
+      return new Writable({
+        write(chunk, _enc, cb) {
+          chunks.push(Buffer.from(chunk))
+          cb()
+        },
+        final(cb) {
+          blobs.set(key, Buffer.concat(chunks))
+          mimes.set(key, opts.mime)
+          cb()
+        },
+      })
     },
   }
 }

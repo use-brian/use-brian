@@ -67,8 +67,29 @@ export type Workspace = {
    * the correct tier without a separate `/api/usage` round-trip.
    */
   plan: WorkspacePlan
+  /**
+   * The workspace's default recording blueprint — a `workspace_page_templates`
+   * id carrying an `extraction` spec (a blueprint). When a recording is
+   * processed with no explicit blueprint pick, this is the fallback the
+   * selection ladder (`explicit ?? workspace default ?? none`) resolves at the
+   * enqueue edge. `null` = no default (ingest-only). Migration 291. See
+   * docs/architecture/brain/structural-synthesis.md.
+   */
+  defaultRecordingBlueprintId: string | null
   createdAt: Date
   updatedAt: Date
+}
+
+/**
+ * Thrown by `setDefaultRecordingBlueprint` when the supplied template id is not
+ * a valid blueprint for this workspace (missing, cross-workspace, or carries no
+ * `extraction` spec). The route maps it to HTTP 400.
+ */
+export class InvalidRecordingBlueprintError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'InvalidRecordingBlueprintError'
+  }
 }
 
 export type WorkspaceMember = {
@@ -121,6 +142,7 @@ const WORKSPACE_COLUMNS = `
   icon_seed AS "iconSeed",
   is_personal AS "isPersonal",
   plan,
+  default_recording_blueprint_id AS "defaultRecordingBlueprintId",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const
@@ -148,6 +170,15 @@ export type WorkspaceStore = {
   list(userId: string): Promise<Workspace[]>
   get(userId: string, workspaceId: string): Promise<Workspace | null>
   update(userId: string, workspaceId: string, updates: { name?: string; purpose?: string }): Promise<Workspace | null>
+  /**
+   * Set (or clear) the workspace's default recording blueprint (migration 291).
+   * `templateId === null` clears it (ingest-only). A non-null id is VALIDATED:
+   * the template must exist, belong to THIS workspace, and carry an `extraction`
+   * spec (be a blueprint) — otherwise `InvalidRecordingBlueprintError` is thrown
+   * (the route maps it to 400). Returns the updated workspace, or `null` when
+   * the workspace is not found / not writable under RLS.
+   */
+  setDefaultRecordingBlueprint(userId: string, workspaceId: string, templateId: string | null): Promise<Workspace | null>
   delete(userId: string, workspaceId: string): Promise<boolean>
   listMembers(userId: string, workspaceId: string): Promise<WorkspaceMember[]>
   addMember(userId: string, workspaceId: string, memberUserId: string, role?: 'admin' | 'member'): Promise<WorkspaceMember>
@@ -587,6 +618,30 @@ export async function getWorkspacePurpose(
 }
 
 /**
+ * System-level lookup of a workspace's default recording blueprint (migration
+ * 291). Returns the `workspace_page_templates` id, or `null` when no default is
+ * set, the workspace is missing, or the lookup fails. Null-safe by design: this
+ * backs the channel-media-intake enqueue-edge resolver, and a recording must
+ * never be blocked by a default-lookup error — it just falls back to
+ * ingest-only. See docs/architecture/brain/structural-synthesis.md.
+ */
+export async function getWorkspaceDefaultRecordingBlueprint(
+  workspaceId: string | null | undefined,
+): Promise<string | null> {
+  if (!workspaceId) return null
+  try {
+    const row = await query<{ default_recording_blueprint_id: string | null }>(
+      `SELECT default_recording_blueprint_id FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    return row.rows[0]?.default_recording_blueprint_id ?? null
+  } catch (err) {
+    console.error('[workspace-store] default recording blueprint lookup failed, defaulting to none:', err)
+    return null
+  }
+}
+
+/**
  * System-level lookup of a workspace's identity (name + purpose) in a
  * single round-trip. Used by the distribution L1 soul which grounds both
  * the role framing and the topic scope. Returns null when the workspace
@@ -911,6 +966,7 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
              (assistant_id, capability, granted_by_user_id, reason)
            VALUES ($1, 'tasks', $2, '§17 default-on at primary creation'),
                   ($1, 'crm',   $2, '§17 default-on at primary creation'),
+                  ($1, 'goals', $2, 'goals default-on at primary creation'),
                   ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
                   ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
           [assistantResult.rows[0].id, userId],
@@ -966,6 +1022,43 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         `UPDATE workspaces SET ${sets.join(', ')} WHERE id = $${idx}
          RETURNING ${WORKSPACE_COLUMNS}`,
         values,
+      )
+      return result.rows[0] ?? null
+    },
+
+    async setDefaultRecordingBlueprint(userId, workspaceId, templateId) {
+      if (templateId !== null) {
+        // Validate the template is a blueprint (carries an `extraction` spec)
+        // AND lives in THIS workspace. Both checks ride the same RLS-scoped
+        // SELECT — a cross-workspace id simply yields no row under the
+        // `workspace_page_templates_workspace_member` policy, so a non-member's
+        // template is indistinguishable from a missing one (no leak), and a
+        // member's template in ANOTHER workspace is caught by the explicit
+        // `workspace_id = $2` predicate.
+        const check = await queryWithRLS<{ extraction: unknown }>(
+          userId,
+          `SELECT extraction FROM workspace_page_templates WHERE id = $1 AND workspace_id = $2`,
+          [templateId, workspaceId],
+        )
+        const row = check.rows[0]
+        if (!row) {
+          throw new InvalidRecordingBlueprintError(
+            'Blueprint not found in this workspace',
+          )
+        }
+        if (row.extraction == null) {
+          throw new InvalidRecordingBlueprintError(
+            'Template is not a blueprint (no extraction spec)',
+          )
+        }
+      }
+
+      const result = await queryWithRLS<Workspace>(
+        userId,
+        `UPDATE workspaces SET default_recording_blueprint_id = $1, updated_at = now()
+         WHERE id = $2
+         RETURNING ${WORKSPACE_COLUMNS}`,
+        [templateId, workspaceId],
       )
       return result.rows[0] ?? null
     },

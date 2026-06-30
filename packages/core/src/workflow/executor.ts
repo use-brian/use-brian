@@ -817,6 +817,10 @@ async function dispatchAssistantCall(
     // recurring workflow saves only new facts). See
     // docs/architecture/features/workflow.md → "assistant_call memory continuity".
     workflowId: ctx.workflow.id,
+    // Blueprint to fill on a research step (structural-synthesis P4). The callee
+    // executor runs the research fan-out as the gather, then synthesizes this
+    // blueprint into the anchored page. Absent → free-form authoring.
+    blueprintId: step.blueprintId,
     caller: {
       workspaceId: ctx.run.workspaceId,
       assistantId: ctx.primaryAssistantId,

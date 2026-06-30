@@ -25,6 +25,7 @@ vi.mock('../../db/users.js', () => ({
 import { workspaceRoutes } from '../workspaces.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { findUserById } from '../../db/users.js'
+import { InvalidRecordingBlueprintError } from '../../db/workspace-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
@@ -37,6 +38,7 @@ const workspaceStore = {
   get: vi.fn(),
   listMembers: vi.fn(),
   update: vi.fn(),
+  setDefaultRecordingBlueprint: vi.fn(),
   delete: vi.fn(),
   countFreeOwned: vi.fn(),
 }
@@ -174,5 +176,67 @@ describe('[COMP:api/workspaces-route] requireWorkspaceRole gate', () => {
       .post('/api/workspaces/ws-1/members')
       .send({ email: 'nobody@example.com' })
     expect(res.status).toBe(404)
+  })
+})
+
+describe('[COMP:api/workspaces-route] PATCH /:workspaceId default recording blueprint (migration 291)', () => {
+  const BP = '11111111-1111-4111-8111-111111111111'
+
+  it('sets a valid blueprint default (200, routed to the store setter)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceStore.setDefaultRecordingBlueprint.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', defaultRecordingBlueprintId: BP,
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ defaultRecordingBlueprintId: BP })
+    expect(res.status).toBe(200)
+    expect(res.body.defaultRecordingBlueprintId).toBe(BP)
+    expect(workspaceStore.setDefaultRecordingBlueprint).toHaveBeenCalledWith('u-1', 'ws-1', BP)
+    // The name/purpose update path is not touched when only the blueprint changes.
+    expect(workspaceStore.update).not.toHaveBeenCalled()
+  })
+
+  it('clears the default with null (200)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceStore.setDefaultRecordingBlueprint.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', defaultRecordingBlueprintId: null,
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ defaultRecordingBlueprintId: null })
+    expect(res.status).toBe(200)
+    expect(res.body.defaultRecordingBlueprintId).toBeNull()
+    expect(workspaceStore.setDefaultRecordingBlueprint).toHaveBeenCalledWith('u-1', 'ws-1', null)
+  })
+
+  it('400s a cross-workspace / non-blueprint template (store throws InvalidRecordingBlueprintError)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceStore.setDefaultRecordingBlueprint.mockRejectedValueOnce(
+      new InvalidRecordingBlueprintError('Blueprint not found in this workspace'),
+    )
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ defaultRecordingBlueprintId: BP })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toContain('Blueprint not found')
+  })
+
+  it('400s a malformed (non-uuid) blueprint id at the boundary, never hitting the store', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ defaultRecordingBlueprintId: 'not-a-uuid' })
+    expect(res.status).toBe(400)
+    expect(workspaceStore.setDefaultRecordingBlueprint).not.toHaveBeenCalled()
+  })
+
+  it('requires at least an admin role (member → 403)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('member')
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ defaultRecordingBlueprintId: BP })
+    expect(res.status).toBe(403)
+    expect(workspaceStore.setDefaultRecordingBlueprint).not.toHaveBeenCalled()
   })
 })

@@ -173,6 +173,8 @@ export const consultRequestSchema = z.object({
   // Always a concrete saved_views id on the wire (the workflow executor
   // resolves create/fromStep variants before the consult).
   pageAnchorId: z.string().uuid().optional(),
+  // Blueprint slug to fill on a research step (structural-synthesis P4).
+  blueprintId: z.string().min(1).max(128).optional(),
   caller: callerIdentitySchema,
   chain: consultChainSchema,
 })

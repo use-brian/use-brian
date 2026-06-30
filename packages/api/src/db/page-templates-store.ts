@@ -17,6 +17,7 @@ import type {
   Block,
   CustomPageTemplate,
   CustomPageTemplateSummary,
+  ExtractionSpec,
   PageTemplateCategory,
 } from '@sidanclaw/core'
 
@@ -30,6 +31,8 @@ export type CreatePageTemplateInput = {
   icon?: string | null
   category: PageTemplateCategory
   blocks: Block[]
+  /** Present → the saved template is a blueprint the synthesis engine can fill. */
+  extraction?: ExtractionSpec | null
 }
 
 export type PageTemplateStore = {
@@ -51,6 +54,7 @@ type SummaryRow = {
   description: string | null
   icon: string | null
   category: string
+  extraction: ExtractionSpec | null
   created_at: Date
   updated_at: Date
 }
@@ -58,7 +62,7 @@ type SummaryRow = {
 type FullRow = SummaryRow & { blocks: Block[] }
 
 const SUMMARY_SELECT =
-  'id, workspace_id, created_by, name, description, icon, category, created_at, updated_at'
+  'id, workspace_id, created_by, name, description, icon, category, extraction, created_at, updated_at'
 const FULL_SELECT = `${SUMMARY_SELECT}, blocks`
 
 function rowToSummary(row: SummaryRow): CustomPageTemplateSummary {
@@ -70,6 +74,7 @@ function rowToSummary(row: SummaryRow): CustomPageTemplateSummary {
     description: row.description,
     icon: row.icon,
     category: row.category as PageTemplateCategory,
+    extraction: row.extraction ?? null,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   }
@@ -102,12 +107,12 @@ export function createDbPageTemplateStore(): PageTemplateStore {
       return result.rows[0] ? rowToFull(result.rows[0]) : null
     },
 
-    async create(userId, { workspaceId, name, description, icon, category, blocks }) {
+    async create(userId, { workspaceId, name, description, icon, category, blocks, extraction }) {
       const result = await queryWithRLS<FullRow>(
         userId,
         `INSERT INTO workspace_page_templates
-           (workspace_id, created_by, name, description, icon, category, blocks)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+           (workspace_id, created_by, name, description, icon, category, blocks, extraction)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -117,6 +122,7 @@ export function createDbPageTemplateStore(): PageTemplateStore {
           icon ?? null,
           category,
           JSON.stringify(blocks),
+          extraction ? JSON.stringify(extraction) : null,
         ],
       )
       return rowToFull(result.rows[0])

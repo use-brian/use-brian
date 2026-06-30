@@ -10,9 +10,10 @@
  *     `orderedList` / `taskList` parent. `blocksToPMDoc` groups consecutive
  *     same-kind items into one list; `pmDocToBlocks` flattens them back, in
  *     order, with each item's `blockId` preserved.
- *   - **Embeds.** data/chart/image/file/bookmark/child_page collapse to one
- *     `embed` atom carrying the original block JSON as a string — a lossless,
- *     id-preserving round-trip.
+ *   - **Embeds.** Every non-prose kind (data/chart/image/file/bookmark/
+ *     child_page/video/audio/extraction_slot) collapses to one `embed` atom
+ *     carrying the original block JSON as a string — a lossless, id-preserving
+ *     round-trip.
  *
  * `canonicalizeBlock` is the documented canonical form: it fills the defaults
  * the round-trip applies (empty `richText` → one empty paragraph, `variant`
@@ -351,7 +352,12 @@ export function blockToNode(block: Block): PMNode {
     case 'table':
       return tableToNode(block)
     default:
-      // data | chart | image | file | bookmark | child_page → opaque embed.
+      // data | chart | image | file | bookmark | child_page | video | audio |
+      // extraction_slot → opaque embed. `extraction_slot` is a non-prose
+      // authoring directive (a blueprint section's extraction instruction), so
+      // it rides the same lossless JSON embed atom as every other non-prose
+      // kind — no dedicated ProseMirror node, hence no byte-for-byte Yjs schema
+      // change. The app-web embed node-view dispatches it to a richer renderer.
       return {
         type: 'embed',
         attrs: { blockId: block.id, block: JSON.stringify(block) },

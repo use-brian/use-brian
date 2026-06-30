@@ -7,8 +7,10 @@
  *                                 never creates an active skill directly.
  *   enableSkill / disableSkill  — per-assistant workspace-skill enablement.
  *   setConnectorPolicy          — L2 allow/ask/block on one connector tool.
- *   addPatConnector             — team connector instance with a PAT/token
- *                                 credential (the headless-completable kind).
+ *   addPatConnector             — personal connector instance with a PAT/token
+ *                                 credential (the headless-completable kind),
+ *                                 auto-shared with the bound workspace via a
+ *                                 grant (canonical unified-connectors model).
  *   configureConnectorInstance  — label / sensitivity / connected / token
  *                                 rotation on an existing instance.
  *   createAssistant / updateAssistant — assistant drafting (§6.3) under the
@@ -44,6 +46,7 @@ import {
 import { OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 
@@ -52,6 +55,14 @@ export type AgentWriteToolDeps = {
   enablementStore: WorkspaceSkillEnablementStore
   mcpSettingsStore: McpSettingsStore
   connectorInstanceStore: ConnectorInstanceStore
+  /**
+   * Exposes a freshly-created personal connector to the bound workspace.
+   * `addPatConnector` follows the canonical unified-connectors model — a
+   * personal `scope='user'` instance reaches workspace assistants only via a
+   * `connector_grant` (mcp.md → "Unified connectors"); team-native
+   * `scope='workspace'` creation is retired.
+   */
+  connectorGrantStore: ConnectorGrantStore
   /**
    * Resolve the human approver for a staged row created from this context —
    * the credential's creator when known, else the workspace owner (the
@@ -195,10 +206,10 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
   const addPatConnector = buildTool({
     name: 'addPatConnector',
     description:
-      'Add a token-authenticated (PAT / API-key) connector to the workspace and mark it ' +
-      'connected. Works headless because a token is just data. OAuth connectors (Gmail, ' +
-      'Google Calendar, Drive, Notion, Fathom) can NOT be completed here — for those, ' +
-      'create nothing and tell the user to connect via Studio.',
+      'Add a token-authenticated (PAT / API-key) connector for yourself and share it with ' +
+      'this workspace, marked connected. Works headless because a token is just data. ' +
+      'OAuth connectors (Gmail, Google Calendar, Drive, Notion, Fathom) can NOT be ' +
+      'completed here — for those, create nothing and tell the user to connect via Studio.',
     inputSchema: z.object({
       provider: z.string().min(1).describe("registry provider id (e.g. 'github') — see listConnectors"),
       label: z.string().min(1).max(120).describe('Display label for this connection'),
@@ -217,23 +228,42 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
           isError: true,
         }
       }
-      const instance = await deps.connectorInstanceStore.createWorkspaceInstance({
-        workspaceId,
+      // Canonical unified-connectors model (mcp.md → "Unified connectors"):
+      // mint a PERSONAL instance owned by the acting user, then expose it to
+      // the bound workspace via a grant — the same shape the human
+      // connect-then-share flow produces. Team-native `scope='workspace'`
+      // creation is retired; it produced connectors that were usable but
+      // invisible/unmanageable on the Studio → Connectors page.
+      const instance = await deps.connectorInstanceStore.createUserInstance({
+        userId: ctx.userId,
         provider: input.provider,
         label: input.label,
-        // Same credential shape the team PAT route stores (client_secret = the token).
+        // Same credential shape the connect flow stores (client_secret = the token).
         credentials: { client_id: '', client_secret: input.token },
         connected: true,
         createdBy: ctx.userId,
       })
-      return { data: `Connector '${input.label}' (${input.provider}) created and connected. instanceId=${instance.id}` }
+      // Idempotent (ON CONFLICT DO NOTHING). Solo workspaces have no audience,
+      // but the grant is harmless and keeps the connector workspace-reachable
+      // the moment a teammate joins.
+      await deps.connectorGrantStore.create({
+        actingUserId: ctx.userId,
+        connectorInstanceId: instance.id,
+        targetType: 'workspace',
+        targetId: workspaceId,
+      })
+      return {
+        data:
+          `Connector '${input.label}' (${input.provider}) created, connected, and shared ` +
+          `with this workspace. instanceId=${instance.id}`,
+      }
     },
   })
 
   const configureConnectorInstance = buildTool({
     name: 'configureConnectorInstance',
     description:
-      'Update an existing workspace connector instance: label, sensitivity tier, connected ' +
+      'Update an existing connector instance you own: label, sensitivity tier, connected ' +
       'flag, or rotate its PAT token. Use listConnectors for the instanceId. Cannot mint ' +
       'OAuth credentials.',
     inputSchema: z.object({

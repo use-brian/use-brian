@@ -269,6 +269,136 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     )
   })
 
+  // config.preflightHeaders — static operational headers configured per
+  // connector — merge OVER the auth headers and travel on both discovery and
+  // the mcp_call dispatcher, same join-by-URL path. See tool-hooks.md.
+  // (Unique userId/connectorId/url so the per-process discovery cache, keyed
+  // on userId:connectorId:url:updatedAt, doesn't short-circuit discovery.)
+  it('merges config.preflightHeaders over auth headers through discovery and dispatch', async () => {
+    discoverMcpServer.mockResolvedValueOnce({
+      name: 'Preflight MCP', url: 'http://localhost:9100/mcp',
+      tools: [{ name: 'getQuote', description: 'Read a market quote', inputSchema: { type: 'object', properties: {} } }],
+    })
+    callRemoteMcpTool.mockResolvedValueOnce('42')
+    const tools = new Map()
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        {
+          id: 'ci-pf-1', connectorId: 'cx-pf-1', name: 'Preflight MCP', connected: true,
+          url: 'http://localhost:9100/mcp', custom: true,
+          config: { preflightHeaders: [{ name: 'X-Tenant', value: 'acme' }] },
+          createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-02T00:00:00Z'),
+        },
+      ]),
+    }
+    const connectorInstanceStore = {
+      getAuthCredentialsSystem: vi.fn().mockResolvedValue({ type: 'bearer', token: 'tok-1' }),
+      getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
+    }
+    await injectMcpTools({
+      userId: 'u-pf-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+    })
+    expect(discoverMcpServer).toHaveBeenCalledWith(
+      'http://localhost:9100/mcp', 'Preflight MCP',
+      { Authorization: 'Bearer tok-1', 'X-Tenant': 'acme' },
+    )
+    const mcpCall = tools.get('mcp_call') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    await mcpCall.execute({ server: 'Preflight MCP', tool: 'getQuote', args: { symbol: 'ADA' } }, {} as never)
+    expect(callRemoteMcpTool).toHaveBeenCalledWith(
+      'http://localhost:9100/mcp', 'getQuote', { symbol: 'ADA' },
+      { Authorization: 'Bearer tok-1', 'X-Tenant': 'acme' },
+    )
+  })
+
+  it('drops an invalid preflight header at inject time but keeps auth + valid ones', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    discoverMcpServer.mockResolvedValueOnce({ name: 'Preflight MCP 2', url: 'http://localhost:9101/mcp', tools: [] })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-pf-2', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-pf-2', connectorId: 'cx-pf-2', name: 'Preflight MCP 2', connected: true,
+            url: 'http://localhost:9101/mcp', custom: true,
+            config: { preflightHeaders: [{ name: 'X-Bad: nope\r\n', value: 'v' }, { name: 'X-Good', value: 'ok' }] },
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-03T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({ type: 'bearer', token: 'tok-1' }),
+        getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
+      } as never,
+    })
+    expect(discoverMcpServer).toHaveBeenCalledWith(
+      'http://localhost:9101/mcp', 'Preflight MCP 2',
+      { Authorization: 'Bearer tok-1', 'X-Good': 'ok' },
+    )
+  })
+
+  // Opt-in actor identity: the connector with config.sendActorIdentity gets the
+  // reserved X-Sidanclaw-Actor-* headers (over auth + preflight). See tool-hooks.md.
+  it('injects X-Sidanclaw-Actor-* for an opted-in connector at highest precedence', async () => {
+    discoverMcpServer.mockResolvedValueOnce({
+      name: 'Actor MCP', url: 'http://localhost:9200/mcp',
+      tools: [{ name: 'getQuote', description: 'q', inputSchema: { type: 'object', properties: {} } }],
+    })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-actor-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-actor-1', connectorId: 'cx-actor-1', name: 'Actor MCP', connected: true,
+            url: 'http://localhost:9200/mcp', custom: true,
+            config: { sendActorIdentity: true, preflightHeaders: [{ name: 'X-Tenant', value: 'acme' }] },
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-04T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue({ type: 'bearer', token: 'tok' }),
+        getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(),
+      } as never,
+      actorIdentity: { channel: 'web', id: 'ceo@corp.com', email: 'ceo@corp.com', userId: 'u-actor-1' },
+    })
+    expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9200/mcp', 'Actor MCP', {
+      Authorization: 'Bearer tok',
+      'X-Tenant': 'acme',
+      'X-Sidanclaw-Actor-Channel': 'web',
+      'X-Sidanclaw-User-Id': 'u-actor-1',
+      'X-Sidanclaw-Actor-Id': 'ceo@corp.com',
+      'X-Sidanclaw-Actor-Email': 'ceo@corp.com',
+    })
+  })
+
+  it('does NOT inject actor headers for a connector that did not opt in (no PII leak)', async () => {
+    discoverMcpServer.mockResolvedValueOnce({ name: 'No-Actor MCP', url: 'http://localhost:9201/mcp', tools: [] })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-actor-2', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-actor-2', connectorId: 'cx-actor-2', name: 'No-Actor MCP', connected: true,
+            url: 'http://localhost:9201/mcp', custom: true,
+            config: {}, // sendActorIdentity absent → opted out
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-05T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      actorIdentity: { channel: 'web', id: 'ceo@corp.com', email: 'ceo@corp.com', userId: 'u-actor-2' },
+    })
+    expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9201/mcp', 'No-Actor MCP', {})
+  })
+
   it('discovers with empty headers when no instance store is wired (legacy parity)', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'Open MCP', url: 'http://localhost:9001/mcp', tools: [] })
     const tools = new Map()

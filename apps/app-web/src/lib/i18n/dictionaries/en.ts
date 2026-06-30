@@ -442,6 +442,8 @@ export const en = {
     iconStudioAria: "Studio",
     iconWorkflow: "Workflow",
     iconWorkflowAria: "Workflow",
+    iconGoals: "Goals",
+    iconGoalsAria: "Goals",
     // Studio cold-start nudge — shown until the workspace has a connected
     // connector; dismissable, persisted per workspace.
     studioSetupNudge: "Set up",
@@ -922,12 +924,25 @@ export const en = {
         bookmark: "Bookmark",
         chart: "Chart",
         diagram: "Diagram",
+        extraction_slot: "Extraction slot",
       },
       empty: "No matches.",
       ariaLabel: "Block types",
       filteredResults: "Filtered results",
       closeMenu: "Close menu",
       esc: "esc",
+    },
+    // Extraction-slot block ("/extract") - a blueprint authoring directive
+    // carrying a section's extraction instruction + an optional output shape.
+    extractionSlot: {
+      label: "Extraction slot",
+      instructionAria: "Extraction instruction",
+      instructionPlaceholder: "Describe what fills this section when the blueprint runs",
+      outputLabel: "Output",
+      outputAuto: "Auto",
+      outputProse: "Prose",
+      outputList: "List",
+      outputTable: "Table",
     },
     // Page template gallery: opened by the "/template" slash item, inserts a
     // starter layout's blocks at the caret.
@@ -1526,7 +1541,13 @@ export const en = {
       groupPersonal: "Personal",
       groupConnected: "Connected",
       groupAvailable: "Available",
+      groupWorkspaceShared: "Available in this workspace",
       groupBuiltin: "Built-in",
+      workspaceSharedByMember: "Shared by {name}",
+      workspaceSharedByTeammate: "Shared by a teammate",
+      workspaceSharedTeamNative: "Workspace connector",
+      workspaceSharedReadonlyNote:
+        "This connector is shared with the workspace, so you can use it to set up knowledge and assistants here. Only the member who connected it can manage or remove it. Per-assistant tool permissions are set in Assistant, Tools, Connectors.",
       railAriaLabel: "Your connectors",
       selectPrompt: "Select a connector to manage it.",
       workspaceAccessTitle: "Workspace access",
@@ -1580,6 +1601,21 @@ export const en = {
       testingConnection: "Testing connection...",
       testOk: "Connected. {count} tools found.",
       testFailed: "Connection failed: {error}",
+      preflightTitle: "Preflight headers",
+      preflightDesc: "Extra HTTP headers sent with every request to this server, for example a tenant or tracing header. Not for secrets: use the authentication section above for credentials.",
+      preflightEmpty: "No preflight headers yet.",
+      preflightAddRow: "Add header",
+      preflightNamePlaceholder: "Header name",
+      preflightValuePlaceholder: "Header value",
+      preflightRemove: "Remove",
+      preflightSave: "Save headers",
+      preflightSaved: "Saved",
+      preflightErrInvalidName: "Header names can only use letters, numbers, and characters like - _ .",
+      preflightErrEmptyValue: "Enter a value with no line breaks for this header.",
+      preflightErrDuplicate: "This header name is already used.",
+      actorIdentityTitle: "Send signed-in user identity",
+      actorIdentityDesc: "Sends the signed-in user's identity (email on web, phone on WhatsApp, handle on Telegram, user id on Slack) to this server with every request, so it can act on their behalf. Off by default.",
+      actorIdentityNoAuthWarning: "This connector has no authentication, so the server cannot verify the identity came from sidanclaw. Add a bearer token or custom header above before relying on it for sign-in.",
     },
     skills: {
       title: "Skills",
@@ -1945,6 +1981,34 @@ export const en = {
         "{failed} of {total} could not be resolved. Still selected for retry.",
     },
   },
+  goalsPage: {
+    title: "Goals",
+    description: "Goals the workspace is driving to a verifiable end.",
+    emptyTitle: "No goals yet",
+    emptyBody:
+      "Ask the assistant to keep working on something until it is done, and the goal shows up here.",
+    loading: "Loading…",
+    countBadge: "{count}",
+    filterStatusLabel: "Status",
+    statusAll: "All active",
+    status: {
+      active: "Active",
+      running: "Running",
+      awaiting_approval: "Awaiting approval",
+      blocked: "Blocked",
+      done: "Done",
+      abandoned: "Abandoned",
+    },
+    host: {
+      task: "Task",
+      page: "Page",
+      entity: "Entity",
+      workflow: "Workflow",
+      standalone: "Standalone",
+    },
+    updated: "Updated {when}",
+    blocker: "Blocked: {reason}",
+  },
   workflowPage: {
     title: "Workflow",
     description: "Automations your brain runs on its own.",
@@ -2079,6 +2143,13 @@ export const en = {
       pageAnchorChipCreate: "Creates a page",
       pageAnchorHint:
         "Anchor this step to a page. The assistant runs with page editing tools and works on that page, like a doc chat. Without an anchor it cannot edit pages.",
+      blueprintLabel: "Blueprint (optional)",
+      blueprintNone: "No blueprint",
+      blueprintPlaceholder: "Pick a blueprint...",
+      blueprintSearchPlaceholder: "Search blueprints…",
+      blueprintEmpty: "No blueprints in this workspace yet.",
+      blueprintHint:
+        "Fill a blueprint on this step: the assistant produces its sections from what it gathers, instead of free-form output.",
       triggerJobsHeading: "Active triggers",
       triggerJobsDriftManual:
         "The configured trigger does not schedule this workflow, but the triggers below are firing it. They are what actually runs; remove them if that is unintended.",
@@ -2205,6 +2276,31 @@ export const en = {
       webhookSnippetTabCurl: "curl",
       webhookSnippetTabNode: "Node",
       webhookSnippetTabPython: "Python",
+      // ── Webhook filter (match) ───────────────────────────────────────
+      webhookFilterHeading: "Filter (optional)",
+      webhookFilterHint:
+        "Leave empty to run on every signed request. Add rules to run only on matching payloads.",
+      webhookFilterAddRule: "+ Add rule",
+      webhookFilterRemoveRule: "Remove rule",
+      webhookFilterFieldPlaceholder: "payload field (e.g. type or data.amount)",
+      webhookFilterValuePlaceholder: "value (e.g. deal.won)",
+      webhookFilterCombineAll: "Match all rules (AND)",
+      webhookFilterCombineAny: "Match any rule (OR)",
+      webhookFilterOpEquals: "equals",
+      webhookFilterOpNotEquals: "does not equal",
+      webhookFilterOpGt: "greater than",
+      webhookFilterOpGte: "greater or equal",
+      webhookFilterOpLt: "less than",
+      webhookFilterOpLte: "less or equal",
+      webhookFilterOpContains: "contains",
+      webhookFilterAdvancedShow: "Edit as JSONLogic",
+      webhookFilterAdvancedHide: "Back to simple rules",
+      webhookFilterAdvancedHint:
+        "JSONLogic evaluated against { input: <payload> }. Same operators as a branch step.",
+      webhookFilterRawPlaceholder: '{ "==": [{ "var": "input.type" }, "deal.won"] }',
+      webhookFilterRawInvalid: "Not valid JSON.",
+      webhookFilterRawComplexNote:
+        "This filter is too complex for the simple editor. Keep editing it as JSONLogic.",
       // ── Event trigger UI ─────────────────────────────────────────────
       triggerEvent: "On an event",
       triggerEventHint:
@@ -2315,6 +2411,7 @@ export const en = {
     sections: {
       entries: "Entries",
       skills: "Skills",
+      blueprints: "Blueprints",
       reviews: "Reviews",
     },
     viewToggle: {
@@ -2322,6 +2419,17 @@ export const en = {
       graph: "Graph",
       listAria: "Show list view",
       graphAria: "Show graph view",
+    },
+    groupedView: {
+      showCompleted: "Show completed ({count})",
+      hideCompleted: "Hide completed ({count})",
+    },
+    taskStatus: {
+      todo: "To do",
+      in_progress: "In progress",
+      blocked: "Blocked",
+      done: "Done",
+      archived: "Archived",
     },
     unconfirmedBanner: {
       headingOne: "1 entry needs your OK",
@@ -2413,6 +2521,26 @@ export const en = {
       noMatches: "No skills match these filters.",
       back: "All skills",
       needsReview: "Needs review ({count})",
+    },
+    blueprints: {
+      searchPlaceholder: "Search blueprints…",
+      countOne: "1 blueprint",
+      countMany: "{count} blueprints",
+      newBlueprint: "New blueprint",
+      newBlueprintTitle: "Untitled blueprint",
+      emptyTitle: "No blueprints yet",
+      emptyBody:
+        "A blueprint is a page that knows how to fill itself: sections plus an instruction for each, so a recording, the brain, or a research run becomes a finished brief. Make one to capture the same shaped output every time.",
+      noMatches: "No blueprints match your search.",
+      badge: "Blueprint",
+      sectionsOne: "1 section",
+      sectionsMany: "{count} sections",
+      deleteTitle: "Delete this blueprint?",
+      deleteBody:
+        "\"{name}\" will be removed. Pages already made from it are kept; only the blueprint goes.",
+      deleteConfirm: "Yes, delete",
+      deleteCancel: "Cancel",
+      deleteAria: "Delete blueprint {name}",
     },
     skillEditor: {
       titlePlaceholder: "Untitled skill",
@@ -2642,6 +2770,12 @@ export const en = {
       provenanceHeading: "Source",
       savedBy: "Saved by {author}",
       savedAt: "Saved {date}",
+      goalHeading: "Goal",
+      goalConfirm: "Confirm goal",
+      goalWork: "Work this",
+      goalWorking: "Working on this task…",
+      goalDone: "Completed",
+      titleRequired: "Title can't be empty.",
       filePreview: {
         heading: "Preview",
         loading: "Loading preview…",
@@ -3012,6 +3146,11 @@ export const en = {
       statusOff: "Not ingesting",
       scopePersonal: "Personal",
       scopeWorkspace: "Workspace",
+      personalGlobalNote:
+        "On and off applies to this connector across all your workspaces.",
+      personalRoutingNote:
+        "Events from this personal source feed your Personal workspace, not {workspace}.",
+      personalAddSourceCta: "Add a source for {workspace}",
       enableAction: "Enable ingestion",
       disableAction: "Disable",
       working: "Saving…",
@@ -3176,6 +3315,28 @@ export const en = {
     },
     channels: {
       intro: "Channels are owned by the workspace. Set each one's clearance and capabilities, and route conversations to the right assistant.",
+      whatsappOfficial: {
+        title: "Official WhatsApp bot",
+        intro: "Add our shared WhatsApp number to a group chat and it quietly reads that group into your brain. It follows whoever added it, so the group lands in that person's workspace.",
+        numberLabel: "Number to add",
+        numberUnconfigured: "The official bot isn't set up for this deployment yet.",
+        howToTitle: "How it works",
+        howToStep1: "Add the number above to your WhatsApp group.",
+        howToStep2: "Link your WhatsApp to your account first (Settings, then Account), or the bot will leave the group.",
+        howToStep3: "It reads the group silently and never sends. Remove it from the group anytime to stop.",
+        groupsTitle: "Groups it's reading",
+        groupsEmpty: "No groups yet. Add the bot to one to get started.",
+        boundByYou: "Added by you",
+        boundByTeammate: "Added by a teammate",
+        stopCta: "Stop ingesting",
+        stopping: "Stopping…",
+        stopConfirmTitle: "Stop ingesting this group?",
+        stopConfirmBody: "The bot stays in the group but stops reading it into your brain.",
+        stopConfirmCta: "Stop ingesting",
+        cancel: "Cancel",
+        loadError: "Couldn't load the official bot. Refresh to try again.",
+        stopError: "Couldn't stop ingesting. Try again.",
+      },
       noActiveWorkspace: "Select a workspace to see its channels.",
       loading: "Loading channels…",
       loadError: "Couldn't load channels. Refresh to try again.",
@@ -3920,10 +4081,23 @@ export const en = {
     confirmAction: "Transcribe",
     done: "Recording transcribed and filed to the brain.",
     partialDone: "Recording transcribed (partial). Filed what we could; you were not charged.",
-    salesDetected: "Detected a sales call: extracted the people, company, and next steps.",
     tooLong: "That recording is too long. Recordings over 3 hours are not supported yet; split the file.",
     cannotReadDuration: "We could not read that recording's length. Re-export the file and try again.",
     failed: "We could not process that recording. Please try again.",
+    blueprintLabel: "Blueprint (optional)",
+    blueprintAuto: "Ingest to brain only (no page)",
+    blueprintPlaceholder: "Choose a brief, or ingest only",
+    blueprintSearchPlaceholder: "Search blueprints…",
+  },
+  // Workspace recording brief default (migration 291) — the settings subsection
+  // that sets the blueprint every recording auto-uses when none is picked.
+  recordingDefault: {
+    heading: "Recording brief default",
+    description:
+      "The brief every recording fills in by default. Pick a blueprint to auto-build a brief page, or keep ingest only (the recording still goes to the brain).",
+    searchPlaceholder: "Search blueprints…",
+    ingestOnly: "Ingest to brain only (no page)",
+    saveFailed: "Could not save the default. Please try again.",
   },
 };
 

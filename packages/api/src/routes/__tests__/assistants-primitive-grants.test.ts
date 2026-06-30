@@ -54,6 +54,7 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
     expect(res.body.grants).toEqual([
       { capability: 'tasks', enabled: true },
       { capability: 'crm', enabled: true },
+      { capability: 'goals', enabled: false },
       { capability: 'configure', enabled: false },
     ])
   })
@@ -69,6 +70,7 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
     expect(res.body.grants).toEqual([
       { capability: 'tasks', enabled: false },
       { capability: 'crm', enabled: false },
+      { capability: 'goals', enabled: false },
       { capability: 'configure', enabled: false },
     ])
   })
@@ -147,6 +149,25 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
 
     expect(res.status).toBe(200)
     expect(capabilityStore.revoke).not.toHaveBeenCalled()
+  })
+
+  it('grants the goals primitive (default-on, member-toggleable)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    capabilityStore.grant.mockResolvedValueOnce({ id: 'g-goals' } as never)
+    capabilityStore.listActive.mockResolvedValueOnce(['tasks', 'crm', 'goals'])
+
+    const res = await request(makeApp({ userId: 'u-1' }))
+      .patch('/api/assistants/a-1/primitive-grants/goals')
+      .send({ enabled: true })
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ capability: 'goals', enabled: true })
+    expect(capabilityStore.grant).toHaveBeenCalledWith({
+      assistantId: 'a-1',
+      capability: 'goals',
+      grantedByUserId: 'u-1',
+      reason: '§17 toggled on by workspace member',
+    })
   })
 
   it('400 for an unknown capability name', async () => {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createWorkerManager } from '../worker.js'
-import type { WorkerResult } from '../worker.js'
+import type { WorkerResult, WorkerUsageEvent } from '../worker.js'
 import type { LLMProvider, ProviderSession, SessionOptions, StreamChunk, Message, ProviderRequest } from '../../providers/types.js'
 
 /** Minimal fake provider that yields a single text message. */
@@ -111,6 +111,29 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     // A's worker forwarded to A's captured sink, never B's.
     expect(aEvents.length).toBeGreaterThan(0)
     expect(bEvents).toHaveLength(0)
+  })
+
+  it('forwards a worker run\'s accumulated usage to onUsage with the spawn billing identity', async () => {
+    const usages: WorkerUsageEvent[] = []
+    const manager = createWorkerManager({
+      provider: makeFakeProvider('done'),
+      model: 'gemini-flash',
+      tools: new Map(),
+      onUsage: (u) => usages.push(u),
+    })
+    manager.spawn('research X', ctx)
+    await manager.waitForNext()
+    expect(usages).toHaveLength(1)
+    expect(usages[0]).toMatchObject({
+      workerId: 'worker_1',
+      userId: 'u1',
+      assistantId: 'a1',
+      sessionId: 's1',
+      model: 'gemini-flash',
+    })
+    // Accumulated provider usage flows through unchanged (the fake yields 10 in / N out).
+    expect(usages[0].usage.inputTokens).toBe(10)
+    expect(usages[0].usage.outputTokens).toBe('done'.length)
   })
 
   it('records worker_runs under the spawning context, not a concurrently-changed persistence target', async () => {

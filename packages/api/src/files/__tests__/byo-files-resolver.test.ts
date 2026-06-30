@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { Writable } from 'node:stream'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from '../byo-files-resolver.js'
 import { createSingletonFilesClientResolver, type FilesClientResolver } from '../files-api.js'
 import type { GcsFilesClient } from '../gcs-client.js'
@@ -10,6 +11,7 @@ function fakeGcs(tag: string): GcsFilesClient & { tag: string } {
     async readBlob() { return null },
     async signedReadUrl(k) { return `https://${tag}/${k}` },
     async signedWriteUrl(k) { return `https://${tag}/${k}` },
+    writeStream() { return new Writable({ write(_c, _e, cb) { cb() } }) },
   }
 }
 

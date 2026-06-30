@@ -84,6 +84,14 @@ import {
   type WorkspaceSkillSummary,
 } from "@/lib/api/skills";
 import {
+  createDraft,
+  deleteCustomPageTemplate,
+  listCustomPageTemplates,
+} from "@/lib/api/views";
+import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { blankBlueprintBlocks, filterBlueprints } from "@/lib/blueprints";
+import { docPagePath } from "@/lib/doc-page-url";
+import {
   BRAIN_REFRESH_EVENT,
   requestBrainRefresh,
   type BrainRefreshDetail,
@@ -107,6 +115,7 @@ import { BrainGraphView } from "@/components/brain/graph-view";
 import { BrainGroupedView } from "@/components/brain/grouped-view";
 import { SkillsLibrary } from "@/components/brain/skills-library";
 import { SkillCreator } from "@/components/brain/skill-creator";
+import { BlueprintsLibrary } from "@/components/brain/blueprints-library";
 import { ProvenanceProvider, useProvenanceState } from "@/components/provenance/provenance-context";
 import { ProvenanceSheet } from "@/components/provenance/provenance-sheet";
 import {
@@ -171,6 +180,12 @@ function BrainPageInner() {
 
   const [rows, setRows] = useState<BrainRow[] | null>(null);
   const [selected, setSelected] = useState<BrainRow | null>(null);
+  // Completed (done / archived) tasks — fetched separately from the main list
+  // (which hides them) so the grouped view can tuck them behind a "Show
+  // completed" disclosure that leads with live work. Only fetched when tasks
+  // are in scope (All or the Tasks chip).
+  const [completedTasks, setCompletedTasks] = useState<BrainRow[] | null>(null);
+  const [showCompletedTasks, setShowCompletedTasks] = useState(false);
   // Skills — the procedural-brain primitive, fetched separately (skills don't
   // flow through `/api/brain/list`). The Skills SECTION owns the library; this
   // page-level copy backs the library pane, the graph-node → drawer
@@ -179,6 +194,13 @@ function BrainPageInner() {
   const [selectedSkill, setSelectedSkill] = useState<WorkspaceSkillSummary | null>(
     null,
   );
+  // Blueprints — fillable page templates (those carrying an `extraction` spec).
+  // Fetched from the page-templates list and filtered client-side; refetched on
+  // every brain refresh so a create/delete converges. The Blueprints SECTION
+  // owns the library pane. See structural-synthesis.md.
+  const [blueprints, setBlueprints] = useState<
+    CustomPageTemplateSummary[] | null
+  >(null);
   // The Reviews detail pool — fetched via the SAME `fetchReviewItems`
   // composition the sidebar's master list uses, so scope + order agree and
   // the shared selection key resolves identically on both sides.
@@ -250,6 +272,34 @@ function BrainPageInner() {
     refreshTick,
   ]);
 
+  // Completed tasks for the grouped view's "Show completed" disclosure. Only
+  // fetched when the Entries section has tasks in scope (All, or the Tasks
+  // chip selected) — otherwise the completed list is cleared so it never
+  // surfaces under an unrelated primitive filter. The main list above hides
+  // these (`taskStatus` defaults to active), so there's no overlap.
+  const tasksInScope = primitives.length === 0 || primitives.includes("tasks");
+  useEffect(() => {
+    if (!activeId || section !== "entries" || !tasksInScope) {
+      setCompletedTasks(null);
+      return;
+    }
+    let cancelled = false;
+    listBrain({
+      workspaceId: activeId,
+      primitives: ["tasks"],
+      taskStatus: "completed",
+      search: search || undefined,
+      viewpointAssistantId,
+      limit: 100,
+    }).then((result) => {
+      if (cancelled) return;
+      setCompletedTasks(result.rows);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, section, tasksInScope, search, viewpointAssistantId, refreshTick]);
+
   // Workspace graph snapshot — needed by BOTH browse modes: the grouped default
   // decorates its entity rows with degree + neighbour-kind dots, and the graph
   // mode renders the force-directed doc. Fetched whenever the workspace /
@@ -299,12 +349,57 @@ function BrainPageInner() {
     };
   }, [activeId, refreshTick]);
 
+  // Workspace blueprints (fillable templates) — fetched on every brain refresh,
+  // the same contract as skills, so a create/delete from the library converges.
+  // The list API returns every page template; the library filters to those with
+  // an `extraction` spec.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    listCustomPageTemplates(activeId).then((result) => {
+      if (cancelled) return;
+      setBlueprints(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, refreshTick]);
+
   // Skill row clicks (library + sidebar quick-list) open the FULL editor page
   // (brain-skill-management-ux.md §3.1); only the graph-node click path keeps
   // the quick-look drawer.
   const openSkillEditor = (skill: WorkspaceSkillSummary) => {
     if (!activeId) return;
     router.push(`/w/${activeId}/brain/skills/${skill.rowId}`);
+  };
+
+  // "+ New blueprint" — seed a blank blueprint doc (a heading + an empty
+  // extraction slot) and open it in the editor, where the author fills the slot
+  // and saves it as a blueprint template. Mirrors the doc-shell "New template"
+  // create flow (createDraft -> navigate). The author saves it as a template
+  // (with its extraction spec) from the editor's "Save as template" path.
+  const openNewBlueprint = async () => {
+    if (!activeId) return;
+    try {
+      const created = await createDraft({
+        workspaceId: activeId,
+        name: t.brainPage.blueprints.newBlueprintTitle,
+        blocks: blankBlueprintBlocks() as never,
+      });
+      router.push(docPagePath(activeId, created.id));
+    } catch {
+      // Surface nothing destructive — a failed draft create is a no-op; the
+      // user can retry. (The doc-shell create path owns the richer error UI.)
+    }
+  };
+
+  // Delete a blueprint (a page template) after the library's confirm resolved.
+  // Optimistically drop it, then refetch to converge with the server.
+  const deleteBlueprint = async (template: CustomPageTemplateSummary) => {
+    if (!activeId) return;
+    setBlueprints((prev) => prev?.filter((b) => b.id !== template.id) ?? prev);
+    await deleteCustomPageTemplate(activeId, template.id).catch(() => {});
+    requestBrainRefresh(activeId);
   };
 
   // Knowledge rows open the ENTRY READER directly (grouped list + graph
@@ -501,6 +596,26 @@ function BrainPageInner() {
           {t.brainPage.skills.newSkill}
         </button>
       </>
+    ) : section === "blueprints" ? (
+      <>
+        {blueprints !== null && (
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {filterBlueprints(blueprints).length === 1
+              ? t.brainPage.blueprints.countOne
+              : format(t.brainPage.blueprints.countMany, {
+                  count: filterBlueprints(blueprints).length,
+                })}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={() => void openNewBlueprint()}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Plus className="size-3.5" aria-hidden />
+          {t.brainPage.blueprints.newBlueprint}
+        </button>
+      </>
     ) : null;
 
   return (
@@ -518,7 +633,7 @@ function BrainPageInner() {
       <div className="md:hidden flex flex-col gap-2 border-b border-border bg-muted/20 px-3 py-2.5">
         {/* Three-way section segmented control — Entries / Skills / Reviews. */}
         <div className="inline-flex w-full rounded-md border border-border bg-muted/30 p-0.5 text-[12px]">
-          {(["entries", "skills", "reviews"] as BrainSection[]).map((s) => (
+          {(["entries", "skills", "blueprints", "reviews"] as BrainSection[]).map((s) => (
             <button
               key={s}
               type="button"
@@ -614,6 +729,21 @@ function BrainPageInner() {
               />
             )
           ) : null
+        ) : section === "blueprints" ? (
+          /* Blueprints section — the library pane lists the workspace's
+             fillable templates (those with an extraction spec). Sibling of the
+             skills library; structural-synthesis.md -> "The blueprint object".
+             "+ New blueprint" (topbar) seeds a blank blueprint doc and opens
+             the editor; row delete confirms through the on-brand dialog. */
+          activeId ? (
+            <BlueprintsLibrary
+              workspaceId={activeId}
+              blueprints={blueprints}
+              search={search}
+              onNewBlueprint={() => void openNewBlueprint()}
+              onDeleteBlueprint={(template) => void deleteBlueprint(template)}
+            />
+          ) : null
         ) : viewMode === "graph" && !showNoData ? (
           /* Graph is the entries DEFAULT — but a pristine brain still gets
              the onboarding nudge below, not an empty canvas. */
@@ -636,7 +766,14 @@ function BrainPageInner() {
         ) : showNoResults ? (
           <EmptyState />
         ) : (
-          <BrainGroupedView rows={rows ?? []} graph={graph} onSelect={openRow} />
+          <BrainGroupedView
+            rows={rows ?? []}
+            graph={graph}
+            onSelect={openRow}
+            completedTasks={completedTasks}
+            showCompletedTasks={showCompletedTasks}
+            onToggleCompletedTasks={() => setShowCompletedTasks((v) => !v)}
+          />
         )}
       </div>
 

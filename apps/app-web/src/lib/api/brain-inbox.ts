@@ -161,15 +161,22 @@ export async function verifyBrainRow(
  *
  *  Field availability per primitive:
  *  - memory: scope, sensitivity, summary, detail
- *  - entity: display_name, sensitivity */
+ *  - entity: display_name, sensitivity
+ *  - workspace_file: sensitivity, tags
+ *  - task: title, status, due_at, tags */
 export type AdjustMemoryChanges = {
   scope?: "personal" | "workspace_shared" | "workspace";
   sensitivity?: "public" | "internal" | "confidential";
   summary?: string;
   detail?: string;
   display_name?: string;
-  /** workspace_file adjust — replace the tag set. */
+  /** workspace_file + task adjust — replace the tag set. */
   tags?: string[];
+  /** task adjust — the editable doc-like fields. */
+  title?: string;
+  status?: "todo" | "in_progress" | "blocked" | "done" | "archived";
+  /** task adjust — ISO date string, or null to clear the due date. */
+  due_at?: string | null;
   reason?: string;
 };
 

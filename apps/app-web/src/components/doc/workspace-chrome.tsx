@@ -238,6 +238,7 @@ export function WorkspaceChrome({
       "2": "brain",
       "3": "studio",
       "4": "workflow",
+      "5": "goals",
     };
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;

@@ -50,7 +50,8 @@ import {
   runPreflight,
   buildPreflightPrompt,
 } from '@sidanclaw/core'
-import type { SavedViewStore } from '@sidanclaw/core'
+import type { SavedViewStore, EngineHooks } from '@sidanclaw/core'
+import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
 import {
   findOrCreateSession,
   addSessionMessage,
@@ -90,6 +91,12 @@ export type CalleeExecutorOptions = {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
+  /**
+   * Tool-use interception port (remote MCP only), forwarded to the callee's
+   * `injectMcpTools`. Open default = unset. See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
   /** Capability-grants store — used to filter privileged tools for the callee. */
   capabilityStore: CapabilityStore
   /**
@@ -157,6 +164,18 @@ export type CalleeExecutorOptions = {
    * docs/architecture/features/workflow.md → "assistant_call research fan-out".
    */
   workerRunsStore?: WorkerRunsStore
+  /**
+   * Structural-synthesis P4 — the RESEARCH fill. When wired, a research-tier
+   * `assistant_call` step carrying BOTH a `blueprintId` and a `pageAnchorId`
+   * runs the research fan-out as the GATHER, then fills the blueprint into the
+   * anchored page via `synthesizeFromSource` (a `kind:'research'` source whose
+   * tool returns the gathered findings) INSTEAD of the free-form authoring loop.
+   * Built in boot from the shared stores. Absent (or unresolved blueprint / null
+   * result) → the step authors freely, exactly as before. Failure-isolated: a
+   * synthesis throw never fails the step. See
+   * docs/architecture/brain/structural-synthesis.md → "The three fill modes".
+   */
+  researchSynthesize?: ResearchSynthesizeFn
 }
 
 export type CalleeQueryParams = {
@@ -240,6 +259,16 @@ export type CalleeQueryParams = {
    * "assistant_call memory continuity".
    */
   workflowId?: string
+  /**
+   * Blueprint slug to FILL on a research step (`ConsultRequest.blueprintId`,
+   * structural-synthesis P4). When set together with `pageAnchorId` on a
+   * research-tier step, the executor runs the research fan-out as the gather,
+   * then fills this blueprint into the anchored page via `synthesizeFromSource`
+   * (structured authoring) INSTEAD of the free-form authoring loop. A built-in
+   * skill id, workspace skill slug, or page-template id. Absent → free authoring.
+   * See docs/architecture/brain/structural-synthesis.md → "The three fill modes".
+   */
+  blueprintId?: string
 }
 
 export type CalleeExecutor = (params: CalleeQueryParams) => Promise<string>
@@ -363,6 +392,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorGrantStore: options.connectorGrantStore,
           connectorInstanceStore: options.connectorInstanceStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
+          engineHooks: options.engineHooks,
         })
       } catch (err) {
         console.error('[inter-assistant] MCP injection failed for callee:', err)
@@ -602,7 +632,20 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    // Anti-fabrication guard for workflow-origin callees (fix C). A workflow
+    // step runs unattended — if a tool it needs fails (auth error, connector
+    // not connected, 401/"bad credentials", empty result), the model must NOT
+    // substitute data from memory/training and present it as fetched; that
+    // ships a fabricated deliverable (the GitHub `Bad credentials` → invented
+    // summary incident). The hard structural guarantee is a dedicated
+    // `tool_call` step (halts the run on a tool error — workflow.md "Authoring
+    // validation"); this prompt guard covers data fetched inside the consult.
+    const workflowGuardBlock =
+      params.callerChannelType === 'workflow'
+        ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
+        : ''
+
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //
@@ -687,9 +730,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // A page-anchored step is excluded (coordinator-style delegation would
     // strip its doc-authoring tools). See docs/architecture/features/workflow.md
     // → "assistant_call research fan-out".
+    // Structural-synthesis P4 — the RESEARCH fill. A research-tier step carrying
+    // BOTH a `blueprintId` and a `pageAnchorId` (with the synthesizer wired) runs
+    // the SAME fan-out gather, then fills the blueprint into the anchored page via
+    // the synthesis engine instead of the free-form authoring loop. This is the
+    // ONE case a page-anchored step still runs fan-out — for it the gather feeds
+    // a structured synthesis, not coordinator-style delegation. See
+    // docs/architecture/brain/structural-synthesis.md → "The three fill modes".
+    const isBlueprintResearch =
+      params.depth?.tier === 'deep' &&
+      !!params.pageAnchorId &&
+      !!params.blueprintId &&
+      !!calleeAssistant.workspaceId &&
+      !!options.workerRunsStore &&
+      !!options.researchSynthesize
+
     const isResearchFanout =
       params.depth?.tier === 'deep' &&
-      !params.pageAnchorId &&
+      // A page-anchored step normally skips fan-out (it would strip the doc
+      // tools); the blueprint-research case is the deliberate exception — its
+      // gather feeds the synthesis engine, not a free-form authoring loop.
+      (!params.pageAnchorId || isBlueprintResearch) &&
       !!calleeAssistant.workspaceId &&
       !!options.workerRunsStore
 
@@ -739,10 +800,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         })
         if (pre.type === 'researched') researchContext = pre.context
         // Record the splitter classifier call as overhead so it is visible in
-        // usage_tracking. NOTE: the workers' own LLM token usage is NOT
-        // recorded here — the WorkerManager has no usage hook (a pre-existing
-        // gap that also affects chat research mode). Tracked as a follow-up;
-        // see docs/architecture/features/workflow.md → "assistant_call research fan-out".
+        // usage_tracking. The workers' own LLM token usage is now recorded
+        // separately via the WorkerManager `onUsage` hook (wired in boot to
+        // `usageStore` as `triggerKey='worker_run'`, COGS-only) — closing the
+        // long-standing worker-metering gap. This path records only the
+        // splitter overhead.
         if (options.usageStore && pre.usage && pre.model) {
           options.usageStore
             .recordUsage({
@@ -765,13 +827,51 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
+    // Structural-synthesis P4 — the RESEARCH fill (AUTHORING half). With a
+    // blueprint + page anchor, the gather above IS the source: fill the blueprint
+    // into the anchored page via the synthesis engine, REPLACING the free-form
+    // authoring loop below (don't double-author). Failure-isolated: a throw / null
+    // (unresolved blueprint) logs and falls through to the normal authoring loop,
+    // so a synthesis failure never fails the step. Skipped when the gather found
+    // nothing — there is no source to synthesize from, so author normally.
+    let synthesisHandled = false
+    if (isBlueprintResearch && researchContext && options.researchSynthesize) {
+      try {
+        const result = await options.researchSynthesize({
+          blueprintSlug: params.blueprintId!,
+          findings: researchContext,
+          pageId: params.pageAnchorId!,
+          workspaceId: calleeAssistant.workspaceId!,
+          userId: calleeActorUserId,
+          assistantId: params.calleeAssistantId,
+          sensitivity: calleeAssistant.clearance ?? 'internal',
+          sourceRef: params.workflowId ? `workflow:${params.workflowId}` : params.pageAnchorId!,
+        })
+        if (result) {
+          synthesisHandled = true
+          // The page IS the deliverable; the step's text output is a short receipt.
+          responseText = 'Filled the blueprint into the anchored page from the gathered research.'
+        }
+      } catch (err) {
+        console.error(
+          '[inter-assistant] blueprint research synthesis failed; falling back to authoring:',
+          err,
+        )
+      }
+    }
+
     // The synthesis loop sees the gathered findings (research fan-out only);
     // compaction above used the un-injected prompt, which is correct.
     const loopSystemPrompt = researchContext
       ? buildPreflightPrompt(fullSystemPrompt, researchContext)
       : fullSystemPrompt
 
+    // When the blueprint-research fill authored the page above, SKIP the
+    // free-form authoring loop (don't double-author) — but stay inside this
+    // try/finally so the wall-clock timer is still cleared and any registered
+    // confirmation resolvers are still released.
     try {
+      if (!synthesisHandled)
       for await (const event of queryLoop({
         provider: options.provider,
         model,

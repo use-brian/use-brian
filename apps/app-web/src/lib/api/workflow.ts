@@ -111,7 +111,16 @@ export type WorkflowTrigger =
         nagUntilKeyword?: string;
       };
     }
-  | { kind: "webhook" }
+  | {
+      kind: "webhook";
+      /**
+       * Optional server-side event filter. `match.condition` is JSONLogic the
+       * receiver evaluates against `{ input: <parsed payload> }`; a falsy
+       * result ACKs 200 without a run. Mirrors `packages/core/src/workflow/
+       * schemas.ts`. Absent → fire on every signed delivery.
+       */
+      match?: { condition: unknown };
+    }
   | { kind: "event"; event: { sources: EventSubscription[] } };
 
 // ── Definition shape (mirrors WorkflowDefinitionSchema) ──────────────────
@@ -141,6 +150,13 @@ export type AssistantCallStep = {
   tools?: string[];
   /** Page anchor — the callee runs doc-anchored against the resolved page. */
   page?: PageAnchor;
+  /**
+   * Blueprint to fill on this step (a built-in slug or a workspace blueprint
+   * template id) — the synthesis blueprint the step's research/gather fills.
+   * FE-only mirror for now; // P4 executor consumes this. See
+   * docs/architecture/brain/structural-synthesis.md -> "The three fill modes".
+   */
+  blueprintId?: string;
   /** When set, the step's text output is pushed to this channel after the consult. */
   deliver?: { channelType: DeliverChannelType; channelId: string };
   /** `persistent` reuses one callee session across runs; `per_run` (default) is fresh. */

@@ -11,7 +11,7 @@ vi.mock('../client.js', () => ({
   })),
 }))
 
-import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, isSoloWorkspaceSystem, resolveReadCompartmentsSystem, effectiveReadCompartments, intersectCompartments } from '../workspace-store.js'
+import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, isSoloWorkspaceSystem, resolveReadCompartmentsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
 import { query, queryWithRLS, getPool } from '../client.js'
 
 const mockQuery = vi.mocked(query)
@@ -145,6 +145,77 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       const sql = mockQueryWithRLS.mock.calls[0][1] as string
       expect(sql).toContain('SELECT')
       expect(sql).not.toContain('UPDATE')
+    })
+  })
+
+  describe('setDefaultRecordingBlueprint (migration 291)', () => {
+    it('clears the default (null) without validating any template', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ id: 't_1', name: 'WS', defaultRecordingBlueprintId: null }],
+        rowCount: 1,
+      } as never)
+
+      const ws = await store.setDefaultRecordingBlueprint('u_1', 't_1', null)
+      expect(ws?.defaultRecordingBlueprintId ?? null).toBeNull()
+
+      // Only the UPDATE ran (no validation SELECT for the null case).
+      expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+      const sql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(sql).toContain('UPDATE workspaces SET default_recording_blueprint_id = $1')
+      const args = mockQueryWithRLS.mock.calls[0][2] as unknown[]
+      expect(args).toEqual([null, 't_1'])
+    })
+
+    it('sets a valid same-workspace blueprint (validation SELECT then UPDATE)', async () => {
+      // 1) validation SELECT — template exists in this workspace + carries an extraction spec
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ extraction: { sections: [{ heading: 'H', instruction: 'I' }], capture: [] } }],
+        rowCount: 1,
+      } as never)
+      // 2) UPDATE
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ id: 't_1', name: 'WS', defaultRecordingBlueprintId: 'tpl_1' }],
+        rowCount: 1,
+      } as never)
+
+      const ws = await store.setDefaultRecordingBlueprint('u_1', 't_1', 'tpl_1')
+      expect(ws?.defaultRecordingBlueprintId).toBe('tpl_1')
+
+      // The validation SELECT keys on BOTH the template id and the workspace id.
+      const checkSql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(checkSql).toContain('FROM workspace_page_templates')
+      expect(checkSql).toContain('workspace_id = $2')
+      expect(mockQueryWithRLS.mock.calls[0][2]).toEqual(['tpl_1', 't_1'])
+
+      const updateSql = mockQueryWithRLS.mock.calls[1][1] as string
+      expect(updateSql).toContain('UPDATE workspaces')
+      expect(mockQueryWithRLS.mock.calls[1][2]).toEqual(['tpl_1', 't_1'])
+    })
+
+    it('rejects a cross-workspace / missing template (validation SELECT yields no row) and never UPDATEs', async () => {
+      // RLS-scoped SELECT keyed on workspace_id returns nothing for a template
+      // that belongs to another workspace (or does not exist).
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      await expect(
+        store.setDefaultRecordingBlueprint('u_1', 't_1', 'tpl_other'),
+      ).rejects.toBeInstanceOf(InvalidRecordingBlueprintError)
+
+      // Only the validation SELECT ran — no UPDATE.
+      expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+    })
+
+    it('rejects a non-blueprint template (extraction is null) and never UPDATEs', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ extraction: null }],
+        rowCount: 1,
+      } as never)
+
+      await expect(
+        store.setDefaultRecordingBlueprint('u_1', 't_1', 'tpl_plain'),
+      ).rejects.toBeInstanceOf(InvalidRecordingBlueprintError)
+
+      expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -637,5 +708,33 @@ describe('[COMP:api/workspace-store] isSoloWorkspaceSystem (connector base-load 
   it('returns false (fail-closed) when the lookup throws', async () => {
     mockQuery.mockRejectedValueOnce(new Error('connection reset'))
     expect(await isSoloWorkspaceSystem('ws-err')).toBe(false)
+  })
+})
+
+describe('[COMP:api/workspace-store] getWorkspaceDefaultRecordingBlueprint (enqueue-edge resolver)', () => {
+  it('returns null without querying when no workspace id is given', async () => {
+    expect(await getWorkspaceDefaultRecordingBlueprint(null)).toBeNull()
+    expect(await getWorkspaceDefaultRecordingBlueprint(undefined)).toBeNull()
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('returns the configured default blueprint id', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ default_recording_blueprint_id: 'tpl_1' }], rowCount: 1 } as never)
+    expect(await getWorkspaceDefaultRecordingBlueprint('ws-1')).toBe('tpl_1')
+  })
+
+  it('returns null when no default is set (ingest-only)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ default_recording_blueprint_id: null }], rowCount: 1 } as never)
+    expect(await getWorkspaceDefaultRecordingBlueprint('ws-1')).toBeNull()
+  })
+
+  it('returns null (null-safe) when the workspace row is missing', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await getWorkspaceDefaultRecordingBlueprint('ws-missing')).toBeNull()
+  })
+
+  it('returns null (null-safe) when the lookup throws — never blocks a recording', async () => {
+    mockQuery.mockRejectedValueOnce(new Error('connection reset'))
+    expect(await getWorkspaceDefaultRecordingBlueprint('ws-err')).toBeNull()
   })
 })

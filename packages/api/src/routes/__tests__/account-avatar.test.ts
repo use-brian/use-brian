@@ -12,6 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
+import { Writable } from 'node:stream'
 import { createTestApp } from './helpers.js'
 import type { GcsFilesClient } from '../../files/gcs-client.js'
 
@@ -73,6 +74,20 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
     },
     async signedWriteUrl(key) {
       return `https://signed.example/${key}?upload=1`
+    },
+    writeStream(key, opts) {
+      const chunks: Buffer[] = []
+      return new Writable({
+        write(chunk, _enc, cb) {
+          chunks.push(Buffer.from(chunk))
+          cb()
+        },
+        final(cb) {
+          blobs.set(key, Buffer.concat(chunks))
+          mimes.set(key, opts.mime)
+          cb()
+        },
+      })
     },
   }
 }

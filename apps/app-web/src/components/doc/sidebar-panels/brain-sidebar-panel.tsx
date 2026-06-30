@@ -93,7 +93,12 @@ import {
   onActiveAssistantChanged,
 } from "@/lib/sidebar-cache";
 
-const SECTION_ORDER: BrainSection[] = ["entries", "skills", "reviews"];
+const SECTION_ORDER: BrainSection[] = [
+  "entries",
+  "skills",
+  "blueprints",
+  "reviews",
+];
 
 /** Entries option order — the FilterStrip chip order minus `all`. */
 const ENTRY_OPTIONS: BrainPrimitive[] = [
@@ -228,6 +233,7 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const sectionLabel: Record<BrainSection, string> = {
     entries: t.brainPage.sections.entries,
     skills: t.brainPage.sections.skills,
+    blueprints: t.brainPage.sections.blueprints,
     reviews: t.brainPage.sections.reviews,
   };
 
@@ -398,6 +404,23 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
             })}
           </ul>
         </>
+      )}
+
+      {brain.section === "blueprints" && (
+        /* Blueprints body — just the shared search input. The library pane
+           (the page) lists the workspace blueprints + owns "+ New blueprint";
+           blueprints have no status/governance filters, so the sidebar stays
+           a single needle row (no popover). */
+        <input
+          type="search"
+          value={brain.search}
+          onChange={(e) => brain.setSearch(e.target.value)}
+          placeholder={t.brainPage.blueprints.searchPlaceholder}
+          className={cn(
+            "w-full rounded-md border border-border bg-background px-2.5 py-1.5 text-[12px]",
+            "outline-none focus:ring-2 focus:ring-ring/50 placeholder:text-muted-foreground/60",
+          )}
+        />
       )}
 
       {brain.section === "reviews" && (

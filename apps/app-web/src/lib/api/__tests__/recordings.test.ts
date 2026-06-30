@@ -70,10 +70,10 @@ describe("[COMP:web/recording-upload] recordings SDK", () => {
   it("processRecording returns the pipeline result", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({
       utteranceCount: 40, segmentsInserted: 12, truncated: false,
-      salesCall: { isSalesCall: true, score: 0.8 }, surchargeCredits: 11, surcharged: true,
+      surchargeCredits: 11, surcharged: true,
     }));
     const res = await processRecording("rec-1");
     expect(res.surcharged).toBe(true);
-    expect(res.salesCall.isSalesCall).toBe(true);
+    expect(res.segmentsInserted).toBe(12);
   });
 });

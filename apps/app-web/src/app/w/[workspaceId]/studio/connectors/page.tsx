@@ -54,6 +54,9 @@ import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
+import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
+import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
+import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { groupConnectors } from "@/lib/connector-groups";
@@ -143,6 +146,18 @@ type Connector = {
   authType?: ConnectorAuthType;
   /** Custom-header connectors only — the non-secret header name. */
   authHeaderName?: string;
+  /**
+   * Read-only workspace-shared row — a connector available to you in this
+   * workspace that you do NOT own (a teammate exposed it, or a legacy
+   * team-native instance). No manage/connect/remove affordances; credentials
+   * never leave the server. Set by the backend's "Available in this workspace"
+   * list.
+   */
+  readonly?: boolean;
+  /** Read-only rows only — how it reaches you: 'granted' | 'team_native'. */
+  source?: "granted" | "team_native";
+  /** Read-only granted rows only — display name of the member who shared it. */
+  sharedBy?: string | null;
 };
 
 /** Current scope revision for each OAuth connector. Bump when scopes change. */
@@ -1290,11 +1305,13 @@ function ConnectorsList() {
       ? [
           { id: "shared", label: tc.groupShared, rows: grouped.shared },
           { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
+          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
           { id: "available", label: tc.groupAvailable, rows: grouped.available },
           { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
         ]
       : [
           { id: "personal", label: tc.groupConnected, rows: grouped.personal },
+          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
           { id: "available", label: tc.groupAvailable, rows: grouped.available },
           { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
         ]
@@ -1495,6 +1512,41 @@ function ConnectorsList() {
             </div>
           ) : (() => {
             const rid = rowId(sel);
+            // Read-only workspace-shared connector — a teammate's or a legacy
+            // team-native instance the member can use but not manage. A
+            // self-contained panel: identity + attribution + status, no
+            // connect / rename / remove / share affordances and no credentials.
+            if (sel.readonly) {
+              return (
+                <div key={rid} className="space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                      <ConnectorIcon connectorId={sel.id} iconUrl={sel.icon_url} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                        {sel.label ?? sel.name}
+                      </h2>
+                      <p className="text-[12px] text-muted-foreground">
+                        {sel.source === "granted"
+                          ? sel.sharedBy
+                            ? tc.workspaceSharedByMember.replace("{name}", sel.sharedBy)
+                            : tc.workspaceSharedByTeammate
+                          : tc.workspaceSharedTeamNative}
+                      </p>
+                    </div>
+                    {sel.connected && (
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                        {tc.connected}
+                      </span>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+                    {tc.workspaceSharedReadonlyNote}
+                  </div>
+                </div>
+              );
+            }
             const transport = getTransportLabel(sel.url);
             const instanceId = sel.connectorInstanceId;
             // Built-in primitive — always-on pill, no connect/disconnect/
@@ -1948,7 +2000,7 @@ function ConnectorsList() {
                       </button>
                       {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
                         <button
-                          onClick={() => { setExpandTab("settings"); if (CONFIGURABLE_CONNECTORS.has(sel.id) && !configMap[sel.id]) loadConfig(sel.id); }}
+                          onClick={() => { setExpandTab("settings"); if ((CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) && !configMap[sel.id]) loadConfig(sel.id); }}
                           className={`text-xs font-medium px-3 py-1.5 border-b-2 transition-colors ${expandTab === "settings" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                         >
                           {tc.tabSettings}
@@ -2035,6 +2087,21 @@ function ConnectorsList() {
                             {tc.saveBtn}
                           </button>
                         </div>
+                        {configMap[sel.id] !== undefined && (
+                          <PreflightHeadersSection
+                            key={sel.id}
+                            initial={readPreflightHeaders(configMap[sel.id])}
+                            onSave={(rows) => saveConfig(sel.id, { preflightHeaders: rows })}
+                          />
+                        )}
+                        {configMap[sel.id] !== undefined && (
+                          <ActorIdentityToggle
+                            key={`actor-${sel.id}`}
+                            initial={configMap[sel.id]?.sendActorIdentity === true}
+                            hasAuth={!!sel.authType && sel.authType !== "none"}
+                            onSave={(enabled) => saveConfig(sel.id, { sendActorIdentity: enabled })}
+                          />
+                        )}
                       </div>
                     )}
 

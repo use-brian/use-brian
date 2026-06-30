@@ -74,6 +74,7 @@ export function buildOutline(
     video: 0,
     audio: 0,
     child_page: 0,
+    extraction_slot: 0,
   }
 
   const blocks: OutlineEntry[] = page.blocks.map(block => {
@@ -196,6 +197,10 @@ function previewFor(block: Block): string {
       // store read). Surface the linked page id so the model can fetch /
       // navigate it; the renderer resolves the title at display time.
       return truncate(`child page (${block.childPageId || '<unset>'})`)
+    }
+    case 'extraction_slot': {
+      // Authoring-only (a blueprint section's extraction instruction).
+      return truncate(`extract: ${block.instruction || '<empty>'}`)
     }
     default: {
       const _exhaustive: never = block

@@ -35,6 +35,7 @@ import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { WhatsappEventSource } from "@/components/ingest/whatsapp-groups";
 import { IngestRuleEditor, type EditableRule } from "@/components/ingest/rule-editor";
 import { useWorkspaces } from "@/contexts/workspace-context";
+import { ingestSourceNotice } from "@/lib/ingest-source-notice";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -302,7 +303,8 @@ function IngestSection({
 export default function StudioIngestRulesPage() {
   const t = useT();
   const copy = t.studioPage.ingestRules;
-  const { activeId } = useWorkspaces();
+  const { activeId, active } = useWorkspaces();
+  const activeName = active?.name ?? copy.scopeWorkspace;
   const params = useParams<{ workspaceId: string }>();
   const workspaceId = params?.workspaceId ?? "";
   const connectorsHref = `/w/${workspaceId}/studio/connectors`;
@@ -454,6 +456,32 @@ export default function StudioIngestRulesPage() {
             {copy.reconnectNote}
           </div>
         )}
+
+        {/* Personal (scope='user') sources are account-level: they show on
+            every workspace's events page, route ingestion to the owner's
+            Personal workspace, and carry one global on/off flag. Spell both
+            out so a per-workspace page never implies per-workspace behavior.
+            `ingest-source-notice.ts` / docs ingest-pipeline.md. */}
+        {(() => {
+          const notice = ingestSourceNotice(s.scope, active?.isPersonal);
+          if (!notice.globalToggle && !notice.routesToPersonal) return null;
+          return (
+            <div className="px-5 pb-3 text-[11px] text-muted-foreground leading-relaxed">
+              {notice.routesToPersonal && (
+                <p>
+                  {format(copy.personalRoutingNote, { workspace: activeName })}{" "}
+                  <Link
+                    href={connectorsHref}
+                    className="font-medium text-primary hover:underline"
+                  >
+                    {format(copy.personalAddSourceCta, { workspace: activeName })}
+                  </Link>
+                </p>
+              )}
+              {notice.globalToggle && <p>{copy.personalGlobalNote}</p>}
+            </div>
+          );
+        })()}
 
         {showPicker && (
           <GithubRepoPicker instanceId={s.instanceId} copy={copy.repos} />

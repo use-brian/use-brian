@@ -20,7 +20,15 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
-import { knowledgeRoutes } from '../knowledge.js'
+// The GitHub picker resolves the caller's clearance via this lookup; stub it
+// (effectiveReadClearance stays real). Deferred arrow dodges the hoist trap.
+const mockMembership = vi.fn()
+vi.mock('../../db/workspace-store.js', async (io) => ({
+  ...(await io<typeof import('../../db/workspace-store.js')>()),
+  getWorkspaceMembershipWithClearanceSystem: (...a: unknown[]) => mockMembership(...a),
+}))
+
+import { knowledgeRoutes, workspaceKnowledgeRoutes } from '../knowledge.js'
 import { query, queryWithRLS } from '../../db/client.js'
 
 const mockQuery = vi.mocked(query)
@@ -47,6 +55,27 @@ function app(userId?: string) {
   )
 }
 
+// Connector stores for the workspace-scoped GitHub picker.
+const connectorInstanceStore = {
+  listByUser: vi.fn(),
+  listByWorkspace: vi.fn(),
+}
+const connectorGrantStore = {
+  listForTargetSystem: vi.fn(),
+}
+
+function appWs(userId?: string) {
+  return createTestApp(
+    '/api/workspaces/:workspaceId/knowledge',
+    workspaceKnowledgeRoutes({
+      knowledgeStore: knowledgeStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      connectorGrantStore: connectorGrantStore as never,
+    }),
+    userId ? { userId } : undefined,
+  )
+}
+
 beforeEach(() => {
   vi.clearAllMocks()
   // Default: assistant exists in ws-1; caller is a direct member; clearance internal.
@@ -60,6 +89,38 @@ beforeEach(() => {
   knowledgeStore.listDisabledSourceIds.mockResolvedValue([])
   knowledgeStore.setSourceDisabled.mockResolvedValue(undefined)
   vi.spyOn(console, 'error').mockImplementation(() => {})
+})
+
+describe('[COMP:api/knowledge-route] GET /github/instances (usable picker)', () => {
+  function ghInst(over: Record<string, unknown>) {
+    return {
+      scope: 'user', userId: 'u-1', workspaceId: null, provider: 'github', label: 'GH',
+      connectedEmail: null, url: null, custom: false, config: {}, sensitivity: 'internal',
+      connected: true, ingestionEnabled: false, credentialsType: 'oauth', createdBy: 'u-1',
+      createdAt: new Date(0), updatedAt: new Date(0), ...over,
+    }
+  }
+
+  it('lists own + teammate-granted GitHub within clearance; hides above-clearance and non-GitHub', async () => {
+    // workspace_members row for verifyWorkspaceMember.
+    mockRls.mockResolvedValue({ rows: [{ role: 'member', clearance: 'internal', compartments: null }], rowCount: 1 } as never)
+    mockMembership.mockResolvedValue({ role: 'member', clearance: 'internal' })
+    connectorInstanceStore.listByUser.mockResolvedValue([ghInst({ id: 'own-gh', label: 'My GitHub' })])
+    connectorInstanceStore.listByWorkspace.mockResolvedValue([])
+    connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      { grantedByUserId: 'alice', instance: ghInst({ id: 'alice-gh', userId: 'alice', label: 'Alice GH', sensitivity: 'internal' }) },
+      { grantedByUserId: 'bob', instance: ghInst({ id: 'bob-gh', userId: 'bob', sensitivity: 'confidential' }) },
+      { grantedByUserId: 'carol', instance: ghInst({ id: 'carol-notion', userId: 'carol', provider: 'notion', sensitivity: 'public' }) },
+    ])
+
+    const res = await request(appWs('u-1')).get('/api/workspaces/ws-1/knowledge/github/instances')
+    expect(res.status).toBe(200)
+    const ids = (res.body.instances as Array<{ id: string }>).map((i) => i.id)
+    expect(ids).toContain('own-gh')
+    expect(ids).toContain('alice-gh')
+    expect(ids).not.toContain('bob-gh') // above the member's internal clearance
+    expect(ids).not.toContain('carol-notion') // not a GitHub connector
+  })
 })
 
 describe('[COMP:api/knowledge-route] GET /entries', () => {

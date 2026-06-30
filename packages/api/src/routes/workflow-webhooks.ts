@@ -3,14 +3,26 @@
  * accepts a payload, verifies an HMAC signature against the workflow's
  * `webhook_secret`, and kicks off a workflow run.
  *
- * Mounted at `/api/workflow-webhooks/:slug` in `apps/api/src/index.ts`.
+ * Mounted PUBLIC in `boot.ts` — BEFORE the bare `app.use('/api',
+ * requireAuth(...))` guards. Express runs path-prefix middleware in
+ * registration order, so a webhook route registered after the first bare
+ * `/api` guard is 401'd before its handler runs (the shadowing bug fixed
+ * 2026-06-30). External senders carry `X-Workflow-Signature`, never a Bearer
+ * token, so they can never satisfy `requireAuth`.
+ *
  * Auth model: HMAC-SHA256 over the raw request body in header
  * `X-Workflow-Signature: sha256=<hex>`. Caller supplies the body; we
- * compare timing-safe against `hmac(webhook_secret, body)`.
+ * compare timing-safe against `hmac(webhook_secret, body)`. The exact bytes
+ * come from `req.rawBody` (stashed by the global `express.json()` `verify`
+ * hook for `application/json`) or the route-level `raw()` Buffer otherwise —
+ * never from the parsed object, whose key order would not re-serialize to the
+ * signed bytes.
  *
- * The sender becomes `workflow.created_by` for billing/audit. The body
- * is parsed as JSON and made available to steps as `{{input.X}}`. Non-
- * JSON bodies are accepted as `{ rawBody: string }`.
+ * The sender becomes `workflow.created_by` for billing/audit. The body is
+ * parsed as JSON and made available to steps as `{{input.X}}`. Non-JSON bodies
+ * are accepted as `{ rawBody: string }`. An optional `trigger.match.condition`
+ * (JSONLogic over the parsed payload) lets one slug react to only specific
+ * events: a non-matching delivery is ACKed 200 without starting a run.
  *
  * Spec: `docs/plans/company-brain/workflow-builder.md`.
  *
@@ -21,6 +33,7 @@ import { Router, raw } from 'express'
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import {
   advanceWorkflowRun,
+  evaluateBoolean,
   type ExecutorDeps,
   type WorkflowRunStore,
   type WorkflowStore,
@@ -72,7 +85,18 @@ export function workflowWebhookRoutes(opts: WorkflowWebhookRouteOptions): Router
     }
 
     const sigHeader = req.header(SIGNATURE_HEADER)
-    const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)
+    // The global `express.json()` consumes the stream for `application/json`
+    // and stashes the exact bytes on `req.rawBody` (string) via its `verify`
+    // hook; the route-level `raw()` parser is then skipped, so `req.body` is the
+    // parsed OBJECT, not a Buffer. HMAC must run over the original bytes, so
+    // prefer `req.rawBody`; fall back to the Buffer for non-JSON content types.
+    const rawBody = (req as typeof req & { rawBody?: string }).rawBody
+    const body =
+      typeof rawBody === 'string'
+        ? Buffer.from(rawBody, 'utf8')
+        : Buffer.isBuffer(req.body)
+          ? req.body
+          : Buffer.alloc(0)
     if (!verifySignature(body, workflow.webhookSecret, sigHeader)) {
       res.status(401).json({ error: 'Invalid signature' })
       return
@@ -84,6 +108,30 @@ export function workflowWebhookRoutes(opts: WorkflowWebhookRouteOptions): Router
     }
 
     const input = tryParseJson(body)
+
+    // Optional server-side event filter. `match.condition` is JSONLogic
+    // evaluated against `{ input }` (same engine as the `branch` step). A falsy
+    // result ACKs 200 without starting a run; a malformed condition fails CLOSED
+    // (no run) and is reported — it never 500s the receiver.
+    const match = workflow.trigger.kind === 'webhook' ? workflow.trigger.match : undefined
+    if (match) {
+      let fires: boolean
+      try {
+        fires = evaluateBoolean(match.condition, { input })
+      } catch (err) {
+        res.status(200).json({
+          runId: null,
+          status: 'skipped',
+          reason: 'filter_error',
+          error: err instanceof Error ? err.message : String(err),
+        })
+        return
+      }
+      if (!fires) {
+        res.status(200).json({ runId: null, status: 'skipped', reason: 'no_match' })
+        return
+      }
+    }
 
     const run = await opts.runStore.createRun({
       workflowId: workflow.id,

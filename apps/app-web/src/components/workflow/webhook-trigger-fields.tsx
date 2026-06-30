@@ -1,40 +1,348 @@
 "use client";
 
 /**
- * Webhook trigger fields (app-web) — one-click copies for URL / secret /
- * curl, a confirm-gated secret rotation, an in-browser HMAC-signed test
- * request pane, and language-tabbed signature helper snippets.
+ * Webhook trigger fields (app-web) — an optional server-side event filter
+ * (the guided rule-builder / raw-JSONLogic editor), plus one-click copies for
+ * URL / secret / curl, a confirm-gated secret rotation, an in-browser
+ * HMAC-signed test request pane, and language-tabbed signature snippets.
  *
  * Ported from `apps/web/src/components/workflow/webhook-trigger-fields.tsx`
- * (app consolidation §5a). The browser computes the signature live via
- * `crypto.subtle` so the "Send test request" round-trip is fully
- * self-contained — no backend proxy, no copy-paste, no leak of the secret
- * to a third party. The confirm uses app-web's themed `confirmDialog`,
- * never `window.confirm`.
+ * (app consolidation §5a); the `match` filter editor was added 2026-06-30.
+ * The browser computes the signature live via `crypto.subtle` so the "Send
+ * test request" round-trip is fully self-contained — no backend proxy, no
+ * copy-paste, no leak of the secret to a third party. The confirm uses
+ * app-web's themed `confirmDialog`, never `window.confirm`.
  *
- * Spec: docs/architecture/features/workflow.md → Webhook UI polish.
+ * Spec: docs/architecture/features/workflow.md → Webhook trigger.
  * [COMP:app-web/workflow]
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
-import { webhookUrlForSlug } from "@/lib/api/workflow";
+import { webhookUrlForSlug, type WorkflowTrigger } from "@/lib/api/workflow";
 import {
   computeWebhookSignature,
   curlSnippet,
   nodeSnippet,
   pythonSnippet,
 } from "@/lib/workflow-signature";
+import {
+  conditionToRules,
+  emptyRule,
+  rulesToCondition,
+  WEBHOOK_OPS,
+  type WebhookCombine,
+  type WebhookOp,
+  type WebhookRule,
+} from "@/lib/webhook-match";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
 type Props = {
+  trigger: Extract<WorkflowTrigger, { kind: "webhook" }>;
+  onChange: (next: WorkflowTrigger) => void;
   slug: string | null;
   secret: string | null;
   onRotate: () => void | Promise<void>;
   disabled?: boolean;
 };
+
+export function WebhookTriggerFields({
+  trigger,
+  onChange,
+  slug,
+  secret,
+  onRotate,
+  disabled,
+}: Props) {
+  const t = useT();
+
+  const setCondition = (condition: unknown) =>
+    onChange(
+      condition === undefined
+        ? { kind: "webhook" }
+        : { kind: "webhook", match: { condition } },
+    );
+
+  return (
+    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-3">
+      <WebhookMatchEditor
+        condition={trigger.match?.condition}
+        onChange={setCondition}
+        disabled={disabled}
+      />
+      {slug && secret ? (
+        <WebhookCredentials
+          slug={slug}
+          secret={secret}
+          onRotate={onRotate}
+          disabled={disabled}
+        />
+      ) : (
+        <div className="text-xs text-muted-foreground pt-1 border-t border-border/60">
+          {t.workflowPage.builder.saveChanges} →
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Match filter editor ───────────────────────────────────────────────────
+
+function WebhookMatchEditor({
+  condition,
+  onChange,
+  disabled,
+}: {
+  condition: unknown;
+  onChange: (condition: unknown) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  // Seed local editor state from the stored condition once (this panel mounts
+  // per workflow / per trigger-kind selection, and is the only writer of the
+  // condition, so a one-shot seed stays in sync).
+  const seed = useMemo(() => conditionToRules(condition), [condition]);
+  const [rules, setRules] = useState<WebhookRule[]>(seed?.rules ?? []);
+  const [combine, setCombine] = useState<WebhookCombine>(seed?.combine ?? "and");
+  const [rawMode, setRawMode] = useState(seed === null);
+  const [rawText, setRawText] = useState(
+    condition === undefined ? "" : JSON.stringify(condition, null, 2),
+  );
+  const [rawError, setRawError] = useState<string | null>(null);
+
+  const OP_LABELS: Record<WebhookOp, string> = {
+    "==": t.workflowPage.builder.webhookFilterOpEquals,
+    "!=": t.workflowPage.builder.webhookFilterOpNotEquals,
+    ">": t.workflowPage.builder.webhookFilterOpGt,
+    ">=": t.workflowPage.builder.webhookFilterOpGte,
+    "<": t.workflowPage.builder.webhookFilterOpLt,
+    "<=": t.workflowPage.builder.webhookFilterOpLte,
+    contains: t.workflowPage.builder.webhookFilterOpContains,
+  };
+
+  const commit = (nextRules: WebhookRule[], nextCombine: WebhookCombine) => {
+    setRules(nextRules);
+    setCombine(nextCombine);
+    onChange(rulesToCondition(nextRules, nextCombine));
+  };
+
+  const updateRule = (idx: number, patch: Partial<WebhookRule>) =>
+    commit(
+      rules.map((r, i) => (i === idx ? { ...r, ...patch } : r)),
+      combine,
+    );
+  const addRule = () => setRules([...rules, emptyRule()]); // local until it has a path
+  const removeRule = (idx: number) =>
+    commit(
+      rules.filter((_, i) => i !== idx),
+      combine,
+    );
+
+  const enterRaw = () => {
+    const cond = rulesToCondition(rules, combine);
+    setRawText(cond === undefined ? "" : JSON.stringify(cond, null, 2));
+    setRawError(null);
+    setRawMode(true);
+  };
+
+  const exitRaw = () => {
+    let parsed: unknown;
+    if (rawText.trim() === "") parsed = undefined;
+    else {
+      try {
+        parsed = JSON.parse(rawText);
+      } catch {
+        setRawError(t.workflowPage.builder.webhookFilterRawInvalid);
+        return;
+      }
+    }
+    const back = conditionToRules(parsed);
+    if (back === null) {
+      setRawError(t.workflowPage.builder.webhookFilterRawComplexNote);
+      return;
+    }
+    setRules(back.rules);
+    setCombine(back.combine);
+    setRawError(null);
+    setRawMode(false);
+  };
+
+  const onRawChange = (text: string) => {
+    setRawText(text);
+    if (text.trim() === "") {
+      setRawError(null);
+      onChange(undefined);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text);
+      setRawError(null);
+      onChange(parsed);
+    } catch {
+      setRawError(t.workflowPage.builder.webhookFilterRawInvalid);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 pb-1">
+      <div className="flex items-center justify-between gap-2">
+        <div>
+          <div className="text-xs font-medium text-muted-foreground">
+            {t.workflowPage.builder.webhookFilterHeading}
+          </div>
+          <p className="text-[11px] text-muted-foreground/80">
+            {t.workflowPage.builder.webhookFilterHint}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={rawMode ? exitRaw : enterRaw}
+          disabled={disabled}
+          className="text-[11px] px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-50 whitespace-nowrap"
+        >
+          {rawMode
+            ? t.workflowPage.builder.webhookFilterAdvancedHide
+            : t.workflowPage.builder.webhookFilterAdvancedShow}
+        </button>
+      </div>
+
+      {rawMode ? (
+        <div className="flex flex-col gap-1">
+          <textarea
+            value={rawText}
+            onChange={(e) => onRawChange(e.target.value)}
+            placeholder={t.workflowPage.builder.webhookFilterRawPlaceholder}
+            rows={5}
+            disabled={disabled}
+            className="w-full text-xs px-2 py-1.5 bg-background border border-border rounded font-mono outline-none focus:ring-2 focus:ring-ring resize-y"
+          />
+          <p className="text-[11px] text-muted-foreground/80">
+            {t.workflowPage.builder.webhookFilterAdvancedHint}
+          </p>
+          {rawError && (
+            <p className="text-[11px] text-red-600 dark:text-red-400">{rawError}</p>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-2">
+          {rules.length > 1 && (
+            <div className="flex items-center gap-2">
+              <Select
+                value={combine}
+                onValueChange={(v) => commit(rules, v as WebhookCombine)}
+                disabled={disabled}
+              >
+                <SelectTrigger className="w-44 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="and">
+                    {t.workflowPage.builder.webhookFilterCombineAll}
+                  </SelectItem>
+                  <SelectItem value="or">
+                    {t.workflowPage.builder.webhookFilterCombineAny}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          {rules.map((rule, idx) => (
+            <RuleRow
+              key={idx}
+              rule={rule}
+              opLabels={OP_LABELS}
+              onChange={(patch) => updateRule(idx, patch)}
+              onRemove={() => removeRule(idx)}
+              disabled={disabled}
+            />
+          ))}
+
+          <button
+            type="button"
+            onClick={addRule}
+            disabled={disabled}
+            className="self-start text-xs px-2 py-1 rounded border border-border hover:bg-muted disabled:opacity-50"
+          >
+            {t.workflowPage.builder.webhookFilterAddRule}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RuleRow({
+  rule,
+  opLabels,
+  onChange,
+  onRemove,
+  disabled,
+}: {
+  rule: WebhookRule;
+  opLabels: Record<WebhookOp, string>;
+  onChange: (patch: Partial<WebhookRule>) => void;
+  onRemove: () => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        type="text"
+        value={rule.path}
+        onChange={(e) => onChange({ path: e.target.value })}
+        placeholder={t.workflowPage.builder.webhookFilterFieldPlaceholder}
+        disabled={disabled}
+        className="flex-1 min-w-[8rem] px-2 py-1.5 bg-background border border-border rounded text-xs font-mono outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+      />
+      <Select
+        value={rule.op}
+        onValueChange={(v) => onChange({ op: v as WebhookOp })}
+        disabled={disabled}
+      >
+        <SelectTrigger className="w-36 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {WEBHOOK_OPS.map((op) => (
+            <SelectItem key={op} value={op}>
+              {opLabels[op]}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <input
+        type="text"
+        value={rule.value}
+        onChange={(e) => onChange({ value: e.target.value })}
+        placeholder={t.workflowPage.builder.webhookFilterValuePlaceholder}
+        disabled={disabled}
+        className="flex-1 min-w-[8rem] px-2 py-1.5 bg-background border border-border rounded text-xs font-mono outline-none focus:ring-2 focus:ring-ring disabled:opacity-60"
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={disabled}
+        aria-label={t.workflowPage.builder.webhookFilterRemoveRule}
+        className="text-xs text-red-600 dark:text-red-400 hover:underline disabled:opacity-50 px-1"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+// ── Credentials (URL / secret / curl / test / snippets) ─────────────────────
 
 type CopiedTarget =
   | "url"
@@ -51,27 +359,22 @@ type TestResult =
   | { status: "done"; httpStatus: number; body: string }
   | { status: "error"; message: string };
 
-export function WebhookTriggerFields({
+function WebhookCredentials({
   slug,
   secret,
   onRotate,
   disabled,
-}: Props) {
+}: {
+  slug: string;
+  secret: string;
+  onRotate: () => void | Promise<void>;
+  disabled?: boolean;
+}) {
   const t = useT();
   const [copied, setCopied] = useState<CopiedTarget>(null);
   const [tab, setTab] = useState<"curl" | "node" | "python">("curl");
   const [bodyDraft, setBodyDraft] = useState('{"hello":"world"}');
   const [test, setTest] = useState<TestResult>({ status: "idle" });
-
-  if (!slug || !secret) {
-    // Webhook trigger selected but credentials haven't been minted yet —
-    // they'll appear after Save changes.
-    return (
-      <div className="ml-6 pl-3 border-l border-border text-xs text-muted-foreground">
-        {t.workflowPage.builder.saveChanges} →
-      </div>
-    );
-  }
 
   const url = webhookUrlForSlug(slug);
   const curlExample = curlSnippet(url, secret, "{}");
@@ -129,7 +432,7 @@ export function WebhookTriggerFields({
   } as const;
 
   return (
-    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-3">
+    <div className="flex flex-col gap-3 pt-1 border-t border-border/60">
       <FieldWithCopy
         label={t.workflowPage.builder.webhookUrlLabel}
         value={url}

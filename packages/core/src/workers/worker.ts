@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto'
 
-import type { LLMProvider, Message } from '../providers/types.js'
+import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import type { Tool, ToolContext } from '../tools/types.js'
 import { queryLoop, type QueryEvent } from '../engine/query-loop.js'
 
@@ -117,6 +117,23 @@ export type WorkerRunsStore = {
   deleteTerminalOlderThan(cutoff: Date): Promise<number>
 }
 
+/** A worker turn's accumulated LLM usage, carried with the per-spawn billing
+ *  identity so the api layer can record COGS. The WorkerManager singleton has
+ *  no billing context of its own (the identity is per-spawn, from the spawning
+ *  turn's `context`), and the `usageStore` is closed — so the worker hands the
+ *  usage out via this callback and the boot wiring records it. This is what
+ *  closed the WorkerManager COGS gap (workers' LLM spend was previously
+ *  unrecorded). See `docs/architecture/features/goals.md` → metering. */
+export type WorkerUsageEvent = {
+  workerId: string
+  userId: string
+  assistantId: string
+  sessionId: string
+  workspaceId: string | null
+  model: string
+  usage: TokenUsage
+}
+
 export type WorkerOptions = {
   provider: LLMProvider
   model: string
@@ -124,6 +141,11 @@ export type WorkerOptions = {
   maxTurns?: number
   /** Forward worker query loop events (tool_start, tool_result, etc.) to the caller. */
   onEvent?: (workerId: string, event: QueryEvent) => void
+  /** Forward each worker run's accumulated LLM usage (the terminal-once
+   *  `turn_complete`) so the api layer records its COGS. Identity-carrying so
+   *  open core stays billing-agnostic; absent in OSS (no usageStore) → workers
+   *  record nothing, which is also the acting-loop metering signal. */
+  onUsage?: (usage: WorkerUsageEvent) => void
 }
 
 const WORKER_SYSTEM_PROMPT = `You are a research assistant. Your job is to find specific information and return it concisely.
@@ -385,6 +407,7 @@ export function createWorkerManager(options: WorkerOptions) {
     const ownWorkspaceId: string | null = context.workspaceId ?? persistenceWorkspaceId ?? null
     const ownerSessionId: string | null = ownSessionId
     const ownOnEvent = options.onEvent
+    const ownOnUsage = options.onUsage
 
     // Persistence — record spawn (skip when rehydrating; the row already
     // exists with `status='running'`). Fire-and-forget; a slow DB write
@@ -478,6 +501,21 @@ export function createWorkerManager(options: WorkerOptions) {
           if (event.type === 'tool_start') {
             if (event.name === 'urlReader') urlReaderCalls++
             else if (event.name === 'webSearch') webSearchCalls++
+          }
+          if (event.type === 'turn_complete' && ownOnUsage && ownSessionId) {
+            // Terminal-once with accumulated usage — hand the worker's COGS to
+            // the api layer under the spawning turn's billing identity (the same
+            // session the worker_runs row is written under, so a goal iteration
+            // that sums usage_tracking by session captures its workers too).
+            ownOnUsage({
+              workerId,
+              userId: context.userId,
+              assistantId: context.assistantId,
+              sessionId: ownSessionId,
+              workspaceId: ownWorkspaceId,
+              model: event.response.model,
+              usage: event.totalUsage,
+            })
           }
           // Forward events to the SPAWNING turn's sink (snapshotted at spawn),
           // never the singleton's live options.onEvent — see capture block.

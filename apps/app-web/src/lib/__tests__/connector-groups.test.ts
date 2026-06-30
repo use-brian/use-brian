@@ -121,6 +121,42 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
     expect(grouped.personal).toEqual([customFiles]);
   });
 
+  it("buckets read-only workspace-shared rows into `workspace`, never the owned groups", () => {
+    const teammateGithub = {
+      id: "github",
+      connectorInstanceId: "inst-mate",
+      connected: true,
+      name: "GitHub",
+      readonly: true,
+    };
+    const grouped = groupConnectors([rows.exposedGithub, teammateGithub], {
+      sharedWorkspace: true,
+      // Even if a stale grant entry exists for the read-only row, it stays in
+      // `workspace` — readonly is checked first.
+      exposedGrants: { "inst-gh": "grant-1", "inst-mate": "grant-2" },
+    });
+    expect(grouped.workspace).toEqual([teammateGithub]);
+    expect(grouped.shared).toEqual([rows.exposedGithub]);
+    expect(grouped.personal).toEqual([]);
+    expect(grouped.available).toEqual([]);
+  });
+
+  it("read-only rows bucket to `workspace` even in a solo workspace (legacy team-native)", () => {
+    const teamNative = {
+      id: "github",
+      connectorInstanceId: "inst-tn",
+      connected: true,
+      name: "GitHub",
+      readonly: true,
+    };
+    const grouped = groupConnectors([teamNative], {
+      sharedWorkspace: false,
+      exposedGrants: {},
+    });
+    expect(grouped.workspace).toEqual([teamNative]);
+    expect(grouped.personal).toEqual([]);
+  });
+
   it("buckets nothing as builtin when no builtinIds are passed", () => {
     const filesPlaceholder = { id: "files", connected: false, name: "Workspace Files" };
     const grouped = groupConnectors([filesPlaceholder], {

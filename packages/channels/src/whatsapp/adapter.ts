@@ -42,6 +42,17 @@ export type WhatsAppIncomingPayload = {
   mediaMimeType?: string
   /** Original filename for the media, if available. */
   mediaFileName?: string
+  /**
+   * Large media the connector streamed straight to GCS (over the inline cap) —
+   * a reference, not the bytes. The API routes this through the channel-media
+   * intake (recording / document → brain). See docs/plans/channel-media-ingest.md.
+   */
+  mediaRef?: {
+    gcsKey: string
+    mimeType: string
+    fileName?: string
+    sizeBytes?: number
+  }
 }
 
 export type WhatsAppAdapterOptions = {

@@ -46,8 +46,10 @@ import type {
 import type { ReviewFilter } from "@/lib/review-queue";
 import type { SkillStatus } from "@/lib/skills-view";
 
-/** Top-level Brain section — the sidebar's three stacked rows. */
-export type BrainSection = "entries" | "skills" | "reviews";
+/** Top-level Brain section — the sidebar's stacked rows. `blueprints` is the
+ *  fillable-template library (structural-synthesis.md): page templates carrying
+ *  an `extraction` spec, a sibling of the procedural `skills` library. */
+export type BrainSection = "entries" | "skills" | "reviews" | "blueprints";
 
 /** `graph` (force-directed doc — the DEFAULT entries surface) or
  *  `grouped` (the list overview behind the List toggle). Scopes the

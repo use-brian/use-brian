@@ -106,6 +106,7 @@ export type WorkspaceSurface =
   | "brain"
   | "studio"
   | "workflow"
+  | "goals"
   | "approvals"
   | "knowledge-base"
   | "inbox";
@@ -118,6 +119,7 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "brain",
   "studio",
   "workflow",
+  "goals",
   "approvals",
   "knowledge-base",
   "inbox",

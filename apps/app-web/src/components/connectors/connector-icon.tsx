@@ -1,15 +1,16 @@
 /**
  * Connector icon set (app-web).
  *
- * Ported verbatim from `apps/web/src/components/connectors/connector-icon.tsx`
- * (app consolidation §9 #5). No app-local imports, so it copies cleanly.
- * Used by Studio -> Assistants -> Tools (assistant-scoped connectors list).
+ * Originally ported from the pre-consolidation `apps/web` copy (app
+ * consolidation §9 #5), now the single home for the set — `apps/web` is
+ * marketing-only and no longer carries this component. No app-local imports.
+ * Used by Studio -> Assistants -> Tools (assistant-scoped connectors list) and
+ * Studio -> Events (ingest sources, keyed on the source's `provider`).
  *
  * Official connector icons are inlined SVGs (brand colors, consistent size).
  * Community / custom connectors fall back to their `icon_url` or a plug glyph.
  *
- * Adding an official connector: add a case in ConnectorIcon() only. Keep this
- * in sync with the apps/web copy.
+ * Adding an official connector: add a case in ConnectorIcon() only.
  */
 
 function GmailIcon() {
@@ -118,6 +119,25 @@ function WhatsAppIcon() {
   );
 }
 
+function SlackIcon() {
+  // Official Slack mark — four-color octothorpe (viewBox 0 0 24 24). Brand
+  // colors hard-coded like the rest of the official set. Slack ingest sources
+  // (provider `slack`) reach this via `connectorId="slack"`; without the case
+  // they fell through to the plug fallback and read as a generic/GitHub icon.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52z" fill="#E01E5A" />
+      <path d="M6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z" fill="#E01E5A" />
+      <path d="M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834z" fill="#36C5F0" />
+      <path d="M8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z" fill="#36C5F0" />
+      <path d="M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834z" fill="#2EB67D" />
+      <path d="M17.688 8.834a2.528 2.528 0 0 1-2.522 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.166 0a2.528 2.528 0 0 1 2.522 2.522v6.312z" fill="#2EB67D" />
+      <path d="M15.166 18.956a2.528 2.528 0 0 1 2.522 2.522A2.528 2.528 0 0 1 15.166 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52z" fill="#ECB22E" />
+      <path d="M15.166 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.312A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.312z" fill="#ECB22E" />
+    </svg>
+  );
+}
+
 import type { ReactNode } from "react";
 
 export function ConnectorIcon({
@@ -135,6 +155,7 @@ export function ConnectorIcon({
     case "gcal": return <GoogleCalendarIcon />;
     case "gdrive": return <GoogleDriveIcon />;
     case "github": return <GitHubIcon />;
+    case "slack": return <SlackIcon />;
     case "notion": return <NotionIcon />;
     case "fathom": return <FathomIcon />;
     case "whatsapp": return <WhatsAppIcon />;

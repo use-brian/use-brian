@@ -27,7 +27,16 @@ export function resolvePoolMax(raw: string | undefined): number {
 }
 
 const POOL_MAX = resolvePoolMax(process.env.PG_POOL_MAX)
-const POOL_OPTS = { max: POOL_MAX, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000 }
+// `connectionTimeoutMillis` is how long a checkout waits in the pool's queue
+// when all `max` connections are busy before it throws `timeout exceeded when
+// trying to connect`. Bumped 5s → 8s (2026-06-29) so a brief burst rides out as
+// added latency instead of a dropped request — pg.Pool already queues waiters;
+// this just extends their patience. Kept modest on purpose: this is a shared,
+// fleet-wide knob (both pools, every service + code path), so a larger value
+// would also slow failure detection during a real outage and stack onto
+// synchronous HTTP request timeouts. See docs/architecture/platform/deployment.md
+// → "fleet-wide connection budget".
+const POOL_OPTS = { max: POOL_MAX, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 8_000 }
 
 /**
  * Single-connection mode for the embedded PGLite brain (the OSS local default).

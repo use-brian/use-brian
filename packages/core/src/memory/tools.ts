@@ -163,8 +163,10 @@ export function createMemoryTools(
             'dedicated `## Voice Rules` block). Use `operational-state` ' +
             'for short-lived snapshots that should be pruned when stale. ' +
             'For user-self facts (name, role, location, birthday) call ' +
-            '`updateSelfProfile` instead of saveMemory — those live on ' +
-            "the user's self entity.",
+            '`updateSelfProfile` instead of saveMemory; for another person, ' +
+            'company, or deal call `saveContact` / `saveCompany` / ' +
+            '`saveDeal` (one record per distinct person — never collapse a ' +
+            'team roster into one memory).',
         ),
       entityId: z
         .string()

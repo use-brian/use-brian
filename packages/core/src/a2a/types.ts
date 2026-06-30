@@ -283,6 +283,16 @@ export type ConsultRequest = {
    * "assistant_call memory continuity".
    */
   workflowId?: string
+  /**
+   * Optional blueprint slug to FILL on a research `assistant_call` step
+   * (structural-synthesis P4). When set together with `pageAnchorId` on a
+   * research-tier step, the callee executor runs the research fan-out as the
+   * gather, then fills this blueprint into the anchored page via the synthesis
+   * engine (structured authoring) instead of free-form authoring. A built-in
+   * skill id, workspace skill slug, or page-template id. Absent → free authoring.
+   * See docs/architecture/brain/structural-synthesis.md → "The three fill modes".
+   */
+  blueprintId?: string
   caller: CallerIdentity
   chain: ConsultChain
 }

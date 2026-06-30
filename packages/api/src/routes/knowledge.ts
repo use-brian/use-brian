@@ -21,6 +21,7 @@ import { query, queryWithRLS } from '../db/client.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
+import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspace-store.js'
 import * as github from '../github/client.js'
 import type { AccessContext, Sensitivity } from '@sidanclaw/core'
@@ -93,26 +94,29 @@ type KnowledgeRouteOptions = {
 }
 
 /**
- * List the GitHub `connector_instance` rows usable as a workspace KB source:
- * legacy team-native instances plus the caller's own connected personal
- * instances (which, in a shared workspace, are auto-exposed via a grant).
- * Deduped by id. RLS-gated reads — the caller only sees their own + team rows.
+ * List the GitHub `connector_instance` rows usable as a workspace KB source —
+ * the member's own connected personal instances PLUS every workspace-shared
+ * GitHub connector within their clearance (legacy team-native + teammate-
+ * granted). Mirrors `listUsableWorkspaceConnectors` so the picker shows
+ * exactly what the member is allowed to configure with; above-clearance shared
+ * connectors are hidden. Deduped by id.
  */
 async function listWorkspaceGithubInstances(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
+  connectorGrantStore: ConnectorGrantStore | undefined,
   userId: string,
   workspaceId: string,
 ): Promise<ConnectorInstance[]> {
-  if (!connectorInstanceStore) return []
-  const [teamNative, own] = await Promise.all([
-    connectorInstanceStore.listByWorkspace(userId, workspaceId),
-    connectorInstanceStore.listByUser(userId, userId),
-  ])
-  const byId = new Map<string, ConnectorInstance>()
-  for (const i of [...teamNative, ...own]) {
-    if (i.provider === 'github' && i.connected) byId.set(i.id, i)
-  }
-  return [...byId.values()]
+  if (!connectorInstanceStore || !connectorGrantStore) return []
+  const usable = await listUsableWorkspaceConnectors({
+    connectorInstanceStore,
+    connectorGrantStore,
+    userId,
+    workspaceId,
+  })
+  return usable
+    .map((u) => u.instance)
+    .filter((i) => i.provider === 'github' && i.connected)
 }
 
 const GITHUB_PAGE_SIZE = 100
@@ -152,15 +156,23 @@ async function githubFetchAllPages<T>(
  * Resolve a workspace-scoped GitHub PAT from a caller-selected
  * `connector_instance`. Shared between the assistant-scoped and
  * workspace-scoped routers. Writes a 4xx on failure and returns null.
+ *
+ * Authorization travels through the SAME usable-set the picker lists from
+ * (`listUsableWorkspaceConnectors`), so the resolver can never operate a
+ * connector the member isn't allowed to see — above-clearance or not shared to
+ * this workspace is denied. It accepts the member's own personal instance, a
+ * legacy team-native instance, and a teammate-granted personal instance
+ * (within clearance for the shared kinds).
  */
 async function resolveWorkspaceGithubPat(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
+  connectorGrantStore: ConnectorGrantStore | undefined,
   userId: string,
   workspaceId: string,
   connectorInstanceId: string | undefined,
   res: import('express').Response,
 ): Promise<{ pat: string } | null> {
-  if (!connectorInstanceStore) {
+  if (!connectorInstanceStore || !connectorGrantStore) {
     res.status(503).json({ error: 'Connector store not configured on the server.' })
     return null
   }
@@ -170,27 +182,31 @@ async function resolveWorkspaceGithubPat(
     })
     return null
   }
-  const instance = await connectorInstanceStore.get(userId, connectorInstanceId)
-  if (!instance) {
-    res.status(404).json({ error: 'Connector not found or not visible to you.' })
-    return null
-  }
-  if (instance.provider !== 'github') {
-    res.status(400).json({ error: 'Selected connector is not a GitHub connector.' })
-    return null
-  }
-  // Accept either a legacy team-native instance owned by this workspace, or
-  // the caller's own personal instance (the unified-connectors path — it's
-  // exposed to the workspace via a grant). Both are RLS-readable here, so
-  // `getCredentials(userId, …)` resolves them; another member's exposed
-  // instance is not pickable through this surface (the owner connects it).
-  const isTeamNative = instance.scope === 'workspace' && instance.workspaceId === workspaceId
-  const isOwnPersonal = instance.scope === 'user' && instance.userId === userId
-  if (!isTeamNative && !isOwnPersonal) {
+  const usable = await listUsableWorkspaceConnectors({
+    connectorInstanceStore,
+    connectorGrantStore,
+    userId,
+    workspaceId,
+  })
+  const match = usable.find((u) => u.instance.id === connectorInstanceId)
+  if (!match) {
     res.status(403).json({ error: 'Selected connector is not available to this workspace.' })
     return null
   }
-  const creds = await connectorInstanceStore.getCredentials(userId, connectorInstanceId)
+  if (match.instance.provider !== 'github') {
+    res.status(400).json({ error: 'Selected connector is not a GitHub connector.' })
+    return null
+  }
+  // A teammate-granted instance is owned by another member, so it isn't
+  // RLS-readable here — resolve its credential with the SAME system read the
+  // sync worker uses for granted connectors. The usable-set lookup already
+  // proved the grant + clearance, so this discloses nothing the member
+  // couldn't already use. Own / team-native instances stay on the RLS read
+  // (which also enforces `connected = true`); a disconnected granted instance
+  // is treated as having no credentials.
+  const creds = match.source === 'granted'
+    ? (match.instance.connected ? await connectorInstanceStore.getCredentialsSystem(connectorInstanceId) : null)
+    : await connectorInstanceStore.getCredentials(userId, connectorInstanceId)
   if (!creds) {
     res.status(400).json({
       error: 'Selected connector has no credentials configured. Reconnect it in Studio → Connectors.',
@@ -221,7 +237,7 @@ async function createGithubKnowledgeSource(opts: {
 
   if (connectorInstanceStore) {
     try {
-      const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, userId, workspaceId, connectorInstanceId, res)
+      const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, connectorGrantStore, userId, workspaceId, connectorInstanceId, res)
       if (!resolved) return
 
       // If the caller's own personal connector backs this workspace source,
@@ -410,7 +426,7 @@ export function knowledgeRoutes({
     connectorInstanceId: string | undefined,
     res: import('express').Response,
   ): Promise<{ pat: string } | null> {
-    return resolveWorkspaceGithubPat(connectorInstanceStore, userId, workspaceId, connectorInstanceId, res)
+    return resolveWorkspaceGithubPat(connectorInstanceStore, connectorGrantStore, userId, workspaceId, connectorInstanceId, res)
   }
 
   async function verifyMembership(
@@ -804,7 +820,7 @@ export function knowledgeRoutes({
         return
       }
 
-      const instances = await listWorkspaceGithubInstances(connectorInstanceStore, userId, workspaceId)
+      const instances = await listWorkspaceGithubInstances(connectorInstanceStore, connectorGrantStore, userId, workspaceId)
 
       res.json({
         instances: instances.map((i) => ({
@@ -1290,7 +1306,7 @@ export function workspaceKnowledgeRoutes({
     const auth = await verifyWorkspaceMember(req as any, res)
     if (!auth) return
     try {
-      const instances = await listWorkspaceGithubInstances(connectorInstanceStore, auth.userId, auth.workspaceId)
+      const instances = await listWorkspaceGithubInstances(connectorInstanceStore, connectorGrantStore, auth.userId, auth.workspaceId)
       res.json({
         instances: instances.map((i) => ({
           id: i.id,
@@ -1309,7 +1325,7 @@ export function workspaceKnowledgeRoutes({
     const auth = await verifyWorkspaceMember(req as any, res)
     if (!auth) return
     const { connectorInstanceId } = req.query as { connectorInstanceId?: string }
-    const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, auth.userId, auth.workspaceId, connectorInstanceId, res)
+    const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, connectorGrantStore, auth.userId, auth.workspaceId, connectorInstanceId, res)
     if (!resolved) return
     try {
       const firstUrl = `https://api.github.com/user/repos?per_page=${GITHUB_PAGE_SIZE}&sort=updated&affiliation=owner,organization_member`
@@ -1338,7 +1354,7 @@ export function workspaceKnowledgeRoutes({
     const auth = await verifyWorkspaceMember(req as any, res)
     if (!auth) return
     const { connectorInstanceId } = req.query as { connectorInstanceId?: string }
-    const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, auth.userId, auth.workspaceId, connectorInstanceId, res)
+    const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, connectorGrantStore, auth.userId, auth.workspaceId, connectorInstanceId, res)
     if (!resolved) return
     const { owner, repo } = req.params as { owner: string; repo: string }
     try {

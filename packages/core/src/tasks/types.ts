@@ -105,6 +105,8 @@ export type TaskStore = {
     attributes?: TaskAttributes
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
+    /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
+    source?: 'user' | 'extracted'
     /**
      * Task ids this task depends on — each becomes a task→task
      * `depends_on` edge (graph layer; fire-and-forget). v1 append-only.

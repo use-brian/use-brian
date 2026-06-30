@@ -109,6 +109,9 @@ export const BLOCK_KIND_REGISTRY: Record<Block['kind'], BlockLayer> = {
   video: 'media',
   audio: 'media',
   child_page: 'media',
+  // Authoring directive (a blueprint section's extraction instruction), not
+  // prose — distillation skips it; it only ever lives in a blueprint template.
+  extraction_slot: 'media',
 }
 
 /** The authored layer = every kind the registry marks `authored`. Derived once

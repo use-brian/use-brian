@@ -23,9 +23,10 @@
  */
 
 import { useCallback, useMemo } from "react";
+import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { entityColorVar } from "@/lib/brain-colors";
-import { useT } from "@/lib/i18n/client";
+import { useT, format } from "@/lib/i18n/client";
 import type {
   BrainGraph,
   BrainGraphNode,
@@ -42,7 +43,48 @@ type Props = {
   graph: BrainGraph | null;
   /** Click handler — hands the row straight to `BrainDetailDrawer`. */
   onSelect: (row: BrainRow) => void;
+  /**
+   * Completed (done / archived) tasks — fetched separately so the Tasks
+   * section can lead with live work and tuck finished items behind a "Show
+   * completed" disclosure. `null`/empty ⇒ no toggle renders. The page only
+   * fetches these when tasks are in scope (All or the Tasks chip), so they
+   * never appear under an unrelated primitive filter.
+   */
+  completedTasks?: BrainRow[] | null;
+  /** Whether the completed-task disclosure is open. */
+  showCompletedTasks?: boolean;
+  /** Flip the completed-task disclosure. */
+  onToggleCompletedTasks?: () => void;
 };
+
+/** Chip tint per task status. Live work earns a little colour (in-progress =
+ *  primary, blocked = amber); todo + the completed states stay neutral so the
+ *  list reads calm. Reuses existing theme utilities — no new tokens. */
+const TASK_STATUS_CLASS: Record<string, string> = {
+  todo: "bg-muted text-muted-foreground border-border",
+  in_progress: "bg-primary/10 text-primary border-primary/20",
+  blocked:
+    "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
+  done: "bg-muted text-muted-foreground border-border",
+  archived: "bg-muted text-muted-foreground border-border",
+};
+
+/** Small lifecycle-status pill for a task row (todo / in progress / blocked /
+ *  done / archived), localized via `brainPage.taskStatus`. */
+function TaskStatusChip({ status }: { status: string }) {
+  const t = useT();
+  const labels = t.brainPage.taskStatus as Record<string, string>;
+  return (
+    <span
+      className={cn(
+        "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
+        TASK_STATUS_CLASS[status] ?? "bg-muted text-muted-foreground border-border",
+      )}
+    >
+      {labels[status] ?? status}
+    </span>
+  );
+}
 
 // Canonical group keys, in display order. Entity-like groups first (they
 // carry the graph degree/neighbour decoration), content groups after.
@@ -205,10 +247,18 @@ function groupColor(group: GroupKey): string {
   }
 }
 
-export function BrainGroupedView({ rows, graph, onSelect }: Props) {
+export function BrainGroupedView({
+  rows,
+  graph,
+  onSelect,
+  completedTasks,
+  showCompletedTasks = false,
+  onToggleCompletedTasks,
+}: Props) {
   const t = useT();
   const legend = t.brainPage.graphView.legend;
   const filters = t.brainPage.filters;
+  const completedCount = completedTasks?.length ?? 0;
 
   // Human label per group — composed from the existing filter-chip + graph
   // legend dictionaries (no new i18n keys needed).
@@ -283,6 +333,9 @@ export function BrainGroupedView({ rows, graph, onSelect }: Props) {
       if (list) list.push(row);
       else buckets.set(g, [row]);
     }
+    // Ensure a Tasks section renders even when every task is completed (so
+    // hidden by default) — the "Show completed" disclosure lives in it.
+    if (completedCount > 0 && !buckets.has("tasks")) buckets.set("tasks", []);
     return GROUP_ORDER.filter((g) => buckets.has(g)).map((g) => {
       const list = buckets.get(g)!;
       if (ENTITY_GROUPS.has(g)) {
@@ -295,7 +348,7 @@ export function BrainGroupedView({ rows, graph, onSelect }: Props) {
       }
       return { key: g, rows: list };
     });
-  }, [rows, resolveNode]);
+  }, [rows, resolveNode, completedCount]);
 
   const presentLegend = useMemo(
     () => groups.map((g) => g.key).filter((g) => LEGEND_GROUPS.has(g)),
@@ -394,29 +447,89 @@ export function BrainGroupedView({ rows, graph, onSelect }: Props) {
                             )}
                           </>
                         ) : (
-                          row.sensitivity && (
-                            <span
-                              className={cn(
-                                "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
-                                row.sensitivity === "confidential" &&
-                                  "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
-                                row.sensitivity === "restricted" &&
-                                  "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
-                                row.sensitivity === "internal" &&
-                                  "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
-                                row.sensitivity === "public" &&
-                                  "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
-                              )}
-                            >
-                              {row.sensitivity}
-                            </span>
-                          )
+                          <>
+                            {group.key === "tasks" && row.status && (
+                              <TaskStatusChip status={row.status} />
+                            )}
+                            {row.sensitivity && (
+                              <span
+                                className={cn(
+                                  "shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border",
+                                  row.sensitivity === "confidential" &&
+                                    "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
+                                  row.sensitivity === "restricted" &&
+                                    "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
+                                  row.sensitivity === "internal" &&
+                                    "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
+                                  row.sensitivity === "public" &&
+                                    "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
+                                )}
+                              >
+                                {row.sensitivity}
+                              </span>
+                            )}
+                          </>
                         )}
                       </button>
                     </li>
                   );
                 })}
               </ul>
+
+              {/* Completed-task disclosure — only under the Tasks section, and
+                  only when finished tasks exist. Collapsed by default so the
+                  Brain leads with live work; reveal renders them dimmed +
+                  struck through with their status chip. */}
+              {group.key === "tasks" && completedCount > 0 && (
+                <div className="mt-0.5">
+                  <button
+                    type="button"
+                    onClick={onToggleCompletedTasks}
+                    aria-expanded={showCompletedTasks}
+                    className="inline-flex items-center gap-1 px-1 py-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ChevronDown
+                      aria-hidden
+                      className={cn(
+                        "size-3 transition-transform",
+                        showCompletedTasks && "rotate-180",
+                      )}
+                    />
+                    {format(
+                      showCompletedTasks
+                        ? t.brainPage.groupedView.hideCompleted
+                        : t.brainPage.groupedView.showCompleted,
+                      { count: completedCount },
+                    )}
+                  </button>
+                  {showCompletedTasks && (
+                    <ul className="mt-1 flex flex-col gap-1">
+                      {(completedTasks ?? []).map((row) => (
+                        <li key={`completed-task:${row.id}`}>
+                          <button
+                            type="button"
+                            onClick={() => onSelect(row)}
+                            className={cn(
+                              "w-full text-left flex items-center gap-3 px-3 py-2 rounded-md border border-border bg-card opacity-60",
+                              "transition-all hover:opacity-100 hover:border-primary/50 hover:bg-muted/40",
+                            )}
+                          >
+                            <span
+                              aria-hidden
+                              className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+                              style={{ backgroundColor: groupColor("tasks") }}
+                            />
+                            <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
+                              {row.name}
+                            </span>
+                            {row.status && <TaskStatusChip status={row.status} />}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </section>
           );
         })}

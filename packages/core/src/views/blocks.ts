@@ -369,6 +369,22 @@ export type Block =
   | VideoBlock
   | AudioBlock
   | ChildPageBlock
+  | ExtractionSlotBlock
+
+/**
+ * Authoring-only block carrying a blueprint section's extraction instruction —
+ * the text that says what fills this section when the synthesis engine runs.
+ * Only appears in blueprint templates; never in a filled / distilled page. The
+ * section heading is the nearest preceding `heading` block. See
+ * docs/architecture/brain/structural-synthesis.md -> "The blueprint object".
+ */
+export type ExtractionSlotBlock = {
+  kind: 'extraction_slot'
+  id: string
+  /** What fills this section when the blueprint runs. */
+  instruction: string
+  outputType?: 'prose' | 'list' | 'table'
+}
 
 export type Page = {
   blocks: Block[]
@@ -437,6 +453,13 @@ const headingBlockSchema = z.object({
 const dividerBlockSchema: z.ZodType<DividerBlock> = z.object({
   kind: z.literal('divider'),
   id: blockId,
+})
+
+const extractionSlotBlockSchema: z.ZodType<ExtractionSlotBlock> = z.object({
+  kind: z.literal('extraction_slot'),
+  id: blockId,
+  instruction: z.string().min(0).max(2000),
+  outputType: z.enum(['prose', 'list', 'table']).optional(),
 })
 
 const dataBlockSchema: z.ZodType<DataBlock> = z.object({
@@ -811,6 +834,7 @@ const blockUnionMembers = [
   videoBlockSchema,
   audioBlockSchema,
   childPageBlockSchema,
+  extractionSlotBlockSchema,
 ] as unknown as [
   z.ZodDiscriminatedUnionOption<'kind'>,
   ...z.ZodDiscriminatedUnionOption<'kind'>[],

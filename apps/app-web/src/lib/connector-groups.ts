@@ -10,6 +10,11 @@
  *   - `available` — everything not connected: never-connected built-in
  *                   placeholders, disconnected instances, unprobed custom
  *                   servers.
+ *   - `workspace`  — read-only connectors available to the member in this
+ *                   workspace but NOT owned by them (a teammate exposed them,
+ *                   or a legacy team-native instance), already clearance-
+ *                   filtered server-side. Bucketed FIRST on the `readonly`
+ *                   flag, so they never mix into the manageable groups.
  *   - `builtin`   — first-party workspace primitives (registry entries with
  *                   `auth_type: 'none'`, e.g. Workspace Files). Always-on:
  *                   their tools are capability-gated at runtime, so they
@@ -18,7 +23,9 @@
  *
  * In a SOLO workspace the personal/workspace distinction collapses — the
  * caller renders `personal` under a "Connected" header and `shared` stays
- * empty (grants are never minted without an audience).
+ * empty (grants are never minted without an audience). The `workspace` group
+ * is independent of member count: a legacy team-native connector can exist in
+ * a solo workspace, and it's still read-only-available there.
  *
  * Spec: docs/architecture/integrations/mcp.md → "Unified connectors — the
  * master-detail Studio surface".
@@ -26,7 +33,7 @@
  * [COMP:app-web/connector-groups]
  */
 
-export type ConnectorGroupId = "shared" | "personal" | "available" | "builtin";
+export type ConnectorGroupId = "shared" | "personal" | "available" | "workspace" | "builtin";
 
 export type GroupableConnector = {
   /** Provider slug — matches the registry id (e.g. "files"). */
@@ -36,6 +43,12 @@ export type GroupableConnector = {
   connected: boolean;
   /** Custom MCP servers never bucket as builtin even on a slug collision. */
   custom?: boolean;
+  /**
+   * Read-only workspace-shared row (a teammate's or a legacy team-native
+   * connector available to the member). Buckets to `workspace` first — these
+   * are never owned by the member, so the manageable groups must not claim them.
+   */
+  readonly?: boolean;
 };
 
 export function groupConnectors<C extends GroupableConnector>(
@@ -48,13 +61,18 @@ export function groupConnectors<C extends GroupableConnector>(
     /** Provider slugs of built-in primitives (BUILTIN_PRIMITIVE_CONNECTOR_IDS). */
     builtinIds?: ReadonlySet<string>;
   },
-): { shared: C[]; personal: C[]; available: C[]; builtin: C[] } {
+): { shared: C[]; personal: C[]; available: C[]; workspace: C[]; builtin: C[] } {
   const shared: C[] = [];
   const personal: C[] = [];
   const available: C[] = [];
+  const workspace: C[] = [];
   const builtin: C[] = [];
   for (const c of connectors) {
-    if (c.id && !c.custom && opts.builtinIds?.has(c.id)) {
+    if (c.readonly) {
+      // Read-only workspace-shared rows are never the member's to manage —
+      // bucket them out before any owned-connector classification.
+      workspace.push(c);
+    } else if (c.id && !c.custom && opts.builtinIds?.has(c.id)) {
       builtin.push(c);
     } else if (!c.connected) {
       available.push(c);
@@ -68,5 +86,5 @@ export function groupConnectors<C extends GroupableConnector>(
       personal.push(c);
     }
   }
-  return { shared, personal, available, builtin };
+  return { shared, personal, available, workspace, builtin };
 }

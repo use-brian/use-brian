@@ -250,6 +250,15 @@ function makeAllTools(opts?: {
   ) => Promise<{ workspaceId: string; state: 'draft' | 'saved'; name: string } | null>
   deliverToChannel?: DeliverToChannel
   jobStore?: JobStore & { rows: ScheduledJob[] }
+  validateDeliveryTarget?: (args: {
+    assistantId: string
+    channelType: 'telegram' | 'slack' | 'whatsapp'
+    channelId: string
+  }) => Promise<{ ok: boolean; reason?: string }>
+  preflightConnectorTool?: (args: {
+    userId: string
+    toolName: string
+  }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -272,6 +281,8 @@ function makeAllTools(opts?: {
     resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
     deliverToChannel: opts?.deliverToChannel,
     resolveViewWorkspace: async () => WORKSPACE_ID,
+    validateDeliveryTarget: opts?.validateDeliveryTarget,
+    preflightConnectorTool: opts?.preflightConnectorTool,
   })
   return { tools, stores, events, jobStore }
 }
@@ -1037,5 +1048,147 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
       makeContext(),
     )
     expect(updated.isError).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
+  const deliverDef = (channelType: 'slack' | 'telegram', channelId: string): WorkflowDefinition => ({
+    startStepId: 's1',
+    steps: [
+      {
+        id: 's1',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Summarize and send.',
+        deliver: { channelType, channelId },
+      },
+    ],
+  })
+
+  it('proposeWorkflow blocks an unreachable Slack delivery target (the channel_not_found incident)', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'Slack: channel_not_found' }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: deliverDef('slack', 'web-session-123') },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    const data = r.data as { ok: boolean; errors: string[] }
+    expect(data.ok).toBe(false)
+    expect(data.errors.join(' ')).toContain('channel_not_found')
+    expect(validateDeliveryTarget).toHaveBeenCalledWith({
+      assistantId: PRIMARY_ASSISTANT_ID,
+      channelType: 'slack',
+      channelId: 'web-session-123',
+    })
+  })
+
+  it('createWorkflow refuses to persist an unreachable delivery target', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'Slack: channel_not_found' }))
+    const { tools, stores } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      { name: 'X', definition: deliverDef('slack', 'nope') },
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    expect([...(await stores.workflowStore.list(USER_ID, WORKSPACE_ID))]).toHaveLength(0)
+  })
+
+  it('validates the resolved schedule trigger delivery target, not just explicit step.deliver', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: false, reason: 'Slack: channel_not_found' }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Brief.' }],
+    }
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'X',
+        definition: def,
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '09:00' }, delivery: { channel: 'slack' } },
+      },
+      // A non-Slack (web) session — resolveDeliveryChannel stamps the web
+      // channelId as the Slack target, which the validator rejects.
+      makeContext(),
+    )
+    expect(r.isError).toBe(true)
+    expect(validateDeliveryTarget).toHaveBeenCalled()
+  })
+
+  it('allows a reachable delivery target', async () => {
+    const validateDeliveryTarget = vi.fn(async () => ({ ok: true }))
+    const { tools } = makeAllTools({ validateDeliveryTarget })
+    const r = await tools.proposeWorkflow.execute(
+      { name: 'X', definition: deliverDef('telegram', 'tg-123') },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    expect((r.data as { ok: boolean }).ok).toBe(true)
+  })
+
+  it('blocks a tool_call against a connector whose preflight fails (the Bad credentials incident)', async () => {
+    const preflightConnectorTool = vi.fn(async () => ({
+      ok: false,
+      provider: 'GitHub',
+      reason: 'its access token is invalid or revoked',
+    }))
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [{ id: 's1', type: 'tool_call', toolName: 'githubListPullRequests', arguments: {} }],
+    }
+    const { tools } = makeAllTools({ preflightConnectorTool, isKnownTool: () => true })
+    const r = await tools.createWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    expect(r.isError).toBe(true)
+    expect((r.data as { errors: string[] }).errors.join(' ')).toContain('GitHub')
+    expect(preflightConnectorTool).toHaveBeenCalledWith({ userId: USER_ID, toolName: 'githubListPullRequests' })
+  })
+
+  it('skips preflight for a tool that is not a connector tool (returns null)', async () => {
+    const preflightConnectorTool = vi.fn(async () => null)
+    const { tools } = makeAllTools({ preflightConnectorTool })
+    const r = await tools.createWorkflow.execute({ name: 'X', definition: SIMPLE_DEF }, makeContext())
+    expect(r.isError).toBeFalsy()
+    expect(preflightConnectorTool).toHaveBeenCalled()
+  })
+
+  it('warns (fix D) when an assistant_call fetches connector data with no pinned tool', async () => {
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'Summarize the GitHub pull requests merged in the last 24 hours.',
+        },
+      ],
+    }
+    const { tools } = makeAllTools({})
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => /tool_call/.test(w) && /fabricate/.test(w))).toBe(true)
+  })
+
+  it('does NOT warn (fix D) when a dedicated tool_call already fetches the data', async () => {
+    const def: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        { id: 's1', type: 'tool_call', toolName: 'githubListPullRequests', arguments: {}, storeOutputAs: 'prs', nextStepId: 's2' },
+        { id: 's2', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'Summarize the GitHub PRs in {{vars.prs}}.' },
+      ],
+    }
+    const { tools } = makeAllTools({ isKnownTool: () => true })
+    const r = await tools.proposeWorkflow.execute({ name: 'X', definition: def }, makeContext())
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => /fabricate/.test(w))).toBe(false)
+  })
+
+  it('skips all external checks when validators are not wired (tests / minimal boots)', async () => {
+    const { tools } = makeAllTools({})
+    const r = await tools.createWorkflow.execute(
+      { name: 'X', definition: deliverDef('slack', 'anything') },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
   })
 })

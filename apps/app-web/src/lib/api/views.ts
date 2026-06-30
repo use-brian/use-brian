@@ -323,6 +323,19 @@ export type ChildPageBlock = {
   childPageId: string;
 };
 
+/**
+ * Authoring-only directive carrying a blueprint section's extraction
+ * instruction (what fills this section when the synthesis engine runs). Only
+ * appears in blueprint templates, never a normal page. Mirrors the canonical
+ * core `ExtractionSlotBlock` in `packages/core/src/views/blocks.ts`.
+ */
+export type ExtractionSlotBlock = {
+  kind: "extraction_slot";
+  id: string;
+  instruction: string;
+  outputType?: "prose" | "list" | "table";
+};
+
 export type Block =
   | TextBlock
   | HeadingBlock
@@ -343,7 +356,8 @@ export type Block =
   | BookmarkBlock
   | VideoBlock
   | AudioBlock
-  | ChildPageBlock;
+  | ChildPageBlock
+  | ExtractionSlotBlock;
 
 export type Page = {
   blocks: Block[];

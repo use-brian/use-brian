@@ -19,13 +19,13 @@
  */
 
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools } from '@sidanclaw/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource } from '@sidanclaw/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks } from '@sidanclaw/core'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
-import { buildConnectorAuthHeaders } from './auth-headers.js'
+import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
   listCalendarEvents, getCalendarEvent, createCalendarEvent, updateCalendarEvent, deleteCalendarEvent,
@@ -281,13 +281,31 @@ export async function injectMcpTools(params: {
    * See `docs/architecture/integrations/mcp.md` → "Tool search pattern".
    */
   keepBuiltinsDirect?: boolean
+  /**
+   * Tool-use interception port (remote MCP only). Threaded into
+   * `createMcpSearchTools` so `preToolUse` can inject/overwrite outbound
+   * headers (merged over the connector's stored-credential headers),
+   * rewrite args, or block; `postToolUse` observes the result. The open
+   * build leaves this unset; the platform supplies the config-driven impl.
+   * See `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
+  /**
+   * The acting user's resolved identity for this turn (server-side, from the
+   * authenticated session — never model output). When set, connectors that
+   * opted in (`config.sendActorIdentity`) receive `X-Sidanclaw-Actor-*` headers
+   * at highest precedence. The call site resolves it cheaply (web = email;
+   * channels = the webhook's native id + email). See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  actorIdentity?: ActorIdentity
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false,
+    keepBuiltinsDirect = false, engineHooks, actorIdentity,
   } = params
 
   const unavailable: string[] = []
@@ -344,9 +362,13 @@ export async function injectMcpTools(params: {
     url: string
     instanceId: string | null
     updatedAt: Date | null
+    /** Static operational headers from `config.preflightHeaders` (validated at merge). */
+    preflightHeaders: Record<string, string>
+    /** Opt-in: send the acting user's `X-Sidanclaw-Actor-*` identity to this connector. */
+    sendActorIdentity: boolean
   }> = connectors
     .filter((c) => c.connected && c.url)
-    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt }))
+    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true }))
 
   // Team-native custom MCP instances live as separate `connector_instance`
   // rows scoped to the team. The `provider` column is a UUID for custom
@@ -364,6 +386,8 @@ export async function injectMcpTools(params: {
           url: inst.url,
           instanceId: inst.id,
           updatedAt: inst.updatedAt,
+          preflightHeaders: preflightHeadersToRecord(inst.config),
+          sendActorIdentity: inst.config?.sendActorIdentity === true,
         })
       }
     } catch (err) {
@@ -422,7 +446,22 @@ export async function injectMcpTools(params: {
   // first in that order, not whichever DB read resolved first — discovery
   // and the mcp_call dispatcher then agree on one header set per URL.
   const resolvedHeaders = await Promise.all(active.map((c) => loadAuthHeaders(c.instanceId)))
-  active.forEach((c, i) => registerAuthHeaders(c.url, resolvedHeaders[i]))
+  // Reserved-namespace identity headers, built once per turn (the actor is
+  // constant for the turn). Only attached to connectors that opted in, and
+  // merged LAST so neither user config nor auth can shadow the assertion.
+  const actorHeaders = actorIdentity ? actorIdentityHeaders(actorIdentity) : null
+  active.forEach((c, i) => {
+    // Layer the connector's static preflight headers (config) over its auth
+    // headers (credentials) — preflight wins on a name clash, both validated
+    // and deduped in mergeValidatedHeaders. The merged set travels on
+    // discovery + every mcp_call; a runtime preToolUse hook can still override
+    // it per call. See docs/architecture/engine/tool-hooks.md.
+    let merged = mergeValidatedHeaders(resolvedHeaders[i], c.preflightHeaders)
+    if (actorHeaders && c.sendActorIdentity) {
+      merged = mergeValidatedHeaders(merged, actorHeaders)
+    }
+    registerAuthHeaders(c.url, merged ?? {})
+  })
 
   const discoveries = await Promise.allSettled(
     active.map(async (connector) => {
@@ -812,8 +851,12 @@ export async function injectMcpTools(params: {
       userId,
       // The execution dispatcher — every remote mcp_call lands here with
       // only the serverUrl, so per-connector auth joins via headersByUrl.
-      callMcpTool: (serverUrl, toolName, input) =>
-        callRemoteMcpTool(serverUrl, toolName, input, headersByUrl.get(serverUrl)),
+      // A preflight hook may pass `overrides`, merged over the stored-
+      // credential headers (override wins, re-validated) just before the
+      // wire call. See docs/architecture/engine/tool-hooks.md.
+      callMcpTool: (serverUrl, toolName, input, overrides) =>
+        callRemoteMcpTool(serverUrl, toolName, input, mergeValidatedHeaders(headersByUrl.get(serverUrl), overrides)),
+      hooks: engineHooks,
     })
     for (const tool of searchTools) {
       tools.set(tool.name, tool)

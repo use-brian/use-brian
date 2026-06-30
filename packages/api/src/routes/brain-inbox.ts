@@ -48,10 +48,11 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
-import { SYSTEM_ENTITY_KINDS } from '@sidanclaw/core'
+import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@sidanclaw/core'
 import { updateCompany, updateContact } from '../db/crm.js'
 import { updateWorkspaceFileMeta } from '../db/workspace-files.js'
-import type { FilesApi, FilesContext } from '@sidanclaw/core'
+import { updateTask } from '../db/tasks.js'
+import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
@@ -915,6 +916,108 @@ export function brainInboxRoutes({
       } catch (err) {
         console.error('[brain-inbox] workspace_file adjust failed:', err)
         res.status(500).json({ error: 'Failed to adjust file' })
+      }
+      return
+    }
+
+    if (primitiveParam === 'task') {
+      // Task adjust — v1 supports the doc-like editable fields surfaced in
+      // the Brain detail panel: title, status, due date, and tags. Each
+      // edit supersedes the row (a new bi-temporal id), so the preserved
+      // old row IS the audit trail — no brain_verification stamp here.
+      const { title, status, due_at, tags } = req.body as {
+        title?: unknown
+        status?: unknown
+        due_at?: unknown
+        tags?: unknown
+      }
+
+      const fields: TaskUpdateFields = {}
+
+      if (title !== undefined) {
+        if (typeof title !== 'string' || title.trim().length === 0) {
+          res.status(400).json({ error: 'title must be a non-empty string' })
+          return
+        }
+        if (title.length > 500) {
+          res.status(400).json({ error: 'title must be 500 characters or less' })
+          return
+        }
+        fields.title = title.trim()
+      }
+
+      if (status !== undefined) {
+        if (!TASK_STATUSES.includes(status as TaskRecordStatus)) {
+          res.status(400).json({
+            error: `status must be one of ${TASK_STATUSES.join(', ')}`,
+          })
+          return
+        }
+        fields.status = status as TaskRecordStatus
+      }
+
+      if (due_at !== undefined) {
+        // null clears the due date; a string must parse to a valid date.
+        if (due_at === null) {
+          fields.due = null
+        } else if (typeof due_at === 'string') {
+          const parsed = new Date(due_at)
+          if (Number.isNaN(parsed.getTime())) {
+            res.status(400).json({ error: 'due_at must be an ISO date string or null' })
+            return
+          }
+          fields.due = parsed
+        } else {
+          res.status(400).json({ error: 'due_at must be an ISO date string or null' })
+          return
+        }
+      }
+
+      if (tags !== undefined) {
+        if (!Array.isArray(tags) || tags.some((t) => typeof t !== 'string')) {
+          res.status(400).json({ error: 'tags must be an array of strings' })
+          return
+        }
+        fields.tags = (tags as string[]).map((s) => s.trim()).filter(Boolean)
+      }
+
+      if (Object.keys(fields).length === 0) {
+        res.status(400).json({
+          error: 'At least one field (title, status, due_at, tags) is required',
+        })
+        return
+      }
+
+      try {
+        // Workspace-ownership check — requireWorkspaceMember already gated
+        // membership; this confirms the row lives in *this* workspace and
+        // distinguishes 404 (gone) from 403 (cross-workspace).
+        const before = await query<{ workspaceId: string }>(
+          `SELECT workspace_id as "workspaceId" FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+          [rowId],
+        )
+        if (before.rows.length === 0) {
+          res.status(404).json({ error: 'Task not found' })
+          return
+        }
+        if (before.rows[0].workspaceId !== workspaceId) {
+          res.status(403).json({ error: 'Task belongs to a different workspace' })
+          return
+        }
+
+        const updated = await updateTask(userId, rowId, fields)
+        if (!updated) {
+          res.status(404).json({ error: 'Task not found' })
+          return
+        }
+
+        // Supersession mints a new id; return it so the client can re-anchor
+        // (the panel closes + refetches, so a stale id never lingers).
+        void notifyBrainInboxChange(workspaceId, 'task', rowId, 'update')
+        res.json({ ok: true, stamped: true, id: updated.id })
+      } catch (err) {
+        console.error('[brain-inbox] task adjust failed:', err)
+        res.status(500).json({ error: 'Failed to adjust task' })
       }
       return
     }

@@ -206,6 +206,16 @@ export type UsageStore = {
    */
   getEarliestChargeAfter(workspaceId: string, after: Date): Promise<Date | null>
 
+  /**
+   * Total recorded COGS (excl. `overhead:*`) for one session. Backs the
+   * goal-seeker per-iteration / per-goal spend read: a goal iteration runs
+   * under its own session, so summing `usage_tracking` by `session_id` is the
+   * deterministic per-iteration COGS the acting loop feeds into `maxSpend`
+   * (see docs/architecture/features/goals.md → metering). Distinct from the
+   * workspace-scoped reads above — it is keyed by session, not workspace.
+   */
+  getSessionCostUsd(sessionId: string): Promise<number>
+
   // ── Per-assistant queries (Cost tab) ──────────────────────
   /** Total cost for one assistant in the last 7 days. */
   getAssistantWeeklyCost(workspaceId: string, assistantId: string): Promise<number>

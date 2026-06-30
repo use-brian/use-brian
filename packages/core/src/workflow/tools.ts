@@ -135,6 +135,38 @@ export type WorkflowToolDeps = {
   resolveDeliveryTarget?: DeliveryTargetResolver
   deliverToChannel?: DeliverToChannel
   resolveViewWorkspace?: ViewWorkspaceResolver
+  /**
+   * Authoring-time delivery-target reachability check (the `channel_not_found`
+   * incident). For a step's resolved `(channelType, channelId)` it confirms the
+   * target is actually postable — Slack: the BYO bot's token is valid AND the
+   * channel resolves via `conversations.info` (a non-Slack session stamping a
+   * web/Telegram session id as the Slack channel is the exact failure mode).
+   * Returns `{ ok:false, reason }` so the authoring tools block create/update
+   * instead of persisting a workflow whose every fire silently fails delivery.
+   * Absent (tests, minimal boots) → the check is skipped and the executor's
+   * best-effort soft-fail stays the only guard. See
+   * docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
+   */
+  validateDeliveryTarget?: (args: {
+    assistantId: string
+    channelType: 'telegram' | 'slack' | 'whatsapp'
+    channelId: string
+  }) => Promise<{ ok: boolean; reason?: string }>
+  /**
+   * Authoring-time connector preflight (the GitHub `Bad credentials` incident).
+   * Given a tool name a step references (`tool_call.toolName` or an
+   * `assistant_call.tools[]` entry), resolves the owning built-in connector and
+   * probes its credentials with one cheap authenticated call. Returns `null`
+   * when the name is NOT a built-in connector tool (a first-party / brain tool —
+   * nothing to preflight), else `{ ok, provider, reason }`. `ok:false` blocks
+   * authoring so a workflow can't be created against a connector that is
+   * disconnected or whose token is revoked/expired. Absent → skipped. See
+   * docs/architecture/features/workflow.md → "Authoring validation".
+   */
+  preflightConnectorTool?: (args: {
+    userId: string
+    toolName: string
+  }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
 }
 
 const idShape = z.string().uuid()
@@ -330,6 +362,144 @@ async function pageAnchorIssues(
       }
     }
   }
+  return { errors, warnings }
+}
+
+/**
+ * Connector names that, when a step pulls data from them without a pinned
+ * tool, are the fix-D footgun: an `assistant_call` that fetches connector data
+ * but lets the model choose tools on the fly will, when the connector errors,
+ * fabricate a result from memory/training instead of failing (the GitHub
+ * `Bad credentials` → hallucinated summary incident). Paired with a fetch verb
+ * to keep the heuristic tight.
+ */
+const CONNECTOR_DATA_KEYWORD =
+  /\b(github|gmail|notion|fathom|(google\s*)?(calendar|drive|docs|sheets|slides)|gcal|gdrive)\b/i
+const FETCH_VERB = /\b(summari[sz]|fetch|pull|retriev|gather|list|report on|review|digest|recap|scan)\b/i
+
+/** The terminal (last-by-order, or sole) `assistant_call` step id — where a
+ *  schedule trigger's `delivery` sugar gets stamped. `null` when none. */
+function terminalAssistantCallId(def: WorkflowDefinition): string | null {
+  for (let i = def.steps.length - 1; i >= 0; i--) {
+    if (def.steps[i].type === 'assistant_call') return def.steps[i].id
+  }
+  return null
+}
+
+/**
+ * External-dependency authoring checks: delivery-target reachability (fix A)
+ * and connector preflight (fix B), plus the fix-D "connector data fetched on
+ * the fly" warning. Mirrors `pageAnchorIssues` — errors block create/update;
+ * warnings surface for the author to resolve. Network validators are injected
+ * (ports) and skipped when absent, so tests / minimal boots are unaffected and
+ * the runtime guards stay authoritative.
+ */
+async function dependencyIssues(
+  def: WorkflowDefinition,
+  trigger: WorkflowTrigger | undefined,
+  context: ToolContext,
+  deps: Pick<WorkflowToolDeps, 'validateDeliveryTarget' | 'preflightConnectorTool'>,
+): Promise<{ errors: string[]; warnings: string[] }> {
+  const errors: string[] = []
+  const warnings: string[] = []
+
+  // ── A. Delivery-target reachability ──────────────────────────────────────
+  if (deps.validateDeliveryTarget) {
+    const targets: Array<{ stepId: string; channelType: 'telegram' | 'slack' | 'whatsapp'; channelId: string }> = []
+    for (const step of def.steps) {
+      if (
+        step.type === 'assistant_call' &&
+        step.deliver &&
+        step.deliver.channelType !== 'web'
+      ) {
+        targets.push({ stepId: step.id, channelType: step.deliver.channelType, channelId: step.deliver.channelId })
+      }
+    }
+    // The schedule trigger's `delivery` sugar is stamped onto the terminal
+    // assistant_call step at persist time (resolveDeliveryChannel → that step's
+    // deliver). Resolve + validate it NOW so a non-Slack session can't persist a
+    // bogus Slack channel id that fails `channel_not_found` on every fire.
+    if (trigger?.kind === 'schedule' && trigger.delivery) {
+      const resolved = resolveDeliveryChannel(context, trigger.delivery.channel)
+      const termId = terminalAssistantCallId(def)
+      if (termId && resolved.channelType !== 'web') {
+        targets.push({
+          stepId: termId,
+          channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp',
+          channelId: resolved.channelId,
+        })
+      }
+    }
+    for (const t of targets) {
+      try {
+        const res = await deps.validateDeliveryTarget({
+          assistantId: context.assistantId,
+          channelType: t.channelType,
+          channelId: t.channelId,
+        })
+        if (!res.ok) {
+          errors.push(
+            `Step "${t.stepId}" delivers to the ${t.channelType} channel "${t.channelId}", which is not reachable: ${
+              res.reason ?? 'channel check failed'
+            }. ${
+              t.channelType === 'slack'
+                ? 'Author the workflow from inside the Slack channel you want the result posted to (the channel is captured automatically there), or pick a channel the connected bot is a member of.'
+                : 'Author from inside the chat you want the result delivered to so the correct channel is captured.'
+            }`,
+          )
+        }
+      } catch (err) {
+        // A validator throw is treated as not-blocking (the runtime soft-fail
+        // remains) — never let a flaky reachability probe block authoring.
+        console.warn('[workflow/dependencyIssues] delivery validator threw:', err)
+      }
+    }
+  }
+
+  // ── B. Connector preflight ───────────────────────────────────────────────
+  if (deps.preflightConnectorTool) {
+    const refs: Array<{ stepId: string; toolName: string }> = []
+    for (const step of def.steps) {
+      if (step.type === 'tool_call') refs.push({ stepId: step.id, toolName: step.toolName })
+      if (step.type === 'assistant_call' && step.tools) {
+        for (const tn of step.tools) refs.push({ stepId: step.id, toolName: tn })
+      }
+    }
+    const probed = new Set<string>()
+    for (const ref of refs) {
+      if (probed.has(ref.toolName)) continue
+      probed.add(ref.toolName)
+      try {
+        const res = await deps.preflightConnectorTool({ userId: context.userId, toolName: ref.toolName })
+        if (res && !res.ok) {
+          errors.push(
+            `Step "${ref.stepId}" uses the ${res.provider} tool "${ref.toolName}", but ${res.provider} is not usable right now: ${
+              res.reason ?? 'connection check failed'
+            }. Reconnect ${res.provider} (or refresh its token) before creating this workflow — otherwise every run fails here.`,
+          )
+        }
+      } catch (err) {
+        console.warn('[workflow/dependencyIssues] connector preflight threw:', err)
+      }
+    }
+  }
+
+  // ── D. Connector data fetched inside a free-choice assistant_call ─────────
+  // No network needed — a pure authoring heuristic. If a step pulls connector
+  // data but pins no tool, the model picks tools on the fly and, on a connector
+  // error, fabricates rather than failing. Steer to a dedicated tool_call.
+  const hasToolCall = def.steps.some((s) => s.type === 'tool_call')
+  for (const step of def.steps) {
+    if (step.type !== 'assistant_call') continue
+    if (step.tools && step.tools.length > 0) continue // already pinned
+    if (hasToolCall) continue // a tool_call already fetches deterministically
+    if (CONNECTOR_DATA_KEYWORD.test(step.prompt) && FETCH_VERB.test(step.prompt)) {
+      warnings.push(
+        `Step "${step.id}" asks the assistant to pull data from a connector but pins no tool, so the assistant chooses tools on the fly — and if the connector errors (bad token, not connected) it may fabricate a result from memory instead of failing. Prefer a dedicated \`tool_call\` step that fetches the data (it HALTS the run if the connector errors), storing it via \`storeOutputAs\`, feeding an \`assistant_call\` that summarizes \`{{vars.<name>}}\`. If you keep it as one step, add a \`tools\` allow-list naming the exact connector tool.`,
+      )
+    }
+  }
+
   return { errors, warnings }
 }
 
@@ -700,9 +870,16 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         { userId: context.userId, workspaceId: context.workspaceId! },
         deps.resolvePageAnchor,
       )
-      if (anchorIssues.errors.length > 0) {
+      // External-dependency checks: delivery-target reachability + connector
+      // preflight (fix A / B); the fix-D fabrication-risk warning rides along.
+      const depIssues = await dependencyIssues(definition, trigger, context, deps)
+      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0) {
         return {
-          data: { ok: false, errors: anchorIssues.errors, stepTypes: STEP_TYPE_VALUES },
+          data: {
+            ok: false,
+            errors: [...anchorIssues.errors, ...depIssues.errors],
+            stepTypes: STEP_TYPE_VALUES,
+          },
           isError: true,
         }
       }
@@ -717,6 +894,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
           warnings: [
             ...warningsFor(definition, { phaseBActive, isKnownTool: deps.isKnownTool }),
             ...anchorIssues.warnings,
+            ...depIssues.warnings,
             ...triggerWarnings(definition, trigger),
             ...reservedOutcomeVarWarnings(definition, trigger),
           ],
@@ -791,8 +969,14 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
         { userId: context.userId, workspaceId: context.workspaceId! },
         deps.resolvePageAnchor,
       )
-      if (anchorIssues.errors.length > 0) {
-        return { data: { ok: false, errors: anchorIssues.errors }, isError: true }
+      // Delivery-target reachability + connector preflight (fix A / B). Block
+      // here too — createWorkflow can be reached with an edited definition.
+      const depIssues = await dependencyIssues(parsed.data, trigger, context, deps)
+      if (anchorIssues.errors.length > 0 || depIssues.errors.length > 0) {
+        return {
+          data: { ok: false, errors: [...anchorIssues.errors, ...depIssues.errors] },
+          isError: true,
+        }
       }
 
       // Cap check BEFORE persist so a capped user never orphans a workflow row.
@@ -962,6 +1146,19 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
 
       // Mirror the trigger column so the builder renders reality.
       if (trigger !== undefined) fields.trigger = trigger
+
+      // Delivery-target reachability + connector preflight (fix A / B) — only
+      // when the definition or trigger is actually changing. A bare
+      // `{ enabled: false }` (or rename) must never be blocked by a connector
+      // token that has since expired; the runtime guards cover live runs.
+      if (input.definition !== undefined || trigger !== undefined) {
+        const effectiveDef = fields.definition ?? existing.definition
+        const effectiveTrigger = trigger ?? existing.trigger
+        const depIssues = await dependencyIssues(effectiveDef, effectiveTrigger, context, deps)
+        if (depIssues.errors.length > 0) {
+          return { data: { ok: false, errors: depIssues.errors }, isError: true }
+        }
+      }
 
       if (Object.keys(fields).length === 0) {
         return { data: 'Nothing to update — pass at least one of name / description / definition / enabled / trigger.', isError: true }

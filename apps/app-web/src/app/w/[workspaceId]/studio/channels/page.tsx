@@ -46,11 +46,16 @@ import {
   deleteWhatsappBotTrigger,
   setWhatsappBotAccess,
   setWhatsappBotBehavior,
+  getWhatsappOfficial,
+  unbindWhatsappOfficialGroup,
   type WhatsappGroup,
   type WhatsappBotConfig,
   type WhatsappBotSendScope,
   type WhatsappBotAccessMode,
+  type WhatsappOfficialBinding,
 } from "@/lib/api/whatsapp-ingest";
+import { isHostedEdition } from "@/lib/edition";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   API_URL,
   listChannels,
@@ -294,6 +299,13 @@ export default function StudioChannelsPage() {
           onCreated={onChannelCreated}
           onClose={() => setAddOpen(false)}
         />
+      )}
+
+      {/* Official shared bot: hosted-only. Gated behind isHostedEdition() so the
+          open OSS core never renders it (its backend lives in closed
+          api-platform). See docs/architecture/channels/whatsapp.md. */}
+      {isHostedEdition() && activeId && (
+        <WhatsappOfficialCard workspaceId={activeId} />
       )}
 
       {!activeId ? (
@@ -2353,6 +2365,118 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
  * the Studio → Events page now (the Channels/Events split — Channels owns the
  * chat/broadcast surface, Events owns ingestion).
  */
+// Official shared-bot surface (hosted-only). The number is paired centrally; a
+// workspace doesn't pair it - users add the number to a group (which binds that
+// group to the adder's workspace) and manage their bound groups here. Backend:
+// packages/api-platform/src/routes/whatsapp-official-admin.ts.
+// [COMP:app-web/whatsapp-official-card]
+function WhatsappOfficialCard({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const c = t.studioPage.channels.whatsappOfficial;
+  const [state, setState] = useState<{
+    officialNumber: string | null;
+    bindings: WhatsappOfficialBinding[];
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    getWhatsappOfficial(workspaceId)
+      .then((s) => {
+        setState({ officialNumber: s.officialNumber, bindings: s.bindings });
+        setError(null);
+      })
+      .catch(() => setError(c.loadError));
+  }, [workspaceId, c.loadError]);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  async function onStop(groupJid: string) {
+    const ok = await confirmDialog({
+      title: c.stopConfirmTitle,
+      description: c.stopConfirmBody,
+      confirmLabel: c.stopConfirmCta,
+      cancelLabel: c.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setStopping(groupJid);
+    try {
+      await unbindWhatsappOfficialGroup(workspaceId, groupJid);
+      refresh();
+    } catch {
+      setError(c.stopError);
+    } finally {
+      setStopping(null);
+    }
+  }
+
+  return (
+    <section className="border border-border rounded-md bg-card/50 p-4 flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <h3 className="text-sm font-medium">{c.title}</h3>
+        <p className="text-[13px] text-muted-foreground max-w-prose">{c.intro}</p>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-xs text-muted-foreground">{c.numberLabel}</span>
+        {state?.officialNumber ? (
+          <code className="text-sm font-medium">{state.officialNumber}</code>
+        ) : (
+          <span className="text-[13px] text-muted-foreground">
+            {c.numberUnconfigured}
+          </span>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <span className="text-xs font-medium">{c.howToTitle}</span>
+        <ol className="list-decimal list-inside text-[13px] text-muted-foreground flex flex-col gap-1">
+          <li>{c.howToStep1}</li>
+          <li>{c.howToStep2}</li>
+          <li>{c.howToStep3}</li>
+        </ol>
+      </div>
+
+      <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <span className="text-xs font-medium">{c.groupsTitle}</span>
+        {error ? (
+          <p className="text-xs text-amber-600 dark:text-amber-400">{error}</p>
+        ) : null}
+        {state === null ? null : state.bindings.length === 0 ? (
+          <p className="text-[13px] text-muted-foreground">{c.groupsEmpty}</p>
+        ) : (
+          <ul className="flex flex-col gap-2">
+            {state.bindings.map((b) => (
+              <li
+                key={b.groupJid}
+                className="flex items-center justify-between gap-3 text-sm"
+              >
+                <span className="flex flex-col min-w-0">
+                  <code className="truncate text-[13px]">{b.groupJid}</code>
+                  <span className="text-xs text-muted-foreground">
+                    {b.boundByYou ? c.boundByYou : c.boundByTeammate}
+                  </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onStop(b.groupJid)}
+                  disabled={stopping === b.groupJid}
+                  className="shrink-0 text-xs font-medium rounded-md border border-border px-2 py-1 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  {stopping === b.groupJid ? c.stopping : c.stopCta}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const wa = t.studioPage.ingestRules.whatsapp;

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { Writable } from 'node:stream'
 import { validateGcsByoBinding, BYO_HEALTHCHECK_KEY } from '../gcs-byo-validate.js'
 import type { GcsFilesClient } from '../gcs-client.js'
 
@@ -16,6 +17,7 @@ function fakeClient(overrides: Partial<GcsFilesClient> = {}): GcsFilesClient {
     async deleteBlob(key) { blobs.delete(key) },
     async signedReadUrl(key) { return `https://x/${key}` },
     async signedWriteUrl(key) { return `https://x/${key}` },
+    writeStream() { return new Writable({ write(_c, _e, cb) { cb() } }) },
     ...overrides,
   }
 }

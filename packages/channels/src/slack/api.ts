@@ -169,6 +169,20 @@ export function createSlackApi(options: SlackApiOptions) {
     clearAssistantStatus: (channelId: string, threadTs: string) =>
       call<{}>('assistant.threads.setStatus', { channel_id: channelId, thread_ts: threadTs, status: '' }),
 
+    /**
+     * Look up a channel by id — confirms the BYO bot can actually see and
+     * (for a member channel) post to it. Throws `channel_not_found` when the
+     * id is wrong, from another workspace, or a non-Slack id mistakenly stamped
+     * as a Slack channel (the workflow `channel_not_found` delivery incident).
+     * Used by the authoring-time delivery-target validator. Requires no extra
+     * scope beyond what a posting bot already holds.
+     */
+    conversationsInfo: (channel: string) =>
+      call<{ channel: { id: string; name?: string; is_archived?: boolean; is_member?: boolean } }>(
+        'conversations.info',
+        { channel },
+      ),
+
     /** Fetch recent messages from a channel. Requires channels:history scope. */
     conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
       call<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(

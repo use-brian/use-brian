@@ -86,6 +86,15 @@ export type CrmToolOptions = {
    *   §Decision semantics per boundary — B2 chat tool
    */
   entityKindClassifier?: Classifier<EntityKind>
+  /**
+   * `source` stamped on rows these tools create. Default behavior (absent)
+   * is unchanged — the store writes its default `'user'`. The structural-
+   * synthesis engine builds these tools with `writeSource: 'extracted'` so
+   * synthesis-captured companies / contacts / deals surface in Brain Reviews
+   * (`?includeExtracted=true`). Only affects fresh inserts; the upsert/merge
+   * path preserves the existing row's source.
+   */
+  writeSource?: 'user' | 'extracted'
 }
 
 /**
@@ -460,6 +469,7 @@ export function createCrmTools(
             context.compartmentAccumulator?.compartments,
             context.assistantDefaultCompartments,
           ),
+          source: opts?.writeSource,
         })
         opts?.onEvent?.({ type: 'contact_created', contactId: contact.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({
@@ -690,6 +700,7 @@ export function createCrmTools(
           context.compartmentAccumulator?.compartments,
           context.assistantDefaultCompartments,
         ),
+        source: opts?.writeSource,
       })
       opts?.onEvent?.({ type: 'company_created', companyId: company.id }, eventCtx(context))
       const linksSummary = await applyExplicitLinks({
@@ -901,6 +912,7 @@ export function createCrmTools(
             context.compartmentAccumulator?.compartments,
             context.assistantDefaultCompartments,
           ),
+          source: opts?.writeSource,
         })
         opts?.onEvent?.({ type: 'deal_created', dealId: deal.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({

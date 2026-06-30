@@ -86,6 +86,20 @@ export type GitHubComment = {
   updated_at: string
 }
 
+// ── Auth probe ───────────────────────────────────────────────
+
+/**
+ * The authenticated user behind a PAT — the cheapest call that proves the
+ * token is valid (`GET /user`). `ghFetch` already maps a 401 to the message
+ * "GitHub PAT is invalid or revoked". Used by the workflow connector preflight
+ * so a workflow can't be authored against an expired/revoked GitHub token
+ * (the `Bad credentials` incident).
+ */
+export async function getAuthenticatedUser(pat: string): Promise<{ login: string }> {
+  const res = await ghFetch(pat, '/user')
+  return (await res.json()) as { login: string }
+}
+
 // ── Repositories ─────────────────────────────────────────────
 
 export async function searchRepositories(

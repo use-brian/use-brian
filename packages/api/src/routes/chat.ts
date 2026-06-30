@@ -20,7 +20,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 // WebChatOptions so the chat route depends on no platform-specific code. The
 // composition root passes the real impls; the open build uses the inline
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
-import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult } from '@sidanclaw/core'
+import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@sidanclaw/core'
 
 import { resolveModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
@@ -191,6 +191,14 @@ type WebChatOptions = {
   injectExtraTools?: InjectExtraTools
   resolveExtraSystemPrompt?: (session: { mode: string | null; channelType: string }) => string | null
   resolveAppSoul?: ResolveAppSoul
+  /**
+   * Tool-use interception port (remote MCP only), forwarded through
+   * `applyMcpInjection` → `injectMcpTools` → `createMcpSearchTools`.
+   * `preToolUse` can inject/overwrite outbound headers, rewrite args, or
+   * block; `postToolUse` observes. Open default = unset. See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
   analytics?: AnalyticsLogger
   cacheStore?: CacheStore
   connectorStore?: ConnectorStore
@@ -2444,6 +2452,21 @@ export function chatRoutes(options: WebChatOptions): Router {
           'If you cannot save the file, say plainly that it could not be saved.'
       }
 
+      // Task autopilot nudge (task-goal-autopilot.md). Capability-gated + dynamic
+      // (post-`injectMcpTools`), so naming the goal tools here is allowed — they
+      // exist whenever this runs. Without this, the auto-drafted goal is a silent
+      // DB row the model never surfaces; this makes the model offer it + enforces
+      // the confirm-before-work contract.
+      if (activeCapabilities.has('goals')) {
+        fullSystemPrompt +=
+          '\n\n# Goals for tasks\n' +
+          'Every top-level task you create is automatically given a DRAFT goal — a plan to drive that task to done. A draft goal does NOTHING on its own. ' +
+          'Right after you create a task, briefly tell the user the goal it was given and ask whether you should work it for them. ' +
+          'If they agree, confirm the goal (confirmGoal), then spin it up (workTask) so you complete the task autonomously. ' +
+          'NEVER start working a task whose goal is not confirmed: if you are about to work a task and its goal is still a draft, stop and confirm the outcome with the user first. ' +
+          'Use listGoals to find a task’s draft goal.'
+      }
+
       // ── Doc outline injection (Lock #5/#6, §5.4) ────────────
       // When a doc page is open in the editor, inject its outline so the
       // model can address blocks by id and plan against the LIVE document.
@@ -2965,6 +2988,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         userTimezone: user.timezone,
         tools: allTools,
         stores: options,
+        engineHooks: options.engineHooks,
+        // In-app actor identity: email is how the signed-in user is known on
+        // the web/app surface. Channel turns (WA/TG/Slack) set their native id
+        // in channel-pipeline. Resolved server-side from the session — never
+        // model output. Opted-in connectors receive X-Sidanclaw-Actor-*.
+        actorIdentity: { channel: session.channelType ?? 'web', id: user.email, email: user.email, userId: user.id },
         // Forwarded to `injectGoogleTools` → Gmail `sendMessage` audit
         // wrap. Shared with the host extra-tool inject above.
         connectorActionAudit,

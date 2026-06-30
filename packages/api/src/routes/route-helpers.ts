@@ -7,7 +7,8 @@
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@sidanclaw/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent } from '@sidanclaw/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks } from '@sidanclaw/core'
+import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
 // It is injected into `checkUsageBudget` as `creditGate` by the platform; the
@@ -255,6 +256,17 @@ export type ApplyMcpInjectionParams = {
    * `public`). Forwarded to `injectMcpTools → injectGoogleTools`.
    */
   workspaceDomain?: string | null
+  /**
+   * Tool-use interception port (remote MCP only), forwarded to
+   * `injectMcpTools`. Open default = unset. See
+   * `docs/architecture/engine/tool-hooks.md`.
+   */
+  engineHooks?: EngineHooks
+  /**
+   * The acting user's resolved identity for this turn, forwarded to
+   * `injectMcpTools` (opted-in connectors get `X-Sidanclaw-Actor-*` headers).
+   */
+  actorIdentity?: ActorIdentity
 }
 
 /**
@@ -297,6 +309,8 @@ export async function applyMcpInjection(
       connectorActionAudit: params.connectorActionAudit,
       assistantConnectorGrantsStore: stores.assistantConnectorGrantsStore,
       workspaceDomain: params.workspaceDomain,
+      engineHooks: params.engineHooks,
+      actorIdentity: params.actorIdentity,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)

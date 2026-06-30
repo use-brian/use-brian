@@ -102,6 +102,8 @@ export function TriggerEditor({
         />
         {trigger.kind === "webhook" && (
           <WebhookTriggerFields
+            trigger={trigger}
+            onChange={onChange}
             slug={webhookSlug}
             secret={webhookSecret}
             onRotate={onRotateWebhook}

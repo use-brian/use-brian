@@ -68,6 +68,7 @@ import {
   addEntityAlias,
   removeEntityAlias,
 } from "@/lib/api/brain-inbox";
+import { goalForTask, confirmGoal, workGoal, type GoalRow } from "@/lib/api/goals";
 import {
   type WorkspaceSkillSummary,
   confirmSkill,
@@ -1774,7 +1775,52 @@ function PrimitiveSection({
   const isMemory = primitive === "memory";
   const isCrm = primitive === "company" || primitive === "contact" || primitive === "deal";
   const isFile = primitive === "workspace_file";
+  const isTask = primitive === "task";
   const isVerified = Boolean(detail.verifiedAt);
+  // Task autopilot: the goal auto-drafted for this task (Confirm / Work this).
+  const [taskGoal, setTaskGoal] = useState<GoalRow | null>(null);
+  const [goalBusy, setGoalBusy] = useState(false);
+  const [goalError, setGoalError] = useState<string | null>(null);
+  // Load this task's auto-drafted goal. Best-effort — the affordance stays
+  // hidden if there's none (a sub-task, or a task edited so the host link moved).
+  useEffect(() => {
+    if (!isTask) return;
+    let cancelled = false;
+    setTaskGoal(null);
+    setGoalError(null);
+    void goalForTask(workspaceId, detail.id).then((g) => {
+      if (!cancelled) setTaskGoal(g);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isTask, workspaceId, detail.id]);
+  async function handleConfirmGoal() {
+    if (!taskGoal) return;
+    setGoalBusy(true);
+    setGoalError(null);
+    const r = await confirmGoal(taskGoal.id);
+    setGoalBusy(false);
+    if (!r.ok) {
+      // The §12 clarity gate may decline to arm a goal that's too vague to work
+      // autonomously and ask for detail; surface its question (model-generated).
+      setGoalError(r.needsClarification && r.question ? r.question : r.error ?? "Could not confirm the goal.");
+      return;
+    }
+    if (r.goal) setTaskGoal(r.goal);
+  }
+  async function handleWorkGoal() {
+    if (!taskGoal) return;
+    setGoalBusy(true);
+    setGoalError(null);
+    const r = await workGoal(taskGoal.id);
+    setGoalBusy(false);
+    if (!r.ok) {
+      setGoalError(r.error ?? "Could not start working the task.");
+      return;
+    }
+    if (r.goal) setTaskGoal(r.goal);
+  }
   const summary = String(detail.body.summary ?? "");
   const memoryDetail = (detail.body.detail as string | null) ?? null;
   // CRM rows store the user-facing label in `name`; everything else uses `display_name`.
@@ -1805,6 +1851,22 @@ function PrimitiveSection({
     : [];
   const fileTagsJoined = fileTags.join(", ");
   const [draftFileTags, setDraftFileTags] = useState(fileTagsJoined);
+
+  // Task draft fields — the doc-like editable surface (title/status/due/tags).
+  // Tags reuse `fileTags`/`fileTagsJoined` (the generic `detail.body.tags`
+  // parse above), so a task and a file share the comma-separated tag editor.
+  const taskStatusLabels = t.brainPage.taskStatus;
+  const taskTitle = isTask ? String(detail.body.title ?? "") : "";
+  const taskStatus = isTask ? String(detail.body.status ?? "todo") : "todo";
+  // due_at is an ISO string in the projection; <input type="date"> wants
+  // YYYY-MM-DD, so slice when seeding and re-expand to ISO on submit.
+  const taskDueDate = isTask
+    ? String(detail.body.due_at ?? "").slice(0, 10)
+    : "";
+  const [draftTaskTitle, setDraftTaskTitle] = useState(taskTitle);
+  const [draftTaskStatus, setDraftTaskStatus] = useState(taskStatus);
+  const [draftTaskDue, setDraftTaskDue] = useState(taskDueDate);
+  const [draftTaskTags, setDraftTaskTags] = useState(fileTagsJoined);
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
@@ -1838,10 +1900,14 @@ function PrimitiveSection({
     setDraftDetail(memoryDetail ?? "");
     setDraftCrmName(crmName);
     setDraftFileTags(fileTagsJoined);
+    setDraftTaskTitle(taskTitle);
+    setDraftTaskStatus(taskStatus);
+    setDraftTaskDue(taskDueDate);
+    setDraftTaskTags(fileTagsJoined);
     setDraftReason("");
     setMode("view");
     setError(null);
-  }, [detail.id, inferredScope, inferredSensitivity, summary, memoryDetail, crmName, fileTagsJoined]);
+  }, [detail.id, inferredScope, inferredSensitivity, summary, memoryDetail, crmName, fileTagsJoined, taskTitle, taskStatus, taskDueDate]);
 
   async function handleConfirm() {
     setBusy(true);
@@ -1882,13 +1948,46 @@ function PrimitiveSection({
     setDraftSummary(summary);
     setDraftDetail(memoryDetail ?? "");
     setDraftFileTags(fileTagsJoined);
+    setDraftTaskTitle(taskTitle);
+    setDraftTaskStatus(taskStatus);
+    setDraftTaskDue(taskDueDate);
+    setDraftTaskTags(fileTagsJoined);
     setDraftReason("");
     setError(null);
   }
 
   async function submitEdit() {
     const changes: AdjustMemoryChanges = {};
-    if (isCrm) {
+    if (isTask) {
+      // Task edit shape — title/status/due_at/tags. Each field is sent only
+      // when it actually changed; the server supersedes the row (a new
+      // bi-temporal id) and the panel closes + refetches afterwards.
+      const trimmedTitle = draftTaskTitle.trim();
+      if (trimmedTitle.length === 0) {
+        setError(labels.titleRequired);
+        return;
+      }
+      if (trimmedTitle !== taskTitle) changes.title = trimmedTitle;
+      if (draftTaskStatus !== taskStatus) {
+        changes.status = draftTaskStatus as NonNullable<
+          AdjustMemoryChanges["status"]
+        >;
+      }
+      if (draftTaskDue !== taskDueDate) {
+        // Empty clears the due date; otherwise pin to day-start UTC.
+        changes.due_at = draftTaskDue
+          ? new Date(`${draftTaskDue}T00:00:00.000Z`).toISOString()
+          : null;
+      }
+      const parsedTags = draftTaskTags
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const tagsChanged =
+        parsedTags.length !== fileTags.length ||
+        parsedTags.some((tag, i) => tag !== fileTags[i]);
+      if (tagsChanged) changes.tags = parsedTags;
+    } else if (isCrm) {
       // CRM rows expose name + sensitivity. Name maps to `display_name`
       // on the wire — the server's adjust handler for company/contact
       // /deal translates that to the CRM table's `name` column AND
@@ -2017,7 +2116,7 @@ function PrimitiveSection({
               {review.confirm}
             </button>
           )}
-          {(isMemory || isCrm || isFile) && (
+          {(isMemory || isCrm || isFile || isTask) && (
             <button
               type="button"
               disabled={busy}
@@ -2070,6 +2169,39 @@ function PrimitiveSection({
         </div>
       )}
 
+      {isTask && taskGoal && mode === "view" && (
+        <section className="mt-1 flex flex-col gap-2 rounded-md border border-border bg-card/50 p-3">
+          <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+            {labels.goalHeading}
+          </div>
+          <p className="text-sm text-foreground">{taskGoal.outcome}</p>
+          {!taskGoal.confirmedAt ? (
+            <button
+              type="button"
+              disabled={goalBusy}
+              onClick={handleConfirmGoal}
+              className="self-start text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              {labels.goalConfirm}
+            </button>
+          ) : taskGoal.status === "done" ? (
+            <span className="text-xs text-emerald-600 dark:text-emerald-400">{labels.goalDone}</span>
+          ) : taskGoal.hasWorkflow ? (
+            <span className="text-xs text-muted-foreground">{labels.goalWorking}</span>
+          ) : (
+            <button
+              type="button"
+              disabled={goalBusy}
+              onClick={handleWorkGoal}
+              className="self-start text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+            >
+              {labels.goalWork}
+            </button>
+          )}
+          {goalError && <p className="text-xs text-red-500">{goalError}</p>}
+        </section>
+      )}
+
       {mode === "edit" && (
         <FormActions
           t={t}
@@ -2115,7 +2247,98 @@ function PrimitiveSection({
         </p>
       )}
 
-      {isCrm && mode === "edit" ? (
+      {isTask && mode === "edit" ? (
+        <section className="flex flex-col gap-2">
+          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
+            {labels.detailsHeading}
+          </h3>
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("title")}
+              </dt>
+              <dd>
+                <input
+                  type="text"
+                  value={draftTaskTitle}
+                  onChange={(e) => setDraftTaskTitle(e.target.value)}
+                  disabled={busy}
+                  maxLength={500}
+                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
+                />
+              </dd>
+            </div>
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("status")}
+              </dt>
+              <dd>
+                <Select
+                  value={draftTaskStatus}
+                  onValueChange={(v) => {
+                    if (v) setDraftTaskStatus(v);
+                  }}
+                  disabled={busy}
+                  items={{
+                    todo: taskStatusLabels.todo,
+                    in_progress: taskStatusLabels.in_progress,
+                    blocked: taskStatusLabels.blocked,
+                    done: taskStatusLabels.done,
+                    archived: taskStatusLabels.archived,
+                  }}
+                >
+                  <SelectTrigger className="text-xs w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false}>
+                    <SelectItem value="todo">{taskStatusLabels.todo}</SelectItem>
+                    <SelectItem value="in_progress">
+                      {taskStatusLabels.in_progress}
+                    </SelectItem>
+                    <SelectItem value="blocked">{taskStatusLabels.blocked}</SelectItem>
+                    <SelectItem value="done">{taskStatusLabels.done}</SelectItem>
+                    <SelectItem value="archived">{taskStatusLabels.archived}</SelectItem>
+                  </SelectContent>
+                </Select>
+              </dd>
+            </div>
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("due_at")}
+              </dt>
+              <dd>
+                <input
+                  type="date"
+                  value={draftTaskDue}
+                  onChange={(e) => setDraftTaskDue(e.target.value)}
+                  disabled={busy}
+                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
+                />
+              </dd>
+            </div>
+            <div className="contents">
+              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
+                {humaniseKey("tags")}
+              </dt>
+              <dd>
+                <input
+                  type="text"
+                  value={draftTaskTags}
+                  onChange={(e) => setDraftTaskTags(e.target.value)}
+                  placeholder={labels.filePreview.tagsPlaceholder}
+                  disabled={busy}
+                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
+                />
+              </dd>
+            </div>
+          </dl>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {format(labels.savedAt, {
+              date: new Date(detail.createdAt).toLocaleString(),
+            })}
+          </p>
+        </section>
+      ) : isCrm && mode === "edit" ? (
         <section className="flex flex-col gap-2">
           <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
             {labels.detailsHeading}

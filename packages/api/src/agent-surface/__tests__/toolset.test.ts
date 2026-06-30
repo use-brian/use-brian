@@ -23,6 +23,7 @@ vi.mock('../../db/client.js', () => ({
 
 import { bandOf, isControlPlaneWrite, TIER2_WRITE_BANDS } from '../banding.js'
 import { buildAgentToolset } from '../toolset.js'
+import { createAgentWriteTools } from '../write-tools.js'
 import { applyStagedWrite } from '../staged-write.js'
 import type { PendingApproval, PendingApprovalsStore } from '../../db/pending-approvals-store.js'
 
@@ -86,7 +87,8 @@ function makeToolset(allToolNames: string[] = ['createWorkflow', 'runWorkflow', 
     writeToolDeps: {
       enablementStore: { enable: vi.fn(), disable: vi.fn() } as never,
       mcpSettingsStore: { setPolicy: vi.fn() } as never,
-      connectorInstanceStore: { createWorkspaceInstance: vi.fn(), update: vi.fn() } as never,
+      connectorInstanceStore: { createUserInstance: vi.fn(), createWorkspaceInstance: vi.fn(), update: vi.fn() } as never,
+      connectorGrantStore: { create: vi.fn() } as never,
       resolveApprover: vi.fn(async () => 'approver-1'),
     },
   })
@@ -188,6 +190,70 @@ describe('[COMP:agent-surface/toolset] buildAgentToolset', () => {
       expect(tool, name).toBeDefined()
       expect(tool!.requiresCapability, name).toBe(CONFIGURE_CAPABILITY)
     }
+  })
+})
+
+describe('[COMP:agent-surface/write-tools] addPatConnector — personal + grant', () => {
+  function makeWriteDeps() {
+    const createUserInstance = vi.fn(async () => ({ id: 'ci-1' }))
+    const createWorkspaceInstance = vi.fn()
+    const grantCreate = vi.fn(async () => ({ id: 'grant-1' }))
+    const deps = {
+      approvalsStore: {} as never,
+      enablementStore: {} as never,
+      mcpSettingsStore: {} as never,
+      connectorInstanceStore: { createUserInstance, createWorkspaceInstance, update: vi.fn() } as never,
+      connectorGrantStore: { create: grantCreate } as never,
+      resolveApprover: vi.fn(async () => 'approver-1'),
+    }
+    const addPatConnector = createAgentWriteTools(deps).find((t) => t.name === 'addPatConnector')!
+    return { addPatConnector, createUserInstance, createWorkspaceInstance, grantCreate }
+  }
+
+  it('mints a personal scope=user instance owned by the actor and grants it to the bound workspace — never team-native', async () => {
+    const { addPatConnector, createUserInstance, createWorkspaceInstance, grantCreate } = makeWriteDeps()
+    const result = await addPatConnector.execute(
+      { provider: 'github', label: 'Work GitHub', token: 'ghp_aaaaaaaa' },
+      ctx(),
+    )
+    expect(result.isError).toBeFalsy()
+    // Canonical model: personal instance, NOT a team-native (scope='workspace') one.
+    expect(createWorkspaceInstance).not.toHaveBeenCalled()
+    expect(createUserInstance).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'owner-1', provider: 'github', label: 'Work GitHub', connected: true }),
+    )
+    // ...exposed to the bound workspace via a grant (the human connect-then-share shape).
+    expect(grantCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actingUserId: 'owner-1',
+        connectorInstanceId: 'ci-1',
+        targetType: 'workspace',
+        targetId: WS,
+      }),
+    )
+    expect(String(result.data)).toContain('shared')
+  })
+
+  it('refuses OAuth providers without creating an instance or a grant', async () => {
+    const { addPatConnector, createUserInstance, grantCreate } = makeWriteDeps()
+    const result = await addPatConnector.execute(
+      { provider: 'gmail', label: 'Mail', token: 'tok_bbbbbbbb' },
+      ctx(),
+    )
+    expect(result.isError).toBe(true)
+    expect(createUserInstance).not.toHaveBeenCalled()
+    expect(grantCreate).not.toHaveBeenCalled()
+  })
+
+  it('requires a bound workspace', async () => {
+    const { addPatConnector, createUserInstance, grantCreate } = makeWriteDeps()
+    const result = await addPatConnector.execute(
+      { provider: 'github', label: 'X', token: 'ghp_cccccccc' },
+      ctx({ workspaceId: undefined }),
+    )
+    expect(result.isError).toBe(true)
+    expect(createUserInstance).not.toHaveBeenCalled()
+    expect(grantCreate).not.toHaveBeenCalled()
   })
 })
 

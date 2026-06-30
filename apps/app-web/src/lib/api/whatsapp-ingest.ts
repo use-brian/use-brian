@@ -337,3 +337,55 @@ function dispatchFrame(frame: string, handlers: WhatsappConnectHandlers): void {
   else if (event === "error")
     handlers.onError?.(typeof payload.error === "string" ? payload.error : "");
 }
+
+// ── Official bot (shared business number) ──────────────────────────────
+// Distinct from BYON above: the official number is paired centrally; a
+// workspace doesn't pair it, it just adds the number to a group (which binds
+// that group to the adder's workspace) and sees its bound groups here.
+// Backend: packages/api-platform/src/routes/whatsapp-official-admin.ts (closed).
+// The card that uses these is gated behind isHostedEdition().
+
+export type WhatsappOfficialBinding = {
+  groupJid: string;
+  /** True when the current user is the one who added the bot to this group. */
+  boundByYou: boolean;
+  status: "active" | "removed";
+};
+
+export type WhatsappOfficialState = {
+  /** The official shared bot's number to add to a group; null if unconfigured. */
+  officialNumber: string | null;
+  bindings: WhatsappOfficialBinding[];
+};
+
+export async function getWhatsappOfficial(
+  workspaceId: string,
+): Promise<WhatsappOfficialState> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/official`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Failed to load official bot (${res.status})`);
+  }
+  return (await res.json()) as WhatsappOfficialState;
+}
+
+/** Stop ingesting a bound group (owner/admin). The bot stays a silent member. */
+export async function unbindWhatsappOfficialGroup(
+  workspaceId: string,
+  groupJid: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/whatsapp/official/unbind`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ groupJid }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Failed to stop ingesting (${res.status})`);
+  }
+}

@@ -64,6 +64,7 @@ describe('[COMP:api/page-templates-store] page-templates store', () => {
       description: 'two-week sprint',
       icon: '🏃',
       category: 'planning',
+      extraction: null,
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     })
@@ -103,6 +104,7 @@ describe('[COMP:api/page-templates-store] page-templates store', () => {
       '🏃',
       'planning',
       JSON.stringify(blocks),
+      null,
     ])
     expect(created.id).toBe(TEMPLATE_ID)
     expect(created.blocks).toEqual(blocks)

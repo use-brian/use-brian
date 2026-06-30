@@ -134,6 +134,16 @@ export type AssistantCallStep = WorkflowStepCommon & {
   researchMode?: boolean
   /** Hard turn cap for this step's callee loop. Null/undefined = executor default. */
   maxTurns?: number | null
+  /**
+   * Optional blueprint to FILL on a research step (structural-synthesis P4). With
+   * a page anchor on a `researchMode`/`deep` step, the executor runs the research
+   * fan-out as the gather, then fills this blueprint into the anchored page via
+   * `synthesizeFromSource` (the structured authoring half) instead of free-form
+   * authoring. A blueprint slug: a built-in skill id, workspace skill slug, or
+   * page-template id. Mirrors `blueprintId` in `schemas.ts` (Zod authoritative).
+   * See docs/architecture/brain/structural-synthesis.md → "The three fill modes".
+   */
+  blueprintId?: string
 }
 
 export type ToolCallStep = WorkflowStepCommon & {
@@ -330,7 +340,16 @@ export type WorkflowTrigger =
         nagUntilKeyword?: string
       }
     }
-  | { kind: 'webhook' }
+  | {
+      kind: 'webhook'
+      /**
+       * Optional server-side event filter. `match.condition` is JSONLogic
+       * (`condition.ts`) the receiver evaluates against `{ input: <payload> }`;
+       * a falsy result ACKs 200 without a run. Mirrors the schema's webhook
+       * `match`. Absent → fire on every signed delivery.
+       */
+      match?: { condition: JsonLogicRule }
+    }
   | {
       /**
        * Fired when an event arrives on any subscribed source — connector

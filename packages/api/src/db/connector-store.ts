@@ -131,6 +131,12 @@ export type McpConnector = {
   custom: boolean
   connected: boolean
   credentialsType: ConnectorAuthType
+  /**
+   * Non-secret, client-writable JSON config (gdrive authorized files, gcal
+   * config, the `custom_header` name mirror, and `preflightHeaders` — see
+   * `docs/architecture/engine/tool-hooks.md`). Never holds credentials.
+   */
+  config?: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
 }
@@ -192,6 +198,7 @@ const PUBLIC_COLS = `
   label AS name,
   url, custom, connected,
   credentials_type AS "credentialsType",
+  config,
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const

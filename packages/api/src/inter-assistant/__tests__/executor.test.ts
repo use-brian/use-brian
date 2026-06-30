@@ -655,4 +655,128 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     await callee(baseParams) // no workflowId
     expect(store.getWorkspaceMemoriesByCategory).not.toHaveBeenCalled()
   })
+
+  // ── Structural-synthesis P4: the RESEARCH fill ──
+  // A research-tier step carrying a blueprintId + a page anchor runs the fan-out
+  // as the gather, then fills the blueprint into the anchored page via the
+  // injected synthesizer INSTEAD of the free-form authoring loop.
+  const anchoredSavedViewStore = () => ({
+    getById: vi.fn().mockResolvedValue({ id: 'page-1', workspaceId: 'ws-1', clearance: 'internal', state: 'saved' }),
+    setAutoPruneAt: vi.fn(),
+  })
+  const blueprintParams = {
+    ...baseParams,
+    depth: { tier: 'deep' as const },
+    pageAnchorId: 'page-1',
+    blueprintId: 'my-blueprint',
+    callerChannelType: 'workflow' as const,
+    workflowId: 'wf-1',
+  }
+
+  it('runs fan-out then synthesizes the blueprint into the anchored page (no authoring loop)', async () => {
+    mockRunPreflight.mockResolvedValue({ type: 'researched', context: 'finding: 62% adoption (census.gov.hk)', usage: null, model: null })
+    const researchSynthesize = vi.fn().mockResolvedValue({ pageId: 'page-1' })
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: anchoredSavedViewStore() as never,
+      researchSynthesize: researchSynthesize as never,
+    })
+
+    const out = await callee(blueprintParams)
+
+    // The fan-out gather ran (the page-anchored exception), then synthesis filled it.
+    expect(mockRunPreflight).toHaveBeenCalledTimes(1)
+    expect(researchSynthesize).toHaveBeenCalledTimes(1)
+    expect(researchSynthesize.mock.calls[0][0]).toMatchObject({
+      blueprintSlug: 'my-blueprint',
+      findings: 'finding: 62% adoption (census.gov.hk)',
+      pageId: 'page-1',
+      workspaceId: 'ws-1',
+      sourceRef: 'workflow:wf-1',
+    })
+    // The structured synthesis REPLACES the free-form authoring loop.
+    expect(mockQueryLoop).not.toHaveBeenCalled()
+    expect(out).toContain('Filled the blueprint into the anchored page')
+  })
+
+  it('falls back to the authoring loop when the synthesizer returns null (unresolved blueprint)', async () => {
+    mockRunPreflight.mockResolvedValue({ type: 'researched', context: 'some findings', usage: null, model: null })
+    yields([{ type: 'turn_complete', response: { content: [{ type: 'text', text: 'authored' }] } }])
+    const researchSynthesize = vi.fn().mockResolvedValue(null) // blueprint unresolved
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: anchoredSavedViewStore() as never,
+      researchSynthesize: researchSynthesize as never,
+    })
+
+    await callee(blueprintParams)
+
+    expect(researchSynthesize).toHaveBeenCalledTimes(1)
+    // Failure isolation: the step still authors via the normal loop.
+    expect(mockQueryLoop).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to the authoring loop when the synthesizer throws (failure isolation)', async () => {
+    mockRunPreflight.mockResolvedValue({ type: 'researched', context: 'some findings', usage: null, model: null })
+    yields([{ type: 'turn_complete', response: { content: [{ type: 'text', text: 'authored' }] } }])
+    const researchSynthesize = vi.fn().mockRejectedValue(new Error('synthesis boom'))
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: anchoredSavedViewStore() as never,
+      researchSynthesize: researchSynthesize as never,
+    })
+
+    // A synthesis throw must not fail the step.
+    await expect(callee(blueprintParams)).resolves.toBeTruthy()
+    expect(mockQueryLoop).toHaveBeenCalledTimes(1)
+  })
+
+  it('does NOT run fan-out or synthesis on a page-anchored step WITHOUT a blueprintId (authoring preserved)', async () => {
+    const researchSynthesize = vi.fn()
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: anchoredSavedViewStore() as never,
+      researchSynthesize: researchSynthesize as never,
+    })
+    // pageAnchorId but no blueprintId → the existing authoring path, no fan-out.
+    await callee({ ...blueprintParams, blueprintId: undefined })
+    expect(mockRunPreflight).not.toHaveBeenCalled()
+    expect(researchSynthesize).not.toHaveBeenCalled()
+  })
+
+  it('does NOT synthesize when the gather found nothing (no source → author normally)', async () => {
+    mockRunPreflight.mockResolvedValue({ type: 'passthrough', usage: null, model: null })
+    yields([{ type: 'turn_complete', response: { content: [{ type: 'text', text: 'authored' }] } }])
+    const researchSynthesize = vi.fn().mockResolvedValue({ pageId: 'page-1' })
+    const callee = createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: wsMemoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      workerRunsStore: workerRunsStore as never,
+      savedViewStore: anchoredSavedViewStore() as never,
+      researchSynthesize: researchSynthesize as never,
+    })
+    await callee(blueprintParams)
+    // Fan-out ran but yielded no findings → no synthesis, author via the loop.
+    expect(mockRunPreflight).toHaveBeenCalledTimes(1)
+    expect(researchSynthesize).not.toHaveBeenCalled()
+    expect(mockQueryLoop).toHaveBeenCalledTimes(1)
+  })
 })

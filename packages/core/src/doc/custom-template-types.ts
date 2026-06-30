@@ -33,6 +33,31 @@ export const PAGE_TEMPLATE_CATEGORIES = [
 
 export const pageTemplateCategorySchema = z.enum(PAGE_TEMPLATE_CATEGORIES)
 
+/** Brain primitives a blueprint can declare it captures from a source. */
+export const BLUEPRINT_CAPTURE_KINDS = ['company', 'contact', 'deal', 'task'] as const
+export type BlueprintCaptureKind = (typeof BLUEPRINT_CAPTURE_KINDS)[number]
+
+/** One section of a blueprint: a heading plus the instruction that fills it. */
+export const extractionSectionSchema = z.object({
+  heading: z.string().min(1).max(200),
+  instruction: z.string().min(1).max(2000),
+  outputType: z.enum(['prose', 'list', 'table']).default('prose'),
+})
+export type ExtractionSection = z.infer<typeof extractionSectionSchema>
+
+/**
+ * The `extraction` spec that turns a plain page template into a BLUEPRINT — the
+ * sections (each a heading + extraction instruction) plus which brain entities to
+ * capture. A template with no extraction spec is just a skeleton; add the spec and
+ * the synthesis engine can fill it from a source. See
+ * docs/architecture/brain/structural-synthesis.md -> "The blueprint object".
+ */
+export const extractionSpecSchema = z.object({
+  sections: z.array(extractionSectionSchema).min(1).max(20),
+  capture: z.array(z.enum(BLUEPRINT_CAPTURE_KINDS)).default([]),
+})
+export type ExtractionSpec = z.infer<typeof extractionSpecSchema>
+
 /**
  * A custom template, stored in `workspace_page_templates`. Mirrors a built-in
  * `PageTemplate` (name / description / icon / category) but carries a concrete
@@ -49,6 +74,11 @@ export type CustomPageTemplate = {
   category: PageTemplateCategory
   /** The page skeleton — a canonical block list. */
   blocks: Block[]
+  /**
+   * Present → this template is a BLUEPRINT the synthesis engine can fill from a
+   * source. Null → a plain page skeleton. See structural-synthesis.md.
+   */
+  extraction: ExtractionSpec | null
   createdAt: string
   updatedAt: string
 }
@@ -71,6 +101,8 @@ export const customTemplateCreateInputSchema = z.object({
   icon: z.string().max(16).nullish(),
   category: pageTemplateCategorySchema,
   blocks: z.array(blockSchema).min(1).max(1000),
+  /** Optional — present turns the saved template into a blueprint. */
+  extraction: extractionSpecSchema.nullish(),
 })
 
 export type CustomTemplateCreateInput = z.infer<typeof customTemplateCreateInputSchema>
@@ -93,4 +125,34 @@ export function withFreshBlockIds(blocks: Block[], genId: () => string): Block[]
     }
     return { ...b, id: genId() }
   })
+}
+
+/**
+ * Derive a blueprint's extraction spec from authored blocks: each
+ * `extraction_slot` block pairs with its nearest preceding `heading` to form a
+ * section. Returns null when the blocks carry no extraction slots (a plain
+ * template skeleton). `capture` is a template-level choice supplied by the
+ * caller (the editor's capture toggles). This is the WYSIWYG authoring half —
+ * the spec the gallery sends + the store persists is derived from the doc.
+ * See docs/architecture/brain/structural-synthesis.md -> "The blueprint object".
+ */
+export function blocksToExtractionSpec(
+  blocks: Block[],
+  capture: BlueprintCaptureKind[] = [],
+): ExtractionSpec | null {
+  const sections: ExtractionSection[] = []
+  let heading: string | null = null
+  for (const b of blocks) {
+    if (b.kind === 'heading') {
+      const t = b.text.trim()
+      if (t) heading = t
+    } else if (b.kind === 'extraction_slot') {
+      sections.push({
+        heading: heading ?? 'Section',
+        instruction: b.instruction.trim(),
+        outputType: b.outputType ?? 'prose',
+      })
+    }
+  }
+  return sections.length > 0 ? { sections, capture } : null
 }

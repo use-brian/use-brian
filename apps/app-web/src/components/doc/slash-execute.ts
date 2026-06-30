@@ -59,6 +59,11 @@ function embedStubBlock(kind: EmbedKind, id: string): Record<string, unknown> {
       // author of diagrams) supplies the Mermaid `code` later; the node-view
       // renders a stub meanwhile.
       return { kind, id, syntax: "mermaid", code: "" };
+    case "extraction_slot":
+      // A blueprint authoring directive opens with an empty instruction (the
+      // schema allows `instruction: ''`); the author types the "what to extract"
+      // prompt into the rendered panel. `outputType` stays absent until chosen.
+      return { kind, id, instruction: "" };
   }
 }
 

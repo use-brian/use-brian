@@ -154,6 +154,23 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(store.rows[0].summary).toBe('Likes ramen')
   })
 
+  it('routes people/companies/deals to their own primitive, not a bundled memory', () => {
+    // Regression (2026-06-30): a 4-person team roster was saved as a single flat
+    // saveMemory blob because only the self-entity had a routing nudge. The tool
+    // must steer distinct people to per-person primitives so a normal
+    // (non-research) chat turn does not collapse a roster into one memory. The
+    // routing lives on the `tags` field note (kept tight for the per-turn token
+    // budget), alongside the proven-effective updateSelfProfile self-routing.
+    const { saveMemory } = createMemoryTools(makeFakeStore())
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tagsNote: string = (saveMemory.inputSchema as any).shape.tags.description ?? ''
+    expect(tagsNote).toMatch(/updateSelfProfile/)
+    expect(tagsNote).toMatch(/saveContact/)
+    expect(tagsNote).toMatch(/saveCompany/)
+    expect(tagsNote).toMatch(/saveDeal/)
+    expect(tagsNote).toMatch(/never collapse a team roster/i)
+  })
+
   it('unions injectedTags onto a created memory (workflow tagging)', async () => {
     // The workflow callee passes injectedTags: ['workflow:<id>'] so a written
     // memory is traceable to the workflow — the key behind prior-run visibility.
