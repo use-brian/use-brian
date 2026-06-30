@@ -7,7 +7,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isDesktopAuth, desktopAuthSource, desktopSignOut } from "../desktop-auth-source";
+import {
+  isDesktopAuth,
+  desktopAuthSource,
+  desktopSignOut,
+  classifyRefreshStatus,
+} from "../desktop-auth-source";
 
 const realFetch = globalThis.fetch;
 
@@ -80,14 +85,14 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
     expect(signIn).toHaveBeenCalledOnce();
   });
 
-  it("refresh returns null and clears when there is no refresh token", async () => {
+  it("refresh is unauthenticated and clears when there is no refresh token", async () => {
     const clear = vi.fn();
     setBridge({ signIn: () => {}, getAccessToken: () => null, getRefreshToken: () => null, clear });
-    expect(await desktopAuthSource.refresh()).toBeNull();
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "unauthenticated" });
     expect(clear).toHaveBeenCalledOnce();
   });
 
-  it("refresh exchanges the refresh token, stores the rotated pair, returns the access token", async () => {
+  it("refresh exchanges the refresh token, stores the rotated pair, returns ok+token", async () => {
     const setTokens = vi.fn();
     setBridge({
       signIn: () => {},
@@ -97,11 +102,11 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
     });
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: true,
+      status: 200,
       json: async () => ({ accessToken: "newA", refreshToken: "newR", user: { id: "u1" } }),
     }) as unknown as typeof fetch;
 
-    const token = await desktopAuthSource.refresh();
-    expect(token).toBe("newA");
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "ok", token: "newA" });
     expect(setTokens).toHaveBeenCalledWith({
       accessToken: "newA",
       refreshToken: "newR",
@@ -111,11 +116,53 @@ describe("[COMP:app-web/desktop-auth-source] desktopAuthSource", () => {
     expect(JSON.parse(init.body)).toEqual({ refreshToken: "rt" });
   });
 
-  it("refresh clears and returns null on a non-OK response", async () => {
+  it("refresh clears and is unauthenticated on a 401 (dead session)", async () => {
     const clear = vi.fn();
     setBridge({ signIn: () => {}, getAccessToken: () => "old", getRefreshToken: () => "rt", clear });
-    globalThis.fetch = vi.fn().mockResolvedValue({ ok: false, json: async () => ({}) }) as unknown as typeof fetch;
-    expect(await desktopAuthSource.refresh()).toBeNull();
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }) as unknown as typeof fetch;
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "unauthenticated" });
     expect(clear).toHaveBeenCalledOnce();
+  });
+
+  it("refresh is transient and does NOT clear on a 5xx (server blip)", async () => {
+    const clear = vi.fn();
+    setBridge({ signIn: () => {}, getAccessToken: () => "old", getRefreshToken: () => "rt", clear });
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: false, status: 503, json: async () => ({}) }) as unknown as typeof fetch;
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "transient" });
+    expect(clear).not.toHaveBeenCalled();
+  });
+
+  it("refresh is transient and does NOT clear when the network fetch throws (offline)", async () => {
+    const clear = vi.fn();
+    setBridge({ signIn: () => {}, getAccessToken: () => "old", getRefreshToken: () => "rt", clear });
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Failed to fetch")) as unknown as typeof fetch;
+    expect(await desktopAuthSource.refresh()).toEqual({ kind: "transient" });
+    expect(clear).not.toHaveBeenCalled();
+  });
+});
+
+describe("[COMP:app-web/desktop-auth-source] classifyRefreshStatus", () => {
+  it("maps 2xx to ok", () => {
+    expect(classifyRefreshStatus(200)).toBe("ok");
+    expect(classifyRefreshStatus(204)).toBe("ok");
+  });
+
+  it("maps 400/401/403 to unauthenticated (a dead session)", () => {
+    expect(classifyRefreshStatus(400)).toBe("unauthenticated");
+    expect(classifyRefreshStatus(401)).toBe("unauthenticated");
+    expect(classifyRefreshStatus(403)).toBe("unauthenticated");
+  });
+
+  it("maps everything else (5xx, 429, 0) to transient — never a logout", () => {
+    expect(classifyRefreshStatus(500)).toBe("transient");
+    expect(classifyRefreshStatus(502)).toBe("transient");
+    expect(classifyRefreshStatus(429)).toBe("transient");
+    expect(classifyRefreshStatus(0)).toBe("transient");
   });
 });

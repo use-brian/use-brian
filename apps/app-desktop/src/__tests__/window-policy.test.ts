@@ -5,6 +5,7 @@ import {
   isConnectorOAuth,
   isLoginNavigation,
   parseRefreshBounce,
+  decideLoadFailureAction,
 } from "../window-policy.js";
 
 const CANVAS_ORIGIN = "https://app.sidan.ai";
@@ -128,5 +129,45 @@ describe("[COMP:app-desktop/window-policy] parseRefreshBounce", () => {
     expect(parseRefreshBounce("https://app.sidan.ai/w/x/p/y", CANVAS_ORIGIN)).toBeNull();
     expect(parseRefreshBounce("https://sidan.ai/api/auth/logout?next=x", CANVAS_ORIGIN)).toBeNull();
     expect(parseRefreshBounce("not a url", CANVAS_ORIGIN)).toBeNull();
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] decideLoadFailureAction", () => {
+  const REMOTE = "https://app.sidan.ai/w/x/p/y";
+
+  it("signs in only when there is NO session", () => {
+    expect(
+      decideLoadFailureAction({ errorCode: -106, isMainFrame: true, failedUrl: REMOTE, hasSession: false }),
+    ).toBe("signin");
+  });
+
+  it("shows the offline landing (never sign-in) when a session exists — the offline→logout fix", () => {
+    // ERR_INTERNET_DISCONNECTED (-106), ERR_NAME_NOT_RESOLVED (-105), timeout (-7):
+    // any network failure with a live session keeps the user signed in.
+    for (const errorCode of [-106, -105, -7, -2, -118]) {
+      expect(
+        decideLoadFailureAction({ errorCode, isMainFrame: true, failedUrl: REMOTE, hasSession: true }),
+      ).toBe("offline-retry");
+    }
+  });
+
+  it("ignores sub-frame failures and our own intentional aborts (ERR_ABORTED -3)", () => {
+    expect(
+      decideLoadFailureAction({ errorCode: -106, isMainFrame: false, failedUrl: REMOTE, hasSession: true }),
+    ).toBe("ignore");
+    expect(
+      decideLoadFailureAction({ errorCode: -3, isMainFrame: true, failedUrl: REMOTE, hasSession: false }),
+    ).toBe("ignore");
+  });
+
+  it("just surfaces the window if our own file: landing fails to load (packaging bug, not a logout)", () => {
+    expect(
+      decideLoadFailureAction({
+        errorCode: -6,
+        isMainFrame: true,
+        failedUrl: "file:///app/dist/signin.html",
+        hasSession: false,
+      }),
+    ).toBe("show-window");
   });
 });

@@ -15,7 +15,12 @@
 
 import { getUserInfo, setUserInfoCache } from "@/lib/user";
 import { primaryAuthUrl } from "@/lib/primary-auth";
-import { isDesktopAuth, desktopAuthSource } from "@/lib/desktop-auth-source";
+import {
+  isDesktopAuth,
+  desktopAuthSource,
+  classifyRefreshStatus,
+  type RefreshOutcome,
+} from "@/lib/desktop-auth-source";
 
 const APP_URL = typeof window !== "undefined" ? window.location.origin : "";
 
@@ -68,7 +73,7 @@ function clearUserCookie() {
   setUserInfoCache(null);
 }
 
-let inflightRefresh: Promise<string | null> | null = null;
+let inflightRefresh: Promise<RefreshOutcome> | null = null;
 
 // Flipped the instant we trigger a full-page auth redirect (token refresh or
 // login bounce). Sub-apps can't refresh `.sidan.ai` cookies in place — they
@@ -86,48 +91,60 @@ export function isAuthRedirectInFlight(): boolean {
 }
 
 /**
- * Refresh the access token. In production this redirects the browser
- * to `${primary}/api/auth/refresh-and-return?next=<current url>` —
- * the primary writes the rotated `.sidan.ai` cookies and the browser
- * comes back with a fresh access token. We return null (since the
- * navigation happens before any subsequent code runs) and the caller's
- * `window.location.href = ...` is harmless because we've already
- * triggered the redirect.
+ * Refresh the access token, classifying the result so callers can tell a
+ * transient network failure (keep the session, retry) from a dead session
+ * (sign in). See `RefreshOutcome`.
  *
- * In dev there's no primary, so we fall back to the local refresh
- * route which writes host-only cookies — that mode preserves the
- * pre-architecture-fix dev workflow.
+ * In production this redirects the browser to
+ * `${primary}/api/auth/refresh-and-return?next=<current url>` — the primary
+ * writes the rotated `.sidan.ai` cookies and the browser comes back with a
+ * fresh token (outcome `redirecting`, since the navigation happens before any
+ * subsequent code runs). **Offline, that full-page bounce must not fire:** it
+ * would fail, and in the desktop shell the shell intercepts it and misreads the
+ * failed refresh as a sign-out (the "Mac goes offline → logged out" bug). So we
+ * guard on `navigator.onLine` and return `transient` instead of navigating.
+ *
+ * In dev there's no primary, so we fall back to the local refresh route which
+ * writes host-only cookies; only an explicit 401/400 there clears cookies.
  */
-async function tryRefreshToken(): Promise<string | null> {
+async function tryRefreshToken(): Promise<RefreshOutcome> {
   if (inflightRefresh) return inflightRefresh;
-  inflightRefresh = (async () => {
+  inflightRefresh = (async (): Promise<RefreshOutcome> => {
     // Bundled desktop app: refresh against the API directly via the shell
     // bridge (no `.sidan.ai` cookie redirect). Dormant on web + thin shell.
     if (isDesktopAuth()) return desktopAuthSource.refresh();
     const primary = primaryAuthUrl();
     if (primary && typeof window !== "undefined") {
+      // Offline: do NOT navigate. The bounce would fail and (in the desktop
+      // shell) be misread as a sign-out. Treat it as transient — the caller
+      // keeps the session and retries when connectivity returns.
+      if (typeof navigator !== "undefined" && navigator.onLine === false) {
+        return { kind: "transient" };
+      }
       const refreshUrl = new URL("/api/auth/refresh-and-return", primary);
       refreshUrl.searchParams.set("next", window.location.href);
       authRedirectInFlight = true;
       window.location.href = refreshUrl.toString();
-      // The page is unloading — return null so the caller doesn't try
-      // to retry with the old token while the redirect is in flight.
-      return null;
+      return { kind: "redirecting" };
     }
     try {
       const res = await fetch(`${APP_URL}/api/auth/refresh`, {
         method: "POST",
         credentials: "same-origin",
       });
-      if (!res.ok) {
+      const verdict = classifyRefreshStatus(res.status);
+      if (verdict === "unauthenticated") {
         clearUserCookie();
-        return null;
+        return { kind: "unauthenticated" };
       }
+      if (verdict === "transient") return { kind: "transient" };
       const data = (await res.json()) as { accessToken?: string };
-      return data.accessToken ?? null;
+      return data.accessToken ? { kind: "ok", token: data.accessToken } : { kind: "transient" };
     } catch (err) {
-      console.warn("[authFetch] refresh call failed:", err);
-      return null;
+      // A thrown fetch is a network failure (offline, DNS, reset) — transient.
+      // Keep cookies; the next attempt retries. Must NOT log the user out.
+      console.warn("[authFetch] refresh call failed (transient):", err);
+      return { kind: "transient" };
     }
   })();
   try {
@@ -163,12 +180,14 @@ export async function getValidAccessToken(): Promise<string | null> {
   const token = getAccessToken();
   const nowSeconds = Math.floor(Date.now() / 1000);
   if (token && jwtExpSeconds(token) - 60 > nowSeconds) return token;
-  const refreshed = await tryRefreshToken();
-  // Dev refresh returns the token directly; prod refresh navigates away
-  // (so this resolves null and the page reloads with a fresh cookie). Fall
-  // back to a fresh cookie read in case the refresh wrote one without
-  // returning it.
-  return refreshed ?? getAccessToken();
+  const outcome = await tryRefreshToken();
+  if (outcome.kind === "ok") return outcome.token;
+  // transient / redirecting / unauthenticated: fall back to the current cookie
+  // token (possibly stale). Never trigger a redirect here — the collab
+  // WebSocket caller just retries on its next reconnect, and a network blip
+  // must not log the user out. Prod online refresh navigates away (resolves
+  // `redirecting`), so the page reloads with a fresh cookie regardless.
+  return getAccessToken();
 }
 
 const CLIENT_TIMEZONE: string | null = (() => {
@@ -228,11 +247,17 @@ export async function authFetch(
 ): Promise<Response> {
   let token = getAccessToken();
   if (!token) {
-    const refreshed = await tryRefreshToken();
-    if (refreshed) {
-      token = refreshed;
+    const outcome = await tryRefreshToken();
+    if (outcome.kind === "ok") {
+      token = outcome.token;
+    } else if (outcome.kind === "transient") {
+      // Offline / transient: surface a network error like any failed fetch
+      // (`fetch(url)` below throws the same way when offline with a live token).
+      // The session stays intact and callers degrade + retry — never a logout.
+      throw new TypeError("authFetch: network unavailable (offline)");
     } else {
-      redirectToLogin();
+      // `unauthenticated` → send to login; `redirecting` → page is unloading.
+      if (outcome.kind === "unauthenticated") redirectToLogin();
       return new Response(null, { status: 401 });
     }
   }
@@ -240,13 +265,15 @@ export async function authFetch(
   let response = await fetch(url, { ...init, headers });
   if (response.status !== 401) return response;
 
-  const newToken = await tryRefreshToken();
-  if (!newToken) {
-    redirectToLogin();
+  const outcome = await tryRefreshToken();
+  if (outcome.kind === "ok") {
+    const retryHeaders = withAuthHeader(init.headers, outcome.token);
+    response = await fetch(url, { ...init, headers: retryHeaders });
     return response;
   }
-  const retryHeaders = withAuthHeader(init.headers, newToken);
-  response = await fetch(url, { ...init, headers: retryHeaders });
+  // transient → keep the session and return the 401 we already have (no logout);
+  // redirecting → page is unloading; unauthenticated → the session is dead.
+  if (outcome.kind === "unauthenticated") redirectToLogin();
   return response;
 }
 

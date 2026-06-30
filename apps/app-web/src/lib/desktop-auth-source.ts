@@ -38,6 +38,11 @@ export interface DesktopBridge {
    */
   signOut?: () => void;
   /**
+   * Ask the shell to reload the app (the offline landing's "Retry" button).
+   * Present in every shell mode; called from the shell-owned `offline.html`.
+   */
+  retry?: () => void;
+  /**
    * Start the system-browser sign-in for a SECOND account (stash the active one
    * into the shell's saved-account store, don't replace it). Present in the
    * Electron shell only; the web switcher bounces to `/login?addAccount=1`
@@ -102,11 +107,44 @@ export function desktopSignOut(): boolean {
   return true;
 }
 
+/**
+ * Outcome of a token-refresh attempt — the shared contract of the cookie
+ * refresh (`auth-fetch.ts` `tryRefreshToken`) and this desktop Bearer refresh.
+ * Lives here (the leaf module) so the dependency stays one-directional:
+ * `auth-fetch` imports this, never the reverse. The discriminant lets the
+ * orchestration tell a **transient** network failure (offline / 5xx — keep the
+ * session, surface a retryable error, NEVER a logout) apart from a **dead**
+ * session (401/400 — clear it and sign in). See
+ * docs/architecture/platform/auth.md → "On transient network failure".
+ */
+export type RefreshOutcome =
+  | { kind: "ok"; token: string }
+  /** A prod full-page bounce to the primary started; the page is unloading. */
+  | { kind: "redirecting" }
+  /** Offline / network error / 5xx — keep the session and retry later. */
+  | { kind: "transient" }
+  /** 401/400 or no refresh token — the session is dead, go to login. */
+  | { kind: "unauthenticated" };
+
+/**
+ * Map a refresh-endpoint HTTP status to a verdict. 400/401/403 mean the session
+ * is dead (clear it, sign in); every other non-2xx (5xx, 429, …) is transient
+ * and must NOT log the user out — only an explicit auth rejection clears
+ * cookies. Pure + exported for tests. Shared by both refresh paths.
+ */
+export function classifyRefreshStatus(
+  status: number,
+): "ok" | "unauthenticated" | "transient" {
+  if (status >= 200 && status < 300) return "ok";
+  if (status === 400 || status === 401 || status === 403) return "unauthenticated";
+  return "transient";
+}
+
 export interface AuthSource {
   /** Synchronously read the current access token, or null. */
   getAccessToken(): string | null;
-  /** Refresh and return a fresh access token, or null. */
-  refresh(): Promise<string | null>;
+  /** Refresh the session, classifying the result (see `RefreshOutcome`). */
+  refresh(): Promise<RefreshOutcome>;
   /** Send the user to sign in. */
   redirectToLogin(): void;
 }
@@ -121,35 +159,41 @@ export const desktopAuthSource: AuthSource = {
     return window.sidanclawDesktop?.getAccessToken?.() ?? null;
   },
 
-  async refresh() {
+  async refresh(): Promise<RefreshOutcome> {
     const bridge = window.sidanclawDesktop;
     const refreshToken = bridge?.getRefreshToken?.();
     if (!refreshToken) {
       bridge?.clear?.();
-      return null;
+      return { kind: "unauthenticated" };
     }
+    let res: Response;
     try {
-      const res = await fetch(`${API_BASE}/auth/refresh`, {
+      res = await fetch(`${API_BASE}/auth/refresh`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refreshToken }),
       });
-      if (!res.ok) {
-        bridge?.clear?.();
-        return null;
-      }
-      const data = (await res.json()) as Partial<DesktopTokens>;
-      if (data.accessToken && data.refreshToken) {
-        bridge?.setTokens?.({
-          accessToken: data.accessToken,
-          refreshToken: data.refreshToken,
-          user: data.user,
-        });
-      }
-      return data.accessToken ?? null;
     } catch {
-      return null;
+      // A thrown fetch is a network failure (offline, DNS, reset). Keep the
+      // stored tokens and retry later — clearing here would sign the user out
+      // on a blip. See docs/architecture/platform/auth.md.
+      return { kind: "transient" };
     }
+    const verdict = classifyRefreshStatus(res.status);
+    if (verdict === "unauthenticated") {
+      bridge?.clear?.();
+      return { kind: "unauthenticated" };
+    }
+    if (verdict === "transient") return { kind: "transient" };
+    const data = (await res.json()) as Partial<DesktopTokens>;
+    if (data.accessToken && data.refreshToken) {
+      bridge?.setTokens?.({
+        accessToken: data.accessToken,
+        refreshToken: data.refreshToken,
+        user: data.user,
+      });
+    }
+    return data.accessToken ? { kind: "ok", token: data.accessToken } : { kind: "transient" };
   },
 
   redirectToLogin() {

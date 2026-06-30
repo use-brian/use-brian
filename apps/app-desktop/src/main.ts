@@ -27,6 +27,7 @@ import {
   safeStorage,
   dialog,
   powerMonitor,
+  net,
   BrowserWindow,
   Tray,
   Menu,
@@ -53,7 +54,12 @@ import {
   type UpdateEvent,
   type UpdateState,
 } from "./auto-update.js";
-import { classifyNavigation, isLoginNavigation, parseRefreshBounce } from "./window-policy.js";
+import {
+  classifyNavigation,
+  isLoginNavigation,
+  parseRefreshBounce,
+  decideLoadFailureAction,
+} from "./window-policy.js";
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl } from "./quick-capture.js";
 import { buildAppMenu } from "./menu.js";
@@ -107,6 +113,12 @@ const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
 const SIGNIN_PAGE = join(__dirname, "signin.html");
+/**
+ * The offline landing — shown (instead of the sign-in landing) when a signed-in
+ * user's main-frame load fails for lack of network. Keeps the session intact and
+ * auto-reconnects. See `showOffline` + "Offline resilience" in the spec.
+ */
+const OFFLINE_PAGE = join(__dirname, "offline.html");
 /**
  * The bundled SPA index (Phase 4, docs/plans/canvas-desktop-bundled-offline.md).
  * Present only in a packaged bundled build (the client export is emitted to
@@ -225,18 +237,29 @@ function createWindow(): BrowserWindow {
   win.webContents.on("will-navigate", handleNavigation);
   win.webContents.on("will-redirect", handleNavigation);
 
-  // Never leave a blank window: a real load failure (canvas unreachable, etc.)
-  // falls back to the sign-in landing. `-3` is ERR_ABORTED — our own
-  // intentional redirect cancels (see handleNavigation) — so it is ignored.
+  // Never leave a blank window on a main-frame load failure. A SIGNED-IN user
+  // (a refresh token in the jar) whose load fails for lack of network gets the
+  // offline landing + auto-retry, never the sign-in landing — a network blip is
+  // not a sign-out. Only a user with no session goes to sign-in. The verdict is
+  // the pure `decideLoadFailureAction`; this just enacts it. `-3` (ERR_ABORTED)
+  // and our own `file:` landing are handled inside the helper.
   win.webContents.on("did-fail-load", (_e, errorCode, _desc, failedUrl, isMainFrame) => {
-    if (!isMainFrame || errorCode === -3) return;
-    // If the landing itself failed (a packaging bug), just surface the window
-    // rather than re-loading it in a loop.
-    if (failedUrl.startsWith("file:")) {
-      win.show();
-      return;
-    }
-    promptSignIn();
+    void (async () => {
+      const hasSession = !!(await readJarCookie("refresh_token"));
+      switch (decideLoadFailureAction({ errorCode, isMainFrame, failedUrl, hasSession })) {
+        case "ignore":
+          return;
+        case "show-window":
+          win.show();
+          return;
+        case "offline-retry":
+          showOffline(win);
+          return;
+        case "signin":
+          promptSignIn();
+          return;
+      }
+    })();
   });
 
   void loadApp(win);
@@ -273,8 +296,51 @@ function handleNavigation(event: Event, url: string): void {
 
 /** Show the built-in sign-in landing (never a blank window). */
 function promptSignIn(): void {
+  stopOfflineRetry(); // leaving the offline state for a real sign-out
   const win = ensureWindow();
   void win.webContents.loadFile(SIGNIN_PAGE).then(() => focusWindow(win));
+}
+
+// ── Offline landing + auto-retry ───────────────────────────────
+//
+// A signed-in user whose Mac drops off the network must never be bounced to the
+// sign-in landing (that reads as a spurious logout). Instead the shell shows a
+// branded offline landing and polls connectivity, reloading the app the moment
+// the network returns. The jar's refresh token is untouched throughout. Spec:
+// docs/architecture/features/app-desktop.md → "Offline resilience".
+
+const OFFLINE_RETRY_INTERVAL_MS = 5 * 1000;
+let offlineRetryTimer: ReturnType<typeof setInterval> | null = null;
+
+function stopOfflineRetry(): void {
+  if (offlineRetryTimer) {
+    clearInterval(offlineRetryTimer);
+    offlineRetryTimer = null;
+  }
+}
+
+/**
+ * Reload the app once connectivity is back. Clears the watcher first so a slow
+ * load can't stack reloads; if the load fails again, `did-fail-load` re-arms the
+ * watcher via `showOffline`. `net.isOnline()` only proves *some* network exists,
+ * not that our origin is reachable — that's fine, a still-failing load just
+ * re-shows the offline landing.
+ */
+async function retryLoad(win: BrowserWindow): Promise<void> {
+  stopOfflineRetry();
+  await loadApp(win);
+}
+
+/**
+ * Show the offline landing and start polling for the network to return. Keeps
+ * the session intact — only a real sign-out (`promptSignIn`) clears the user.
+ */
+function showOffline(win: BrowserWindow): void {
+  void win.webContents.loadFile(OFFLINE_PAGE).then(() => focusWindow(win));
+  stopOfflineRetry();
+  offlineRetryTimer = setInterval(() => {
+    if (net.isOnline()) void retryLoad(win);
+  }, OFFLINE_RETRY_INTERVAL_MS);
 }
 
 /** Return the live window, recreating it if it was closed (tray app model). */
@@ -814,7 +880,14 @@ async function resumeAfterRefresh(nextUrl: string): Promise<void> {
     }
     return;
   }
-  promptSignIn();
+  if (outcome === "failed") {
+    // Transient (offline / 5xx) — the refresh token is still valid. Show the
+    // offline landing and auto-retry; do NOT bounce to sign-in. This was a
+    // path of the "Mac goes offline → logged out" bug.
+    showOffline(ensureWindow());
+    return;
+  }
+  promptSignIn(); // "signed-out" — the refresh token is dead
 }
 
 /** Keep the thin shell's session alive across access-token expiries. */
@@ -1077,6 +1150,11 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("sidanclaw:sign-in", () => startSignIn());
+
+  // The offline landing's "Retry" button asks the shell to reload the app now
+  // (the watcher already auto-retries every few seconds; this is the manual
+  // path). Stops the watcher first so the manual load isn't double-fired.
+  ipcMain.on("sidanclaw:retry-load", () => void retryLoad(ensureWindow()));
 
   // The web logout UI (workspace switcher / settings) asks the shell to sign
   // out in place. Registered in EVERY mode (unlike the bundled token bridge):

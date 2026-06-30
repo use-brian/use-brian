@@ -28,6 +28,9 @@ const bridge = {
   platform: process.platform,
   signIn: () => ipcRenderer.send("sidanclaw:sign-in"),
   signOut: () => ipcRenderer.send("sidanclaw:sign-out"),
+  // The offline landing's "Retry" button asks the shell to reload the app now.
+  // Present in every mode (like signIn/out); the offline landing is shell-owned.
+  retry: () => ipcRenderer.send("sidanclaw:retry-load"),
   // Multi-account. `addAccount` starts the system-browser sign-in for a SECOND
   // account (stash, don't replace); `switchAccount` swaps the active account to a
   // saved one and resolves to `{ ok }` / `{ ok:false, error }` so the switcher

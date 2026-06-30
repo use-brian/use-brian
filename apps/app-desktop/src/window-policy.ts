@@ -132,3 +132,34 @@ export function isLoginNavigation(targetUrl: string): boolean {
   if (OAUTH_PROVIDER_HOSTS.includes(url.hostname)) return true;
   return url.pathname === "/login" || url.pathname.startsWith("/login/");
 }
+
+export type LoadFailureAction = "ignore" | "show-window" | "offline-retry" | "signin";
+
+/**
+ * Decide what a main-frame load failure (`did-fail-load`) should do. A signed-in
+ * user must NEVER be bounced to the sign-in landing by a transient load failure
+ * (offline, the canvas origin unreachable) — that was the "Mac goes offline →
+ * logged out" bug. The decision is driven by SESSION PRESENCE, not a network
+ * error-code taxonomy: a user with a live session is shown the offline landing
+ * and auto-reconnected; only a user with no session goes to sign-in.
+ *
+ *  - non-main-frame, or `errorCode === -3` (ERR_ABORTED — our own intentional
+ *    redirect cancels, see `handleNavigation`) → `ignore`.
+ *  - the failed URL is our own `file:` landing (a packaging bug, not a network
+ *    failure) → `show-window` rather than reload it in a loop.
+ *  - a session exists (a refresh token in the jar) → `offline-retry`.
+ *  - otherwise (no session) → `signin`.
+ *
+ * Pure: unit-tests with no Electron. Spec:
+ * docs/architecture/features/app-desktop.md → "Offline resilience".
+ */
+export function decideLoadFailureAction(opts: {
+  errorCode: number;
+  isMainFrame: boolean;
+  failedUrl: string;
+  hasSession: boolean;
+}): LoadFailureAction {
+  if (!opts.isMainFrame || opts.errorCode === -3) return "ignore";
+  if (opts.failedUrl.startsWith("file:")) return "show-window";
+  return opts.hasSession ? "offline-retry" : "signin";
+}

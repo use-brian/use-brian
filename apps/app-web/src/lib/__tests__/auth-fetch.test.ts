@@ -1,5 +1,13 @@
-import { describe, it, expect } from "vitest";
-import { selectFreshestAccessToken } from "@/lib/auth-fetch";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { selectFreshestAccessToken, getValidAccessToken } from "@/lib/auth-fetch";
+
+// Force the production refresh path (a primary auth origin is configured), so
+// the offline guard below is the only thing standing between a stale token and
+// a full-page bounce to the primary.
+vi.mock("@/lib/primary-auth", () => ({
+  primaryAuthUrl: () => "https://sidan.ai",
+  buildPrimaryAuthUrl: () => "https://sidan.ai",
+}));
 
 /**
  * Build a JWT-shaped token whose payload carries `exp` (epoch seconds). Only
@@ -59,5 +67,40 @@ describe("[COMP:app-web/auth-fetch] access_token selection", () => {
     expect(
       selectFreshestAccessToken("access_token=garbage1; access_token=garbage2"),
     ).toBe("garbage2");
+  });
+});
+
+describe("[COMP:app-web/auth-fetch] offline refresh guard", () => {
+  const NOW_SEC = Math.floor(Date.now() / 1000);
+  const expiredToken = tokenWithExp(NOW_SEC - 3600); // stale → forces a refresh
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("offline: does NOT navigate to the primary — returns the current token (no logout)", async () => {
+    const location = { href: "https://app.sidan.ai/w/1", origin: "https://app.sidan.ai" };
+    vi.stubGlobal("window", { location });
+    vi.stubGlobal("document", { cookie: `access_token=${expiredToken}` });
+    vi.stubGlobal("navigator", { onLine: false });
+
+    const token = await getValidAccessToken();
+
+    // The stale cookie token comes back as-is, and crucially the prod bounce did
+    // NOT fire (href unchanged) — so the desktop shell never intercepts a failed
+    // refresh and never bounces the user to sign-in. This is the offline→logout fix.
+    expect(token).toBe(expiredToken);
+    expect(location.href).toBe("https://app.sidan.ai/w/1");
+  });
+
+  it("online: a stale token triggers the primary refresh-and-return bounce (unchanged prod behavior)", async () => {
+    const location = { href: "https://app.sidan.ai/w/1", origin: "https://app.sidan.ai" };
+    vi.stubGlobal("window", { location });
+    vi.stubGlobal("document", { cookie: `access_token=${expiredToken}` });
+    vi.stubGlobal("navigator", { onLine: true });
+
+    await getValidAccessToken();
+
+    expect(location.href).toContain("/api/auth/refresh-and-return");
   });
 });
