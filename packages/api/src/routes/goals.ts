@@ -6,6 +6,9 @@
  *   GET  /                — list goals for a workspace (filterable by status /
  *                           hostType / hostId — the last backs the Brain task
  *                           panel finding a task's goal)
+ *   GET  /:id             — one goal's richer detail (the board drill-down):
+ *                           the acceptance contract (doneWhen / budget / policy /
+ *                           means) + the verified completion claim
  *   POST /:id/confirm     — arm a DRAFT goal (autopilot); optional `outcome` edit
  *   POST /:id/work        — spin up the acting loop: set the means (a chosen
  *                           workflow, or the default completion workflow) + kick off
@@ -64,6 +67,21 @@ function projectGoal(g: GoalRecord) {
   }
 }
 
+/** Drill-down projection — the board projection plus the full acceptance
+ *  contract (`doneWhen` / `budget` / `policy` / `means`) and the verified
+ *  completion claim (`completionClaim`, already ISO-stamped). Backs the
+ *  goal-detail page. */
+function projectGoalDetail(g: GoalRecord) {
+  return {
+    ...projectGoal(g),
+    doneWhen: g.doneWhen,
+    means: g.means,
+    budget: g.budget,
+    policy: g.policy,
+    completionClaim: g.completionClaim,
+  }
+}
+
 export function goalsRoutes(opts: GoalsRouteOptions): Router {
   const router = Router()
 
@@ -103,6 +121,23 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       includeTerminal,
     })
     res.json({ goals: goals.map(projectGoal) })
+  })
+
+  // GET /:id — one goal's richer detail (the board drill-down). RLS-scoped:
+  // `getGoalById` returns null for a non-member, so a stranger gets a 404 (not
+  // a leak that the id exists).
+  router.get('/:id', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const goal = await getGoalById(userId, req.params.id)
+    if (!goal) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    res.json({ goal: projectGoalDetail(goal) })
   })
 
   // POST /:id/confirm — arm a draft goal (the user confirms its detail).

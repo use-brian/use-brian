@@ -4,6 +4,7 @@ import {
   matchesEvent,
   createWorkflowEventDispatcher,
   type DispatchEvent,
+  type EventWaitingGoal,
   type WorkflowEventDispatchError,
   type WorkflowEventInput,
 } from '../event-trigger.js'
@@ -271,5 +272,198 @@ describe('[COMP:workflow/event-trigger] createWorkflowEventDispatcher', () => {
       },
     })
     await expect(dispatcher.dispatch(SLACK_EVENT)).resolves.toBeUndefined()
+  })
+})
+
+describe('[COMP:workflow/event-trigger] goal subscriber (until:event)', () => {
+  /** A goal parked on the same Slack channel, with an optional match filter. */
+  const waitingGoal = (
+    goalId: string,
+    match?: EventSubscription['match'],
+  ): EventWaitingGoal => ({
+    goalId,
+    workspaceId: 'ws1',
+    sources: [slackSub(match)],
+  })
+
+  it('resumes a goal whose parked subscription matches the event', async () => {
+    const resumed: Array<{ goalId: string; eventText: string | null }> = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [waitingGoal('g1', { keywords: ['down'] })],
+      resumeEventWaitingGoal: async ({ goalId, event }) => {
+        resumed.push({ goalId, eventText: event.text })
+      },
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    // The goal is resumed and handed the matching event (so the goal-tick can
+    // carry it). The event text proves it is the real dispatched event.
+    expect(resumed).toEqual([{ goalId: 'g1', eventText: 'prod is DOWN — pager fired' }])
+  })
+
+  it('(a)+(b): a workflow STILL dispatches unchanged while a matching goal is ALSO resumed', async () => {
+    const started: string[] = []
+    const resumed: string[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [
+        { workflowId: 'wf1', workspaceId: 'ws1', sources: [slackSub()] },
+      ],
+      startWorkflowRun: async ({ workflowId }) => {
+        started.push(workflowId)
+      },
+      findEventWaitingGoals: async () => [waitingGoal('g1')],
+      resumeEventWaitingGoal: async ({ goalId }) => {
+        resumed.push(goalId)
+      },
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    expect(started).toEqual(['wf1']) // workflow path: unchanged
+    expect(resumed).toEqual(['g1']) // goal path: additive, also fired
+  })
+
+  it('default is workflow-only: goal deps absent → workflows dispatch, no goal fan-out', async () => {
+    const started: string[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [
+        { workflowId: 'wf1', workspaceId: 'ws1', sources: [slackSub()] },
+      ],
+      startWorkflowRun: async ({ workflowId }) => {
+        started.push(workflowId)
+      },
+      // findEventWaitingGoals / resumeEventWaitingGoal omitted.
+    })
+    await expect(dispatcher.dispatch(SLACK_EVENT)).resolves.toBeUndefined()
+    expect(started).toEqual(['wf1'])
+  })
+
+  it('is a no-op for goals when only the finder is wired (both deps required)', async () => {
+    let finderCalls = 0
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => {
+        finderCalls += 1
+        return [waitingGoal('g1')]
+      },
+      // resumeEventWaitingGoal intentionally omitted — the pair is incomplete.
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    expect(finderCalls).toBe(0) // short-circuits before even finding goals
+  })
+
+  it('skips a goal whose parked subscription does not match the event', async () => {
+    const resumed: string[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [
+        waitingGoal('match', { keywords: ['down'] }),
+        waitingGoal('miss', { keywords: ['deploy'] }),
+      ],
+      resumeEventWaitingGoal: async ({ goalId }) => {
+        resumed.push(goalId)
+      },
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    expect(resumed).toEqual(['match'])
+  })
+
+  it('resumes a goal at most once even when several of its parked subscriptions match', async () => {
+    let resumes = 0
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [
+        {
+          goalId: 'g1',
+          workspaceId: 'ws1',
+          sources: [slackSub({ keywords: ['down'] }), slackSub({ inChannels: ['C_INCIDENTS'] })],
+        },
+      ],
+      resumeEventWaitingGoal: async () => {
+        resumes += 1
+      },
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    expect(resumes).toBe(1)
+  })
+
+  it('runs the goal fan-out even when the workspace has NO event workflows', async () => {
+    const resumed: string[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      // Zero workflows — the workflow path early-returns, but that must NOT
+      // skip the independent goal subscriber.
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [waitingGoal('g1')],
+      resumeEventWaitingGoal: async ({ goalId }) => {
+        resumed.push(goalId)
+      },
+    })
+    await dispatcher.dispatch(SLACK_EVENT)
+    expect(resumed).toEqual(['g1'])
+  })
+
+  it('a WORKFLOW-finder failure does not suppress the goal subscriber', async () => {
+    const resumed: string[] = []
+    const errors: WorkflowEventDispatchError[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => {
+        throw new Error('db down')
+      },
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [waitingGoal('g1')],
+      resumeEventWaitingGoal: async ({ goalId }) => {
+        resumed.push(goalId)
+      },
+      onError: (_err, ctx) => {
+        errors.push(ctx)
+      },
+    })
+    await expect(dispatcher.dispatch(SLACK_EVENT)).resolves.toBeUndefined()
+    expect(resumed).toEqual(['g1']) // goal still resumed despite the workflow finder error
+    expect(errors).toEqual([{ workspaceId: 'ws1' }]) // the workflow finder failure
+  })
+
+  it('isolates a per-goal resume failure — siblings still resume, onError fires with goalId', async () => {
+    const resumed: string[] = []
+    const errors: WorkflowEventDispatchError[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => [
+        waitingGoal('g1'),
+        waitingGoal('g2'),
+        waitingGoal('g3'),
+      ],
+      resumeEventWaitingGoal: async ({ goalId }) => {
+        if (goalId === 'g2') throw new Error('boom')
+        resumed.push(goalId)
+      },
+      onError: (_err, ctx) => {
+        errors.push(ctx)
+      },
+    })
+    await expect(dispatcher.dispatch(SLACK_EVENT)).resolves.toBeUndefined()
+    expect(resumed).toEqual(['g1', 'g3'])
+    expect(errors).toEqual([{ workspaceId: 'ws1', goalId: 'g2' }])
+  })
+
+  it('swallows a goal-finder failure via onError and never throws', async () => {
+    let errCtx: WorkflowEventDispatchError | null = null
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [],
+      startWorkflowRun: async () => {},
+      findEventWaitingGoals: async () => {
+        throw new Error('goals table down')
+      },
+      resumeEventWaitingGoal: async () => {},
+      onError: (_err, ctx) => {
+        errCtx = ctx
+      },
+    })
+    await expect(dispatcher.dispatch(SLACK_EVENT)).resolves.toBeUndefined()
+    expect(errCtx).toEqual({ workspaceId: 'ws1' })
   })
 })

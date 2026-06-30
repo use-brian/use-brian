@@ -50,6 +50,55 @@ export type ListGoalsOptions = {
   includeTerminal?: boolean;
 };
 
+// ── Goal detail (the board drill-down) ───────────────────────────────────────
+// Local mirrors of the core acceptance-contract types
+// (`packages/core/src/goals/{types,done-when}.ts`) — the SDK carries the
+// structured payload; the detail page renders an i18n summary over it.
+
+/** The goal's engine-verifiable acceptance tree. The detail page summarises it
+ *  (e.g. "sub-tasks closed" / "verified by an agent"); it never evaluates it. */
+export type DoneWhenNode =
+  | { kind: "subtasks" }
+  | { kind: "query"; query: { description?: string; predicate: Record<string, unknown> } }
+  | { kind: "tool"; tool: { tool: string; args?: Record<string, unknown>; description?: string } }
+  | { kind: "verify" }
+  | { all: DoneWhenNode[] }
+  | { any: DoneWhenNode[] }
+  | { not: DoneWhenNode };
+
+export type GoalBudget = {
+  maxIterations?: number;
+  /** The load-bearing dollar cap (gated on COGS metering). */
+  maxSpend?: number;
+  /** ISO-8601 timestamp. */
+  deadline?: string | null;
+};
+
+export type GoalPolicy = {
+  blastRadius?: "internal" | "external";
+  approval?: "auto" | "ask";
+  escalateTo?: string | null;
+};
+
+export type GoalMeans = {
+  workflowId?: string | null;
+  blueprintIds?: string[];
+  skillIds?: string[];
+};
+
+/** Agentic-termination verified-done marker (§12): present only once an
+ *  adversarial verifier passed a completion claim. */
+export type GoalCompletionClaim = { because: string; verifiedAt: string };
+
+/** The board row plus the full acceptance contract + completion claim. */
+export type GoalDetail = GoalRow & {
+  doneWhen: DoneWhenNode;
+  means: GoalMeans;
+  budget: GoalBudget;
+  policy: GoalPolicy;
+  completionClaim: GoalCompletionClaim | null;
+};
+
 /** List goals for the workspace, most-recently-updated first. Returns `[]` on
  *  any non-OK response (the board renders its empty state). */
 export async function listGoals(
@@ -71,6 +120,16 @@ export async function listGoals(
 export async function goalForTask(workspaceId: string, taskId: string): Promise<GoalRow | null> {
   const goals = await listGoals(workspaceId, { hostType: "task", hostId: taskId, includeTerminal: true });
   return goals[0] ?? null;
+}
+
+/** Fetch one goal's richer detail (the board drill-down). RLS-scoped server-side
+ *  by membership — returns `null` on any non-OK response (not found / non-member
+ *  / network), so the detail page renders its not-found state. */
+export async function getGoalDetail(goalId: string): Promise<GoalDetail | null> {
+  const res = await authFetch(`${API_URL}/api/goals/${encodeURIComponent(goalId)}`);
+  if (!res.ok) return null;
+  const data = (await res.json().catch(() => ({}))) as { goal?: GoalDetail };
+  return data.goal ?? null;
 }
 
 type GoalActionResult = {

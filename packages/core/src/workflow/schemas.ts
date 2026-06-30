@@ -424,7 +424,10 @@ const eventMatchSchema = z.object({
   fromBots: z.boolean().optional(),
 })
 
-const eventSubscriptionSchema = z.object({
+// Exported so the goals acting loop's `waitForEvent` tool can validate the
+// subscription an agent parks a goal on — the same `(source, match)` struct an
+// `event`-trigger workflow subscribes with.
+export const EventSubscriptionSchema = z.object({
   source: eventSourceRefSchema,
   match: eventMatchSchema.optional(),
 })
@@ -490,7 +493,7 @@ export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('event'),
     event: z.object({
-      sources: z.array(eventSubscriptionSchema).min(1).max(20),
+      sources: z.array(EventSubscriptionSchema).min(1).max(20),
     }),
   }),
 ])

@@ -16,8 +16,8 @@
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
-import { buildTool, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@sidanclaw/core'
-import { getGoalByIdSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
+import { buildTool, EventSubscriptionSchema, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@sidanclaw/core'
+import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 
 export type GoalWorkToolsDeps = {
   /** Build the simple default "complete this task" workflow for a goal's host
@@ -34,6 +34,12 @@ export type GoalWorkToolsDeps = {
    *  the next tick); a refutation is returned to the agent, which keeps working.
    *  Absent → the tool cannot verify and refuses to stamp (fail-safe). */
   verify?: GoalVerifier
+  /** Read-only host-evidence gatherer (boot wires `gatherGoalEvidence`). When
+   *  wired, `markGoalComplete` collects a concise snapshot of the goal's host
+   *  and passes it to the verifier as `evidence`, so the claim is checked
+   *  against reality, not just the agent's self-report. Best-effort: a failure
+   *  (or absence) just omits evidence — the verifier still runs. */
+  gatherEvidence?: (goal: GoalRecord) => Promise<string | undefined>
 }
 
 function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
@@ -45,7 +51,7 @@ function workspaceGate(workspaceId: string | null | undefined): { data: string; 
 
 export function createGoalWorkTools(
   deps: GoalWorkToolsDeps,
-): { confirmGoal: Tool; workTask: Tool; markGoalComplete: Tool } {
+): { confirmGoal: Tool; workTask: Tool; markGoalComplete: Tool; waitForEvent: Tool } {
   const confirmGoal = buildTool({
     name: 'confirmGoal',
     requiresCapability: 'goals',
@@ -151,9 +157,16 @@ export function createGoalWorkTools(
       }
       const goal = await getGoalByIdSystem(input.goal_id)
       if (!goal) return { data: 'Goal not found.', isError: true }
+      // Gather read-only host evidence so the verifier checks the claim against
+      // reality. Best-effort — a failure never blocks the verify path (the
+      // gatherer itself fails soft; the `.catch` guards a throwing dep too).
+      const evidence = deps.gatherEvidence
+        ? await deps.gatherEvidence(goal).catch(() => undefined)
+        : undefined
       const verdict = await deps.verify({
         outcome: goal.outcome,
         because: input.because,
+        evidence,
         userId: context.userId,
       })
       if (!verdict.verified) {
@@ -169,5 +182,35 @@ export function createGoalWorkTools(
     },
   })
 
-  return { confirmGoal, workTask, markGoalComplete }
+  // waitForEvent — the `until:event` park (task-goal-seeker.md §4.11). When the
+  // agent working a goal is genuinely BLOCKED waiting on something external to
+  // happen (a reply lands, a PR merges, a watched doc changes), it parks the
+  // goal on that event instead of looping/polling: the goal's loop is suspended
+  // durably, and the workflow event dispatcher resumes it when a matching event
+  // arrives (a far-out safety-net tick is the backstop). The marker's loop state
+  // is filled in by the driver's re-arm so the budget counters survive the wait.
+  const waitForEvent = buildTool({
+    name: 'waitForEvent',
+    requiresCapability: 'goals',
+    description:
+      'Park this goal until a specific EXTERNAL event happens, instead of looping. Call this ONLY when you are genuinely blocked waiting on the outside world — a reply or message arrives, a pull request merges, a watched document changes — and there is nothing useful to do until then. The goal suspends and resumes automatically when a matching event arrives, so do NOT use it for work you can do now. Specify the event source (a connector instance, a channel integration, or a watched page) and optional filters (keywords, from, in channels).',
+    inputSchema: z.object({
+      goal_id: z.string().uuid(),
+      event: EventSubscriptionSchema.describe(
+        'The event to wait for: { source, match? }. Source is a connector/channel/page ref; match narrows it (keywords, fromActors, inChannels, mentions).',
+      ),
+    }),
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      const goal = await getGoalByIdSystem(input.goal_id)
+      if (!goal) return { data: 'Goal not found.', isError: true }
+      // Write just the subscriptions; the driver's re-arm overwrites this with
+      // `{ subscriptions, state }` so the loop-state handoff survives the wait.
+      await setGoalAwaitingEventSystem(input.goal_id, { subscriptions: [input.event] })
+      return { data: "Parked - I'll resume when that event arrives." }
+    },
+  })
+
+  return { confirmGoal, workTask, markGoalComplete, waitForEvent }
 }

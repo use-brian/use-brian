@@ -41,6 +41,7 @@
 import {
   processGoalIteration,
   type ActingLoopDeps,
+  type EventSubscription,
   type GoalRecord,
   type GoalStore,
 } from '@sidanclaw/core'
@@ -56,12 +57,28 @@ export type GoalLoopState = {
   runId: string | null
 }
 
+/** The durable event-park marker the driver persists while a goal waits on an
+ *  external event (`until:event`). `subscriptions` is what the workflow event
+ *  dispatcher matches to resume the goal; `state` is the loop-state handoff,
+ *  preserved so the budget counters survive the wait. Mirrors
+ *  `GoalAwaitingEventMarker` in `db/goals.ts` (the store keeps `state` opaque;
+ *  here it is typed). */
+export type GoalAwaitingEvent = {
+  subscriptions: EventSubscription[]
+  state?: GoalLoopState
+}
+
 export type DispatchRunResult = {
   runId: string
   /** The run reached a terminal state (completed / failed / timeout). */
   terminal: boolean
   /** The run completed successfully (the "progress" signal). */
   completed: boolean
+  /** Set when the iteration's agent parked the goal on an external event this
+   *  iteration (the `waitForEvent` tool wrote the subscriptions). Drives the
+   *  `until:event` re-arm (durable marker + safety net) instead of the
+   *  paused-run poll. Null / absent → not parked on an event. */
+  eventSubscriptions?: EventSubscription[] | null
 }
 
 export type GoalDriverDeps = {
@@ -86,15 +103,34 @@ export type GoalDriverDeps = {
   deliver: GoalDeliver
   /** Re-arm: schedule the next goal tick to fire at `fireAt`, carrying `state`. */
   scheduleGoalTick: (goal: GoalRecord, fireAt: Date, state: GoalLoopState) => Promise<void>
+  /** Read a goal's durable event-park marker (`until:event`), or null when not
+   *  parked. Used by `resumeOnEvent` to restore the preserved loop state. */
+  getAwaitingEvent: (goalId: string) => Promise<GoalAwaitingEvent | null>
+  /** Persist the event-park marker (the re-arm's external-park branch) so the
+   *  event dispatcher can resume the goal AND the budget counters survive. */
+  setAwaitingEvent: (goalId: string, marker: GoalAwaitingEvent) => Promise<void>
+  /** Drop the event-park marker. Returns true iff a marker was actually cleared
+   *  — so an event resume is claimed exactly once under concurrent events. */
+  clearAwaitingEvent: (goalId: string) => Promise<boolean>
   /** Injected clock (api side; the core takes `now` as a string param). */
   now: () => Date
 }
 
 const INITIAL_STATE: GoalLoopState = { iteration: 0, spend: 0, noProgressStreak: 0, runId: null }
 
-/** `until:event` resume has no real dispatcher yet (R2) — a parked goal polls
- *  its in-flight run on this fixed backoff until the run completes. */
+/** A paused (approval / wait) run is "waiting on the world" with no external
+ *  event to wake it — the goal polls its in-flight run on this fixed backoff
+ *  until the run completes. (Distinct from an `until:event` external park, which
+ *  is woken by the dispatcher and backstopped by the safety net below.) */
 const UNTIL_EVENT_POLL_SECONDS = 60
+
+/** Safety-net cadence for an external event park: when a goal parks on
+ *  `until:event` the dispatcher is the primary wake path, but a far-out tick is
+ *  the backstop for an event that never arrives (or a missed dispatch). Used
+ *  when the goal has no `budget.deadline`; a deadline, if set, is the backstop
+ *  instead. One redundant (budget-bounded) iteration if the event already
+ *  resumed the goal is acceptable (v1). */
+const SAFETY_NET_SECONDS = 3600
 
 export type GoalDriver = {
   /** Run one iteration of the goal. `carried` is the loop state handed off from
@@ -103,6 +139,14 @@ export type GoalDriver = {
   /** Arm the first tick of an acting goal (a goal with a `means.workflowId`).
    *  A no-means monitor / structural goal is left to the rollup. */
   kickoffGoal: (goalId: string) => Promise<void>
+  /** Resume a goal parked on `until:event` (the workflow event dispatcher's
+   *  second-subscriber path): clear the durable marker and schedule an immediate
+   *  tick restoring the preserved loop state. A no-op if the goal already
+   *  un-parked (the marker is gone) so concurrent events resume it once.
+   *
+   *  NOTE (v1): the event payload is NOT handed to the agent — the resumed
+   *  iteration re-reads the world. */
+  resumeOnEvent: (goalId: string) => Promise<void>
 }
 
 export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
@@ -124,6 +168,13 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     // `active`→`running` atomically; a lost claim means a concurrent tick (a
     // re-arm racing an event wake) already owns it.
     if (!(await deps.tryClaim(goalId))) return
+
+    // This tick is acting NOW (a resume, a safety-net fire, or a normal tick),
+    // so drop any stale `until:event` park marker: a fresh decision (park again,
+    // or not) follows from this iteration. Clearing here also takes the goal out
+    // of the dispatcher's event-waiting set while it runs, and un-parks a goal
+    // whose safety net fired because its event never arrived.
+    await deps.clearAwaitingEvent(goalId)
 
     const state = carried ?? INITIAL_STATE
     const nowDate = deps.now()
@@ -151,11 +202,21 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
         activeRunId = r.terminal ? null : r.runId
         lastSpend = await deps.sessionCostUsd(`workflow_run_${r.runId}`)
         lastProgressed = r.completed
+        const eventSubs = r.eventSubscriptions ?? null
         return {
           progressed: r.completed,
-          // A non-terminal (paused) run is "waiting on the world" — surface it
-          // as an event-wait so the gate re-arms on the poll cadence, not now.
-          awaitingEvent: r.terminal ? null : { runId: r.runId },
+          // Priority: the agent parked this goal on an EXTERNAL event this
+          // iteration (`waitForEvent`) → surface the subscriptions so the gate
+          // picks `until:event` and `rearm` persists the durable marker + safety
+          // net. Otherwise a non-terminal (paused) run is "waiting on the world"
+          // — surface it as `{runId}` so the gate re-arms on the poll cadence; a
+          // terminal run with no event park is not awaiting anything.
+          awaitingEvent:
+            eventSubs && eventSubs.length > 0
+              ? { eventSubscriptions: eventSubs }
+              : r.terminal
+                ? null
+                : { runId: r.runId },
           spend: lastSpend,
         }
       },
@@ -169,13 +230,35 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
           noProgressStreak: lastProgressed ? 0 : state.noProgressStreak + 1,
           runId: activeRunId,
         }
+        if (resume.kind === 'until') {
+          // `until:event` — two shapes carry through the (opaque) resume event:
+          const subs = (resume.event as { eventSubscriptions?: EventSubscription[] }).eventSubscriptions
+          if (subs && subs.length > 0) {
+            // (a) EXTERNAL event park (`waitForEvent`): persist the durable
+            // marker WITH the loop state so the dispatcher can resume the goal
+            // and the budget counters survive the wait; arm a far-out safety-net
+            // tick (the deadline, else `SAFETY_NET_SECONDS`) as the backstop for
+            // an event that never arrives.
+            await deps.setAwaitingEvent(g.id, { subscriptions: subs, state: nextState })
+            const safetyFireAt = g.budget.deadline
+              ? new Date(g.budget.deadline)
+              : new Date(nowDate.getTime() + SAFETY_NET_SECONDS * 1000)
+            await deps.scheduleGoalTick(g, safetyFireAt, nextState)
+            return
+          }
+          // (b) PAUSED run (`{runId}`): no external event — poll the in-flight
+          // run on the fixed cadence until it completes.
+          await deps.scheduleGoalTick(
+            g,
+            new Date(nowDate.getTime() + UNTIL_EVENT_POLL_SECONDS * 1000),
+            nextState,
+          )
+          return
+        }
         const fireAt =
           resume.kind === 'now'
             ? nowDate
-            : resume.kind === 'after'
-              ? new Date(nowDate.getTime() + resume.seconds * 1000)
-              : // `until:event` — no dispatcher yet (R2); poll the in-flight run.
-                new Date(nowDate.getTime() + UNTIL_EVENT_POLL_SECONDS * 1000)
+            : new Date(nowDate.getTime() + resume.seconds * 1000)
         await deps.scheduleGoalTick(g, fireAt, nextState)
       },
     }
@@ -191,5 +274,22 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     await deps.scheduleGoalTick(goal, deps.now(), INITIAL_STATE)
   }
 
-  return { tickGoal, kickoffGoal }
+  async function resumeOnEvent(goalId: string): Promise<void> {
+    // Read the park marker first so we can restore the preserved loop state.
+    const marker = await deps.getAwaitingEvent(goalId)
+    if (!marker) return // already un-parked by a concurrent tick — nothing to do.
+    // Atomically claim the resume: only the caller that actually flips the
+    // marker null schedules the tick, so two events racing on one goal resume it
+    // exactly once (the loser no-ops). This also removes the goal from the
+    // dispatcher's event-waiting set immediately.
+    if (!(await deps.clearAwaitingEvent(goalId))) return
+    const goal = await deps.goalStore.getByIdSystem(goalId)
+    if (!goal) return
+    // Schedule an immediate tick restoring the budget counters (the safety-net
+    // tick armed at park time may still fire later; that is a budget-bounded
+    // redundant iteration, accepted in v1).
+    await deps.scheduleGoalTick(goal, deps.now(), marker.state ?? INITIAL_STATE)
+  }
+
+  return { tickGoal, kickoffGoal, resumeOnEvent }
 }

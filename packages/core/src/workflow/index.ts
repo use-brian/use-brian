@@ -35,6 +35,7 @@ export {
   WorkflowDefinitionSchema,
   WorkflowStepSchema,
   WorkflowTriggerSchema,
+  EventSubscriptionSchema,
   STEP_TYPE_VALUES,
 } from './schemas.js'
 
@@ -86,6 +87,9 @@ export {
   type EventTriggeredWorkflowFinder,
   type WorkflowRunStarter,
   type WorkflowEventInput,
+  type EventWaitingGoal,
+  type EventWaitingGoalFinder,
+  type EventWaitingGoalResumer,
   type WorkflowEventDispatchError,
   type WorkflowEventDispatcherDeps,
   type WorkflowEventDispatcher,

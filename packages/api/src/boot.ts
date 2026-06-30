@@ -81,6 +81,7 @@ import {
   type SyncCredentials,
   type ExecutorDeps as WorkflowExecutorDeps,
   type LLMProvider,
+  type TokenUsage,
   type Tool,
   type UsageStore,
   type BrainCandidateStore,
@@ -124,7 +125,7 @@ import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
 import { kbGapsRoutes } from './routes/kb-gaps.js'
-import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem } from './db/workspace-store.js'
+import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
 import { createPendingMessageStore } from './db/pending-message-store.js'
@@ -181,8 +182,15 @@ import { createDbGoalStore } from './db/goals-store.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
 import { createGoalDriver, type GoalLoopState } from './goals/driver.js'
 import { createGoalWorkTools } from './goals/work-tools.js'
+import { gatherGoalEvidence } from './goals/evidence.js'
 import { type GoalDeliver } from './goals/writeback.js'
-import { tryClaimGoalForTick } from './db/goals.js'
+import {
+  tryClaimGoalForTick,
+  getGoalAwaitingEventSystem,
+  setGoalAwaitingEventSystem,
+  clearGoalAwaitingEventSystem,
+  findEventWaitingGoalsSystem,
+} from './db/goals.js'
 import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
@@ -1395,14 +1403,39 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // jobStore (re-arm via a one-shot `scheduled_jobs` tick). The per-iteration
   // run session is `workflow_run_<runId>`, so spend = getSessionCostUsd of it.
   // See goals/driver.ts + docs/plans/task-goal-seeker.md §10/§11.
+  // Closed credit gate (injected by the platform; absent in OSS). Captured so
+  // the `workspaceBudgetOk` closure narrows it cleanly.
+  const creditGate = ports.checkCreditBudget
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
     sessionCostUsd: (sessionId) =>
       usageStore ? usageStore.getSessionCostUsd(sessionId) : Promise.resolve(0),
     meteringAvailable: () => Boolean(usageStore),
-    // workspaceBudgetOk (the hosted per-iteration credit-cap check) is a
-    // follow-up; the per-goal maxSpend + the metering barrier are the v1 guards.
+    // Workspace credit-cap backstop (hosted): an autonomous acting loop respects
+    // the same monthly credit cap a chat turn does — over the cap it BLOCKS
+    // (`workspace_over_budget`) rather than run the workspace into the ground.
+    // Resolve the workspace plan (system read; fails safe to 'free') and run the
+    // injected credit gate: `ok` = under the monthly allowance → proceed,
+    // `downgraded`/`blocked` = at/over it → false. The driver only consults this
+    // when metering is live (`Boolean(usageStore)`), so it is inert in OSS.
+    // Wired only when the closed credit gate is injected; absent (open) →
+    // undefined → no cap check (mirrors how `usageStore` is injected). A
+    // billing-lookup error fails OPEN — a transient gate failure must never
+    // strand a goal; the per-goal `maxSpend` + the metering barrier remain as
+    // backstops. See routes/route-helpers.ts → `checkUsageBudget` for the gate.
+    workspaceBudgetOk: creditGate
+      ? async (workspaceId) => {
+          try {
+            const plan = await getWorkspacePlan(workspaceId)
+            const { status } = await creditGate(workspaceId, plan)
+            return status === 'ok'
+          } catch (err) {
+            console.error('[goals] workspace budget check failed, allowing:', err)
+            return true
+          }
+        }
+      : undefined,
     dispatchRun: async ({ goal, runId }) => {
       let activeRunId = runId
       if (activeRunId) {
@@ -1436,7 +1469,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
       const outcome = await advanceWorkflowRun(workflowExecutorDeps, activeRunId)
       const terminal = outcome.kind === 'completed' || outcome.kind === 'failed'
-      return { runId: activeRunId, terminal, completed: outcome.kind === 'completed' }
+      // Did the agent park this goal on an external event this iteration
+      // (`waitForEvent`)? Surface the subscriptions so the driver persists the
+      // durable `until:event` marker + safety net rather than the paused-run
+      // poll. The marker was cleared at claim time, so this reflects only THIS
+      // iteration's `waitForEvent` call (if any).
+      const parked = await getGoalAwaitingEventSystem(goal.id)
+      return {
+        runId: activeRunId,
+        terminal,
+        completed: outcome.kind === 'completed',
+        eventSubscriptions: parked?.subscriptions ?? null,
+      }
     },
     deliver: deliverGoalTerminal,
     scheduleGoalTick: async (goal, fireAt, state) => {
@@ -1454,6 +1498,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         nextRunAt: fireAt,
       })
     },
+    // until:event park persistence (mig 293). The store keeps `state` opaque; the
+    // driver owns its shape (`GoalLoopState`), so the read bridges the cast.
+    getAwaitingEvent: async (goalId) => {
+      const m = await getGoalAwaitingEventSystem(goalId)
+      return m ? { subscriptions: m.subscriptions, state: m.state as GoalLoopState | undefined } : null
+    },
+    setAwaitingEvent: (goalId, marker) => setGoalAwaitingEventSystem(goalId, marker),
+    clearAwaitingEvent: (goalId) => clearGoalAwaitingEventSystem(goalId),
     now: () => new Date(),
   })
 
@@ -1775,25 +1827,74 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('setGoal', goalTools.setGoal)
   allTools.set('listGoals', goalTools.listGoals)
 
+  // COGS for the goal clarity + verify Flash calls. Both assessors only know
+  // the confirming/verifying user, so resolve that user's primary assistant for
+  // attribution (recordUsage INSERTs over `assistants WHERE id = $assistantId`,
+  // so the row only persists against a real assistant). Falls back to `userId`
+  // as the attribution id if none resolves. Overhead source (excluded from
+  // billing aggregates); best-effort + fire-and-forget, never blocks the
+  // confirm/verify flow, and a no-op when usageStore/userId is absent (OSS).
+  const resolveGoalOverheadAssistant = async (userId: string): Promise<string> => {
+    try {
+      const assistants = await listAccessibleAssistants(userId)
+      return assistants.find((a) => a.kind === 'primary')?.id ?? assistants[0]?.id ?? userId
+    } catch {
+      return userId
+    }
+  }
+  const recordGoalOverheadUsage =
+    (source: 'overhead:goal-clarity' | 'overhead:goal-verify') =>
+    (usage: TokenUsage, userId?: string): void => {
+      if (!usageStore || !userId) return
+      const store = usageStore
+      void resolveGoalOverheadAssistant(userId)
+        .then((assistantId) =>
+          store.recordUsage({
+            userId,
+            assistantId,
+            sessionId: null,
+            model: 'gemini-flash',
+            inputTokens: usage.inputTokens,
+            outputTokens: usage.outputTokens,
+            cacheReadTokens: usage.cacheReadTokens,
+            cacheWriteTokens: usage.cacheWriteTokens,
+            actualCostUsd: calculateCost('gemini-flash', usage),
+            source,
+          }),
+        )
+        .catch((err) => console.error(`[${source}] usage tracking failed:`, err))
+    }
+
   // Confirmation clarity gate (§12) — assesses whether a goal's definition of
   // done is clear enough to work autonomously; an unclear goal is blocked at
   // confirm with a clarifying question. Cheap Flash classifier; fail-open.
-  const goalClarityAssessor = createGoalClarityAssessor({ provider, model: 'gemini-flash' })
+  const goalClarityAssessor = createGoalClarityAssessor({
+    provider,
+    model: 'gemini-flash',
+    onUsage: recordGoalOverheadUsage('overhead:goal-clarity'),
+  })
   // Agentic completion verifier (§12 Phase 3) — adversarially judges a
   // markGoalComplete claim against the goal's outcome before it closes.
-  const goalVerifier = createGoalVerifier({ provider, model: 'gemini-flash' })
+  const goalVerifier = createGoalVerifier({
+    provider,
+    model: 'gemini-flash',
+    onUsage: recordGoalOverheadUsage('overhead:goal-verify'),
+  })
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
-  // the agentic completion signal (markGoalComplete).
+  // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
+  // verifier a read-only host snapshot so it checks the claim against reality.
   const goalWorkTools = createGoalWorkTools({
     createCompletionWorkflow,
     kickoffGoal: goalDriver.kickoffGoal,
     assessClarity: goalClarityAssessor,
     verify: goalVerifier,
+    gatherEvidence: gatherGoalEvidence,
   })
   allTools.set('confirmGoal', goalWorkTools.confirmGoal)
   allTools.set('workTask', goalWorkTools.workTask)
   allTools.set('markGoalComplete', goalWorkTools.markGoalComplete)
+  allTools.set('waitForEvent', goalWorkTools.waitForEvent)
 
   allTools.set('listWorkspaceMembers', createWorkspaceTools(workspaceDirectoryStore).listWorkspaceMembers)
 
@@ -2525,9 +2626,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
       await advanceWorkflowRun(workflowExecutorDeps, run.id)
     },
+    // Second subscriber (additive): goals parked on `until:event`. The finder
+    // reads the workspace's non-terminal goals carrying an `awaiting_event`
+    // marker and exposes their subscriptions; the resumer hands off to the
+    // driver, which clears the marker and schedules an immediate tick restoring
+    // the preserved loop state. Wiring BOTH enables the goal fan-out; the
+    // workflow path above is untouched.
+    findEventWaitingGoals: async ({ workspaceId }) => {
+      const rows = await findEventWaitingGoalsSystem(workspaceId)
+      return rows.map((r) => ({ goalId: r.goalId, workspaceId, sources: r.subscriptions }))
+    },
+    resumeEventWaitingGoal: ({ goalId }) => goalDriver.resumeOnEvent(goalId),
     onError: (err, errCtx) => {
+      const subject = errCtx.workflowId
+        ? `workflow ${errCtx.workflowId}`
+        : errCtx.goalId
+          ? `goal ${errCtx.goalId}`
+          : '(finder)'
       console.warn(
-        `[workflow-event] ${errCtx.workflowId ?? '(finder)'} failed:`,
+        `[workflow-event] ${subject} failed:`,
         err instanceof Error ? err.message : err,
       )
     },

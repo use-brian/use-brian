@@ -7,8 +7,21 @@
  * authorization gate; user reads go through the app pool (`queryWithRLS`),
  * confined by the `goals_workspace_member` policy.
  */
-import type { DoneWhenNode, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalMeans, GoalRecord, GoalStatus } from '@sidanclaw/core'
+import type { DoneWhenNode, EventSubscription, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalMeans, GoalRecord, GoalStatus } from '@sidanclaw/core'
 import { query, queryWithRLS } from './client.js'
+
+/**
+ * The durable event-park marker stored in `goals.awaiting_event` (mig 293).
+ * `subscriptions` is what the workflow event dispatcher matches to resume the
+ * goal; `state` is the acting-loop handoff (the driver's `GoalLoopState`)
+ * preserved verbatim so budget counters survive the wait — the store treats it
+ * as opaque (the driver owns its shape). NULL column when the goal is not
+ * parked on an event. See `goals/driver.ts` (`until:event` resume).
+ */
+export type GoalAwaitingEventMarker = {
+  subscriptions: EventSubscription[]
+  state?: Record<string, unknown>
+}
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", parent_goal_id as "parentGoalId",
@@ -262,4 +275,65 @@ export async function countOpenSubGoalsSystem(id: string): Promise<number> {
     [id, TERMINAL_STATUSES],
   )
   return Number(result.rows[0]?.count ?? '0')
+}
+
+// ── until:event park (mig 293) ──────────────────────────────────────────────
+//
+// The acting loop parks a goal on an external event rather than polling: the
+// `waitForEvent` tool writes `{ subscriptions }`, the driver's re-arm fills in
+// `{ subscriptions, state }`, and the workflow event dispatcher (the second
+// subscriber in `workflow/event-trigger.ts`) resumes it when a matching event
+// arrives. System path (the tool / driver are the authz gate).
+
+/** Park a goal on an external event: write the durable marker. The agent's
+ *  `waitForEvent` call writes `{ subscriptions }`; the driver's re-arm later
+ *  overwrites it with `{ subscriptions, state }` so the loop-state handoff
+ *  (budget counters) survives the wait. */
+export async function setGoalAwaitingEventSystem(
+  id: string,
+  marker: GoalAwaitingEventMarker,
+): Promise<void> {
+  await query(`UPDATE goals SET awaiting_event = $1::jsonb WHERE id = $2`, [
+    JSON.stringify(marker),
+    id,
+  ])
+}
+
+/** Drop a goal's event-park marker. Returns true iff a non-null marker was
+ *  cleared — so a resume can be claimed exactly once when two events race on
+ *  the same goal (only the call that flips it null schedules the tick). */
+export async function clearGoalAwaitingEventSystem(id: string): Promise<boolean> {
+  const result = await query(
+    `UPDATE goals SET awaiting_event = NULL WHERE id = $1 AND awaiting_event IS NOT NULL RETURNING id`,
+    [id],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/** Read a goal's event-park marker, or null when the goal is not parked. */
+export async function getGoalAwaitingEventSystem(
+  id: string,
+): Promise<GoalAwaitingEventMarker | null> {
+  const result = await query<{ awaitingEvent: GoalAwaitingEventMarker | null }>(
+    `SELECT awaiting_event as "awaitingEvent" FROM goals WHERE id = $1`,
+    [id],
+  )
+  return result.rows[0]?.awaitingEvent ?? null
+}
+
+/** The event-dispatcher finder (second subscriber): a workspace's goals parked
+ *  on `until:event`. Non-terminal only; pulls the subscriptions out of the
+ *  marker jsonb for the dispatcher's `matchesEvent` filter. */
+export async function findEventWaitingGoalsSystem(
+  workspaceId: string,
+): Promise<Array<{ goalId: string; subscriptions: EventSubscription[] }>> {
+  const result = await query<{ goalId: string; subscriptions: EventSubscription[] | null }>(
+    `SELECT id as "goalId", awaiting_event->'subscriptions' as subscriptions
+       FROM goals
+      WHERE awaiting_event IS NOT NULL
+        AND workspace_id = $1
+        AND status <> ALL($2)`,
+    [workspaceId, TERMINAL_STATUSES],
+  )
+  return result.rows.map((r) => ({ goalId: r.goalId, subscriptions: r.subscriptions ?? [] }))
 }

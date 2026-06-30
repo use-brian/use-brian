@@ -202,3 +202,61 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm — clarity gate (�
     expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
   })
 })
+
+describe('[COMP:api/goals-route] GET /api/goals/:id — drill-down detail', () => {
+  // A confirmed, armed goal carrying the full acceptance contract + a verified
+  // completion claim — exercises every field the detail projection adds.
+  const DETAIL_GOAL = {
+    ...DRAFT_GOAL,
+    confirmedAt: NOW,
+    means: { workflowId: 'wf1' },
+    budget: { maxSpend: 50, maxIterations: 5 },
+    policy: { approval: 'ask' },
+    doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
+    completionClaim: { because: 'all sub-tasks closed', verifiedAt: '2026-06-30T12:00:00.000Z' },
+  }
+
+  it('401 when unauthenticated (never reads the goal)', async () => {
+    const { app } = makeApp({ role: 'member' })
+    const res = await request(app).get('/api/goals/g1')
+    expect(res.status).toBe(401)
+    expect(mockGetGoalById).not.toHaveBeenCalled()
+  })
+
+  it('404 when the goal is absent / the caller is not a member (RLS-scoped read)', async () => {
+    mockGetGoalById.mockResolvedValue(null as never)
+    const { app } = makeApp({ userId: 'stranger', role: null })
+    const res = await request(app).get('/api/goals/g1')
+    expect(res.status).toBe(404)
+    expect(mockGetGoalById).toHaveBeenCalledWith('stranger', 'g1')
+  })
+
+  it('200 returns the richer projection (acceptance contract + budget/policy/means + completion claim)', async () => {
+    mockGetGoalById.mockResolvedValue(DETAIL_GOAL as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+    const res = await request(app).get('/api/goals/g1')
+
+    expect(res.status).toBe(200)
+    expect(mockGetGoalById).toHaveBeenCalledWith('u1', 'g1')
+    // Board fields (confirmedAt/hasWorkflow) plus the detail-only fields, with
+    // Dates ISO-stamped and internal columns (workspaceId/createdByUserId) dropped.
+    expect(res.body.goal).toEqual({
+      id: 'g1',
+      outcome: 'grow the business',
+      status: 'active',
+      host: { type: 'task', id: 't1' },
+      parentGoalId: null,
+      recipeId: null,
+      blockerReason: null,
+      confirmedAt: NOW.toISOString(),
+      hasWorkflow: true,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+      doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
+      means: { workflowId: 'wf1' },
+      budget: { maxSpend: 50, maxIterations: 5 },
+      policy: { approval: 'ask' },
+      completionClaim: { because: 'all sub-tasks closed', verifiedAt: '2026-06-30T12:00:00.000Z' },
+    })
+  })
+})

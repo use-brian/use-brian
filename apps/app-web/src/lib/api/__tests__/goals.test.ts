@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { listGoals, confirmGoal, type GoalRow } from "../goals";
+import { listGoals, confirmGoal, getGoalDetail, type GoalRow, type GoalDetail } from "../goals";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -99,5 +99,39 @@ describe("[COMP:app-web/goals-board] confirmGoal clarity gate (§12)", () => {
     const r = await confirmGoal("g1");
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy();
+  });
+});
+
+describe("[COMP:app-web/goals-board] getGoalDetail", () => {
+  const SAMPLE_DETAIL: GoalDetail = {
+    ...SAMPLE,
+    confirmedAt: "2026-06-30T00:00:00.000Z",
+    hasWorkflow: true,
+    doneWhen: {
+      kind: "query",
+      query: { description: "task complete", predicate: { hostTaskDone: true } },
+    },
+    means: { workflowId: "wf1" },
+    budget: { maxSpend: 50 },
+    policy: { approval: "ask" },
+    completionClaim: { because: "all sub-tasks closed", verifiedAt: "2026-06-30T12:00:00.000Z" },
+  };
+
+  it("fetches one goal by id and parses the richer detail envelope", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ goal: SAMPLE_DETAIL }));
+    const out = await getGoalDetail("g1");
+    expect(out).toEqual(SAMPLE_DETAIL);
+    const url = mockAuthFetch.mock.calls[0][0] as string;
+    expect(url).toContain("/api/goals/g1");
+  });
+
+  it("returns null on a non-OK response (detail page renders not-found)", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ error: "nope" }, 404));
+    expect(await getGoalDetail("g1")).toBeNull();
+  });
+
+  it("returns null when the envelope carries no goal", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({}));
+    expect(await getGoalDetail("g1")).toBeNull();
   });
 });

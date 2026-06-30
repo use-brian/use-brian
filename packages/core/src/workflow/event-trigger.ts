@@ -128,19 +128,83 @@ export type WorkflowEventInput = {
   event: Record<string, unknown>
 }
 
+// ── Second subscriber type: goals parked on `until:event` ─────────────────
+//
+// The acting-loop driver (`packages/api/src/goals/driver.ts`) can park a goal
+// on `until:event` — the iteration declared it is waiting on a specific event
+// rather than polling. Such a goal is a SECOND first-class subscriber on the
+// same event stream as workflows: the dispatcher matches the workspace's
+// event-waiting goals against each event with the SAME `matchesEvent` and
+// resumes the first hit (schedules a goal-tick). This is strictly additive —
+// the workflow fan-out is untouched and runs whether or not the goal deps are
+// wired.
+//
+// NOTE: the finder's data source — a DURABLE record of "goal G parked on
+// subscription S" — is the gating follow-up (a `goals` migration + goals-store
+// finder/writer + a `GoalResume` that carries the `EventSubscription`). Until
+// that lands the deps below stay unwired and a parked goal falls back to the
+// driver's safety-net poll. The seam is kept here, matched + isolated exactly
+// like the workflow path, so wiring it is a pure addition. See
+// docs/plans/task-goal-seeker.md.
+
+/**
+ * A goal parked on `until:event`. The finder returns goals in the workspace
+ * whose acting loop declared it is waiting on one or more event subscriptions
+ * (`sources`, OR-combined — mirrors `EventTriggeredWorkflow.sources`).
+ */
+export type EventWaitingGoal = {
+  goalId: string
+  workspaceId: string
+  /** The subscriptions this goal parked on; any one matching resumes it. */
+  sources: EventSubscription[]
+}
+
+/**
+ * Resolve a workspace → its event-waiting goals. The optional second-subscriber
+ * analog of `EventTriggeredWorkflowFinder`. Absent → no goal fan-out (default).
+ */
+export type EventWaitingGoalFinder = (params: {
+  workspaceId: string
+}) => Promise<EventWaitingGoal[]>
+
+/**
+ * Resume one event-waiting goal — the concrete impl schedules a goal-tick
+ * carrying the event, exactly as the driver's re-arm does. The optional
+ * second-subscriber analog of `WorkflowRunStarter`. Resolves once the resume
+ * is *scheduled* (the tick fires asynchronously).
+ */
+export type EventWaitingGoalResumer = (params: {
+  goalId: string
+  workspaceId: string
+  event: DispatchEvent
+}) => Promise<void>
+
 /** Context handed to `onError` so the sink can attribute a failure. */
 export type WorkflowEventDispatchError = {
   workspaceId: string
   /** Set when a specific workflow's start failed; absent for a finder failure. */
   workflowId?: string
+  /** Set when a specific goal's resume failed (the goal-subscriber path). */
+  goalId?: string
 }
 
 export type WorkflowEventDispatcherDeps = {
   findEventTriggeredWorkflows: EventTriggeredWorkflowFinder
   startWorkflowRun: WorkflowRunStarter
   /**
-   * Failure sink. The dispatcher never throws; every failure (the finder, or
-   * a per-workflow start) is reported here. Defaults to a no-op.
+   * OPTIONAL second subscriber type: goals parked on `until:event`. Wire BOTH
+   * to enable the goal fan-out; if either is absent the dispatcher behaves
+   * byte-for-byte as workflow-only (the default — see the `EventWaitingGoal`
+   * note above for the gating follow-up). The goal fan-out runs INDEPENDENTLY
+   * of the workflow path: a workspace with no event workflows still resumes a
+   * matching goal, and a failure on either side never suppresses the other.
+   */
+  findEventWaitingGoals?: EventWaitingGoalFinder
+  resumeEventWaitingGoal?: EventWaitingGoalResumer
+  /**
+   * Failure sink. The dispatcher never throws; every failure (the workflow
+   * finder, a per-workflow start, the goal finder, or a per-goal resume) is
+   * reported here. Defaults to a no-op.
    */
   onError?: (err: unknown, ctx: WorkflowEventDispatchError) => void
 }
@@ -248,38 +312,79 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
 export function createWorkflowEventDispatcher(
   deps: WorkflowEventDispatcherDeps,
 ): WorkflowEventDispatcher {
-  return {
-    async dispatch(event) {
-      let workflows: EventTriggeredWorkflow[]
+  // ── Subscriber 1: event-triggered workflows. The original behavior, kept
+  //    byte-for-byte — its early returns scope to this helper, never to the
+  //    whole dispatch (so they cannot suppress the goal subscriber below). ──
+  async function dispatchToWorkflows(event: DispatchEvent): Promise<void> {
+    let workflows: EventTriggeredWorkflow[]
+    try {
+      workflows = await deps.findEventTriggeredWorkflows({
+        workspaceId: event.workspaceId,
+      })
+    } catch (err) {
+      deps.onError?.(err, { workspaceId: event.workspaceId })
+      return
+    }
+    if (workflows.length === 0) return
+
+    const input = buildInput(event)
+
+    for (const wf of workflows) {
+      // A workflow fires at most once per event, even when several of its
+      // subscriptions match.
+      if (!wf.sources.some((sub) => matchesEvent(event, sub))) continue
       try {
-        workflows = await deps.findEventTriggeredWorkflows({
-          workspaceId: event.workspaceId,
+        await deps.startWorkflowRun({
+          workflowId: wf.workflowId,
+          workspaceId: wf.workspaceId,
+          input,
         })
       } catch (err) {
-        deps.onError?.(err, { workspaceId: event.workspaceId })
-        return
+        deps.onError?.(err, {
+          workspaceId: wf.workspaceId,
+          workflowId: wf.workflowId,
+        })
       }
-      if (workflows.length === 0) return
+    }
+  }
 
-      const input = buildInput(event)
+  // ── Subscriber 2 (optional, additive): goals parked on `until:event`. A
+  //    no-op unless BOTH goal deps are wired, so default dispatch is identical
+  //    to workflow-only behavior. Independent of subscriber 1 — runs even when
+  //    the workspace has no event workflows, and is isolated per-goal exactly
+  //    as the workflow start is isolated per-workflow. ──
+  async function dispatchToGoals(event: DispatchEvent): Promise<void> {
+    const findGoals = deps.findEventWaitingGoals
+    const resumeGoal = deps.resumeEventWaitingGoal
+    if (!findGoals || !resumeGoal) return
 
-      for (const wf of workflows) {
-        // A workflow fires at most once per event, even when several of its
-        // subscriptions match.
-        if (!wf.sources.some((sub) => matchesEvent(event, sub))) continue
-        try {
-          await deps.startWorkflowRun({
-            workflowId: wf.workflowId,
-            workspaceId: wf.workspaceId,
-            input,
-          })
-        } catch (err) {
-          deps.onError?.(err, {
-            workspaceId: wf.workspaceId,
-            workflowId: wf.workflowId,
-          })
-        }
+    let goals: EventWaitingGoal[]
+    try {
+      goals = await findGoals({ workspaceId: event.workspaceId })
+    } catch (err) {
+      deps.onError?.(err, { workspaceId: event.workspaceId })
+      return
+    }
+
+    for (const g of goals) {
+      // A goal resumes at most once per event, even when several of the
+      // subscriptions it parked on match.
+      if (!g.sources.some((sub) => matchesEvent(event, sub))) continue
+      try {
+        await resumeGoal({ goalId: g.goalId, workspaceId: g.workspaceId, event })
+      } catch (err) {
+        deps.onError?.(err, { workspaceId: g.workspaceId, goalId: g.goalId })
       }
+    }
+  }
+
+  return {
+    async dispatch(event) {
+      // Two independent subscriber fan-outs over one event. Workflows first
+      // (unchanged), then the optional goal subscriber. Neither suppresses the
+      // other; each isolates its own failures to `onError`.
+      await dispatchToWorkflows(event)
+      await dispatchToGoals(event)
     },
   }
 }
