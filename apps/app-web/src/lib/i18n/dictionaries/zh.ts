@@ -2071,6 +2071,8 @@ export const zh: Dictionary = {
       // ── 傳送目的地選擇器 ─────────────────────────────────────
       deliverDestinationLabel: "傳送目的地",
       deliverDestinationPlaceholder: "選擇近期聊天…",
+      deliverDestinationSlackPlaceholder: "選擇 Slack 頻道…",
+      deliverDestinationSlackEmpty: "找不到 Slack 頻道，Slack 是否已連接？",
       deliverDestinationEmpty: "此管道尚無近期聊天記錄，請於下方直接輸入 ID。",
       deliverDestinationCustomOption: "改用自訂 ID…",
       deliverDestinationCustomLabel: "管道或聊天 ID",

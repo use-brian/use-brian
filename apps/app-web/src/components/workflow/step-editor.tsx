@@ -25,6 +25,7 @@ import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
+  SlackChannelOption,
   DeliverChannelType,
   PageAnchor,
   WorkflowModelAlias,
@@ -61,6 +62,12 @@ type Props = {
    */
   destinations: ChannelDestination[];
   /**
+   * Workspace Slack channels (by name, from `conversations.list`) — backs the
+   * deliver picker when the channel type is Slack, so authors pick `#name`
+   * instead of a raw id. Empty when Slack isn't connected or the fetch failed.
+   */
+  slackChannels: SlackChannelOption[];
+  /**
    * Workspace page roster (saved + drafts) — backs the page-anchor picker
    * (`PageAnchorField`). Empty when the roster fetch failed; the field
    * degrades gracefully.
@@ -90,6 +97,7 @@ export function StepEditor({
   step,
   assistants,
   destinations,
+  slackChannels,
   pages,
   blueprints,
   steps,
@@ -173,6 +181,7 @@ export function StepEditor({
             step={step}
             assistants={assistants}
             destinations={destinations}
+            slackChannels={slackChannels}
             pages={pages}
             blueprints={blueprints}
             steps={steps}
@@ -216,6 +225,7 @@ function AssistantCallFields({
   step,
   assistants,
   destinations,
+  slackChannels,
   pages,
   blueprints,
   steps,
@@ -226,6 +236,7 @@ function AssistantCallFields({
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
   assistants: StudioAssistantSummary[];
   destinations: ChannelDestination[];
+  slackChannels: SlackChannelOption[];
   pages: ViewListRow[];
   blueprints: CustomPageTemplateSummary[];
   steps: WorkflowStep[];
@@ -474,6 +485,7 @@ function AssistantCallFields({
       <DeliverField
         step={step}
         destinations={destinations}
+        slackChannels={slackChannels}
         onChange={onChange}
         disabled={disabled}
         t={t}
@@ -757,12 +769,14 @@ function BlueprintField({
 function DeliverField({
   step,
   destinations,
+  slackChannels,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
   destinations: ChannelDestination[];
+  slackChannels: SlackChannelOption[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
@@ -770,10 +784,22 @@ function DeliverField({
   const channelType = step.deliver?.channelType ?? "telegram";
   const channelId = step.deliver?.channelId ?? "";
 
-  // Destinations relevant to the picked channel type. 'web' has no sessions
-  // surface — destinations stays empty and the custom-ID input takes over.
+  // Known destinations for the picked channel type. Slack is sourced live from
+  // the workspace's real channels by NAME (`#dev-work`), so authors never see
+  // a raw id and a non-Slack id (a Telegram chat id, an internal channels.id)
+  // can never appear — it just isn't a real Slack channel. Other types fall
+  // back to the sessions-derived recent chats. 'web' has no destination
+  // surface — the custom-ID input takes over.
+  const isSlack = channelType === "slack";
   const relevant = destinations.filter((d) => d.channelType === channelType);
-  const matchesKnown = relevant.some((d) => d.channelId === channelId);
+  const known: SearchableSelectItem[] = isSlack
+    ? slackChannels.map((c) => ({ value: c.id, label: `#${c.name}`, hint: c.id }))
+    : relevant.map((d) => ({
+        value: d.channelId,
+        label: d.title || d.channelId,
+        hint: d.title ? d.channelId : undefined,
+      }));
+  const matchesKnown = known.some((k) => k.value === channelId);
 
   // Custom-mode is sticky once toggled (so the input stays visible while
   // empty) — derived from data otherwise.
@@ -781,11 +807,7 @@ function DeliverField({
   const showCustom = stickyCustom || (!matchesKnown && channelId !== "");
 
   const items: SearchableSelectItem[] = [
-    ...relevant.map((d) => ({
-      value: d.channelId,
-      label: d.title || d.channelId,
-      hint: d.title ? d.channelId : undefined,
-    })),
+    ...known,
     {
       value: CUSTOM_DESTINATION_VALUE,
       label: t.workflowPage.builder.deliverDestinationCustomOption,
@@ -875,13 +897,23 @@ function DeliverField({
                 });
               }}
               items={items}
-              placeholder={t.workflowPage.builder.deliverDestinationPlaceholder}
-              emptyMessage={t.workflowPage.builder.deliverDestinationEmpty}
+              placeholder={
+                isSlack
+                  ? t.workflowPage.builder.deliverDestinationSlackPlaceholder
+                  : t.workflowPage.builder.deliverDestinationPlaceholder
+              }
+              emptyMessage={
+                isSlack
+                  ? t.workflowPage.builder.deliverDestinationSlackEmpty
+                  : t.workflowPage.builder.deliverDestinationEmpty
+              }
               disabled={disabled || channelType === "web"}
             />
-            {relevant.length === 0 && channelType !== "web" && (
+            {known.length === 0 && channelType !== "web" && (
               <div className="text-xs text-muted-foreground">
-                {t.workflowPage.builder.deliverDestinationEmpty}
+                {isSlack
+                  ? t.workflowPage.builder.deliverDestinationSlackEmpty
+                  : t.workflowPage.builder.deliverDestinationEmpty}
               </div>
             )}
           </div>

@@ -2268,6 +2268,8 @@ export const en = {
       // ── Delivery destination picker ──────────────────────────────────
       deliverDestinationLabel: "Destination",
       deliverDestinationPlaceholder: "Pick a recent chat…",
+      deliverDestinationSlackPlaceholder: "Pick a Slack channel…",
+      deliverDestinationSlackEmpty: "No Slack channels found. Is Slack connected?",
       deliverDestinationEmpty: "No recent chats with this channel yet. Use a custom ID below.",
       deliverDestinationCustomOption: "Use a custom ID…",
       deliverDestinationCustomLabel: "Channel or chat ID",

@@ -33,10 +33,12 @@ import {
   deleteWorkflow,
   getWorkflowFull,
   listChannelDestinations,
+  listWorkspaceSlackChannels,
   listWorkflowRuns,
   runWorkflowNow,
   updateWorkflow,
   type ChannelDestination,
+  type SlackChannelOption,
   type WorkflowFull,
   type WorkflowIssue,
   type WorkflowRunSummary,
@@ -72,6 +74,7 @@ export default function WorkflowDetailPage({
   const [draft, setDraft] = useState<WorkflowFull | null>(null);
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [destinations, setDestinations] = useState<ChannelDestination[]>([]);
+  const [slackChannels, setSlackChannels] = useState<SlackChannelOption[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
@@ -124,6 +127,20 @@ export default function WorkflowDetailPage({
     void (async () => {
       const list = await listChannelDestinations(activeId);
       if (!cancelled) setDestinations(list);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
+
+  // Load the workspace's Slack channels (by name) for the deliver picker's
+  // Slack destination dropdown. Best-effort — empty when Slack isn't connected.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      const list = await listWorkspaceSlackChannels(activeId);
+      if (!cancelled) setSlackChannels(list);
     })();
     return () => {
       cancelled = true;
@@ -635,6 +652,7 @@ export default function WorkflowDetailPage({
                 step={selectedStep}
                 assistants={assistants}
                 destinations={destinations}
+                slackChannels={slackChannels}
                 pages={pages}
                 blueprints={blueprints}
                 steps={draft.definition.steps}

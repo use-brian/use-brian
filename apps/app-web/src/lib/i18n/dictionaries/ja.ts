@@ -2083,6 +2083,8 @@ export const ja: Dictionary = {
       // ── 送信先ピッカー ───────────────────────────────────────────
       deliverDestinationLabel: "送信先",
       deliverDestinationPlaceholder: "最近のチャットから選択…",
+      deliverDestinationSlackPlaceholder: "Slackチャンネルを選択…",
+      deliverDestinationSlackEmpty: "Slackチャンネルが見つかりません。Slackは接続されていますか？",
       deliverDestinationEmpty: "このチャンネルの最近のチャットはありません。下の欄でIDを直接指定してください。",
       deliverDestinationCustomOption: "IDを直接入力…",
       deliverDestinationCustomLabel: "チャンネルまたはチャットID",

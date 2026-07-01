@@ -716,6 +716,30 @@ export async function listChannelDestinations(
   return Array.isArray(data.destinations) ? data.destinations : [];
 }
 
+/**
+ * A Slack channel the workspace bot can see, resolved live via Slack
+ * `conversations.list`. Powers the deliver picker's Slack destination
+ * dropdown so authors pick a channel by NAME (`#dev-work`) instead of a raw
+ * `C…` id — and non-Slack ids can never appear (only real channels are
+ * returned). `isMember` channels are postable without a join.
+ */
+export type SlackChannelOption = {
+  id: string;
+  name: string;
+  isMember: boolean;
+};
+
+export async function listWorkspaceSlackChannels(
+  workspaceId: string,
+): Promise<SlackChannelOption[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/slack-channels`,
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as { channels?: SlackChannelOption[] };
+  return Array.isArray(data.channels) ? data.channels : [];
+}
+
 export async function listWorkspaceChannelOptions(
   workspaceId: string,
 ): Promise<WorkspaceChannelOption[]> {
