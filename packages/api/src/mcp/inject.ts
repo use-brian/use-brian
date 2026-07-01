@@ -25,6 +25,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
+import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
@@ -310,6 +311,12 @@ export async function injectMcpTools(params: {
 
   const unavailable: string[] = []
 
+  // Call-time connector-liveness writer (migration 294). Passed to the built-in
+  // injectors so a 401/403 at tool-call time flips the backing instance to
+  // `auth_failed` and a success resets it. Fire-and-forget; no-op without a
+  // connector-instance store. See mcp/connector-health.ts.
+  const reportHealth = createHealthReporter(connectorInstanceStore)
+
   // ── Workspace connector-scoping gate (SECURITY — incident 2026-06-01,
   //    re-opened 2026-06-02) ──
   //
@@ -587,8 +594,8 @@ export async function injectMcpTools(params: {
     : undefined
 
   // ── Built-in connectors ─────────────────────────────────────
-  await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds)
-  await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds)
+  await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth })
+  await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth })
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain)
 
@@ -627,11 +634,18 @@ export async function injectMcpTools(params: {
         const p = g.instance.provider
         if (overlaidByGrant.has(p)) continue    // first grant per provider wins
         overlaidByGrant.add(p)
+        // Health gate (migration 294): a granted connector whose credentials
+        // died is announced as needing reconnect rather than injected, so the
+        // model doesn't burn its tool budget on a dead connector.
+        if (g.instance.healthStatus === 'auth_failed') {
+          unavailable.push(connectorReconnectNotice(p, g.instance.label))
+          continue
+        }
         const grantorConnectors = await connectorStore.list(g.grantedByUserId).catch(() => [])
         if (p === 'github') {
-          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
+          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, undefined, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
         } else if (p === 'notion') {
-          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
+          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, undefined, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
@@ -673,6 +687,15 @@ export async function injectMcpTools(params: {
         const p = inst.provider
         if (overlaidByTeam.has(p)) continue    // first team-native per provider wins
         overlaidByTeam.add(p)
+        // Health gate (migration 294): a team-native connector whose credentials
+        // died (401 at call time) is announced as needing reconnect and NOT
+        // re-injected — the exact fix for the dead-GitHub-token incident, where
+        // the model burned its tool budget calling a 401ing connector. Reconnect
+        // resets health to 'ok'. See docs/architecture/integrations/connector-health.md.
+        if (inst.healthStatus === 'auth_failed') {
+          unavailable.push(connectorReconnectNotice(p, inst.label))
+          continue
+        }
         syntheticConnectors.push({ connectorId: p, connected: true, url: inst.url ?? null })
 
         if (p === 'github') {
@@ -689,6 +712,9 @@ export async function injectMcpTools(params: {
               const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
               return creds?.client_secret ?? null
             },
+            undefined,
+            undefined,
+            { report: reportHealth, instanceId: inst.id },
           )
         } else if (p === 'notion') {
           await injectNotionTools(
@@ -704,6 +730,9 @@ export async function injectMcpTools(params: {
               const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
               return creds?.client_secret ?? null
             },
+            undefined,
+            undefined,
+            { report: reportHealth, instanceId: inst.id },
           )
         } else if (p === 'fathom') {
           // Fathom team-native is intentionally deferred: refresh tokens are
@@ -1847,6 +1876,14 @@ async function injectGitHubTools(
    */
   extraInstances?: ConnectorInstanceRef[],
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  /**
+   * Call-time liveness probe (migration 294). When set, the built tools are
+   * wrapped so a 401/403 flips the backing connector_instance to `auth_failed`
+   * (and a success resets it). `instanceId` overrides the resolved primary id —
+   * needed on the team-native / grant paths whose synthetic connector array
+   * carries no id. See mcp/connector-health.ts.
+   */
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
 ): Promise<void> {
   const github = connectors.find((c) => c.connectorId === 'github' && c.connected)
   const githubEnabled = github && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'github'))
@@ -1884,8 +1921,12 @@ async function injectGitHubTools(
     return creds.client_secret
   }
 
+  const primaryInstanceId = healthProbe?.instanceId ?? (github as { id?: string }).id ?? null
   try {
-    const ghTools = buildTools(getPat)
+    const built = buildTools(getPat)
+    const ghTools = healthProbe && primaryInstanceId
+      ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+      : built
 
     for (const tool of ghTools) {
       if (await applyPolicyOrSkip(tool, 'github', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1899,12 +1940,14 @@ async function injectGitHubTools(
         provider: 'github',
         extras: extraInstances,
         settingsStore, assistantId, userId, tools,
-        buildToolsForInstance: (inst) =>
-          buildTools(async () => {
+        buildToolsForInstance: (inst) => {
+          const variant = buildTools(async () => {
             const pat = await resolveInstanceCreds(inst.id)
             if (!pat) throw new Error(`GitHub instance ${inst.id} has no credentials`)
             return pat
-          }),
+          })
+          return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
+        },
       })
     }
 
@@ -1930,6 +1973,8 @@ async function injectNotionTools(
   /** Additional connected Notion instances (multi-workspace). See `injectGitHubTools`. */
   extraInstances?: ConnectorInstanceRef[],
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  /** Call-time liveness probe (migration 294). See `injectGitHubTools`. */
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
 ): Promise<void> {
   if (!getConnectorConfig('notion')) return
 
@@ -1966,8 +2011,12 @@ async function injectNotionTools(
     return creds.client_secret
   }
 
+  const primaryInstanceId = healthProbe?.instanceId ?? (notion as { id?: string }).id ?? null
   try {
-    const notionTools = buildTools(getAccessToken)
+    const builtNotion = buildTools(getAccessToken)
+    const notionTools = healthProbe && primaryInstanceId
+      ? wrapToolsWithHealthProbe(builtNotion, primaryInstanceId, healthProbe.report)
+      : builtNotion
 
     for (const tool of notionTools) {
       if (await applyPolicyOrSkip(tool, 'notion', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1980,12 +2029,14 @@ async function injectNotionTools(
         provider: 'notion',
         extras: extraInstances,
         settingsStore, assistantId, userId, tools,
-        buildToolsForInstance: (inst) =>
-          buildTools(async () => {
+        buildToolsForInstance: (inst) => {
+          const variant = buildTools(async () => {
             const token = await resolveInstanceCreds(inst.id)
             if (!token) throw new Error(`Notion instance ${inst.id} has no credentials`)
             return token
-          }),
+          })
+          return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
+        },
       })
     }
 

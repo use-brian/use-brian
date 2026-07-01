@@ -1570,6 +1570,10 @@ export const en = {
       assistantConnectorsTab: "Assistant Connectors tab",
       reconnectScopeTitle: "Reconnect to use the new file picker",
       reconnectScopeDesc: "We now use Google's per-file sharing flow. Reconnect to pick the specific documents you want the assistant to read and edit.",
+      reconnectNeeded: "Reconnect needed",
+      healthReconnectTitle: "This connector stopped working",
+      healthReconnectDesc: "Its credentials expired or were revoked, so the assistant can't use it. Reconnect to restore access.",
+      reconnectBtn: "Reconnect",
       // Per-connector descriptions (keyed by connector id)
       cardDesc: {
         gcal: "Manage events, schedule meetings, and check your agenda.",

@@ -167,6 +167,18 @@ export type WorkflowToolDeps = {
     userId: string
     toolName: string
   }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
+  /**
+   * Authoring-time Slack channel discovery — backs the `listSlackChannels`
+   * tool so the model can target a real Slack channel id (`C…`/`G…`) from any
+   * session (including web/Telegram) instead of guessing, then set it on the
+   * step's `deliver.channelId`. Enumerates the BYO bot's channels via Slack
+   * `conversations.list`. Absent (tests, minimal boots) → the tool reports that
+   * discovery is unavailable. See docs/plans/slack-native-delivery-target.md.
+   */
+  listSlackChannels?: (args: { assistantId: string }) => Promise<
+    | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
+    | { ok: false; reason: string }
+  >
 }
 
 const idShape = z.string().uuid()
@@ -416,18 +428,24 @@ async function dependencyIssues(
       }
     }
     // The schedule trigger's `delivery` sugar is stamped onto the terminal
-    // assistant_call step at persist time (resolveDeliveryChannel → that step's
-    // deliver). Resolve + validate it NOW so a non-Slack session can't persist a
-    // bogus Slack channel id that fails `channel_not_found` on every fire.
+    // assistant_call step at persist time. An explicit `deliver.channelId` on
+    // that step WINS (already collected + validated by the step loop above);
+    // otherwise resolve it from the session NOW so a cross-type request can't
+    // persist a bogus channel id that fails `channel_not_found` on every fire.
     if (trigger?.kind === 'schedule' && trigger.delivery) {
-      const resolved = resolveDeliveryChannel(context, trigger.delivery.channel)
+      const channel = trigger.delivery.channel
       const termId = terminalAssistantCallId(def)
-      if (termId && resolved.channelType !== 'web') {
-        targets.push({
-          stepId: termId,
-          channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp',
-          channelId: resolved.channelId,
-        })
+      if (termId && !terminalExplicitDeliverId(def, channel)) {
+        const resolved = resolveDeliveryChannel(context, channel)
+        if (!resolved.channelId) {
+          errors.push(unresolvedDeliveryError(channel))
+        } else if (resolved.channelType !== 'web') {
+          targets.push({
+            stepId: termId,
+            channelType: resolved.channelType as 'telegram' | 'slack' | 'whatsapp',
+            channelId: resolved.channelId,
+          })
+        }
       }
     }
     for (const t of targets) {
@@ -443,7 +461,7 @@ async function dependencyIssues(
               res.reason ?? 'channel check failed'
             }. ${
               t.channelType === 'slack'
-                ? 'Author the workflow from inside the Slack channel you want the result posted to (the channel is captured automatically there), or pick a channel the connected bot is a member of.'
+                ? 'Call `listSlackChannels` to get a real channel id and set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (the internal id from `listChannels` is not a Slack channel id). Or author the workflow from inside the Slack channel you want the result posted to.'
                 : 'Author from inside the chat you want the result delivered to so the correct channel is captured.'
             }`,
           )
@@ -569,6 +587,44 @@ function stampTerminalDeliver(
   if (idx === -1) return null
   const steps = def.steps.map((s, i) => (i === idx ? { ...(s as AssistantCallStep), deliver } : s))
   return { ...def, steps }
+}
+
+/**
+ * An explicit `deliver.channelId` the model set on the terminal `assistant_call`
+ * step, when it matches the schedule trigger's `delivery.channel` type — the
+ * model named a specific channel (e.g. a Slack `C…` id from `listSlackChannels`).
+ * This WINS over the `trigger.delivery` sugar's context resolution, so a
+ * channel picked from another session survives the stamp. `null` when the
+ * terminal step carries no matching explicit target.
+ */
+function terminalExplicitDeliverId(
+  def: WorkflowDefinition,
+  channel: 'telegram' | 'slack' | 'whatsapp',
+): string | null {
+  const termId = terminalAssistantCallId(def)
+  const termStep = termId ? def.steps.find((s) => s.id === termId) : undefined
+  if (termStep?.type !== 'assistant_call') return null
+  const d = termStep.deliver
+  return d && d.channelType === channel && d.channelId ? d.channelId : null
+}
+
+/**
+ * Guidance when a schedule trigger's `delivery` sugar cannot be resolved to a
+ * concrete channel id from the authoring session (a cross-type request with no
+ * matching session/preferred channel). Points at `listSlackChannels` for Slack;
+ * for Telegram/WhatsApp the sanctioned path is authoring from inside the chat.
+ */
+function unresolvedDeliveryError(channel: 'telegram' | 'slack' | 'whatsapp'): string {
+  if (channel === 'slack') {
+    return (
+      'Cannot resolve which Slack channel to deliver to from this session. Call `listSlackChannels` to get the target channel\'s id, ' +
+      'then set it on the terminal step\'s `deliver` as `{ "channelType": "slack", "channelId": "<id>" }` (or drop `trigger.delivery` and author from inside the Slack channel).'
+    )
+  }
+  return (
+    `Cannot resolve which ${channel} chat to deliver to from this session. Author the workflow from inside the ${channel} chat you want ` +
+    `the result delivered to (the channel is captured there), or set the terminal step's \`deliver\` explicitly.`
+  )
 }
 
 /**
@@ -797,6 +853,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   runWorkflow: Tool
   listWorkflows: Tool
   getWorkflowRun: Tool
+  listSlackChannels: Tool
 } {
   const phaseBActive = deps.executorDeps.pauseRunForWait !== undefined
 
@@ -988,20 +1045,29 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       // executor reads `assistant_call.deliver`, not the trigger).
       let definition: WorkflowDefinition = parsed.data
       if (trigger?.kind === 'schedule' && trigger.delivery) {
-        const { channelId } = resolveDeliveryChannel(context, trigger.delivery.channel)
-        const stamped = stampTerminalDeliver(definition, { channelType: trigger.delivery.channel, channelId })
-        if (!stamped) {
-          return {
-            data: {
-              ok: false,
-              errors: [
-                'trigger.delivery is set but the workflow has no assistant_call step to deliver from. Add one, or remove trigger.delivery.',
-              ],
-            },
-            isError: true,
+        const channel = trigger.delivery.channel
+        // Explicit `deliver.channelId` on the terminal step wins over the sugar
+        // (a channel the model picked from another session, e.g. via
+        // listSlackChannels) — keep it as-is; dependencyIssues validated it.
+        if (!terminalExplicitDeliverId(definition, channel)) {
+          const { channelId } = resolveDeliveryChannel(context, channel)
+          if (!channelId) {
+            return { data: { ok: false, errors: [unresolvedDeliveryError(channel)] }, isError: true }
           }
+          const stamped = stampTerminalDeliver(definition, { channelType: channel, channelId })
+          if (!stamped) {
+            return {
+              data: {
+                ok: false,
+                errors: [
+                  'trigger.delivery is set but the workflow has no assistant_call step to deliver from. Add one, or remove trigger.delivery.',
+                ],
+              },
+              isError: true,
+            }
+          }
+          definition = stamped
         }
-        definition = stamped
       }
 
       const record = await deps.workflowStore.create({
@@ -1133,15 +1199,24 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       // being set, else the existing one.
       if (trigger?.kind === 'schedule' && trigger.delivery) {
         const base = fields.definition ?? existing.definition
-        const { channelId } = resolveDeliveryChannel(context, trigger.delivery.channel)
-        const stamped = stampTerminalDeliver(base, { channelType: trigger.delivery.channel, channelId })
-        if (!stamped) {
-          return {
-            data: { ok: false, errors: ['trigger.delivery is set but the workflow has no assistant_call step to deliver from.'] },
-            isError: true,
+        const channel = trigger.delivery.channel
+        // Explicit terminal `deliver.channelId` wins over the sugar (see createWorkflow).
+        if (!terminalExplicitDeliverId(base, channel)) {
+          const { channelId } = resolveDeliveryChannel(context, channel)
+          if (!channelId) {
+            return { data: { ok: false, errors: [unresolvedDeliveryError(channel)] }, isError: true }
           }
+          const stamped = stampTerminalDeliver(base, { channelType: channel, channelId })
+          if (!stamped) {
+            return {
+              data: { ok: false, errors: ['trigger.delivery is set but the workflow has no assistant_call step to deliver from.'] },
+              isError: true,
+            }
+          }
+          fields.definition = stamped
         }
-        fields.definition = stamped
+        // Explicit target kept: the definition (new or existing) already carries
+        // the terminal `deliver`, so nothing to stamp.
       }
 
       // Mirror the trigger column so the builder renders reality.
@@ -1442,7 +1517,44 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     },
   })
 
-  return { proposeWorkflow, createWorkflow, updateWorkflow, getWorkflow, runWorkflow, listWorkflows, getWorkflowRun }
+  const listSlackChannels = buildTool({
+    name: 'listSlackChannels',
+    description:
+      "List the Slack channels this workspace's bot can post to: each channel's id (a Slack `C…`/`G…` id) and name. " +
+      'Call this BEFORE setting a Slack delivery target on a workflow or reminder, then use the chosen channel\'s `id` as the delivery target — set it on the terminal step\'s `deliver` as `{ channelType: "slack", channelId: "<id>" }`. ' +
+      'The internal channel UUID from `listChannels` is NOT a Slack channel id and fails `channel_not_found` — always use an id from here. ' +
+      '`isMember: true` marks channels the bot is already in (postable without a join).',
+    inputSchema: z.object({
+      assistantId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe('The delivering assistant (the workflow step target). Defaults to the current assistant.'),
+    }),
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      if (!deps.listSlackChannels) {
+        return { data: 'Slack channel discovery is not available in this context.', isError: true }
+      }
+      const res = await deps.listSlackChannels({ assistantId: input.assistantId ?? context.assistantId })
+      if (!res.ok) return { data: res.reason, isError: true }
+      return { data: { channels: res.channels } }
+    },
+  })
+
+  return {
+    proposeWorkflow,
+    createWorkflow,
+    updateWorkflow,
+    getWorkflow,
+    runWorkflow,
+    listWorkflows,
+    getWorkflowRun,
+    listSlackChannels,
+  }
 }
 
 function outcomeStatus(o: RunOutcome): string {

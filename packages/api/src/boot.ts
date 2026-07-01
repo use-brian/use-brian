@@ -1340,6 +1340,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       waConnectorUrl: env.WA_CONNECTOR_URL,
       waConnectorSecret: env.WA_CONNECTOR_SECRET,
     }),
+    // Connector-health surfacing (migration 294): the workspace's dead
+    // connectors, so a finished run names them + notifies the owner.
+    getAuthFailedConnectors: async (workspaceId: string) =>
+      (await connectorInstanceStore.listByWorkspaceSystem(workspaceId))
+        .filter((c) => c.healthStatus === 'auth_failed')
+        .map((c) => ({ provider: c.provider, label: c.label })),
     createAnchorPage: async ({ workspaceId, userId, title, nestUnder, originPrompt, anchorKey }) => {
       // Per-workflow reuse (mig 279): a recurring anchor page is found-and-
       // reused, not re-minted, so the workflow appends to ONE page instead of
@@ -1550,13 +1556,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const {
     proposeWorkflow, createWorkflow: createWorkflowTool, updateWorkflow,
-    getWorkflow, runWorkflow, listWorkflows, getWorkflowRun,
+    getWorkflow, runWorkflow, listWorkflows, getWorkflowRun, listSlackChannels,
   } = createWorkflowTools({
     workflowStore,
     runStore: workflowRunStore,
     executorDeps: workflowExecutorDeps,
     validateDeliveryTarget: workflowDependencyPreflight.validateDeliveryTarget,
     preflightConnectorTool: workflowDependencyPreflight.preflightConnectorTool,
+    listSlackChannels: workflowDependencyPreflight.listSlackChannels,
     resolvePageAnchor: async (userId, pageId) => {
       const view = await savedViewStore.getById(userId, pageId)
       return view ? { workspaceId: view.workspaceId, state: view.state, name: view.name } : null
@@ -1594,6 +1601,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('runWorkflow', runWorkflow)
   allTools.set('listWorkflows', listWorkflows)
   allTools.set('getWorkflowRun', getWorkflowRun)
+  allTools.set('listSlackChannels', listSlackChannels)
 
   allTools.set('findPage', createFindPageTool({ savedViewStore, docPageStore: createDbDocPageStore() }))
 

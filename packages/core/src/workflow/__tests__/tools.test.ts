@@ -259,6 +259,10 @@ function makeAllTools(opts?: {
     userId: string
     toolName: string
   }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
+  listSlackChannels?: (args: { assistantId: string }) => Promise<
+    | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
+    | { ok: false; reason: string }
+  >
 }) {
   const events: WorkflowToolEvent[] = []
   const stores = fakeStores()
@@ -283,6 +287,7 @@ function makeAllTools(opts?: {
     resolveViewWorkspace: async () => WORKSPACE_ID,
     validateDeliveryTarget: opts?.validateDeliveryTarget,
     preflightConnectorTool: opts?.preflightConnectorTool,
+    listSlackChannels: opts?.listSlackChannels,
   })
   return { tools, stores, events, jobStore }
 }
@@ -494,6 +499,85 @@ describe('[COMP:workflow/tools] inline schedule trigger', () => {
     )
     const warnings = (r.data as { warnings: string[] }).warnings
     expect(warnings.some((w) => w.includes('LAST assistant_call'))).toBe(true)
+  })
+})
+
+describe('[COMP:workflow/tools] Slack native delivery target', () => {
+  const oneStep = (deliver?: { channelType: 'slack'; channelId: string }): WorkflowDefinition => ({
+    startStepId: 's1',
+    steps: [
+      {
+        id: 's1',
+        type: 'assistant_call',
+        target: { assistantId: 'primary' },
+        prompt: 'Give me a morning brief.',
+        ...(deliver ? { deliver } : {}),
+      },
+    ],
+  })
+
+  // The prod incident: author "deliver to Slack" from a web session whose
+  // preferred channel is Telegram. resolveDeliveryChannel yields no Slack id, so
+  // the tool must block with guidance rather than stamp the Telegram id.
+  it('blocks a cross-type Slack delivery from a non-Slack session (no cross-wiring)', async () => {
+    const { tools, stores } = makeAllTools()
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Daily GitHub Dev Work Summary',
+        definition: oneStep(),
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '09:00' }, delivery: { channel: 'slack' } },
+      },
+      makeContext({
+        channelType: 'web',
+        channelId: 'web-session',
+        preferredChannel: { channelType: 'telegram', channelId: '880211324' },
+      }),
+    )
+    expect(r.isError).toBe(true)
+    expect(JSON.stringify(r.data)).toContain('listSlackChannels')
+    expect(stores.workflows.size).toBe(0) // nothing persisted
+  })
+
+  // Model picked a real channel via listSlackChannels and set it on the step;
+  // the trigger.delivery sugar must NOT overwrite it with a session id.
+  it('keeps an explicit Slack channelId on the step over the trigger sugar', async () => {
+    const { tools, stores } = makeAllTools()
+    const r = await tools.createWorkflow.execute(
+      {
+        name: 'Daily GitHub Dev Work Summary',
+        definition: oneStep({ channelType: 'slack', channelId: 'C0BB4AK5BHB' }),
+        trigger: { kind: 'schedule', schedule: { type: 'daily', time: '09:00' }, delivery: { channel: 'slack' } },
+      },
+      makeContext({
+        channelType: 'web',
+        channelId: 'web-session',
+        preferredChannel: { channelType: 'telegram', channelId: '880211324' },
+      }),
+    )
+    expect(r.isError).toBeFalsy()
+    const wf = stores.workflows.get((r.data as { id: string }).id)!
+    expect((wf.definition.steps[0] as { deliver?: unknown }).deliver).toEqual({
+      channelType: 'slack',
+      channelId: 'C0BB4AK5BHB',
+    })
+  })
+
+  it('listSlackChannels returns the enumerated channels', async () => {
+    const { tools } = makeAllTools({
+      listSlackChannels: async () => ({
+        ok: true,
+        channels: [{ id: 'C0BB4AK5BHB', name: 'deltadefi-dev', isMember: true }],
+      }),
+    })
+    const r = await tools.listSlackChannels.execute({}, makeContext())
+    expect(r.isError).toBeFalsy()
+    expect(r.data).toEqual({ channels: [{ id: 'C0BB4AK5BHB', name: 'deltadefi-dev', isMember: true }] })
+  })
+
+  it('listSlackChannels reports when discovery is unwired', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.listSlackChannels.execute({}, makeContext())
+    expect(r.isError).toBe(true)
   })
 })
 
@@ -1107,9 +1191,11 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
         definition: def,
         trigger: { kind: 'schedule', schedule: { type: 'daily', time: '09:00' }, delivery: { channel: 'slack' } },
       },
-      // A non-Slack (web) session — resolveDeliveryChannel stamps the web
-      // channelId as the Slack target, which the validator rejects.
-      makeContext(),
+      // Slack IS resolvable here (the preferred channel is a Slack channel), so
+      // the sugar-resolved target is validated — and the validator rejects this
+      // (stale/unreachable) channel. (A cross-type request with no resolvable
+      // Slack channel is blocked earlier, without a reachability probe.)
+      makeContext({ preferredChannel: { channelType: 'slack', channelId: 'C_STALE' } }),
     )
     expect(r.isError).toBe(true)
     expect(validateDeliveryTarget).toHaveBeenCalled()

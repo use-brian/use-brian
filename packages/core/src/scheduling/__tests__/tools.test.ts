@@ -328,9 +328,26 @@ describe('[COMP:scheduling/tools] createScheduledJob', () => {
         instructions: 'ping',
         deliveryChannel: 'slack',
       },
-      ctx,
+      // Slack must be resolvable for the override to land — the user's preferred
+      // channel is a Slack channel. (A cross-type request with no matching
+      // channel is rejected, not cross-wired onto the telegram session id.)
+      { ...ctx, preferredChannel: { channelType: 'slack', channelId: 'C_SLACK' } },
     )
     expect(store.rows[0].channelType).toBe('slack')
+    expect(store.rows[0].channelId).toBe('C_SLACK')
+  })
+
+  it('rejects an explicit deliveryChannel that the session cannot resolve (no cross-wiring)', async () => {
+    const store = makeFakeJobStore()
+    const { createScheduledJob } = createSchedulingTools({ jobStore: store, workflowStore: makeFakeWorkflowStore() })
+    // ctx is a Telegram session with no preferred Slack channel → 'slack' has no
+    // real id; the job must be rejected rather than stamped with the telegram id.
+    const r = await createScheduledJob.execute(
+      { schedule: { type: 'daily', time: '09:00' }, timezone: 'UTC', instructions: 'ping', deliveryChannel: 'slack' },
+      ctx,
+    )
+    expect(r.isError).toBe(true)
+    expect(store.rows).toHaveLength(0)
   })
 
   it('falls back to context.channelType when no override', async () => {

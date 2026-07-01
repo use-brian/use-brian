@@ -1402,6 +1402,10 @@ export const ja: Dictionary = {
       assistantConnectorsTab: "アシスタントの「コネクタ」タブ",
       reconnectScopeTitle: "新しいファイル ピッカーを使うため再接続",
       reconnectScopeDesc: "Google のファイル単位共有フローに切り替えました。アシスタントに読み書きさせたい特定のドキュメントを選ぶには再接続してください。",
+      reconnectNeeded: "再接続が必要",
+      healthReconnectTitle: "このコネクタは動作を停止しました",
+      healthReconnectDesc: "認証情報の有効期限が切れたか失効したため、アシスタントが利用できません。再接続してアクセスを復元してください。",
+      reconnectBtn: "再接続",
       cardDesc: {
         gcal: "予定の管理、会議のスケジュール、アジェンダ確認。",
         gmail: "あなたに代わってメールを作成・送信。",

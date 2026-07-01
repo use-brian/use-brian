@@ -58,7 +58,7 @@ import { Router } from 'express'
 import { classifyTool, defaultPolicy } from '@sidanclaw/core'
 import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
-import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
+import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
 import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
@@ -83,6 +83,12 @@ type ConnectorRowOut = {
   oauthRequired?: boolean
   category?: 'official' | 'community'
   connectedEmail?: string
+  /**
+   * Liveness (migration 294). 'auth_failed' means the credentials stopped
+   * working (a 401/403 at call time) and the connector needs reconnecting even
+   * though `connected` is still true. Drives the "Reconnect needed" UI state.
+   */
+  healthStatus?: ConnectorHealthStatus
 }
 
 type ConnectorRouteOptions = {
@@ -151,6 +157,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     oauthRequired: entry?.oauth_required,
     category: entry ? entry.category : 'community',
     connectedEmail: inst.connectedEmail ?? undefined,
+    healthStatus: inst.healthStatus,
   }
 }
 
@@ -365,6 +372,39 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     } catch (err) {
       console.error('[connectors] directory add failed:', err)
       res.status(500).json({ error: 'Failed to add connector' })
+    }
+  })
+
+  // ── GET /workspace/:workspaceId — workspace-scoped connectors + health ──
+  //
+  // Governance view (migration 294). The engine injects EVERY workspace-scoped
+  // connector into this workspace's assistants via `listByWorkspaceSystem`
+  // (membership-bypassing), while the personal connector list only shows a
+  // member their own rows. This route closes that gap: it lets an owner/admin
+  // see - and act on - every connector that is live-to-the-model in their
+  // workspace, with its liveness (`healthStatus`), so a dead connector can
+  // never be one no member can find. RLS-gated: only workspace members get
+  // rows. See docs/architecture/integrations/connector-health.md.
+  router.get('/workspace/:workspaceId', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspace id' }); return }
+    try {
+      const instances = await connectorInstanceStore.listByWorkspace(userId, workspaceId)
+      const connectors = instances.map((inst) => ({
+        connectorInstanceId: inst.id,
+        provider: inst.provider,
+        label: inst.label,
+        connected: inst.connected,
+        healthStatus: inst.healthStatus,
+        lastError: inst.lastError,
+        lastCheckedAt: inst.lastCheckedAt,
+      }))
+      res.json({ connectors })
+    } catch (err) {
+      console.error('[connectors] workspace connector list failed:', err)
+      res.status(500).json({ error: 'Failed to list workspace connectors' })
     }
   })
 

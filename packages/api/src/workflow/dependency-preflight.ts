@@ -73,9 +73,25 @@ export type PreflightConnectorTool = (args: {
   toolName: string
 }) => Promise<{ ok: boolean; provider: string; reason?: string } | null>
 
-export function createWorkflowDependencyPreflight(
-  options: WorkflowDependencyPreflightOptions,
-): { validateDeliveryTarget: ValidateDeliveryTarget; preflightConnectorTool: PreflightConnectorTool } {
+/**
+ * Enumerate the Slack channels the BYO bot can see, so the authoring model can
+ * target a real channel id (`C…`/`G…`) instead of guessing — the discovery
+ * half of the `channel_not_found` cross-wiring fix. Member channels first (the
+ * ones the bot can post to without a join). `ok:false` when Slack is not
+ * connected or the enumeration fails (e.g. `missing_scope`).
+ */
+export type ListSlackChannels = (args: {
+  assistantId: string
+}) => Promise<
+  | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
+  | { ok: false; reason: string }
+>
+
+export function createWorkflowDependencyPreflight(options: WorkflowDependencyPreflightOptions): {
+  validateDeliveryTarget: ValidateDeliveryTarget
+  preflightConnectorTool: PreflightConnectorTool
+  listSlackChannels: ListSlackChannels
+} {
   const validateDeliveryTarget: ValidateDeliveryTarget = async ({ assistantId, channelType, channelId }) => {
     if (channelType === 'slack') {
       if (!options.integrationStore) return { ok: true } // can't check → don't block
@@ -149,5 +165,26 @@ export function createWorkflowDependencyPreflight(
     return { ok: true, provider }
   }
 
-  return { validateDeliveryTarget, preflightConnectorTool }
+  const listSlackChannels: ListSlackChannels = async ({ assistantId }) => {
+    if (!options.integrationStore) {
+      return { ok: false, reason: 'Slack channel listing is unavailable in this context' }
+    }
+    const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
+    const botToken = integ && (integ.credentials as { bot_token?: string }).bot_token
+    if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
+    try {
+      const { channels } = await createSlackApi({ botToken }).conversationsList()
+      const usable = channels
+        .filter((c) => !c.isArchived)
+        // Member channels first (postable without a join), then by name.
+        .sort((a, b) => (a.isMember === b.isMember ? a.name.localeCompare(b.name) : a.isMember ? -1 : 1))
+        .map((c) => ({ id: c.id, name: c.name, isMember: c.isMember }))
+      return { ok: true, channels: usable }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, reason: msg.replace(/^Slack API conversations\.list:\s*/, 'Slack: ') }
+    }
+  }
+
+  return { validateDeliveryTarget, preflightConnectorTool, listSlackChannels }
 }

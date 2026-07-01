@@ -128,3 +128,58 @@ describe('[COMP:workflow/dependency-preflight] preflightConnectorTool', () => {
     expect(r).toEqual({ ok: true, provider: 'Notion' })
   })
 })
+
+describe('[COMP:workflow/dependency-preflight] listSlackChannels', () => {
+  it('rejects when the assistant has no Slack integration', async () => {
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({}),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID })
+    expect(r.ok).toBe(false)
+  })
+
+  it('returns member channels first, then by name', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            channels: [
+              { id: 'C_ZED', name: 'zed', is_member: false },
+              { id: 'C_DEV', name: 'deltadefi-dev', is_member: true },
+              { id: 'C_ARCH', name: 'archived', is_member: true, is_archived: true },
+            ],
+            response_metadata: { next_cursor: '' },
+          }),
+          { status: 200 },
+        ),
+      ),
+    )
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    // Archived dropped; member channel first.
+    expect(r.channels).toEqual([
+      { id: 'C_DEV', name: 'deltadefi-dev', isMember: true },
+      { id: 'C_ZED', name: 'zed', isMember: false },
+    ])
+  })
+
+  it('surfaces a missing_scope error instead of throwing', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ ok: false, error: 'missing_scope' }), { status: 200 })),
+    )
+    const { listSlackChannels } = createWorkflowDependencyPreflight({
+      integrationStore: integrationStoreWith({ slack: { credentials: { bot_token: 'xoxb-1' } } }),
+    })
+    const r = await listSlackChannels({ assistantId: ASSISTANT_ID })
+    expect(r.ok).toBe(false)
+    if (r.ok) return
+    expect(r.reason).toMatch(/missing_scope/)
+  })
+})

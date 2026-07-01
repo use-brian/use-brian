@@ -262,6 +262,15 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         deliver = undefined
         rowChannelType = 'doc'
         rowChannelId = viewId
+      } else if (!deliveryChannelId) {
+        // A messaging type was requested but the session yields no channel id of
+        // that type (resolveDeliveryChannel returns empty rather than borrowing a
+        // wrong-type id — the `channel_not_found` cross-wiring fix). Reject with
+        // guidance instead of persisting an empty channel that fails every fire.
+        return {
+          data: `Cannot resolve which ${coercedChannel} chat to deliver to from this session. Schedule from inside the ${coercedChannel} chat you want the reminder delivered to, so the correct channel is captured.`,
+          isError: true,
+        }
       } else {
         deliver = { channelType: coercedChannel, channelId: deliveryChannelId }
         rowChannelType = coercedChannel
@@ -471,13 +480,18 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
         updates.timezone = context.userTimezone
       }
 
-      // Resolve delivery channel change.
+      // Resolve delivery channel change — via the shared resolver so it never
+      // cross-wires a wrong-type session id (the `channel_not_found` fix).
       if (input.deliveryChannel) {
+        const { channelId } = resolveDeliveryChannel(context, input.deliveryChannel)
+        if (!channelId) {
+          return {
+            data: `Cannot resolve which ${input.deliveryChannel} chat to deliver to from this session. Update the job from inside the ${input.deliveryChannel} chat you want the reminder delivered to.`,
+            isError: true,
+          }
+        }
         updates.channelType = input.deliveryChannel
-        const preferred = context.preferredChannel
-        updates.channelId = input.deliveryChannel === preferred?.channelType
-          ? preferred.channelId
-          : context.channelId
+        updates.channelId = channelId
       }
 
       // Recompute next_run_at whenever schedule or timezone moves.

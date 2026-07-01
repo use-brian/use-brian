@@ -38,6 +38,9 @@ function instance(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
     connected: true,
     ingestionEnabled: false,
     credentialsType: 'oauth',
+    healthStatus: 'ok',
+    lastError: null,
+    lastCheckedAt: null,
     createdBy: 'u1',
     createdAt: new Date(0),
     updatedAt: new Date(0),
@@ -55,6 +58,7 @@ function makeApp(userId?: string) {
     getAuthCredentials: vi.fn().mockResolvedValue(null),
     listForUser: vi.fn().mockResolvedValue([]),
     listByUser: vi.fn().mockResolvedValue([]),
+    listByWorkspace: vi.fn().mockResolvedValue([]),
     createUserInstance: vi.fn().mockResolvedValue(instance()),
     update: vi.fn().mockResolvedValue(instance()),
     deleteInstance: vi.fn().mockResolvedValue(true),
@@ -72,6 +76,7 @@ function makeApp(userId?: string) {
   const connectorInstanceStore = {
     listForUser: m.listForUser,
     listByUser: m.listByUser,
+    listByWorkspace: m.listByWorkspace,
     createUserInstance: m.createUserInstance,
     update: m.update,
     delete: m.deleteInstance,
@@ -91,6 +96,28 @@ function makeApp(userId?: string) {
 
 describe('[COMP:api/connectors-route] /api/connectors', () => {
   beforeEach(() => vi.clearAllMocks())
+
+  // Connector-health governance route (migration 294).
+  it('[COMP:integrations/connector-health] GET /workspace/:id lists workspace connectors with health for a member', async () => {
+    const { app, listByWorkspace } = makeApp('u1')
+    const WS = '11111111-1111-1111-1111-111111111111'
+    listByWorkspace.mockResolvedValue([
+      instance({ provider: 'github', label: 'sidanclaw', connected: true, healthStatus: 'auth_failed', lastError: '401 Bad credentials' }),
+      instance({ provider: 'slack', label: 'DeltaDeFi', connected: true, healthStatus: 'ok' }),
+    ])
+    const res = await request(app).get(`/api/connectors/workspace/${WS}`)
+    expect(res.status).toBe(200)
+    expect(listByWorkspace).toHaveBeenCalledWith('u1', WS)
+    const gh = res.body.connectors.find((c: { provider: string }) => c.provider === 'github')
+    expect(gh.healthStatus).toBe('auth_failed')
+    expect(gh.label).toBe('sidanclaw')
+  })
+
+  it('[COMP:integrations/connector-health] GET /workspace/:id rejects a non-uuid workspace id', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).get('/api/connectors/workspace/not-a-uuid')
+    expect(res.status).toBe(400)
+  })
 
   it('401 without auth', async () => {
     const { app } = makeApp()

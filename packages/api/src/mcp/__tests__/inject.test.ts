@@ -500,6 +500,60 @@ describe('[COMP:api/mcp-inject] multi-instance built-ins', () => {
   })
 })
 
+describe('[COMP:integrations/connector-health] team-native connector health gate', () => {
+  function teamGithub(healthStatus: 'ok' | 'auth_failed') {
+    return {
+      id: 'ci-ws', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+      provider: 'github', label: 'sidanclaw', connectedEmail: null, url: null,
+      custom: false, config: {}, sensitivity: 'internal', connected: true,
+      ingestionEnabled: false, credentialsType: 'oauth', healthStatus,
+      lastError: null, lastCheckedAt: null, createdBy: null,
+      createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-01-01T00:00:00Z'),
+    }
+  }
+  function makeStores(healthStatus: 'ok' | 'auth_failed') {
+    return {
+      connectorStore: { list: vi.fn().mockResolvedValue([]), getCredentials: vi.fn().mockResolvedValue(null) },
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([teamGithub(healthStatus)]),
+        getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'github_pat', client_secret: 'pat-ws' }),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue(null),
+        markHealth: vi.fn(),
+      },
+    }
+  }
+
+  it('injects a healthy team-native GitHub connector (no reconnect notice)', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = makeStores('ok')
+    const result = await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+    expect([...tools.keys()]).toContain('githubSearchRepositories')
+    expect(result.unavailable.some((u) => /stopped working/i.test(u))).toBe(false)
+  })
+
+  it('skips a dead team-native GitHub connector and tells the model to reconnect', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = makeStores('auth_failed')
+    const result = await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+    expect([...tools.keys()].some((n) => n.startsWith('githubSearchRepositories'))).toBe(false)
+    expect(result.unavailable.some((u) => /stopped working/i.test(u) && /github/i.test(u))).toBe(true)
+  })
+})
+
 describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
   it('reports the discovery-cache size as a non-negative number', () => {
     const size = _getMcpDiscoveryCacheSize()

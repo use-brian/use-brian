@@ -60,6 +60,9 @@ const INSTANCE_COLS_AS = `
   ci.connected AS "instance_connected",
   ci.ingestion_enabled AS "instance_ingestionEnabled",
   ci.credentials_type AS "instance_credentialsType",
+  ci.health_status AS "instance_healthStatus",
+  ci.last_error AS "instance_lastError",
+  ci.last_checked_at AS "instance_lastCheckedAt",
   ci.created_by AS "instance_createdBy",
   ci.created_at AS "instance_createdAt",
   ci.updated_at AS "instance_updatedAt"
@@ -80,6 +83,9 @@ type FlatGrantInstanceRow = ConnectorGrant & {
   instance_connected: boolean
   instance_ingestionEnabled: boolean
   instance_credentialsType: ConnectorInstance['credentialsType']
+  instance_healthStatus: ConnectorInstance['healthStatus']
+  instance_lastError: ConnectorInstance['lastError']
+  instance_lastCheckedAt: ConnectorInstance['lastCheckedAt']
   instance_createdBy: string | null
   instance_createdAt: Date
   instance_updatedAt: Date
@@ -108,6 +114,9 @@ function unflatten(row: FlatGrantInstanceRow): GrantWithInstance {
       connected: row.instance_connected,
       ingestionEnabled: row.instance_ingestionEnabled,
       credentialsType: row.instance_credentialsType,
+      healthStatus: row.instance_healthStatus,
+      lastError: row.instance_lastError,
+      lastCheckedAt: row.instance_lastCheckedAt,
       createdBy: row.instance_createdBy,
       createdAt: row.instance_createdAt,
       updatedAt: row.instance_updatedAt,
@@ -242,6 +251,9 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            ci.url, ci.custom, ci.config, ci.sensitivity, ci.connected,
            ci.ingestion_enabled AS "ingestionEnabled",
            ci.credentials_type AS "credentialsType",
+           ci.health_status AS "healthStatus",
+           ci.last_error AS "lastError",
+           ci.last_checked_at AS "lastCheckedAt",
            ci.created_by AS "createdBy",
            ci.created_at AS "createdAt",
            ci.updated_at AS "updatedAt"

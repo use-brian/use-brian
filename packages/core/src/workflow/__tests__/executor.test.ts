@@ -333,6 +333,49 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.finishedAt).toBeInstanceOf(Date)
   })
 
+  it('[COMP:integrations/connector-health] a completed run names a dead connector in its outcome and notifies the owner', async () => {
+    // The dead-GitHub-token incident: the run COMPLETES (the model apologizes),
+    // so the surfacing must key off persisted connector health, not run failure.
+    const delivered: Array<{ channelId: string; text: string }> = []
+    const stores = makeFakeStores()
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'I could not fetch GitHub activity.' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (p) => {
+        delivered.push({ channelId: p.channelId, text: p.text })
+        return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
+      },
+      getAuthFailedConnectors: async () => [{ provider: 'github', label: 'sidanclaw' }],
+    }
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'summarize github',
+          deliver: { channelType: 'slack', channelId: 'C123' },
+        },
+      ],
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('completed')
+
+    const updated = stores.runs.get(run.id)
+    expect(
+      updated?.outcome?.blockers.some((b) => b.includes('sidanclaw') && b.includes('github')),
+    ).toBe(true)
+    // A reconnect notification reached the deliver channel (distinct from the
+    // step's own output delivery, which has no "reconnect" text).
+    expect(delivered.some((d) => d.channelId === 'C123' && /reconnect/i.test(d.text))).toBe(true)
+  })
+
   it('fails an assistant_call with a non-UUID target before reaching the consult', async () => {
     // Regression: a definition persisted before the schema enforced
     // `uuid | 'primary'` (e.g. a model-authored "product-assistant" slug)

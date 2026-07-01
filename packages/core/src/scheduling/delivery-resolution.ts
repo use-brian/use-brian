@@ -114,11 +114,23 @@ export async function describeDelivery(
 }
 
 /**
- * Resolve the delivery channel TYPE + concrete channel id for a new schedule,
- * in precedence: explicit override > preferred messaging channel > current
- * channel. The id captures the topic-encoded chat id when the chosen channel
- * matches the session the request came from — that is how per-group / per-topic
- * cron delivery is pinned automatically.
+ * Resolve the delivery channel TYPE + concrete channel id for a new schedule.
+ *
+ * No explicit channel → deliver to the preferred (else current) messaging
+ * channel; the id captures the topic-encoded chat id of the session the
+ * request came from, so per-group / per-topic cron delivery is pinned
+ * automatically.
+ *
+ * An explicit channel TYPE was requested → the returned id must actually
+ * belong to that type. A `channelId` is used only when the requested type
+ * matches the preferred channel OR the current session; otherwise the id is
+ * **empty** (unresolved). Pairing the requested type with a *different*
+ * channel's id is the `channel_not_found` cross-wiring bug — authoring
+ * "deliver to Slack" from a web/Telegram session stamped the session's
+ * Telegram chat id (`880211324`) as the Slack channel, which fails on every
+ * fire. On an empty id the caller guides the model (e.g. `listSlackChannels`,
+ * or set the step's `deliver.channelId`) instead of persisting a bad target.
+ * See docs/plans/slack-native-delivery-target.md.
  */
 export function resolveDeliveryChannel(
   context: {
@@ -129,13 +141,19 @@ export function resolveDeliveryChannel(
   explicitChannel?: MessagingChannel,
 ): { channelType: string; channelId: string } {
   const preferred = context.preferredChannel
-  const channelType = explicitChannel ?? preferred?.channelType ?? context.channelType
-  const channelId = explicitChannel
-    ? explicitChannel === preferred?.channelType
+  if (!explicitChannel) {
+    return {
+      channelType: preferred?.channelType ?? context.channelType,
+      channelId: preferred?.channelId ?? context.channelId,
+    }
+  }
+  const channelId =
+    explicitChannel === preferred?.channelType
       ? preferred.channelId
-      : preferred?.channelId ?? context.channelId
-    : preferred?.channelId ?? context.channelId
-  return { channelType, channelId }
+      : explicitChannel === context.channelType
+        ? context.channelId
+        : ''
+  return { channelType: explicitChannel, channelId }
 }
 
 /**

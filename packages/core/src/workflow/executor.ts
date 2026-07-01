@@ -224,6 +224,16 @@ export type ExecutorDeps = {
    * consult completes. Absent = `deliver` is parsed but inert.
    */
   deliverToChannel?: DeliverToChannel
+  /**
+   * Connector-health surfacing (migration 294). Returns the workspace's
+   * connectors whose credentials failed (`health_status = 'auth_failed'`) so a
+   * finished run can name them in its outcome and notify the workspace owner
+   * through their own channel. Absent = inert (Phase A / tests). See
+   * docs/architecture/integrations/connector-health.md.
+   */
+  getAuthFailedConnectors?: (
+    workspaceId: string,
+  ) => Promise<Array<{ provider: string; label: string }>>
   /** Test override; defaults to `Date.now`. */
   now?: () => number
   /**
@@ -577,11 +587,16 @@ export async function advanceWorkflowRun(
 
   // Terminal completion.
   const finishedAt = new Date(now())
+  // A run can finish "completed" while a connector it needed was dead (the
+  // model apologizes rather than erroring — the dead-GitHub-token incident).
+  // Name the connector in the outcome and notify the owner. See
+  // docs/architecture/integrations/connector-health.md.
+  const healthBlockers = await surfaceConnectorHealth(deps, run, workflow, primaryAssistantId)
   await deps.runStore.updateRun(runId, {
     status: 'completed',
     finishedAt,
     currentStepId: null,
-    outcome: composeRunOutcome(vars, runLog, 'completed', finishedAt, lastOutput),
+    outcome: composeRunOutcome(vars, runLog, 'completed', finishedAt, lastOutput, null, healthBlockers),
   })
   fireAndForgetAudit(deps, {
     type: 'workflow.run_completed',
@@ -1234,6 +1249,10 @@ function composeRunOutcome(
   finishedAt: Date,
   lastOutput: unknown,
   error?: ExecutorError | null,
+  // Extra blocker lines merged in by the executor after the step loop — e.g. a
+  // connector-health notice (migration 294) naming a connector that stopped
+  // working during the run. Kept separate from `vars.blockers` (author-set).
+  extraBlockers?: string[],
 ): WorkflowRunOutcome {
   const toList = (v: unknown): string[] =>
     Array.isArray(v)
@@ -1243,6 +1262,7 @@ function composeRunOutcome(
         : []
   const blockers = toList(vars.blockers)
   if (error?.message) blockers.push(error.message)
+  for (const b of extraBlockers ?? []) blockers.push(b)
   const todo = toList(vars.todo)
   const state =
     vars.state && typeof vars.state === 'object' && !Array.isArray(vars.state)
@@ -1262,6 +1282,86 @@ function composeRunOutcome(
     todo,
     state,
     finishedAt: finishedAt.toISOString(),
+  }
+}
+
+/** Blocker-line prefix that both marks the outcome and drives notification dedup. */
+const CONNECTOR_HEALTH_BLOCKER_PREFIX = 'Connector needs reconnecting:'
+
+/**
+ * Connector-health surfacing (migration 294): when a run finishes while a
+ * workspace connector's credentials have failed, name it in the run outcome and
+ * notify the workspace owner through the deliver step's channel. Best-effort and
+ * deduped so a recurring workflow pings once, not every run. Returns the blocker
+ * lines to fold into the outcome. Mirrors `maybeDisableForDeadAnchor`. See
+ * docs/architecture/integrations/connector-health.md.
+ */
+async function surfaceConnectorHealth(
+  deps: ExecutorDeps,
+  run: WorkflowRunRecord,
+  workflow: WorkflowRecord,
+  primaryAssistantId: string,
+): Promise<string[]> {
+  if (!deps.getAuthFailedConnectors) return []
+  try {
+    const dead = await deps.getAuthFailedConnectors(run.workspaceId)
+    if (dead.length === 0) return []
+    const blockers = dead.map(
+      (c) =>
+        `${CONNECTOR_HEALTH_BLOCKER_PREFIX} ${c.label} (${c.provider}) - its credentials stopped ` +
+        `working. Reconnect it in Studio then Connectors.`,
+    )
+
+    // Notify the workspace owner once, on the first run to observe it — a
+    // recurring workflow must not ping every fire. Dedup by checking whether the
+    // previous run already carried a connector-health blocker.
+    const userId = run.triggeredBy ?? workflow.createdBy
+    if (
+      deps.deliverToChannel &&
+      !(await healthAlreadySurfaced(deps, userId, workflow.id, run.id))
+    ) {
+      const deliverStep = workflow.definition.steps.find(
+        (s): s is AssistantCallStep => s.type === 'assistant_call' && !!s.deliver,
+      )
+      if (deliverStep?.deliver) {
+        try {
+          await deps.deliverToChannel({
+            workspaceId: run.workspaceId,
+            assistantId: primaryAssistantId,
+            userId,
+            channelType: deliverStep.deliver.channelType,
+            channelId: deliverStep.deliver.channelId,
+            text:
+              `Heads up: workflow "${workflow.name}" couldn't use a connector because its ` +
+              `credentials stopped working (${dead.map((c) => c.label).join(', ')}). ` +
+              `Reconnect it in Studio then Connectors, then re-run.`,
+          })
+        } catch (err) {
+          console.warn('[workflow] connector-health notification failed:', err)
+        }
+      }
+    }
+    return blockers
+  } catch (err) {
+    console.warn('[workflow] connector-health surfacing failed:', err)
+    return []
+  }
+}
+
+async function healthAlreadySurfaced(
+  deps: ExecutorDeps,
+  userId: string,
+  workflowId: string,
+  currentRunId: string,
+): Promise<boolean> {
+  try {
+    const recent = await deps.runStore.listRunsForWorkflow(userId, workflowId, { limit: 2 })
+    const prev = recent.find((r) => r.id !== currentRunId)
+    const blockers =
+      (prev?.outcome as WorkflowRunOutcome | null | undefined)?.blockers ?? []
+    return blockers.some((b) => b.startsWith(CONNECTOR_HEALTH_BLOCKER_PREFIX))
+  } catch {
+    return false
   }
 }
 

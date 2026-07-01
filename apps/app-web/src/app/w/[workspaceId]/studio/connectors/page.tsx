@@ -129,6 +129,12 @@ type Connector = {
   isPlaceholder?: boolean;
   description?: string;
   connected: boolean;
+  /**
+   * Liveness (migration 294). "auth_failed" means the credentials stopped
+   * working (a 401/403 at call time) and the connector needs reconnecting even
+   * though `connected` is still true - drives the "Reconnect needed" state.
+   */
+  healthStatus?: "ok" | "auth_failed" | "unknown";
   custom?: boolean;
   url?: string;
   oauthRequired?: boolean;
@@ -1670,12 +1676,20 @@ function ConnectorsList() {
                   <span
                     className={cn(
                       "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                      builtin || sel.connected
-                        ? "bg-primary/10 text-primary"
-                        : "bg-muted text-muted-foreground",
+                      sel.connected && sel.healthStatus === "auth_failed"
+                        ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                        : builtin || sel.connected
+                          ? "bg-primary/10 text-primary"
+                          : "bg-muted text-muted-foreground",
                     )}
                   >
-                    {builtin ? tc.alwaysOn : sel.connected ? tc.connected : tc.disconnected}
+                    {builtin
+                      ? tc.alwaysOn
+                      : sel.connected && sel.healthStatus === "auth_failed"
+                        ? tc.reconnectNeeded
+                        : sel.connected
+                          ? tc.connected
+                          : tc.disconnected}
                   </span>
                 </div>
 
@@ -1689,6 +1703,29 @@ function ConnectorsList() {
                     <p className="text-xs text-muted-foreground">{desc}</p>
                   ) : null;
                 })()}
+
+                {/* Connector-health reconnect banner (migration 294): the
+                    credentials stopped working (a 401/403 at call time) even
+                    though the connector still reads as connected. */}
+                {sel.connected && sel.healthStatus === "auth_failed" && (
+                  <div className="flex items-start gap-2 text-[11px] bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2 text-amber-600 dark:text-amber-400">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="shrink-0 mt-0.5">
+                      <path d="M8 5v3m0 2.5v.5" strokeLinecap="round" />
+                      <circle cx="8" cy="8" r="6.5" />
+                    </svg>
+                    <div className="min-w-0">
+                      <div className="font-medium">{tc.healthReconnectTitle}</div>
+                      <div className="mt-0.5 opacity-80">{tc.healthReconnectDesc}</div>
+                      <button
+                        onClick={() => handleConnect(sel)}
+                        disabled={connecting === rid}
+                        className="mt-1 text-[11px] font-medium underline underline-offset-2 hover:opacity-80 disabled:opacity-50"
+                      >
+                        {connecting === rid ? tc.connectingBtn : tc.reconnectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {/* Scope-migration reconnect banner. */}
                 {sel.connected &&

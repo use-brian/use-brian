@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createSlackAdapter } from '../slack/adapter.js'
+import { createSlackApi } from '../slack/api.js'
 import { verifySlackSignature } from '../slack/verify.js'
 import { createHmac } from 'node:crypto'
 
@@ -378,5 +379,47 @@ describe('[COMP:channels/slack] sendMessage documents', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('[COMP:channels/slack] conversationsList', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  function mockPage(
+    channels: Array<{ id: string; name?: string; is_private?: boolean; is_member?: boolean; is_archived?: boolean }>,
+    nextCursor = '',
+  ) {
+    ;(globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      json: async () => ({ ok: true, channels, response_metadata: { next_cursor: nextCursor } }),
+    } as unknown as Response)
+  }
+
+  it('maps Slack fields to the compact projection', async () => {
+    mockPage([
+      { id: 'C0BB4AK5BHB', name: 'deltadefi-dev', is_private: false, is_member: true },
+      { id: 'G0PRIV', name: 'founders', is_private: true, is_member: false },
+    ])
+    const { channels } = await createSlackApi({ botToken: 'xoxb-test' }).conversationsList()
+    expect(channels).toEqual([
+      { id: 'C0BB4AK5BHB', name: 'deltadefi-dev', isPrivate: false, isMember: true, isArchived: false },
+      { id: 'G0PRIV', name: 'founders', isPrivate: true, isMember: false, isArchived: false },
+    ])
+  })
+
+  it('follows next_cursor across pages, then stops', async () => {
+    mockPage([{ id: 'C1', name: 'one', is_member: true }], 'CURSOR2')
+    mockPage([{ id: 'C2', name: 'two', is_member: true }], '')
+    const { channels } = await createSlackApi({ botToken: 'xoxb-test' }).conversationsList()
+    expect(channels.map((c) => c.id)).toEqual(['C1', 'C2'])
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2)
+  })
+
+  it('propagates a Slack error (e.g. missing_scope)', async () => {
+    ;(globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      json: async () => ({ ok: false, error: 'missing_scope' }),
+    } as unknown as Response)
+    await expect(createSlackApi({ botToken: 'xoxb-test' }).conversationsList()).rejects.toThrow('missing_scope')
   })
 })

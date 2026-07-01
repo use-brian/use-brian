@@ -183,6 +183,49 @@ export function createSlackApi(options: SlackApiOptions) {
         { channel },
       ),
 
+    /**
+     * List the (non-archived) public + private conversations the BYO bot can
+     * see, paginating through `conversations.list`. Backs the workflow
+     * authoring `listSlackChannels` tool so the model can target a real
+     * channel id (`C…` public, `G…` private) instead of guessing — the fix for
+     * the `channel_not_found` cross-wiring incident. Requires `channels:read` +
+     * `groups:read` (both already in the BYO app manifest). `isMember` marks
+     * the channels the bot can actually post to without a join. Paging is
+     * bounded (10 pages) so a huge workspace can't spin the authoring turn.
+     */
+    conversationsList: async (
+      opts?: { limit?: number },
+    ): Promise<{
+      channels: Array<{ id: string; name: string; isPrivate: boolean; isMember: boolean; isArchived: boolean }>
+    }> => {
+      const pageLimit = Math.min(Math.max(opts?.limit ?? 200, 1), 1000)
+      const channels: Array<{ id: string; name: string; isPrivate: boolean; isMember: boolean; isArchived: boolean }> = []
+      let cursor: string | undefined
+      for (let page = 0; page < 10; page++) {
+        const res = await call<{
+          channels?: Array<{ id: string; name?: string; is_private?: boolean; is_member?: boolean; is_archived?: boolean }>
+          response_metadata?: { next_cursor?: string }
+        }>('conversations.list', {
+          types: 'public_channel,private_channel',
+          exclude_archived: true,
+          limit: pageLimit,
+          cursor,
+        })
+        for (const c of res.channels ?? []) {
+          channels.push({
+            id: c.id,
+            name: c.name ?? c.id,
+            isPrivate: c.is_private ?? false,
+            isMember: c.is_member ?? false,
+            isArchived: c.is_archived ?? false,
+          })
+        }
+        cursor = res.response_metadata?.next_cursor || undefined
+        if (!cursor) break
+      }
+      return { channels }
+    },
+
     /** Fetch recent messages from a channel. Requires channels:history scope. */
     conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
       call<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(

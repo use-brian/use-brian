@@ -53,6 +53,9 @@ function fakeRow(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance 
     connected: true,
     ingestionEnabled: false,
     credentialsType: 'none',
+    healthStatus: 'ok',
+    lastError: null,
+    lastCheckedAt: null,
     createdBy: 'u_1',
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -557,6 +560,51 @@ describe('[COMP:api/connector-instance-store] createConnectorInstanceStore', () 
 
       const ok = await store.delete('u_1', 'ci_1')
       expect(ok).toBe(false)
+    })
+  })
+
+  describe('[COMP:integrations/connector-health] markHealth', () => {
+    it('writes health only on a transition and returns whether it changed', async () => {
+      const store = createConnectorInstanceStore(key)
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+      const changed = await store.markHealth('ci_1', 'auth_failed', '401 Bad credentials')
+      expect(changed).toBe(true)
+      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain('UPDATE connector_instance')
+      expect(sql).toContain('health_status = $2')
+      expect(sql).toContain('IS DISTINCT FROM')
+      expect(params).toEqual(['ci_1', 'auth_failed', '401 Bad credentials'])
+    })
+
+    it('returns false when no row transitioned (idempotent success path)', async () => {
+      const store = createConnectorInstanceStore(key)
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      expect(await store.markHealth('ci_1', 'ok')).toBe(false)
+    })
+  })
+
+  describe('[COMP:integrations/connector-health] reconnect resets health', () => {
+    it('update() with fresh credentials also clears auth_failed', async () => {
+      const store = createConnectorInstanceStore(key)
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [fakeRow()], rowCount: 1 } as never)
+
+      await store.update('u_1', 'ci_1', {
+        credentials: { type: 'oauth', client_id: '', client_secret: 'pat' },
+      })
+      const [, sql] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+      expect(sql).toContain("health_status = 'ok'")
+      expect(sql).toContain('last_error = NULL')
+    })
+
+    it('updateCredentialsSystem() clears auth_failed', async () => {
+      const store = createConnectorInstanceStore(key)
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+      await store.updateCredentialsSystem('ci_1', { type: 'oauth', client_id: '', client_secret: 'pat' })
+      const [sql] = mockQuery.mock.calls[0] as [string, unknown[]]
+      expect(sql).toContain("health_status = 'ok'")
+      expect(sql).toContain('last_error = NULL')
     })
   })
 })

@@ -30,6 +30,16 @@ export type ConnectorScope = 'user' | 'workspace'
 // (renamed from 'team' in migration 110)
 export type SensitivityTier = 'public' | 'internal' | 'confidential'
 
+/**
+ * Connector liveness (migration 294). `connected` is user intent ("set up");
+ * `healthStatus` is truth ("credentials work right now"). See
+ * docs/architecture/integrations/connector-health.md.
+ *   ok           worked on last use (default)
+ *   auth_failed  a 401/403/invalid_grant at call time — needs reconnect
+ *   unknown      reserved (never exercised)
+ */
+export type ConnectorHealthStatus = 'ok' | 'auth_failed' | 'unknown'
+
 export type ConnectorInstance = {
   id: string
   scope: ConnectorScope
@@ -51,6 +61,12 @@ export type ConnectorInstance = {
    * the decrypted blob's `type`, never this column.
    */
   credentialsType: ConnectorAuthType
+  /** Liveness — 'ok' | 'auth_failed' | 'unknown' (migration 294). Distinct from `connected`. */
+  healthStatus: ConnectorHealthStatus
+  /** Last auth-failure message captured at call time (migration 294). Null when healthy. */
+  lastError: string | null
+  /** When `healthStatus` last transitioned (migration 294). Null until first flip. */
+  lastCheckedAt: Date | null
   createdBy: string | null
   createdAt: Date
   updatedAt: Date
@@ -165,6 +181,17 @@ export type ConnectorInstanceStore = {
    * correct here — a background worker holds no session user.
    */
   updateCredentialsSystem(id: string, credentials: ConnectorCredentials | OAuthCredentials): Promise<void>
+
+  /**
+   * Record connector liveness with no acting user (migration 294). Called at
+   * tool-call time: `auth_failed` on a 401/403, `ok` on a subsequent success.
+   * Writes only on an actual transition (idempotent — no write storm on the hot
+   * success path); returns true when the status changed, which is the one-shot
+   * signal downstream surfaces (owner notification) key on. RLS bypass is
+   * correct — detection runs in engine/system context with no session user.
+   * See docs/architecture/integrations/connector-health.md.
+   */
+  markHealth(id: string, status: ConnectorHealthStatus, error?: string | null): Promise<boolean>
 }
 
 // ── Column projections ─────────────────────────────────────────
@@ -178,6 +205,9 @@ const PUBLIC_COLS = `
   url, custom, config, sensitivity, connected,
   ingestion_enabled AS "ingestionEnabled",
   credentials_type AS "credentialsType",
+  health_status AS "healthStatus",
+  last_error AS "lastError",
+  last_checked_at AS "lastCheckedAt",
   created_by AS "createdBy",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
@@ -334,6 +364,9 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
         const encrypted = encryptOrNull(updates.credentials, encryptionKey)
         sets.push(`credentials = $${idx}`); values.push(encrypted); idx++
         sets.push(`credentials_type = $${idx}`); values.push(credsTypeOf(updates.credentials)); idx++
+        // A fresh credential clears any prior auth-failure (reconnect recovery).
+        sets.push(`health_status = 'ok'`)
+        sets.push(`last_error = NULL`)
       }
 
       if (sets.length === 0) {
@@ -494,10 +527,25 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
 
     async updateCredentialsSystem(id, credentials) {
       const encrypted = encryptOrNull(credentials, encryptionKey)
+      // A fresh credential clears any prior auth-failure (reconnect recovery).
       await query(
-        `UPDATE connector_instance SET credentials = $2, credentials_type = $3 WHERE id = $1`,
+        `UPDATE connector_instance
+         SET credentials = $2, credentials_type = $3, health_status = 'ok', last_error = NULL
+         WHERE id = $1`,
         [id, encrypted, credsTypeOf(credentials)],
       )
+    },
+
+    async markHealth(id, status, error = null) {
+      // `IS DISTINCT FROM` → write only on a real transition, so calling
+      // markHealth('ok') on every successful call is a cheap no-op UPDATE.
+      const result = await query(
+        `UPDATE connector_instance
+         SET health_status = $2, last_error = $3, last_checked_at = now()
+         WHERE id = $1 AND health_status IS DISTINCT FROM $2`,
+        [id, status, error],
+      )
+      return (result.rowCount ?? 0) > 0
     },
   }
 }

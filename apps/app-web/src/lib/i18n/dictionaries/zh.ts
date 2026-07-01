@@ -1392,6 +1392,10 @@ export const zh: Dictionary = {
       assistantConnectorsTab: "助理的「連接器」分頁",
       reconnectScopeTitle: "重新連接以使用新的檔案挑選器",
       reconnectScopeDesc: "我們現已採用 Google 的個別檔案共用流程。請重新連接，以挑選你希望助理讀取及編輯的特定文件。",
+      reconnectNeeded: "需要重新連接",
+      healthReconnectTitle: "此連接器已停止運作",
+      healthReconnectDesc: "其憑證已過期或被撤銷，助理無法使用。請重新連接以恢復存取。",
+      reconnectBtn: "重新連接",
       // Per-connector descriptions (keyed by connector id)
       cardDesc: {
         gcal: "管理活動、安排會議並查看你的行程。",

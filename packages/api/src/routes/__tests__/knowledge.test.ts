@@ -96,7 +96,8 @@ describe('[COMP:api/knowledge-route] GET /github/instances (usable picker)', () 
     return {
       scope: 'user', userId: 'u-1', workspaceId: null, provider: 'github', label: 'GH',
       connectedEmail: null, url: null, custom: false, config: {}, sensitivity: 'internal',
-      connected: true, ingestionEnabled: false, credentialsType: 'oauth', createdBy: 'u-1',
+      connected: true, ingestionEnabled: false, credentialsType: 'oauth',
+      healthStatus: 'ok', lastError: null, lastCheckedAt: null, createdBy: 'u-1',
       createdAt: new Date(0), updatedAt: new Date(0), ...over,
     }
   }
