@@ -92,6 +92,7 @@ import { createDbCommentThreadStore } from '../db/comment-thread-store.js'
 import { createRefineActiveThemeTool } from './theme-tools.js'
 import { createDbCrmStore } from '../db/crm-store.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
+import { publishPageLifecycle } from '../page-event-fanout.js'
 import { createDbTaskStore } from '../db/tasks-store.js'
 import { createDbWorkflowRunStore } from '../db/workflow-store.js'
 import { createWorkspaceStore } from '../db/workspace-store.js'
@@ -311,9 +312,20 @@ export async function injectDocTools(
   const docEntityStore =
     options.docEntityStore ??
     (cachedDocEntityStore ??= createDbDocEntityStore())
+  // The cached fallback MUST carry the page-lifecycle hook: the interactive
+  // chat route injects doc tools without supplying a store, so an assistant's
+  // createSubPage / patchPage / renderPage write reaches the DB through this
+  // singleton. Without the hook those `system` writes emit no page event and a
+  // `page`-source workflow never fires (the empty PageWorkflowRuns chip — most
+  // visible in single-player OSS where the assistant authors most pages). The
+  // hook is a no-op until `bootOpenApi` binds the dispatcher and best-effort
+  // thereafter, so it is safe on every fallback consumer. See
+  // docs/architecture/features/workflow.md → "Page event source".
   const savedViewStore =
     options.savedViewStore ??
-    (cachedSavedViewStore ??= createDbSavedViewStore())
+    (cachedSavedViewStore ??= createDbSavedViewStore({
+      onPageLifecycle: publishPageLifecycle,
+    }))
   const taskStore =
     options.taskStore ?? (cachedTaskStore ??= createDbTaskStore())
   const crmStore = options.crmStore ?? (cachedCrmStore ??= createDbCrmStore())
