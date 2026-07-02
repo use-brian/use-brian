@@ -21,13 +21,28 @@ vi.mock('../../db/client.js', () => ({
 // happy-path test exercises the route wiring without a DB / live stream.
 vi.mock('../../db/tasks.js', () => ({ updateTask: vi.fn() }))
 vi.mock('../../brain-stream/notify.js', () => ({ notifyBrainInboxChange: vi.fn() }))
+// Null-assistant memory adjust runs inline (no redirect) via the memory
+// store + verification store; stub them so the route wiring is exercised
+// without a DB.
+vi.mock('../../db/memories.js', () => ({
+  updateMemory: vi.fn(),
+  getMemoryByIdSystem: vi.fn(),
+  markVerifiedDirect: vi.fn(),
+}))
+vi.mock('../../db/memory-verifications-store.js', () => ({ recordVerification: vi.fn() }))
 
 import { brainInboxRoutes } from '../brain-inbox.js'
 import { query } from '../../db/client.js'
 import { updateTask } from '../../db/tasks.js'
+import { updateMemory, getMemoryByIdSystem, markVerifiedDirect } from '../../db/memories.js'
+import { recordVerification } from '../../db/memory-verifications-store.js'
 
 const mockQuery = vi.mocked(query)
 const mockUpdateTask = vi.mocked(updateTask)
+const mockUpdateMemory = vi.mocked(updateMemory)
+const mockGetMemoryByIdSystem = vi.mocked(getMemoryByIdSystem)
+const mockMarkVerifiedDirect = vi.mocked(markVerifiedDirect)
+const mockRecordVerification = vi.mocked(recordVerification)
 
 const WS = 'e1799b0e-9f64-46d5-8ed8-132a2194943d'
 const ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f543'
@@ -238,6 +253,86 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
       .send({ status: 'done' })
     expect(res.status).toBe(403)
     expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
+  // ── Memory adjust ────────────────────────────────────────────────
+  const ASSISTANT = 'a1b2c3d4-0000-4000-8000-000000000001'
+  const NEW_ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f999'
+
+  it('memory adjust 308-redirects to the per-assistant route when the memory has an owning assistant', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: ASSISTANT }] } as never)
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
+      .send({ summary: 'new' })
+    expect(res.status).toBe(308)
+    expect(res.headers.location).toBe(`/api/assistants/${ASSISTANT}/memories/${ROW}/adjust`)
+    // Delegated — the inline path must not run.
+    expect(mockUpdateMemory).not.toHaveBeenCalled()
+  })
+
+  it('memory adjust handles a null-assistant (workspace-shared) memory inline, no redirect', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
+    mockGetMemoryByIdSystem.mockResolvedValueOnce({
+      id: ROW,
+      assistantId: null,
+      workspaceId: WS,
+      scope: 'shared',
+      sensitivity: 'confidential',
+      summary: 'old',
+      detail: null,
+    } as never)
+    mockUpdateMemory.mockResolvedValueOnce({
+      id: NEW_ROW,
+      workspaceId: WS,
+      scope: 'shared',
+      sensitivity: 'confidential',
+      summary: 'new',
+      detail: null,
+    } as never)
+    mockRecordVerification.mockResolvedValue({} as never)
+    mockMarkVerifiedDirect.mockResolvedValueOnce({ id: NEW_ROW, summary: 'new' } as never)
+
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
+      .send({ summary: 'new' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.memory).toMatchObject({ id: NEW_ROW })
+    // The redirect assistantId must never be built from null.
+    expect(res.headers.location).toBeUndefined()
+    expect(mockUpdateMemory).toHaveBeenCalledWith(ROW, expect.objectContaining({ summary: 'new' }))
+    // Summary change writes an edit_summary verification, and the new row is stamped.
+    expect(mockRecordVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'edit_summary', verifiedBy: 'u_caller' }),
+    )
+    expect(mockMarkVerifiedDirect).toHaveBeenCalledWith(NEW_ROW, 'u_caller')
+  })
+
+  it('null-assistant memory adjust returns 404 when the memory is in another workspace', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
+    mockGetMemoryByIdSystem.mockResolvedValueOnce({
+      id: ROW,
+      assistantId: null,
+      workspaceId: 'other-ws',
+      scope: 'shared',
+      sensitivity: 'internal',
+      summary: 'old',
+      detail: null,
+    } as never)
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
+      .send({ summary: 'new' })
+    expect(res.status).toBe(404)
+    expect(mockUpdateMemory).not.toHaveBeenCalled()
+  })
+
+  it('null-assistant memory adjust requires at least one field', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ assistantId: null }] } as never)
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/adjust`)
+      .send({})
+    expect(res.status).toBe(400)
+    expect(mockGetMemoryByIdSystem).not.toHaveBeenCalled()
   })
 })
 
