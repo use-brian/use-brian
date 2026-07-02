@@ -164,6 +164,20 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     // the generic directory-add path would mint a junk user-scoped row).
     single_instance: true,
   },
+  {
+    id: 's3',
+    name: 'S3-Compatible Storage',
+    description: 'Store your workspace file bytes in your own S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, Backblaze B2, and more), under your own keys. Your files, your bucket, revocable by you.',
+    category: 'official',
+    // Access-key/secret-key paste — same api_key shape as gcs (a pasted secret
+    // credential). The connect UI is a dedicated form (bucket, region,
+    // endpoint, access key, secret key), not the generic PAT input.
+    // See docs/plans/byo-s3-storage.md.
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['storage', 's3', 'workspace'],
+  },
 ]
 
 // ── Built-in workspace primitives ─────────────────────────────

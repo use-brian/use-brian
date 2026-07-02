@@ -36,13 +36,16 @@ export type BuiltinToolDefaultPolicy = 'allow' | 'ask'
  * `Authorization: Bearer <token>`; `custom_header` sends one named header.
  *
  * `gcs` is a first-party storage credential — a customer service-account key
- * for bring-your-own GCS storage. It is NOT an MCP outbound scheme (it never
- * appears in the custom-connector auth dropdown, which lists an explicit
- * subset) and derives no outbound header. See
- * docs/architecture/integrations/mcp.md → "Custom connector auth" and
- * docs/plans/byo-google-storage.md.
+ * for bring-your-own GCS storage. `s3` is its S3-compatible sibling — a
+ * customer access-key/secret-key pair (plus bucket/region/endpoint) for
+ * bring-your-own S3 storage (AWS S3, MinIO, Cloudflare R2, Backblaze B2, …).
+ * Neither is an MCP outbound scheme (they never appear in the custom-connector
+ * auth dropdown, which lists an explicit subset) and neither derives an
+ * outbound header. See docs/architecture/integrations/mcp.md → "Custom
+ * connector auth", docs/plans/byo-google-storage.md, and
+ * docs/plans/byo-s3-storage.md.
  */
-export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs'] as const
+export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs', 's3'] as const
 export type ConnectorAuthType = (typeof CONNECTOR_AUTH_TYPES)[number]
 
 export type BuiltinConnectorTool = {
