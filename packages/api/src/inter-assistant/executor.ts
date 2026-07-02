@@ -758,7 +758,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // the modest default. Absent → ASSISTANT_CALL_DEFAULT_BUDGET (5 turns,
     // 30s) — unchanged from before depth config existed.
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
+    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
+    // partialOutput (operator-facing, never delivered). The returned consult
+    // text is assembled from `turnTexts` instead: deltas re-stream on
+    // empty-turn retries and include text the turn-boundary leak sanitiser
+    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
+    // GitHub activity" ×3 triplication, run 26d50608). See
+    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
     let responseText = ''
+    // Finalised per-turn text (post leak-sanitiser), one entry per turn that
+    // produced visible text — the source of the returned consult text.
+    const turnTexts: string[] = []
     const abortController = new AbortController()
     // A scheduled-origin step may suspend up to 5 min on a tool confirmation;
     // an ordinary A2A consult must not hang. Give the former headroom past
@@ -904,7 +914,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         if (result) {
           synthesisHandled = true
           // The page IS the deliverable; the step's text output is a short receipt.
-          responseText = 'Filled the blueprint into the anchored page from the gathered research.'
+          turnTexts.push('Filled the blueprint into the anchored page from the gathered research.')
         }
       } catch (err) {
         console.error(
@@ -968,6 +978,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })) {
         if (event.type === 'text_delta') {
           responseText += event.text
+        } else if (event.type === 'assistant_turn') {
+          // Finalised turn content — a leak-suppressed turn has its text
+          // blocks stripped and contributes nothing; a retried turn
+          // contributes only the attempt that landed.
+          const turnText = event.response.content
+            .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+            .map((b) => b.text)
+            .join('')
+            .trim()
+          if (turnText.length > 0) turnTexts.push(turnText)
         } else if (event.type === 'tool_confirmation_required') {
           // A scheduled-origin step's inner query loop hit an `ask`-policy
           // MCP tool. Park the confirmation: register the resolver so the
@@ -1090,6 +1110,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    return responseText.trim() || 'The assistant did not produce a response.'
+    return turnTexts.join('\n').trim() || 'The assistant did not produce a response.'
   }
 }

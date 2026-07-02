@@ -1426,9 +1426,16 @@ export function looksLikeInstructionLeak(text: string): boolean {
     return true
   }
   // First-sentence structural check: imperatives + meta-talk openers.
-  // Real summaries don't start with "No X." / "Don't Y." / "Just Z."
+  // Deliberately NO `no\b` anchor: "No X happened" is the most common
+  // legitimate opener for a negative status report ("No recorded GitHub
+  // activity in the last 24 hours.", "No meetings today."), and a workflow
+  // prompt that mandates a verbatim fallback sentence phrases it exactly that
+  // way — the 2026-07-02 triplication incident (run 26d50608) was this anchor
+  // suppressing a mandated fallback, EMPTY_RETRY re-prompting twice, and the
+  // callee executor concatenating all three streams. The genuine "No …" leaks
+  // ("No further tool calls", "No sycophancy") are covered by SUBSTRINGS above.
   const firstSentence = text.trim().slice(0, 120).split(/[.!?\n]/)[0]?.trim() ?? ''
-  if (/^(no\b|do not\b|don't\b|never\b|just a\b|always\b|reply with\b|tell them\b|produce a\b|write a\b)/i.test(firstSentence)) {
+  if (/^(do not\b|don't\b|never\b|just a\b|always\b|reply with\b|tell them\b|produce a\b|write a\b)/i.test(firstSentence)) {
     return true
   }
   // Plan-tail meta-narration: short text that talks ABOUT the user in
