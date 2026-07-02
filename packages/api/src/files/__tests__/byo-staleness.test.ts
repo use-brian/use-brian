@@ -22,7 +22,10 @@ function makeDeps(instances: ConnectorInstance[]) {
   const retractByStorageBucketSystem = vi.fn(async () => 3)
   return {
     connectorInstanceStore: {
-      listByProviderSystem: vi.fn(async () => instances),
+      // Provider-aware, mirroring the real store: return only the instances
+      // whose `provider` matches, so the sweep's per-provider scan doesn't
+      // double-count.
+      listByProviderSystem: vi.fn(async (provider: string) => instances.filter((i) => i.provider === provider)),
       updateCredentialsSystem,
       setConfigSystem,
     },
@@ -79,5 +82,26 @@ describe('[COMP:files/byo-staleness] sweepStaleByoBindings', () => {
     const res = await sweepStaleByoBindings({ ...deps, graceMs: 24 * 60 * 60 * 1000 }) // 1-day grace
     expect(res.swept).toBe(1)
     expect(BYO_DISCONNECT_GRACE_MS).toBeGreaterThan(0)
+  })
+
+  it('reclaims a stale s3 binding the same way as gcs', async () => {
+    const deps = makeDeps([
+      inst({ id: 's3old', provider: 's3', label: 'S3', config: { bucket: 's3-bucket', disconnectedAt: daysAgo(31) } }),
+    ])
+    const res = await sweepStaleByoBindings(deps)
+    expect(res.swept).toBe(1)
+    expect(res.retractedFiles).toBe(3)
+    expect(deps.retractByStorageBucketSystem).toHaveBeenCalledWith('ws_1', 's3-bucket', BYO_STALE_RETRACT_REASON)
+    expect(deps.setConfigSystem).toHaveBeenCalledWith('s3old', { staleSwept: true })
+  })
+
+  it('sweeps gcs and s3 bindings together in one run', async () => {
+    const deps = makeDeps([
+      inst({ id: 'gcsold', provider: 'gcs', config: { bucket: 'gcs-bucket', disconnectedAt: daysAgo(31) } }),
+      inst({ id: 's3old', provider: 's3', config: { bucket: 's3-bucket', disconnectedAt: daysAgo(31) } }),
+    ])
+    const res = await sweepStaleByoBindings(deps)
+    expect(res.scanned).toBe(2)
+    expect(res.swept).toBe(2)
   })
 })

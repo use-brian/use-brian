@@ -1,5 +1,5 @@
 /**
- * Bring-your-own GCS storage — staleness garbage collection.
+ * Bring-your-own storage — staleness garbage collection (GCS and S3).
  *
  * Disconnecting BYO storage drops the customer key entirely (zero standing
  * access), but KEEPS the `workspace_files` index rows so a reconnect (which
@@ -11,10 +11,12 @@
  * grace window with no reconnect: it retracts the dormant `workspace_files`
  * rows whose bytes lived in that bucket (so the brain stops surfacing dead
  * references) and marks the binding swept. The bucket is read from the
- * binding's `config` (non-secret) since the key is already gone.
+ * binding's `config` (non-secret) since the key is already gone. Both storage
+ * backends (`gcs` and `s3`) share the identical config shape, so one sweep
+ * handles both.
  *
- * See docs/architecture/features/files.md → "Bring-your-own storage" and
- * docs/plans/byo-google-storage.md.
+ * See docs/architecture/features/files.md → "Bring-your-own storage",
+ * docs/plans/byo-google-storage.md, and docs/plans/byo-s3-storage.md.
  */
 
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
@@ -39,7 +41,7 @@ export type ByoStalenessSweepDeps = {
 }
 
 export type ByoStalenessSweepResult = {
-  /** Disconnected, not-yet-swept gcs bindings with a parseable `disconnectedAt`. */
+  /** Disconnected, not-yet-swept gcs/s3 bindings with a parseable `disconnectedAt`. */
   scanned: number
   /** Bindings reclaimed this run (past grace). */
   swept: number
@@ -47,9 +49,14 @@ export type ByoStalenessSweepResult = {
   retractedFiles: number
 }
 
+/** BYO storage backends whose disconnected bindings this sweep reclaims. */
+const BYO_STORAGE_PROVIDERS = ['gcs', 's3'] as const
+
 export async function sweepStaleByoBindings(deps: ByoStalenessSweepDeps): Promise<ByoStalenessSweepResult> {
   const grace = deps.graceMs ?? BYO_DISCONNECT_GRACE_MS
-  const instances = await deps.connectorInstanceStore.listByProviderSystem('gcs')
+  const instances = (
+    await Promise.all(BYO_STORAGE_PROVIDERS.map((p) => deps.connectorInstanceStore.listByProviderSystem(p)))
+  ).flat()
   const result: ByoStalenessSweepResult = { scanned: 0, swept: 0, retractedFiles: 0 }
 
   for (const inst of instances) {
@@ -76,9 +83,9 @@ export async function sweepStaleByoBindings(deps: ByoStalenessSweepDeps): Promis
         BYO_STALE_RETRACT_REASON,
       )
       result.retractedFiles += n
-      deps.log?.(`[byo-staleness] reclaimed stale gcs binding ${inst.id} (ws ${inst.workspaceId}); retracted ${n} file(s)`)
+      deps.log?.(`[byo-staleness] reclaimed stale ${inst.provider} binding ${inst.id} (ws ${inst.workspaceId}); retracted ${n} file(s)`)
     } else {
-      deps.log?.(`[byo-staleness] reclaimed stale gcs binding ${inst.id} (no bucket/workspace to retract)`)
+      deps.log?.(`[byo-staleness] reclaimed stale ${inst.provider} binding ${inst.id} (no bucket/workspace to retract)`)
     }
 
     // Mark swept so subsequent runs skip it (idempotent reclaim).
