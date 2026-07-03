@@ -1442,6 +1442,8 @@ export const zh: Dictionary = {
       actorIdentityTitle: "傳送登入使用者身分",
       actorIdentityDesc: "在每次請求時將登入使用者的身分（網頁為電子郵件、WhatsApp 為電話號碼、Telegram 為帳號代稱、Slack 為使用者 ID）傳送給此伺服器，使其可代表該使用者進行操作。預設為關閉。",
       actorIdentityNoAuthWarning: "此連接器尚未設定驗證，伺服器無法確認身分是否來自 sidanclaw。在用於登入之前，請先於上方設定 Bearer 權杖或自訂標頭。",
+      mediaTokenTitle: "允許擷取此使用者的媒體",
+      mediaTokenDesc: "讓此伺服器可擷取登入使用者最近在頻道傳送的語音訊息或影片以進行處理。每次請求都會附帶僅限此使用者、短時效的權杖，因此伺服器無法存取其他使用者的媒體。預設為關閉。",
     },
     skills: {
       title: "技能",

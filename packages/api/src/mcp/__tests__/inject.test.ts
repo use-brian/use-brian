@@ -399,6 +399,58 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9201/mcp', 'No-Actor MCP', {})
   })
 
+  // Opt-in media capability: the connector with config.sendMediaToken gets the
+  // reserved X-Sidanclaw-Media-Token header, gated INDEPENDENTLY of actor identity.
+  it('injects X-Sidanclaw-Media-Token for an opted-in connector', async () => {
+    discoverMcpServer.mockResolvedValueOnce({ name: 'Media MCP', url: 'http://localhost:9210/mcp', tools: [] })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-media-1', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-media-1', connectorId: 'cx-media-1', name: 'Media MCP', connected: true,
+            url: 'http://localhost:9210/mcp', custom: true,
+            config: { sendMediaToken: true }, // media opt-in, actor identity NOT opted in
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-06T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      actorIdentity: { channel: 'whatsapp', id: '+15551234567', email: null, userId: 'u-media-1', mediaToken: 'tok.media.sig' },
+    })
+    // Media token present; actor headers absent (that connector opted out of identity).
+    expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9210/mcp', 'Media MCP', {
+      'X-Sidanclaw-Media-Token': 'tok.media.sig',
+    })
+  })
+
+  it('does NOT inject X-Sidanclaw-Media-Token for a connector that did not opt in', async () => {
+    discoverMcpServer.mockResolvedValueOnce({ name: 'No-Media MCP', url: 'http://localhost:9211/mcp', tools: [] })
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-media-2', assistantId: 'a-1', tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue([
+          {
+            id: 'ci-media-2', connectorId: 'cx-media-2', name: 'No-Media MCP', connected: true,
+            url: 'http://localhost:9211/mcp', custom: true,
+            config: { sendActorIdentity: true }, // identity opted in, media NOT
+            createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-06-07T00:00:00Z'),
+          },
+        ]),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      actorIdentity: { channel: 'whatsapp', id: '+15551234567', email: null, userId: 'u-media-2', mediaToken: 'tok.media.sig' },
+    })
+    // Actor headers present (identity opt-in), but NO media token.
+    expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9211/mcp', 'No-Media MCP', {
+      'X-Sidanclaw-Actor-Channel': 'whatsapp',
+      'X-Sidanclaw-User-Id': 'u-media-2',
+      'X-Sidanclaw-Actor-Id': '+15551234567',
+    })
+  })
+
   it('discovers with empty headers when no instance store is wired (legacy parity)', async () => {
     discoverMcpServer.mockResolvedValueOnce({ name: 'Open MCP', url: 'http://localhost:9001/mcp', tools: [] })
     const tools = new Map()

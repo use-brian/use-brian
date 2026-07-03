@@ -373,9 +373,11 @@ export async function injectMcpTools(params: {
     preflightHeaders: Record<string, string>
     /** Opt-in: send the acting user's `X-Sidanclaw-Actor-*` identity to this connector. */
     sendActorIdentity: boolean
+    /** Opt-in: send the acting user's `X-Sidanclaw-Media-Token` capability to this connector. */
+    sendMediaToken: boolean
   }> = connectors
     .filter((c) => c.connected && c.url)
-    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true }))
+    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true }))
 
   // Team-native custom MCP instances live as separate `connector_instance`
   // rows scoped to the team. The `provider` column is a UUID for custom
@@ -395,6 +397,7 @@ export async function injectMcpTools(params: {
           updatedAt: inst.updatedAt,
           preflightHeaders: preflightHeadersToRecord(inst.config),
           sendActorIdentity: inst.config?.sendActorIdentity === true,
+          sendMediaToken: inst.config?.sendMediaToken === true,
         })
       }
     } catch (err) {
@@ -457,6 +460,12 @@ export async function injectMcpTools(params: {
   // constant for the turn). Only attached to connectors that opted in, and
   // merged LAST so neither user config nor auth can shadow the assertion.
   const actorHeaders = actorIdentity ? actorIdentityHeaders(actorIdentity) : null
+  // Media capability token — a separate reserved header gated on its OWN opt-in
+  // (`sendMediaToken`), independent of `sendActorIdentity`. It is a bearer
+  // capability (possession fetches the user's latest recording), so it only
+  // attaches to connectors the user explicitly granted media access.
+  const mediaTokenHeader =
+    actorIdentity?.mediaToken ? { 'X-Sidanclaw-Media-Token': actorIdentity.mediaToken } : null
   active.forEach((c, i) => {
     // Layer the connector's static preflight headers (config) over its auth
     // headers (credentials) — preflight wins on a name clash, both validated
@@ -466,6 +475,9 @@ export async function injectMcpTools(params: {
     let merged = mergeValidatedHeaders(resolvedHeaders[i], c.preflightHeaders)
     if (actorHeaders && c.sendActorIdentity) {
       merged = mergeValidatedHeaders(merged, actorHeaders)
+    }
+    if (mediaTokenHeader && c.sendMediaToken) {
+      merged = mergeValidatedHeaders(merged, mediaTokenHeader)
     }
     registerAuthHeaders(c.url, merged ?? {})
   })
