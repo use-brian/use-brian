@@ -48,6 +48,14 @@ export type BrainEpisodeInput = {
    * default ref). The closed impl persists it verbatim.
    */
   sourceRef?: Record<string, unknown>
+  /**
+   * The Episode's `content_ref` payload (JSONB). File-upload ingest passes
+   * `{ source_kind:'file_upload', file_id, text: <head> }` so the fact→passage
+   * escalation seam (D5, large-content-artifacts.md) knows the derived facts
+   * point at a stored artifact. Omitted for the generic text ingest path (the
+   * ingestor falls back to a `manual_paste` inline ref). Persisted verbatim.
+   */
+  contentRef?: Record<string, unknown>
 }
 
 /** Ingest an arbitrary text Episode (e.g. an MCP `ingestToBrain` call). */

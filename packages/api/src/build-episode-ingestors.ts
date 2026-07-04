@@ -36,6 +36,10 @@ import type { BrainEpisodeIngestor, ChatEpisodeIngestor } from './ingest-port.js
 const EXTRACTION_MODEL = 'gemini-3-flash-standard'
 const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
 
+/** Head of the raw text stored inline on a generic Episode's `content_ref`
+ *  (matches the closed impl's manual-paste budget). */
+const CONTENT_REF_MAX_CHARS = 16_000
+
 /** Generic text ingest (brain-MCP / file) lands as a manual paste; the doc-page
  *  runner overrides this with `'doc_page'` via the input's `sourceKind`. */
 const DEFAULT_BRAIN_SOURCE_KIND: SourceKind = 'manual_paste'
@@ -95,6 +99,13 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByAssistantId: input.assistantId,
       sensitivity,
       summaryText: input.sourceLabel ?? null,
+      // File-upload ingest points content_ref at the stored artifact
+      // ({source_kind:'file_upload', file_id}); generic text falls back to an
+      // inline manual-paste peek, matching the closed impl (parity across builds).
+      contentRef: input.contentRef ?? {
+        kind: 'manual_paste',
+        text: input.content.slice(0, CONTENT_REF_MAX_CHARS),
+      },
     })
 
     // 2. Run Pipeline B over the persisted episode + resolved content.

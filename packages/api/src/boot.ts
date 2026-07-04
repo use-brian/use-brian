@@ -198,6 +198,9 @@ import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
+import { createArtifactPromoter } from './files/artifact-promote.js'
+import { createFileIngestWorker } from './files/file-ingest-worker.js'
+import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
 import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
@@ -2091,8 +2094,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Brain-inspection tools need the closed InspectionStore; open default = none.
   const brainInspectionTools = ports.inspectionTools
 
+  // ── Silent artifact promotion (large-content-artifacts §2.3/§3.1) ──
+  // One promoter instance shared by /upload, the web-chat paste intercept,
+  // and (via the platform routes) the channel paste intercept. Pipeline B
+  // decomposition rides file_ingest_jobs (worker below); a files-less deploy
+  // gets null and every caller degrades to legacy behavior.
+  const artifactPromoter = filesApi
+    ? createArtifactPromoter({
+        filesApi,
+        enqueue: (job) => enqueueFileIngestJob(job),
+      })
+    : null
+
   app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
     provider,
+    artifactPromoter,
     checkCreditBudget: ports.checkCreditBudget,
     publishSessionEvent,
     isPlaceholderTitle: ports.isPlaceholderTitle,
@@ -2229,7 +2245,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/feedback', optionalAuth(env.JWT_SECRET), feedbackRoutes())
 
-  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never))
+  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never, artifactPromoter))
   if (filesApi && filesBlobClient) {
     app.use('/api/doc-files', requireAuth(env.JWT_SECRET), docFilesRoutes({
       filesApi,
@@ -3123,6 +3139,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) embeddingWorker.start()
 
+  // ── File-ingest worker (large-content-artifacts §Phase 2.2) ──
+  // Drains file_ingest_jobs: readBytes → parse → chunk (idempotent) →
+  // Pipeline B (when the platform passed an episode-ingestor port; OSS
+  // without one runs store-only) → stamp source_episode_id + indexing status.
+  // Same single-service model as every worker: runs only where runWorkers is
+  // set (prod: sidanclaw-api-workers).
+  const fileIngestWorker = filesApi
+    ? createFileIngestWorker({
+        claim: claimNextFileIngestJob,
+        markDone: markFileIngestJobDone,
+        markFailed: markFileIngestJobFailed,
+        filesApi,
+        ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
+      })
+    : null
+  if (runWorkers && fileIngestWorker) fileIngestWorker.start()
+
   // ── file_cache reaper ──
   // Cached files are read with an `expires_at > now()` filter, so a lapsed row
   // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
@@ -3310,6 +3343,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pollWorker.stop()
     knowledgeSyncWorker.stop()
     stuckSessionSweeper.stop()
+    fileIngestWorker?.stop()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
