@@ -6,6 +6,7 @@ import { getSelfEntityId } from '../db/memories.js'
 import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { renderArtifactManifest } from '../files/artifact-manifest.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
@@ -1720,6 +1721,24 @@ export function chatRoutes(options: WebChatOptions): Router {
                 transcription
                   ? `[voice] ${transcription.text}`
                   : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[voice note — transcription unavailable]</attached_file>`,
+              )
+            } else if (file.artifactFileId) {
+              // The upload was silently promoted to a durable artifact
+              // (large-content-artifacts §Phase 2.3): the turn carries a
+              // compact manifest — the artifact id + searchFileContent hints —
+              // never the raw content. Persisted in session_messages, so the
+              // id outlives the file_cache TTL.
+              textParts.push(
+                renderArtifactManifest({
+                  fileId: file.artifactFileId,
+                  fileName: file.fileName,
+                  mime: file.mimeType,
+                  sizeBytes: file.sizeBytes,
+                  charLength: file.content.length,
+                  ...(file.artifactSegmentCount != null ? { segmentCount: file.artifactSegmentCount } : {}),
+                  summary: file.summary,
+                  status: file.artifactSegmentCount && file.artifactSegmentCount > 0 ? 'ready' : 'pending',
+                }),
               )
             } else {
               textParts.push(

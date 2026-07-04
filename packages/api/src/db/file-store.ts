@@ -2,9 +2,9 @@ import type { AccessContext, FileStore } from '@sidanclaw/core'
 import { query } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 
-const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes"`
+const SELECT = `id, session_id as "sessionId", file_name as "fileName", mime_type as "mimeType", content, summary, size_bytes as "sizeBytes", artifact_file_id as "artifactFileId", artifact_segment_count as "artifactSegmentCount"`
 
-type Row = { id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number }
+type Row = { id: string; sessionId: string; fileName: string; mimeType: string; content: string; summary: string | null; sizeBytes: number; artifactFileId: string | null; artifactSegmentCount: number | null }
 
 export function createDbFileStore(): FileStore {
   return {
@@ -75,6 +75,14 @@ export function createDbFileStore(): FileStore {
     async sweepExpired() {
       const result = await query(`DELETE FROM file_cache WHERE expires_at <= now()`)
       return result.rowCount ?? 0
+    },
+
+    // Stamp the durable-artifact link after silent promotion (migration 299).
+    async linkArtifact(id, artifactFileId, segmentCount) {
+      await query(
+        `UPDATE file_cache SET artifact_file_id = $2, artifact_segment_count = $3 WHERE id = $1`,
+        [id, artifactFileId, segmentCount],
+      )
     },
   }
 }

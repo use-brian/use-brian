@@ -20,6 +20,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
+import { renderArtifactManifest } from '../files/artifact-manifest.js'
 
 // ── User resolution ────────────────────────────────────────────
 
@@ -666,16 +667,28 @@ export type FileContentBlocksResult = {
  *
  * - Images + PDFs → multimodal `image` content block (Gemini `inlineData`)
  * - Text/JSON/CSV (small) → inlined as <attached_file> text
- * - Large files → cached in fileStore (if provided) with readFileContent reference
+ * - Large files → durable artifact manifest when `promoteArtifact` is wired
+ *   (large-content-artifacts §Phase 2.3); else cached in fileStore (if
+ *   provided) with a readFileContent reference; else the 20K truncation
+ *   fallback.
  *
  * @param files - Array of file inputs to process
  * @param fileStore - Optional file store for caching large files
  * @param sessionId - Required if fileStore is provided (for caching)
+ * @param promoteArtifact - Optional workspace-bound promotion closure: a large
+ *   text-like file is written to workspace_files + chunked, and the turn
+ *   carries the artifact manifest instead of losing everything past 20K chars.
  */
 export async function buildFileContentBlocks(
   files: FileInput[],
   fileStore?: FileStore,
   sessionId?: string,
+  promoteArtifact?: (input: {
+    fileName: string
+    mime: string
+    bytes: Buffer
+    parsedText: string
+  }) => Promise<{ fileId: string; path: string; status: 'ready' | 'pending'; segmentCount: number; truncated: boolean } | null>,
 ): Promise<FileContentBlocksResult> {
   const contentBlocks: ContentBlock[] = []
   const textParts: string[] = []
@@ -705,6 +718,47 @@ export async function buildFileContentBlocks(
         textParts.push(
           `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${text}\n</attached_file>`,
         )
+      } else if (promoteArtifact) {
+        // Durable artifact path (large-content-artifacts §Phase 2.3): the file
+        // is written to workspace_files + chunked into file_segments, and the
+        // turn carries a manifest. Falls through to the legacy paths on a
+        // promotion failure — never drops the attachment.
+        const promoted = await promoteArtifact({
+          fileName: file.fileName,
+          mime: file.mimeType,
+          bytes: file.buffer,
+          parsedText: text,
+        }).catch(() => null)
+        if (promoted) {
+          textParts.push(
+            renderArtifactManifest({
+              fileId: promoted.fileId,
+              fileName: file.fileName,
+              mime: file.mimeType,
+              sizeBytes: file.buffer.length,
+              charLength: text.length,
+              segmentCount: promoted.segmentCount,
+              status: promoted.status,
+              truncated: promoted.truncated,
+            }),
+          )
+        } else if (fileStore && sessionId) {
+          const cached = await fileStore.cache({
+            sessionId,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            content: text,
+            sizeBytes: file.buffer.length,
+          })
+          textParts.push(
+            `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
+          )
+        } else {
+          const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+          textParts.push(
+            `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
+          )
+        }
       } else if (fileStore && sessionId) {
         // Cache large files for on-demand retrieval via readFileContent tool
         const cached = await fileStore.cache({

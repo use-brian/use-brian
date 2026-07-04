@@ -12,6 +12,14 @@ export type CachedFile = {
   content: string
   summary: string | null
   sizeBytes: number
+  /**
+   * Set when the upload was silently promoted to a durable workspace_files
+   * artifact (large-content-artifacts §Phase 2.3): the artifact id the chat
+   * attach seam renders a manifest for, and its indexed section count.
+   * Null/undefined on legacy rows, small files, and inline media.
+   */
+  artifactFileId?: string | null
+  artifactSegmentCount?: number | null
 }
 
 export type FileStore = {
@@ -54,4 +62,11 @@ export type FileStore = {
    * runs it (on a jittered interval from boot); in-memory/test stores omit it.
    */
   sweepExpired?(): Promise<number>
+
+  /**
+   * Stamp the durable-artifact link on a cached upload after silent promotion
+   * (large-content-artifacts §Phase 2.3). Optional: only the DB store carries
+   * the columns (migration 299).
+   */
+  linkArtifact?(id: string, artifactFileId: string, segmentCount: number): Promise<void>
 }

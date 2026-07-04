@@ -25,9 +25,9 @@ vi.mock('@sidanclaw/core', async () => {
 })
 
 import { fileRoutes } from '../files.js'
-import { findOrCreateUser, getDefaultAssistant, findUserById } from '../../db/users.js'
+import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById } from '../../db/users.js'
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
-import { parseFileContent } from '@sidanclaw/core'
+import { parseFileContent, shouldInline } from '@sidanclaw/core'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
 const mockGetDefaultAssistant = vi.mocked(getDefaultAssistant)
@@ -161,5 +161,116 @@ describe('[COMP:api/files-route] File routes', () => {
     const res = await request(app).get('/api/files/f_img/preview')
     expect(res.status).toBe(200)
     expect(res.headers['content-type']).toMatch(/image\/png/)
+  })
+})
+
+// ── large-content-artifacts §Phase 2.3: silent upload promotion ──────
+describe('[COMP:api/files-upload-promotion] /upload silent artifact promotion', () => {
+  const fileStore = {
+    cache: vi.fn(),
+    get: vi.fn(),
+    getBySession: vi.fn(),
+    linkArtifact: vi.fn(),
+  }
+  const mockShouldInline = vi.mocked(shouldInline)
+
+  function arm(workspaceId: string | null = 'ws-1') {
+    mockFindOrCreateUser.mockResolvedValue({ user: { id: 'u_1' }, isNew: false } as never)
+    mockGetDefaultAssistant.mockResolvedValue({ id: 'a_1', workspaceId } as never)
+    mockFindOrCreateSession.mockResolvedValue({ id: 's_1', assistantId: 'a_1' } as never)
+    vi.mocked(findAssistantById).mockResolvedValue({ id: 'a_1', workspaceId } as never)
+    fileStore.cache.mockResolvedValue({ id: 'f_1', fileName: 'big.md', mimeType: 'text/markdown', sizeBytes: 90000 })
+    fileStore.linkArtifact.mockResolvedValue(undefined)
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks()
+  })
+
+  it('promotes a large text file: promoter called, cache linked, response carries artifact', async () => {
+    arm()
+    mockParseFileContent.mockResolvedValue({ text: 'X'.repeat(90000), summary: 'big doc' })
+    mockShouldInline.mockReturnValue(false)
+    const promoter = vi.fn().mockResolvedValue({
+      fileId: 'wf-9', path: '/uploads/chat/x-big.md', status: 'ready', segmentCount: 42, truncated: false,
+    })
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter))
+
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('X'.repeat(90000)), { filename: 'big.md', contentType: 'text/markdown' })
+
+    expect(res.status).toBe(200)
+    expect(promoter).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fileName: 'big.md',
+        mime: 'text/markdown',
+        workspaceId: 'ws-1',
+        actingUserId: 'u_1',
+        storeOnly: false,
+      }),
+    )
+    expect(fileStore.linkArtifact).toHaveBeenCalledWith('f_1', 'wf-9', 42)
+    expect(res.body.files[0].artifact).toEqual({ fileId: 'wf-9', path: '/uploads/chat/x-big.md', indexing: 'ready' })
+  })
+
+  it('small files are NOT promoted', async () => {
+    arm()
+    mockParseFileContent.mockResolvedValue({ text: 'short', summary: 's' })
+    mockShouldInline.mockReturnValue(true)
+    const promoter = vi.fn()
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter))
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('short'), { filename: 'small.txt', contentType: 'text/plain' })
+    expect(res.status).toBe(200)
+    expect(promoter).not.toHaveBeenCalled()
+    expect(res.body.files[0].artifact).toBeNull()
+  })
+
+  it('promotion failure degrades to cache-only, never fails the upload', async () => {
+    arm()
+    mockParseFileContent.mockResolvedValue({ text: 'X'.repeat(90000), summary: null as never })
+    mockShouldInline.mockReturnValue(false)
+    const promoter = vi.fn().mockResolvedValue(null)
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter))
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('X'.repeat(90000)), { filename: 'big.md', contentType: 'text/markdown' })
+    expect(res.status).toBe(200)
+    expect(res.body.files[0].id).toBe('f_1')
+    expect(res.body.files[0].artifact).toBeNull()
+    expect(fileStore.linkArtifact).not.toHaveBeenCalled()
+  })
+
+  it('big PDFs promote store-only (no parsed text handed to the chunker)', async () => {
+    arm()
+    mockParseFileContent.mockResolvedValue({ text: 'base64ish', summary: 'PDF document' })
+    mockShouldInline.mockReturnValue(true) // PDFs bypass the text gate entirely
+    const promoter = vi.fn().mockResolvedValue({
+      fileId: 'wf-pdf', path: '/uploads/chat/x.pdf', status: 'ready', segmentCount: 0, truncated: false,
+    })
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter))
+    const big = Buffer.alloc(3 * 1024 * 1024, 1)
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', big, { filename: 'deck.pdf', contentType: 'application/pdf' })
+    expect(res.status).toBe(200)
+    expect(promoter).toHaveBeenCalledWith(
+      expect.objectContaining({ storeOnly: true, parsedText: '' }),
+    )
+  })
+
+  it('no workspace -> no promotion (cache-only legacy behavior)', async () => {
+    arm(null)
+    mockParseFileContent.mockResolvedValue({ text: 'X'.repeat(90000), summary: null as never })
+    mockShouldInline.mockReturnValue(false)
+    const promoter = vi.fn()
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, promoter))
+    const res = await request(app)
+      .post('/api/files/upload')
+      .attach('files', Buffer.from('X'.repeat(90000)), { filename: 'big.md', contentType: 'text/markdown' })
+    expect(res.status).toBe(200)
+    expect(promoter).not.toHaveBeenCalled()
   })
 })
