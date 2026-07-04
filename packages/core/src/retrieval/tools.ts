@@ -204,7 +204,9 @@ export function createRetrievalTools(
     description:
       'Hybrid search across the company brain. Returns matched rows keyed by `primitive` + `row_id`. ' +
       'Supports `scope` (primitive kind), `filters` (flat key-value, per-primitive allowlist), `limit`, and opaque `cursor` pagination. ' +
-      'Bi-temporal `as_of` defaults to now. Vector fusion ships with WS-8; v1 uses FTS + graph + recency.',
+      'Bi-temporal `as_of` defaults to now. Vector fusion ships with WS-8; v1 uses FTS + graph + recency. ' +
+      'Rows with `primitive: "file_segment"` are passages inside a stored document (capped per file here); ' +
+      'follow up with the per-file content tool using their `file_id` to search or read that document in depth.',
     inputSchema: searchSchema,
     isConcurrencySafe: true,
     isReadOnly: true,

@@ -176,6 +176,26 @@ export type EntityInstanceSearchRow = SearchResultRow & {
   source_app: 'doc' | 'chat' | 'import' | 'api'
 }
 
+/**
+ * Workspace-file body chunk surfaced through `search` when
+ * `primitive === 'file_segment'` (large-content-artifacts hybrid
+ * discoverability; `file_segments`, migration 297). Hard-capped per source
+ * artifact in the fused page; `file_id` + `segment_index` hand off to the
+ * per-file `searchFileContent` tool for precision extraction. See
+ * `packages/api/src/db/retrieval-store.ts` → `searchFileSegmentsScope`.
+ */
+export type FileSegmentSearchRow = SearchResultRow & {
+  primitive: 'file_segment'
+  file_id: string
+  file_name: string | null
+  segment_index: number
+  heading_path: string[]
+  snippet: string
+  tags: string[]
+  sensitivity: string
+  valid_from: string
+}
+
 // ── Neural search process trace (audit) ─────────────────────────────
 
 /**
