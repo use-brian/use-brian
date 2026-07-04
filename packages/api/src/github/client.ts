@@ -71,6 +71,13 @@ export type GitHubPullRequest = {
   base: { ref: string }
   draft: boolean
   mergeable: boolean | null
+  /**
+   * Present on the single-PR endpoint (`getPullRequest`) only — the list
+   * endpoint (`listPullRequests`) shares this type and genuinely omits it,
+   * so it must stay optional. The ingest poller's PR enrichment reads it to
+   * classify a closed PR as merged vs closed.
+   */
+  merged?: boolean
   additions: number
   deletions: number
   changed_files: number
@@ -407,8 +414,11 @@ export type CompareFile = {
 }
 
 /**
- * Compare two commits and return changed files.
- * Used for incremental sync after initial full sync.
+ * Compare two commits and return changed files plus the commit range itself.
+ * Used for incremental KB sync (headSha + files) and by the ingest poller's
+ * push enrichment (commit messages — the `/repos/.../events` feed ships
+ * PushEvent payloads without a commits array, so the poller recovers the
+ * pushed range's messages from `{before}...{head}` via this call).
  */
 export async function compareCommits(
   pat: string,
@@ -416,19 +426,32 @@ export async function compareCommits(
   repo: string,
   base: string,
   head: string,
-): Promise<{ headSha: string; files: CompareFile[] }> {
+): Promise<{
+  headSha: string
+  files: CompareFile[]
+  totalCommits: number
+  commits: Array<{ sha: string; message: string }>
+}> {
   const res = await ghFetch(
     pat,
     `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${base}...${head}`,
   )
   const data = await res.json() as {
-    commits: Array<{ sha: string }>
+    commits: Array<{ sha: string; commit?: { message?: string } }>
+    total_commits?: number
     files?: CompareFile[]
   }
   const headSha = data.commits.length > 0
     ? data.commits[data.commits.length - 1].sha
     : head
-  return { headSha, files: data.files ?? [] }
+  return {
+    headSha,
+    files: data.files ?? [],
+    // The compare API caps the inline `commits` list (250); `total_commits`
+    // is the true range size. Fall back to the list length when absent.
+    totalCommits: data.total_commits ?? data.commits.length,
+    commits: data.commits.map((c) => ({ sha: c.sha, message: c.commit?.message ?? '' })),
+  }
 }
 
 /**
