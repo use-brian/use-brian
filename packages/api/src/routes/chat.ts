@@ -1668,7 +1668,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             const isAudio = file.mimeType.startsWith('audio/')
             // Inline-media types (image + PDF) are always emitted as a multimodal
             // `image` block regardless of size. Text-like files gate on size.
-            const isTextLike = !isImage && !isPdf && !isAudio && shouldInline(file.content.length)
+            const isTextLike = !isImage && !isPdf && !isAudio && shouldInline(file.content)
 
             if (isTextLike) {
               textParts.push(

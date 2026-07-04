@@ -168,7 +168,7 @@ export function fileRoutes(fileStore: FileStore, ingestor?: FileIngestor | null)
             mimeType: cached.mimeType,
             sizeBytes: cached.sizeBytes,
             summary,
-            inline: shouldInline(text.length),
+            inline: shouldInline(text),
             // Send back the parsed text preview so the chat endpoint can inline it
             // without re-fetching (saves a round-trip)
             preview: text.slice(0, 200),

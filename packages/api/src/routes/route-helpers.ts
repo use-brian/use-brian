@@ -699,7 +699,7 @@ export async function buildFileContentBlocks(
       }
     } else {
       const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
-      const isSmall = shouldInline(text.length)
+      const isSmall = shouldInline(text)
 
       if (isSmall) {
         textParts.push(

@@ -557,7 +557,7 @@ export function skillRoutes({
         } else {
           // Text-like: inline when small; hard-truncate otherwise (this
           // path has no readFileContent tool to page through a cache ref).
-          const body = shouldInline(file.content.length)
+          const body = shouldInline(file.content)
             ? file.content
             : `${file.content.slice(0, 20_000)}\n…(truncated)`
           textParts.push(

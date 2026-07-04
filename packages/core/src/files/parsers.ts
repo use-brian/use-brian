@@ -7,6 +7,7 @@ import TurndownService from 'turndown'
 import { gfm } from 'turndown-plugin-gfm'
 import { parseXlsxToMarkdown } from './xlsx.js'
 import { parsePptxToMarkdown } from './pptx.js'
+import { estimateStringTokens } from '../compaction/compact.js'
 
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -188,9 +189,15 @@ export async function parseFileContent(
 
 /**
  * Determine if content should be inlined (small) or cached (large).
+ *
+ * The gate is CJK-aware: it estimates the token cost of the text via
+ * `estimateStringTokens` (≈1 token per CJK codepoint, ~4 chars/token
+ * otherwise) rather than a flat `length * 4` byte heuristic. A 6,000-char
+ * CJK document is ~6,000 tokens and must NOT inline, even though its char
+ * count sits under the old 20K-char line; the estimator catches that.
  */
-const INLINE_TOKEN_THRESHOLD = 5000 // ~20K chars
+const INLINE_TOKEN_THRESHOLD = 5000 // ~20K chars of Latin text
 
-export function shouldInline(textLength: number): boolean {
-  return textLength <= INLINE_TOKEN_THRESHOLD * 4
+export function shouldInline(text: string): boolean {
+  return estimateStringTokens(text) <= INLINE_TOKEN_THRESHOLD
 }

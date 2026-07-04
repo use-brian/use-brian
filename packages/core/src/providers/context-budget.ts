@@ -34,6 +34,15 @@ export const MAX_TOOL_RESULT_TOKENS = 25_000
 export const TOOL_RESULT_TRUNCATION_MARKER =
   '\n\n[Response truncated at 25k tokens — narrow your query or paginate.]'
 
+/**
+ * Appended when stage 2.5 shrinks a lone oversized newest message (a giant
+ * paste or attachment that alone blows the budget). Deliberately DISTINCT
+ * from `TOOL_RESULT_TRUNCATION_MARKER` so a clamped user turn and a clamped
+ * tool_result stay legible when a transcript is inspected.
+ */
+export const MESSAGE_TRUNCATION_MARKER =
+  '\n\n…[truncated: message exceeded the context budget]'
+
 // ── Per-model input window ──────────────────────────────────────
 
 /**
@@ -142,6 +151,43 @@ function clampToolResults(msg: Message): Message {
 }
 
 /**
+ * Clamp one text payload to `maxTokens`, CJK-aware, appending the
+ * message-truncation marker. Returns `text` unchanged (same reference) when
+ * it already fits — the twin of `capToolResultTokens`, but with a DISTINCT
+ * marker so a clamped user turn and a clamped tool_result stay legible.
+ */
+function capMessageText(text: string, maxTokens: number): string {
+  if (estimateStringTokens(text) <= maxTokens) return text
+  return truncateToTokenBudget(text, maxTokens) + MESSAGE_TRUNCATION_MARKER
+}
+
+/**
+ * Clamp the text payload of a single message to `maxTokens`. Targets a
+ * plain-string `content` and the `text` blocks of a multi-block message;
+ * image / tool_use / tool_result blocks are left untouched (a tool_result
+ * already carries its own stage-1 cap). Returns the same message reference
+ * when nothing changed.
+ */
+function clampMessageText(msg: Message, maxTokens: number): Message {
+  if (typeof msg.content === 'string') {
+    const capped = capMessageText(msg.content, maxTokens)
+    return capped === msg.content ? msg : { ...msg, content: capped }
+  }
+  let changed = false
+  const content = msg.content.map((block): ContentBlock => {
+    if (block.type === 'text') {
+      const capped = capMessageText(block.text, maxTokens)
+      if (capped !== block.text) {
+        changed = true
+        return { ...block, text: capped }
+      }
+    }
+    return block
+  })
+  return changed ? { ...msg, content } : msg
+}
+
+/**
  * After evicting an oldest prefix, the new first message may be a `user`
  * turn carrying `tool_result` blocks whose `tool_use` (in the dropped
  * preceding assistant turn) is gone. Gemini 400s on a `functionResponse`
@@ -159,12 +205,16 @@ function stripLeadingOrphanToolResults(msgs: Message[]): Message[] {
 
 /**
  * Shrink `messages` to fit `budgetTokens`, deterministically and without an
- * LLM call. Two stages:
+ * LLM call. Stages:
  *   1. Clamp every over-sized `tool_result` block to `MAX_TOOL_RESULT_TOKENS`.
  *   2. If still over budget, evict oldest messages — preserving the leading
  *      `system` prefix and the most-recent suffix (the current turn is never
  *      dropped) — then repair tool_use/tool_result pairing at the new head and
  *      prepend a one-line breadcrumb noting how many messages were omitted.
+ *   2.5. If eviction left only the newest message and it STILL exceeds the
+ *      budget, no eviction can help (the current turn is never dropped) — so
+ *      clamp that message's own text payload via `clampMessageText`. Handles a
+ *      single giant paste/attachment that alone blows the window.
  *
  * `trimmed` is false (and `messages` is returned untouched) when the input
  * already fits — the common case, so this is cheap on the hot path.
@@ -208,6 +258,17 @@ export function fitMessagesToBudget(messages: Message[], budgetTokens: number): 
     keptReversed.push(body[j]!)
     running += t
   }
+
+  // Stage 2.5 — clamp a lone oversized newest message. When the only survivor
+  // of eviction is the current turn itself and it still blows the budget,
+  // further eviction can't help (the turn is never dropped). Shrink its text
+  // payload deterministically, capped at half the budget (never above the
+  // tool_result cap) so a runaway paste can't reclaim the whole window.
+  if (keptReversed.length === 1 && systemTokens + running > budgetTokens) {
+    const cap = Math.min(MAX_TOOL_RESULT_TOKENS, Math.floor(budgetTokens / 2))
+    keptReversed[0] = clampMessageText(keptReversed[0]!, cap)
+  }
+
   const kept = stripLeadingOrphanToolResults(keptReversed.reverse())
 
   const breadcrumb: Message[] =

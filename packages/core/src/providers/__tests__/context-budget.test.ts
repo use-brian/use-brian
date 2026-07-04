@@ -4,6 +4,7 @@ import {
   resolveInputTokenLimit,
   MAX_TOOL_RESULT_TOKENS,
   TOOL_RESULT_TRUNCATION_MARKER,
+  MESSAGE_TRUNCATION_MARKER,
 } from '../context-budget.js'
 import { wrapContextBudget } from '../wrappers.js'
 import { collectStream } from '../accumulator.js'
@@ -118,6 +119,74 @@ describe('[COMP:providers/context-budget] fitMessagesToBudget', () => {
     expect(result.trimmed).toBe(true)
     expect(result.messages.some(hasToolResult)).toBe(false)
     expect(result.messages[result.messages.length - 1]!.content).toBe('latest')
+  })
+
+  it('clamps a lone oversized newest message and fits the budget (stage 2.5)', () => {
+    const budget = 10_000
+    // One ~50k-token paste is the only message — eviction can't help (the
+    // current turn is never dropped), so stage 2.5 must shrink it in place.
+    const messages: Message[] = [{ role: 'user', content: ascii(50_000) }]
+    const result = fitMessagesToBudget(messages, budget)
+    expect(result.trimmed).toBe(true)
+    expect(result.messages.length).toBe(1)
+    const content = result.messages[0]!.content
+    expect(typeof content).toBe('string')
+    expect(content as string).toContain(MESSAGE_TRUNCATION_MARKER)
+    // cap = min(25k, floor(budget/2)=5k) = 5k → fits well under the 10k budget.
+    expect(result.tokensAfter).toBeLessThanOrEqual(budget)
+  })
+
+  it('leaves normal multi-message eviction untouched — no stage-2.5 marker (regression)', () => {
+    const messages: Message[] = [
+      { role: 'system', content: 'SYSTEM' },
+      ...Array.from({ length: 20 }, (_, i): Message => ({ role: i % 2 === 0 ? 'user' : 'assistant', content: `msg-${i}` })),
+      { role: 'user', content: 'the latest question' },
+    ]
+    const result = fitMessagesToBudget(messages, 30) // forces eviction, keeps several
+    expect(result.dropped).toBeGreaterThan(0)
+    // More than one body message survives, so stage 2.5 never fires and no
+    // message-truncation marker is introduced — plain eviction, unchanged.
+    expect(JSON.stringify(result.messages)).not.toContain('truncated: message exceeded')
+    expect(result.messages[result.messages.length - 1]!.content).toBe('the latest question')
+    expect(result.messages.length).toBeGreaterThan(2) // system + breadcrumb + ≥1 kept
+  })
+
+  it('cuts CJK content under the cap, CJK-aware (stage 2.5)', () => {
+    const budget = 4_000
+    // 20k CJK codepoints ≈ 20k tokens (1 token each), one message over a 4k budget.
+    const messages: Message[] = [{ role: 'user', content: '中'.repeat(20_000) }]
+    const result = fitMessagesToBudget(messages, budget)
+    expect(result.trimmed).toBe(true)
+    const content = result.messages[0]!.content as string
+    expect(content).toContain(MESSAGE_TRUNCATION_MARKER)
+    // cap = min(25k, floor(4000/2)=2000) = 2000 CJK chars kept.
+    const body = content.slice(0, content.length - MESSAGE_TRUNCATION_MARKER.length)
+    expect(estimateStringTokens(body)).toBeLessThanOrEqual(2_000)
+  })
+
+  it('clamps only text blocks in a multi-block newest message, leaving image blocks intact', () => {
+    const budget = 10_000
+    const image = { type: 'image' as const, mimeType: 'image/png', data: 'AAAA' }
+    const messages: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: ascii(50_000) }, image] },
+    ]
+    const result = fitMessagesToBudget(messages, budget)
+    expect(result.trimmed).toBe(true)
+    const content = result.messages[0]!.content as Extract<Message['content'], unknown[]>
+    const textBlock = content[0]!
+    expect(textBlock.type).toBe('text')
+    if (textBlock.type === 'text') expect(textBlock.text).toContain(MESSAGE_TRUNCATION_MARKER)
+    // The image block passes through byte-for-byte — only text is clamped.
+    expect(content[1]).toEqual(image)
+  })
+
+  it('keeps the cap floor sane at a tiny budget (stage 2.5)', () => {
+    // budget=1 → cap = min(25k, floor(1/2)=0) = 0 → text truncated to empty + marker.
+    const messages: Message[] = [{ role: 'user', content: ascii(50_000) }]
+    const result = fitMessagesToBudget(messages, 1)
+    expect(result.trimmed).toBe(true)
+    const content = result.messages[0]!.content as string
+    expect(content).toBe(MESSAGE_TRUNCATION_MARKER)
   })
 })
 
