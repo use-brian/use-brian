@@ -331,8 +331,20 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     )
   }
 
+  // The bot's own numeric user id — Telegram bot tokens are `<bot_id>:<secret>`,
+  // so the id is always derivable without an extra getMe round-trip.
+  const selfBotId = /^(\d+):/.exec(options.token)?.[1] ?? null
+
   function isReplyToBot(msg: TelegramMessage): boolean {
-    return !!msg.reply_to_message?.from?.is_bot
+    // Only a reply to THIS bot's message counts as addressing it. In a
+    // multi-bot group (e.g. one BYO bot per forum topic) a reply to another
+    // bot's message must not pass the mention gate — matching any `is_bot`
+    // sender made every co-resident bot answer as itself (the Claw Center
+    // rotating-replies incident). Mirrors the Discord adapter, which compares
+    // `referenced_message.author.id` against its own `botUserId`.
+    const from = msg.reply_to_message?.from
+    if (!from?.is_bot) return false
+    return selfBotId !== null && String(from.id) === selfBotId
   }
 
   function isGroupChat(msg: TelegramMessage): boolean {

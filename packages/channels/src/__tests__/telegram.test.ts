@@ -745,6 +745,48 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
   })
 })
 
+// ── getChat metadata lookup ───────────────────────────────────
+
+describe('[COMP:channels/telegram] api getChat', () => {
+  it('posts chat_id and returns the chat metadata result', async () => {
+    let captured: Record<string, unknown> = {}
+    const mock = vi.fn(async (url: string, init?: { body?: string }) => {
+      expect(url.endsWith('/getChat')).toBe(true)
+      captured = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {}
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          result: { id: -100123, type: 'supergroup', title: 'Dev Work' },
+        }),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const chat = await api.getChat('-100123')
+      expect(captured).toEqual({ chat_id: '-100123' })
+      expect(chat).toEqual({ id: -100123, type: 'supergroup', title: 'Dev Work' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('throws TelegramApiError when the bot cannot see the chat', async () => {
+    const mock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+    }) as unknown as Response)
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      await expect(api.getChat('880211324')).rejects.toThrow(/chat not found/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
 // ── Chunked-reply truncation marker ───────────────────────────
 
 describe('[COMP:channels/telegram] sendMessage truncation marker', () => {
@@ -1232,6 +1274,64 @@ describe('[COMP:channels/telegram] requireMention overrides', () => {
       buildGroupMessage({ chatId: -100, isForum: false, text: 'hi' }),
     )
     expect(seen.map((s) => s.channelId)).toEqual(['-200'])
+  })
+})
+
+describe('[COMP:channels/telegram] reply-to-bot addressing', () => {
+  // Repro: the Claw Center rotating-replies incident. Six BYO bots (one per
+  // forum topic) all receive every group message; a user reply to one bot's
+  // message must only address THAT bot. The old check matched any `is_bot`
+  // sender, so whichever other bot processed the update answered as itself.
+  const SELF_BOT_ID = 7654321
+
+  function buildReplyMessage(repliedFrom: { id: number; is_bot?: boolean }): Record<string, unknown> {
+    return {
+      update_id: 1,
+      message: {
+        message_id: 20,
+        from: { id: 42, first_name: 'U' },
+        chat: { id: -100, type: 'supergroup', title: 'Team Chat', is_forum: true },
+        date: Math.floor(Date.now() / 1000),
+        text: 'follow-up question',
+        message_thread_id: 2,
+        reply_to_message: { message_id: 19, from: repliedFrom },
+      },
+    }
+  }
+
+  function collect(token: string): { seen: string[]; adapter: ReturnType<typeof createTelegramAdapter> } {
+    const seen: string[] = []
+    const adapter = createTelegramAdapter({
+      token,
+      botUsername: 'testbot',
+      config: { requireMention: true },
+      onMessage: (m) => { seen.push(m.text ?? '') },
+    })
+    return { seen, adapter }
+  }
+
+  it('delivers a reply to THIS bot\'s message under requireMention=true', () => {
+    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
+    adapter.handleWebhook(buildReplyMessage({ id: SELF_BOT_ID, is_bot: true }))
+    expect(seen).toEqual(['follow-up question'])
+  })
+
+  it('drops a reply to ANOTHER bot\'s message', () => {
+    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
+    adapter.handleWebhook(buildReplyMessage({ id: 999999, is_bot: true }))
+    expect(seen).toEqual([])
+  })
+
+  it('drops a reply to a human\'s message', () => {
+    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
+    adapter.handleWebhook(buildReplyMessage({ id: 43 }))
+    expect(seen).toEqual([])
+  })
+
+  it('fails closed when the token has no numeric bot-id prefix', () => {
+    const { seen, adapter } = collect('opaque-test-token')
+    adapter.handleWebhook(buildReplyMessage({ id: SELF_BOT_ID, is_bot: true }))
+    expect(seen).toEqual([])
   })
 })
 
