@@ -299,6 +299,14 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     opts?: { mimeHint?: string },
   ): Promise<{ buffer: Buffer; mime: string; name: string }>
   /**
+   * Resolve a `file_id` to its authenticated Bot API file URL (cloud host,
+   * `https://api.telegram.org/file/bot<token>/<file_path>`). Lets a caller
+   * STREAM the bytes (e.g. `streamUrlToGcs` in the channel-media intake)
+   * instead of buffering via `downloadMedia`. Same 20MB `getFile` cloud cap
+   * applies. See large-content-artifacts §Phase 0.3.
+   */
+  resolveFileUrl(fileId: string): Promise<string>
+  /**
    * Remove the bot from the given group/supergroup/channel. Silently swallows
    * "chat not found" errors so a best-effort leave never surfaces to the caller.
    */
@@ -929,6 +937,14 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     },
 
     downloadMedia: downloadMediaImpl,
+
+    async resolveFileUrl(fileId: string): Promise<string> {
+      const file = await api.getFile(fileId)
+      if (!file.file_path) {
+        throw new Error(`Telegram getFile returned no file_path for ${fileId}`)
+      }
+      return `https://api.telegram.org/file/bot${options.token}/${file.file_path}`
+    },
 
     async leaveChat(chatId: string): Promise<void> {
       try {

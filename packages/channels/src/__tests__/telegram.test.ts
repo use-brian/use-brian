@@ -435,6 +435,31 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
     }
   })
 
+  it('resolveFileUrl builds the authenticated file host URL from getFile (no download)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toContain('/getFile')
+      return {
+        ok: true,
+        json: async () => ({ ok: true, result: { file_path: 'documents/report_7.pdf' } }),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      const url = await adapter.resolveFileUrl('doc_id')
+      expect(url).toBe('https://api.telegram.org/file/bottest-token/documents/report_7.pdf')
+      expect(fetchMock).toHaveBeenCalledOnce()
+      // Missing file_path is a loud error, not a silent empty URL.
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ ok: true, result: {} }),
+      }) as unknown as Response))
+      await expect(adapter.resolveFileUrl('gone')).rejects.toThrow(/no file_path/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('ignores service messages', () => {
     const update = {
       update_id: 5,
