@@ -314,7 +314,28 @@ export async function updateWorkspaceFileMeta(
      RETURNING ${FULL_SELECT}`,
     values,
   )
-  return result.rows.length === 0 ? null : toRecord(result.rows[0])
+  if (result.rows.length === 0) return null
+
+  // Lifecycle propagation (large-content-artifacts §Phase 2.1): file_segments
+  // are derived rows that inherit sensitivity/compartments/tags verbatim at
+  // chunk time — a ceiling raise on the parent must reach them or segments
+  // keep surfacing at the OLD ceiling. Runs immediately after the RLS-gated
+  // parent update (segments are rebuildable derived data; a failure here is
+  // loud, not silent).
+  if (patch.sensitivity !== undefined || patch.tags !== undefined) {
+    const segSets: string[] = []
+    const segValues: unknown[] = [id]
+    if (patch.sensitivity !== undefined) {
+      segValues.push(patch.sensitivity)
+      segSets.push(`sensitivity = $${segValues.length}`)
+    }
+    if (patch.tags !== undefined) {
+      segValues.push(patch.tags)
+      segSets.push(`tags = $${segValues.length}`)
+    }
+    await query(`UPDATE file_segments SET ${segSets.join(', ')} WHERE file_id = $1`, segValues)
+  }
+  return toRecord(result.rows[0])
 }
 
 export async function updateWorkspaceFileSize(
@@ -375,6 +396,22 @@ export async function retractWorkspaceFilesByStorageBucket(
         AND retracted_at IS NULL`,
     [workspaceId, `gs://${bucket}/`, reason],
   )
+  // Propagate the retraction to derived file_segments so the retrieval
+  // predicates (retracted_at IS NULL + bi-temporal window) stop surfacing
+  // segments of now-unreadable files (large-content-artifacts §Phase 2.1).
+  if ((result.rowCount ?? 0) > 0) {
+    await query(
+      `UPDATE file_segments fs
+          SET valid_to = now(), retracted_at = now(), retracted_reason = $3
+         FROM workspace_files wf
+        WHERE fs.file_id = wf.id
+          AND wf.workspace_id = $1
+          AND wf.storage_uri ^@ $2
+          AND wf.retracted_reason = $3
+          AND fs.retracted_at IS NULL`,
+      [workspaceId, `gs://${bucket}/`, reason],
+    )
+  }
   return result.rowCount ?? 0
 }
 
@@ -530,6 +567,18 @@ export async function supersedeWorkspaceFile(
               superseded_by = $1
         WHERE id = $2 AND workspace_id = $3`,
       [newId, id, workspaceId],
+    )
+
+    // Same-transaction segment close (large-content-artifacts §Phase 2.1):
+    // the old version's derived file_segments leave the current window with
+    // their parent, so retrieval never mixes superseded content with the new
+    // version. The caller re-indexes the NEW row (indexFileArtifact) when it
+    // has the new bytes' parsed text.
+    await client.query(
+      `UPDATE file_segments
+          SET valid_to = now()
+        WHERE file_id = $1 AND valid_to IS NULL`,
+      [id],
     )
 
     const inserted = await client.query<FileRow>(
