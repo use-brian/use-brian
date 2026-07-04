@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createTelegramAdapter, parseTopicChannelId } from '../telegram/adapter.js'
+import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig } from '../telegram/adapter.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
@@ -1277,14 +1277,18 @@ describe('[COMP:channels/telegram] requireMention overrides', () => {
   })
 })
 
-describe('[COMP:channels/telegram] reply-to-bot addressing', () => {
-  // Repro: the Claw Center rotating-replies incident. Six BYO bots (one per
-  // forum topic) all receive every group message; a user reply to one bot's
-  // message must only address THAT bot. The old check matched any `is_bot`
-  // sender, so whichever other bot processed the update answered as itself.
-  const SELF_BOT_ID = 7654321
+describe('[COMP:channels/telegram] replies are not an addressing trigger', () => {
+  // The Claw Center rotating-replies incident: six BYO bots (one per forum
+  // topic) all receive every group message; reply-based triggering let every
+  // bot answer a reply to any bot's message. Replying is now NEVER a trigger —
+  // only the requireMention rule (mention, or a per-topic override) decides.
+  const BOT_ID = 7654321
 
-  function buildReplyMessage(repliedFrom: { id: number; is_bot?: boolean }): Record<string, unknown> {
+  function buildReplyMessage(params: {
+    repliedFrom: { id: number; is_bot?: boolean }
+    mention?: boolean
+  }): Record<string, unknown> {
+    const text = params.mention ? '@testbot follow-up question' : 'follow-up question'
     return {
       update_id: 1,
       message: {
@@ -1292,46 +1296,51 @@ describe('[COMP:channels/telegram] reply-to-bot addressing', () => {
         from: { id: 42, first_name: 'U' },
         chat: { id: -100, type: 'supergroup', title: 'Team Chat', is_forum: true },
         date: Math.floor(Date.now() / 1000),
-        text: 'follow-up question',
+        text,
+        ...(params.mention
+          ? { entities: [{ type: 'mention', offset: 0, length: 8 }] }
+          : {}),
         message_thread_id: 2,
-        reply_to_message: { message_id: 19, from: repliedFrom },
+        reply_to_message: { message_id: 19, from: params.repliedFrom },
       },
     }
   }
 
-  function collect(token: string): { seen: string[]; adapter: ReturnType<typeof createTelegramAdapter> } {
+  function collect(config: TelegramAdapterConfig): { seen: string[]; adapter: ReturnType<typeof createTelegramAdapter> } {
     const seen: string[] = []
     const adapter = createTelegramAdapter({
-      token,
+      token: `${BOT_ID}:secret`,
       botUsername: 'testbot',
-      config: { requireMention: true },
+      config,
       onMessage: (m) => { seen.push(m.text ?? '') },
     })
     return { seen, adapter }
   }
 
-  it('delivers a reply to THIS bot\'s message under requireMention=true', () => {
-    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
-    adapter.handleWebhook(buildReplyMessage({ id: SELF_BOT_ID, is_bot: true }))
+  it('drops a reply to the bot\'s OWN message under requireMention=true (replying never triggers)', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: BOT_ID, is_bot: true } }))
+    expect(seen).toEqual([])
+  })
+
+  it('drops a reply to ANOTHER bot\'s message under requireMention=true', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: 999999, is_bot: true } }))
+    expect(seen).toEqual([])
+  })
+
+  it('delivers a reply when the bot is @mentioned in it', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: 999999, is_bot: true }, mention: true }))
     expect(seen).toEqual(['follow-up question'])
   })
 
-  it('drops a reply to ANOTHER bot\'s message', () => {
-    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
-    adapter.handleWebhook(buildReplyMessage({ id: 999999, is_bot: true }))
-    expect(seen).toEqual([])
-  })
-
-  it('drops a reply to a human\'s message', () => {
-    const { seen, adapter } = collect(`${SELF_BOT_ID}:secret`)
-    adapter.handleWebhook(buildReplyMessage({ id: 43 }))
-    expect(seen).toEqual([])
-  })
-
-  it('fails closed when the token has no numeric bot-id prefix', () => {
-    const { seen, adapter } = collect('opaque-test-token')
-    adapter.handleWebhook(buildReplyMessage({ id: SELF_BOT_ID, is_bot: true }))
-    expect(seen).toEqual([])
+  it('delivers a reply in a topic where an override flips requireMention off', () => {
+    const { seen, adapter } = collect({
+      requireMention: { default: true, overrides: [{ chatId: '-100', topicId: 2 }] },
+    })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: BOT_ID, is_bot: true } }))
+    expect(seen).toEqual(['follow-up question'])
   })
 })
 

@@ -331,22 +331,6 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     )
   }
 
-  // The bot's own numeric user id — Telegram bot tokens are `<bot_id>:<secret>`,
-  // so the id is always derivable without an extra getMe round-trip.
-  const selfBotId = /^(\d+):/.exec(options.token)?.[1] ?? null
-
-  function isReplyToBot(msg: TelegramMessage): boolean {
-    // Only a reply to THIS bot's message counts as addressing it. In a
-    // multi-bot group (e.g. one BYO bot per forum topic) a reply to another
-    // bot's message must not pass the mention gate — matching any `is_bot`
-    // sender made every co-resident bot answer as itself (the Claw Center
-    // rotating-replies incident). Mirrors the Discord adapter, which compares
-    // `referenced_message.author.id` against its own `botUserId`.
-    const from = msg.reply_to_message?.from
-    if (!from?.is_bot) return false
-    return selfBotId !== null && String(from.id) === selfBotId
-  }
-
   function isGroupChat(msg: TelegramMessage): boolean {
     return msg.chat.type === 'group' || msg.chat.type === 'supergroup'
   }
@@ -383,15 +367,19 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const isGroup = isGroupChat(msg)
     const mentioned = isBotMentioned(msg)
 
-    // In groups, respond when mentioned or when replying to the bot's message
-    // (unless requireMention is explicitly set to false for this chat/topic)
+    // In groups, respond only when @mentioned (unless requireMention is
+    // explicitly set to false for this chat/topic via override). Replying to
+    // the bot's message is deliberately NOT an addressing trigger: in a
+    // multi-bot group (e.g. one BYO bot per forum topic, all receiving every
+    // message) reply-based triggering caused cross-bot replies — the Claw
+    // Center rotating-replies incident (2026-07-04). The requireMention rule
+    // alone decides.
     const chatIdStr = String(msg.chat.id)
     const topicId = (msg.chat.is_forum === true && msg.message_thread_id != null)
       ? msg.message_thread_id
       : undefined
     const requireMention = resolveRequireMention(chatIdStr, topicId)
-    const replyToBot = isReplyToBot(msg)
-    if (isGroup && requireMention && !mentioned && !replyToBot) return null
+    if (isGroup && requireMention && !mentioned) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
@@ -469,7 +457,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaSizeBytes,
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
-      isMentioned: mentioned || replyToBot,
+      isMentioned: mentioned,
       timestamp: msg.date * 1000,
       raw: msg,
     }
