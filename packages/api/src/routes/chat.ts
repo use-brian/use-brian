@@ -7,6 +7,8 @@ import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, cr
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
+import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
+import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
@@ -156,6 +158,13 @@ type WebChatOptions = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   fileStore?: FileStore
+  /**
+   * Silent large-content promotion (large-content-artifacts): giant pastes
+   * become workspace_files artifacts + file_segments; the turn carries the
+   * manifest. Boot passes the same instance the /upload route uses. Absent
+   * (files-less deploy) → pastes flow through unchanged.
+   */
+  artifactPromoter?: ArtifactPromoter | null
   usageStore?: UsageStore
   /**
    * Doc-page → brain distillation runner (the "Sync to brain" pipeline). When
@@ -1076,7 +1085,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1149,6 +1158,12 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       followupChips?: boolean
     }
+    // Mutable so the giant-paste promotion (large-content-artifacts §Phase
+    // 3.1) can swap an over-threshold paste for its artifact manifest + head
+    // excerpt once the workspace/assistant are resolved below. Every
+    // downstream consumer (nag resolver, classifier, persistence, the model
+    // turn) sees the replaced text — the original is durable in the artifact.
+    let message = rawMessage
     // `requestedMode` semantics:
     //   - 'research'  → manual on, classifier skipped, downstream uses research budget
     //   - 'default'   → manual off, classifier skipped (user explicitly opted out)
@@ -1349,6 +1364,25 @@ export function chatRoutes(options: WebChatOptions): Router {
           // platform, which is the safe (non-undercharging) default.
           console.error('[chat] BYO LLM key resolution failed:', (err as Error).message)
         }
+      }
+
+      // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
+      // An over-threshold paste (8K tokens, CJK-aware) becomes a durable
+      // artifact; the turn (and the persisted user row) carries the manifest
+      // + head excerpt instead. Runs before every message consumer below.
+      // Failure or no promoter → the original paste flows through unchanged.
+      if (message && options.artifactPromoter && assistant.workspaceId && shouldPromotePaste(message)) {
+        const promoted = await promotePastedText({
+          text: message,
+          workspaceId: assistant.workspaceId,
+          actingUserId: user.id,
+          assistantId: assistant.id,
+          promote: options.artifactPromoter,
+        }).catch((err) => {
+          console.error('[chat] paste promotion failed (keeping original text):', err)
+          return null
+        })
+        if (promoted) message = promoted.replaced
       }
 
       // Adaptive research entry. When the request didn't pin a mode, run a
