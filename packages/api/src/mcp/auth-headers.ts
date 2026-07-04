@@ -183,6 +183,14 @@ export type ActorIdentity = {
   email?: string | null
   /** Stable sidanclaw user UUID — the key that never changes across channels. */
   userId: string
+  /**
+   * Opaque, short-lived media capability token (minted by the closed platform,
+   * HMAC-signed). When set, `injectMcpTools` emits it as `X-Sidanclaw-Media-Token`
+   * to connectors that opted in via `sendMediaToken`, letting them fetch this
+   * user's latest recording server-to-server. Open core carries the string only;
+   * it never signs or verifies it. Emitted separately from the actor headers.
+   */
+  mediaToken?: string
 }
 
 /**

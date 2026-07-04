@@ -57,6 +57,7 @@ import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
 import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
+import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { groupConnectors } from "@/lib/connector-groups";
@@ -2137,6 +2138,13 @@ function ConnectorsList() {
                             initial={configMap[sel.id]?.sendActorIdentity === true}
                             hasAuth={!!sel.authType && sel.authType !== "none"}
                             onSave={(enabled) => saveConfig(sel.id, { sendActorIdentity: enabled })}
+                          />
+                        )}
+                        {configMap[sel.id] !== undefined && (
+                          <MediaTokenToggle
+                            key={`media-${sel.id}`}
+                            initial={configMap[sel.id]?.sendMediaToken === true}
+                            onSave={(enabled) => saveConfig(sel.id, { sendMediaToken: enabled })}
                           />
                         )}
                       </div>

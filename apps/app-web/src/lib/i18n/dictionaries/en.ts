@@ -1620,6 +1620,8 @@ export const en = {
       actorIdentityTitle: "Send signed-in user identity",
       actorIdentityDesc: "Sends the signed-in user's identity (email on web, phone on WhatsApp, handle on Telegram, user id on Slack) to this server with every request, so it can act on their behalf. Off by default.",
       actorIdentityNoAuthWarning: "This connector has no authentication, so the server cannot verify the identity came from sidanclaw. Add a bearer token or custom header above before relying on it for sign-in.",
+      mediaTokenTitle: "Allow fetching this user's media",
+      mediaTokenDesc: "Lets this server fetch the signed-in user's most recent voice note or video (sent on a channel) to process it. Each request carries a short-lived token scoped to this user only, so the server can never reach anyone else's media. Off by default.",
     },
     skills: {
       title: "Skills",
