@@ -2290,6 +2290,11 @@ export const ja: Dictionary = {
       showCompleted: "完了を表示 ({count})",
       hideCompleted: "完了を非表示 ({count})",
     },
+    fallbackCard: {
+      documentExcerpt: "ドキュメントの抜粋",
+      documentFallback: "ドキュメント",
+      untitled: "無題の項目",
+    },
     taskStatus: {
       todo: "未着手",
       in_progress: "進行中",

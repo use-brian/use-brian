@@ -33,6 +33,7 @@ import type {
   BrainGraphNodeKind,
   BrainRow,
 } from "@/lib/api/brain";
+import { BrainFallbackCard } from "@/components/brain/file-segment-card";
 
 type Props = {
   rows: BrainRow[];
@@ -144,6 +145,30 @@ const LEGEND_GROUPS = new Set<GroupKey>([
   "memories",
 ]);
 
+/** Every `BrainRow.kind` this grouped view renders as a first-class
+ *  single-line row. A row whose kind is NOT here — a `file_segment`, or a
+ *  future `search()` primitive this build predates — renders through
+ *  `BrainFallbackCard` instead (which assumes no meaningful `name`). This is
+ *  the grouped view's own render-capability list, so it stays an explicit
+ *  literal rather than a derived "all primitives" set. */
+const KNOWN_ROW_KINDS = new Set<BrainRow["kind"]>([
+  "people",
+  "companies",
+  "deals",
+  "knowledge",
+  "memories",
+  "files",
+  "sessions",
+  "tasks",
+  "person",
+  "company",
+  "project",
+  "deal",
+  "product",
+  "repository",
+  "other",
+]);
+
 /** Normalise a `BrainRow.kind` — which mixes singular entity kinds
  *  (`person`, `project`) and plural primitive kinds (`people`, `files`) —
  *  into a single canonical group key. */
@@ -167,6 +192,9 @@ function groupOf(kind: BrainRow["kind"]): GroupKey {
     case "knowledge":
       return "knowledge";
     case "files":
+    // A file_segment is a chunk of a file — home it under the Files section
+    // (it renders as a fallback excerpt card, not the single-line file row).
+    case "file_segment":
       return "files";
     case "tasks":
       return "tasks";
@@ -392,6 +420,17 @@ export function BrainGroupedView({
               </div>
               <ul className="flex flex-col gap-1">
                 {group.rows.map((row) => {
+                  // file_segment + any primitive this build predates render as
+                  // a graceful fallback card, never the single-line row (which
+                  // assumes a meaningful `name`). Defensive default — a future
+                  // search primitive still renders, never a blank row or crash.
+                  if (!KNOWN_ROW_KINDS.has(row.kind)) {
+                    return (
+                      <li key={`${row.kind}:${row.id}`}>
+                        <BrainFallbackCard row={row} />
+                      </li>
+                    );
+                  }
                   const node = resolveNode(row, group.key);
                   const degree = node?.degree ?? 0;
                   const kinds = node

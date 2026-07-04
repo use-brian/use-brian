@@ -2476,6 +2476,11 @@ export const en = {
       showCompleted: "Show completed ({count})",
       hideCompleted: "Hide completed ({count})",
     },
+    fallbackCard: {
+      documentExcerpt: "Document excerpt",
+      documentFallback: "Document",
+      untitled: "Untitled item",
+    },
     taskStatus: {
       todo: "To do",
       in_progress: "In progress",

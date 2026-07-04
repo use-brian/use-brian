@@ -2275,6 +2275,11 @@ export const zh: Dictionary = {
       showCompleted: "顯示已完成 ({count})",
       hideCompleted: "隱藏已完成 ({count})",
     },
+    fallbackCard: {
+      documentExcerpt: "文件摘錄",
+      documentFallback: "文件",
+      untitled: "未命名項目",
+    },
     taskStatus: {
       todo: "待辦",
       in_progress: "進行中",
