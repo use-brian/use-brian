@@ -24,15 +24,21 @@ describe("[COMP:app-web/studio-ingest] ingestSourceNotice", () => {
     expect(ingestSourceNotice("user", undefined).globalToggle).toBe(true);
   });
 
-  it("flags Personal-workspace routing only on a non-personal active workspace", () => {
+  it("warns about Personal-workspace routing when the active workspace is NOT the caller's owned personal workspace", () => {
+    // Defensive branch: a current API never returns a personal row on such a
+    // page, but a stale client against an older API must still warn. The
+    // input is the API's `ownedPersonal` — false covers both a team workspace
+    // and a legacy personal-FLAGGED workspace owned by someone else (the
+    // 2026-07 incident shape, where keying off the raw isPersonal label
+    // wrongly suppressed this warning).
     expect(ingestSourceNotice("user", false).routesToPersonal).toBe(true);
   });
 
-  it("hides the routing notice on the Personal workspace itself (no mismatch)", () => {
+  it("hides the routing warning on the caller's owned personal workspace (no mismatch)", () => {
     expect(ingestSourceNotice("user", true).routesToPersonal).toBe(false);
   });
 
-  it("fail-safe: hides the routing notice while the active workspace is unknown", () => {
+  it("fail-safe: hides the routing warning while ownedPersonal is unknown", () => {
     expect(ingestSourceNotice("user", undefined).routesToPersonal).toBe(false);
   });
 });

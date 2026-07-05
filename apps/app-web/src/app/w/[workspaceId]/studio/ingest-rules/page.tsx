@@ -311,6 +311,11 @@ export default function StudioIngestRulesPage() {
 
   const [sources, setSources] = useState<IngestSource[] | null>(null);
   const [available, setAvailable] = useState<AvailableProvider[]>([]);
+  // Whether the active workspace is the caller's OWNED personal workspace —
+  // the API's `ownedPersonal`, the only placement truth the notices may use.
+  // Never derive this from the workspace's bare `isPersonal` flag: a legacy
+  // personal-flagged team workspace is not the viewer's personal workspace.
+  const [ownedPersonal, setOwnedPersonal] = useState<boolean | undefined>(undefined);
   const [loadError, setLoadError] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
@@ -334,14 +339,19 @@ export default function StudioIngestRulesPage() {
         (data: {
           sources: IngestSource[];
           available: AvailableProvider[];
+          ownedPersonal?: boolean;
         }) => {
           setSources(data.sources);
           setAvailable(data.available ?? []);
+          setOwnedPersonal(
+            typeof data.ownedPersonal === "boolean" ? data.ownedPersonal : undefined,
+          );
         },
       )
       .catch(() => {
         setSources([]);
         setAvailable([]);
+        setOwnedPersonal(undefined);
         setLoadError(true);
       });
   }, [activeId]);
@@ -457,13 +467,14 @@ export default function StudioIngestRulesPage() {
           </div>
         )}
 
-        {/* Personal (scope='user') sources are account-level: they show on
-            every workspace's events page, route ingestion to the owner's
-            Personal workspace, and carry one global on/off flag. Spell both
-            out so a per-workspace page never implies per-workspace behavior.
+        {/* Personal (scope='user') sources are account-level. The API only
+            returns them when this page IS the caller's owned personal
+            workspace (placement rule), so normally just the global-toggle
+            note renders; the routing warning stays as a defensive branch for
+            a stale client against an older API.
             `ingest-source-notice.ts` / docs ingest-pipeline.md. */}
         {(() => {
-          const notice = ingestSourceNotice(s.scope, active?.isPersonal);
+          const notice = ingestSourceNotice(s.scope, ownedPersonal);
           if (!notice.globalToggle && !notice.routesToPersonal) return null;
           return (
             <div className="px-5 pb-3 text-[11px] text-muted-foreground leading-relaxed">
