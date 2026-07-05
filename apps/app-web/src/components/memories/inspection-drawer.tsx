@@ -142,6 +142,10 @@ export function InspectionDrawer({
       const decoder = new TextDecoder();
       let buffer = "";
       let assistantText = "";
+      // The current SSE event name — only `text_delta` payloads are answer
+      // text. Appending every data line used to leak `reasoning` deltas
+      // (the model's thinking stream) into the visible reply.
+      let currentEvent = "";
       let flushScheduled = false;
       const flush = () => {
         flushScheduled = false;
@@ -172,7 +176,12 @@ export function InspectionDrawer({
         buffer = lines.pop() ?? "";
         for (const line of lines) {
           const trimmed = line.trim();
+          if (trimmed.startsWith("event:")) {
+            currentEvent = trimmed.slice(6).trim();
+            continue;
+          }
           if (!trimmed.startsWith("data:")) continue;
+          if (currentEvent !== "text_delta") continue;
           const json = trimmed.slice(5).trim();
           if (!json) continue;
           try {

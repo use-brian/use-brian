@@ -38,7 +38,7 @@ export function ManualTriggerPanel({ workflowId, disabled }: Props) {
   };
 
   return (
-    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-1.5">
+    <div className="flex flex-col gap-1.5">
       <label className="text-xs font-medium text-muted-foreground">
         {t.workflowPage.builder.manualEndpointLabel}
       </label>

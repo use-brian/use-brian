@@ -111,6 +111,29 @@ export function readyFileIds(attachments: ReadonlyArray<Attachment>): string[] {
 }
 
 /**
+ * The image files carried by a clipboard paste — but ONLY when the paste has
+ * no plain-text payload. This is the standard "paste a screenshot / copied
+ * image → attach" gate: a bare image paste (a screenshot on the clipboard, or
+ * "Copy image" from a browser / preview) carries no `text/plain`, so its image
+ * files attach; pasting rich text from Word / Excel / a web page drags a
+ * rendered image along *next to* the real `text/plain`, so we leave it to the
+ * textarea and paste it as text instead of hijacking it into an attachment.
+ * Non-image files are ignored — chat paste is for pictures; other file types
+ * still go through the paperclip or drag-drop. The host feeds the result to
+ * `upload()`, which stages the same chip a picker/drop would.
+ */
+export function imageFilesFromClipboard(
+  clipboard:
+    | { files?: ArrayLike<File> | null; getData: (type: string) => string }
+    | null
+    | undefined,
+): File[] {
+  if (!clipboard) return [];
+  if (clipboard.getData("text/plain").trim().length > 0) return [];
+  return Array.from(clipboard.files ?? []).filter((f) => f.type.startsWith("image/"));
+}
+
+/**
  * @param getSessionId Optional accessor for the session the upload should be
  *   cached against (e.g. a comment thread's `sessionId`). Read lazily on each
  *   upload so a session adopted mid-conversation is picked up. The `fileId`

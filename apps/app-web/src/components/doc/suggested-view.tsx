@@ -27,6 +27,7 @@ import {
   FileText,
   RefreshCw,
   Sparkles,
+  Target,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -425,14 +426,26 @@ function ActionCard({
           fallbackCaption: t.reviewCaption,
           cta: t.reviewCta,
         }
-      : {
-          accent: "approve" as const,
-          Icon: CheckCircle2,
-          href: `/w/${workspaceId}/approvals`,
-          title: t.approvalsTitle,
-          fallbackCaption: t.approvalsCaption,
-          cta: t.approvalsCta,
-        };
+      : card.kind === "approvals"
+        ? {
+            accent: "approve" as const,
+            Icon: CheckCircle2,
+            href: `/w/${workspaceId}/approvals`,
+            title: t.approvalsTitle,
+            fallbackCaption: t.approvalsCaption,
+            cta: t.approvalsCta,
+          }
+        : {
+            // Autopilot — draft goals awaiting a confirm + blocked goals. The
+            // goals board has no sidebar slot (Approvals precedent): this card
+            // and the Brain task panel are its entry points.
+            accent: "workflow" as const,
+            Icon: Target,
+            href: `/w/${workspaceId}/goals`,
+            title: t.autopilotTitle,
+            fallbackCaption: t.autopilotCaption,
+            cta: t.autopilotCta,
+          };
   const a = ACCENT[cfg.accent];
   return (
     <Link

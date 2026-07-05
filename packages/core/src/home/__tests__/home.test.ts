@@ -7,6 +7,7 @@ function signals(over: Partial<HomeSignals> = {}): HomeSignals {
   return {
     brainReviewCount: 5,
     approvalsCount: 2,
+    autopilotCount: 0,
     upcomingWorkflows: [{ id: 'w1', name: 'Investor digest', nextRunAt: '2026-06-10T17:00:00Z' }],
     recentDrafts: [{ id: 'd1', name: 'Q2 memo', updatedAt: '2026-06-10T08:00:00Z' }],
     brainEntryCount: 142,
@@ -73,6 +74,12 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     }
     const dock = mergeHomeDock(layout, signals({ brainReviewCount: 0 }))
     expect(dock.needsYou.map((n) => n.kind)).toEqual(['approvals'])
+  })
+
+  it('surfaces the autopilot card when goals wait on a confirm/unblock', () => {
+    const dock = mergeHomeDock(null, signals({ autopilotCount: 3 }))
+    expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals', 'autopilot'])
+    expect(dock.needsYou[2].count).toBe(3)
   })
 
   it('de-dups a kind the artifact listed twice', () => {

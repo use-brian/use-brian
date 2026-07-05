@@ -189,12 +189,30 @@ export function brainFileContentUrl(workspaceId: string, rowId: string): string 
   return `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/workspace_file/${encodeURIComponent(rowId)}/content`;
 }
 
+/**
+ * Extract the superseded row's new id from an adjust response.
+ * Task adjusts answer `{ ok, stamped, id }`; memory adjusts (behind the
+ * 308 redirect to the per-assistant route) answer `{ memory: { id } }`.
+ * In-place adjusts (entity / CRM / file) answer without an id → null.
+ */
+export function parseAdjustNewId(json: unknown): string | null {
+  if (!json || typeof json !== "object") return null;
+  const obj = json as Record<string, unknown>;
+  if (typeof obj.id === "string" && obj.id.length > 0) return obj.id;
+  const memory = obj.memory;
+  if (memory && typeof memory === "object") {
+    const id = (memory as Record<string, unknown>).id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return null;
+}
+
 export async function adjustBrainRow(
   workspaceId: string,
   primitive: BrainPrimitive,
   rowId: string,
   changes: AdjustMemoryChanges,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true; newId: string | null } | { ok: false; error: string }> {
   const res = await authFetch(
     `${API_URL}/api/brain-inbox/${encodeURIComponent(workspaceId)}/${primitive}/${encodeURIComponent(rowId)}/adjust`,
     {
@@ -206,7 +224,12 @@ export async function adjustBrainRow(
       redirect: "follow",
     },
   );
-  if (res.ok) return { ok: true };
+  if (res.ok) {
+    // Task + memory adjusts supersede the row and return the new
+    // bi-temporal id; the drawer re-anchors on it instead of closing.
+    const data = (await res.json().catch(() => ({}))) as unknown;
+    return { ok: true, newId: parseAdjustNewId(data) };
+  }
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return { ok: false, error: data.error ?? `Adjust failed (${res.status})` };
 }

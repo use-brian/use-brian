@@ -1,7 +1,7 @@
 /**
  * Home signals assembler — the live source of truth for every NUMBER the
  * "Suggested for you" dock shows. Assembled per request from the brain inbox,
- * approvals, workflows, drafts, and brain counts. The merge
+ * approvals, autopilot goals, workflows, drafts, and brain counts. The merge
  * (`mergeHomeDock`, core) folds the assistant's curation artifact over THIS.
  *
  * Every source is wrapped so one failing query degrades to a zero/empty value
@@ -50,9 +50,10 @@ export async function assembleHomeSignals(
   deps: HomeSignalsDeps,
   now: Date = new Date(),
 ): Promise<HomeSignals> {
-  const [review, approvalsCount, brain, workflows, drafts, hasConnector] = await Promise.all([
+  const [review, approvalsCount, autopilotCount, brain, workflows, drafts, hasConnector] = await Promise.all([
     safe(() => countBrainInbox(workspaceId).then((r) => r.total), 0),
     safe(() => countPendingApprovals(workspaceId), 0),
+    safe(() => countAutopilotAttention(workspaceId), 0),
     safe(() => countBrainEntries(workspaceId), { total: 0, last7: 0 }),
     safe(() => deps.workflowStore.list(userId, workspaceId), [] as Awaited<ReturnType<WorkflowLister['list']>>),
     safe(
@@ -65,6 +66,7 @@ export async function assembleHomeSignals(
   return {
     brainReviewCount: review,
     approvalsCount,
+    autopilotCount,
     upcomingWorkflows: computeUpcoming(workflows, now),
     recentDrafts: drafts.map((d) => ({
       id: d.id,
@@ -104,6 +106,21 @@ async function countPendingApprovals(workspaceId: string): Promise<number> {
   const res = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM pending_approvals
      WHERE workspace_id = $1 AND status = 'pending'`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
+/** Autopilot goals needing the user: unconfirmed drafts (may not act until
+ *  confirmed) + blocked goals (clarity question / metering / budget). A
+ *  confirmed goal sitting in `awaiting_approval` is already counted by
+ *  `countPendingApprovals`, so it is excluded here — one item, one card. */
+async function countAutopilotAttention(workspaceId: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM goals
+     WHERE workspace_id = $1
+       AND status NOT IN ('done', 'abandoned')
+       AND (confirmed_at IS NULL OR status = 'blocked')`,
     [workspaceId],
   )
   return Number.parseInt(res.rows[0]?.count ?? '0', 10)

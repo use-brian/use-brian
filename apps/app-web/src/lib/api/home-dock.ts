@@ -15,7 +15,7 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type ResolvedNeed = {
-  kind: "brain_review" | "approvals";
+  kind: "brain_review" | "approvals" | "autopilot";
   count: number;
   caption: string | null;
 };

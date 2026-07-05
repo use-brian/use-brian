@@ -1,15 +1,16 @@
 "use client";
 
 /**
- * Trigger configuration UI (app-web) — radio across all four kinds
- * (Manual / Schedule / Webhook / Event), with per-kind authoring panels.
+ * Trigger configuration UI (app-web) — a card picker across the four kinds
+ * (Manual / Schedule / Webhook / Event) with the selected kind's authoring
+ * panel below, in the builder's document + soft-card design language
+ * (matching the redesigned step editor; see `field.tsx`). Replaced the old
+ * radio-stack, which buried the four options and their config in one long
+ * column of text.
  *
- * Ported from `apps/web/src/components/workflow/trigger-editor.tsx` (app
- * consolidation §5a). This is the unified editor consumed by the workflow
- * board's detail page — the kind toggle re-shapes the `trigger`
- * discriminated union and the parent persists via `PATCH /api/workflows/:id`.
- *
- * Per-kind panels live in adjacent files for readability:
+ * The kind cards re-shape the `trigger` discriminated union and the parent
+ * persists via `PATCH /api/workflows/:id`. Per-kind panels live in adjacent
+ * files for readability:
  *   - ManualTriggerPanel  → manual-trigger-panel.tsx
  *   - ScheduleFields      → schedule-trigger-fields.tsx
  *   - WebhookFields       → webhook-trigger-fields.tsx
@@ -38,6 +39,8 @@ type Props = {
   disabled?: boolean;
 };
 
+type TriggerKind = WorkflowTrigger["kind"];
+
 export function TriggerEditor({
   workflowId,
   workspaceId,
@@ -49,40 +52,90 @@ export function TriggerEditor({
   disabled,
 }: Props) {
   const t = useT();
+  const b = t.workflowPage.builder;
+
+  const kinds: Array<{ kind: TriggerKind; label: string; hint: string }> = [
+    { kind: "manual", label: b.triggerManual, hint: b.triggerManualHint },
+    { kind: "schedule", label: b.triggerSchedule, hint: b.triggerScheduleHint },
+    { kind: "webhook", label: b.triggerWebhook, hint: b.triggerWebhookHint },
+    { kind: "event", label: b.triggerEvent, hint: b.triggerEventHint },
+  ];
+
+  const select = (kind: TriggerKind) => {
+    if (kind === trigger.kind) return;
+    switch (kind) {
+      case "manual":
+        onChange({ kind: "manual" });
+        return;
+      case "schedule":
+        onChange({
+          kind: "schedule",
+          schedule: { type: "daily", time: "09:00" },
+        });
+        return;
+      case "webhook":
+        onChange({ kind: "webhook" });
+        return;
+      case "event":
+        onChange({ kind: "event", event: { sources: [] } });
+        return;
+    }
+  };
 
   return (
-    <div className="border border-border rounded-md bg-card overflow-hidden">
-      <div className="px-4 py-2 border-b border-border text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {t.workflowPage.builder.triggerHeading}
+    <div className="rounded-xl border border-border/60 bg-card p-5 flex flex-col gap-4">
+      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+        {b.triggerHeading}
       </div>
-      <div className="p-4 flex flex-col gap-3">
-        <RadioOption
-          name="trigger"
-          value="manual"
-          checked={trigger.kind === "manual"}
-          onSelect={() => onChange({ kind: "manual" })}
-          disabled={disabled}
-          label={t.workflowPage.builder.triggerManual}
-          hint={t.workflowPage.builder.triggerManualHint}
-        />
+
+      {/* Kind picker — four compact cards instead of a radio stack. */}
+      <div
+        role="radiogroup"
+        aria-label={b.triggerHeading}
+        className="grid grid-cols-2 gap-2 lg:grid-cols-4"
+      >
+        {kinds.map(({ kind, label, hint }) => {
+          const selected = trigger.kind === kind;
+          return (
+            <button
+              key={kind}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              onClick={() => select(kind)}
+              disabled={disabled}
+              className={cn(
+                "flex flex-col items-start gap-1.5 rounded-lg border p-3 text-left transition",
+                selected
+                  ? "border-primary bg-primary/5 ring-1 ring-primary/25"
+                  : "border-border hover:border-primary/40 hover:bg-muted/40",
+                disabled && "cursor-not-allowed opacity-60",
+              )}
+            >
+              <span
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-md",
+                  selected
+                    ? "bg-primary/15 text-primary"
+                    : "bg-muted text-muted-foreground",
+                )}
+              >
+                <KindIcon kind={kind} />
+              </span>
+              <span className="text-sm font-medium leading-tight">{label}</span>
+              <span className="text-[11px] leading-snug text-muted-foreground line-clamp-2">
+                {hint}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* The selected kind's panel. */}
+      <div className="border-t border-border/60 pt-4">
         {trigger.kind === "manual" && (
           <ManualTriggerPanel workflowId={workflowId} disabled={disabled} />
         )}
-
-        <RadioOption
-          name="trigger"
-          value="schedule"
-          checked={trigger.kind === "schedule"}
-          onSelect={() =>
-            onChange({
-              kind: "schedule",
-              schedule: { type: "daily", time: "09:00" },
-            })
-          }
-          disabled={disabled}
-          label={t.workflowPage.builder.triggerSchedule}
-          hint={t.workflowPage.builder.triggerScheduleHint}
-        />
         {trigger.kind === "schedule" && (
           <ScheduleTriggerFields
             trigger={trigger}
@@ -90,16 +143,6 @@ export function TriggerEditor({
             disabled={disabled}
           />
         )}
-
-        <RadioOption
-          name="trigger"
-          value="webhook"
-          checked={trigger.kind === "webhook"}
-          onSelect={() => onChange({ kind: "webhook" })}
-          disabled={disabled}
-          label={t.workflowPage.builder.triggerWebhook}
-          hint={t.workflowPage.builder.triggerWebhookHint}
-        />
         {trigger.kind === "webhook" && (
           <WebhookTriggerFields
             trigger={trigger}
@@ -110,21 +153,6 @@ export function TriggerEditor({
             disabled={disabled}
           />
         )}
-
-        <RadioOption
-          name="trigger"
-          value="event"
-          checked={trigger.kind === "event"}
-          onSelect={() =>
-            onChange({
-              kind: "event",
-              event: { sources: [] },
-            })
-          }
-          disabled={disabled}
-          label={t.workflowPage.builder.triggerEvent}
-          hint={t.workflowPage.builder.triggerEventHint}
-        />
         {trigger.kind === "event" && (
           <EventTriggerFields
             workspaceId={workspaceId}
@@ -138,44 +166,44 @@ export function TriggerEditor({
   );
 }
 
-function RadioOption({
-  name,
-  value,
-  checked,
-  onSelect,
-  disabled,
-  label,
-  hint,
-}: {
-  name: string;
-  value: string;
-  checked: boolean;
-  onSelect: () => void;
-  disabled?: boolean;
-  label: string;
-  hint: string;
-}) {
-  return (
-    <label
-      className={cn(
-        "flex items-start gap-3 cursor-pointer rounded-md px-2 py-1.5 -mx-2",
-        checked && "bg-muted/40",
-        disabled && "cursor-not-allowed opacity-60",
-      )}
-    >
-      <input
-        type="radio"
-        name={name}
-        value={value}
-        checked={checked}
-        onChange={onSelect}
-        disabled={disabled}
-        className="mt-1 accent-primary"
-      />
-      <div className="flex flex-col">
-        <span className="text-sm font-medium">{label}</span>
-        <span className="text-xs text-muted-foreground">{hint}</span>
-      </div>
-    </label>
-  );
+function KindIcon({ kind }: { kind: TriggerKind }) {
+  const common = {
+    width: 14,
+    height: 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  switch (kind) {
+    case "manual":
+      return (
+        <svg {...common}>
+          <path d="M6 4.5 19 12 6 19.5Z" />
+        </svg>
+      );
+    case "schedule":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      );
+    case "webhook":
+      return (
+        <svg {...common}>
+          <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />
+          <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
+        </svg>
+      );
+    case "event":
+      return (
+        <svg {...common}>
+          <path d="M13 2 3 14h7l-1 8 10-12h-7l1-8Z" />
+        </svg>
+      );
+  }
 }

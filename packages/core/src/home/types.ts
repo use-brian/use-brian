@@ -5,8 +5,8 @@
  * from two layers (docs/plans/home-dock.md, docs/architecture/features/home-dock.md):
  *
  *   - **Live signals** (`HomeSignals`) — assembled server-side per request from
- *     the brain inbox, approvals, workflows, drafts, and brain counts. The
- *     source of truth for every NUMBER the dock shows.
+ *     the brain inbox, approvals, autopilot goals, workflows, drafts, and brain
+ *     counts. The source of truth for every NUMBER the dock shows.
  *   - **Layout artifact** (`HomeDockLayout`) — the primary assistant's curation:
  *     a freeform note + the ordering/captions of the "needs you" action cards.
  *     Carries NO counts (the freshness contract): order + caption + note only.
@@ -28,6 +28,9 @@ export type HomeSignals = {
   brainReviewCount: number
   /** Pending approvals for the workspace. */
   approvalsCount: number
+  /** Autopilot goals needing the user: unconfirmed drafts + blocked goals.
+   *  (A confirmed goal in `awaiting_approval` counts under `approvalsCount`.) */
+  autopilotCount: number
   /** Soonest-first upcoming scheduled workflow runs (pre-capped). */
   upcomingWorkflows: { id: string; name: string; nextRunAt: string }[]
   /** Most-recently-edited drafts to resume (pre-capped). */
@@ -45,7 +48,7 @@ export type HomeSignals = {
 // ── Layout artifact (what `setHomeDock` writes) ───────────────────────────
 
 /** The action-card kinds the assistant may order in the "Needs you" group. */
-export const NEED_CARD_KINDS = ['brain_review', 'approvals'] as const
+export const NEED_CARD_KINDS = ['brain_review', 'approvals', 'autopilot'] as const
 export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
 
 export const homeDockLayoutSchema = z.object({

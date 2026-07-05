@@ -46,10 +46,18 @@ export type ResolvedDock = {
 const DEFAULT_NEEDS: ReadonlyArray<{ kind: NeedCardKind; caption?: string }> = [
   { kind: 'brain_review' },
   { kind: 'approvals' },
+  { kind: 'autopilot' },
 ]
 
 function countFor(kind: NeedCardKind, signals: HomeSignals): number {
-  return kind === 'brain_review' ? signals.brainReviewCount : signals.approvalsCount
+  switch (kind) {
+    case 'brain_review':
+      return signals.brainReviewCount
+    case 'approvals':
+      return signals.approvalsCount
+    case 'autopilot':
+      return signals.autopilotCount
+  }
 }
 
 export function mergeHomeDock(

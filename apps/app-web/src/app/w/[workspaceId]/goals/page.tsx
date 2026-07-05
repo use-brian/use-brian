@@ -1,7 +1,11 @@
 "use client";
 
 /**
- * Goals board — `/w/[workspaceId]/goals` (app-web).
+ * Goals board (titled "Autopilot") — `/w/[workspaceId]/goals` (app-web).
+ *
+ * Deliberately has NO sidebar slot or keyboard shortcut (the Approvals
+ * pattern): entry is attention-routed via the home-dock `autopilot` needs-you
+ * card and the Brain task panel's autopilot affordance.
  *
  * Observability + light control over the goal-seeker primitive: lists the
  * workspace's goals (outcome / status / host / blocker), most-recently-updated

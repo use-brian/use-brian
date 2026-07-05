@@ -1178,9 +1178,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       return
     }
 
-    // Set up SSE headers
+    // Set up SSE headers. `no-transform` matters: compressing proxies
+    // (Next dev rewrites included — its compressor honors no-transform)
+    // otherwise buffer the stream and deliver it as one chunk at the end.
     res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no') // Disable nginx buffering
     res.flushHeaders()

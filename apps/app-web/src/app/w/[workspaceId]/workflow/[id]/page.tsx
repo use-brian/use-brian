@@ -34,17 +34,16 @@ import {
   getWorkflowFull,
   listChannelDestinations,
   listWorkspaceSlackChannels,
-  listWorkflowRuns,
   runWorkflowNow,
   updateWorkflow,
   type ChannelDestination,
   type SlackChannelOption,
   type WorkflowFull,
   type WorkflowIssue,
-  type WorkflowRunSummary,
   type WorkflowStep,
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
+import { useWorkflowLiveRun } from "@/lib/workflow-live-run";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
   listCustomPageTemplates,
@@ -57,6 +56,7 @@ import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
 import { RunHistory } from "@/components/workflow/run-history";
+import { LiveRunBanner } from "@/components/workflow/live-run-banner";
 import { cn } from "@/lib/utils";
 
 export default function WorkflowDetailPage({
@@ -77,7 +77,6 @@ export default function WorkflowDetailPage({
   const [slackChannels, setSlackChannels] = useState<SlackChannelOption[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
-  const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
   const [editing, setEditing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -87,18 +86,22 @@ export default function WorkflowDetailPage({
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [refetchTick, setRefetchTick] = useState(0);
 
-  // Load workflow + recent runs.
+  // Recent runs + live-run overlay. The hook owns the runs list (poll-based:
+  // 2.5 s while a run is executing, 15 s idle, so a schedule/webhook fire
+  // lights the board up too). `running` (the Run-now POST in flight) keeps
+  // the fast cadence through the gap before the new run row is visible.
+  const { runs, liveView, pollNow } = useWorkflowLiveRun(id, {
+    forceActive: running,
+  });
+
+  // Load the workflow.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [wf, runList] = await Promise.all([
-        getWorkflowFull(id),
-        listWorkflowRuns(id, 10),
-      ]);
+      const wf = await getWorkflowFull(id);
       if (cancelled) return;
       setWorkflow(wf);
       setDraft(wf);
-      setRuns(runList);
     })();
     return () => {
       cancelled = true;
@@ -389,8 +392,13 @@ export default function WorkflowDetailPage({
     setRunMessage(null);
     setError(null);
     setRunning(true);
+    // Light the live overlay up immediately — the POST holds until the run
+    // terminates, but the run row (and its step statuses) are visible to the
+    // poller right away.
+    pollNow();
     const result = await runWorkflowNow(workflow.id, {});
     setRunning(false);
+    pollNow();
     if (!result) {
       setError(t.workflowPage.builder.runFail);
       return;
@@ -400,7 +408,6 @@ export default function WorkflowDetailPage({
         status: t.workflowPage.builder.runStatus[result.status],
       }),
     );
-    refresh();
   };
 
   const onToggleEnabled = async () => {
@@ -557,11 +564,24 @@ export default function WorkflowDetailPage({
           </div>
         </div>
 
-        {runMessage && (
+        {runMessage && !liveView && (
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
       </header>
+
+      {/* Live activity — visible whenever a run is in flight (Run now,
+          schedule, webhook or event), so the user sees which step the
+          assistant is working on instead of a silent board. */}
+      {liveView && (
+        <LiveRunBanner
+          workspaceId={workspaceId}
+          workflowId={workflow.id}
+          view={liveView}
+          definition={workflow.definition}
+          assistants={assistants}
+        />
+      )}
 
       {/* Board — the n8n-style illustration. Always visible; reflects the
           live draft. Clicking a node opens its editor. */}
@@ -571,6 +591,7 @@ export default function WorkflowDetailPage({
         assistants={assistants}
         pages={pages}
         selectedKey={editing ? selectedKey : null}
+        live={liveView}
         onSelectStep={selectStep}
         onSelectTrigger={selectTrigger}
       />

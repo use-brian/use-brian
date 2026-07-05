@@ -1,35 +1,37 @@
 "use client";
 
 /**
- * BrainDetailDrawer — right-sliding preview + review surface for a brain
- * list row.
+ * BrainDetailDrawer — right-sliding entry page for a brain list row, in
+ * the Notion sub-page shape: kind/sensitivity chips in a slim header, a
+ * big inline-editable page title, then one property row per field
+ * (icon + label + click-to-edit value), content sections, and the
+ * source context.
  *
  * Replaces the legacy `/brain-inbox/[primitive]/[rowId]` full-page detail
  * view. Hosts the entire data-review workflow inline:
  *
  *   • Confirm  — verify the row as-is (hidden once verified).
- *   • Adjust   — scope + sensitivity tweak (memory v1).
- *   • Edit     — summary + detail rewrite (memory v1).
- *   • Delete   — soft delete with inline confirm.
- *   • Ask      — opens InspectionDrawer for an ephemeral chat.
+ *   • Inline edit — each property commits on its own through /adjust
+ *     (no drawer-wide edit mode). Task + memory adjusts supersede the
+ *     row; the drawer re-anchors on the returned new id and stays open.
+ *   • Delete   — soft delete behind `confirmDialog`.
+ *   • Ask      — an inline EntryThread at the page bottom (the Notion
+ *     "Comments" analog): ephemeral read-only Q&A with the workspace's
+ *     primary assistant. No stacked overlay.
  *   • Why?     — collapsible source-session context (lazy /explain).
  *
- * Adjust / edit work post-confirm too: the underlying memory adjust
- * route supersedes the row, writes `memory_verifications`
- * audit rows for each changed field, and re-stamps verified. That audit
- * trail is the workspace's learning signal — same path as the original
- * unverified review flow, surfaced here so users can correct facts
- * after they've already approved them.
+ * Inline edits work post-confirm too: the underlying adjust routes write
+ * `memory_verifications` / `brain_verifications` audit rows per changed
+ * field (tasks audit via the preserved superseded row) and re-stamp
+ * verified. That audit trail is the workspace's learning signal.
  *
- * Width: w-full sm:w-[420px] lg:w-[560px] — roughly 1/3 of a desktop
- * doc, matching the ProvenanceSheet pattern.
+ * Property primitives: property-field.tsx; pure logic: property-edit.ts
+ * (`[COMP:app-web/brain-property-fields]`).
  *
- * Spec: docs/architecture/brain/corrections.md.
+ * Width: w-full sm:w-[480px] lg:w-[640px] xl:w-[760px] — the Notion
+ * side-peek proportion (wider than the old ProvenanceSheet third).
  *
- * Ported verbatim from apps/web (docs/plans/doc-web-app-consolidation.md
- * §5a — brain surface migration). All dependencies (brain / brain-inbox
- * SDKs, react-markdown, InspectionDrawer, EntityRow, Select, Popover)
- * resolve in app-web unchanged.
+ * Spec: docs/architecture/brain/corrections.md → "Entry page view".
  *
  * [COMP:app-web/brain-detail-drawer]
  */
@@ -74,7 +76,7 @@ import {
   updateSkill,
   deleteSkill,
 } from "@/lib/api/skills";
-import { InspectionDrawer } from "@/components/memories/inspection-drawer";
+import { EntryThread } from "@/components/brain/entry-thread";
 import { EntityRow } from "@/components/brain/entity-row";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
@@ -85,14 +87,52 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
-import { MoreHorizontal } from "lucide-react";
+import {
+  AlignLeft,
+  BookOpen,
+  Box,
+  Braces,
+  Building2,
+  Calendar,
+  CircleDashed,
+  Clock,
+  FileText,
+  Folder,
+  FolderGit2,
+  Handshake,
+  MessageSquare,
+  MoreHorizontal,
+  Package,
+  Shield,
+  Sparkles,
+  SquareCheckBig,
+  Tags,
+  UserRound,
+  Users,
+} from "lucide-react";
+import {
+  DateProperty,
+  MoreProperties,
+  PageTitle,
+  SelectProperty,
+  StaticProperty,
+  TagsProperty,
+  type CommitResult,
+  type SelectPropertyOption,
+} from "@/components/brain/property-field";
+import {
+  applyChangesToBody,
+  bodyTags,
+  dateInputToIso,
+  extraBodyFields,
+  flattenAttributes,
+  humaniseKey,
+  isoToDateInput,
+} from "@/components/brain/property-edit";
 
-// Chat-home (default ON, live 2026-06-03): the drawer reads as a clean View +
-// Why surface, with the secondary / destructive actions (Change type, Delete)
-// tucked behind a "More" overflow menu instead of crowding the primary action
-// row. NEXT_PUBLIC_CHAT_HOME_ENABLED=false puts every action back inline
-// (rollback). Build-time inlined env.
-const CHAT_HOME_FLIP = process.env.NEXT_PUBLIC_CHAT_HOME_ENABLED !== "false";
+// (The NEXT_PUBLIC_CHAT_HOME_ENABLED inline-actions rollback flag retired
+// with the Notion-style entry page: all page actions live in the drawer's
+// top toolbar now — there is no inline action row to fall back to.)
 
 type OverflowItem = {
   key: string;
@@ -111,7 +151,7 @@ function OverflowMenu({ items, ariaLabel }: { items: OverflowItem[]; ariaLabel: 
     <Popover>
       <PopoverTrigger
         aria-label={ariaLabel}
-        className="text-xs px-2 py-1.5 rounded-md border border-border text-muted-foreground hover:bg-muted inline-flex items-center"
+        className="text-xs px-2 py-1 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground inline-flex items-center"
       >
         <MoreHorizontal className="w-4 h-4" />
       </PopoverTrigger>
@@ -150,9 +190,11 @@ type Props = {
   onClose: () => void;
 };
 
-type Mode = "view" | "edit" | "delete" | "change-type";
+// "edit" / "delete" modes are gone — properties edit in place and delete
+// confirms through `confirmDialog`. Only the entity change-type panel
+// still swaps the section body.
+type Mode = "view" | "change-type";
 type Scope = "personal" | "workspace_shared" | "workspace";
-type Sensitivity = "public" | "internal" | "confidential";
 
 const ENTITY_KINDS = new Set<EntityKind>([
   "person",
@@ -164,19 +206,87 @@ const ENTITY_KINDS = new Set<EntityKind>([
   "other",
 ]);
 
-/** Body fields that should never reach the user — provenance plumbing
- *  not entry content. */
-const HIDDEN_BODY_KEYS = new Set([
-  "source_episode_id",
-  "source_session_id",
-  "assistant_id",
-  "user_id",
-  "verified_by_user_id",
-  "verified_at",
-  "original_scope",
-  "original_sensitivity",
-  "original_summary",
-]);
+// Body-field visibility (hidden plumbing + per-primitive dedicated keys)
+// lives in property-edit.ts alongside the rest of the property-page logic.
+
+/** State-dot tints for the Notion-style value pills (muted pill, colored
+ *  dot, sentence-case label). Live work earns colour; terminal states stay
+ *  neutral. */
+const TASK_STATUS_DOT_CLASS: Record<string, string> = {
+  todo: "bg-muted-foreground/40",
+  in_progress: "bg-primary",
+  blocked: "bg-amber-500",
+  done: "bg-emerald-500",
+  archived: "bg-muted-foreground/30",
+};
+
+const SENSITIVITY_DOT_CLASS: Record<string, string> = {
+  public: "bg-emerald-500",
+  internal: "bg-amber-500",
+  confidential: "bg-red-500",
+};
+
+/** Big page icon per row kind — the Notion page-icon slot. */
+function pageKindIcon(kind: string): React.ReactNode {
+  switch (kind) {
+    case "tasks":
+      return <SquareCheckBig />;
+    case "memories":
+      return <Sparkles />;
+    case "files":
+      return <FileText />;
+    case "knowledge":
+      return <BookOpen />;
+    case "people":
+    case "person":
+      return <UserRound />;
+    case "companies":
+    case "company":
+      return <Building2 />;
+    case "deals":
+    case "deal":
+      return <Handshake />;
+    case "project":
+      return <Folder />;
+    case "product":
+      return <Package />;
+    case "repository":
+      return <FolderGit2 />;
+    case "sessions":
+      return <MessageSquare />;
+    default:
+      return <Box />;
+  }
+}
+
+/** Icon per known property key; generic fields fall back to AlignLeft. */
+function propertyIcon(key: string): React.ReactNode {
+  switch (key) {
+    case "status":
+      return <CircleDashed />;
+    case "due_at":
+    case "close_date":
+      return <Calendar />;
+    case "tags":
+      return <Tags />;
+    case "sensitivity":
+      return <Shield />;
+    case "scope":
+      return <Users />;
+    case "saved":
+    case "created_at":
+    case "updated_at":
+      return <Clock />;
+    case "path":
+    case "mime_type":
+    case "name":
+      return <FileText />;
+    case "attributes":
+      return <Braces />;
+    default:
+      return <AlignLeft />;
+  }
+}
 
 /** Map a brain-list row kind to the inbox primitive used by the
  *  primitive-detail fetch. Returns null for kinds that don't have a
@@ -261,6 +371,25 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
   const requestEntityRefresh = useCallback(() => {
     setEntityRefreshTick((n) => n + 1);
   }, []);
+  // Lifted page actions — Confirm / Ask / Delete / Change type live in the
+  // top toolbar (the Notion chrome position), so the shell owns them rather
+  // than each section rendering its own button row.
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Bumped by the toolbar's "Change type" item; EntitySection listens and
+  // opens its change-type panel.
+  const [changeTypeTick, setChangeTypeTick] = useState(0);
+  // Bumped by the toolbar's "Ask about this" item; EntryThread scrolls its
+  // composer into view and focuses it.
+  const [askFocusTick, setAskFocusTick] = useState(0);
+
+  const displayRowId = displayRow?.id ?? null;
+  useEffect(() => {
+    setActionBusy(false);
+    setActionError(null);
+    setChangeTypeTick(0);
+    setAskFocusTick(0);
+  }, [displayRowId]);
 
   useEffect(() => {
     if (row || skill) {
@@ -478,25 +607,96 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
   const headerName =
     liveName && liveName.trim().length > 0 ? liveName : displayRow.name;
 
-  // The kind / sensitivity / summary badges share the title's staleness:
-  // `onUpdated` patches `primitive.body` but never `displayRow`, so editing
-  // sensitivity to "public" (or reclassifying the kind, or rewriting a memory
-  // summary) left these reading the frozen list snapshot. Derive each from the
-  // live body, falling back to the list value while the primitive loads or for
-  // kinds with no primitive body (knowledge). For non-entity primitives the
-  // kind lives in `displayRow.kind` (memories / tasks / …), not the body.
-  const headerSensitivity =
-    primitive && typeof primitive.body.sensitivity === "string"
-      ? primitive.body.sensitivity
-      : displayRow.sensitivity;
+  // The live kind (reclassify patches `primitive.body`, never `displayRow`)
+  // drives the big page icon. For non-entity primitives the kind lives in
+  // `displayRow.kind` (memories / tasks / …), not the body.
   const headerKind =
     primitive && typeof primitive.body.kind === "string"
       ? primitive.body.kind
       : displayRow.kind;
-  const headerSummary =
-    primitive && typeof primitive.body.summary === "string"
-      ? primitive.body.summary
-      : displayRow.summary;
+  // The page title renders inside the scroll body (the Notion sub-page
+  // shape). Interactive sections own it (inline rename); the static
+  // branches below (loading / not-found / knowledge) render it here.
+  const sectionOwnsTitle =
+    !loading && !notFound && !isKnowledgeKind && (isEntityKind || inboxPrim !== null);
+  // Verified state renders as a small toolbar chip, not a body banner —
+  // the page body stays title → properties → content.
+  const rowVerified = Boolean(primitive?.verifiedAt);
+
+  // Toolbar actions target the same primitive the sections adjust. Knowledge
+  // is read-only (no inbox primitive) → no actions, no composer.
+  const actionPrim = isEntityKind ? ("entity" as InboxPrimitive) : inboxPrim;
+  const canAct = !loading && !notFound && Boolean(primitive) && actionPrim !== null;
+
+  async function handleConfirm() {
+    if (!primitive || !actionPrim) return;
+    setActionBusy(true);
+    setActionError(null);
+    const result = await verifyBrainRow(workspaceId, actionPrim, primitive.id);
+    setActionBusy(false);
+    if (!result.ok) {
+      setActionError(result.error);
+      return;
+    }
+    setPrimitive({
+      ...primitive,
+      verifiedAt: new Date().toISOString(),
+      verifiedByUserId: primitive.verifiedByUserId ?? "self",
+    });
+    requestBrainRefresh(workspaceId);
+  }
+
+  async function requestDelete() {
+    if (!primitive || !actionPrim) return;
+    const ok = await confirmDialog({
+      title: t.memoriesReview.delete,
+      description: t.memoriesReview.deleteConfirmBody,
+      confirmLabel: t.memoriesReview.deleteConfirmAction,
+      cancelLabel: t.memoriesReview.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setActionBusy(true);
+    setActionError(null);
+    const result = await deleteBrainRow(workspaceId, actionPrim, primitive.id);
+    setActionBusy(false);
+    if (!result.ok) {
+      setActionError(result.error);
+      return;
+    }
+    // Drop the row from the brain page (list / facets / graph / count)
+    // before the drawer closes, so it doesn't linger stale behind it.
+    requestBrainRefresh(workspaceId);
+    onClose();
+  }
+
+  const overflowItems: OverflowItem[] = canAct
+    ? [
+        {
+          key: "ask",
+          label: t.memoriesReview.askAboutThis,
+          disabled: actionBusy,
+          onClick: () => setAskFocusTick((n) => n + 1),
+        },
+        ...(isEntityKind
+          ? [
+              {
+                key: "change-type",
+                label: labels.changeType,
+                disabled: actionBusy,
+                onClick: () => setChangeTypeTick((n) => n + 1),
+              },
+            ]
+          : []),
+        {
+          key: "delete",
+          label: t.memoriesReview.delete,
+          destructive: true,
+          disabled: actionBusy,
+          onClick: () => void requestDelete(),
+        },
+      ]
+    : [];
 
   return (
     <>
@@ -514,7 +714,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
         aria-label={headerName}
         className={cn(
           "fixed top-0 right-0 bottom-0 z-50",
-          "w-full sm:w-[420px] lg:w-[560px] bg-popover border-l border-border shadow-2xl",
+          "w-full sm:w-[480px] lg:w-[640px] xl:w-[760px] bg-popover border-l border-border shadow-2xl",
           "flex flex-col overflow-hidden",
           "duration-300 ease-out will-change-transform",
           closing
@@ -522,59 +722,84 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
             : "animate-in slide-in-from-right",
         )}
       >
-        <header className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border">
-          <div className="flex flex-col gap-1 min-w-0 flex-1">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide">
-                {headerKind}
-              </span>
-              {headerSensitivity && (
-                <span
-                  className={cn(
-                    "text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide border",
-                    headerSensitivity === "confidential" &&
-                      "bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20",
-                    headerSensitivity === "restricted" &&
-                      "bg-red-700/10 text-red-800 dark:text-red-300 border-red-700/30",
-                    headerSensitivity === "internal" &&
-                      "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20",
-                    headerSensitivity === "public" &&
-                      "bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20",
-                  )}
+        {/* Top toolbar — the Notion chrome position: quiet state on the
+            left, page actions on the right. */}
+        <header className="flex items-center justify-between gap-3 px-3 py-2 border-b border-border">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1 pl-1">
+            {rowVerified && (
+              <span
+                title={t.brainInbox.detailVerifiedNote}
+                className="text-[11px] px-1.5 py-0.5 rounded text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 inline-flex items-center gap-1"
+              >
+                <svg
+                  width="10"
+                  height="10"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="3"
+                  aria-hidden
                 >
-                  {headerSensitivity}
-                </span>
-              )}
-            </div>
-            <h2 className="text-base font-semibold break-words leading-snug">
-              {headerName}
-            </h2>
+                  <path d="M20 6L9 17l-5-5" />
+                </svg>
+                {labels.confirmedChip}
+              </span>
+            )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={labels.close}
-            className="h-7 w-7 rounded hover:bg-muted inline-flex items-center justify-center text-muted-foreground shrink-0"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden
+          <div className="flex items-center gap-1 shrink-0">
+            {canAct && !rowVerified && (
+              <button
+                type="button"
+                disabled={actionBusy}
+                onClick={() => void handleConfirm()}
+                className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+              >
+                {t.memoriesReview.confirm}
+              </button>
+            )}
+            <OverflowMenu ariaLabel={labels.moreActions} items={overflowItems} />
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={labels.close}
+              className="h-7 w-7 rounded hover:bg-muted inline-flex items-center justify-center text-muted-foreground shrink-0"
             >
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                aria-hidden
+              >
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
-          {headerSummary && (
-            <p className="text-sm text-muted-foreground whitespace-pre-wrap break-words">
-              {headerSummary}
+        <div className="flex-1 overflow-y-auto px-6 py-6 flex flex-col gap-4">
+          {actionError && (
+            <p className="text-xs text-red-500" role="alert">
+              {actionError}
             </p>
+          )}
+
+          {/* Big page icon — the Notion page-icon slot, derived from kind. */}
+          {!loading && !notFound && (
+            <div
+              className="text-muted-foreground/40 [&_svg]:size-9 [&_svg]:stroke-[1.5] -mb-1"
+              aria-hidden
+            >
+              {pageKindIcon(headerKind)}
+            </div>
+          )}
+
+          {!sectionOwnsTitle && (
+            <h2 className="text-3xl font-bold leading-tight break-words">
+              {headerName}
+            </h2>
           )}
 
           {loading && (
@@ -595,7 +820,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
               workspaceId={workspaceId}
               entity={entity}
               detail={primitive}
-              onClose={onClose}
+              changeTypeTick={changeTypeTick}
               onUpdated={(next) => {
                 setPrimitive(next);
                 // Re-pull the read-only rollup (kind / attributes /
@@ -619,13 +844,30 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
               primitive={inboxPrim}
               detail={primitive}
               crmEntity={crmEntity}
-              onClose={onClose}
               onUpdated={(next) => {
                 setPrimitive(next);
                 // Keep the brain page (list row, facets, graph,
                 // unconfirmed count) in sync with this verify / adjust.
                 requestBrainRefresh(workspaceId);
               }}
+            />
+          )}
+
+          {/* The "Comments" analog — an inline ephemeral Q&A thread with
+              the workspace's primary assistant, right on the page. */}
+          {canAct && primitive && actionPrim && (
+            <EntryThread
+              key={displayRowId ?? "none"}
+              workspaceId={workspaceId}
+              primitive={actionPrim}
+              rowId={primitive.id}
+              entrySummary={headerName || t.memoriesReview.unknownAuthor}
+              entryDetail={
+                typeof primitive.body.detail === "string"
+                  ? primitive.body.detail
+                  : null
+              }
+              focusTick={askFocusTick}
             />
           )}
         </div>
@@ -649,6 +891,26 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
 function KnowledgeSection({ entry }: { entry: KnowledgeEntryDetail }) {
   const t = useT();
   const labels = t.brainPage.detailDrawer;
+  const review = t.memoriesReview;
+  const propLabels = labels.propertyLabels as Record<string, string>;
+
+  const sensitivityOptions: SelectPropertyOption[] = [
+    {
+      value: "public",
+      label: review.sensitivityPublic,
+      dotClassName: SENSITIVITY_DOT_CLASS.public,
+    },
+    {
+      value: "internal",
+      label: review.sensitivityInternal,
+      dotClassName: SENSITIVITY_DOT_CLASS.internal,
+    },
+    {
+      value: "confidential",
+      label: review.sensitivityConfidential,
+      dotClassName: SENSITIVITY_DOT_CLASS.confidential,
+    },
+  ];
 
   return (
     <>
@@ -658,9 +920,40 @@ function KnowledgeSection({ entry }: { entry: KnowledgeEntryDetail }) {
         </p>
       )}
 
+      {/* Properties first, page body after — the Notion page order. All
+          read-only: the source of truth is the synced repo. */}
+      <div className="flex flex-col">
+        <SelectProperty
+          icon={propertyIcon("sensitivity")}
+          label={propLabels.sensitivity}
+          value={String(entry.sensitivity ?? "")}
+          options={sensitivityOptions}
+          readOnly
+        />
+        <StaticProperty
+          icon={propertyIcon("path")}
+          label={labels.knowledgePathLabel}
+          value={entry.path}
+          mono
+        />
+        {entry.tags.length > 0 && (
+          <TagsProperty
+            icon={propertyIcon("tags")}
+            label={labels.knowledgeTagsLabel}
+            tags={entry.tags}
+            readOnly
+          />
+        )}
+        <StaticProperty
+          icon={propertyIcon("updated_at")}
+          label={propLabels.updated_at}
+          value={new Date(entry.updatedAt).toLocaleString()}
+        />
+      </div>
+
       {entry.content.trim().length > 0 ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
+        <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
+          <h3 className="text-sm font-medium text-foreground/80">
             {labels.knowledgeContentHeading}
           </h3>
           <div className="chat-markdown text-sm leading-relaxed break-words">
@@ -670,42 +963,6 @@ function KnowledgeSection({ entry }: { entry: KnowledgeEntryDetail }) {
       ) : (
         <p className="text-xs text-muted-foreground">{labels.noBody}</p>
       )}
-
-      <section className="flex flex-col gap-2 border-t border-border pt-3">
-        <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-          {labels.detailsHeading}
-        </h3>
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1.5 text-sm">
-          <div className="contents">
-            <dt className="text-xs text-muted-foreground">
-              {labels.knowledgePathLabel}
-            </dt>
-            <dd className="break-all font-mono text-[12px]">{entry.path}</dd>
-          </div>
-          {entry.tags.length > 0 && (
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground">
-                {labels.knowledgeTagsLabel}
-              </dt>
-              <dd className="flex flex-wrap gap-1">
-                {entry.tags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </dd>
-            </div>
-          )}
-        </dl>
-        <p className="text-[11px] text-muted-foreground mt-1">
-          {format(labels.knowledgeUpdatedAt, {
-            date: new Date(entry.updatedAt).toLocaleString(),
-          })}
-        </p>
-      </section>
     </>
   );
 }
@@ -1156,9 +1413,11 @@ function AliasesSection({
   );
 }
 
+/** Read-only attribute rows for an entity rollup, in the shared
+ *  property-row face. Renders nothing when the entity carries no display
+ *  attributes (the sensitivity row above keeps the list non-empty). */
 function EntityBody({ entity }: { entity: EntityRollup }) {
   const t = useT();
-  const labels = t.brainPage.detailDrawer;
   const attrLabels = t.brainPage.entityPanel.attributeLabels as Record<
     string,
     string
@@ -1175,26 +1434,19 @@ function EntityBody({ entity }: { entity: EntityRollup }) {
       value: typeof value === "string" ? value : JSON.stringify(value),
     }));
 
-  if (rows.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">{labels.noBody}</p>
-    );
-  }
+  if (rows.length === 0) return null;
 
   return (
-    <section className="flex flex-col gap-2">
-      <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-        {labels.detailsHeading}
-      </h3>
-      <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1.5 text-sm">
-        {rows.map((row) => (
-          <div key={row.key} className="contents">
-            <dt className="text-xs text-muted-foreground">{row.label}</dt>
-            <dd className="break-words">{row.value}</dd>
-          </div>
-        ))}
-      </dl>
-    </section>
+    <>
+      {rows.map((row) => (
+        <StaticProperty
+          key={row.key}
+          icon={propertyIcon(row.key)}
+          label={row.label}
+          value={row.value}
+        />
+      ))}
+    </>
   );
 }
 
@@ -1204,50 +1456,37 @@ type EntitySectionProps = {
   workspaceId: string;
   entity: EntityRollup;
   detail: BrainInboxRowDetail;
-  onClose: () => void;
+  /** Bumped by the drawer toolbar's "Change type" item — opens the panel. */
+  changeTypeTick: number;
   onUpdated: (next: BrainInboxRowDetail) => void;
 };
 
-/** Mirror of `PrimitiveSection` for the `entity` brain primitive.
- *  Surfaces the same Confirm / Edit / Delete / Ask shell that memories
- *  get, with a slimmer edit form (display_name + sensitivity in v1 —
- *  attribute editing is a follow-up that needs per-kind schema work).
- *  The entity attributes from `getEntity` render read-only beneath the
- *  form for context. */
+/** Mirror of `PrimitiveSection` for the `entity` brain primitive: page
+ *  title (inline rename), sensitivity + attribute property rows, aliases,
+ *  change-type panel (toolbar-triggered), and the source context. Page
+ *  actions (Confirm / Ask / Delete / Change type) live in the drawer
+ *  toolbar, not here. */
 function EntitySection({
   workspaceId,
   entity,
   detail,
-  onClose,
+  changeTypeTick,
   onUpdated,
 }: EntitySectionProps) {
   const t = useT();
   const labels = t.brainPage.detailDrawer;
   const review = t.memoriesReview;
 
-  const isVerified = Boolean(detail.verifiedAt);
   const initialName = String(
     detail.body.display_name ?? entity.name ?? "",
   );
   const rawSensitivity = String(detail.body.sensitivity ?? "internal");
-  const inferredSensitivity: Sensitivity =
-    rawSensitivity === "public" || rawSensitivity === "confidential"
-      ? rawSensitivity
-      : "internal";
 
   const [mode, setMode] = useState<Mode>("view");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [draftName, setDraftName] = useState(initialName);
-  const [draftSensitivity, setDraftSensitivity] =
-    useState<Sensitivity>(inferredSensitivity);
-  const [draftReason, setDraftReason] = useState("");
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
   const [whyContext, setWhyContext] = useState<ExplainContext | null>(null);
-  const [askOpen, setAskOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1264,207 +1503,61 @@ function EntitySection({
     };
   }, [workspaceId, detail.id]);
 
-  // Resync drafts when the underlying row swaps.
+  // Reset transient panel state when the underlying row swaps.
   useEffect(() => {
-    setDraftName(initialName);
-    setDraftSensitivity(inferredSensitivity);
-    setDraftReason("");
     setMode("view");
-    setError(null);
-  }, [detail.id, initialName, inferredSensitivity]);
+  }, [detail.id]);
 
-  async function handleConfirm() {
-    setBusy(true);
-    setError(null);
-    const result = await verifyBrainRow(workspaceId, "entity", detail.id);
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    onUpdated({
-      ...detail,
-      verifiedAt: new Date().toISOString(),
-      verifiedByUserId: detail.verifiedByUserId ?? "self",
-    });
-  }
+  // Toolbar "Change type" → open the panel.
+  useEffect(() => {
+    if (changeTypeTick > 0) setMode("change-type");
+  }, [changeTypeTick]);
 
-  async function handleDelete() {
-    setBusy(true);
-    setError(null);
-    const result = await deleteBrainRow(workspaceId, "entity", detail.id);
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    // Drop the row from the brain page (list / facets / graph / count)
-    // before the drawer closes, so it doesn't linger stale behind it.
-    requestBrainRefresh(workspaceId);
-    onClose();
-  }
-
-  function cancelEdit() {
-    setMode("view");
-    setDraftName(initialName);
-    setDraftSensitivity(inferredSensitivity);
-    setDraftReason("");
-    setError(null);
-  }
-
-  async function submitEdit() {
-    const changes: AdjustMemoryChanges = {};
-    const trimmedName = draftName.trim();
-    if (trimmedName.length === 0) {
-      setError(labels.nameRequired);
-      return;
-    }
-    if (trimmedName !== initialName) changes.display_name = trimmedName;
-    if (draftSensitivity !== inferredSensitivity) {
-      changes.sensitivity = draftSensitivity;
-    }
-    if (draftReason.trim().length > 0) changes.reason = draftReason.trim();
-
-    if (
-      changes.display_name === undefined &&
-      changes.sensitivity === undefined
-    ) {
-      // No-op edit — treat as confirm so the user's "this is right"
-      // intent isn't lost.
-      if (!isVerified) {
-        await handleConfirm();
-      }
-      setMode("view");
-      return;
-    }
-
-    setBusy(true);
-    setError(null);
+  /**
+   * Inline property commit — entity adjust mutates in place + stamps
+   * verified server-side, so mirror both locally. The parent's `onUpdated`
+   * re-pulls the read-only rollup and refreshes the brain page.
+   */
+  async function commitChanges(
+    changes: AdjustMemoryChanges,
+  ): Promise<CommitResult> {
     const result = await adjustBrainRow(workspaceId, "entity", detail.id, changes);
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    // Adjust mutates in place + stamps verified — refresh locally and
-    // exit edit mode.
+    if (!result.ok) return { ok: false, error: result.error };
     onUpdated({
       ...detail,
-      body: {
-        ...detail.body,
-        display_name: changes.display_name ?? detail.body.display_name,
-        sensitivity: changes.sensitivity ?? detail.body.sensitivity,
-      },
+      body: applyChangesToBody(detail.body, changes, "entity"),
       verifiedAt: new Date().toISOString(),
       verifiedByUserId: detail.verifiedByUserId ?? "self",
     });
-    setMode("view");
+    return { ok: true };
   }
+
+  const propLabels = labels.propertyLabels as Record<string, string>;
+  const sensitivityOptions: SelectPropertyOption[] = [
+    {
+      value: "public",
+      label: review.sensitivityPublic,
+      dotClassName: SENSITIVITY_DOT_CLASS.public,
+    },
+    {
+      value: "internal",
+      label: review.sensitivityInternal,
+      dotClassName: SENSITIVITY_DOT_CLASS.internal,
+    },
+    {
+      value: "confidential",
+      label: review.sensitivityConfidential,
+      dotClassName: SENSITIVITY_DOT_CLASS.confidential,
+    },
+  ];
 
   return (
     <>
-      {isVerified && (
-        <div className="flex items-start gap-2 p-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 text-xs text-emerald-700 dark:text-emerald-300">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden
-            className="shrink-0 mt-0.5"
-          >
-            <path d="M20 6L9 17l-5-5" />
-          </svg>
-          <p className="flex-1">{t.brainInbox.detailVerifiedNote}</p>
-        </div>
-      )}
-
-      {mode === "view" && (
-        <div className="flex flex-wrap items-center gap-2">
-          {!isVerified && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleConfirm}
-              className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
-            >
-              {review.confirm}
-            </button>
-          )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setError(null);
-              setMode("edit");
-            }}
-            className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-          >
-            {review.edit}
-          </button>
-          {!CHAT_HOME_FLIP && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setError(null);
-                setMode("change-type");
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-            >
-              {labels.changeType}
-            </button>
-          )}
-          {!CHAT_HOME_FLIP && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setError(null);
-                setMode("delete");
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border text-red-500 hover:bg-red-500/10 disabled:opacity-50"
-            >
-              {review.delete}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setAskOpen(true)}
-            className="text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:bg-muted"
-          >
-            {review.askAboutThis}
-          </button>
-          {CHAT_HOME_FLIP && (
-            <OverflowMenu
-              ariaLabel={labels.moreActions}
-              items={[
-                {
-                  key: "change-type",
-                  label: labels.changeType,
-                  disabled: busy,
-                  onClick: () => {
-                    setError(null);
-                    setMode("change-type");
-                  },
-                },
-                {
-                  key: "delete",
-                  label: review.delete,
-                  destructive: true,
-                  disabled: busy,
-                  onClick: () => {
-                    setError(null);
-                    setMode("delete");
-                  },
-                },
-              ]}
-            />
-          )}
-        </div>
-      )}
+      <PageTitle
+        value={initialName}
+        editable
+        onCommit={(next) => commitChanges({ display_name: next })}
+      />
 
       {mode === "change-type" && (
         <ChangeTypePanel
@@ -1472,12 +1565,9 @@ function EntitySection({
           entityId={detail.id}
           currentKind={String(detail.body.kind ?? entity.kind ?? "product")}
           currentName={initialName}
-          onCancel={() => {
-            setMode("view");
-            setError(null);
-          }}
+          onCancel={() => setMode("view")}
           onChanged={(nextKind) => {
-            // Mutate the local row's kind so the chip + body re-render
+            // Mutate the local row's kind so the page icon + body re-render
             // without a round-trip. `onUpdated` also fires
             // requestBrainRefresh + the entity-rollup re-fetch so the
             // list / facets / graph / EntityBody all reflect the new kind.
@@ -1492,126 +1582,38 @@ function EntitySection({
         />
       )}
 
-      {mode === "edit" && (
-        <FormActions
-          t={t}
-          busy={busy}
-          submitLabel={review.editSubmit}
-          onSubmit={submitEdit}
-          onCancel={cancelEdit}
+      {/* Property list — sensitivity edits in place; the attribute rollup
+          renders read-only beneath it, audit rows behind the fold. */}
+      <div className="flex flex-col">
+        <SelectProperty
+          icon={propertyIcon("sensitivity")}
+          label={propLabels.sensitivity}
+          value={rawSensitivity}
+          options={sensitivityOptions}
+          onCommit={(v) =>
+            commitChanges({
+              sensitivity: v as NonNullable<AdjustMemoryChanges["sensitivity"]>,
+            })
+          }
         />
-      )}
-
-      {mode === "delete" && (
-        <div className="flex flex-col gap-2 border border-red-500/40 rounded-md p-3 bg-red-500/5">
-          <p className="text-xs text-red-600 dark:text-red-400">
-            {review.deleteConfirmBody}
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleDelete}
-              className="text-xs px-3 py-1.5 rounded-md bg-red-500 text-white hover:opacity-90 disabled:opacity-50"
-            >
-              {review.deleteConfirmAction}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setMode("view");
-                setError(null);
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-            >
-              {review.cancel}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <p className="text-xs text-red-500" role="alert">
-          {error}
-        </p>
-      )}
-
-      {mode === "edit" ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-            {labels.detailsHeading}
-          </h3>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {labels.nameLabel}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftName}
-                  onChange={(e) => setDraftName(e.target.value)}
-                  disabled={busy}
-                  maxLength={200}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("sensitivity")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftSensitivity}
-                  onValueChange={(v) => {
-                    if (v) setDraftSensitivity(v as Sensitivity);
-                  }}
-                  disabled={busy}
-                  items={{
-                    public: review.sensitivityPublic,
-                    internal: review.sensitivityInternal,
-                    confidential: review.sensitivityConfidential,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="public">
-                      {review.sensitivityPublic}
-                    </SelectItem>
-                    <SelectItem value="internal">
-                      {review.sensitivityInternal}
-                    </SelectItem>
-                    <SelectItem value="confidential">
-                      {review.sensitivityConfidential}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {review.why}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftReason}
-                  onChange={(e) => setDraftReason(e.target.value)}
-                  placeholder={review.reasonPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-          </dl>
-        </section>
-      ) : (
         <EntityBody entity={entity} />
-      )}
+        <MoreProperties
+          count={(whyContext?.savedByAssistantName ? 1 : 0) + 1}
+        >
+          {whyContext?.savedByAssistantName && (
+            <StaticProperty
+              icon={<UserRound />}
+              label={propLabels.created_by}
+              value={whyContext.savedByAssistantName}
+            />
+          )}
+          <StaticProperty
+            icon={propertyIcon("saved")}
+            label={propLabels.saved}
+            value={new Date(detail.createdAt).toLocaleString()}
+          />
+        </MoreProperties>
+      </div>
 
       <AliasesSection
         workspaceId={workspaceId}
@@ -1619,9 +1621,9 @@ function EntitySection({
         initialAliases={entity.aliases ?? []}
       />
 
-      <section className="flex flex-col gap-2 border-t border-border pt-3">
-        <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-          {review.why}
+      <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
+        <h3 className="text-sm font-medium text-foreground/80">
+          {labels.provenanceHeading}
         </h3>
         <WhyBody
           loading={whyLoading}
@@ -1631,18 +1633,6 @@ function EntitySection({
           onToggleDetails={() => setWhyDetailsOpen((v) => !v)}
         />
       </section>
-
-      {askOpen && (
-        <InspectionDrawer
-          workspaceId={workspaceId}
-          primitive="entity"
-          rowId={detail.id}
-          memorySummary={initialName || review.unknownAuthor}
-          memoryDetail={null}
-          savingAssistantName={review.unknownAuthor}
-          onClose={() => setAskOpen(false)}
-        />
-      )}
     </>
   );
 }
@@ -1657,7 +1647,6 @@ type PrimitiveSectionProps = {
    *  canonical entity this row specialises. Undefined while loading,
    *  null when not applicable (memory/task/file) or no linked entity. */
   crmEntity?: EntityRollup | null | undefined;
-  onClose: () => void;
   onUpdated: (next: BrainInboxRowDetail) => void;
 };
 
@@ -1757,12 +1746,133 @@ function FileContentPreview({
   );
 }
 
+/**
+ * Click-to-edit page body for a memory's `detail` field — the Notion
+ * "page content" analog beneath the property list. View mode renders
+ * markdown; clicking it (or the pencil next to the heading) swaps in a
+ * textarea. Blur or Cmd/Ctrl+Enter commits; Escape cancels.
+ */
+function MemoryDetailBody({
+  value,
+  onCommit,
+}: {
+  value: string | null;
+  onCommit: (next: string) => Promise<CommitResult>;
+}) {
+  const t = useT();
+  const labels = t.brainPage.detailDrawer;
+  const committed = value ?? "";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(committed);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function commit() {
+    setEditing(false);
+    if (draft === committed) return;
+    setBusy(true);
+    setError(null);
+    const result = await onCommit(draft);
+    setBusy(false);
+    if (!result.ok) {
+      setDraft(committed);
+      setError(result.error ?? labels.saveFailed);
+    }
+  }
+
+  return (
+    <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
+      <div className="flex items-center gap-1.5">
+        <h3 className="text-sm font-medium text-foreground/80">
+          {labels.propertyLabels.detail}
+        </h3>
+        {!editing && (
+          <button
+            type="button"
+            disabled={busy}
+            aria-label={format(labels.editValue, {
+              label: labels.propertyLabels.detail,
+            })}
+            onClick={() => {
+              setDraft(committed);
+              setError(null);
+              setEditing(true);
+            }}
+            className="h-5 w-5 rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground inline-flex items-center justify-center"
+          >
+            <svg
+              width="11"
+              height="11"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              aria-hidden
+            >
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {editing ? (
+        <textarea
+          autoFocus
+          value={draft}
+          rows={6}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void commit();
+            }
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              setDraft(committed);
+              setEditing(false);
+            }
+          }}
+          className="w-full resize-y rounded-md bg-muted/50 px-2.5 py-2 text-sm leading-relaxed outline-none ring-1 ring-ring/40"
+        />
+      ) : (
+        <div
+          onClick={() => {
+            if (busy) return;
+            setDraft(committed);
+            setError(null);
+            setEditing(true);
+          }}
+          className={cn(
+            "rounded-md -mx-1.5 px-1.5 py-1 cursor-text transition-colors hover:bg-muted/40",
+            busy && "opacity-60",
+          )}
+        >
+          {committed.trim().length > 0 ? (
+            <div className="chat-markdown text-sm leading-relaxed break-words">
+              <Markdown>{committed}</Markdown>
+            </div>
+          ) : (
+            <span className="text-sm text-muted-foreground/60">
+              {labels.detailPlaceholder}
+            </span>
+          )}
+        </div>
+      )}
+      {error && (
+        <p className="text-xs text-red-500" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function PrimitiveSection({
   workspaceId,
   primitive,
   detail,
   crmEntity,
-  onClose,
   onUpdated,
 }: PrimitiveSectionProps) {
   const t = useT();
@@ -1773,7 +1883,6 @@ function PrimitiveSection({
   const isCrm = primitive === "company" || primitive === "contact" || primitive === "deal";
   const isFile = primitive === "workspace_file";
   const isTask = primitive === "task";
-  const isVerified = Boolean(detail.verifiedAt);
   // Task autopilot: the goal auto-drafted for this task (Confirm / Work this).
   const [taskGoal, setTaskGoal] = useState<GoalRow | null>(null);
   const [goalBusy, setGoalBusy] = useState(false);
@@ -1824,51 +1933,18 @@ function PrimitiveSection({
   const crmName = String(detail.body.name ?? detail.body.display_name ?? "");
   const inferredScope = inferScope(detail);
   const rawSensitivity = String(detail.body.sensitivity ?? "internal");
-  const inferredSensitivity: Sensitivity =
-    rawSensitivity === "public" || rawSensitivity === "confidential"
-      ? rawSensitivity
-      : "internal";
 
-  const [mode, setMode] = useState<Mode>("view");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const [draftScope, setDraftScope] = useState<Scope>(inferredScope);
-  const [draftSensitivity, setDraftSensitivity] =
-    useState<Sensitivity>(inferredSensitivity);
-  const [draftReason, setDraftReason] = useState("");
-  const [draftSummary, setDraftSummary] = useState(summary);
-  const [draftDetail, setDraftDetail] = useState(memoryDetail ?? "");
-  // CRM name draft — shared field for company/contact/deal edits.
-  const [draftCrmName, setDraftCrmName] = useState(crmName);
-  // workspace_file tags draft — comma-separated for editing; the original
-  // set drives the change detection in `submitEdit`.
-  const fileTags: string[] = Array.isArray(detail.body.tags)
-    ? (detail.body.tags as unknown[]).filter((x): x is string => typeof x === "string")
-    : [];
-  const fileTagsJoined = fileTags.join(", ");
-  const [draftFileTags, setDraftFileTags] = useState(fileTagsJoined);
-
-  // Task draft fields — the doc-like editable surface (title/status/due/tags).
-  // Tags reuse `fileTags`/`fileTagsJoined` (the generic `detail.body.tags`
-  // parse above), so a task and a file share the comma-separated tag editor.
-  const taskStatusLabels = t.brainPage.taskStatus;
+  // Property-row inputs (each row edits in place and commits on its own —
+  // there is no drawer-wide edit mode anymore).
+  const rowTags = bodyTags(detail.body.tags);
+  const taskStatusLabels = t.brainPage.taskStatus as Record<string, string>;
   const taskTitle = isTask ? String(detail.body.title ?? "") : "";
   const taskStatus = isTask ? String(detail.body.status ?? "todo") : "todo";
-  // due_at is an ISO string in the projection; <input type="date"> wants
-  // YYYY-MM-DD, so slice when seeding and re-expand to ISO on submit.
-  const taskDueDate = isTask
-    ? String(detail.body.due_at ?? "").slice(0, 10)
-    : "";
-  const [draftTaskTitle, setDraftTaskTitle] = useState(taskTitle);
-  const [draftTaskStatus, setDraftTaskStatus] = useState(taskStatus);
-  const [draftTaskDue, setDraftTaskDue] = useState(taskDueDate);
-  const [draftTaskTags, setDraftTaskTags] = useState(fileTagsJoined);
+  const taskDueDate = isTask ? isoToDateInput(detail.body.due_at) : "";
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
   const [whyContext, setWhyContext] = useState<ExplainContext | null>(null);
-  const [askOpen, setAskOpen] = useState(false);
 
   // Provenance loads as soon as the row is shown — the summary is
   // always visible at the bottom of the drawer body, so we need its
@@ -1888,286 +1964,254 @@ function PrimitiveSection({
     };
   }, [workspaceId, primitive, detail.id]);
 
-  // When the detail prop changes (e.g. parent swapped rows), resync the
-  // draft state so the form reflects the new row.
-  useEffect(() => {
-    setDraftScope(inferredScope);
-    setDraftSensitivity(inferredSensitivity);
-    setDraftSummary(summary);
-    setDraftDetail(memoryDetail ?? "");
-    setDraftCrmName(crmName);
-    setDraftFileTags(fileTagsJoined);
-    setDraftTaskTitle(taskTitle);
-    setDraftTaskStatus(taskStatus);
-    setDraftTaskDue(taskDueDate);
-    setDraftTaskTags(fileTagsJoined);
-    setDraftReason("");
-    setMode("view");
-    setError(null);
-  }, [detail.id, inferredScope, inferredSensitivity, summary, memoryDetail, crmName, fileTagsJoined, taskTitle, taskStatus, taskDueDate]);
-
-  async function handleConfirm() {
-    setBusy(true);
-    setError(null);
-    const result = await verifyBrainRow(workspaceId, primitive, detail.id);
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    // Optimistic — flip verified state locally.
-    onUpdated({
-      ...detail,
-      verifiedAt: new Date().toISOString(),
-      verifiedByUserId: detail.verifiedByUserId ?? "self",
-    });
-  }
-
-  async function handleDelete() {
-    setBusy(true);
-    setError(null);
-    const result = await deleteBrainRow(workspaceId, primitive, detail.id);
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    // Drop the row from the brain page (list / facets / graph / count)
-    // before the drawer closes, so it doesn't linger stale behind it.
-    requestBrainRefresh(workspaceId);
-    onClose();
-  }
-
-  function cancelEdit() {
-    setMode("view");
-    setDraftScope(inferredScope);
-    setDraftSensitivity(inferredSensitivity);
-    setDraftSummary(summary);
-    setDraftDetail(memoryDetail ?? "");
-    setDraftFileTags(fileTagsJoined);
-    setDraftTaskTitle(taskTitle);
-    setDraftTaskStatus(taskStatus);
-    setDraftTaskDue(taskDueDate);
-    setDraftTaskTags(fileTagsJoined);
-    setDraftReason("");
-    setError(null);
-  }
-
-  async function submitEdit() {
-    const changes: AdjustMemoryChanges = {};
-    if (isTask) {
-      // Task edit shape — title/status/due_at/tags. Each field is sent only
-      // when it actually changed; the server supersedes the row (a new
-      // bi-temporal id) and the panel closes + refetches afterwards.
-      const trimmedTitle = draftTaskTitle.trim();
-      if (trimmedTitle.length === 0) {
-        setError(labels.titleRequired);
-        return;
-      }
-      if (trimmedTitle !== taskTitle) changes.title = trimmedTitle;
-      if (draftTaskStatus !== taskStatus) {
-        changes.status = draftTaskStatus as NonNullable<
-          AdjustMemoryChanges["status"]
-        >;
-      }
-      if (draftTaskDue !== taskDueDate) {
-        // Empty clears the due date; otherwise pin to day-start UTC.
-        changes.due_at = draftTaskDue
-          ? new Date(`${draftTaskDue}T00:00:00.000Z`).toISOString()
-          : null;
-      }
-      const parsedTags = draftTaskTags
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const tagsChanged =
-        parsedTags.length !== fileTags.length ||
-        parsedTags.some((tag, i) => tag !== fileTags[i]);
-      if (tagsChanged) changes.tags = parsedTags;
-    } else if (isCrm) {
-      // CRM rows expose name + sensitivity. Name maps to `display_name`
-      // on the wire — the server's adjust handler for company/contact
-      // /deal translates that to the CRM table's `name` column AND
-      // updates the linked entity so both surfaces stay in sync.
-      const trimmedName = draftCrmName.trim();
-      if (trimmedName.length === 0) {
-        setError(labels.nameRequired);
-        return;
-      }
-      if (trimmedName !== crmName) changes.display_name = trimmedName;
-      if (draftSensitivity !== inferredSensitivity) {
-        changes.sensitivity = draftSensitivity;
-      }
-    } else if (isFile) {
-      // File edit shape — sensitivity + tags (rename is path-coupled and
-      // out of scope; the server's workspace_file adjust handler patches
-      // the metadata and stamps the row verified).
-      if (draftSensitivity !== inferredSensitivity) {
-        changes.sensitivity = draftSensitivity;
-      }
-      const parsedTags = draftFileTags
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const tagsChanged =
-        parsedTags.length !== fileTags.length ||
-        parsedTags.some((tag, i) => tag !== fileTags[i]);
-      if (tagsChanged) changes.tags = parsedTags;
-    } else {
-      // Memory edit shape — scope/sensitivity/summary/detail.
-      if (draftScope !== inferredScope) changes.scope = draftScope;
-      if (draftSensitivity !== inferredSensitivity) {
-        changes.sensitivity = draftSensitivity;
-      }
-      if (draftSummary !== summary) {
-        if (draftSummary.trim().length === 0) {
-          setError(review.summaryRequired);
-          return;
-        }
-        changes.summary = draftSummary.trim();
-      }
-      if (draftDetail !== (memoryDetail ?? "")) {
-        changes.detail = draftDetail;
-      }
-    }
-    if (draftReason.trim().length > 0) changes.reason = draftReason.trim();
-    if (Object.keys(changes).length === 0 || (
-      isCrm
-        ? changes.display_name === undefined && changes.sensitivity === undefined
-        : isFile
-          ? changes.sensitivity === undefined && changes.tags === undefined
-          : false
-    )) {
-      // Nothing to change — collapse the form. If the row was unverified,
-      // also stamp it verified so the user's "no, this is right" intent
-      // doesn't get silently lost.
-      if (!isVerified) {
-        await handleConfirm();
-      }
-      setMode("view");
-      return;
-    }
-    await runAdjust(changes);
-  }
-
-  async function runAdjust(changes: AdjustMemoryChanges) {
-    setBusy(true);
-    setError(null);
+  /**
+   * Inline property commit — one adjust per field, straight from the row.
+   * Task + memory adjusts supersede the row (a new bi-temporal id): the
+   * response carries it, so re-anchor `detail.id` and keep the panel open.
+   * Entity-family adjusts (CRM / file) mutate in place and stamp verified
+   * server-side — mirror the stamp locally. Task supersession carries its
+   * audit in the preserved old row and leaves the verify flag alone.
+   */
+  async function commitChanges(
+    changes: AdjustMemoryChanges,
+  ): Promise<CommitResult> {
     const result = await adjustBrainRow(
       workspaceId,
       primitive,
       detail.id,
       changes,
     );
-    setBusy(false);
-    if (!result.ok) {
-      setError(result.error);
-      return;
-    }
-    // Supersession mints a new memory id — close the drawer rather
-    // than holding a stale `detail.id` that no longer resolves. Tell the
-    // brain page to refetch (list / facets / graph / count) so the row
-    // behind the drawer reflects the edit before it closes.
-    requestBrainRefresh(workspaceId);
-    onClose();
+    if (!result.ok) return { ok: false, error: result.error };
+    // `onUpdated` also asks the brain page to refetch (list / facets /
+    // graph / count) so the row behind the drawer reflects the edit.
+    onUpdated({
+      ...detail,
+      id: result.newId ?? detail.id,
+      body: applyChangesToBody(detail.body, changes, primitive),
+      ...(isTask
+        ? {}
+        : {
+            verifiedAt: new Date().toISOString(),
+            verifiedByUserId: detail.verifiedByUserId ?? "self",
+          }),
+    });
+    return { ok: true };
   }
 
-  const fields = listDetailFields(detail.body);
-  const tagsRaw = detail.body.tags;
-  const tagsDisplay =
-    Array.isArray(tagsRaw) && tagsRaw.length > 0
-      ? tagsRaw
-          .map((t) => (typeof t === "string" ? t : JSON.stringify(t)))
-          .join(", ")
-      : "—";
+  // Page title per primitive: tasks edit `title`, memories edit `summary`,
+  // CRM rows edit `display_name` (mirrored to `name` server-side). Files
+  // keep a static name (rename is path-coupled, out of scope).
+  const pageTitleValue = isTask
+    ? taskTitle
+    : isMemory
+      ? summary
+      : isCrm
+        ? crmName
+        : String(detail.body.name ?? detail.body.title ?? "");
+  const canRenameInline = isTask || isMemory || isCrm;
+  async function commitTitle(next: string): Promise<CommitResult> {
+    if (isTask) return commitChanges({ title: next });
+    if (isMemory) return commitChanges({ summary: next });
+    if (isCrm) return commitChanges({ display_name: next });
+    return { ok: true };
+  }
+
+  const propLabels = labels.propertyLabels as Record<string, string>;
+  const statusOptions: SelectPropertyOption[] = (
+    ["todo", "in_progress", "blocked", "done", "archived"] as const
+  ).map((s) => ({
+    value: s,
+    label: taskStatusLabels[s] ?? s,
+    dotClassName: TASK_STATUS_DOT_CLASS[s],
+  }));
+  const sensitivityOptions: SelectPropertyOption[] = [
+    {
+      value: "public",
+      label: review.sensitivityPublic,
+      dotClassName: SENSITIVITY_DOT_CLASS.public,
+    },
+    {
+      value: "internal",
+      label: review.sensitivityInternal,
+      dotClassName: SENSITIVITY_DOT_CLASS.internal,
+    },
+    {
+      value: "confidential",
+      label: review.sensitivityConfidential,
+      dotClassName: SENSITIVITY_DOT_CLASS.confidential,
+    },
+  ];
+  const scopeOptions: SelectPropertyOption[] = [
+    { value: "personal", label: review.scopePersonal },
+    { value: "workspace_shared", label: review.scopeWorkspaceShared },
+    { value: "workspace", label: review.scopeWorkspace },
+  ];
+
+  const attributeRows = isTask ? flattenAttributes(detail.body.attributes) : [];
+  const extraFields = extraBodyFields(primitive, detail.body);
+  // CRM rows keep their substance (email / domain / stage …) visible; for
+  // the other kinds the generic remainder is secondary and folds behind
+  // "N more properties" together with the audit rows.
+  const visibleExtras = isCrm ? extraFields : [];
+  const foldedExtras = isCrm ? [] : extraFields;
+  const createdByName = whyContext?.savedByAssistantName ?? null;
+  const foldedCount =
+    attributeRows.length + foldedExtras.length + (createdByName ? 1 : 0) + 1;
 
   return (
     <>
-      {isVerified && (
-        <div className="flex items-start gap-2 p-3 rounded-md border border-emerald-500/30 bg-emerald-500/5 text-xs text-emerald-700 dark:text-emerald-300">
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden
-            className="shrink-0 mt-0.5"
-          >
-            <path d="M20 6L9 17l-5-5" />
-          </svg>
-          <p className="flex-1">{t.brainInbox.detailVerifiedNote}</p>
-        </div>
-      )}
+      <PageTitle
+        value={pageTitleValue}
+        editable={canRenameInline}
+        onCommit={commitTitle}
+      />
 
-      {mode === "view" && (
-        <div className="flex flex-wrap items-center gap-2">
-          {!isVerified && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleConfirm}
-              className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
-            >
-              {review.confirm}
-            </button>
-          )}
-          {(isMemory || isCrm || isFile || isTask) && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setError(null);
-                setMode("edit");
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-            >
-              {review.edit}
-            </button>
-          )}
-          {!CHAT_HOME_FLIP && (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setError(null);
-                setMode("delete");
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border text-red-500 hover:bg-red-500/10 disabled:opacity-50"
-            >
-              {review.delete}
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setAskOpen(true)}
-            className="text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:bg-muted"
-          >
-            {review.askAboutThis}
-          </button>
-          {CHAT_HOME_FLIP && (
-            <OverflowMenu
-              ariaLabel={labels.moreActions}
-              items={[
-                {
-                  key: "delete",
-                  label: review.delete,
-                  destructive: true,
-                  disabled: busy,
-                  onClick: () => {
-                    setError(null);
-                    setMode("delete");
-                  },
-                },
-              ]}
+      {/* Property list — one inline-editable row per field. */}
+      <div className="flex flex-col">
+        {isTask && (
+          <>
+            <SelectProperty
+              icon={propertyIcon("status")}
+              label={propLabels.status}
+              value={taskStatus}
+              options={statusOptions}
+              onCommit={(v) =>
+                commitChanges({
+                  status: v as NonNullable<AdjustMemoryChanges["status"]>,
+                })
+              }
+            />
+            <DateProperty
+              icon={propertyIcon("due_at")}
+              label={propLabels.due_at}
+              value={taskDueDate}
+              onCommit={(v) => commitChanges({ due_at: dateInputToIso(v) })}
+            />
+            <TagsProperty
+              icon={propertyIcon("tags")}
+              label={propLabels.tags}
+              tags={rowTags}
+              placeholder={labels.filePreview.tagsPlaceholder}
+              onCommit={(next) => commitChanges({ tags: next })}
+            />
+            {/* Task sensitivity carries forward untouched on edit (not in
+                TaskUpdateFields) — read-only row. */}
+            <SelectProperty
+              icon={propertyIcon("sensitivity")}
+              label={propLabels.sensitivity}
+              value={rawSensitivity}
+              options={sensitivityOptions}
+              readOnly
+            />
+          </>
+        )}
+
+        {isMemory && (
+          <>
+            <SelectProperty
+              icon={propertyIcon("scope")}
+              label={propLabels.scope}
+              value={inferredScope}
+              options={scopeOptions}
+              onCommit={(v) =>
+                commitChanges({
+                  scope: v as NonNullable<AdjustMemoryChanges["scope"]>,
+                })
+              }
+            />
+            <SelectProperty
+              icon={propertyIcon("sensitivity")}
+              label={propLabels.sensitivity}
+              value={rawSensitivity}
+              options={sensitivityOptions}
+              onCommit={(v) =>
+                commitChanges({
+                  sensitivity: v as NonNullable<
+                    AdjustMemoryChanges["sensitivity"]
+                  >,
+                })
+              }
+            />
+            {rowTags.length > 0 && (
+              <TagsProperty
+                icon={propertyIcon("tags")}
+                label={propLabels.tags}
+                tags={rowTags}
+                readOnly
+              />
+            )}
+          </>
+        )}
+
+        {(isFile || isCrm) && (
+          <SelectProperty
+            icon={propertyIcon("sensitivity")}
+            label={propLabels.sensitivity}
+            value={rawSensitivity}
+            options={sensitivityOptions}
+            onCommit={(v) =>
+              commitChanges({
+                sensitivity: v as NonNullable<
+                  AdjustMemoryChanges["sensitivity"]
+                >,
+              })
+            }
+          />
+        )}
+
+        {isFile && (
+          <TagsProperty
+            icon={propertyIcon("tags")}
+            label={propLabels.tags}
+            tags={rowTags}
+            placeholder={labels.filePreview.tagsPlaceholder}
+            onCommit={(next) => commitChanges({ tags: next })}
+          />
+        )}
+
+        {visibleExtras.map(([k, v]) => (
+          <StaticProperty
+            key={k}
+            icon={propertyIcon(k)}
+            label={propLabels[k] ?? humaniseKey(k)}
+            value={v}
+          />
+        ))}
+
+        <MoreProperties count={foldedCount}>
+          {attributeRows.map(([k, v]) => (
+            <StaticProperty
+              key={`attr:${k}`}
+              icon={propertyIcon("attributes")}
+              label={humaniseKey(k)}
+              value={v}
+            />
+          ))}
+          {foldedExtras.map(([k, v]) => (
+            <StaticProperty
+              key={k}
+              icon={propertyIcon(k)}
+              label={propLabels[k] ?? humaniseKey(k)}
+              value={v}
+            />
+          ))}
+          {createdByName && (
+            <StaticProperty
+              icon={<UserRound />}
+              label={propLabels.created_by}
+              value={createdByName}
             />
           )}
-        </div>
-      )}
+          <StaticProperty
+            icon={propertyIcon("saved")}
+            label={propLabels.saved}
+            value={new Date(detail.createdAt).toLocaleString()}
+          />
+        </MoreProperties>
+      </div>
 
-      {isTask && taskGoal && mode === "view" && (
-        <section className="mt-1 flex flex-col gap-2 rounded-md border border-border bg-card/50 p-3">
+      {isTask && taskGoal && (
+        <section className="flex flex-col gap-2 rounded-lg border border-border bg-card/50 p-3">
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
             {labels.goalHeading}
           </div>
@@ -2199,466 +2243,32 @@ function PrimitiveSection({
         </section>
       )}
 
-      {mode === "edit" && (
-        <FormActions
-          t={t}
-          busy={busy}
-          submitLabel={review.editSubmit}
-          onSubmit={submitEdit}
-          onCancel={cancelEdit}
+      {isMemory && (
+        <MemoryDetailBody
+          value={memoryDetail}
+          onCommit={(next) => commitChanges({ detail: next })}
         />
       )}
 
-      {mode === "delete" && (
-        <div className="flex flex-col gap-2 border border-red-500/40 rounded-md p-3 bg-red-500/5">
-          <p className="text-xs text-red-600 dark:text-red-400">
-            {review.deleteConfirmBody}
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleDelete}
-              className="text-xs px-3 py-1.5 rounded-md bg-red-500 text-white hover:opacity-90 disabled:opacity-50"
-            >
-              {review.deleteConfirmAction}
-            </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                setMode("view");
-                setError(null);
-              }}
-              className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-            >
-              {review.cancel}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <p className="text-xs text-red-500" role="alert">
-          {error}
-        </p>
-      )}
-
-      {isTask && mode === "edit" ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-            {labels.detailsHeading}
+      {isFile && (
+        <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
+          <h3 className="text-sm font-medium text-foreground/80">
+            {labels.filePreview.heading}
           </h3>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("title")}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftTaskTitle}
-                  onChange={(e) => setDraftTaskTitle(e.target.value)}
-                  disabled={busy}
-                  maxLength={500}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("status")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftTaskStatus}
-                  onValueChange={(v) => {
-                    if (v) setDraftTaskStatus(v);
-                  }}
-                  disabled={busy}
-                  items={{
-                    todo: taskStatusLabels.todo,
-                    in_progress: taskStatusLabels.in_progress,
-                    blocked: taskStatusLabels.blocked,
-                    done: taskStatusLabels.done,
-                    archived: taskStatusLabels.archived,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="todo">{taskStatusLabels.todo}</SelectItem>
-                    <SelectItem value="in_progress">
-                      {taskStatusLabels.in_progress}
-                    </SelectItem>
-                    <SelectItem value="blocked">{taskStatusLabels.blocked}</SelectItem>
-                    <SelectItem value="done">{taskStatusLabels.done}</SelectItem>
-                    <SelectItem value="archived">{taskStatusLabels.archived}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("due_at")}
-              </dt>
-              <dd>
-                <input
-                  type="date"
-                  value={draftTaskDue}
-                  onChange={(e) => setDraftTaskDue(e.target.value)}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("tags")}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftTaskTags}
-                  onChange={(e) => setDraftTaskTags(e.target.value)}
-                  placeholder={labels.filePreview.tagsPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-          </dl>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            {format(labels.savedAt, {
-              date: new Date(detail.createdAt).toLocaleString(),
-            })}
-          </p>
+          <FileContentPreview
+            workspaceId={workspaceId}
+            fileId={detail.id}
+            mime={String(detail.body.mime_type ?? "")}
+            name={String(detail.body.name ?? "file")}
+          />
         </section>
-      ) : isCrm && mode === "edit" ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-            {labels.detailsHeading}
-          </h3>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {labels.nameLabel}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftCrmName}
-                  onChange={(e) => setDraftCrmName(e.target.value)}
-                  disabled={busy}
-                  maxLength={200}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("sensitivity")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftSensitivity}
-                  onValueChange={(v) => {
-                    if (v) setDraftSensitivity(v as Sensitivity);
-                  }}
-                  disabled={busy}
-                  items={{
-                    public: review.sensitivityPublic,
-                    internal: review.sensitivityInternal,
-                    confidential: review.sensitivityConfidential,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="public">{review.sensitivityPublic}</SelectItem>
-                    <SelectItem value="internal">{review.sensitivityInternal}</SelectItem>
-                    <SelectItem value="confidential">{review.sensitivityConfidential}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {review.why}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftReason}
-                  onChange={(e) => setDraftReason(e.target.value)}
-                  placeholder={review.reasonPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-          </dl>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            {format(labels.savedAt, {
-              date: new Date(detail.createdAt).toLocaleString(),
-            })}
-          </p>
-        </section>
-      ) : isMemory && mode === "edit" ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-            {labels.detailsHeading}
-          </h3>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
-            {tagsDisplay && (
-              <div className="contents">
-                <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                  {humaniseKey("tags")}
-                </dt>
-                <dd className="break-words font-mono text-[12px] leading-relaxed pt-1.5">
-                  {tagsDisplay}
-                </dd>
-              </div>
-            )}
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("scope")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftScope}
-                  onValueChange={(v) => {
-                    if (v) setDraftScope(v as Scope);
-                  }}
-                  disabled={busy}
-                  items={{
-                    personal: review.scopePersonal,
-                    workspace_shared: review.scopeWorkspaceShared,
-                    workspace: review.scopeWorkspace,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="personal">
-                      {review.scopePersonal}
-                    </SelectItem>
-                    <SelectItem value="workspace_shared">
-                      {review.scopeWorkspaceShared}
-                    </SelectItem>
-                    <SelectItem value="workspace">
-                      {review.scopeWorkspace}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("detail")}
-              </dt>
-              <dd>
-                <textarea
-                  value={draftDetail}
-                  onChange={(e) => setDraftDetail(e.target.value)}
-                  disabled={busy}
-                  rows={4}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background resize-y w-full font-mono"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("summary")}
-              </dt>
-              <dd>
-                <textarea
-                  value={draftSummary}
-                  onChange={(e) => setDraftSummary(e.target.value)}
-                  disabled={busy}
-                  rows={2}
-                  maxLength={500}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background resize-y w-full font-mono"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("sensitivity")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftSensitivity}
-                  onValueChange={(v) => {
-                    if (v) setDraftSensitivity(v as Sensitivity);
-                  }}
-                  disabled={busy}
-                  items={{
-                    public: review.sensitivityPublic,
-                    internal: review.sensitivityInternal,
-                    confidential: review.sensitivityConfidential,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="public">
-                      {review.sensitivityPublic}
-                    </SelectItem>
-                    <SelectItem value="internal">
-                      {review.sensitivityInternal}
-                    </SelectItem>
-                    <SelectItem value="confidential">
-                      {review.sensitivityConfidential}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {review.why}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftReason}
-                  onChange={(e) => setDraftReason(e.target.value)}
-                  placeholder={review.reasonPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-          </dl>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            {format(labels.savedAt, {
-              date: new Date(detail.createdAt).toLocaleString(),
-            })}
-          </p>
-        </section>
-      ) : isFile && mode === "edit" ? (
-        <section className="flex flex-col gap-2">
-          <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-            {labels.detailsHeading}
-          </h3>
-          <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-2 text-sm items-start">
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("sensitivity")}
-              </dt>
-              <dd>
-                <Select
-                  value={draftSensitivity}
-                  onValueChange={(v) => {
-                    if (v) setDraftSensitivity(v as Sensitivity);
-                  }}
-                  disabled={busy}
-                  items={{
-                    public: review.sensitivityPublic,
-                    internal: review.sensitivityInternal,
-                    confidential: review.sensitivityConfidential,
-                  }}
-                >
-                  <SelectTrigger className="text-xs w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent alignItemWithTrigger={false}>
-                    <SelectItem value="public">{review.sensitivityPublic}</SelectItem>
-                    <SelectItem value="internal">{review.sensitivityInternal}</SelectItem>
-                    <SelectItem value="confidential">{review.sensitivityConfidential}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {humaniseKey("tags")}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftFileTags}
-                  onChange={(e) => setDraftFileTags(e.target.value)}
-                  placeholder={labels.filePreview.tagsPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-            <div className="contents">
-              <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-1.5">
-                {review.why}
-              </dt>
-              <dd>
-                <input
-                  type="text"
-                  value={draftReason}
-                  onChange={(e) => setDraftReason(e.target.value)}
-                  placeholder={review.reasonPlaceholder}
-                  disabled={busy}
-                  className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full"
-                />
-              </dd>
-            </div>
-          </dl>
-          <p className="text-[11px] text-muted-foreground mt-1">
-            {format(labels.savedAt, {
-              date: new Date(detail.createdAt).toLocaleString(),
-            })}
-          </p>
-        </section>
-      ) : (
-        <>
-          {isFile && (
-            <section className="flex flex-col gap-2">
-              <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-                {labels.filePreview.heading}
-              </h3>
-              <FileContentPreview
-                workspaceId={workspaceId}
-                fileId={detail.id}
-                mime={String(detail.body.mime_type ?? "")}
-                name={String(detail.body.name ?? "file")}
-              />
-            </section>
-          )}
-          {fields.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-                {labels.detailsHeading}
-              </h3>
-              <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1.5 text-sm">
-                {fields.map(([k, v]) => (
-                  <div key={k} className="contents">
-                    <dt className="text-xs text-muted-foreground uppercase tracking-wide pt-0.5">
-                      {humaniseKey(k)}
-                    </dt>
-                    <dd className="break-words font-mono text-[12px] leading-relaxed">
-                      {v}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-              <p className="text-[11px] text-muted-foreground mt-2">
-                {format(labels.savedAt, {
-                  date: new Date(detail.createdAt).toLocaleString(),
-                })}
-              </p>
-            </section>
-          )}
-        </>
       )}
 
       {crmEntity && <EmbeddedRollupSections rollup={crmEntity} />}
 
-      <section className="flex flex-col gap-2 border-t border-border pt-3">
-        <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
-          {review.why}
+      <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
+        <h3 className="text-sm font-medium text-foreground/80">
+          {labels.provenanceHeading}
         </h3>
         <WhyBody
           loading={whyLoading}
@@ -2668,18 +2278,6 @@ function PrimitiveSection({
           onToggleDetails={() => setWhyDetailsOpen((v) => !v)}
         />
       </section>
-
-      {askOpen && (
-        <InspectionDrawer
-          workspaceId={workspaceId}
-          primitive={primitive}
-          rowId={detail.id}
-          memorySummary={summary || review.unknownAuthor}
-          memoryDetail={memoryDetail}
-          savingAssistantName={review.unknownAuthor}
-          onClose={() => setAskOpen(false)}
-        />
-      )}
     </>
   );
 }
@@ -2777,39 +2375,8 @@ function inferScope(detail: BrainInboxRowDetail): Scope {
   return "personal";
 }
 
-function listDetailFields(body: Record<string, unknown>): Array<[string, string]> {
-  return Object.entries(body)
-    .filter(([k, v]) => !HIDDEN_BODY_KEYS.has(k) && v != null && v !== "")
-    .map(([k, v]) => [k, formatValue(v)] as [string, string]);
-}
-
-function formatValue(v: unknown): string {
-  if (v == null) return "—";
-  if (typeof v === "string") {
-    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(v)) {
-      const d = new Date(v);
-      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
-    }
-    return v;
-  }
-  if (typeof v === "number" || typeof v === "boolean") return String(v);
-  if (Array.isArray(v)) {
-    if (v.length === 0) return "—";
-    return v
-      .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
-      .join(", ");
-  }
-  if (typeof v === "object") {
-    const entries = Object.entries(v as Record<string, unknown>);
-    if (entries.length === 0) return "—";
-    return JSON.stringify(v, null, 2);
-  }
-  return String(v);
-}
-
-function humaniseKey(key: string): string {
-  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-}
+// (listDetailFields / formatValue / humaniseKey moved to property-edit.ts —
+// the property page's pure logic module.)
 
 // ── Why-expander: typed content parsing + summary ────────────────
 
@@ -3204,7 +2771,7 @@ function SkillDrawer({
         aria-label={skill.name}
         className={cn(
           "fixed top-0 right-0 bottom-0 z-50",
-          "w-full sm:w-[420px] lg:w-[560px] bg-popover border-l border-border shadow-2xl",
+          "w-full sm:w-[480px] lg:w-[640px] xl:w-[760px] bg-popover border-l border-border shadow-2xl",
           "flex flex-col overflow-hidden",
           "duration-300 ease-out will-change-transform",
           closing

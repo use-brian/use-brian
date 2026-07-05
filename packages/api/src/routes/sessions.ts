@@ -445,7 +445,9 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
 
     res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
+    // `no-transform` keeps compressing proxies (Next dev rewrites included)
+    // from buffering the stream into one end-of-turn chunk.
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()

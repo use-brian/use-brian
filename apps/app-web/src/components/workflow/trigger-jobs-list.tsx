@@ -19,6 +19,7 @@ import type {
   WorkflowTrigger,
   WorkflowTriggerJob,
 } from "@/lib/api/workflow";
+import { InfoTip } from "@/components/workflow/field";
 import { cn } from "@/lib/utils";
 
 function scheduleLabel(schedule: ScheduleConfig, t: Dictionary): string {
@@ -64,9 +65,14 @@ export function TriggerJobsList({
   const duplicate = enabledJobs.length > 1;
 
   return (
-    <div className="border border-border rounded-md bg-card overflow-hidden">
-      <div className="px-4 py-2 border-b border-border text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {b.triggerJobsHeading}
+    <div className="border border-border/60 rounded-xl bg-card overflow-hidden">
+      <div className="px-4 py-2 border-b border-border/60 flex items-center gap-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+          {b.triggerJobsHeading}
+        </span>
+        {/* The "these rows are the truth" explainer moved off the card body
+            into a tip — visible on demand, no longer a standing paragraph. */}
+        <InfoTip text={b.triggerJobsHint} />
       </div>
       <div className="p-4 flex flex-col gap-2">
         {driftManual && (
@@ -110,7 +116,6 @@ export function TriggerJobsList({
             </li>
           ))}
         </ul>
-        <div className="text-xs text-muted-foreground">{b.triggerJobsHint}</div>
       </div>
     </div>
   );

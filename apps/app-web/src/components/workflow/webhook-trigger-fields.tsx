@@ -73,7 +73,7 @@ export function WebhookTriggerFields({
     );
 
   return (
-    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-3">
+    <div className="flex flex-col gap-3">
       <WebhookMatchEditor
         condition={trigger.match?.condition}
         onChange={setCondition}
