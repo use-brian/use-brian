@@ -10,15 +10,23 @@
  * mirror the gate").
  *
  *   usable(U, W) =
- *       U's own personal instances            (scope='user', U owns them — any tier)
- *     ∪ workspace-shared instances            (team-native scope='workspace'
- *                                               + teammate-granted personal)
+ *       U's own personal instances EXPOSED to W  (scope='user' + a live
+ *                                                  connector_grant targeting W — any tier)
+ *     ∪ workspace-shared instances               (team-native scope='workspace'
+ *                                                  + teammate-granted personal)
  *         filtered to sensitivity ≤ U's effective read clearance
  *
+ * Exposure is the workspace boundary for EVERYONE, owner included: a personal
+ * connector connected in workspace A must never surface in workspace B's
+ * config pickers unless the owner exposed it to B (the fls.com.hk Knowledge
+ * picker leak, 2026-07-06). Connect-in-context auto-exposes to the active
+ * workspace (`resolveAutoExpose`, solo included), so the bootstrap flow still
+ * lands connectors in the picker; a revoked grant stays revoked.
+ *
  * Clearance is a credential-disclosure boundary, so it fails closed: a
- * non-member sees only their own personal instances, and any workspace-shared
+ * non-member sees no workspace-shared connectors, and any workspace-shared
  * connector above the member's effective clearance is hidden. Your OWN
- * connectors are never clearance-filtered — you own them.
+ * exposed connectors are never clearance-filtered — you own them.
  *
  * The workspace-shared reads are SYSTEM reads (`listForTargetSystem` /
  * `listByWorkspace`) returning the public column set only (never credentials),
@@ -65,6 +73,10 @@ export type ListUsableWorkspaceConnectorsParams = {
  * member both owns and exposed (it's "shared by you", not "shared by a
  * teammate"), and `team_native` over `granted` is impossible (grants only
  * target user-scoped instances).
+ *
+ * The member's own personal instances are included ONLY when a live
+ * `connector_grant` targets this workspace — ownership grants use-anywhere in
+ * chat, not presence on every workspace's config surfaces.
  */
 export async function listUsableWorkspaceConnectors(
   params: ListUsableWorkspaceConnectorsParams,
@@ -91,8 +103,12 @@ export async function listUsableWorkspaceConnectors(
 
   const byId = new Map<string, UsableConnector>()
 
-  // 1. Own personal — always, any tier (the member owns the credential).
+  // 1. Own personal, EXPOSED here — any tier (the member owns the credential),
+  //    but only where a live grant targets this workspace. Ungranted personal
+  //    instances stay out of every workspace surface, the owner's included.
+  const grantedInstanceIds = new Set(granted.map((g) => g.instance.id))
   for (const inst of own) {
+    if (!grantedInstanceIds.has(inst.id)) continue
     byId.set(inst.id, { instance: inst, source: 'personal' })
   }
 

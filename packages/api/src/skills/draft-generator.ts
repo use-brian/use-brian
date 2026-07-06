@@ -36,7 +36,9 @@ import {
   queryLoop,
   webSearchTool,
   urlReaderTool,
+  extractionSpecSchema,
   type ContentBlock,
+  type ExtractionSpec,
   type LLMProvider,
   type Message,
   type TokenUsage,
@@ -94,6 +96,10 @@ export type SkillDraftFields = {
   whenToUse: string
   content: string
   sensitivity: 'public' | 'internal' | 'confidential'
+  /** Structural-synthesis Phase 2: when the skill produces a structured artifact,
+   *  its output shape lives here as a blueprint spec (not baked into `content`);
+   *  the save path mints + links a `workspace_page_templates` blueprint from it. */
+  extraction?: ExtractionSpec
 }
 
 /** Attachment payload for the latest user message, pre-built by the route
@@ -120,6 +126,11 @@ const draftSchema = z.object({
   content: z.string().trim().min(1).max(5000),
   sensitivity: z.enum(['public', 'internal', 'confidential']),
   message: z.string().trim().max(600).optional(),
+  // Structural-synthesis Phase 2: when the skill's job is to produce a STRUCTURED
+  // artifact (a doc/report/brief with defined sections), the model emits the
+  // output shape HERE as a blueprint extraction spec instead of baking format
+  // prose into `content`; on save the API mints + links a blueprint from it.
+  extraction: extractionSpecSchema.optional(),
 })
 const replySchema = z.object({
   action: z.literal('reply'),
@@ -142,7 +153,7 @@ ${builderSkill.trim() || '(methodology unavailable — apply the rules below con
 Return ONE JSON object and NOTHING else — no markdown fences, no commentary. Exactly one of these two shapes:
 
 1. The revised draft — whenever the user asks you to create the skill or change ANYTHING about it (this is the default):
-{ "action": "draft", "name": "<2-5 word imperative name>", "description": "<one sentence>", "whenToUse": "<trigger phrases + situations, concrete>", "content": "<markdown body, numbered steps>", "sensitivity": "public" | "internal" | "confidential", "message": "<1-2 plain sentences telling the user what you created or changed>" }
+{ "action": "draft", "name": "<2-5 word imperative name>", "description": "<one sentence>", "whenToUse": "<trigger phrases + situations, concrete>", "content": "<markdown body, numbered steps>", "sensitivity": "public" | "internal" | "confidential", "message": "<1-2 plain sentences telling the user what you created or changed>", "extraction"?: { "sections": [{ "heading": "<title>", "instruction": "<how to fill this section from the source>", "outputType": "prose"|"list"|"table" }], "capture": ["company"|"contact"|"deal"|"task"] } }
 
 2. A reply with no draft change — ONLY when the user asked a question, or you genuinely cannot draft without one or two specific answers:
 { "action": "reply", "message": "<your answer or your clarifying questions, plain text>" }
@@ -151,6 +162,7 @@ Hard rules:
 - "## Current draft" in the latest message is the LIVE document, including the user's own hand edits since your last revision — revise FROM it; never silently discard their edits.
 - Never ask clarifying questions twice in a row: if the user already answered a clarify reply, you MUST return the draft shape.
 - The body is markdown with numbered steps in execution order, under ~60 lines, no secrets/credentials, no frozen one-off facts.
+- **Output structure goes in "extraction", not the body.** If the skill's PURPOSE is to produce a structured document (a brief, report, spec, or a contact/company list with defined sections captured the same way every time), add "extraction": put each output section (heading + how to fill it from the source + prose/list/table) in "sections", and list which brain entities the run should capture in "capture". Keep "content" for the PROCEDURE (how to gather and decide). Never duplicate the section layout in both "content" and "extraction". A purely procedural skill (no fixed output document) omits "extraction" entirely.
 - Ground the draft in the workspace context: prefer the team's stated preferences and real entity names over generic best practice.${researchRule}`
 }
 
@@ -323,6 +335,7 @@ export async function generateSkillDraft(params: {
       whenToUse: parsed.whenToUse,
       content: parsed.content,
       sensitivity: parsed.sensitivity,
+      extraction: parsed.extraction,
     },
     message: parsed.message ?? '',
     usage,

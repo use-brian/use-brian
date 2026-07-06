@@ -1,14 +1,19 @@
 "use client";
 
 /**
- * Schedule trigger fields (app-web) — picker for daily / weekly /
- * monthly / one-off / cron cadences with a live "next fires" preview +
- * cron validator.
+ * Schedule trigger fields (app-web) — picker for daily / weekly / monthly /
+ * one-off / cron cadences with a live "next fires" preview + cron validator.
  *
- * Ported from `apps/web/src/components/workflow/schedule-trigger-fields.tsx`
- * (app consolidation §5a). The schedule shape is the legacy `ScheduleConfig`
- * (matches the persisted `workflows.trigger.schedule` JSONB column and the
- * Zod schema in `packages/core/src/workflow/schemas.ts`). The conceptual
+ * Reorganized in the builder redesign: the core cadence (type / params /
+ * timezone) sits in one compact grid, the next-fires preview is a prominent
+ * chip strip directly under it, and the power-user options (timezone
+ * ownership, delivery sugar, reminder policy) collapse into an Advanced
+ * disclosure that auto-opens when any of them is already set. Long-form
+ * explanations ride InfoTips instead of stacked helper paragraphs.
+ *
+ * The schedule shape is the legacy `ScheduleConfig` (matches the persisted
+ * `workflows.trigger.schedule` JSONB column and the Zod schema in
+ * `packages/core/src/workflow/schemas.ts`). The conceptual
  * `StructuredSchedule` (`cron|every|at`) in `packages/core/src/scheduling`
  * is the runtime representation a `scheduled_jobs` row carries; this editor
  * authors the human-facing declarative summary, which the route keeps in
@@ -20,7 +25,6 @@
 
 import { useMemo } from "react";
 import { useT } from "@/lib/i18n/client";
-import { format as fmt } from "@/lib/i18n";
 import type {
   ScheduleConfig,
   WorkflowTrigger,
@@ -32,6 +36,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+  Disclosure,
+  FieldLabel,
+  SummaryChip,
+  SwitchRow,
+} from "@/components/workflow/field";
 import {
   nextFireTimes,
   validateCron,
@@ -48,6 +59,10 @@ const DAYS = [
   "sunday",
 ];
 
+/** Compact input matching the panel's `size="sm"` selects. */
+const INPUT_CLS =
+  "w-full h-8 px-2.5 bg-background border border-input rounded-md text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
+
 type Props = {
   trigger: Extract<WorkflowTrigger, { kind: "schedule" }>;
   onChange: (next: WorkflowTrigger) => void;
@@ -56,6 +71,7 @@ type Props = {
 
 export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
   const t = useT();
+  const b = t.workflowPage.builder;
   const s = trigger.schedule;
   const setSchedule = (sched: ScheduleConfig) =>
     onChange({ ...trigger, schedule: sched });
@@ -70,51 +86,60 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
       ? validateCron(s.expression)
       : ({ valid: true } as const);
   const previewFires = useMemo(() => {
+    if (s.type === "once") {
+      // A one-off has exactly one fire — echo the picked datetime.
+      const d = new Date(s.datetime);
+      return Number.isNaN(d.getTime()) ? [] : [d];
+    }
     if (!cronEquivalent) return [];
     return nextFireTimes(cronEquivalent, new Date(), 3);
-  }, [cronEquivalent]);
+  }, [s, cronEquivalent]);
+
+  // Advanced options auto-open when any is already configured, so a set
+  // option is never hidden behind the fold.
+  const advancedActive =
+    trigger.mode === "user" ||
+    !!trigger.delivery ||
+    !!trigger.policy?.silentUntilFire ||
+    trigger.policy?.nagIntervalMins != null ||
+    !!trigger.policy?.nagUntilKeyword;
 
   return (
-    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-3">
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.scheduleType}
-        </label>
-        <Select
-          value={s.type}
-          onValueChange={(v) => {
-            if (v) setSchedule(defaultScheduleOf(v as ScheduleConfig["type"]));
-          }}
-          disabled={disabled}
-        >
-          <SelectTrigger className="w-full max-w-xs text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="daily">{t.workflowPage.builder.scheduleTypeDaily}</SelectItem>
-            <SelectItem value="weekly">{t.workflowPage.builder.scheduleTypeWeekly}</SelectItem>
-            <SelectItem value="monthly">{t.workflowPage.builder.scheduleTypeMonthly}</SelectItem>
-            <SelectItem value="once">{t.workflowPage.builder.scheduleTypeOnce}</SelectItem>
-            <SelectItem value="cron">{t.workflowPage.builder.scheduleTypeCron}</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
+    <div className="flex flex-col gap-4">
+      {/* ── Core cadence grid ─────────────────────────────────────────── */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="flex flex-col gap-1.5">
+          <FieldLabel label={b.scheduleType} />
+          <Select
+            value={s.type}
+            onValueChange={(v) => {
+              if (v) setSchedule(defaultScheduleOf(v as ScheduleConfig["type"]));
+            }}
+            disabled={disabled}
+            items={{
+              daily: b.scheduleTypeDaily,
+              weekly: b.scheduleTypeWeekly,
+              monthly: b.scheduleTypeMonthly,
+              once: b.scheduleTypeOnce,
+              cron: b.scheduleTypeCron,
+            }}
+          >
+            <SelectTrigger size="sm" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="daily">{b.scheduleTypeDaily}</SelectItem>
+              <SelectItem value="weekly">{b.scheduleTypeWeekly}</SelectItem>
+              <SelectItem value="monthly">{b.scheduleTypeMonthly}</SelectItem>
+              <SelectItem value="once">{b.scheduleTypeOnce}</SelectItem>
+              <SelectItem value="cron">{b.scheduleTypeCron}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
 
-      {s.type === "daily" && (
-        <TimeField
-          label={t.workflowPage.builder.scheduleTimeLabel}
-          value={s.time}
-          disabled={disabled}
-          onChange={(time) => setSchedule({ type: "daily", time })}
-        />
-      )}
-
-      {s.type === "weekly" && (
-        <>
+        {s.type === "weekly" && (
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t.workflowPage.builder.scheduleDaysLabel}
-            </label>
+            <FieldLabel label={b.scheduleDaysLabel} />
             <div className="flex flex-wrap gap-1">
               {DAYS.map((d) => {
                 const on = s.days.includes(d);
@@ -142,21 +167,11 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
               })}
             </div>
           </div>
-          <TimeField
-            label={t.workflowPage.builder.scheduleTimeLabel}
-            value={s.time}
-            disabled={disabled}
-            onChange={(time) => setSchedule({ ...s, time })}
-          />
-        </>
-      )}
+        )}
 
-      {s.type === "monthly" && (
-        <>
+        {s.type === "monthly" && (
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t.workflowPage.builder.scheduleDomLabel}
-            </label>
+            <FieldLabel label={b.scheduleDomLabel} />
             <input
               type="number"
               min={1}
@@ -172,218 +187,277 @@ export function ScheduleTriggerFields({ trigger, onChange, disabled }: Props) {
                 })
               }
               disabled={disabled}
-              className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-[6rem] outline-none focus:ring-2 focus:ring-ring"
+              className={INPUT_CLS}
             />
           </div>
-          <TimeField
-            label={t.workflowPage.builder.scheduleTimeLabel}
-            value={s.time}
-            disabled={disabled}
-            onChange={(time) => setSchedule({ ...s, time })}
-          />
-        </>
-      )}
+        )}
 
-      {s.type === "once" && (
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.scheduleDatetimeLabel}
-          </label>
-          <input
-            type="datetime-local"
-            value={s.datetime}
-            onChange={(e) =>
-              setSchedule({ type: "once", datetime: e.target.value })
-            }
-            disabled={disabled}
-            className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-xs outline-none focus:ring-2 focus:ring-ring"
-          />
-        </div>
-      )}
-
-      {s.type === "cron" && (
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.scheduleCronLabel}
-          </label>
-          <input
-            type="text"
-            value={s.expression}
-            onChange={(e) =>
-              setSchedule({ type: "cron", expression: e.target.value })
-            }
-            disabled={disabled}
-            placeholder="0 9 * * MON-FRI"
-            className={cn(
-              "px-3 py-2 bg-background border rounded-md text-sm font-mono outline-none max-w-md",
-              cronValidation.valid
-                ? "border-border focus:ring-2 focus:ring-ring"
-                : "border-red-500/50 focus:ring-2 focus:ring-red-500/30",
-            )}
-          />
-          {!cronValidation.valid && (
-            <p className="text-xs text-red-600 dark:text-red-400">
-              {t.workflowPage.builder.scheduleCronInvalid}
-            </p>
-          )}
-        </div>
-      )}
-
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.timezonePickerLabel}
-        </label>
-        <input
-          type="text"
-          value={trigger.timezone ?? ""}
-          onChange={(e) =>
-            onChange({ ...trigger, timezone: e.target.value || undefined })
-          }
-          disabled={disabled}
-          placeholder="Asia/Hong_Kong"
-          list="iana-timezones"
-          className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-xs outline-none focus:ring-2 focus:ring-ring"
-        />
-        <p className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.timezonePickerHint}
-        </p>
-        <TimezoneDataList />
-      </div>
-
-      {/* Timezone ownership (mode) */}
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.scheduleModeLabel}
-        </label>
-        <Select
-          value={trigger.mode ?? "local"}
-          onValueChange={(v) => {
-            if (v) onChange({ ...trigger, mode: v as "local" | "user" });
-          }}
-          disabled={disabled}
-        >
-          <SelectTrigger className="w-full max-w-xs text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="local">{t.workflowPage.builder.scheduleModeLocal}</SelectItem>
-            <SelectItem value="user">{t.workflowPage.builder.scheduleModeUser}</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.scheduleModeHint}
-        </p>
-      </div>
-
-      {/* Delivery channel — type-only sugar; the server resolves the chat +
-          Telegram topic and stamps it onto the terminal assistant_call step. */}
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.scheduleDeliveryLabel}
-        </label>
-        <Select
-          value={trigger.delivery?.channel ?? "none"}
-          onValueChange={(v) => {
-            if (!v) return;
-            onChange(
-              v === "none"
-                ? { ...trigger, delivery: undefined }
-                : { ...trigger, delivery: { channel: v as "telegram" | "slack" | "whatsapp" } },
-            );
-          }}
-          disabled={disabled}
-        >
-          <SelectTrigger className="w-full max-w-xs text-sm">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="none">{t.workflowPage.builder.scheduleDeliveryNone}</SelectItem>
-            <SelectItem value="telegram">Telegram</SelectItem>
-            <SelectItem value="slack">Slack</SelectItem>
-            <SelectItem value="whatsapp">WhatsApp</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.scheduleDeliveryHint}
-        </p>
-      </div>
-
-      {/* Reminder behavior — silent-until-fire + nag policy (trigger-row). */}
-      <div className="flex flex-col gap-2 pt-1 border-t border-border/60">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.schedulePolicyHeading}
-        </label>
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={trigger.policy?.silentUntilFire ?? false}
-            disabled={disabled}
-            onChange={(e) =>
-              onChange({
-                ...trigger,
-                policy: { ...trigger.policy, silentUntilFire: e.target.checked || undefined },
-              })
-            }
-          />
-          {t.workflowPage.builder.schedulePolicySilentLabel}
-        </label>
-        <div className="flex flex-wrap gap-3">
+        {(s.type === "daily" || s.type === "weekly" || s.type === "monthly") && (
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t.workflowPage.builder.scheduleNagIntervalLabel}
-            </label>
+            <FieldLabel label={b.scheduleTimeLabel} />
             <input
-              type="number"
-              min={1}
-              max={1440}
-              value={trigger.policy?.nagIntervalMins ?? ""}
+              type="time"
+              value={s.time}
+              onChange={(e) => setSchedule({ ...s, time: e.target.value })}
               disabled={disabled}
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                onChange({
-                  ...trigger,
-                  policy: {
-                    ...trigger.policy,
-                    nagIntervalMins: Number.isFinite(n) && n > 0 ? Math.min(1440, n) : undefined,
-                  },
-                });
-              }}
-              className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-[8rem] outline-none focus:ring-2 focus:ring-ring"
+              className={INPUT_CLS}
             />
           </div>
+        )}
+
+        {s.type === "once" && (
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t.workflowPage.builder.scheduleNagKeywordLabel}
-            </label>
+            <FieldLabel label={b.scheduleDatetimeLabel} />
+            <input
+              type="datetime-local"
+              value={s.datetime}
+              onChange={(e) =>
+                setSchedule({ type: "once", datetime: e.target.value })
+              }
+              disabled={disabled}
+              className={INPUT_CLS}
+            />
+          </div>
+        )}
+
+        {s.type === "cron" && (
+          <div className="flex flex-col gap-1.5 sm:col-span-2 lg:col-span-1">
+            <FieldLabel label={b.scheduleCronLabel} />
             <input
               type="text"
-              value={trigger.policy?.nagUntilKeyword ?? ""}
-              disabled={disabled}
-              placeholder="done"
+              value={s.expression}
               onChange={(e) =>
-                onChange({
-                  ...trigger,
-                  policy: { ...trigger.policy, nagUntilKeyword: e.target.value || undefined },
-                })
+                setSchedule({ type: "cron", expression: e.target.value })
               }
-              className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-[10rem] outline-none focus:ring-2 focus:ring-ring"
+              disabled={disabled}
+              placeholder="0 9 * * MON-FRI"
+              className={cn(
+                INPUT_CLS,
+                "font-mono",
+                !cronValidation.valid &&
+                  "border-red-500/50 focus:ring-red-500/30",
+              )}
             />
+            {!cronValidation.valid && (
+              <p className="text-xs text-red-600 dark:text-red-400">
+                {b.scheduleCronInvalid}
+              </p>
+            )}
           </div>
+        )}
+
+        <div className="flex flex-col gap-1.5">
+          <FieldLabel
+            label={b.timezonePickerLabel}
+            hint={b.timezonePickerHint}
+          />
+          <input
+            type="text"
+            value={trigger.timezone ?? ""}
+            onChange={(e) =>
+              onChange({ ...trigger, timezone: e.target.value || undefined })
+            }
+            disabled={disabled}
+            placeholder="Asia/Hong_Kong"
+            list="iana-timezones"
+            className={INPUT_CLS}
+          />
+          <TimezoneDataList />
         </div>
-        <p className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.scheduleNagHint}
-        </p>
       </div>
 
-      {/* Next-fire preview — once + cron we compute live; once is just the
-          datetime echo. Skipped when the inputs aren't satisfiable yet
-          (e.g. weekly with no days picked, or cron in an invalid state). */}
+      {/* ── Next-fires preview — the loudest feedback in the panel ─────── */}
       <SchedulePreview
         schedule={s}
         cronValid={cronValidation.valid}
         previewFires={previewFires}
         t={t}
       />
+
+      {/* ── Advanced — timezone ownership, delivery sugar, reminder policy */}
+      <Disclosure
+        label={b.scheduleAdvancedLabel}
+        defaultOpen={advancedActive}
+        summary={
+          <>
+            {trigger.mode === "user" && (
+              <SummaryChip>{b.scheduleModeUser}</SummaryChip>
+            )}
+            {trigger.delivery && (
+              <SummaryChip>
+                {trigger.delivery.channel === "telegram"
+                  ? b.deliverChannelTelegram
+                  : trigger.delivery.channel === "slack"
+                    ? b.deliverChannelSlack
+                    : b.deliverChannelWhatsApp}
+              </SummaryChip>
+            )}
+            {trigger.policy?.silentUntilFire && (
+              <SummaryChip>{b.scheduleChipSilent}</SummaryChip>
+            )}
+            {(trigger.policy?.nagIntervalMins != null ||
+              trigger.policy?.nagUntilKeyword) && (
+              <SummaryChip>{b.scheduleChipNag}</SummaryChip>
+            )}
+          </>
+        }
+      >
+        <div className="flex flex-col gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="flex flex-col gap-1.5">
+              <FieldLabel
+                label={b.scheduleModeLabel}
+                hint={b.scheduleModeHint}
+              />
+              <Select
+                value={trigger.mode ?? "local"}
+                onValueChange={(v) => {
+                  if (v) onChange({ ...trigger, mode: v as "local" | "user" });
+                }}
+                disabled={disabled}
+                items={{
+                  local: b.scheduleModeLocal,
+                  user: b.scheduleModeUser,
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="local">{b.scheduleModeLocal}</SelectItem>
+                  <SelectItem value="user">{b.scheduleModeUser}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Delivery channel — type-only sugar; the server resolves the
+                chat + Telegram topic and stamps it onto the terminal
+                assistant_call step. */}
+            <div className="flex flex-col gap-1.5">
+              <FieldLabel
+                label={b.scheduleDeliveryLabel}
+                hint={b.scheduleDeliveryHint}
+              />
+              <Select
+                value={trigger.delivery?.channel ?? "none"}
+                onValueChange={(v) => {
+                  if (!v) return;
+                  onChange(
+                    v === "none"
+                      ? { ...trigger, delivery: undefined }
+                      : {
+                          ...trigger,
+                          delivery: {
+                            channel: v as "telegram" | "slack" | "whatsapp",
+                          },
+                        },
+                  );
+                }}
+                disabled={disabled}
+                items={{
+                  none: b.scheduleDeliveryNone,
+                  telegram: b.deliverChannelTelegram,
+                  slack: b.deliverChannelSlack,
+                  whatsapp: b.deliverChannelWhatsApp,
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">{b.scheduleDeliveryNone}</SelectItem>
+                  <SelectItem value="telegram">
+                    {b.deliverChannelTelegram}
+                  </SelectItem>
+                  <SelectItem value="slack">{b.deliverChannelSlack}</SelectItem>
+                  <SelectItem value="whatsapp">
+                    {b.deliverChannelWhatsApp}
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {/* Reminder behavior — silent-until-fire + nag policy (trigger-row). */}
+          <div className="rounded-lg bg-muted/40 px-3 py-2.5 flex flex-col gap-2">
+            <div className="flex items-center gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+                {b.schedulePolicyHeading}
+              </span>
+            </div>
+            <SwitchRow
+              label={b.schedulePolicySilentLabel}
+              control={
+                <Switch
+                  checked={trigger.policy?.silentUntilFire ?? false}
+                  onCheckedChange={(checked) =>
+                    onChange({
+                      ...trigger,
+                      policy: {
+                        ...trigger.policy,
+                        silentUntilFire: checked || undefined,
+                      },
+                    })
+                  }
+                  disabled={disabled}
+                  aria-label={b.schedulePolicySilentLabel}
+                />
+              }
+            />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="flex flex-col gap-1.5">
+                <FieldLabel
+                  label={b.scheduleNagIntervalLabel}
+                  hint={b.scheduleNagHint}
+                />
+                <input
+                  type="number"
+                  min={1}
+                  max={1440}
+                  value={trigger.policy?.nagIntervalMins ?? ""}
+                  disabled={disabled}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10);
+                    onChange({
+                      ...trigger,
+                      policy: {
+                        ...trigger.policy,
+                        nagIntervalMins:
+                          Number.isFinite(n) && n > 0
+                            ? Math.min(1440, n)
+                            : undefined,
+                      },
+                    });
+                  }}
+                  className={INPUT_CLS}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <FieldLabel
+                  label={b.scheduleNagKeywordLabel}
+                  hint={b.scheduleNagHint}
+                />
+                <input
+                  type="text"
+                  value={trigger.policy?.nagUntilKeyword ?? ""}
+                  disabled={disabled}
+                  placeholder="done"
+                  onChange={(e) =>
+                    onChange({
+                      ...trigger,
+                      policy: {
+                        ...trigger.policy,
+                        nagUntilKeyword: e.target.value || undefined,
+                      },
+                    })
+                  }
+                  className={INPUT_CLS}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </Disclosure>
     </div>
   );
 }
@@ -399,58 +473,53 @@ function SchedulePreview({
   previewFires: Date[];
   t: ReturnType<typeof useT>;
 }) {
-  const list = previewFires;
+  const b = t.workflowPage.builder;
   if (schedule.type === "cron" && !cronValid) return null;
   if (schedule.type === "weekly" && schedule.days.length === 0) return null;
 
   return (
-    <div className="flex flex-col gap-1.5 pt-1 border-t border-border/60">
-      <label className="text-xs font-medium text-muted-foreground">
-        {t.workflowPage.builder.schedulePreviewHeading}
-      </label>
-      {list.length === 0 ? (
+    <div className="rounded-lg bg-muted/40 px-3 py-2.5 flex flex-col gap-1.5">
+      <div className="flex items-center gap-1.5">
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          strokeLinecap="round"
+          className="text-muted-foreground/60"
+          aria-hidden
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+          {b.schedulePreviewHeading}
+        </span>
+      </div>
+      {previewFires.length === 0 ? (
         <div className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.schedulePreviewNone}
+          {b.schedulePreviewNone}
         </div>
       ) : (
-        <ul className="flex flex-col gap-0.5 text-xs">
-          {list.map((d, i) => (
-            <li key={i} className="font-mono text-muted-foreground">
-              {fmt("{when}", { when: d.toLocaleString() })}
-            </li>
+        <div className="flex flex-wrap gap-1.5">
+          {previewFires.map((d, i) => (
+            <span
+              key={i}
+              className={cn(
+                "rounded-md border border-border bg-background px-2 py-1 text-xs tabular-nums",
+                i === 0 ? "text-foreground font-medium" : "text-muted-foreground",
+              )}
+            >
+              {d.toLocaleString()}
+            </span>
           ))}
-        </ul>
+        </div>
       )}
       <p className="text-[10px] text-muted-foreground/80">
-        {t.workflowPage.builder.schedulePreviewLocalNote}
+        {b.schedulePreviewLocalNote}
       </p>
-    </div>
-  );
-}
-
-function TimeField({
-  label,
-  value,
-  onChange,
-  disabled,
-}: {
-  label: string;
-  value: string;
-  onChange: (next: string) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-medium text-muted-foreground">
-        {label}
-      </label>
-      <input
-        type="time"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        className="px-3 py-2 bg-background border border-border rounded-md text-sm max-w-[10rem] outline-none focus:ring-2 focus:ring-ring"
-      />
     </div>
   );
 }

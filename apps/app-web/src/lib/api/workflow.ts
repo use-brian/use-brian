@@ -63,6 +63,15 @@ export type EventSourceRef =
        * sub-channel.
        */
       pageId: string;
+    }
+  | {
+      /**
+       * The workspace's task table — id-less: `match` does all the selection.
+       * Lifecycle actions (`created` | `completed` | `blocked` | `reopened` |
+       * `assigned` | `tagged` | `updated`) ride `match.inChannels`; task tags
+       * ride the task-only `match.tags`.
+       */
+      type: "task";
     };
 
 /**
@@ -80,6 +89,11 @@ export type EventMatch = {
   inChannels?: string[];
   /** Any entity the event mentions ∈ list. Cap 128. */
   mentions?: string[];
+  /**
+   * Task-event tag filter (overlap). Full set on `created`, ADDED set on
+   * updates. Only task events carry tags. Cap 64.
+   */
+  tags?: string[];
   /** Allow bot-authored events. Default false (self-loop guard). */
   fromBots?: boolean;
 };
@@ -148,6 +162,22 @@ export type AssistantCallStep = {
   target: { assistantId: string; capabilityId?: string };
   prompt: string;
   tools?: string[];
+  /**
+   * Allow-list of brain skill slugs the callee may activate on this step
+   * (built-in ids or workspace skill slugs). When non-empty the callee is
+   * offered the `useSkill` tool over exactly these skills, each still gated by
+   * the assistant's own enablement + clearance. Absent / empty = no skills.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  skills?: string[];
+  /**
+   * Brain skill slugs the callee is FORCED to run: their instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Same enablement + clearance gates as
+   * `skills`; an enforced slug is not also offered for discovery.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  enforcedSkills?: string[];
   /** Page anchor — the callee runs doc-anchored against the resolved page. */
   page?: PageAnchor;
   /**
@@ -218,6 +248,8 @@ export type WorkflowSummary = {
   name: string;
   description?: string | null;
   enabled: boolean;
+  /** Mig 302 — why the storm guard auto-disabled this workflow; null otherwise. */
+  pausedReason?: string | null;
   trigger: WorkflowTrigger;
   stepCount: number;
   updatedAt: string;
@@ -250,6 +282,8 @@ export type WorkflowFull = {
   description: string | null;
   definition: WorkflowDefinition;
   enabled: boolean;
+  /** Mig 302 — why the storm guard auto-disabled this workflow; null otherwise. */
+  pausedReason?: string | null;
   trigger: WorkflowTrigger;
   webhookSlug: string | null;
   webhookSecret: string | null;
@@ -714,6 +748,30 @@ export async function listChannelDestinations(
   if (!res.ok) return [];
   const data = (await res.json()) as { destinations?: ChannelDestination[] };
   return Array.isArray(data.destinations) ? data.destinations : [];
+}
+
+/**
+ * A Slack channel the workspace bot can see, resolved live via Slack
+ * `conversations.list`. Powers the deliver picker's Slack destination
+ * dropdown so authors pick a channel by NAME (`#dev-work`) instead of a raw
+ * `C…` id — and non-Slack ids can never appear (only real channels are
+ * returned). `isMember` channels are postable without a join.
+ */
+export type SlackChannelOption = {
+  id: string;
+  name: string;
+  isMember: boolean;
+};
+
+export async function listWorkspaceSlackChannels(
+  workspaceId: string,
+): Promise<SlackChannelOption[]> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/slack-channels`,
+  );
+  if (!res.ok) return [];
+  const data = (await res.json()) as { channels?: SlackChannelOption[] };
+  return Array.isArray(data.channels) ? data.channels : [];
 }
 
 export async function listWorkspaceChannelOptions(

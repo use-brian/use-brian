@@ -375,3 +375,70 @@ describe('[COMP:retrieval/search-trace-capture] fuseAndDiversifyTraced audit tra
     expect(steps[2]?.metrics?.candidatesAfter).toBe(3)
   })
 })
+
+// ── large-content-artifacts: per-source-artifact group cap ──────────
+describe('[COMP:retrieval/group-cap] file_segment per-artifact fused-page cap', () => {
+  function segRow(id: string, fileId: string, ftsRank: number): ScoredRow {
+    return {
+      ...makeRow({ id, primitive: 'file_segment', ftsRank }),
+      groupKey: `file:${fileId}`,
+    }
+  }
+
+  it('caps one artifact at 2 slots even when it dominates the candidate set', () => {
+    const candidates: ScoredRow[] = [
+      // 30 strong candidates, all from the same file.
+      ...Array.from({ length: 30 }, (_, i) => segRow(`f1-s${i}`, 'f1', 0.9 - i * 0.01)),
+      // Two unrelated rows with weaker FTS scores.
+      makeRow({ id: 'mem-1', ftsRank: 0.3 }),
+      makeRow({ id: 'mem-2', ftsRank: 0.2 }),
+    ]
+    const out = fuseAndDiversify(candidates, 20)
+    const f1 = out.filter((r) => r.primitive === 'file_segment')
+    expect(f1.length).toBeLessThanOrEqual(2)
+    // The unrelated rows survive — the cap frees slots instead of truncating the page.
+    expect(out.some((r) => r.row_id === 'mem-1')).toBe(true)
+    expect(out.some((r) => r.row_id === 'mem-2')).toBe(true)
+  })
+
+  it('keeps each artifact independently capped (two files → up to 2 each)', () => {
+    const candidates: ScoredRow[] = [
+      ...Array.from({ length: 10 }, (_, i) => segRow(`a-s${i}`, 'file-a', 0.9 - i * 0.01)),
+      ...Array.from({ length: 10 }, (_, i) => segRow(`b-s${i}`, 'file-b', 0.8 - i * 0.01)),
+    ]
+    const out = fuseAndDiversify(candidates, 20)
+    expect(out.filter((r) => String(r.row_id).startsWith('a-')).length).toBeLessThanOrEqual(2)
+    expect(out.filter((r) => String(r.row_id).startsWith('b-')).length).toBeLessThanOrEqual(2)
+    expect(out.length).toBeGreaterThanOrEqual(3) // both artifacts represented
+  })
+
+  it('rows without a groupKey are never capped', () => {
+    const candidates: ScoredRow[] = Array.from({ length: 10 }, (_, i) =>
+      makeRow({ id: `m-${i}`, ftsRank: 0.9 - i * 0.05 }),
+    )
+    const out = fuseAndDiversify(candidates, 20)
+    expect(out.length).toBe(10)
+  })
+
+  it('the best-weighted segments of a capped artifact are the survivors', () => {
+    const candidates: ScoredRow[] = Array.from({ length: 8 }, (_, i) =>
+      segRow(`s${i}`, 'f9', 0.9 - i * 0.1),
+    )
+    const out = fuseAndDiversify(candidates, 20)
+    const kept = out.filter((r) => r.primitive === 'file_segment').map((r) => r.row_id)
+    expect(kept).toHaveLength(2)
+    expect(kept).toContain('s0')
+    expect(kept).toContain('s1')
+  })
+})
+
+describe('[COMP:retrieval/file-segments] vector scope gating includes file_segment', () => {
+  it('unscoped keeps file_segment; scoping to memory excludes it; scoping to file_segment isolates it', () => {
+    const all = vectorScopesFor(undefined).map((c) => c.scope)
+    expect(all).toContain('file_segment')
+    const memOnly = vectorScopesFor(new Set(['memory'] as never[]) as never).map((c) => c.scope)
+    expect(memOnly).toEqual(['memory'])
+    const segOnly = vectorScopesFor(new Set(['file_segment'] as never[]) as never).map((c) => c.scope)
+    expect(segOnly).toEqual(['file_segment'])
+  })
+})

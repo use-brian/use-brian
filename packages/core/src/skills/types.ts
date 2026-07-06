@@ -31,4 +31,8 @@ export type SkillMeta = {
 export type SkillContent = SkillMeta & {
   /** Full markdown body (after frontmatter). */
   content: string
+  /** Structural-synthesis Phase 2: the v2 blueprint (page-template id) this skill
+   *  fills. When set, invoking the skill steers its output into that blueprint
+   *  (see `useSkill` in `tool.ts`). Built-in skills never carry one. */
+  blueprintId?: string
 }

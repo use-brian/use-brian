@@ -19,7 +19,7 @@
  */
 
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools } from '@sidanclaw/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks } from '@sidanclaw/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -60,7 +60,7 @@ import {
   unpackFathomTokens, packFathomTokens,
   type FathomTokens,
 } from '../fathom/client.js'
-import { APP_LEVEL_ASSISTANT_ID } from '@sidanclaw/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
 // closed code. See connector-config.ts + oss-local-brain-wedge.md §12.2.
@@ -300,13 +300,20 @@ export async function injectMcpTools(params: {
    * `docs/architecture/engine/tool-hooks.md`.
    */
   actorIdentity?: ActorIdentity
+  /**
+   * Workspace-files byte layer. When set, `gmailSendMessage` can attach
+   * workspace files as real MIME parts (stat → gates → readBytes in core,
+   * per `docs/architecture/integrations/gmail.md` → "Attachments").
+   * Absent → attachment requests fail honestly; plain sends unchanged.
+   */
+  filesApi?: FilesApi
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, gdriveFilesStore,
     connectorGrantStore, connectorInstanceStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
-    keepBuiltinsDirect = false, engineHooks, actorIdentity,
+    keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
   } = params
 
   const unavailable: string[] = []
@@ -373,9 +380,11 @@ export async function injectMcpTools(params: {
     preflightHeaders: Record<string, string>
     /** Opt-in: send the acting user's `X-Sidanclaw-Actor-*` identity to this connector. */
     sendActorIdentity: boolean
+    /** Opt-in: send the acting user's `X-Sidanclaw-Media-Token` capability to this connector. */
+    sendMediaToken: boolean
   }> = connectors
     .filter((c) => c.connected && c.url)
-    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true }))
+    .map((c) => ({ connectorId: c.connectorId, name: c.name, url: c.url!, instanceId: c.id, updatedAt: c.updatedAt, preflightHeaders: preflightHeadersToRecord(c.config), sendActorIdentity: c.config?.sendActorIdentity === true, sendMediaToken: c.config?.sendMediaToken === true }))
 
   // Team-native custom MCP instances live as separate `connector_instance`
   // rows scoped to the team. The `provider` column is a UUID for custom
@@ -395,6 +404,7 @@ export async function injectMcpTools(params: {
           updatedAt: inst.updatedAt,
           preflightHeaders: preflightHeadersToRecord(inst.config),
           sendActorIdentity: inst.config?.sendActorIdentity === true,
+          sendMediaToken: inst.config?.sendMediaToken === true,
         })
       }
     } catch (err) {
@@ -457,6 +467,12 @@ export async function injectMcpTools(params: {
   // constant for the turn). Only attached to connectors that opted in, and
   // merged LAST so neither user config nor auth can shadow the assertion.
   const actorHeaders = actorIdentity ? actorIdentityHeaders(actorIdentity) : null
+  // Media capability token — a separate reserved header gated on its OWN opt-in
+  // (`sendMediaToken`), independent of `sendActorIdentity`. It is a bearer
+  // capability (possession fetches the user's latest recording), so it only
+  // attaches to connectors the user explicitly granted media access.
+  const mediaTokenHeader =
+    actorIdentity?.mediaToken ? { 'X-Sidanclaw-Media-Token': actorIdentity.mediaToken } : null
   active.forEach((c, i) => {
     // Layer the connector's static preflight headers (config) over its auth
     // headers (credentials) — preflight wins on a name clash, both validated
@@ -466,6 +482,9 @@ export async function injectMcpTools(params: {
     let merged = mergeValidatedHeaders(resolvedHeaders[i], c.preflightHeaders)
     if (actorHeaders && c.sendActorIdentity) {
       merged = mergeValidatedHeaders(merged, actorHeaders)
+    }
+    if (mediaTokenHeader && c.sendMediaToken) {
+      merged = mergeValidatedHeaders(merged, mediaTokenHeader)
     }
     registerAuthHeaders(c.url, merged ?? {})
   })
@@ -568,12 +587,23 @@ export async function injectMcpTools(params: {
   }
 
   // ── Multi-account extras (personal base load) ────────────────
-  // For single-secret built-ins a user can connect more than one account.
+  // For credentialed built-ins a user can connect more than one account.
   // The OLDEST connected instance per provider keeps the canonical tools (so
   // single-account users are unchanged); each additional instance is exposed
   // as a label-qualified variant set bound to its own credentials. Requires
   // the instance store for per-instance credential reads/writes.
-  const MULTI_INSTANCE_RUNTIME_PROVIDERS = ['github', 'notion', 'fathom'] as const // drift-sweep: intentionally-narrow: single-secret providers with instance-aware runtime credential resolution (deliberately excludes Google)
+  //
+  // Derived from the registry: every credentialed official connector is
+  // multi-instance at runtime unless marked `single_instance` (gcs — a
+  // workspace-level storage binding, not a user account). Contract when
+  // adding a connector: either consume its extras in its injector below
+  // (the injectGitHubTools / injectGoogleTools pattern) or mark the registry
+  // entry `single_instance` — a provider in this list whose injector ignores
+  // extras ships a silently-dead second account. Checklist:
+  // docs/architecture/integrations/mcp.md → "Adding a new built-in connector tool".
+  const MULTI_INSTANCE_RUNTIME_PROVIDERS = OFFICIAL_CONNECTORS
+    .filter((c) => c.auth_type !== 'none' && !c.single_instance)
+    .map((c) => c.id)
   const extrasByProvider = new Map<string, ConnectorInstanceRef[]>()
   if (connectorInstanceStore) {
     for (const provider of MULTI_INSTANCE_RUNTIME_PROVIDERS) {
@@ -597,7 +627,7 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth })
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth })
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
-  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain)
+  const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth)
 
   // ── Team overlays (Stage 4/5 of the team-connector promotion) ──
   //
@@ -649,7 +679,7 @@ export async function injectMcpTools(params: {
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
-          await injectGoogleTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain)
+          await injectGoogleTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, userTimezone, undefined, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi)
         } else if (g.instance.custom && g.instance.url) {
           // Custom remote MCP shared via a grant. Respect Layer-2 enablement
           // (keyed on the provider UUID, like the team-native custom path),
@@ -774,6 +804,7 @@ export async function injectMcpTools(params: {
           connectorActionAudit,
           assistantConnectorGrantsStore,
           workspaceDomain,
+          filesApi,
         )
       }
 
@@ -1086,6 +1117,29 @@ async function injectGoogleTools(
    * attendee is treated as external and `audience_clearance='public'`.
    */
   workspaceDomain?: string | null,
+  /**
+   * Workspace-files byte layer — enables `gmailSendMessage` attachments
+   * (resolution + gates run in core; see `google-gmail.ts`). Absent →
+   * attachment requests fail honestly inside the tool.
+   */
+  filesApi?: FilesApi,
+  /**
+   * Multi-account extras (personal base load only). Additional connected
+   * instances per Google provider beyond the primary — each is injected as a
+   * label-qualified variant tool set bound to its own refresh token via
+   * `resolveInstanceCreds`, mirroring the GitHub/Notion/Fathom pattern. The
+   * team-native / grant overlay paths never pass these (overlays stay
+   * provider-level, first instance wins).
+   */
+  extrasByProvider?: Map<string, ConnectorInstanceRef[]>,
+  resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  /**
+   * Call-time liveness writer for the extra instances (migration 294): a
+   * 401/403/invalid_grant inside a variant tool call flips that instance to
+   * `auth_failed`. The PRIMARY keeps the legacy prevalidation +
+   * auto-disconnect path above instead.
+   */
+  healthReport?: HealthReporter,
 ): Promise<ConfirmationEnricher> {
   const googleCfg = getConnectorConfig('google')
   if (!googleCfg) return async (_t, input) => input
@@ -1147,6 +1201,40 @@ async function injectGoogleTools(
     const token = await refreshGoogleAccessToken(refreshToken, clientId, clientSecret)
     tokenCache.set(connectorId, token)
     return token
+  }
+
+  // ── Per-instance tokens (multi-account extras) ────────────────
+  // An EXTRA Google account resolves its own refresh token off its
+  // connector_instance row, lazily at first tool call — no prevalidation, so
+  // a dead extra account never delays the primary's injection; it surfaces
+  // through the variant's health probe (`wrapToolsWithHealthProbe` classifies
+  // the thrown invalid_grant) on first use instead. Same request-scoped cache
+  // as the primary, keyed by instance id.
+  async function getAccessTokenForInstance(instanceId: string): Promise<string> {
+    const cacheKey = `inst:${instanceId}`
+    const cached = tokenCache.get(cacheKey)
+    if (cached) return cached
+    const refreshToken = resolveInstanceCreds ? await resolveInstanceCreds(instanceId) : null
+    if (!refreshToken) throw new Error(`Google account instance ${instanceId} has no credentials`)
+    const token = await refreshGoogleAccessToken(refreshToken, clientId, clientSecret)
+    tokenCache.set(cacheKey, token)
+    return token
+  }
+
+  // Suffix → per-instance token getter, populated as variant sets are
+  // injected below. Lets the confirmation enricher resolve the RIGHT
+  // account's token for a suffixed tool name (`googleCalendarUpdateEvent__work_1a2b3c4d`).
+  const instanceTokenBySuffix = new Map<string, () => Promise<string>>()
+
+  /** Extras for one Google provider — only on the personal base load. */
+  function googleExtras(provider: 'gcal' | 'gmail' | 'gdrive'): ConnectorInstanceRef[] {
+    if (credsOverridePerConnector || !resolveInstanceCreds) return []
+    return extrasByProvider?.get(provider) ?? []
+  }
+
+  /** Wrap a variant tool set with the per-instance health probe (when wired). */
+  function probeVariant(built: Tool[], instanceId: string): Tool[] {
+    return healthReport ? wrapToolsWithHealthProbe(built, instanceId, healthReport) : built
   }
 
   // ── Prevalidate all connected Google connectors in parallel ──
@@ -1238,18 +1326,22 @@ async function injectGoogleTools(
         }
       }
 
-      const calTools = createGoogleCalendarTools({
+      // Tool set bound to one account's token source — built once for the
+      // primary (canonical names) and once per extra account (suffixed
+      // variants). The audit emitters, action gates, and sendUpdates config
+      // are provider-level and intentionally shared across accounts.
+      const buildCalTools = (getToken: () => Promise<string>) => createGoogleCalendarTools({
         listEvents: async (params) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return listCalendarEvents(token, params)
         },
         getEvent: async (eventId, calendarId) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return getCalendarEvent(token, eventId, calendarId)
         },
         createEvent: async (event) => {
           await gateGcalAction('googleCalendarCreateEvent')
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           const audience = deriveAudienceFromAttendees(event.attendees)
           const auditPayload: Record<string, unknown> = {
             summary: event.summary,
@@ -1274,7 +1366,7 @@ async function injectGoogleTools(
         },
         updateEvent: async (eventId, updates) => {
           await gateGcalAction('googleCalendarUpdateEvent')
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           const attendeeEmails = updates.attendees
           const audience = deriveAudienceFromAttendees(attendeeEmails)
           const auditPayload: Record<string, unknown> = {
@@ -1295,7 +1387,7 @@ async function injectGoogleTools(
         },
         deleteEvent: async (eventId, calendarId) => {
           await gateGcalAction('googleCalendarDeleteEvent')
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           // Snapshot the event BEFORE delete so the audit captures
           // what was removed (delete is the first DESTRUCTIVE
           // connector action — operators need to see what was lost).
@@ -1335,12 +1427,30 @@ async function injectGoogleTools(
           }
         },
       }, userTimezone)
+      const calTools = buildCalTools(() => getAccessToken('gcal'))
       for (const tool of calTools) {
         if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
         }
       }
-      console.debug(`[mcp-inject] Google Calendar: injected tools`)
+
+      // Extra Google Calendar accounts → label-qualified variant sets bound
+      // to their own tokens (the Tasks variants ride the same suffix in the
+      // Tasks section below).
+      const gcalExtras = googleExtras('gcal')
+      if (gcalExtras.length) {
+        await injectInstanceVariants({
+          provider: 'gcal',
+          extras: gcalExtras,
+          settingsStore, assistantId, userId, tools,
+          buildToolsForInstance: (inst) => {
+            const getToken = () => getAccessTokenForInstance(inst.id)
+            instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
+            return probeVariant(buildCalTools(getToken), inst.id)
+          },
+        })
+      }
+      console.debug(`[mcp-inject] Google Calendar: injected tools${gcalExtras.length ? ` (+${gcalExtras.length} extra account(s))` : ''}`)
     } catch (err) {
       console.error('[mcp-inject] Google Calendar injection failed:', err)
     }
@@ -1356,13 +1466,17 @@ async function injectGoogleTools(
   }
   if (gmail && gmailEnabled) {
     try {
-      const gmailTools = createGmailTools({
+      // Tool set bound to one account's token source (primary + per-extra
+      // variants, same shape as the gcal builder above). The grants gate,
+      // audit wrap, and classifier preflight are provider-level — shared
+      // across accounts by design.
+      const buildGmailToolSet = (getToken: () => Promise<string>) => createGmailTools({
         listMessages: async (params) => {
-          const token = await getAccessToken('gmail')
+          const token = await getToken()
           return listGmailMessages(token, params)
         },
         getMessage: async (messageId) => {
-          const token = await getAccessToken('gmail')
+          const token = await getToken()
           return getGmailMessage(token, messageId)
         },
         sendMessage: async (params) => {
@@ -1383,7 +1497,7 @@ async function injectGoogleTools(
             }
           }
 
-          const token = await getAccessToken('gmail')
+          const token = await getToken()
           // Connector-action audit wrap (per `connector-actions.md`).
           // With the payload classifier (#3) in place, the email body
           // CAN be recorded in the audit payload — the classifier
@@ -1398,10 +1512,19 @@ async function injectGoogleTools(
           // future enhancement.
           const auditPayload = {
             to: params.to,
+            from: params.from ?? null,
             subject: params.subject,
             has_body: Boolean(params.body),
             body_length: params.body?.length ?? 0,
             body: params.body ?? '',
+            // Attachment METADATA only — never bytes. Filenames ride
+            // through the payload classifier with the rest.
+            attachment_count: params.attachments?.length ?? 0,
+            attachments: (params.attachments ?? []).map((a) => ({
+              name: a.filename,
+              mime: a.mime,
+              size_bytes: a.data.byteLength,
+            })),
           }
 
           // Preflight: classifier decides BEFORE the network call. In
@@ -1489,13 +1612,30 @@ async function injectGoogleTools(
             throw err
           }
         },
-      })
+      }, { filesApi })
+      const gmailTools = buildGmailToolSet(() => getAccessToken('gmail'))
       for (const tool of gmailTools) {
         if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
         }
       }
-      console.debug('[mcp-inject] Gmail: injected tools')
+
+      // Extra Gmail accounts → label-qualified variant sets bound to their
+      // own tokens.
+      const gmailExtras = googleExtras('gmail')
+      if (gmailExtras.length) {
+        await injectInstanceVariants({
+          provider: 'gmail',
+          extras: gmailExtras,
+          settingsStore, assistantId, userId, tools,
+          buildToolsForInstance: (inst) => {
+            const getToken = () => getAccessTokenForInstance(inst.id)
+            instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
+            return probeVariant(buildGmailToolSet(getToken), inst.id)
+          },
+        })
+      }
+      console.debug(`[mcp-inject] Gmail: injected tools${gmailExtras.length ? ` (+${gmailExtras.length} extra account(s))` : ''}`)
     } catch (err) {
       console.error('[mcp-inject] Gmail injection failed:', err)
     }
@@ -1562,29 +1702,34 @@ async function injectGoogleTools(
           .catch((e) => console.error('[mcp-inject] updateOnAccess failed:', e))
       }
 
-      // Drive tools
-      const driveTools = createGoogleDriveTools({
+      // Per-account tool-set builders — instantiated for the primary below
+      // and re-bound per extra account in the variants block after the four
+      // families. `gdriveAuthorizedFiles`, `recordCreated`, and `syncOnRead`
+      // are per-USER state (Picker consent + created-file index),
+      // intentionally shared across accounts.
+      const buildDriveTools = (getToken: () => Promise<string>) => createGoogleDriveTools({
         listFiles: async (params) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return listDriveFiles(token, params)
         },
         getFile: async (fileId) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return getDriveFile(token, fileId)
         },
         getFileContent: async (fileId, exportMimeType) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return getDriveFileContent(token, fileId, exportMimeType)
         },
         createFile: async (params) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return createDriveFile(token, params)
         },
         updateFile: async (fileId, params) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return updateDriveFileContent(token, fileId, params)
         },
       }, gdriveAuthorizedFiles)
+      const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
       for (const tool of driveTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
@@ -1592,28 +1737,29 @@ async function injectGoogleTools(
       }
 
       // Docs tools
-      const docsTools = createGoogleDocsTools({
+      const buildDocsTools = (getToken: () => Promise<string>) => createGoogleDocsTools({
         getContent: async (documentId) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const doc = await getDocContent(token, documentId)
           syncOnRead(documentId, doc.title)
           return doc
         },
         appendText: async (documentId, text) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return appendToDoc(token, documentId, text)
         },
         replaceText: async (documentId, findText, replaceText) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return replaceInDoc(token, documentId, findText, replaceText)
         },
         create: async (title) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const doc = await createDocument(token, title)
           recordCreated('doc', doc.documentId, doc.title, doc.url, 'application/vnd.google-apps.document')
           return doc
         },
       }, gdriveAuthorizedFiles)
+      const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
       for (const tool of docsTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
@@ -1621,40 +1767,41 @@ async function injectGoogleTools(
       }
 
       // Sheets tools
-      const sheetsTools = createGoogleSheetsTools({
+      const buildSheetsTools = (getToken: () => Promise<string>) => createGoogleSheetsTools({
         getSpreadsheetInfo: async (spreadsheetId) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const info = await getSpreadsheetInfo(token, spreadsheetId)
           syncOnRead(spreadsheetId, info.title)
           return info
         },
         readRange: async (spreadsheetId, range) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return readSheetRange(token, spreadsheetId, range)
         },
         writeRange: async (spreadsheetId, range, values) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return writeSheetRange(token, spreadsheetId, range, values)
         },
         appendRows: async (spreadsheetId, range, values) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return appendSheetRows(token, spreadsheetId, range, values)
         },
         create: async (title) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const sheet = await createSpreadsheet(token, title)
           recordCreated('sheet', sheet.spreadsheetId, sheet.title, sheet.url, 'application/vnd.google-apps.spreadsheet')
           return sheet
         },
         format: async (spreadsheetId, opts) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return formatSpreadsheet(token, spreadsheetId, opts)
         },
         batchUpdate: async (spreadsheetId, requests) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
       }, gdriveAuthorizedFiles)
+      const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
       for (const tool of sheetsTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
@@ -1663,60 +1810,84 @@ async function injectGoogleTools(
 
       // Slides tools — structured read + placeholder-targeted, atomic write.
       // See docs/architecture/integrations/google-slides.md.
-      const slidesTools = createGoogleSlidesTools({
+      const buildSlidesTools = (getToken: () => Promise<string>) => createGoogleSlidesTools({
         getPresentationInfo: async (presentationId) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const info = await getPresentationInfo(token, presentationId)
           syncOnRead(presentationId, info.title)
           return info
         },
         getSlideContent: async (presentationId, slideIndex) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return getSlideContent(token, presentationId, slideIndex)
         },
         getSlideThumbnail: async (presentationId, slideObjectId, options) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return getSlideThumbnail(token, presentationId, slideObjectId, options)
         },
         createSlide: async (presentationId, args) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesCreateSlide(token, presentationId, args)
         },
         updateSlideContent: async (presentationId, args) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesUpdateSlideContent(token, presentationId, args)
         },
         insertImage: async (presentationId, args) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesInsertImage(token, presentationId, args)
         },
         deleteSlide: async (presentationId, slideObjectId) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesDeleteSlide(token, presentationId, slideObjectId)
         },
         reorderSlides: async (presentationId, slideObjectIds, insertionIndex) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesReorderSlides(token, presentationId, slideObjectIds, insertionIndex)
         },
         duplicateSlide: async (presentationId, slideObjectId, insertionIndex) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return slidesDuplicateSlide(token, presentationId, slideObjectId, insertionIndex)
         },
         batchUpdate: async (presentationId, requests) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           return batchUpdateSlides(token, presentationId, requests)
         },
         createPresentation: async (title) => {
-          const token = await getAccessToken('gdrive')
+          const token = await getToken()
           const pres = await createPresentation(token, title)
           recordCreated('slide', pres.presentationId, pres.title, pres.url, 'application/vnd.google-apps.presentation')
           return pres
         },
       }, gdriveAuthorizedFiles)
+      const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
       for (const tool of slidesTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
         }
+      }
+
+      // Extra Drive accounts → label-qualified variants of all four families,
+      // each bound to its own token. `findGDriveFiles` is deliberately NOT
+      // variant-injected: it reads the per-user created-file index, not the
+      // Drive API — one copy serves every account.
+      const gdriveExtras = googleExtras('gdrive')
+      if (gdriveExtras.length) {
+        await injectInstanceVariants({
+          provider: 'gdrive',
+          extras: gdriveExtras,
+          settingsStore, assistantId, userId, tools,
+          buildToolsForInstance: (inst) => {
+            const getToken = () => getAccessTokenForInstance(inst.id)
+            instanceTokenBySuffix.set(instanceToolSuffix(inst.id, inst.label), getToken)
+            return probeVariant([
+              ...buildDriveTools(getToken),
+              ...buildDocsTools(getToken),
+              ...buildSheetsTools(getToken),
+              ...buildSlidesTools(getToken),
+            ], inst.id)
+          },
+        })
       }
 
       // findGDriveFiles — local index of files this assistant has created.
@@ -1730,7 +1901,7 @@ async function injectGoogleTools(
         }
       }
 
-      console.debug('[mcp-inject] Google Drive (Drive/Docs/Sheets/Slides): injected tools')
+      console.debug(`[mcp-inject] Google Drive (Drive/Docs/Sheets/Slides): injected tools${gdriveExtras.length ? ` (+${gdriveExtras.length} extra account(s))` : ''}`)
     } catch (err) {
       console.error('[mcp-inject] Google Drive injection failed:', err)
     }
@@ -1742,36 +1913,50 @@ async function injectGoogleTools(
   }
   if (gcal && gcalEnabled) {
     try {
-      const tasksTools = createGoogleTasksTools({
+      const buildTasksTools = (getToken: () => Promise<string>) => createGoogleTasksTools({
         listTaskLists: async (params) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return listTaskLists(token, params)
         },
         listTasks: async (params) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return listGoogleTasks(token, params)
         },
         getTask: async (taskListId, taskId) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return getGoogleTask(token, taskListId, taskId)
         },
         createTask: async (taskListId, task) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return createGoogleTask(token, taskListId, task)
         },
         updateTask: async (taskListId, taskId, updates) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return updateGoogleTask(token, taskListId, taskId, updates)
         },
         deleteTask: async (taskListId, taskId) => {
-          const token = await getAccessToken('gcal')
+          const token = await getToken()
           return deleteGoogleTask(token, taskListId, taskId)
         },
       })
+      const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
       for (const tool of tasksTools) {
         if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
           tools.set(tool.name, tool)
         }
+      }
+
+      // Tasks ride the gcal credential, so each extra Calendar account also
+      // gets its Tasks variants (same suffix as its Calendar set above).
+      const tasksExtras = googleExtras('gcal')
+      if (tasksExtras.length) {
+        await injectInstanceVariants({
+          provider: 'gcal',
+          extras: tasksExtras,
+          settingsStore, assistantId, userId, tools,
+          buildToolsForInstance: (inst) =>
+            probeVariant(buildTasksTools(() => getAccessTokenForInstance(inst.id)), inst.id),
+        })
       }
       console.debug('[mcp-inject] Google Tasks: injected tools (via gcal)')
     } catch (err) {
@@ -1786,14 +1971,21 @@ async function injectGoogleTools(
   const enricher: ConfirmationEnricher = async (toolName, input) => {
     if (!gcalConnected) return input
 
+    // Multi-account: a suffixed variant name enriches with ITS OWN account's
+    // token; canonical names use the primary's. An unrecognized suffix (a
+    // non-Google variant, or a stale name) leaves the input unenriched.
+    const canonicalName = baseToolName(toolName)
+    const suffix = toolName.slice(canonicalName.length)
+    const getEnrichToken = suffix ? instanceTokenBySuffix.get(suffix) : () => getAccessToken('gcal')
+
     // ── Google Tasks: fetch title so the user sees "記得 Call 大隻佬" not "eHXMFJ..." ──
-    if (toolName === 'googleTasksUpdateTask' || toolName === 'googleTasksDeleteTask') {
+    if (canonicalName === 'googleTasksUpdateTask' || canonicalName === 'googleTasksDeleteTask') {
       const taskId = input.taskId as string | undefined
       const taskListId = (input.taskListId as string | undefined) ?? '@default'
-      if (!taskId) return input
+      if (!taskId || !getEnrichToken) return input
 
       try {
-        const token = await getAccessToken('gcal')
+        const token = await getEnrichToken()
         const task = await getGoogleTask(token, taskListId, taskId)
         // Replace raw IDs with human-readable fields
         const { taskId: _tid, taskListId: _tlid, ...rest } = input
@@ -1809,13 +2001,13 @@ async function injectGoogleTools(
     }
 
     // ── Google Calendar: fetch event summary/attendees ──
-    if (toolName !== 'googleCalendarUpdateEvent' && toolName !== 'googleCalendarDeleteEvent') return input
+    if (canonicalName !== 'googleCalendarUpdateEvent' && canonicalName !== 'googleCalendarDeleteEvent') return input
 
     const eventId = input.eventId as string | undefined
-    if (!eventId) return input
+    if (!eventId || !getEnrichToken) return input
 
     try {
-      const token = await getAccessToken('gcal')
+      const token = await getEnrichToken()
       const event = await getCalendarEvent(token, eventId)
       const summary = (event as Record<string, unknown>).summary as string | undefined
       const start = (event as Record<string, unknown>).start as { dateTime?: string; date?: string } | undefined
@@ -1823,7 +2015,7 @@ async function injectGoogleTools(
       const attendees = ((event as Record<string, unknown>).attendees as Array<{ email: string }> | undefined)
         ?.map(a => a.email)
 
-      if (toolName === 'googleCalendarUpdateEvent') {
+      if (canonicalName === 'googleCalendarUpdateEvent') {
         return {
           ...input,
           currentSummary: summary ?? input.currentSummary,

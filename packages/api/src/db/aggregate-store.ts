@@ -57,6 +57,9 @@ type PrimitiveAllowlist = {
   dimensionPaths: Record<string, PathSpec>
   /** Allowed filter keys (equality only at launch). */
   filterPaths: Record<string, PathSpec>
+  /** Optional constant predicate ANDed into the WHERE — used when several
+   *  primitives share the `entities` table and need a `kind` filter. */
+  baseWhere?: string
   /**
    * `false` for non-bi-temporal primitives (doc `entity_instances`):
    * skips the `retracted_at`/`valid_from`/`valid_to` window AND the
@@ -75,22 +78,23 @@ type PrimitiveAllowlist = {
  */
 const ALLOWLIST: Readonly<Record<string, PrimitiveAllowlist>> = {
   deals: {
-    table: 'deals',
+    table: 'entities',
+    baseWhere: "kind = 'deal'",
     measurePaths: {
-      amount: { sql: 'amount', type: 'numeric' },
+      amount: { sql: "(attributes->>'amount')::numeric", type: 'numeric' },
       created_at: { sql: 'created_at', type: 'timestamp' },
     },
     dimensionPaths: {
-      stage: { sql: 'stage', type: 'text' },
-      company_id: { sql: 'company_id', type: 'uuid' },
-      contact_id: { sql: 'contact_id', type: 'uuid' },
+      stage: { sql: "attributes->>'stage'", type: 'text' },
+      company_id: { sql: "(attributes->>'company_id')::uuid", type: 'uuid' },
+      contact_id: { sql: "(attributes->>'contact_id')::uuid", type: 'uuid' },
       quarter: { sql: "date_trunc('quarter', created_at)", type: 'timestamp' },
       month: { sql: "date_trunc('month', created_at)", type: 'timestamp' },
     },
     filterPaths: {
-      stage: { sql: 'stage', type: 'text' },
-      company_id: { sql: 'company_id', type: 'uuid' },
-      contact_id: { sql: 'contact_id', type: 'uuid' },
+      stage: { sql: "attributes->>'stage'", type: 'text' },
+      company_id: { sql: "(attributes->>'company_id')::uuid", type: 'uuid' },
+      contact_id: { sql: "(attributes->>'contact_id')::uuid", type: 'uuid' },
     },
   },
   tasks: {
@@ -139,7 +143,8 @@ const ALLOWLIST: Readonly<Record<string, PrimitiveAllowlist>> = {
     },
   },
   companies: {
-    table: 'companies',
+    table: 'entities',
+    baseWhere: "kind = 'company'",
     measurePaths: {},
     dimensionPaths: {
       sensitivity: { sql: 'sensitivity', type: 'text' },
@@ -151,15 +156,16 @@ const ALLOWLIST: Readonly<Record<string, PrimitiveAllowlist>> = {
     },
   },
   contacts: {
-    table: 'contacts',
+    table: 'entities',
+    baseWhere: "kind = 'person' AND NOT COALESCE((attributes->>'self')::boolean, false)",
     measurePaths: {},
     dimensionPaths: {
-      company_id: { sql: 'company_id', type: 'uuid' },
+      company_id: { sql: "(attributes->>'company_id')::uuid", type: 'uuid' },
       sensitivity: { sql: 'sensitivity', type: 'text' },
       source: { sql: 'source', type: 'text' },
     },
     filterPaths: {
-      company_id: { sql: 'company_id', type: 'uuid' },
+      company_id: { sql: "(attributes->>'company_id')::uuid", type: 'uuid' },
       sensitivity: { sql: 'sensitivity', type: 'text' },
       source: { sql: 'source', type: 'text' },
     },
@@ -352,6 +358,7 @@ export function createDbAggregateStore(): Pick<RetrievalStore, 'aggregate'> {
         SELECT ${dimSelect}, ${measureSql} AS measure_value
           FROM ${allow.table}
          WHERE ${apSql}
+           ${allow.baseWhere ? `AND ${allow.baseWhere}` : ''}
            ${bitemporalClause}
            ${filterClauses.length > 0 ? `AND ${filterClauses.join(' AND ')}` : ''}
          GROUP BY ${groupOrderSql}

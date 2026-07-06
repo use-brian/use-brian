@@ -44,7 +44,7 @@ function fakeStores() {
       const now = new Date()
       const r: WorkflowRecord = {
         id: id(), workspaceId, createdBy: userId, name, description: description ?? null,
-        definition, enabled: true,
+        definition, enabled: true, pausedReason: null,
         trigger: trigger ?? { kind: 'manual' },
         webhookSlug: webhookSlug ?? null,
         webhookSecret: webhookSecret ?? null,
@@ -1091,7 +1091,7 @@ describe('[COMP:workflow/tools] page anchor authoring checks', () => {
           schedule: { type: 'cron', expression: '0 * * * *' },
           timezone: 'UTC',
           enabled: true,
-          nextRunAt: new Date('2026-06-10T05:00:00Z'),
+            nextRunAt: new Date('2026-06-10T05:00:00Z'),
           lastStatus: 'failed',
           userId: 'u2', // the teammate's
         },

@@ -71,6 +71,15 @@ type BrowseDirectoryProps = {
   open: boolean;
   onClose: () => void;
   onConnectorAdded: () => void;
+  /**
+   * Launches the connectors page's OAuth flow for an oauth_required entry
+   * (Google / Notion / Fathom) — the page owns the per-provider authorize
+   * URLs and threads `[:add]:<workspaceId>` through `state`, so both Connect
+   * and "Add another" land on the right callback with the right intent.
+   * Absent → the modal falls back to its degraded self-built Google URL
+   * (legacy standalone use).
+   */
+  onOauthConnect?: (entry: { id: string }, opts?: { addAnother?: boolean }) => void;
 };
 
 type SkillCatalogEntry = {
@@ -83,7 +92,7 @@ type SkillCatalogEntry = {
   source: string;
 };
 
-export function BrowseDirectory({ open, onClose, onConnectorAdded }: BrowseDirectoryProps) {
+export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnect }: BrowseDirectoryProps) {
   const t = useT();
   const [activeTab, setActiveTab] = useState<"connectors" | "skills">("connectors");
   const [directory, setDirectory] = useState<DirectoryEntry[]>([]);
@@ -187,7 +196,27 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded }: BrowseDirec
     }
   }
 
+  // "Add another" for a connected entry. OAuth providers go through the
+  // page's OAuth flow with the `:add` intent (a directory-add here would
+  // mint an orphan disconnected instance whose later plain OAuth connect
+  // overwrites the primary's credentials); PAT / remote-MCP entries keep
+  // the create-disconnected-instance path (the rail's PAT form targets the
+  // new instance by id).
+  function handleAddAnother(entry: DirectoryEntry) {
+    if (entry.oauth_required && onOauthConnect) {
+      onOauthConnect(entry, { addAnother: true });
+      return;
+    }
+    handleAdd(entry);
+  }
+
   async function handleConnect(entry: DirectoryEntry) {
+    // Prefer the page's OAuth flow (correct per-provider authorize URL +
+    // workspace-scoped return); the block below is the degraded fallback.
+    if (entry.oauth_required && onOauthConnect) {
+      onOauthConnect(entry);
+      return;
+    }
     setAddingId(entry.id);
 
     // OAuth connectors — build Google OAuth URL client-side (same pattern as login)
@@ -375,6 +404,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded }: BrowseDirec
                       entries={official}
                       addingId={addingId}
                       onAdd={handleAdd}
+                      onAddAnother={handleAddAnother}
                       onConnect={handleConnect}
                     />
                   )}
@@ -384,6 +414,7 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded }: BrowseDirec
                       entries={community}
                       addingId={addingId}
                       onAdd={handleAdd}
+                      onAddAnother={handleAddAnother}
                       onConnect={handleConnect}
                       footer={
                         <p className="text-[11px] text-muted-foreground/60 mt-3">
@@ -418,6 +449,7 @@ function DirectorySection({
   entries,
   addingId,
   onAdd,
+  onAddAnother,
   onConnect,
   footer,
 }: {
@@ -425,6 +457,7 @@ function DirectorySection({
   entries: DirectoryEntry[];
   addingId: string | null;
   onAdd: (entry: DirectoryEntry) => void;
+  onAddAnother: (entry: DirectoryEntry) => void;
   onConnect: (entry: DirectoryEntry) => void;
   footer?: React.ReactNode;
 }) {
@@ -440,6 +473,7 @@ function DirectorySection({
             entry={entry}
             adding={addingId === entry.id}
             onAdd={() => onAdd(entry)}
+            onAddAnother={() => onAddAnother(entry)}
             onConnect={() => onConnect(entry)}
           />
         ))}
@@ -455,11 +489,13 @@ function DirectoryCard({
   entry,
   adding,
   onAdd,
+  onAddAnother,
   onConnect,
 }: {
   entry: DirectoryEntry;
   adding: boolean;
   onAdd: () => void;
+  onAddAnother: () => void;
   onConnect: () => void;
 }) {
   const t = useT();
@@ -533,7 +569,7 @@ function DirectoryCard({
             "Connected" pill, so it never crowds/truncates the card title. */}
         {entry.connected && entry.addable !== false && (
           <button
-            onClick={(e) => { e.stopPropagation(); onAdd(); }}
+            onClick={(e) => { e.stopPropagation(); onAddAnother(); }}
             disabled={adding}
             className="mt-2 text-[11px] font-medium text-primary hover:underline disabled:opacity-50 transition-colors"
           >

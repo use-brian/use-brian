@@ -167,6 +167,7 @@ function BrainPageInner() {
       setViewMode("graph");
     }
     if (searchParams.get("view") === "skills") setSection("skills");
+    if (searchParams.get("view") === "blueprints") setSection("blueprints");
   }, [searchParams, setSection, setViewMode]);
 
   // Any search / filter / pending engagement flips off the pristine nudge, and

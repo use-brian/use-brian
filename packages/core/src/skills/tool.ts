@@ -107,6 +107,17 @@ export function createUseSkillTool(params: UseSkillToolParams) {
         }
       }
 
+      // Structural-synthesis Phase 2: a skill linked to a blueprint produces
+      // that blueprint's structured output. Steer the model to FILL it rather
+      // than free-form the layout. This is dynamic tool-result content (not the
+      // Layer-1 system prompt), so naming the fill tool is fine here; a
+      // blueprint-linked skill is workspace-scoped, exactly where the tool is
+      // injected. See docs/architecture/brain/structural-synthesis.md.
+      if (skill.blueprintId) {
+        instructions +=
+          `\n\n---\n**This skill is bound to a blueprint.** Its output is the structured document defined by blueprint \`${skill.blueprintId}\`. Do NOT compose the section layout yourself: run the procedure above, then produce the result by calling \`fillBlueprintFromBrain\` with \`blueprint: "${skill.blueprintId}"\` and a \`subject\` (the account, company, or topic this run is about). The blueprint owns the sections and which entities to capture.`
+      }
+
       return {
         data: {
           skill: skill.id,

@@ -15,7 +15,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, GDriveFilesStore, McpSettingsStore } from '@sidanclaw/core'
+import type { Tool, KnowledgeStoreInterface, GDriveFilesStore, McpSettingsStore, FilesApi } from '@sidanclaw/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -32,6 +32,9 @@ export type WorkflowToolRegistryDeps = {
   connectorInstanceStore?: ConnectorInstanceStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
+  /** Workspace-files byte layer — `gmailSendMessage` attachments on workflow
+   *  `tool_call` steps (`docs/architecture/integrations/gmail.md`). */
+  filesApi?: FilesApi
 }
 
 /**
@@ -93,6 +96,7 @@ export async function buildWorkflowToolRegistry(
     connectorInstanceStore: deps.connectorInstanceStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
+    filesApi: deps.filesApi,
   })
 
   return tools

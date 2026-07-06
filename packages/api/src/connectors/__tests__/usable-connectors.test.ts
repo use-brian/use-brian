@@ -73,9 +73,18 @@ function run(stores: ReturnType<typeof makeStores>) {
 describe('[COMP:connectors/usable-resolver] listUsableWorkspaceConnectors', () => {
   beforeEach(() => membershipMock.mockReset())
 
-  it('always includes the member’s own personal connectors, any tier', async () => {
+  it('hides the member’s own personal connector when it is not exposed to this workspace', async () => {
+    membershipMock.mockResolvedValue({ role: 'member', clearance: 'confidential' })
+    const res = await run(makeStores({ own: [inst({ id: 'own' })] }))
+    expect(res).toHaveLength(0)
+  })
+
+  it('includes the member’s own EXPOSED personal connector, any tier, clearance-free', async () => {
     membershipMock.mockResolvedValue({ role: 'member', clearance: 'public' })
-    const res = await run(makeStores({ own: [inst({ id: 'own', sensitivity: 'confidential' })] }))
+    const mine = inst({ id: 'own', sensitivity: 'confidential' })
+    const res = await run(
+      makeStores({ own: [mine], granted: [{ grantedByUserId: U, instance: mine }] }),
+    )
     expect(res).toHaveLength(1)
     expect(res[0]).toMatchObject({ source: 'personal', instance: expect.objectContaining({ id: 'own' }) })
   })
@@ -130,7 +139,7 @@ describe('[COMP:connectors/usable-resolver] listUsableWorkspaceConnectors', () =
     expect(res[0]).toMatchObject({ source: 'personal', instance: expect.objectContaining({ id: 'mine' }) })
   })
 
-  it('fails closed for a non-member — only own personal, no workspace-shared visibility', async () => {
+  it('fails closed for a non-member — no workspace-shared visibility, no ungranted personal', async () => {
     membershipMock.mockResolvedValue(null)
     const res = await run(
       makeStores({
@@ -139,7 +148,6 @@ describe('[COMP:connectors/usable-resolver] listUsableWorkspaceConnectors', () =
         granted: [{ grantedByUserId: 'x', instance: inst({ id: 'g', userId: 'x', sensitivity: 'public' }) }],
       }),
     )
-    expect(res.map((u) => u.instance.id)).toEqual(['own'])
-    expect(res[0].source).toBe('personal')
+    expect(res).toHaveLength(0)
   })
 })

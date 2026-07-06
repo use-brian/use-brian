@@ -134,7 +134,7 @@ function placeholderRow(entry: ConnectorEntry): ConnectorRowOut {
     custom: false,
     isPlaceholder: true,
     isPrimary: true,
-    addable: entry.auth_type !== 'none',
+    addable: entry.auth_type !== 'none' && !entry.single_instance,
     oauthRequired: entry.oauth_required,
     category: entry.category,
   }
@@ -149,7 +149,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     name: entry?.name ?? inst.label,
     label: inst.label,
     isPrimary,
-    addable: entry ? entry.auth_type !== 'none' : false,
+    addable: entry ? entry.auth_type !== 'none' && !entry.single_instance : false,
     description: entry?.description,
     connected: inst.connected,
     custom: inst.custom,
@@ -338,7 +338,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           ...entry,
           added: insts.length > 0,
           connected: insts.some((i) => i.connected),
-          addable: entry.auth_type !== 'none',
+          addable: entry.auth_type !== 'none' && !entry.single_instance,
         }
       })
       res.json({ directory })

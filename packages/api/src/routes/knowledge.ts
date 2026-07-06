@@ -73,10 +73,11 @@ type KnowledgeRouteOptions = {
    */
   connectorInstanceStore?: ConnectorInstanceStore
   /**
-   * Used to (a) include the caller's exposed personal GitHub connectors in the
-   * picker and (b) ensure a connector_grant exists when a personal connector
-   * backs a workspace KB source, so the workspace-scoped sync worker can
-   * resolve its credentials by `workspaceId`.
+   * Resolves which connectors are exposed to the workspace: the picker and the
+   * PAT resolver both authorize through the exposure-gated usable set, so a
+   * personal connector never surfaces (or operates) in a workspace it wasn't
+   * granted to — the grant is also what lets the workspace-scoped sync worker
+   * resolve credentials by `workspaceId`.
    */
   connectorGrantStore?: ConnectorGrantStore
   triggerSync?: (sourceId: string) => Promise<void>
@@ -95,11 +96,12 @@ type KnowledgeRouteOptions = {
 
 /**
  * List the GitHub `connector_instance` rows usable as a workspace KB source —
- * the member's own connected personal instances PLUS every workspace-shared
- * GitHub connector within their clearance (legacy team-native + teammate-
- * granted). Mirrors `listUsableWorkspaceConnectors` so the picker shows
- * exactly what the member is allowed to configure with; above-clearance shared
- * connectors are hidden. Deduped by id.
+ * the member's own personal instances EXPOSED to this workspace PLUS every
+ * workspace-shared GitHub connector within their clearance (legacy team-native
+ * + teammate-granted). Mirrors `listUsableWorkspaceConnectors` so the picker
+ * shows exactly what the member is allowed to configure with; an un-exposed
+ * personal connector (connected in another workspace) and above-clearance
+ * shared connectors are hidden. Deduped by id.
  */
 async function listWorkspaceGithubInstances(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
@@ -159,10 +161,11 @@ async function githubFetchAllPages<T>(
  *
  * Authorization travels through the SAME usable-set the picker lists from
  * (`listUsableWorkspaceConnectors`), so the resolver can never operate a
- * connector the member isn't allowed to see — above-clearance or not shared to
- * this workspace is denied. It accepts the member's own personal instance, a
- * legacy team-native instance, and a teammate-granted personal instance
- * (within clearance for the shared kinds).
+ * connector the member isn't allowed to see — un-exposed personal,
+ * above-clearance, or not shared to this workspace is denied. It accepts the
+ * member's own workspace-exposed personal instance, a legacy team-native
+ * instance, and a teammate-granted personal instance (within clearance for
+ * the shared kinds).
  */
 async function resolveWorkspaceGithubPat(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
@@ -240,27 +243,11 @@ async function createGithubKnowledgeSource(opts: {
       const resolved = await resolveWorkspaceGithubPat(connectorInstanceStore, connectorGrantStore, userId, workspaceId, connectorInstanceId, res)
       if (!resolved) return
 
-      // If the caller's own personal connector backs this workspace source,
-      // ensure it's exposed to the workspace so the workspace-scoped sync
-      // worker can resolve its PAT by `workspaceId`. In a shared workspace the
-      // connectors page already created this grant on connect; this covers
-      // solo/personal workspaces and the revoked-then-reconnected case. The
-      // grant is idempotent (ON CONFLICT DO NOTHING).
-      if (connectorGrantStore) {
-        const instance = await connectorInstanceStore.get(userId, connectorInstanceId)
-        if (instance?.scope === 'user' && instance.userId === userId) {
-          try {
-            await connectorGrantStore.create({
-              actingUserId: userId,
-              connectorInstanceId,
-              targetType: 'workspace',
-              targetId: workspaceId,
-            })
-          } catch (err) {
-            console.error('[knowledge] ensure connector grant failed:', err)
-          }
-        }
-      }
+      // No ensure-grant here: a selectable personal connector already carries a
+      // live grant to this workspace (`resolveWorkspaceGithubPat` authorizes
+      // through the exposure-gated usable set), so the workspace-scoped sync
+      // worker can resolve its PAT by `workspaceId`. Re-minting the grant here
+      // would silently resurrect an exposure the owner deliberately revoked.
 
       const [repoOwner, repoName] = repo.split('/')
       if (!repoOwner || !repoName) {

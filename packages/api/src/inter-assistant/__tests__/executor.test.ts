@@ -5,7 +5,8 @@
  * Mocks the DB lookups + billing resolver and stubs `queryLoop` with a
  * controllable async generator (the pure core helpers — prompt /
  * memory-context / tool-filter builders — run for real). Verifies the
- * callee/owner not-found throws, text_delta accumulation, the
+ * callee/owner not-found throws, the assistant_turn-based final-text
+ * assembly (leak-suppressed / retried turns contribute nothing), the
  * empty-response fallback, error-event propagation, and that free mode
  * injects getMemory into the callee's tool set.
  */
@@ -41,6 +42,12 @@ vi.mock('../../db/workspace-store.js', () => ({
   // injectMcpTools gates the owner-personal base load on this; `true`
   // (solo workspace) preserves the pre-gate load behavior these tests expect.
   isSoloWorkspaceSystem: vi.fn().mockResolvedValue(true),
+  // Read-ceiling resolver for the brain retrieval actor. Returned shape mirrors
+  // the real `min(member, assistant)` ceiling; the callee threads it onto the
+  // query-loop ToolContext.
+  resolveReadCeilingsSystem: vi
+    .fn()
+    .mockResolvedValue({ clearance: 'confidential', compartments: null }),
 }))
 vi.mock('../../mcp/inject.js', () => ({
   injectMcpTools: vi.fn().mockResolvedValue({ enrichConfirmation: async (_t: string, i: unknown) => i, unavailable: [] }),
@@ -137,13 +144,64 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     await expect(executor()(baseParams)).rejects.toThrow('Callee owner not found')
   })
 
-  it('accumulates text_delta events into the returned response', async () => {
+  it('assembles the returned response from finalised assistant_turn content, not raw deltas', async () => {
+    // The stream and the finalised turn agree here — but the return must come
+    // from the turn content (post leak-sanitiser), not the delta sum. See
+    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
     yields([
       { type: 'text_delta', text: 'The status ' },
       { type: 'text_delta', text: 'is green.' },
-      { type: 'turn_complete', response: { content: [] } },
+      {
+        type: 'assistant_turn',
+        response: { content: [{ type: 'text', text: 'The status is green.' }] },
+        toolResults: [],
+      },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'The status is green.' }] } },
     ])
     expect(await executor()(baseParams)).toBe('The status is green.')
+  })
+
+  it('joins multi-turn text with newlines and skips text-less tool turns', async () => {
+    yields([
+      { type: 'text_delta', text: 'Checking the brain.' },
+      {
+        type: 'assistant_turn',
+        response: {
+          content: [
+            { type: 'text', text: 'Checking the brain.' },
+            { type: 'tool_use', id: 't1', name: 'recentEpisodes', input: {} },
+          ],
+        },
+        toolResults: [{ type: 'tool_result', tool_use_id: 't1', content: [] }],
+      },
+      { type: 'text_delta', text: 'All clear.' },
+      {
+        type: 'assistant_turn',
+        response: { content: [{ type: 'text', text: 'All clear.' }] },
+        toolResults: [],
+      },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'All clear.' }] } },
+    ])
+    expect(await executor()(baseParams)).toBe('Checking the brain.\nAll clear.')
+  })
+
+  it('does not return re-streamed text from leak-suppressed + retried turns (2026-07-02 triplication)', async () => {
+    // Repro of run 26d50608: the model's mandated fallback sentence streamed
+    // on THREE attempts (initial + 2 EMPTY_RETRY re-prompts), each suppressed
+    // by the turn-boundary leak sanitiser — so each assistant_turn carries no
+    // text blocks. Raw delta accumulation returned all three concatenated
+    // ("…hours.No recorded…"); the turn-based assembly returns none of them.
+    const SENTENCE = 'No recorded GitHub activity in the last 24 hours.'
+    yields([
+      { type: 'text_delta', text: SENTENCE },
+      { type: 'assistant_turn', response: { content: [] }, toolResults: [] },
+      { type: 'text_delta', text: SENTENCE },
+      { type: 'assistant_turn', response: { content: [] }, toolResults: [] },
+      { type: 'text_delta', text: SENTENCE },
+      { type: 'assistant_turn', response: { content: [] }, toolResults: [] },
+      { type: 'turn_complete', response: { content: [] } },
+    ])
+    expect(await executor()(baseParams)).toBe('The assistant did not produce a response.')
   })
 
   it('falls back to a placeholder when the callee produces no text', async () => {
@@ -282,6 +340,91 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
     expect(passedTools.has('getMemory')).toBe(true)
     expect(passedTools.has('saveMemory')).toBe(false)
+  })
+
+  // ── Brain retrieval tools on the callee path (workflow assistant_call) ──
+  // Regression: a workflow step prompted to call `recentEpisodes` (read the
+  // company brain) found no such tool because the callee executor never
+  // injected the retrieval surface the interactive chat route injects per-turn.
+  const workspaceCallee = { ...calleeAssistant, workspaceId: 'ws-1', compartments: null }
+  const RETRIEVAL_TOOL_NAMES = [
+    'recentEpisodes', 'search', 'getEntity', 'provenance', 'aggregate', 'getRowHistory',
+  ]
+  function calleeWithRetrieval() {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: new Map(),
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      retrievalStore: {} as never,
+    })
+  }
+
+  it('injects the 6 brain retrieval tools for a free-mode workspace consult when a retrievalStore is wired', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    for (const name of RETRIEVAL_TOOL_NAMES) {
+      expect(passedTools.has(name)).toBe(true)
+    }
+  })
+
+  it('scopes the query-loop actor to the workspace + read ceiling when retrieval tools are injected', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const ctx = mockQueryLoop.mock.calls[0][0].context as Record<string, unknown>
+    // actorFromContext requires a workspace bind; the read ceiling drives the
+    // clearance/compartment projection.
+    expect(ctx.workspaceId).toBe('ws-1')
+    expect(ctx.clearance).toBe('confidential')
+    expect(ctx.compartments).toBe(null)
+  })
+
+  it('omits the retrieval tools when no retrievalStore is wired (open build / unconfigured)', async () => {
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await executor()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(false)
+    // The context stays unscoped for retrieval (no clearance forced on).
+    const ctx = mockQueryLoop.mock.calls[0][0].context as Record<string, unknown>
+    expect(ctx.clearance).toBeUndefined()
+  })
+
+  it('omits the retrieval tools for a personal (no-workspace) callee even with a store wired', async () => {
+    // Default calleeAssistant has workspaceId: null — the retrieval actor's
+    // permission predicate would only error in actorFromContext, so the tools
+    // must not be injected at all.
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({ ...baseParams, callerChannelType: 'workflow' })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(false)
+  })
+
+  it('a per-step tools allow-list composes over the injected retrieval tools', async () => {
+    // The allow-list runs after injection: a step that names only recentEpisodes
+    // keeps it and strips the sibling reads (search/getEntity/...).
+    mockFindAssistant.mockImplementation(async (id: string) =>
+      (id === 'callee-1' ? workspaceCallee : id === 'caller-1' ? callerAssistant : null) as never,
+    )
+    yields([{ type: 'turn_complete', response: { content: [] } }])
+    await calleeWithRetrieval()({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['recentEpisodes'],
+    })
+    const passedTools = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passedTools.has('recentEpisodes')).toBe(true)
+    expect(passedTools.has('search')).toBe(false)
+    expect(passedTools.has('getEntity')).toBe(false)
   })
 
   it('strips the delegation tools from a callee — leaf invariant, depth=1', async () => {
@@ -484,7 +627,11 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
 
     it('a draft-bump failure never fails the consult', async () => {
       asWorkspaceCallee()
-      yields([{ type: 'text_delta', text: 'done' }, { type: 'turn_complete', response: { content: [] } }])
+      yields([
+        { type: 'text_delta', text: 'done' },
+        { type: 'assistant_turn', response: { content: [{ type: 'text', text: 'done' }] }, toolResults: [] },
+        { type: 'turn_complete', response: { content: [] } },
+      ])
       const store = {
         getById: vi.fn().mockResolvedValue({
           id: PAGE_ID, workspaceId: 'ws-1', clearance: 'internal', state: 'draft',

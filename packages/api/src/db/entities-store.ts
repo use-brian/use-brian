@@ -13,7 +13,6 @@ import type {
   EntitySupersedePatch,
   EntityUpdateFields,
   GetEntityOpts,
-  SystemEntityKind,
 } from '@sidanclaw/core'
 import type { Sensitivity } from '@sidanclaw/core'
 import { buildAccessPredicate } from './access-predicate.js'
@@ -49,13 +48,12 @@ import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js
  * without breaking the CRM write path.
  */
 
-/**
- * `entities.kind` values that are CRM-specialized (Q24). A direct
- * `createEntity` for one of these is a bug — it would leave the
- * specialization row (`contacts` / `companies` / `deals`) unwritten
- * and the entity brain-orphaned. Callers must use the CRM wrappers.
- */
-const CRM_SPECIALIZED_KINDS = new Set<EntityKind>(['person', 'company', 'deal'])
+// (Removed) `CRM_SPECIALIZED_KINDS` guard. Post CRM→entity unification
+// (docs/plans/crm-entity-unification.md) there is no `contacts` /
+// `companies` / `deals` specialization row to orphan — a person / company
+// / deal IS just an `entities` row with its typed fields in `attributes`.
+// `createEntity` accepts every kind directly; the CRM tools in `crm.ts`
+// are thin projections over this store.
 
 const FULL_SELECT = `
   id,
@@ -184,24 +182,6 @@ function toEntityListRow(row: EntityCompactRow): EntityListRow {
 
 export async function createEntity(params: EntityCreateParams): Promise<EntityRecord> {
   assertAuthorshipPresent('createEntity', params.createdByUserId)
-  // Q24: direct entity inserts for the CRM-specialized kinds are blocked
-  // at the app layer (data-model.md §"CRM as specialization of entities").
-  // Creating one of these here would orphan the entity — no matching
-  // `contacts` / `companies` / `deals` specialization row gets written.
-  if (CRM_SPECIALIZED_KINDS.has(params.kind)) {
-    const toolByKind: Record<string, string> = {
-      person: 'saveContact',
-      company: 'saveCompany',
-      deal: 'saveDeal',
-    }
-    const correctTool = toolByKind[params.kind] ?? 'saveContact / saveCompany / saveDeal'
-    throw new Error(
-      `createEntity rejected: kind='${params.kind}' is reserved for the CRM specialization. ` +
-        `Call ${correctTool}({ name: ..., links: [...] }) instead — that tool writes the ` +
-        `entity row AND the CRM row in one transaction and returns the entityId you need ` +
-        `for downstream links. Do not retry createEntity with this kind.`,
-    )
-  }
   const result = await queryWithRLS<EntityRow>(
     params.createdByUserId,
     `INSERT INTO entities (
@@ -1515,11 +1495,6 @@ export async function reclassifyEntityKind(
   id: string,
   params: ReclassifyEntityKindParams,
 ): Promise<EntityRecord | null> {
-  if (CRM_SPECIALIZED_KINDS.has(params.kind as SystemEntityKind)) {
-    throw new Error(
-      `Cannot reclassify to CRM kind '${params.kind}' — use promoteEntityToCrm so the specialization row is created in the same transaction.`,
-    )
-  }
   const result = await queryWithRLS<EntityRow>(
     actorUserId,
     `UPDATE entities
@@ -1574,14 +1549,31 @@ export async function promoteEntityToCrm(
   id: string,
   params: PromoteEntityToCrmParams,
 ): Promise<{ entity: EntityRecord; specializationId: string }> {
-  if (!CRM_SPECIALIZED_KINDS.has(params.kind as SystemEntityKind)) {
-    throw new Error(
-      `Cannot promote to non-CRM kind '${params.kind}' — use reclassifyEntityKind.`,
-    )
-  }
   if (params.kind === 'deal' && !params.stage) {
     throw new Error("Promoting to 'deal' requires a stage value.")
   }
+  // Build the attributes patch + canonical_id for the target kind. No
+  // specialization row exists post-unification; typed fields live in
+  // `attributes`, relationship FKs are set later via updateContact/Deal.
+  const attrs: Record<string, unknown> = {}
+  if (params.kind === 'company') {
+    if (params.domain) attrs.domain = params.domain
+    if (params.tags && params.tags.length) attrs.tags = params.tags
+  } else if (params.kind === 'person') {
+    if (params.email) attrs.email = params.email
+    if (params.phone) attrs.phone = params.phone
+    if (params.tags && params.tags.length) attrs.tags = params.tags
+  } else {
+    attrs.stage = params.stage
+    if (params.amount != null) attrs.amount = params.amount
+    if (params.closeDate) attrs.closeDate = params.closeDate
+  }
+  const canonical =
+    params.kind === 'person'
+      ? params.email ?? null
+      : params.kind === 'company'
+        ? params.domain ?? null
+        : null
 
   const client = await getAppPool().connect()
   try {
@@ -1607,85 +1599,18 @@ export async function promoteEntityToCrm(
         throw new Error('Entity not found or not live.')
       }
       const before = toEntity(entityRes.rows[0])
-      if (CRM_SPECIALIZED_KINDS.has(before.kind as SystemEntityKind)) {
-        await client.query('ROLLBACK')
-        throw new Error(
-          `Entity is already CRM-specialized (kind='${before.kind}'). Demotion is not supported here.`,
-        )
-      }
-
       const effectiveName = params.name?.trim() || before.displayName
-      let specializationId: string
-
-      if (params.kind === 'company') {
-        const ins = await client.query<{ id: string }>(
-          `INSERT INTO companies (
-             workspace_id, name, domain, tags, external_ref,
-             entity_id, created_by_user_id
-           )
-           VALUES ($1, $2, $3, $4, '{}'::jsonb, $5, $6)
-           RETURNING id`,
-          [
-            before.workspaceId,
-            effectiveName,
-            params.domain ?? null,
-            params.tags ?? [],
-            id,
-            actorUserId,
-          ],
-        )
-        specializationId = ins.rows[0].id
-      } else if (params.kind === 'person') {
-        const ins = await client.query<{ id: string }>(
-          `INSERT INTO contacts (
-             workspace_id, name, email, phone, company_id, tags,
-             external_ref, entity_id, created_by_user_id
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, $8)
-           RETURNING id`,
-          [
-            before.workspaceId,
-            effectiveName,
-            params.email ?? null,
-            params.phone ?? null,
-            params.companyId ?? null,
-            params.tags ?? [],
-            id,
-            actorUserId,
-          ],
-        )
-        specializationId = ins.rows[0].id
-      } else {
-        // deal
-        const ins = await client.query<{ id: string }>(
-          `INSERT INTO deals (
-             workspace_id, contact_id, company_id, stage, amount,
-             close_date, external_ref, entity_id, created_by_user_id
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7, $8)
-           RETURNING id`,
-          [
-            before.workspaceId,
-            params.contactId ?? null,
-            params.companyId ?? null,
-            params.stage,
-            params.amount ?? null,
-            params.closeDate ?? null,
-            id,
-            actorUserId,
-          ],
-        )
-        specializationId = ins.rows[0].id
-      }
 
       const updRes = await client.query<EntityRow>(
         `UPDATE entities
             SET kind = $1,
                 display_name = $2,
+                canonical_id = COALESCE($3, canonical_id),
+                attributes = attributes || $4::jsonb,
                 updated_at = now()
-          WHERE id = $3 AND valid_to IS NULL
+          WHERE id = $5 AND valid_to IS NULL
           RETURNING ${FULL_SELECT}`,
-        [params.kind, effectiveName, id],
+        [params.kind, effectiveName, canonical, JSON.stringify(attrs), id],
       )
       if (updRes.rows.length === 0) {
         // Shouldn't happen given the FOR UPDATE above, but be defensive.
@@ -1693,10 +1618,8 @@ export async function promoteEntityToCrm(
         throw new Error('Entity vanished between lock and update.')
       }
       await client.query('COMMIT')
-      return {
-        entity: toEntity(updRes.rows[0]),
-        specializationId,
-      }
+      const entity = toEntity(updRes.rows[0])
+      return { entity, specializationId: entity.id }
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
       throw err

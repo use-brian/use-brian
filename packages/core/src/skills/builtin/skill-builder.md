@@ -63,6 +63,27 @@ Use the workspace context you were given, in priority order:
   finances, or personal data; `public` only for fully generic procedures;
   otherwise `internal`.
 
+## 3a. When the output is a structured document: emit a blueprint
+
+If the skill's whole point is to produce a **structured artifact** the same way
+every time (a discovery brief, an account one-pager, a weekly report, a shop or
+contact list with fixed sections), do NOT describe that layout in the body. Emit
+an `extraction` block instead:
+
+- **sections**: one per output section, each a `heading`, an `instruction` (what
+  to pull for it and from where), and an `outputType` (`prose` / `list` / `table`).
+- **capture**: which brain entities the run should write as it fills the doc
+  (`company`, `contact`, `deal`, `task`). This is what turns a nicely formatted
+  answer into real, queryable brain rows, not throwaway chat text.
+
+Keep the **body** for the PROCEDURE (how to gather, what to check, judgement
+calls); put the **shape** in `extraction`. Never duplicate the section layout in
+both. A skill with a fixed output document is stronger as body-procedure plus
+extraction-shape than as one long prose template, because the shape becomes a
+reusable blueprint the team can fill from a recording, a research run, or the
+brain itself. A purely procedural skill (a message, a decision, or a brain write
+with no fixed document) omits `extraction`.
+
 ## 4. What never goes in a skill
 
 - Secrets, API keys, or credentials (point to the connector instead).

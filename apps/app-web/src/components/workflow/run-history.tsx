@@ -17,6 +17,7 @@ import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { WorkflowRunSummary } from "@/lib/api/workflow";
+import { elapsedLabel, isTerminalRunStatus } from "@/lib/workflow-live-run";
 import { cn } from "@/lib/utils";
 
 type Props = {
@@ -51,7 +52,10 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
                 <div className="flex-1 min-w-0">
                   <div className="text-xs text-muted-foreground">
                     {formatStarted(r.startedAt)} ·{" "}
-                    {durationLabel(r.startedAt, r.finishedAt)}
+                    {isTerminalRunStatus(r.status)
+                      ? durationLabel(r.startedAt, r.finishedAt)
+                      : // In-flight: elapsed so far, refreshed by the live poll.
+                        elapsedLabel(r.startedAt, new Date())}
                   </div>
                   {r.error && (
                     <div className="text-xs text-red-600 dark:text-red-400 truncate">
@@ -81,20 +85,35 @@ function StatusPill({
   t: Dictionary;
 }) {
   const label = t.workflowPage.builder.runStatus[status];
+  const inFlight = status === "pending" || status === "running";
   return (
     <span
       className={cn(
-        "text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide font-medium",
+        "inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide font-medium",
         status === "completed" &&
           "bg-green-500/10 text-green-700 dark:text-green-400",
         status === "failed" && "bg-red-500/10 text-red-700 dark:text-red-400",
         status === "timeout" && "bg-red-500/10 text-red-700 dark:text-red-400",
         (status === "awaiting_wait" || status === "awaiting_input") &&
           "bg-amber-500/10 text-amber-700 dark:text-amber-400",
-        (status === "pending" || status === "running") &&
-          "bg-muted text-muted-foreground",
+        inFlight && "bg-primary/10 text-primary",
       )}
     >
+      {inFlight && (
+        <svg
+          width="9"
+          height="9"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="3"
+          strokeLinecap="round"
+          className="animate-spin"
+          aria-hidden
+        >
+          <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+        </svg>
+      )}
       {label}
     </span>
   );

@@ -45,6 +45,10 @@ export const EMBEDDED_PRIMITIVES = [
   // PRIMITIVE_CONFIGS entry in embedding-store.ts. See
   // docs/plans/recording-to-brain.md.
   'transcript_segment',
+  // Workspace-file text segments (large-content-artifacts). The chunked body
+  // of a large document/paste — heading-path-prefixed embed text via the
+  // PRIMITIVE_CONFIGS entry. See docs/architecture/brain/file-artifacts.md.
+  'file_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]

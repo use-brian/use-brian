@@ -239,26 +239,21 @@ describe('[COMP:corrections/entity-merge-store] isEntityActive', () => {
 })
 
 describe('[COMP:corrections/entity-merge-store] specialization cascade', () => {
-  it('applyCascade supersedes the merged CRM row for an allowlisted table', async () => {
-    await cascade.applyCascade({
-      sourceKind: 'companies',
-      mergedSourceId: 'co-merged',
-      survivorSourceId: 'co-survivor',
-      now: NOW,
-    })
-    expect(poolQueries[0].text).toContain('UPDATE companies')
-    expect(poolQueries[0].values).toEqual(['co-merged', NOW, 'co-survivor'])
-  })
-
-  it('reverseCascade returns "missing" when no row flipped', async () => {
-    poolRowCount = 0
-    expect(
-      await cascade.reverseCascade({ sourceKind: 'contacts', mergedSourceId: 'c-1' }),
-    ).toBe('missing')
-    poolRowCount = 1
-    expect(
-      await cascade.reverseCascade({ sourceKind: 'contacts', mergedSourceId: 'c-1' }),
-    ).toBe('reversed')
+  it('CRM specialization cascade is a no-op post-unification (empty allowlist)', async () => {
+    // Post CRM→entity unification there are no specialization rows to
+    // cascade to; CASCADE_TABLES is empty, so every CRM sourceKind is
+    // rejected by the same guard as an unknown table.
+    await expect(
+      cascade.applyCascade({
+        sourceKind: 'companies',
+        mergedSourceId: 'co-merged',
+        survivorSourceId: 'co-survivor',
+        now: NOW,
+      }),
+    ).rejects.toThrow(/unsupported sourceKind/)
+    await expect(
+      cascade.reverseCascade({ sourceKind: 'contacts', mergedSourceId: 'c-1' }),
+    ).rejects.toThrow(/unsupported sourceKind/)
   })
 
   it('rejects a sourceKind outside the allowlist (SQL-injection guard)', async () => {

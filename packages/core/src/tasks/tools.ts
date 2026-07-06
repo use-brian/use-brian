@@ -210,6 +210,9 @@ export function createTaskTools(
           ),
           source: opts?.writeSource,
           dependsOn: input.depends_on,
+          // Assistant-mediated write (incl. interactive chat) — the workflow
+          // task-event self-loop guard keys on this (fromBots gate).
+          writtenBy: 'system',
         })
         opts?.onEvent?.({ type: 'task_created', taskId: task.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({
@@ -332,7 +335,9 @@ export function createTaskTools(
 
     let updated: TaskRecord | null
     try {
-      updated = await store.update(context.userId, id, fields)
+      // Assistant-mediated write (incl. interactive chat) — the workflow
+      // task-event self-loop guard keys on this (fromBots gate).
+      updated = await store.update(context.userId, id, fields, { writtenBy: 'system' })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('parent_id must reference a task in the same workspace')) {

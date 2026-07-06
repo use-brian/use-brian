@@ -15,7 +15,7 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type ResolvedNeed = {
-  kind: "brain_review" | "approvals";
+  kind: "brain_review" | "approvals" | "autopilot";
   count: number;
   caption: string | null;
 };
@@ -30,6 +30,17 @@ export type ResolvedDock = {
   comingUp: { id: string; name: string; nextRunAt: string }[];
   brain: { entryCount: number; growth7d: number; hasConnector: boolean };
 };
+
+/**
+ * Total items across the "Needs you" cards — the sidebar badge number
+ * (approvals + brain reviews + autopilot as one inbox-style count). The merge
+ * already drops zero-count cards server-side; the clamp just keeps a buggy
+ * negative signal from eating the others.
+ */
+export function needsYouTotal(dock: ResolvedDock | null): number {
+  if (!dock) return 0;
+  return dock.needsYou.reduce((sum, n) => sum + Math.max(0, n.count), 0);
+}
 
 /** The resolved dock, or null on error (the caller renders a quiet fallback). */
 export async function fetchHomeDock(workspaceId: string): Promise<ResolvedDock | null> {

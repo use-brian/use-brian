@@ -40,7 +40,8 @@
  */
 
 import { use, useCallback, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useRouter, useParams } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useT, useLocale, format } from "@/lib/i18n/client";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -439,6 +440,8 @@ function AboutGroup({
   const locale = useLocale();
   const skillsCopy = t.brainPage.skills;
   const copy = t.brainPage.skillEditor;
+  const params = useParams();
+  const workspaceId = params.workspaceId as string;
 
   const intlLocale = locale === "zh" ? "zh-Hant" : locale;
   const dateFmt = (iso: string) =>
@@ -456,6 +459,18 @@ function AboutGroup({
         </span>
       </div>
       <dl className="divide-y divide-border/40">
+        {/* Structural-synthesis Phase 2: the v2 blueprint this skill fills (if
+            the draft carried a structured output shape). Links to the library. */}
+        {skill.blueprintId && (
+          <PropRow label={copy.blueprintLabel}>
+            <Link
+              href={`/w/${workspaceId}/brain?view=blueprints`}
+              className="underline underline-offset-2 decoration-muted-foreground/40 hover:decoration-foreground"
+            >
+              {copy.blueprintView}
+            </Link>
+          </PropRow>
+        )}
         <PropRow label={skillsCopy.confidenceLabel}>
           <span className="flex w-28 items-center gap-2">
             <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">

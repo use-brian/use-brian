@@ -158,6 +158,11 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     const dir = res.body.directory as Array<Record<string, unknown>>
     expect(dir.find((d) => d.id === 'github')).toMatchObject({ added: true, connected: true })
     expect(dir.find((d) => d.id === 'notion')).toMatchObject({ added: false, connected: false })
+    // Multi-account: every credentialed connector is addable — the Google
+    // family included — EXCEPT single_instance registry entries (gcs binds a
+    // workspace bucket, not an account).
+    expect(dir.find((d) => d.id === 'gmail')).toMatchObject({ addable: true })
+    expect(dir.find((d) => d.id === 'gcs')).toMatchObject({ addable: false })
   })
 
   it('POST /directory/:id/add creates a disconnected instance when none exists', async () => {

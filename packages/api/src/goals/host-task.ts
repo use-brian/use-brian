@@ -28,9 +28,10 @@ export function createTaskHostAdapter(deps: { actorUserId: string }): HostAdapte
   return {
     async setTerminal(host: GoalHostRef, terminal: GoalHostTerminal): Promise<void> {
       // 'done' -> close the task; 'blocked' -> mark it blocked. The blocker
-      // reason lives on the goal (tasks have no reason field).
+      // reason lives on the goal (tasks have no reason field). Automated
+      // write — the task-event self-loop guard keys on writtenBy.
       const status = terminal === 'done' ? 'done' : 'blocked'
-      await updateTask(actorUserId, host.id, { status })
+      await updateTask(actorUserId, host.id, { status }, undefined, { writtenBy: 'system' })
     },
     async recordProgress(): Promise<void> {
       // No-op for tasks in v1 — per-iteration progress is read from

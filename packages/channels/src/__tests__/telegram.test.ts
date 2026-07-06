@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createTelegramAdapter, parseTopicChannelId } from '../telegram/adapter.js'
+import { createTelegramAdapter, parseTopicChannelId, type TelegramAdapterConfig } from '../telegram/adapter.js'
 import { createTelegramApi, isTelegramThreadNotFoundError, TelegramApiError } from '../telegram/api.js'
 import { chunkText } from '../chunking.js'
 import { createDedupBuffer } from '../dedup.js'
@@ -435,6 +435,31 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
     }
   })
 
+  it('resolveFileUrl builds the authenticated file host URL from getFile (no download)', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(url).toContain('/getFile')
+      return {
+        ok: true,
+        json: async () => ({ ok: true, result: { file_path: 'documents/report_7.pdf' } }),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    try {
+      const adapter = createTelegramAdapter({ token: 'test-token' })
+      const url = await adapter.resolveFileUrl('doc_id')
+      expect(url).toBe('https://api.telegram.org/file/bottest-token/documents/report_7.pdf')
+      expect(fetchMock).toHaveBeenCalledOnce()
+      // Missing file_path is a loud error, not a silent empty URL.
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ ok: true, result: {} }),
+      }) as unknown as Response))
+      await expect(adapter.resolveFileUrl('gone')).rejects.toThrow(/no file_path/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('ignores service messages', () => {
     const update = {
       update_id: 5,
@@ -739,6 +764,48 @@ describe('[COMP:channels/telegram] api 429 retry', () => {
       const api = createTelegramApi({ token: 'test-token' })
       await expect(api.sendChatAction('42', 'typing')).rejects.toThrow(/Too Many Requests/)
       expect(calls).toBe(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+// ── getChat metadata lookup ───────────────────────────────────
+
+describe('[COMP:channels/telegram] api getChat', () => {
+  it('posts chat_id and returns the chat metadata result', async () => {
+    let captured: Record<string, unknown> = {}
+    const mock = vi.fn(async (url: string, init?: { body?: string }) => {
+      expect(url.endsWith('/getChat')).toBe(true)
+      captured = init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {}
+      return {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          result: { id: -100123, type: 'supergroup', title: 'Dev Work' },
+        }),
+      } as unknown as Response
+    })
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      const chat = await api.getChat('-100123')
+      expect(captured).toEqual({ chat_id: '-100123' })
+      expect(chat).toEqual({ id: -100123, type: 'supergroup', title: 'Dev Work' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('throws TelegramApiError when the bot cannot see the chat', async () => {
+    const mock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ok: false, error_code: 400, description: 'Bad Request: chat not found' }),
+    }) as unknown as Response)
+    vi.stubGlobal('fetch', mock)
+    try {
+      const api = createTelegramApi({ token: 'test-token' })
+      await expect(api.getChat('880211324')).rejects.toThrow(/chat not found/)
     } finally {
       vi.unstubAllGlobals()
     }
@@ -1232,6 +1299,73 @@ describe('[COMP:channels/telegram] requireMention overrides', () => {
       buildGroupMessage({ chatId: -100, isForum: false, text: 'hi' }),
     )
     expect(seen.map((s) => s.channelId)).toEqual(['-200'])
+  })
+})
+
+describe('[COMP:channels/telegram] replies are not an addressing trigger', () => {
+  // The Claw Center rotating-replies incident: six BYO bots (one per forum
+  // topic) all receive every group message; reply-based triggering let every
+  // bot answer a reply to any bot's message. Replying is now NEVER a trigger —
+  // only the requireMention rule (mention, or a per-topic override) decides.
+  const BOT_ID = 7654321
+
+  function buildReplyMessage(params: {
+    repliedFrom: { id: number; is_bot?: boolean }
+    mention?: boolean
+  }): Record<string, unknown> {
+    const text = params.mention ? '@testbot follow-up question' : 'follow-up question'
+    return {
+      update_id: 1,
+      message: {
+        message_id: 20,
+        from: { id: 42, first_name: 'U' },
+        chat: { id: -100, type: 'supergroup', title: 'Team Chat', is_forum: true },
+        date: Math.floor(Date.now() / 1000),
+        text,
+        ...(params.mention
+          ? { entities: [{ type: 'mention', offset: 0, length: 8 }] }
+          : {}),
+        message_thread_id: 2,
+        reply_to_message: { message_id: 19, from: params.repliedFrom },
+      },
+    }
+  }
+
+  function collect(config: TelegramAdapterConfig): { seen: string[]; adapter: ReturnType<typeof createTelegramAdapter> } {
+    const seen: string[] = []
+    const adapter = createTelegramAdapter({
+      token: `${BOT_ID}:secret`,
+      botUsername: 'testbot',
+      config,
+      onMessage: (m) => { seen.push(m.text ?? '') },
+    })
+    return { seen, adapter }
+  }
+
+  it('drops a reply to the bot\'s OWN message under requireMention=true (replying never triggers)', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: BOT_ID, is_bot: true } }))
+    expect(seen).toEqual([])
+  })
+
+  it('drops a reply to ANOTHER bot\'s message under requireMention=true', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: 999999, is_bot: true } }))
+    expect(seen).toEqual([])
+  })
+
+  it('delivers a reply when the bot is @mentioned in it', () => {
+    const { seen, adapter } = collect({ requireMention: true })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: 999999, is_bot: true }, mention: true }))
+    expect(seen).toEqual(['follow-up question'])
+  })
+
+  it('delivers a reply in a topic where an override flips requireMention off', () => {
+    const { seen, adapter } = collect({
+      requireMention: { default: true, overrides: [{ chatId: '-100', topicId: 2 }] },
+    })
+    adapter.handleWebhook(buildReplyMessage({ repliedFrom: { id: BOT_ID, is_bot: true } }))
+    expect(seen).toEqual(['follow-up question'])
   })
 })
 

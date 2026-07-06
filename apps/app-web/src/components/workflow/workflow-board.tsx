@@ -27,6 +27,11 @@ import type {
   WorkflowStep,
   WorkflowTrigger,
 } from "@/lib/api/workflow";
+import {
+  isActivelyExecuting,
+  type LiveRunView,
+  type StepLiveState,
+} from "@/lib/workflow-live-run";
 import { cn } from "@/lib/utils";
 
 // ── Doc geometry ──────────────────────────────────────────────────────
@@ -74,6 +79,13 @@ type Props = {
   /** Workspace page roster — resolves page-anchor chips to page titles. */
   pages?: ViewListRow[];
   selectedKey?: string | null;
+  /**
+   * Live overlay for an in-flight run (`useWorkflowLiveRun`). When set, step
+   * nodes badge their live state (spinner / check / cross / pause), the edge
+   * feeding the running step animates, and the trigger node pulses. Null
+   * renders the neutral board.
+   */
+  live?: LiveRunView | null;
   onSelectStep?: (stepId: string) => void;
   onSelectTrigger?: () => void;
 };
@@ -336,6 +348,80 @@ function NodeIcon({ kind }: { kind: NodeKind }) {
   }
 }
 
+// ── Live-run overlay ─────────────────────────────────────────────────────
+
+/** Node border/ring per live step state (selected still wins). */
+const LIVE_NODE_RING: Record<StepLiveState, string> = {
+  running: "border-primary/70 ring-2 ring-primary/25 shadow-md",
+  waiting: "border-amber-500/60 ring-2 ring-amber-500/20",
+  completed: "border-emerald-500/50",
+  failed: "border-red-500/60",
+  skipped: "border-border opacity-70",
+};
+
+/**
+ * Corner badge showing what the live run is doing with this step: a spinner
+ * while the assistant works it, a pause glyph on a wait/approval, check /
+ * cross / dash once resolved. Icon-only (nodes are 210px wide) — the state
+ * name rides the title/aria-label.
+ */
+function LiveStateBadge({
+  state,
+  t,
+}: {
+  state: StepLiveState;
+  t: Dictionary;
+}) {
+  const label = t.workflowPage.board.stepState[state];
+  const common = {
+    width: 11,
+    height: 11,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 3,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+  return (
+    <span
+      title={label}
+      aria-label={label}
+      className={cn(
+        "absolute -top-2 -right-2 flex h-5 w-5 items-center justify-center rounded-full border border-background shadow-sm",
+        state === "running" && "bg-primary text-primary-foreground",
+        state === "waiting" && "bg-amber-500 text-white",
+        state === "completed" && "bg-emerald-500 text-white",
+        state === "failed" && "bg-red-500 text-white",
+        state === "skipped" && "bg-muted text-muted-foreground",
+      )}
+    >
+      {state === "running" ? (
+        <svg {...common} className="animate-spin">
+          <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+        </svg>
+      ) : state === "waiting" ? (
+        <svg {...common}>
+          <path d="M9 5v14M15 5v14" />
+        </svg>
+      ) : state === "completed" ? (
+        <svg {...common}>
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      ) : state === "failed" ? (
+        <svg {...common}>
+          <path d="M6 6l12 12M18 6L6 18" />
+        </svg>
+      ) : (
+        <svg {...common}>
+          <path d="M5 12h14" />
+        </svg>
+      )}
+    </span>
+  );
+}
+
 // ── Edge geometry ────────────────────────────────────────────────────────
 
 const EDGE_STROKE: Record<EdgeTone, string> = {
@@ -361,6 +447,7 @@ export function WorkflowBoard({
   assistants,
   pages = [],
   selectedKey,
+  live,
   onSelectStep,
   onSelectTrigger,
 }: Props) {
@@ -373,6 +460,8 @@ export function WorkflowBoard({
 
   const triggerKind = trigger.kind;
   const triggerPrimary = t.workflowPage.triggerShort[triggerKind];
+  const liveStates = live?.stepStates;
+  const runActive = live ? isActivelyExecuting(live.status) : false;
 
   return (
     <div
@@ -402,7 +491,17 @@ export function WorkflowBoard({
             const src = nodeByKey.get(edge.from);
             const tgt = nodeByKey.get(edge.to);
             if (!src || !tgt) return null;
-            const stroke = EDGE_STROKE[edge.tone];
+            // An edge feeding the live run's active step flows (dash march);
+            // one feeding an already-completed step reads as traversed.
+            const targetState = liveStates?.[edge.to];
+            const activeEdge = targetState === "running";
+            const doneEdge =
+              targetState === "completed" || targetState === "waiting";
+            const stroke = activeEdge
+              ? "var(--primary)"
+              : doneEdge && edge.tone === "default"
+                ? "#10b981"
+                : EDGE_STROKE[edge.tone];
             const tx = tgt.x;
             const ty = tgt.y + NODE_H / 2;
             return (
@@ -411,9 +510,26 @@ export function WorkflowBoard({
                   d={edgePath(src, tgt)}
                   fill="none"
                   stroke={stroke}
-                  strokeWidth={2}
-                  strokeOpacity={edge.tone === "default" ? 0.5 : 0.8}
-                />
+                  strokeWidth={activeEdge ? 2.5 : 2}
+                  strokeOpacity={
+                    activeEdge || doneEdge
+                      ? 0.9
+                      : edge.tone === "default"
+                        ? 0.5
+                        : 0.8
+                  }
+                  strokeDasharray={activeEdge ? "7 7" : undefined}
+                >
+                  {activeEdge && (
+                    <animate
+                      attributeName="stroke-dashoffset"
+                      from="28"
+                      to="0"
+                      dur="0.9s"
+                      repeatCount="indefinite"
+                    />
+                  )}
+                </path>
                 <circle cx={tx} cy={ty} r={3.5} fill={stroke} />
               </g>
             );
@@ -451,6 +567,8 @@ export function WorkflowBoard({
         {/* Node layer */}
         {layout.nodes.map((node) => {
           const selected = selectedKey === node.key;
+          const liveState =
+            node.kind === "trigger" ? undefined : liveStates?.[node.key];
           const content =
             node.kind === "trigger"
               ? {
@@ -473,7 +591,9 @@ export function WorkflowBoard({
                 "hover:shadow-md hover:border-primary/50",
                 selected
                   ? "border-primary ring-2 ring-primary/30"
-                  : "border-border",
+                  : liveState
+                    ? LIVE_NODE_RING[liveState]
+                    : "border-border",
               )}
               style={{
                 left: node.x,
@@ -503,6 +623,17 @@ export function WorkflowBoard({
                   </span>
                 )}
               </span>
+              {liveState && <LiveStateBadge state={liveState} t={t} />}
+              {node.kind === "trigger" && runActive && (
+                <span
+                  className="absolute -top-1 -right-1 flex h-3 w-3"
+                  title={t.workflowPage.board.runActive}
+                  aria-label={t.workflowPage.board.runActive}
+                >
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+                  <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+                </span>
+              )}
             </button>
           );
         })}

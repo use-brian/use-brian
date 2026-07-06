@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useRef,
   type ChangeEvent,
+  type ClipboardEvent,
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
@@ -61,6 +62,13 @@ export type ChatComposerProps = {
    * for there actually being content to send.
    */
   allowEmptySend?: boolean
+  /**
+   * Clipboard paste on the textarea. Hosts wire this to intercept pasted image
+   * files (a screenshot / copied image → attach) before they land in the text
+   * field: the raw event is forwarded so the host can `preventDefault()` on an
+   * image paste and let a plain text paste fall through untouched.
+   */
+  onPaste?: (event: ClipboardEvent<HTMLTextAreaElement>) => void
 }
 
 /**
@@ -153,6 +161,7 @@ export function ChatComposer(props: ChatComposerProps) {
           value={props.value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={props.onPaste}
           placeholder={props.placeholder ?? 'Send a message…'}
           disabled={props.disabled}
           className={props.textareaClassName}

@@ -8,9 +8,16 @@
  * See docs/architecture/integrations/mcp.md → "Built-in connectors".
  */
 
+import { randomUUID } from 'node:crypto'
+import type { GmailOutgoingAttachment } from '@sidanclaw/core'
+
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
 const GMAIL_API = 'https://www.googleapis.com/gmail/v1'
+// Media upload base — messages with attachments go through the upload
+// endpoint (`uploadType=media`, raw RFC 822 body, 35 MB transport cap)
+// instead of base64url-in-JSON, which is sized for text-only messages.
+const GMAIL_UPLOAD_API = 'https://www.googleapis.com/upload/gmail/v1'
 const TASKS_API = 'https://www.googleapis.com/tasks/v1'
 const DRIVE_API = 'https://www.googleapis.com/drive/v3'
 const DOCS_API = 'https://docs.googleapis.com/v1'
@@ -412,18 +419,116 @@ export async function getGmailMessage(
   }
 }
 
+/**
+ * Strip CR/LF from a header value before it is interpolated into a raw
+ * message — otherwise a value containing embedded newlines could inject
+ * extra headers (e.g. a spoofed `Bcc:`) into the outgoing message.
+ */
+function sanitizeHeaderValue(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ')
+}
+
+/** RFC 2047: encode a header value as Base64 UTF-8 when it contains non-ASCII chars. */
+function encodeHeaderWord(value: string): string {
+  const sanitized = sanitizeHeaderValue(value)
+  return /[^\x00-\x7F]/.test(sanitized)
+    ? `=?UTF-8?B?${Buffer.from(sanitized, 'utf-8').toString('base64')}?=`
+    : sanitized
+}
+
+/** Fold base64 into 76-char lines per RFC 2045. */
+function foldBase64(b64: string): string {
+  return b64.replace(/(.{76})/g, '$1\r\n')
+}
+
+/**
+ * Content-Disposition filename params: a plain ASCII fallback plus an
+ * RFC 2231 `filename*` when the name carries non-ASCII characters.
+ */
+function filenameParams(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'")
+  if (ascii === filename) return `filename="${ascii}"`
+  return `filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+}
+
+/**
+ * Assemble a multipart/mixed RFC 822 message: base64 text part + base64
+ * attachment parts. Returned as a Buffer — the upload endpoint takes the
+ * raw bytes, not base64url-in-JSON.
+ */
+function buildMultipartMessage(params: {
+  to: string
+  from?: string
+  subject: string
+  body: string
+  attachments: GmailOutgoingAttachment[]
+}): Buffer {
+  const boundary = `=_sidanclaw_${randomUUID()}`
+  const lines: string[] = [
+    ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
+    `To: ${sanitizeHeaderValue(params.to)}`,
+    `Subject: ${encodeHeaderWord(params.subject)}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    foldBase64(Buffer.from(params.body, 'utf-8').toString('base64')),
+  ]
+  for (const att of params.attachments) {
+    const mime = att.mime || 'application/octet-stream'
+    lines.push(
+      `--${boundary}`,
+      `Content-Type: ${mime}; name="${att.filename.replace(/[^\x20-\x7E]/g, '_').replace(/"/g, "'")}"`,
+      `Content-Disposition: attachment; ${filenameParams(att.filename)}`,
+      'Content-Transfer-Encoding: base64',
+      '',
+      foldBase64(Buffer.from(att.data).toString('base64')),
+    )
+  }
+  lines.push(`--${boundary}--`, '')
+  return Buffer.from(lines.join('\r\n'), 'utf-8')
+}
+
 export async function sendGmailMessage(
   accessToken: string,
-  params: { to: string; subject: string; body: string },
+  params: { to: string; from?: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] },
 ): Promise<{ id: string; threadId: string }> {
-  // RFC 2047: encode subject as Base64 UTF-8 if it contains non-ASCII chars
-  const encodedSubject = /[^\x00-\x7F]/.test(params.subject)
-    ? `=?UTF-8?B?${Buffer.from(params.subject, 'utf-8').toString('base64')}?=`
-    : params.subject
+  // With attachments: multipart/mixed through the media-upload endpoint.
+  if (params.attachments && params.attachments.length > 0) {
+    const raw = buildMultipartMessage({
+      to: params.to,
+      from: params.from,
+      subject: params.subject,
+      body: params.body,
+      attachments: params.attachments,
+    })
+    const res = await fetch(`${GMAIL_UPLOAD_API}/users/me/messages/send?uploadType=media`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'message/rfc822',
+      },
+      body: raw,
+    })
+
+    if (!res.ok) {
+      const err = await res.text()
+      throw new Error(`Gmail API error (${res.status}): ${err}`)
+    }
+
+    return await res.json() as { id: string; threadId: string }
+  }
+
+  // Text-only: legacy base64url-in-JSON path, byte-identical to before.
+  const encodedSubject = encodeHeaderWord(params.subject)
 
   // Build RFC 2822 message
   const rawMessage = [
-    `To: ${params.to}`,
+    ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
+    `To: ${sanitizeHeaderValue(params.to)}`,
     `Subject: ${encodedSubject}`,
     'Content-Type: text/plain; charset=utf-8',
     '',

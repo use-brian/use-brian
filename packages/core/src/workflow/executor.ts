@@ -195,6 +195,22 @@ export type WorkflowAuditEvent =
     }
   | {
       /**
+       * Emitted by the event-dispatch storm guard when a workflow's event
+       * trigger started more runs inside the window than the threshold
+       * allows. The workflow was paused (`enabled = false` +
+       * `paused_reason`) INSTEAD of enqueueing this run — the spend
+       * circuit-breaker. See workflow.md → "Event run queue".
+       */
+      type: 'workflow.storm_paused'
+      workspaceId: string
+      actorUserId: null
+      workflowId: string
+      /** Runs the workflow started inside the storm window. */
+      recentRuns: number
+      windowSeconds: number
+    }
+  | {
+      /**
        * Emitted after an `assistant_call` step with a `deliver` target
        * attempts channel delivery. Makes a no-op / failed push observable
        * instead of swallowing it: `delivery.status` is `delivered` | `skipped`
@@ -808,6 +824,16 @@ async function dispatchAssistantCall(
     // callee executor, which filters the callee's tool surface to exactly
     // this set. Undefined = the callee's normal tool surface.
     allowedTools: step.tools,
+    // Per-step skill allow-list: a `skills` list rides through to the callee
+    // executor, which offers `useSkill` over exactly these brain skills (each
+    // still gated by the callee's enablement + clearance). Injected after the
+    // tool allow-list, so `tools` never strips `useSkill`. Undefined/empty =
+    // no skill surface.
+    skills: step.skills,
+    // Per-step ENFORCED skills: injected into the callee prompt as mandatory
+    // instructions (not offered via `useSkill`). Same governance as `skills`.
+    // Undefined/empty = no enforced skills.
+    enforcedSkills: step.enforcedSkills,
     // Research depth: step-level `depth` always wins; otherwise derive from
     // the step-level `researchMode` + `maxTurns` knobs (step-level evolution
     // of mig 196). Legacy workflow-row columns are backfilled onto each

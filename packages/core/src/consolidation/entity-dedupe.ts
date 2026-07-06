@@ -50,10 +50,11 @@ import type { LLMProvider } from '../providers/types.js'
 
 /**
  * Priority order for cross-kind survivor selection. Higher index = lower
- * priority. CRM kinds win because they own a downstream specialization
- * row (contacts / companies / deals) — picking a non-CRM survivor would
- * orphan that row. Within the non-CRM tier, `repository` beats
- * `project` (more specific), `project` beats `product` (looser).
+ * priority. The CRM kinds (person / company / deal) win because they are
+ * the user-curated, structured kinds — when a name collides across kinds,
+ * the CRM record is the one the user actively manages, so it should be
+ * the survivor. Within the non-CRM tier, `repository` beats `project`
+ * (more specific), `project` beats `product` (looser).
  *
  * Two entities of the same priority kind cannot exist in a cross-kind
  * cluster by construction (`COUNT(DISTINCT kind) > 1`), so ties are
@@ -387,11 +388,12 @@ async function runCrossKindCluster(
   if (cluster.entityIds.length < 2) return
 
   // Safety: skip clusters with >1 CRM kind. Merging across CRM kinds
-  // (e.g. company + deal) would close one CRM entity while its
-  // specialization row (`deals.entity_id`) still pointed at it,
-  // orphaning the row. The user can promote/demote via the brain UI
-  // when this case arises — typically rare because the CRM kinds have
-  // stronger schema discipline than project/product/repository.
+  // (e.g. company + deal) would conflate two distinct user-curated
+  // records whose typed `attributes` differ by kind (a company's domain
+  // vs a deal's stage/amount), so we never auto-merge them. The user can
+  // promote/demote via the brain UI when this case arises — typically
+  // rare because the CRM kinds have stronger curation discipline than
+  // project/product/repository.
   const crmCount = cluster.kinds.filter((k) => CRM_KINDS.has(k)).length
   if (crmCount > 1) {
     result.crossKind.details.push({

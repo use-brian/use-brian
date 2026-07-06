@@ -49,7 +49,6 @@ import {
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
 import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@sidanclaw/core'
-import { updateCompany, updateContact } from '../db/crm.js'
 import { updateWorkspaceFileMeta } from '../db/workspace-files.js'
 import { updateTask } from '../db/tasks.js'
 import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
@@ -709,22 +708,17 @@ export function brainInboxRoutes({
       }
 
       try {
-        // Resolve the CRM row's current state + entity_id.
-        const table =
-          primitiveParam === 'company'
-            ? 'companies'
-            : primitiveParam === 'contact'
-              ? 'contacts'
-              : 'deals'
+        // Post CRM→entity unification the CRM row IS the entity — read it
+        // directly; the record id is the entity id (entityId == rowId).
         const before = await query<{
           workspaceId: string
           name: string | null
           sensitivity: 'public' | 'internal' | 'confidential'
           entityId: string | null
         }>(
-          `SELECT workspace_id AS "workspaceId", name, sensitivity,
-                  entity_id AS "entityId"
-             FROM ${table}
+          `SELECT workspace_id AS "workspaceId", display_name AS name, sensitivity,
+                  id AS "entityId"
+             FROM entities
             WHERE id = $1 AND valid_to IS NULL`,
           [rowId],
         )
@@ -738,20 +732,8 @@ export function brainInboxRoutes({
         }
         const prev = before.rows[0]
 
-        // Update the CRM row's `name` (companies + contacts; deals has
-        // no `name` column — its label comes from the linked entity).
-        if (nextName !== undefined && primitiveParam !== 'deal') {
-          if (primitiveParam === 'company') {
-            await updateCompany(userId, rowId, { name: nextName })
-          } else {
-            await updateContact(userId, rowId, { name: nextName })
-          }
-        }
-
-        // Mirror name + sensitivity onto the linked entity so the
-        // graph view + brain-search stay in sync. Sensitivity has no
-        // CRM-row update path; the entity column is the canonical
-        // source per the data model.
+        // The CRM row IS the entity now — a single updateEntity write
+        // covers display_name + sensitivity.
         if (prev.entityId && (nextName !== undefined || nextSensitivity !== undefined)) {
           await updateEntity(userId, prev.entityId, {
             ...(nextName !== undefined ? { displayName: nextName } : {}),
@@ -1029,75 +1011,10 @@ export function brainInboxRoutes({
     })
   })
 
-  // ── GET /:workspaceId/entity/:entityId/crm-companion ───────────
-  //
-  // Lookup helper for the brain detail drawer (apps/web). When the
-  // user clicks a graph node with a CRM-specialized kind
-  // (person / company / deal), the node carries the entities.id —
-  // but the rich detail surface (with tags / domain / stage) lives
-  // in the CRM specialization table keyed on its own id with a
-  // `entity_id` FK back to entities. This endpoint resolves
-  // entities.id → { primitive, id } so the drawer can re-fetch
-  // through the existing CRM brain-inbox row path and get the same
-  // rich payload the list view shows. Returns `null` when the
-  // entity has no CRM specialization (non-CRM kinds, or a CRM-kind
-  // entity that's missing its companion row — a data-integrity
-  // surprise the UI silently falls back to the lean entity view).
-  router.get('/:workspaceId/entity/:entityId/crm-companion', async (req, res) => {
-    const role = await requireWorkspaceMember(req as any, res)
-    if (!role) return
-
-    const { workspaceId, entityId } = req.params as {
-      workspaceId: string
-      entityId: string
-    }
-    try {
-      const entityRes = await query<{ kind: string; workspaceId: string }>(
-        `SELECT kind, workspace_id AS "workspaceId"
-           FROM entities
-          WHERE id = $1 AND valid_to IS NULL`,
-        [entityId],
-      )
-      if (entityRes.rows.length === 0) {
-        res.status(404).json({ error: 'Entity not found' })
-        return
-      }
-      if (entityRes.rows[0].workspaceId !== workspaceId) {
-        res.status(403).json({ error: 'Entity belongs to a different workspace' })
-        return
-      }
-      const kind = entityRes.rows[0].kind
-      let table: 'companies' | 'contacts' | 'deals' | null = null
-      let primitive: 'company' | 'contact' | 'deal' | null = null
-      if (kind === 'company') { table = 'companies'; primitive = 'company' }
-      else if (kind === 'person') { table = 'contacts'; primitive = 'contact' }
-      else if (kind === 'deal') { table = 'deals'; primitive = 'deal' }
-
-      if (!table || !primitive) {
-        res.json({ companion: null })
-        return
-      }
-      // `valid_to IS NULL` filters out superseded rows so the drawer
-      // always lands on the current version of the CRM row.
-      const compRes = await query<{ id: string }>(
-        `SELECT id FROM ${table} WHERE entity_id = $1 AND valid_to IS NULL LIMIT 1`,
-        [entityId],
-      )
-      if (compRes.rows.length === 0) {
-        // CRM-kind entity with no companion row — possible after a
-        // soft-delete of the CRM row or a Q24-guard bypass. Surface
-        // null so the UI degrades to the lean entity view.
-        res.json({ companion: null })
-        return
-      }
-      res.json({
-        companion: { primitive, id: compRes.rows[0].id },
-      })
-    } catch (err) {
-      console.error('[brain-inbox] crm-companion lookup failed:', err)
-      res.status(500).json({ error: 'Failed to resolve CRM companion' })
-    }
-  })
+  // (Removed) GET /:workspaceId/entity/:entityId/crm-companion.
+  // Post CRM→entity unification a person/company/deal IS the entity —
+  // the detail drawer fetches it directly, with no separate specialization
+  // row to resolve. The route and its `fetchCrmCompanion` client are gone.
 
   // ── POST /:workspaceId/entity/:entityId/reclassify ─────────────
   //

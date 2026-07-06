@@ -125,6 +125,7 @@ const SAMPLE_WORKFLOW: WorkflowRecord = {
     steps: [{ id: 'a', type: 'tool_call', toolName: 'noop', arguments: {} }],
   },
   enabled: true,
+  pausedReason: null,
   trigger: { kind: 'manual' },
   webhookSlug: null,
   webhookSecret: null,

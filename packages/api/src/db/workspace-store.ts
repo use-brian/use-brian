@@ -53,11 +53,14 @@ export type Workspace = {
    */
   isPersonal: boolean
   /**
-   * Live count of `workspace_members` rows. Computed by `list()` / `get()`;
-   * the frontend reads it to decide solo-vs-shared behavior (e.g. whether to
-   * auto-expose a connector and whether to show the "Share with this workspace"
-   * control). Undefined on the create/update/system return paths that don't
-   * compute it — treat absent as 1 (solo).
+   * Live count of `workspace_members` rows. Computed by `list()` / `get()` via
+   * `memberCountsSystem` (the OWNER pool) — NOT as a subquery inside the
+   * RLS-enforced read, where the `wm_own_workspace` policy would confine the
+   * count to the caller's own row and always yield 1. The frontend reads it to
+   * decide solo-vs-shared behavior (e.g. whether to auto-expose a connector and
+   * whether to show the "Share with this workspace" control). Undefined on the
+   * create/update/system return paths that don't compute it — treat absent as 1
+   * (solo).
    */
   memberCount?: number
   /**
@@ -154,14 +157,32 @@ const MEMBER_COLUMNS = `
   u.email, u.name AS "userName", u.avatar_url AS "avatarUrl"
 ` as const
 
-// Correlated subquery yielding the live `workspace_members` count for the
-// `workspaces` row in scope. Appended to `list()` / `get()` so the frontend can
-// decide solo-vs-shared behavior (connector auto-expose, the "Share with this
-// workspace" control) without a second round-trip. Keyed to the bare table
-// name `workspaces`, so it only attaches to SELECTs over the un-aliased table.
-const MEMBER_COUNT_COLUMN = `
-  (SELECT count(*)::int FROM workspace_members wm WHERE wm.workspace_id = workspaces.id) AS "memberCount"
-` as const
+// Live `workspace_members` counts for a set of workspace ids, computed on the
+// SYSTEM (owner) pool so the count sees EVERY member row — not just the caller's
+// own. This CANNOT be a correlated subquery inside `list()` / `get()`: those run
+// under `queryWithRLS`, and the sole policy on `workspace_members`
+// (`wm_own_workspace`: `user_id = current_user_id`) confines any read of that
+// table to the caller's single membership row. A count taken under RLS is
+// therefore ALWAYS 1, which made every multi-member workspace mis-render as
+// "solo" in the connector-sharing UI — `isSharedWorkspace(memberCount)` keys on
+// `memberCount > 1` (incident 2026-07-01). We mirror `isSoloWorkspaceSystem` /
+// `listMembers`, which use the owner pool for exactly this reason. Membership
+// size is not sensitive to a member (they can already call `listMembers`), so
+// lifting only the count onto the owner pool exposes nothing new; the workspace
+// rows themselves stay RLS-gated.
+async function memberCountsSystem(
+  workspaceIds: string[],
+): Promise<Map<string, number>> {
+  if (workspaceIds.length === 0) return new Map()
+  const result = await query<{ workspaceId: string; count: number }>(
+    `SELECT workspace_id AS "workspaceId", count(*)::int AS count
+       FROM workspace_members
+      WHERE workspace_id = ANY($1)
+      GROUP BY workspace_id`,
+    [workspaceIds],
+  )
+  return new Map(result.rows.map((r) => [r.workspaceId, r.count]))
+}
 
 // ── Store ──────────────────────────────────────────────────────
 
@@ -985,21 +1006,28 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
     async list(userId) {
       const result = await queryWithRLS<Workspace>(
         userId,
-        `SELECT ${WORKSPACE_COLUMNS}, ${MEMBER_COUNT_COLUMN} FROM workspaces
+        `SELECT ${WORKSPACE_COLUMNS} FROM workspaces
          WHERE id IN (SELECT workspace_id FROM workspace_members WHERE user_id = $1)
          ORDER BY is_personal DESC, created_at DESC`,
         [userId],
       )
-      return result.rows
+      // memberCount is filled from the owner pool: under RLS the count would
+      // always be 1 (see memberCountsSystem). Default to 1 only if a row is
+      // absent from the count map (a workspace with zero members is impossible).
+      const counts = await memberCountsSystem(result.rows.map((w) => w.id))
+      return result.rows.map((w) => ({ ...w, memberCount: counts.get(w.id) ?? 1 }))
     },
 
     async get(userId, workspaceId) {
       const result = await queryWithRLS<Workspace>(
         userId,
-        `SELECT ${WORKSPACE_COLUMNS}, ${MEMBER_COUNT_COLUMN} FROM workspaces WHERE id = $1`,
+        `SELECT ${WORKSPACE_COLUMNS} FROM workspaces WHERE id = $1`,
         [workspaceId],
       )
-      return result.rows[0] ?? null
+      const row = result.rows[0]
+      if (!row) return null
+      const counts = await memberCountsSystem([row.id])
+      return { ...row, memberCount: counts.get(row.id) ?? 1 }
     },
 
     async update(userId, workspaceId, updates) {

@@ -18,6 +18,18 @@ export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done', 'archive
 export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
 
 /**
+ * Who authored a task write — the task analog of the page source's
+ * `PageWriteActor`, and the input to the workflow task-event self-loop guard
+ * (`system` → `DispatchEvent.isBot`, gated by `EventMatch.fromBots`).
+ * `system` = any automated / assistant path: the task chat tools (including
+ * from interactive chat), synthesis extraction, the goals host-adapter, a
+ * workflow step. `user` = a human edit through the Brain inbox REST route.
+ * Not persisted — the frozen-v1 `tasks` schema is untouched; the marker only
+ * rides the write into the lifecycle emit.
+ */
+export type TaskWriteActor = 'user' | 'system'
+
+/**
  * External-system reference for synced tasks. Free-form for v1; the intended
  * shape is `{provider, id, url}` but it is not validated at this layer. Open
  * item #5 (sync engine architecture) will firm up the schema later.
@@ -112,6 +124,12 @@ export type TaskStore = {
      * `depends_on` edge (graph layer; fire-and-forget). v1 append-only.
      */
     dependsOn?: readonly string[]
+    /**
+     * Write-actor marker for the workflow task-event self-loop guard.
+     * Default `'user'`; every automated path (chat tools, synthesis, goals)
+     * passes `'system'`. Not persisted.
+     */
+    writtenBy?: TaskWriteActor
   }): Promise<TaskRecord>
 
   /**
@@ -128,6 +146,15 @@ export type TaskStore = {
    * an absent key leaves the field unchanged. Returns null if no row was
    * affected (RLS-hidden or non-existent id). Write paths keep the
    * pre-WU-4.2b `userId` actor arg — authorship + RLS lives there.
+   * `opts.writtenBy` is the write-actor marker for the workflow task-event
+   * self-loop guard (default `'user'`; automated paths pass `'system'`) —
+   * an opts arg, NOT a `fields` key, so it can never trip the empty-patch
+   * no-op check or leak into the supersession write.
    */
-  update(userId: string, id: string, fields: TaskUpdateFields): Promise<TaskRecord | null>
+  update(
+    userId: string,
+    id: string,
+    fields: TaskUpdateFields,
+    opts?: { writtenBy?: TaskWriteActor },
+  ): Promise<TaskRecord | null>
 }

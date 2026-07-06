@@ -39,9 +39,10 @@ describe('[COMP:brain/inbox-store] BrainInboxPrimitive shape', () => {
     expect(primitiveToTable('entity')).toBe('entities')
     expect(primitiveToTable('entity_link')).toBe('entity_links')
     expect(primitiveToTable('task')).toBe('tasks')
-    expect(primitiveToTable('contact')).toBe('contacts')
-    expect(primitiveToTable('company')).toBe('companies')
-    expect(primitiveToTable('deal')).toBe('deals')
+    // Post CRM→entity unification the CRM primitives resolve to `entities`.
+    expect(primitiveToTable('contact')).toBe('entities')
+    expect(primitiveToTable('company')).toBe('entities')
+    expect(primitiveToTable('deal')).toBe('entities')
     expect(primitiveToTable('workspace_file')).toBe('workspace_files')
   })
 })

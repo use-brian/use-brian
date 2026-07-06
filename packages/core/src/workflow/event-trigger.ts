@@ -56,12 +56,27 @@ export type DispatchEvent = {
   actorId: string | null
   /**
    * Sub-channel within the source (Slack channel, GitHub repo) — matched by
-   * `EventMatch.inChannels`. For a `page` source this carries the lifecycle
-   * action (`created` | `updated` | `moved`).
+   * `EventMatch.inChannels`. For a `page` / `task` source this carries the
+   * primary lifecycle action (`created` | `updated` | …).
    */
   channelId: string | null
+  /**
+   * Every lifecycle facet of the write, when one write carries several (a
+   * task update can be `completed` AND `tagged`). `EventMatch.inChannels`
+   * matches this **set** when present — intersection ≠ ∅ passes — falling
+   * back to `[channelId]` when absent, so single-action producers
+   * (connector / channel / page) are unaffected. `channelId` stays the
+   * display-precedence primary.
+   */
+  actions?: string[]
   /** Entities the event mentions — matched by `EventMatch.mentions`. */
   mentions: string[]
+  /**
+   * Event tags — matched by `EventMatch.tags` (overlap). Only `task` events
+   * carry these: the full tag set on `created`, the ADDED set on updates
+   * (appearance semantics — see workflow.md → "Task event source").
+   */
+  tags?: string[]
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
   isBot: boolean
   /** Raw normalized payload, written verbatim to `workflow_runs.input.event`. */
@@ -228,6 +243,11 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
   if (event.type === 'page' && ref.type === 'page') {
     return event.pageId === ref.pageId
   }
+  if (event.type === 'task' && ref.type === 'task') {
+    // Id-less source: every task event in the (already workspace-scoped)
+    // dispatch matches; `match` carries all the selectivity.
+    return true
+  }
   return false
 }
 
@@ -260,13 +280,26 @@ export function matchesEvent(
     }
   }
   if (m.inChannels && m.inChannels.length > 0) {
-    if (event.channelId === null || !m.inChannels.includes(event.channelId)) {
-      return false
-    }
+    // Match the action SET when the producer emits one (a task write can be
+    // `completed` AND `tagged` in one event); single-action producers fall
+    // back to the singleton [channelId].
+    const eventChannels =
+      event.actions && event.actions.length > 0
+        ? event.actions
+        : event.channelId !== null
+          ? [event.channelId]
+          : []
+    const want = m.inChannels
+    if (!eventChannels.some((c) => want.includes(c))) return false
   }
   if (m.mentions && m.mentions.length > 0) {
     const want = m.mentions
     if (!event.mentions.some((x) => want.includes(x))) return false
+  }
+  if (m.tags && m.tags.length > 0) {
+    const eventTags = event.tags ?? []
+    const want = m.tags
+    if (!eventTags.some((t) => want.includes(t))) return false
   }
   return true
 }
@@ -291,12 +324,21 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       channelId: event.channelId,
       actorId: event.actorId,
     }
-  } else {
+  } else if (src.type === 'page') {
     trigger = {
       sourceType: 'page',
       provider: 'page',
       pageId: src.pageId,
       // For a page source `channelId` is the lifecycle action.
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'task',
+      provider: 'task',
+      // For a task source `channelId` is the primary lifecycle action; the
+      // full action set lives in the payload (`input.event.actions`).
       channelId: event.channelId,
       actorId: event.actorId,
     }

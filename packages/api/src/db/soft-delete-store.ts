@@ -28,15 +28,23 @@
 import type { RowSnapshot, SoftDeletePrimitive, SoftDeleteRepository } from '@sidanclaw/core'
 import { getPool, query } from './client.js'
 
-/** Soft-delete primitive → table. The map is the SQL-interpolation allowlist. */
+/**
+ * Soft-delete primitive → table. The map is the SQL-interpolation allowlist.
+ *
+ * Post CRM↔entity collapse (crm-entity-unification), a contact / company /
+ * deal id IS an `entities` row id, so those three primitives dispatch to
+ * `entities` — the same table as `entity`. `applySoftDelete` /
+ * `applyHardPurge` run `UPDATE entities …` / `DELETE FROM entities …` by
+ * id, which is correct for all four.
+ */
 const SOFT_DELETE_TABLES: Record<SoftDeletePrimitive, string> = {
   entity: 'entities',
   task: 'tasks',
   kb_chunk: 'kb_chunks',
   workspace_file: 'workspace_files',
-  contact: 'contacts',
-  company: 'companies',
-  deal: 'deals',
+  contact: 'entities',
+  company: 'entities',
+  deal: 'entities',
   episode: 'episodes',
 }
 

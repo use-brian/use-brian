@@ -421,7 +421,7 @@ export function createCrmTools(
     name: 'saveContact',
     requiresCapability: 'crm',
     description:
-      'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Contacts are visible to every workspace member. Use updateContact when you have an explicit id and need to patch other fields. ' +
+      'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Dedupe and reads are scoped to entities visible to you: a same-name contact another member keeps private is never merged into — you get your own row. Use updateContact when you have an explicit id and need to patch other fields. ' +
       'Pass company_id only after listCompanies confirms the company exists in this workspace; cross-workspace links are rejected by the DB. ' +
       'Pass `links` to record relationship edges from this contact (e.g. cofounder_of a company, attended an event, mentioned in a deal). Use the `entityId` returned from prior saveCompany / saveContact / saveDeal / createEntity calls (or read from list*).',
     inputSchema: z.object({
@@ -454,6 +454,16 @@ export function createCrmTools(
         const contact = await store.createContact({
           userId: context.userId,
           workspaceId: context.workspaceId!,
+          // Scope the upsert-dedupe to entities this caller can read —
+          // never merge into another principal's invisible row.
+          access: ctxFor({
+            userId: context.userId,
+            assistantId: context.assistantId,
+            workspaceId: context.workspaceId!,
+            assistantKind: context.assistantKind,
+            clearance: context.clearance,
+            compartments: context.compartments,
+          }),
           name: input.name,
           email: input.email ?? null,
           phone: input.phone ?? null,
@@ -687,6 +697,15 @@ export function createCrmTools(
       const company = await store.createCompany({
         userId: context.userId,
         workspaceId: context.workspaceId!,
+        // Same dedupe scoping as saveContact — see that call site.
+        access: ctxFor({
+          userId: context.userId,
+          assistantId: context.assistantId,
+          workspaceId: context.workspaceId!,
+          assistantKind: context.assistantKind,
+          clearance: context.clearance,
+          compartments: context.compartments,
+        }),
         name: input.name,
         domain: input.domain ?? null,
         tags: input.tags,

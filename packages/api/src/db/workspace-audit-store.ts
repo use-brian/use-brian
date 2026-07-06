@@ -44,6 +44,8 @@ export type WorkspaceAuditEventType =
   | 'workflow.step_delivered'
   // Page-anchor dead-anchor circuit breaker (workflow-page-anchor.md §9)
   | 'workflow.auto_disabled'
+  // Event-dispatch storm guard (workflow.md → "Event run queue")
+  | 'workflow.storm_paused'
   // Phase C — workflow approval flow (Q4 §12)
   | 'workflow.approval_requested'
   | 'workflow.approval_approved'

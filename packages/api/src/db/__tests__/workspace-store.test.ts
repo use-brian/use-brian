@@ -219,19 +219,55 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
     })
   })
 
-  describe('list', () => {
-    it('returns teams the user belongs to', async () => {
+  describe('list (RLS-safe memberCount)', () => {
+    it('fills memberCount from the owner pool, not the RLS read', async () => {
+      // The RLS read returns the workspace rows WITHOUT a member count. The
+      // count must NOT be a subquery there: the `wm_own_workspace` policy
+      // (`user_id = current_user_id`) would confine it to the caller's own row
+      // and always yield 1, mis-rendering every multi-member workspace as
+      // "solo" (incident 2026-07-01).
       mockQueryWithRLS.mockResolvedValueOnce({
         rows: [
           { id: 't_1', name: 'Eng', ownerUserId: 'u_1', createdAt: new Date(), updatedAt: new Date() },
         ],
         rowCount: 1,
       } as never)
+      // Owner pool sees every member row → 5 for a 5-member workspace.
+      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 't_1', count: 5 }], rowCount: 1 } as never)
 
       const teams = await store.list('u_1')
       expect(teams).toHaveLength(1)
       expect(teams[0].name).toBe('Eng')
+      expect(teams[0].memberCount).toBe(5)
       expect(mockQueryWithRLS.mock.calls[0][0]).toBe('u_1')
+
+      // The RLS query must not count members (capped at 1 under RLS).
+      const rlsSql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(rlsSql).not.toMatch(/count\(/i)
+      // The count comes from the owner pool, grouped by workspace.
+      const countSql = mockQuery.mock.calls[0][0] as string
+      expect(countSql).toMatch(/count\(\*\)/i)
+      expect(countSql).toContain('workspace_members')
+      expect(countSql).toContain('GROUP BY workspace_id')
+      expect(mockQuery.mock.calls[0][1]).toEqual([['t_1']])
+    })
+
+    it('defaults memberCount to 1 when a workspace is absent from the count map', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ id: 't_solo', name: 'Solo', ownerUserId: 'u_1', createdAt: new Date(), updatedAt: new Date() }],
+        rowCount: 1,
+      } as never)
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      const teams = await store.list('u_1')
+      expect(teams[0].memberCount).toBe(1)
+    })
+
+    it('skips the owner-pool count when the RLS read is empty', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      const teams = await store.list('u_1')
+      expect(teams).toEqual([])
+      expect(mockQuery).not.toHaveBeenCalled()
     })
   })
 
@@ -240,6 +276,22 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
       const team = await store.get('u_1', 't_missing')
       expect(team).toBeNull()
+      // No owner-pool count for a workspace the caller cannot see.
+      expect(mockQuery).not.toHaveBeenCalled()
+    })
+
+    it('fills memberCount from the owner pool for a multi-member workspace', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ id: 't_1', name: 'Eng', ownerUserId: 'u_1', createdAt: new Date(), updatedAt: new Date() }],
+        rowCount: 1,
+      } as never)
+      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 't_1', count: 5 }], rowCount: 1 } as never)
+
+      const team = await store.get('u_1', 't_1')
+      expect(team?.memberCount).toBe(5)
+      const rlsSql = mockQueryWithRLS.mock.calls[0][1] as string
+      expect(rlsSql).not.toMatch(/count\(/i)
+      expect(mockQuery.mock.calls[0][1]).toEqual([['t_1']])
     })
   })
 

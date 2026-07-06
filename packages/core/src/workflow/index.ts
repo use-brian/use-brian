@@ -105,6 +105,24 @@ export {
 } from './page-event-trigger.js'
 
 export {
+  TASK_LIFECYCLE_ACTIONS,
+  deriveTaskActions,
+  taskLifecycleToDispatchEvent,
+  createTaskLifecycleTrigger,
+  type TaskLifecycleAction,
+  type TaskLifecycleEvent,
+} from './task-event-trigger.js'
+
+export {
+  createRunQueueWorker,
+  type RunQueueWorker,
+  type RunQueueWorkerDeps,
+  type RunQueueStore,
+  type ClaimedRun,
+  RUN_QUEUE_DEFAULTS,
+} from './run-queue.js'
+
+export {
   CRON_TURN_FRAMING,
   REMINDER_WORKFLOW_DESCRIPTION,
   frameSchedulerPrompt,

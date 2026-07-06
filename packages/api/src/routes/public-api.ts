@@ -115,6 +115,10 @@ export type PublicApiRouteOptions = {
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
   gdriveFilesStore?: GDriveFilesStore
+  /** Workspace-files byte layer — `gmailSendMessage` attachments (forwarded
+   *  via `applyMcpInjection`; the confirmation-strip below still drops the
+   *  send tool on this surface, so this is parity plumbing). */
+  filesApi?: import('@sidanclaw/core').FilesApi
   /**
    * Per-assistant connector WRITE grants — `assertActionAllowed` in the
    * Gmail/GCal write callbacks fires only when this store is present (the

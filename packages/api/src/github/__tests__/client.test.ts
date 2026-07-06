@@ -17,6 +17,7 @@ import {
   getRepoTree,
   compareCommits,
   getBranchHead,
+  getPullRequest,
   createIssue,
   listIssues,
 } from '../client.js'
@@ -123,6 +124,49 @@ describe('[COMP:api/github-client] response shaping', () => {
     expect((await compareCommits('pat', 'o', 'r', 'b', 'h')).headSha).toBe('c2')
     mockFetch.mockResolvedValueOnce(ok({ commits: [], files: [] }))
     expect((await compareCommits('pat', 'o', 'r', 'b', 'h')).headSha).toBe('h')
+  })
+
+  it('compareCommits surfaces commit messages and total_commits (push enrichment)', async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      status: 'ahead',
+      total_commits: 3,
+      commits: [
+        { sha: 'c1', commit: { message: 'fix(a): first' } },
+        { sha: 'c2', commit: { message: 'feat(b): second\n\nbody' } },
+        { sha: 'c3', commit: { message: 'chore: third' } },
+      ],
+      files: [],
+    }))
+    const out = await compareCommits('pat', 'o', 'r', 'b', 'h')
+    expect(out.totalCommits).toBe(3)
+    expect(out.commits.map((c) => c.message)).toEqual([
+      'fix(a): first',
+      'feat(b): second\n\nbody',
+      'chore: third',
+    ])
+  })
+
+  it('compareCommits tolerates sha-only commit entries and a missing total_commits', async () => {
+    // Older mocks / defensive: the mapping must not require `commit.message`.
+    mockFetch.mockResolvedValueOnce(ok({ commits: [{ sha: 'c1' }, { sha: 'c2' }], files: [] }))
+    const out = await compareCommits('pat', 'o', 'r', 'b', 'h')
+    expect(out.totalCommits).toBe(2)
+    expect(out.commits).toEqual([
+      { sha: 'c1', message: '' },
+      { sha: 'c2', message: '' },
+    ])
+  })
+
+  it('getPullRequest surfaces the merged flag from the single-PR endpoint', async () => {
+    mockFetch.mockResolvedValueOnce(ok({
+      id: 1, number: 5, title: 'Add storage connector', body: 'long body',
+      state: 'closed', merged: true, html_url: 'https://github.com/o/r/pull/5',
+      base: { ref: 'develop' },
+    }))
+    const pr = await getPullRequest('pat', 'o', 'r', 5)
+    expect(mockFetch.mock.calls[0][0]).toBe('https://api.github.com/repos/o/r/pulls/5')
+    expect(pr.merged).toBe(true)
+    expect(pr.title).toBe('Add storage connector')
   })
 
   it('getBranchHead extracts the ref object sha', async () => {

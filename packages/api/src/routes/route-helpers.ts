@@ -7,7 +7,7 @@
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@sidanclaw/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks } from '@sidanclaw/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@sidanclaw/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -20,6 +20,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { injectMcpTools, type ConfirmationEnricher, type McpInjectionResult } from '../mcp/inject.js'
+import { renderArtifactManifest } from '../files/artifact-manifest.js'
 
 // ── User resolution ────────────────────────────────────────────
 
@@ -224,6 +225,11 @@ export type ChannelMcpStores = {
    * callbacks gate on `assertActionAllowed` before executing.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+  /**
+   * Workspace-files byte layer — enables `gmailSendMessage` workspace-file
+   * attachments (`docs/architecture/integrations/gmail.md` → "Attachments").
+   */
+  filesApi?: FilesApi
 }
 
 export type ApplyMcpInjectionParams = {
@@ -311,6 +317,7 @@ export async function applyMcpInjection(
       workspaceDomain: params.workspaceDomain,
       engineHooks: params.engineHooks,
       actorIdentity: params.actorIdentity,
+      filesApi: stores.filesApi,
     })
   } catch (err) {
     console.error(`[${params.scope}] MCP tool injection failed:`, err)
@@ -422,11 +429,38 @@ type InjectSkillsOptions = {
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   workspaceId?: string
   invocationBuffer?: import('@sidanclaw/core').SkillInvocationBuffer
+  /**
+   * Optional slug allow-list. When non-empty, only skills whose `id`/slug is
+   * in this set are offered — the governance gates still apply on top. Used by
+   * a workflow `assistant_call` step's `skills` field to pin the exact skills
+   * that step may use. `undefined` → offer every governance-passing skill
+   * (chat). An empty array `[]` → offer NOTHING (an explicit empty allow-list;
+   * used by a workflow step that only enforces skills and offers none).
+   */
+  restrictToSlugs?: string[]
+  /**
+   * Optional list of slugs to ENFORCE. Each governance-passing enforced skill's
+   * instructions are loaded (with pointer expansion) and returned in
+   * `enforcedPromptFragment` for the caller to inject as mandatory system-prompt
+   * instructions — the model runs them regardless of choice. Independent of
+   * `restrictToSlugs` (enforcement is not gated by the discovery allow-list),
+   * but the same enablement / clearance / app_type / connector gates apply, so
+   * an unentitled slug is dropped. An enforced slug is excluded from the
+   * discovery listing so it is never double-surfaced. Used by a workflow
+   * `assistant_call` step's `enforcedSkills` field.
+   */
+  enforceSlugs?: string[]
 }
 
 type InjectSkillsResult = {
-  /** System prompt fragment to append (empty string if no skills) */
+  /** System prompt fragment listing offered (discovery) skills — empty if none. */
   promptFragment: string
+  /**
+   * System-prompt fragment carrying the full instructions of every enforced
+   * skill under a `# Required Skills` block — empty string when no enforced
+   * skill resolved. The caller appends it to the callee system prompt.
+   */
+  enforcedPromptFragment: string
 }
 
 /**
@@ -553,16 +587,40 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       const gov = slugToGovernance.get(s.id) ?? { sensitivity: 'public' as const }
       return isSkillOfferable(gov, viewer)
     }
-    const availableSkills = allSkills.filter((s) => {
+    // Shared governance predicate — enablement + app_type + clearance +
+    // required-connector gates. Both the discovery listing and the enforced
+    // set pass through this, so a workflow step can never surface (offer OR
+    // enforce) a skill the assistant is not entitled to.
+    const passesGovernance = (s: { id: string; source: string; appliesToAppType?: string; requiresConnectors: string[] }): boolean => {
       if (disabledSlugs.has(s.id)) return false
       if (!isEnabled(s)) return false
       if (!matchesAppType(s)) return false
       if (!isOfferable(s)) return false
       return s.requiresConnectors.every((c) => connectedIds.has(c))
-    })
+    }
+
+    // Discovery allow-list (workflow `assistant_call.skills`). `undefined` →
+    // offer every governance-passing skill (chat). `[]` → offer NOTHING (an
+    // explicit empty allow-list — a step that only enforces). `[slugs]` → those.
+    const restrictSet = opts.restrictToSlugs === undefined ? null : new Set(opts.restrictToSlugs)
+    const isInScope = (s: { id: string }): boolean => (restrictSet === null ? true : restrictSet.has(s.id))
+    // Enforced set (workflow `assistant_call.enforcedSkills`) — forced to run,
+    // injected as instructions rather than offered. Independent of the
+    // discovery allow-list; the governance gates still apply.
+    const enforceSet = opts.enforceSlugs && opts.enforceSlugs.length > 0 ? new Set(opts.enforceSlugs) : null
+
+    // Discovery set: governance-passing ∩ allow-list, MINUS anything enforced
+    // (an enforced skill is already active — never double-surface it via useSkill).
+    const availableSkills = allSkills.filter(
+      (s) => passesGovernance(s) && isInScope(s) && !enforceSet?.has(s.id),
+    )
 
     for (const s of allSkills) {
       if (disabledSlugs.has(s.id)) continue
+      // A skill outside the caller's allow-list is not "unavailable" — it was
+      // simply never requested by this step; don't surface it in the prompt.
+      if (!isInScope(s)) continue
+      if (enforceSet?.has(s.id)) continue // enforced, not a discovery candidate
       if (!isEnabled(s)) continue
       // Skills constrained to a different app_type are not "unavailable" —
       // they're irrelevant for this assistant. Skip surfacing them in the
@@ -579,6 +637,35 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       }
     }
 
+    // CL-8: fire-and-forget counter bump (invocations + last_invoked_at, stale
+    // → active reactivation) + post-commit `succeeded` queue. No-ops for
+    // built-in skills (absent from `slugToRowId`). Hoisted so BOTH the
+    // discovery `useSkill` path and the enforced-skill injection use it — an
+    // enforced skill is genuinely run, so it counts as an invocation.
+    const recordInvocation = (slug: string) => {
+      const rowId = slugToRowId.get(slug)
+      if (!rowId) return // built-in or unmapped slug — nothing to record
+      if (opts.workspaceSkillStore) {
+        opts.workspaceSkillStore.recordInvocation(rowId).catch((err) => {
+          console.warn(`[${channel}] CL-8 recordInvocation failed:`, err)
+        })
+      }
+      opts.invocationBuffer?.addInvocation(rowId)
+    }
+
+    // Load-time `{{kind:name}}` pointer expansion: resolve the skill's row UUID
+    // (built-ins are absent → pass through) and substitute support-file
+    // pointers from `workspace_skill_files`. Shared by discovery + enforcement.
+    const filesStore = opts.workspaceSkillFilesStore
+    const expandContent = filesStore
+      ? async (skill: SkillContent): Promise<string> => {
+          const rowId = slugToRowId.get(skill.id)
+          if (!rowId) return skill.content
+          const expanded = await expandSkillPointers(skill, rowId, filesStore)
+          return expanded.content
+        }
+      : undefined
+
     let promptFragment = ''
     const listing = formatSkillListing(availableSkills)
     if (listing) {
@@ -586,42 +673,6 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     }
 
     if (availableSkills.length > 0) {
-      // CL-8: fire-and-forget callback that bumps the synchronous
-      // counters (invocations + last_invoked_at, with stale → active
-      // reactivation) and queues the row id for the post-commit
-      // `succeeded` bump. No-ops for built-in skills (absent from
-      // `slugToRowId`).
-      const recordInvocation = (slug: string) => {
-        const rowId = slugToRowId.get(slug)
-        if (!rowId) return // built-in or unmapped slug — nothing to record
-
-        // Synchronous counters: invocations + last_invoked_at + stale
-        // reactivation. Errors are logged but never thrown to the model.
-        if (opts.workspaceSkillStore) {
-          opts.workspaceSkillStore.recordInvocation(rowId).catch((err) => {
-            console.warn(`[${channel}] CL-8 recordInvocation failed:`, err)
-          })
-        }
-
-        // Per-turn buffer — flushed by chat.ts after assistant message
-        // commit to bump `succeeded`.
-        opts.invocationBuffer?.addInvocation(rowId)
-      }
-
-      // Load-time `{{kind:name}}` pointer expansion: resolve the skill's row
-      // UUID (built-ins are absent → pass through) and substitute support-file
-      // pointers from `workspace_skill_files`. The files store satisfies the
-      // `SkillFileLookup` shape directly.
-      const filesStore = opts.workspaceSkillFilesStore
-      const expandContent = filesStore
-        ? async (skill: SkillContent): Promise<string> => {
-            const rowId = slugToRowId.get(skill.id)
-            if (!rowId) return skill.content
-            const expanded = await expandSkillPointers(skill, rowId, filesStore)
-            return expanded.content
-          }
-        : undefined
-
       tools.set(
         'useSkill',
         createUseSkillTool({
@@ -632,10 +683,37 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
       )
     }
 
-    return { promptFragment }
+    // Enforced skills — inject the full (pointer-expanded) instructions as a
+    // mandatory system-prompt block. Each enforced slug that passes governance
+    // is loaded, counted as an invocation (it IS being run), and concatenated
+    // under `# Required Skills`. An expansion failure falls back to raw content
+    // (must never drop a mandatory instruction). A slug that fails governance
+    // is silently skipped — a workflow step cannot escalate.
+    let enforcedPromptFragment = ''
+    if (enforceSet) {
+      const enforcedSkills = allSkills.filter((s) => enforceSet.has(s.id) && passesGovernance(s))
+      const sections: string[] = []
+      for (const skill of enforcedSkills) {
+        let instructions = skill.content
+        if (expandContent) {
+          try {
+            instructions = await expandContent(skill)
+          } catch {
+            instructions = skill.content
+          }
+        }
+        recordInvocation(skill.id)
+        sections.push(`## ${skill.name}\n${instructions}`)
+      }
+      if (sections.length > 0) {
+        enforcedPromptFragment = `\n\n# Required Skills\nThe skill instructions below are mandatory for this task. Follow each of them in full — they are not optional, and apply in addition to any skill you activate yourself.\n\n${sections.join('\n\n')}`
+      }
+    }
+
+    return { promptFragment, enforcedPromptFragment }
   } catch (err) {
     console.error(`[${channel}] skill injection failed:`, err)
-    return { promptFragment: '' }
+    return { promptFragment: '', enforcedPromptFragment: '' }
   }
 }
 
@@ -666,16 +744,28 @@ export type FileContentBlocksResult = {
  *
  * - Images + PDFs → multimodal `image` content block (Gemini `inlineData`)
  * - Text/JSON/CSV (small) → inlined as <attached_file> text
- * - Large files → cached in fileStore (if provided) with readFileContent reference
+ * - Large files → durable artifact manifest when `promoteArtifact` is wired
+ *   (large-content-artifacts §Phase 2.3); else cached in fileStore (if
+ *   provided) with a readFileContent reference; else the 20K truncation
+ *   fallback.
  *
  * @param files - Array of file inputs to process
  * @param fileStore - Optional file store for caching large files
  * @param sessionId - Required if fileStore is provided (for caching)
+ * @param promoteArtifact - Optional workspace-bound promotion closure: a large
+ *   text-like file is written to workspace_files + chunked, and the turn
+ *   carries the artifact manifest instead of losing everything past 20K chars.
  */
 export async function buildFileContentBlocks(
   files: FileInput[],
   fileStore?: FileStore,
   sessionId?: string,
+  promoteArtifact?: (input: {
+    fileName: string
+    mime: string
+    bytes: Buffer
+    parsedText: string
+  }) => Promise<{ fileId: string; path: string; status: 'ready' | 'pending'; segmentCount: number; truncated: boolean } | null>,
 ): Promise<FileContentBlocksResult> {
   const contentBlocks: ContentBlock[] = []
   const textParts: string[] = []
@@ -699,12 +789,53 @@ export async function buildFileContentBlocks(
       }
     } else {
       const { text } = await parseFileContent(file.buffer, file.mimeType, file.fileName)
-      const isSmall = shouldInline(text.length)
+      const isSmall = shouldInline(text)
 
       if (isSmall) {
         textParts.push(
           `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${text}\n</attached_file>`,
         )
+      } else if (promoteArtifact) {
+        // Durable artifact path (large-content-artifacts §Phase 2.3): the file
+        // is written to workspace_files + chunked into file_segments, and the
+        // turn carries a manifest. Falls through to the legacy paths on a
+        // promotion failure — never drops the attachment.
+        const promoted = await promoteArtifact({
+          fileName: file.fileName,
+          mime: file.mimeType,
+          bytes: file.buffer,
+          parsedText: text,
+        }).catch(() => null)
+        if (promoted) {
+          textParts.push(
+            renderArtifactManifest({
+              fileId: promoted.fileId,
+              fileName: file.fileName,
+              mime: file.mimeType,
+              sizeBytes: file.buffer.length,
+              charLength: text.length,
+              segmentCount: promoted.segmentCount,
+              status: promoted.status,
+              truncated: promoted.truncated,
+            }),
+          )
+        } else if (fileStore && sessionId) {
+          const cached = await fileStore.cache({
+            sessionId,
+            fileName: file.fileName,
+            mimeType: file.mimeType,
+            content: text,
+            sizeBytes: file.buffer.length,
+          })
+          textParts.push(
+            `<attached_file id="${cached.id}" name="${file.fileName}" type="${file.mimeType}">[Large file. Use readFileContent with fileId="${cached.id}" to retrieve full content.]</attached_file>`,
+          )
+        } else {
+          const truncated = text.length > 20000 ? text.slice(0, 20000) + '\n... [truncated]' : text
+          textParts.push(
+            `<attached_file${file.id ? ` id="${file.id}"` : ''} name="${file.fileName}" type="${file.mimeType}">\n${truncated}\n</attached_file>`,
+          )
+        }
       } else if (fileStore && sessionId) {
         // Cache large files for on-demand retrieval via readFileContent tool
         const cached = await fileStore.cache({

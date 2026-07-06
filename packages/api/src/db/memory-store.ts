@@ -276,13 +276,12 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
                   COALESCE(
                     (SELECT display_name FROM entities WHERE id = bv.target_id AND bv.target_kind = 'entity'),
                     (SELECT title FROM tasks WHERE id = bv.target_id AND bv.target_kind = 'task'),
-                    (SELECT name FROM contacts WHERE id = bv.target_id AND bv.target_kind = 'contact'),
-                    (SELECT name FROM companies WHERE id = bv.target_id AND bv.target_kind = 'company'),
-                    (SELECT COALESCE(co.name, ct.name, 'Deal (' || d.stage || ')')
-                     FROM deals d
-                     LEFT JOIN companies co ON co.id = d.company_id
-                     LEFT JOIN contacts ct ON ct.id = d.contact_id
-                     WHERE d.id = bv.target_id AND bv.target_kind = 'deal'),
+                    -- Post CRM↔entity collapse (crm-entity-unification): contact /
+                    -- company / deal ids ARE entities rows, so all three resolve
+                    -- their label from entities.display_name (deals no longer carry
+                    -- a separate stage-based label).
+                    (SELECT display_name FROM entities
+                      WHERE id = bv.target_id AND bv.target_kind IN ('contact', 'company', 'deal')),
                     (SELECT name FROM workspace_files WHERE id = bv.target_id AND bv.target_kind = 'workspace_file')
                   ) AS "rowSummary",
                   bv.reason,

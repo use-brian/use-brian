@@ -39,16 +39,24 @@ import type {
 } from '@sidanclaw/core'
 import { getPool, query } from './client.js'
 
-/** Reclassifiable primitive → table. The map is the interpolation allowlist. */
+/**
+ * Reclassifiable primitive → table. The map is the interpolation allowlist.
+ *
+ * Post CRM↔entity collapse (crm-entity-unification), a contact / company /
+ * deal id IS an `entities` row id, so those three primitives dispatch to
+ * `entities` — the same table as `entity`. Read / update run by id against
+ * `entities`, which carries `sensitivity`, `source_episode_id`, and
+ * `valid_to`, so the reclassification path is correct for all three.
+ */
 const RECLASSIFY_TABLES: Record<ReclassifiablePrimitive, string> = {
   memory: 'memories',
   entity: 'entities',
   task: 'tasks',
   episode: 'episodes',
   kb_chunk: 'kb_chunks',
-  contact: 'contacts',
-  company: 'companies',
-  deal: 'deals',
+  contact: 'entities',
+  company: 'entities',
+  deal: 'entities',
   workspace_file: 'workspace_files',
   entity_link: 'entity_links',
 }

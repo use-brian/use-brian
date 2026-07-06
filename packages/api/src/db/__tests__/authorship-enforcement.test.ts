@@ -165,46 +165,9 @@ describe('[COMP:brain/authorship-enforcement] insert helpers reject missing auth
   })
 })
 
-// ── Q24: CRM-specialized kinds blocked from direct createEntity ───────
-//
-// `createEntity` rejects `kind='person'|'company'|'deal'` (Q24) — those
-// kinds are CRM specializations and must be created through the
-// `saveContact` / `saveCompany` / `saveDeal` wrappers, which write the
-// `entities` row and its specialization row (`contacts` / `companies` /
-// `deals`) in one transaction. A direct insert here would brain-orphan
-// the entity. The guard fires after the authorship check and before any
-// SQL, so a valid `createdByUserId` reaches it without a DB connection.
-//
-// Spec: docs/plans/company-brain/data-model.md §"CRM as specialization
-// of entities"; decisions-log.md Q24.
-
-describe('[COMP:brain/crm-write-wrapper] createEntity Q24 direct-insert block', () => {
-  const base = {
-    displayName: 'Acme',
-    workspaceId: 'w-1',
-    createdByUserId: 'u-1',
-    source: 'user' as const,
-  }
-
-  for (const kind of ['person', 'company', 'deal'] as const) {
-    it(`rejects a direct createEntity for kind='${kind}'`, async () => {
-      await expect(createEntity({ ...base, kind })).rejects.toThrow(
-        /reserved for the CRM specialization/,
-      )
-    })
-  }
-
-  it('the rejection names the kind and directs to the CRM wrappers', async () => {
-    let thrown: unknown
-    try {
-      await createEntity({ ...base, kind: 'company' })
-    } catch (err) {
-      thrown = err
-    }
-    expect(thrown).toBeInstanceOf(Error)
-    const msg = (thrown as Error).message
-    expect(msg).toContain("kind='company'")
-    expect(msg).toContain('reserved for the CRM specialization')
-    expect(msg).toContain('saveCompany')
-  })
-})
+// (Removed) "createEntity Q24 direct-insert block" tests. Post CRM→entity
+// unification (docs/plans/crm-entity-unification.md) `createEntity` no
+// longer rejects kind='person'|'company'|'deal' — a person/company/deal IS
+// a plain entity with typed fields in `attributes`. The CRM tools in
+// crm.ts create these entities directly; their behaviour is covered by
+// crm-store.integration.test.ts.

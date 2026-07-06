@@ -69,7 +69,17 @@ export type Sensitivity =
 
 export type BrainRow = {
   id: string;
-  kind: BrainPrimitive | EntityKind;
+  /**
+   * `file_segment` is the retrieval-only primitive from general `search()`
+   * (a chunk of an ingested document — docs/plans/large-content-artifacts.md
+   * §Phase 1.4), NOT a `BrainPrimitive` filter chip. The grouped view has no
+   * first-class single-line row for it, so it (and any FUTURE primitive this
+   * build predates) renders through `BrainFallbackCard`
+   * (`[COMP:app-web/brain-fallback-card]`). Kept a widened union rather than
+   * a hard `BrainPrimitive` so the backend can land the `search()` inclusion
+   * separately without an app-web compile break.
+   */
+  kind: BrainPrimitive | EntityKind | "file_segment";
   name: string;
   summary?: string | null;
   sensitivity?: Sensitivity;
@@ -80,6 +90,20 @@ export type BrainRow = {
    *  `todo` | `in_progress` | `blocked` | `done` | `archived`. Drives the
    *  grouped view's status chip + the completed-task partition. */
   status?: string;
+  // ── file_segment-only fields (camelCase mirror of the `search()` row's
+  //    `file_id`/`file_name`/`heading_path`/`snippet`/`segment_index`). Absent
+  //    on every other kind; the backend `/api/brain/list` mapping populates
+  //    them when it lands the `file_segment` scope. ──
+  /** Parent `workspace_files` id the segment belongs to. */
+  fileId?: string | null;
+  /** Parent file's display name (fallback rendered as "Document" when empty). */
+  fileName?: string | null;
+  /** ATX heading trail to the segment, breadcrumb-joined for display. */
+  headingPath?: string[];
+  /** The matched excerpt text. */
+  snippet?: string | null;
+  /** 0-based position of the segment within its file. */
+  segmentIndex?: number;
 };
 
 /**

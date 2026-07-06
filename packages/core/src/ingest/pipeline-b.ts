@@ -10,8 +10,10 @@
  *
  * Key wirings (per ingest.md §"Engine and Pipeline B layering"):
  *   - Q24 (CRM routing) — person/company entities go through CrmStore
- *     (`createContact` / `createCompany`), NOT raw EntityStore.create,
- *     so the entity row + CRM specialization row land in one transaction.
+ *     (`createContact` / `createCompany`), NOT raw EntityStore.create.
+ *     Post CRM→entity unification those wrappers write a single `entities`
+ *     row (kind + typed fields in `attributes`) — there is no separate
+ *     specialization row.
  *   - Tag stamping — model-emitted `tags` merge with engine-pre-stamped
  *     `episode.preStampedTags` and propagate to every written memory.
  *   - Q3 async sensitivity classifier — final step; flag-not-bump.
@@ -1314,9 +1316,10 @@ async function writeEntity(
       email,
       ...(externalRef ? { externalRef } : {}),
     })
-    // CRM wrapper inserts an `entities` row alongside the `contacts` row
-    // (entity.canonical_id = email when present). Look it up so the edge
-    // loop has an entity id.
+    // CRM wrapper writes a single `entities` row (kind='person', typed
+    // fields in `attributes`; entity.canonical_id = email when present).
+    // It returns the ContactRecord projection, so look up the entity row
+    // here to give the edge loop an entity id.
     return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, email, 'person')
   }
 
@@ -1351,12 +1354,13 @@ async function writeEntity(
 }
 
 /**
- * After a CRM `createContact` / `createCompany` call commits, the
- * underlying transaction has inserted a row into `entities` with
- * `kind='person'|'company'` and (when supplied) `canonical_id` = email |
+ * After a CRM `createContact` / `createCompany` call commits, it has
+ * written a single `entities` row with `kind='person'|'company'`, typed
+ * fields in `attributes`, and (when supplied) `canonical_id` = email |
  * domain. Pipeline B needs the resulting entity-row id for edge
- * construction, but the core `CrmStore` ports return only the
- * specialization record. Look it up here.
+ * construction, but the core `CrmStore` ports return the CRM record
+ * projection (`ContactRecord` / `CompanyRecord`), not the `EntityRecord`.
+ * Look it up here.
  *
  * Resolution order: by canonical id when present → by display name. Both
  * lookups are workspace-scoped; the entities store filters on RLS so

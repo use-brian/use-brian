@@ -6,6 +6,9 @@ import { getSelfEntityId } from '../db/memories.js'
 import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { renderArtifactManifest } from '../files/artifact-manifest.js'
+import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
+import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
@@ -155,6 +158,13 @@ type WebChatOptions = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   fileStore?: FileStore
+  /**
+   * Silent large-content promotion (large-content-artifacts): giant pastes
+   * become workspace_files artifacts + file_segments; the turn carries the
+   * manifest. Boot passes the same instance the /upload route uses. Absent
+   * (files-less deploy) → pastes flow through unchanged.
+   */
+  artifactPromoter?: ArtifactPromoter | null
   usageStore?: UsageStore
   /**
    * Doc-page → brain distillation runner (the "Sync to brain" pipeline). When
@@ -306,6 +316,10 @@ type WebChatOptions = {
    *  L1 block is injected. Optional so smoke tests / dev runs without GCS
    *  still work. */
   workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  /** Workspace-files byte layer — forwarded via `applyMcpInjection` so
+   *  `gmailSendMessage` can attach workspace files as real MIME parts
+   *  (`docs/architecture/integrations/gmail.md` → "Attachments"). */
+  filesApi?: import('@sidanclaw/core').FilesApi
   /**
    * Company-brain read surface (WS-5). When set, the 6 retrieval tools
    * (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,
@@ -323,6 +337,9 @@ type WebChatOptions = {
    * a DB-backed inspection store. See docs/architecture/brain/corrections.md.
    */
   inspectionTools?: Record<string, import('@sidanclaw/core').Tool>
+  /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
+   *  boot with generateSynthesize + pageTemplateStore; workspace-scoped. */
+  generateBlueprintTool?: Tool
   /**
    * Entity-graph stores (WU-6.12). When both are set — alongside a
    * workspace-scoped assistant — `saveMemory` accepts an `entityId` that
@@ -1075,7 +1092,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1148,6 +1165,12 @@ export function chatRoutes(options: WebChatOptions): Router {
        */
       followupChips?: boolean
     }
+    // Mutable so the giant-paste promotion (large-content-artifacts §Phase
+    // 3.1) can swap an over-threshold paste for its artifact manifest + head
+    // excerpt once the workspace/assistant are resolved below. Every
+    // downstream consumer (nag resolver, classifier, persistence, the model
+    // turn) sees the replaced text — the original is durable in the artifact.
+    let message = rawMessage
     // `requestedMode` semantics:
     //   - 'research'  → manual on, classifier skipped, downstream uses research budget
     //   - 'default'   → manual off, classifier skipped (user explicitly opted out)
@@ -1162,9 +1185,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       return
     }
 
-    // Set up SSE headers
+    // Set up SSE headers. `no-transform` matters: compressing proxies
+    // (Next dev rewrites included — its compressor honors no-transform)
+    // otherwise buffer the stream and deliver it as one chunk at the end.
     res.setHeader('Content-Type', 'text/event-stream')
-    res.setHeader('Cache-Control', 'no-cache')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no') // Disable nginx buffering
     res.flushHeaders()
@@ -1348,6 +1373,25 @@ export function chatRoutes(options: WebChatOptions): Router {
           // platform, which is the safe (non-undercharging) default.
           console.error('[chat] BYO LLM key resolution failed:', (err as Error).message)
         }
+      }
+
+      // ── Giant-paste promotion (large-content-artifacts §Phase 3.1) ──
+      // An over-threshold paste (8K tokens, CJK-aware) becomes a durable
+      // artifact; the turn (and the persisted user row) carries the manifest
+      // + head excerpt instead. Runs before every message consumer below.
+      // Failure or no promoter → the original paste flows through unchanged.
+      if (message && options.artifactPromoter && assistant.workspaceId && shouldPromotePaste(message)) {
+        const promoted = await promotePastedText({
+          text: message,
+          workspaceId: assistant.workspaceId,
+          actingUserId: user.id,
+          assistantId: assistant.id,
+          promote: options.artifactPromoter,
+        }).catch((err) => {
+          console.error('[chat] paste promotion failed (keeping original text):', err)
+          return null
+        })
+        if (promoted) message = promoted.replaced
       }
 
       // Adaptive research entry. When the request didn't pin a mode, run a
@@ -1668,7 +1712,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             const isAudio = file.mimeType.startsWith('audio/')
             // Inline-media types (image + PDF) are always emitted as a multimodal
             // `image` block regardless of size. Text-like files gate on size.
-            const isTextLike = !isImage && !isPdf && !isAudio && shouldInline(file.content.length)
+            const isTextLike = !isImage && !isPdf && !isAudio && shouldInline(file.content)
 
             if (isTextLike) {
               textParts.push(
@@ -1720,6 +1764,24 @@ export function chatRoutes(options: WebChatOptions): Router {
                 transcription
                   ? `[voice] ${transcription.text}`
                   : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[voice note — transcription unavailable]</attached_file>`,
+              )
+            } else if (file.artifactFileId) {
+              // The upload was silently promoted to a durable artifact
+              // (large-content-artifacts §Phase 2.3): the turn carries a
+              // compact manifest — the artifact id + searchFileContent hints —
+              // never the raw content. Persisted in session_messages, so the
+              // id outlives the file_cache TTL.
+              textParts.push(
+                renderArtifactManifest({
+                  fileId: file.artifactFileId,
+                  fileName: file.fileName,
+                  mime: file.mimeType,
+                  sizeBytes: file.sizeBytes,
+                  charLength: file.content.length,
+                  ...(file.artifactSegmentCount != null ? { segmentCount: file.artifactSegmentCount } : {}),
+                  summary: file.summary,
+                  status: file.artifactSegmentCount && file.artifactSegmentCount > 0 ? 'ready' : 'pending',
+                }),
               )
             } else {
               textParts.push(
@@ -2725,6 +2787,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         for (const [name, tool] of Object.entries(retrievalTools)) {
           allTools.set(name, tool)
         }
+      }
+
+      // Generate mode as a chat tool — fill a blueprint from the brain on request
+      // (requiresConfirmation; the cost rides this turn's credit). Workspace-scoped.
+      if (options.generateBlueprintTool && assistant.workspaceId) {
+        allTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
       }
 
       // Brain inbox inspection toolkit — read-only introspection tools.

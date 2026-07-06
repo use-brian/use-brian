@@ -70,6 +70,7 @@ import {
   type ViewMetadata,
 } from "@/lib/api/views";
 import { hasAnyConnectedConnector } from "@/lib/api/studio";
+import { fetchHomeDock, type ResolvedDock } from "@/lib/api/home-dock";
 import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
 import { offlineWrite, getOnline } from "@/lib/offline/offline-writes";
@@ -141,6 +142,20 @@ type SidebarData = {
    * same signal — no second connectors fetch.
    */
   studioSetupIncomplete: boolean | null;
+  /**
+   * The workspace's resolved home dock ("Suggested for you"), fetched here —
+   * once per workspace, revalidated on every list reload — so the sidebar
+   * badge (`HomeDock`) and the Home pane (`SuggestedView`) read ONE dock that
+   * survives soft-nav and never disagrees between the two surfaces. Null until
+   * the first fetch lands (or when it failed with nothing cached).
+   */
+  dock: ResolvedDock | null;
+  /** True only while the workspace's FIRST dock fetch is in flight. */
+  dockLoading: boolean;
+  /** Background-revalidate the dock (stale-while-revalidate; never flashes). */
+  reloadDock: () => void;
+  /** Push an already-fetched dock (SuggestedView's POST /refresh result). */
+  setDock: (dock: ResolvedDock) => void;
   /** Refetch both sidebar lists. Centre-pane mutations route through here too. */
   reloadSidebar: () => void;
   /** Record the open of a page id into the recents list (+ localStorage). */
@@ -337,6 +352,36 @@ export function DocSidebarDataProvider({
       cancelled = true;
     };
   }, [workspaceId, reloadTick]);
+
+  // ── Home dock (the "Suggested for you" data) ───────────────────────────
+  // Owned here per docs/architecture/features/home-dock.md → Frontend: the
+  // sidebar badge (HomeDock) and the Home pane (SuggestedView) share this one
+  // fetch. Stale-while-revalidate — a refetch keeps the current dock until
+  // the new one lands, and a failed refetch keeps it entirely (fetchHomeDock
+  // nulls on error). reloadTick is a dep because page mutations (drafts
+  // created/deleted/saved) move the dock's pickUp list — the lists' refresh
+  // rhythm revalidates the dock too.
+  const [dock, setDock] = useState<ResolvedDock | null>(null);
+  const [dockLoading, setDockLoading] = useState(true);
+  const [dockTick, setDockTick] = useState(0);
+  const reloadDock = useCallback(() => setDockTick((n) => n + 1), []);
+  useEffect(() => {
+    // Workspace switch: drop the old workspace's dock (never badge across).
+    setDock(null);
+    setDockLoading(true);
+  }, [workspaceId]);
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    fetchHomeDock(workspaceId).then((d) => {
+      if (cancelled) return;
+      if (d) setDock(d);
+      setDockLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, dockTick, reloadTick]);
 
   // Floating-chat bridge: a chat turn that persists a draft fires
   // `doc:draft-created`; refresh the lists so the new draft surfaces
@@ -611,6 +656,10 @@ export function DocSidebarDataProvider({
       sidebarOpen,
       setSidebarOpen,
       studioSetupIncomplete,
+      dock,
+      dockLoading,
+      reloadDock,
+      setDock,
       reloadSidebar,
       pushRecent,
       recordPrune,
@@ -638,6 +687,9 @@ export function DocSidebarDataProvider({
       sidebarCollapsed,
       sidebarOpen,
       studioSetupIncomplete,
+      dock,
+      dockLoading,
+      reloadDock,
       reloadSidebar,
       pushRecent,
       recordPrune,

@@ -11,6 +11,10 @@
  *     `Select` primitive (root CLAUDE.md bans native selects outside the
  *     table-cell property editor).
  *   - `confirm()` is replaced with `confirmDialog()` (themed, Promise-returning).
+ *   - Read rows are human-readable: filter labels + value chips (placeholder
+ *     tokens resolved to copy) + spelled-out schedules via the pure
+ *     `@/lib/ingest-rule-display` helpers ([COMP:app-web/ingest-rule-display]).
+ *     The raw JSON/cron stay the editing surface (and the chips' tooltip).
  *
  * Backend surface: POST /api/ingest/sources/:instanceId/rules, PATCH
  * /api/ingest/rules/:ruleId, DELETE /api/ingest/rules/:ruleId
@@ -27,6 +31,10 @@
 import { useState, useMemo } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
+import {
+  describeCronSchedule,
+  humanizeFilterParams,
+} from "@/lib/ingest-rule-display";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   Select,
@@ -200,9 +208,144 @@ function paramsHint(filterType: string): string {
   }
 }
 
+/**
+ * One routing rule as a standalone read card — a when/then block:
+ * header (order + the filter's label + Edit/Delete), body (the matched
+ * values as chips, placeholder tokens resolved), footer (the routing
+ * outcome: mode, spelled-out schedule, alert + sensitivity badges).
+ * Display-only; the stored rule is untouched and the raw JSON stays one
+ * hover away (chips tooltip) and remains the editing surface.
+ */
+function RuleCard({
+  rule,
+  busy,
+  onEdit,
+  onDelete,
+}: {
+  rule: EditableRule;
+  busy: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT();
+  const ingestCopy = t.studioPage.ingestRules;
+  const copy = ingestCopy.editor;
+  const filterLabel =
+    (ingestCopy.filters as Record<string, string>)[rule.filterType] ??
+    rule.filterType;
+  const params = humanizeFilterParams(rule.filterParams, {
+    ":workspace_members": ingestCopy.placeholderValues.workspaceMembers,
+    ":crm_contacts": ingestCopy.placeholderValues.crmContacts,
+  });
+  const spelledSchedule = rule.routingSchedule
+    ? describeCronSchedule(rule.routingSchedule, copy.schedule)
+    : null;
+  const tzSuffix =
+    rule.routingTimezone && rule.routingTimezone !== "UTC"
+      ? ` · ${rule.routingTimezone}`
+      : "";
+
+  return (
+    <div className="rounded-lg border border-border px-3.5 py-2.5">
+      {/* WHEN — what the rule matches. */}
+      <div className="flex items-start gap-2">
+        <span className="mt-px w-5 shrink-0 text-right font-mono text-[11px] text-muted-foreground/70">
+          {rule.ruleOrder}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium">{filterLabel}</div>
+          {params.kind !== "none" && (
+            <div
+              className="mt-1 flex flex-wrap items-center gap-1"
+              title={JSON.stringify(rule.filterParams)}
+            >
+              {params.kind === "items" ? (
+                params.items.map((item, i) => (
+                  <span
+                    key={`${item}-${i}`}
+                    className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  >
+                    {item}
+                  </span>
+                ))
+              ) : (
+                <span className="break-all font-mono text-[10px] text-muted-foreground/70">
+                  {params.json}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            onClick={onEdit}
+            disabled={busy}
+            className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40"
+          >
+            {copy.editAction}
+          </button>
+          <button
+            onClick={onDelete}
+            disabled={busy}
+            className="text-[11px] text-muted-foreground hover:text-destructive disabled:opacity-40"
+          >
+            {copy.deleteAction}
+          </button>
+        </div>
+      </div>
+
+      {/* THEN — where matches go. Indented under the label (order col + gap). */}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 pl-7">
+        <span
+          className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+            rule.routingMode === "realtime"
+              ? "text-primary bg-primary/10"
+              : rule.routingMode === "scheduled"
+                ? "text-blue-600 dark:text-blue-400 bg-blue-500/10"
+                : "text-muted-foreground bg-muted"
+          }`}
+        >
+          {ingestCopy.routing[rule.routingMode]}
+        </span>
+        {rule.routingSchedule &&
+          (spelledSchedule ? (
+            <span
+              className="text-[11px] text-muted-foreground"
+              title={rule.routingSchedule}
+            >
+              {spelledSchedule}
+              {tzSuffix}
+            </span>
+          ) : (
+            <code className="font-mono text-[10px] text-muted-foreground/70">
+              {rule.routingSchedule}
+              {tzSuffix}
+            </code>
+          ))}
+        {rule.alert && (
+          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400">
+            {ingestCopy.alertBadge}
+          </span>
+        )}
+        {rule.episodeSensitivity && (
+          <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400">
+            {rule.episodeSensitivity}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props) {
   const t = useT();
-  const copy = t.studioPage.ingestRules.editor;
+  const ingestCopy = t.studioPage.ingestRules;
+  const copy = ingestCopy.editor;
+
+  // Display-only vocabulary for the draft form's dropdowns: filter-type and
+  // routing-mode labels. Raw identifiers stay the stored payload.
+  const filterLabel = (filterType: string): string =>
+    (ingestCopy.filters as Record<string, string>)[filterType] ?? filterType;
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftRule | null>(null);
@@ -355,8 +498,22 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
     onSave: () => void,
     onCancel: () => void,
   ) {
+    // A rule can carry a type outside this source's vocabulary
+    // (agent-written); keep it selectable when editing. The `items` maps let
+    // the collapsed trigger render the human label instead of the raw value.
+    const ftOptions = filterTypeOptions.includes(current.filterType)
+      ? filterTypeOptions
+      : [current.filterType, ...filterTypeOptions];
+    const ftItems = Object.fromEntries(ftOptions.map((ft) => [ft, filterLabel(ft)]));
+    const routingItems = Object.fromEntries(
+      ROUTING_MODES.map((m) => [m, ingestCopy.routing[m]]),
+    );
+    const sensitivityItems = {
+      __default__: copy.sensitivityDefault,
+      ...Object.fromEntries(SENSITIVITY_OPTIONS.map((s) => [s, s])),
+    };
     return (
-      <div className="flex flex-col gap-2 bg-background border border-border rounded-md p-3">
+      <div className="flex flex-col gap-2 rounded-lg border border-border px-3.5 py-3">
         <div className="grid grid-cols-2 gap-2 text-xs">
           <label className="flex flex-col gap-1">
             <span className="text-muted-foreground">{copy.labels.ruleOrder}</span>
@@ -372,6 +529,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
             <span className="text-muted-foreground">{copy.labels.filterType}</span>
             <Select
               value={current.filterType}
+              items={ftItems}
               onValueChange={(v) => {
                 if (v) update({ ...current, filterType: v });
               }}
@@ -380,8 +538,8 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {filterTypeOptions.map((ft) => (
-                  <SelectItem key={ft} value={ft}>{ft}</SelectItem>
+                {ftOptions.map((ft) => (
+                  <SelectItem key={ft} value={ft}>{filterLabel(ft)}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -408,6 +566,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
             <span className="text-muted-foreground">{copy.labels.routingMode}</span>
             <Select
               value={current.routingMode}
+              items={routingItems}
               onValueChange={(v) => {
                 if (v === "realtime" || v === "scheduled" || v === "drop") {
                   update({
@@ -424,7 +583,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
               </SelectTrigger>
               <SelectContent>
                 {ROUTING_MODES.map((m) => (
-                  <SelectItem key={m} value={m}>{m}</SelectItem>
+                  <SelectItem key={m} value={m}>{ingestCopy.routing[m]}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -433,6 +592,7 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
             <span className="text-muted-foreground">{copy.labels.sensitivity}</span>
             <Select
               value={current.episodeSensitivity || "__default__"}
+              items={sensitivityItems}
               onValueChange={(v) =>
                 update({
                   ...current,
@@ -515,54 +675,18 @@ export function IngestRuleEditor({ instanceId, source, rules, onChange }: Props)
       {rules.length === 0 && !addingDraft ? (
         <p className="text-[11px] text-muted-foreground italic">{copy.emptyRules}</p>
       ) : (
-        <ul className="flex flex-col gap-1.5">
+        <ul className="flex flex-col gap-2">
           {rules.map((rule) => (
             <li key={rule.id}>
               {editingId === rule.id && draft ? (
                 renderDraftForm(draft, setDraft as (d: DraftRule) => void, saveEdit, cancelEdit)
               ) : (
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-muted-foreground/70 font-mono shrink-0 w-6 text-right">{rule.ruleOrder}</span>
-                  <span className="font-medium shrink-0">{rule.filterType}</span>
-                  <span className="text-muted-foreground/70 font-mono text-[10px] truncate flex-1">
-                    {JSON.stringify(rule.filterParams)}
-                  </span>
-                  <span
-                    className={`px-1.5 py-0.5 rounded shrink-0 ${
-                      rule.routingMode === "realtime"
-                        ? "text-primary bg-primary/10"
-                        : rule.routingMode === "scheduled"
-                          ? "text-blue-600 dark:text-blue-400 bg-blue-500/10"
-                          : "text-muted-foreground bg-muted"
-                    }`}
-                  >
-                    {rule.routingMode}
-                  </span>
-                  {rule.routingSchedule && (
-                    <code className="text-[10px] text-muted-foreground/70 font-mono shrink-0">
-                      {rule.routingSchedule}
-                    </code>
-                  )}
-                  {rule.episodeSensitivity && (
-                    <span className="text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400 shrink-0">
-                      {rule.episodeSensitivity}
-                    </span>
-                  )}
-                  <button
-                    onClick={() => startEdit(rule)}
-                    disabled={busy}
-                    className="text-[11px] text-muted-foreground hover:text-foreground disabled:opacity-40 shrink-0"
-                  >
-                    {copy.editAction}
-                  </button>
-                  <button
-                    onClick={() => deleteRule(rule.id)}
-                    disabled={busy}
-                    className="text-[11px] text-muted-foreground hover:text-destructive disabled:opacity-40 shrink-0"
-                  >
-                    {copy.deleteAction}
-                  </button>
-                </div>
+                <RuleCard
+                  rule={rule}
+                  busy={busy}
+                  onEdit={() => startEdit(rule)}
+                  onDelete={() => deleteRule(rule.id)}
+                />
               )}
             </li>
           ))}

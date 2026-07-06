@@ -204,6 +204,24 @@ export function createTelegramApi(options: TelegramApiOptions) {
     leaveChat: (chatId: string) =>
       call<true>('leaveChat', { chat_id: chatId }),
 
+    /**
+     * Chat metadata for a chat this bot can see. `title` is set for
+     * groups/supergroups/channels; private chats carry `first_name` /
+     * `last_name` / `username` instead. Only a bot that is in the chat can
+     * resolve it — a wrong-bot lookup throws `TelegramApiError` ("chat not
+     * found"), which callers treat as "unresolvable", not fatal. Used to
+     * name sessions-derived delivery destinations in the workflow builder.
+     */
+    getChat: (chatId: string) =>
+      call<{
+        id: number
+        type: 'private' | 'group' | 'supergroup' | 'channel'
+        title?: string
+        username?: string
+        first_name?: string
+        last_name?: string
+      }>('getChat', { chat_id: chatId }),
+
     pinChatMessage: (chatId: string, messageId: number, opts?: { disableNotification?: boolean }) =>
       call<true>('pinChatMessage', {
         chat_id: chatId,

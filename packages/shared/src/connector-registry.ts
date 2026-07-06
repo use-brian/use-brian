@@ -17,6 +17,15 @@ export const ConnectorEntrySchema = z.object({
   author_url: z.string().optional(),
   tags: z.array(z.string()).default([]),
   enabled: z.boolean().default(true),
+  /**
+   * One instance per user, ever — suppresses the "Add another" affordance and
+   * excludes the connector from the multi-account runtime
+   * (`MULTI_INSTANCE_RUNTIME_PROVIDERS` in `packages/api/src/mcp/inject.ts`).
+   * Set on connectors that bind a resource rather than an account (gcs — a
+   * per-workspace storage binding). Credentialed connectors WITHOUT this flag
+   * must consume their multi-account extras in their injector.
+   */
+  single_instance: z.boolean().optional(),
 })
 
 export type ConnectorEntry = z.infer<typeof ConnectorEntrySchema>
@@ -125,6 +134,9 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     oauth_required: false,
     enabled: true,
     tags: ['storage', 'google', 'workspace'],
+    // A workspace binds ONE storage bucket; "Add another" is meaningless (and
+    // the generic directory-add path would mint a junk user-scoped row).
+    single_instance: true,
   },
 ]
 
@@ -142,4 +154,16 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
 
 export const BUILTIN_PRIMITIVE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
   OFFICIAL_CONNECTORS.filter((c) => c.auth_type === 'none').map((c) => c.id),
+)
+
+// ── Single-instance connectors ────────────────────────────────
+//
+// Officials marked `single_instance` bind a resource, not an account (gcs —
+// one storage bucket per workspace), so the connector surfaces suppress
+// "Add another" for them and the multi-account runtime skips them. Derived
+// from the registry — never hardcode a slug list for this (the "all
+// built-ins" drift anti-pattern).
+
+export const SINGLE_INSTANCE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
+  OFFICIAL_CONNECTORS.filter((c) => c.single_instance).map((c) => c.id),
 )

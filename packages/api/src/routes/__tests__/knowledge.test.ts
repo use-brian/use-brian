@@ -102,13 +102,19 @@ describe('[COMP:api/knowledge-route] GET /github/instances (usable picker)', () 
     }
   }
 
-  it('lists own + teammate-granted GitHub within clearance; hides above-clearance and non-GitHub', async () => {
+  it('lists own-exposed + teammate-granted GitHub within clearance; hides unexposed-own, above-clearance and non-GitHub', async () => {
     // workspace_members row for verifyWorkspaceMember.
     mockRls.mockResolvedValue({ rows: [{ role: 'member', clearance: 'internal', compartments: null }], rowCount: 1 } as never)
     mockMembership.mockResolvedValue({ role: 'member', clearance: 'internal' })
-    connectorInstanceStore.listByUser.mockResolvedValue([ghInst({ id: 'own-gh', label: 'My GitHub' })])
+    connectorInstanceStore.listByUser.mockResolvedValue([
+      ghInst({ id: 'own-gh', label: 'My GitHub' }),
+      // Connected in ANOTHER workspace, never exposed here — must not surface
+      // (the fls.com.hk Knowledge picker leak).
+      ghInst({ id: 'own-elsewhere', label: 'My other GitHub' }),
+    ])
     connectorInstanceStore.listByWorkspace.mockResolvedValue([])
     connectorGrantStore.listForTargetSystem.mockResolvedValue([
+      { grantedByUserId: 'u-1', instance: ghInst({ id: 'own-gh', label: 'My GitHub' }) },
       { grantedByUserId: 'alice', instance: ghInst({ id: 'alice-gh', userId: 'alice', label: 'Alice GH', sensitivity: 'internal' }) },
       { grantedByUserId: 'bob', instance: ghInst({ id: 'bob-gh', userId: 'bob', sensitivity: 'confidential' }) },
       { grantedByUserId: 'carol', instance: ghInst({ id: 'carol-notion', userId: 'carol', provider: 'notion', sensitivity: 'public' }) },
@@ -119,6 +125,7 @@ describe('[COMP:api/knowledge-route] GET /github/instances (usable picker)', () 
     const ids = (res.body.instances as Array<{ id: string }>).map((i) => i.id)
     expect(ids).toContain('own-gh')
     expect(ids).toContain('alice-gh')
+    expect(ids).not.toContain('own-elsewhere') // owned, but not exposed to this workspace
     expect(ids).not.toContain('bob-gh') // above the member's internal clearance
     expect(ids).not.toContain('carol-notion') // not a GitHub connector
   })

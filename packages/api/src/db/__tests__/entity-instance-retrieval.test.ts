@@ -199,17 +199,15 @@ describe('[COMP:retrieval/entity-instance] aggregate', () => {
 
 describe('[COMP:retrieval/entity-instance] provenance', () => {
   it('probes entity_instances after all other primitives miss', async () => {
-    // First 9 PRIMITIVE_TABLES (memories, tasks, files, entities,
-    // contacts, companies, deals, kb_chunks, entity_links) all miss;
-    // the 10th hit is entity_instances and returns the row.
+    // Post CRM→entity unification the 6 PRIMITIVE_TABLES (memories, tasks,
+    // files, entities, kb_chunks, entity_links) all miss; the 7th hit is
+    // entity_instances and returns the row. (contacts/companies/deals were
+    // removed from the probe list — they're entities now.)
     mockQuery.mockResolvedValue({ rows: [] } as never) // default for all probes
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // memories
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // tasks
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // workspace_files
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // entities
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // contacts
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // companies
-    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // deals
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // kb_chunks
     mockQuery.mockResolvedValueOnce({ rows: [] } as never) // entity_links
     mockQuery.mockResolvedValueOnce({

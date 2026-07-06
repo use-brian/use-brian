@@ -45,6 +45,7 @@ export {
   type RetrievalStore,
   type RetrievalToolEvent,
   type EntityInstanceSearchRow,
+  type FileSegmentSearchRow,
   type RetrievalStep,
   type RetrievalStepName,
   type RetrievalStepCandidate,
@@ -53,6 +54,7 @@ export {
 export {
   type RetrievalToolOptions,
   createRetrievalTools,
+  actorFromContext,
 } from './tools.js'
 
 // WS-5 W5c additions (coordinator-wired).

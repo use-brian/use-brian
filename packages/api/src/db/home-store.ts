@@ -46,7 +46,8 @@ export async function getHomeSetupState(userId: string, workspaceId: string): Pr
       `SELECT
          EXISTS(SELECT 1 FROM entities WHERE workspace_id = $1 AND kind = 'person'
                 AND attributes->>'self' = 'true' AND valid_to IS NULL) AS profile,
-         EXISTS(SELECT 1 FROM companies WHERE workspace_id = $1 AND valid_to IS NULL) AS company,
+         EXISTS(SELECT 1 FROM entities WHERE kind = 'company'
+                AND workspace_id = $1 AND valid_to IS NULL) AS company,
          (EXISTS(SELECT 1 FROM memories WHERE workspace_id = $1 AND valid_to IS NULL)
           OR EXISTS(SELECT 1 FROM entities WHERE workspace_id = $1 AND valid_to IS NULL)) AS populated`,
       [workspaceId],

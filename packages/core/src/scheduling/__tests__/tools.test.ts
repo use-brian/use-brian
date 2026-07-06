@@ -163,6 +163,7 @@ function makeFakeWorkflowStore(): WorkflowStore & { rows: WorkflowRecord[] } {
         description: params.description ?? null,
         definition: params.definition,
         enabled: true,
+        pausedReason: null,
         trigger: params.trigger ?? { kind: 'manual' },
         webhookSlug: params.webhookSlug ?? null,
         webhookSecret: params.webhookSecret ?? null,

@@ -357,16 +357,18 @@ export async function listBrainInbox(params: {
              created_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'entity_id', entity_id,
-               'name', name,
-               'email', email,
-               'phone', phone,
-               'tags', tags,
+               'entity_id', id,
+               'name', display_name,
+               'email', COALESCE(attributes->>'email', canonical_id),
+               'phone', attributes->>'phone',
+               'tags', COALESCE(attributes->'tags', '[]'::jsonb),
                'sensitivity', sensitivity,
                'source_episode_id', source_episode_id
              ) AS body
-      FROM contacts
+      FROM entities
       WHERE workspace_id = $1
+        AND kind = 'person'
+        AND NOT COALESCE((attributes->>'self')::boolean, false)
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -382,15 +384,16 @@ export async function listBrainInbox(params: {
              created_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'entity_id', entity_id,
-               'name', name,
-               'domain', domain,
-               'tags', tags,
+               'entity_id', id,
+               'name', display_name,
+               'domain', COALESCE(attributes->>'domain', canonical_id),
+               'tags', COALESCE(attributes->'tags', '[]'::jsonb),
                'sensitivity', sensitivity,
                'source_episode_id', source_episode_id
              ) AS body
-      FROM companies
+      FROM entities
       WHERE workspace_id = $1
+        AND kind = 'company'
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -406,19 +409,16 @@ export async function listBrainInbox(params: {
              created_at,
              created_by_assistant_id,
              jsonb_build_object(
-               'entity_id', entity_id,
-               -- deals carry no name/value column (the CRM identity lives on the
-               -- linked entity; the money field is amount). Referencing the old
-               -- names made the whole inbox UNION throw, so the list 500'd and the
-               -- brain pending review rendered empty. Project the columns that exist.
-               'stage', stage,
-               'amount', amount,
-               'close_date', close_date,
+               'entity_id', id,
+               'stage', attributes->>'stage',
+               'amount', attributes->>'amount',
+               'close_date', attributes->>'close_date',
                'sensitivity', sensitivity,
                'source_episode_id', source_episode_id
              ) AS body
-      FROM deals
+      FROM entities
       WHERE workspace_id = $1
+        AND kind = 'deal'
         AND verified_by_user_id IS NULL
         AND valid_to IS NULL
         AND retracted_at IS NULL
@@ -634,13 +634,15 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             'entity_id', entity_id, 'name', name, 'email', email,
-             'phone', phone, 'tags', tags,
+             'entity_id', id, 'name', display_name,
+             'email', COALESCE(attributes->>'email', canonical_id),
+             'phone', attributes->>'phone',
+             'tags', COALESCE(attributes->'tags', '[]'::jsonb),
              'sensitivity', sensitivity,
              'source_episode_id', source_episode_id
            ) AS body
-    FROM contacts
-    WHERE workspace_id = $1`,
+    FROM entities
+    WHERE workspace_id = $1 AND kind = 'person'`,
   company: `
     SELECT 'company'::text AS primitive, id,
            workspace_id AS "workspaceId",
@@ -649,13 +651,14 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             'entity_id', entity_id, 'name', name, 'domain', domain,
-             'tags', tags,
+             'entity_id', id, 'name', display_name,
+             'domain', COALESCE(attributes->>'domain', canonical_id),
+             'tags', COALESCE(attributes->'tags', '[]'::jsonb),
              'sensitivity', sensitivity,
              'source_episode_id', source_episode_id
            ) AS body
-    FROM companies
-    WHERE workspace_id = $1`,
+    FROM entities
+    WHERE workspace_id = $1 AND kind = 'company'`,
   deal: `
     SELECT 'deal'::text AS primitive, id,
            workspace_id AS "workspaceId",
@@ -664,16 +667,14 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
            jsonb_build_object(
-             -- deals have no name/value column; money is amount (same fix as
-             -- the list branch; keeps this detail query from erroring).
-             'entity_id', entity_id,
-             'stage', stage, 'amount', amount,
-             'close_date', close_date,
+             'entity_id', id,
+             'stage', attributes->>'stage', 'amount', attributes->>'amount',
+             'close_date', attributes->>'close_date',
              'sensitivity', sensitivity,
              'source_episode_id', source_episode_id
            ) AS body
-    FROM deals
-    WHERE workspace_id = $1`,
+    FROM entities
+    WHERE workspace_id = $1 AND kind = 'deal'`,
   workspace_file: `
     SELECT 'workspace_file'::text AS primitive, id,
            workspace_id AS "workspaceId",
@@ -737,9 +738,10 @@ export async function countBrainInbox(
       `AND NOT ${danglingEntityLinkSql('entity_links')}`,
     ),
     countOne(workspaceId, sourceFilter, 'tasks', 'task'),
-    countOne(workspaceId, sourceFilter, 'contacts', 'contact'),
-    countOne(workspaceId, sourceFilter, 'companies', 'company'),
-    countOne(workspaceId, sourceFilter, 'deals', 'deal'),
+    // CRM primitives are entities filtered by kind (post-unification).
+    countOne(workspaceId, sourceFilter, 'entities', 'contact', `AND kind = 'person' AND NOT COALESCE((attributes->>'self')::boolean, false)`),
+    countOne(workspaceId, sourceFilter, 'entities', 'company', `AND kind = 'company'`),
+    countOne(workspaceId, sourceFilter, 'entities', 'deal', `AND kind = 'deal'`),
     countOne(workspaceId, sourceFilter, 'workspace_files', 'workspace_file'),
   ]
 
@@ -814,9 +816,11 @@ export function primitiveToTable(primitive: BrainInboxPrimitive): string {
     case 'entity': return 'entities'
     case 'entity_link': return 'entity_links'
     case 'task': return 'tasks'
-    case 'contact': return 'contacts'
-    case 'company': return 'companies'
-    case 'deal': return 'deals'
+    // CRM primitives resolve to `entities` post-unification — the record
+    // id IS the entity id, so verify/adjust/delete operate on the entity.
+    case 'contact': return 'entities'
+    case 'company': return 'entities'
+    case 'deal': return 'entities'
     case 'workspace_file': return 'workspace_files'
   }
 }

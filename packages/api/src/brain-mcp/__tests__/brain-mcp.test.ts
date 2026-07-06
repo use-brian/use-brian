@@ -165,6 +165,7 @@ const READ_TOOL_NAMES = [
   'listDeals',
   'listTasks',
   'searchBrain',
+  'searchFileContent',
   'searchKnowledge',
   'searchRecording',
 ] as const
@@ -824,6 +825,7 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     // existing tests still exercise the built-in-only catalog.
     templateList: (...args: unknown[]) => Promise<unknown[]>
     templateGetById: (...args: unknown[]) => Promise<unknown>
+    templateCreate: (...args: unknown[]) => Promise<unknown>
   }> = {}): BrainDocTools {
     const tools: BrainDocTools = {
       savedViewStore: {
@@ -840,10 +842,25 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
         applyPatch: vi.fn(overrides.applyPatch ?? (async () => ({ newVersion: 4 }))),
       } as unknown as BrainDocTools['docPageStore'],
     }
-    if (overrides.templateList || overrides.templateGetById) {
+    if (overrides.templateList || overrides.templateGetById || overrides.templateCreate) {
       tools.pageTemplateStore = {
         list: vi.fn(overrides.templateList ?? (async () => [])),
         getById: vi.fn(overrides.templateGetById ?? (async () => null)),
+        create: vi.fn(
+          overrides.templateCreate ??
+            (async (_userId: string, input: { name: string; category: string }) => ({
+              id: 'ct-new-uuid',
+              workspaceId: '33333333-3333-3333-3333-333333333333',
+              createdBy: 'u',
+              name: input.name,
+              description: null,
+              icon: null,
+              category: input.category,
+              blocks: [],
+              createdAt: '2026-01-01T00:00:00Z',
+              updatedAt: '2026-01-01T00:00:00Z',
+            })),
+        ),
       } as unknown as NonNullable<BrainDocTools['pageTemplateStore']>
     }
     return tools
@@ -1203,5 +1220,73 @@ describe('[COMP:api/brain-mcp-page-tools] doc-page tools (readPage / listPages /
     // Block ids are re-minted, so the stored 'orig-block' id never reaches the page.
     expect(arg.page.blocks).toHaveLength(1)
     expect(arg.page.blocks[0].id).not.toBe('orig-block')
+  })
+
+  it('createPageTemplate is omitted unless the pageTemplateStore is wired', () => {
+    // Built-in catalog tools need no store; createPageTemplate has no fallback.
+    const noStore = buildBrainTools({ ...BASE, scope: 'read_write', docTools: docToolsStub() }).map(
+      (t) => t.name,
+    )
+    expect(noStore).toContain('createPageFromTemplate')
+    expect(noStore).not.toContain('createPageTemplate')
+
+    const withStore = buildBrainTools({
+      ...BASE,
+      scope: 'read_write',
+      docTools: docToolsStub({ templateCreate: async () => ({}) }),
+    }).map((t) => t.name)
+    expect(withStore).toContain('createPageTemplate')
+  })
+
+  it('createPageTemplate is a write tool (absent on a read key)', () => {
+    const readNames = buildBrainTools({
+      ...BASE,
+      scope: 'read',
+      docTools: docToolsStub({ templateCreate: async () => ({}) }),
+    }).map((t) => t.name)
+    expect(readNames).not.toContain('createPageTemplate')
+  })
+
+  it('createPageTemplate persists a template via the store and returns its id', async () => {
+    // `templateList` flips the store branch on; `create` defaults to the stub.
+    const docTools = docToolsStub({ templateList: async () => [] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageTemplate')!
+    const result = await tool.handler({
+      name: 'Weekly sync',
+      category: 'meeting',
+      content: '## Agenda\n- [ ] Item one',
+      icon: '🗓️',
+      description: 'Recurring sync layout',
+    })
+    expect(result.isError).toBeFalsy()
+    expect(textBody(result)).toContain('ct-new-uuid')
+    const create = docTools.pageTemplateStore!.create as ReturnType<typeof vi.fn>
+    expect(create).toHaveBeenCalledTimes(1)
+    const arg = create.mock.calls[0][1]
+    expect(arg.name).toBe('Weekly sync')
+    expect(arg.category).toBe('meeting')
+    expect(arg.icon).toBe('🗓️')
+    expect(arg.description).toBe('Recurring sync layout')
+    // Markdown body became a non-empty canonical block list.
+    expect(arg.blocks.length).toBeGreaterThan(0)
+  })
+
+  it('createPageTemplate rejects an empty name without writing', async () => {
+    const docTools = docToolsStub({ templateList: async () => [] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageTemplate')!
+    const result = await tool.handler({ name: '   ', category: 'meeting', content: '## X' })
+    expect(result.isError).toBe(true)
+    expect(docTools.pageTemplateStore!.create).not.toHaveBeenCalled()
+  })
+
+  it('createPageTemplate rejects content that yields no blocks', async () => {
+    const docTools = docToolsStub({ templateList: async () => [] })
+    const tools = buildBrainTools({ ...BASE, scope: 'read_write', docTools })
+    const tool = tools.find((t) => t.name === 'createPageTemplate')!
+    const result = await tool.handler({ name: 'Empty', category: 'meeting', content: '   ' })
+    expect(result.isError).toBe(true)
+    expect(docTools.pageTemplateStore!.create).not.toHaveBeenCalled()
   })
 })

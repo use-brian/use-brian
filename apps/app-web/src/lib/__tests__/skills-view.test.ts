@@ -32,6 +32,7 @@ function skill(
     verifiedByUserId: null,
     verifiedAt: null,
     rederivationCount: 0,
+    blueprintId: null,
     requiresConnectors: [],
     enabledAssistantIds: [],
     lastInvokedAt: null,

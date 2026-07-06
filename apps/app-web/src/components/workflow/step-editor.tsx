@@ -1,30 +1,39 @@
 "use client";
 
 /**
- * Per-step editor card (app-web). Specializes for `assistant_call` with
- * assistant picker + prompt + tools filter + storeOutputAs. Other step types
- * fall through to a raw-JSON editor (advanced).
+ * Per-step editor (app-web) — the step as a **document + properties rail**,
+ * the skill editor's design language (`brain/skills/[skillRowId]/page.tsx`):
+ * the step's name (its `description`) is a borderless title; directly under
+ * it an **identity strip** (a compact grid: type / assistant / page anchor /
+ * blueprint — what runs, who runs it, what it works on) balances the two
+ * columns; the instruction is a borderless auto-growing body under a quiet
+ * divider. The rail keeps only the tuning knobs — soft cards Execution +
+ * Output — with long-form hints tucked into InfoTips instead of stacked
+ * helper paragraphs. Non-assistant step types keep the plain-language
+ * summary + raw-JSON disclosure as the document body; a `branch` step has
+ * no rail at all (its whole config is the strip + raw JSON).
  *
- * Ported from `apps/web/src/components/workflow/step-editor.tsx` (app
- * consolidation §5a). The model option labels (Standard / Pro / Max) come
- * from the `workflowPage.builder.stepModel*` keys here rather than the
- * `assistant.modelSelector.*` subtree the web app shares — app-web does
- * not host the assistant-config surface, so the workflow subtree carries its
- * own model labels to stay self-contained.
+ * The wire shape is unchanged — this is presentation only; the parent still
+ * owns the draft and persists via `PATCH /api/workflows/:id`. The model
+ * option labels (Standard / Pro / Max) stay on the self-contained
+ * `workflowPage.builder.stepModel*` keys.
  *
- * Spec: docs/architecture/features/workflow.md.
+ * Spec: docs/architecture/features/workflow.md → "Web builder UI".
  * [COMP:app-web/workflow]
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Search } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { ViewListRow } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { WorkspaceSkillSummary } from "@/lib/api/skills";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
+  SlackChannelOption,
   DeliverChannelType,
   PageAnchor,
   WorkflowModelAlias,
@@ -41,14 +50,29 @@ import {
   SearchableSelect,
   type SearchableSelectItem,
 } from "@/components/ui/searchable-select";
+import { Switch } from "@/components/ui/switch";
+import {
+  FieldLabel,
+  RailCard,
+  SwitchRow,
+} from "@/components/workflow/field";
+import {
+  fieldUnderlineCls,
+  quietFieldCls,
+} from "@/components/brain/skill-document";
 import { cn } from "@/lib/utils";
-
-const SELECT_TRIGGER_CLASS = "w-full max-w-xs text-sm";
 
 const MODEL_ALIASES: WorkflowModelAlias[] = ["standard", "pro", "max"];
 
 /** Sentinel value used by the destinations dropdown to reveal a custom-ID input. */
 const CUSTOM_DESTINATION_VALUE = "__custom__";
+
+/** Compact input matching the rail's `size="sm"` selects. */
+const RAIL_INPUT_CLS =
+  "w-full h-8 px-2.5 bg-background border border-input rounded-md text-sm outline-none focus:ring-2 focus:ring-ring disabled:opacity-50";
+
+const PROMPT_MAX = 8000;
+const PROMPT_WARN_AT = 7200;
 
 type Props = {
   index: number;
@@ -61,6 +85,12 @@ type Props = {
    */
   destinations: ChannelDestination[];
   /**
+   * Workspace Slack channels (by name, from `conversations.list`) — backs the
+   * deliver picker when the channel type is Slack, so authors pick `#name`
+   * instead of a raw id. Empty when Slack isn't connected or the fetch failed.
+   */
+  slackChannels: SlackChannelOption[];
+  /**
    * Workspace page roster (saved + drafts) — backs the page-anchor picker
    * (`PageAnchorField`). Empty when the roster fetch failed; the field
    * degrades gracefully.
@@ -69,9 +99,15 @@ type Props = {
   /**
    * Workspace blueprints (page templates carrying an extraction spec) — backs
    * the per-step blueprint picker (`BlueprintField`). Empty when the fetch
-   * failed; the field degrades to just the two built-ins.
+   * failed; the field degrades to just the built-ins.
    */
   blueprints: CustomPageTemplateSummary[];
+  /**
+   * Workspace brain skills — backs the per-step skills allow-list picker
+   * (`SkillsField`). Empty when the fetch failed or none exist; the field
+   * hides itself and any already-selected slugs are preserved.
+   */
+  skills: WorkspaceSkillSummary[];
   /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
@@ -90,8 +126,10 @@ export function StepEditor({
   step,
   assistants,
   destinations,
+  slackChannels,
   pages,
   blueprints,
+  skills,
   steps,
   onChange,
   onMoveUp,
@@ -100,29 +138,41 @@ export function StepEditor({
   disabled,
 }: Props) {
   const t = useT();
+  const b = t.workflowPage.builder;
+  const isAssistant = step.type === "assistant_call";
+  // A branch step's whole config is the identity strip + raw JSON — no
+  // Execution (assistant-only) and no Output (branch stores nothing).
+  const hasRail = step.type !== "branch";
+
   return (
-    <div className="border border-border rounded-md bg-card overflow-hidden">
-      <div className="flex items-center justify-between gap-2 px-4 py-2 border-b border-border bg-muted/30">
-        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          {format(t.workflowPage.builder.stepNumber, { n: String(index + 1) })}
+    <div className="rounded-xl border border-border/60 bg-card">
+      {/* Toolbar — position + type readout left, reorder/remove right. */}
+      <div className="flex items-center justify-between gap-2 px-5 pt-4">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+            {format(b.stepOfTotal, { n: String(index + 1), total: String(total) })}
+          </span>
+          <span className="text-[11px] uppercase tracking-wide text-muted-foreground/40">
+            {stepTypeLabel(step.type, t)}
+          </span>
         </div>
         <div className="flex items-center gap-1">
           <IconButton
-            label={t.workflowPage.builder.moveStepUp}
+            label={b.moveStepUp}
             onClick={onMoveUp}
             disabled={disabled || index === 0}
           >
             <ArrowIcon dir="up" />
           </IconButton>
           <IconButton
-            label={t.workflowPage.builder.moveStepDown}
+            label={b.moveStepDown}
             onClick={onMoveDown}
             disabled={disabled || index === total - 1}
           >
             <ArrowIcon dir="down" />
           </IconButton>
           <IconButton
-            label={t.workflowPage.builder.removeStepBtn}
+            label={b.removeStepBtn}
             onClick={onRemove}
             disabled={disabled || total === 1}
             danger
@@ -132,107 +182,285 @@ export function StepEditor({
         </div>
       </div>
 
-      <div className="p-4 flex flex-col gap-3">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.stepTypeLabel}
-          </label>
-          <Select
-            value={step.type}
-            onValueChange={(v) => {
-              if (v) onChange(convertStep(step, v as WorkflowStep["type"]));
-            }}
-            disabled={disabled}
-            // Base UI's <SelectValue> shows the raw value unless the Root gets
-            // an items label-map - without this the trigger reads "tool_call".
-            items={{
-              assistant_call: t.workflowPage.builder.stepTypeAssistantCall,
-              tool_call: t.workflowPage.builder.stepTypeToolCall,
-              branch: t.workflowPage.builder.stepTypeBranch,
-              wait: t.workflowPage.builder.stepTypeWait,
-            }}
-          >
-            <SelectTrigger className={SELECT_TRIGGER_CLASS}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="assistant_call">
-                {t.workflowPage.builder.stepTypeAssistantCall}
-              </SelectItem>
-              <SelectItem value="tool_call">
-                {t.workflowPage.builder.stepTypeToolCall}
-              </SelectItem>
-              <SelectItem value="branch">{t.workflowPage.builder.stepTypeBranch}</SelectItem>
-              <SelectItem value="wait">{t.workflowPage.builder.stepTypeWait}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {step.type === "assistant_call" ? (
-          <AssistantCallFields
-            step={step}
-            assistants={assistants}
-            destinations={destinations}
-            pages={pages}
-            blueprints={blueprints}
-            steps={steps}
-            onChange={onChange}
-            disabled={disabled}
-            t={t}
-          />
-        ) : (
-          <RawJsonFields step={step} onChange={onChange} disabled={disabled} t={t} />
+      <div
+        className={cn(
+          "px-5 pb-5 pt-3",
+          hasRail && "lg:grid lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-8",
         )}
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.storeOutputAsLabel}
-          </label>
-          <input
-            type="text"
-            value={step.type !== "branch" ? step.storeOutputAs ?? "" : ""}
-            onChange={(e) =>
-              onChange(
-                step.type === "branch"
-                  ? step
-                  : ({ ...step, storeOutputAs: e.target.value || undefined } as WorkflowStep),
-              )
-            }
-            disabled={disabled || step.type === "branch"}
-            placeholder="result"
-            maxLength={64}
-            className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring max-w-xs"
-          />
-          <div className="text-xs text-muted-foreground">
-            {t.workflowPage.builder.storeOutputAsHint}
+      >
+        {/* ── Document column — name, identity strip, the instruction ───── */}
+        <div className="min-w-0 flex flex-col">
+          <div className={fieldUnderlineCls}>
+            <input
+              type="text"
+              value={step.description ?? ""}
+              onChange={(e) =>
+                onChange({
+                  ...step,
+                  description: e.target.value || undefined,
+                } as WorkflowStep)
+              }
+              disabled={disabled}
+              maxLength={200}
+              placeholder={b.stepTitlePlaceholder}
+              aria-label={b.stepTitlePlaceholder}
+              autoComplete="off"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-form-type="other"
+              className={cn(
+                "w-full border-0 bg-transparent p-0 text-xl font-semibold leading-tight text-foreground placeholder:text-muted-foreground/40",
+                quietFieldCls,
+              )}
+            />
           </div>
+
+          {/* Identity strip — what runs, who runs it, what it works on.
+              Lives in the document column so a short instruction doesn't
+              leave it empty while the rail stacks four cards deep. */}
+          <div className="mt-3 grid items-start gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="flex flex-col gap-1.5">
+              <FieldLabel label={b.stepTypeLabel} />
+              <Select
+                value={step.type}
+                onValueChange={(v) => {
+                  if (v) onChange(convertStep(step, v as WorkflowStep["type"]));
+                }}
+                disabled={disabled}
+                // Base UI's <SelectValue> shows the raw value unless the Root
+                // gets an items label-map - without this it reads "tool_call".
+                items={{
+                  assistant_call: b.stepTypeAssistantCall,
+                  tool_call: b.stepTypeToolCall,
+                  branch: b.stepTypeBranch,
+                  wait: b.stepTypeWait,
+                }}
+              >
+                <SelectTrigger size="sm" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="assistant_call">
+                    {b.stepTypeAssistantCall}
+                  </SelectItem>
+                  <SelectItem value="tool_call">{b.stepTypeToolCall}</SelectItem>
+                  <SelectItem value="branch">{b.stepTypeBranch}</SelectItem>
+                  <SelectItem value="wait">{b.stepTypeWait}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {isAssistant && (
+              <>
+                <div className="flex flex-col gap-1.5">
+                  <FieldLabel label={b.assistantPickerLabel} />
+                  <Select
+                    value={step.target.assistantId}
+                    onValueChange={(v) => {
+                      if (v)
+                        onChange({
+                          ...step,
+                          target: { ...step.target, assistantId: v },
+                        });
+                    }}
+                    disabled={disabled}
+                    // Label-map so the trigger shows the name, not a UUID.
+                    items={{
+                      primary: b.assistantPickerPrimary,
+                      ...Object.fromEntries(
+                        assistants.map((a) => [a.id, a.name]),
+                      ),
+                    }}
+                  >
+                    <SelectTrigger size="sm" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="primary">
+                        {b.assistantPickerPrimary}
+                      </SelectItem>
+                      {assistants.map((a) => (
+                        <SelectItem key={a.id} value={a.id}>
+                          {a.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <PageAnchorField
+                  step={step}
+                  pages={pages}
+                  steps={steps}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+                <BlueprintField
+                  step={step}
+                  blueprints={blueprints}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+                <SkillsField
+                  step={step}
+                  skills={skills}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+              </>
+            )}
+          </div>
+
+          {isAssistant ? (
+            <InstructionBody
+              step={step}
+              onChange={onChange}
+              disabled={disabled}
+              t={t}
+            />
+          ) : (
+            <RawJsonFields
+              step={step}
+              onChange={onChange}
+              disabled={disabled}
+              t={t}
+            />
+          )}
         </div>
+
+        {/* ── Properties rail — tuning only (Execution + Output) ────────── */}
+        {hasRail && (
+          <aside className="mt-6 flex flex-col gap-3 text-sm lg:mt-0">
+            {isAssistant && (
+              <RailCard title={b.stepRailExecutionHeading}>
+                <ExecutionFields
+                  step={step}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+              </RailCard>
+            )}
+
+            <RailCard title={b.stepRailOutputHeading}>
+              <div className="flex flex-col gap-2.5">
+                {step.type === "assistant_call" && (
+                  <DeliverField
+                    step={step}
+                    destinations={destinations}
+                    slackChannels={slackChannels}
+                    onChange={onChange}
+                    disabled={disabled}
+                    t={t}
+                  />
+                )}
+                <div className="flex flex-col gap-1.5">
+                  <FieldLabel
+                    label={b.storeOutputAsLabel}
+                    hint={b.storeOutputAsHint}
+                  />
+                  <input
+                    type="text"
+                    value={step.storeOutputAs ?? ""}
+                    onChange={(e) =>
+                      onChange({
+                        ...step,
+                        storeOutputAs: e.target.value || undefined,
+                      } as WorkflowStep)
+                    }
+                    disabled={disabled}
+                    placeholder="result"
+                    maxLength={64}
+                    className={RAIL_INPUT_CLS}
+                  />
+                </div>
+              </div>
+            </RailCard>
+          </aside>
+        )}
       </div>
     </div>
   );
 }
 
-function AssistantCallFields({
+// ── Document body — the instruction as borderless prose ──────────────────
+
+function InstructionBody({
   step,
-  assistants,
-  destinations,
-  pages,
-  blueprints,
-  steps,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
-  assistants: StudioAssistantSummary[];
-  destinations: ChannelDestination[];
-  pages: ViewListRow[];
-  blueprints: CustomPageTemplateSummary[];
-  steps: WorkflowStep[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
 }) {
+  const b = t.workflowPage.builder;
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  // Grow to fit (document feel — the page scrolls, not the field). Same
+  // affordance as the skill document's when-to-use textarea.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [step.prompt]);
+
+  return (
+    <>
+      <div className="mt-4 flex items-center gap-3">
+        <div className="h-px flex-1 bg-border/60" aria-hidden />
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground/50">
+          {b.promptLabel}
+        </span>
+      </div>
+      <div className={cn(fieldUnderlineCls, "mt-2")}>
+        <textarea
+          ref={ref}
+          value={step.prompt}
+          onChange={(e) => onChange({ ...step, prompt: e.target.value })}
+          placeholder={b.promptPlaceholder}
+          disabled={disabled}
+          rows={5}
+          maxLength={PROMPT_MAX}
+          aria-label={b.promptLabel}
+          className={cn(
+            "min-h-32 w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/50",
+            quietFieldCls,
+          )}
+        />
+      </div>
+      {/* Quiet budget counter — appears near the 8000-char schema cap. */}
+      {step.prompt.length > PROMPT_WARN_AT && (
+        <p className="mt-1 text-right text-[11px] tabular-nums text-muted-foreground">
+          {format(b.promptCharCount, {
+            count: String(step.prompt.length),
+            max: String(PROMPT_MAX),
+          })}
+        </p>
+      )}
+    </>
+  );
+}
+
+// ── Execution — model / budget / continuity, compact rail rows ───────────
+
+function ExecutionFields({
+  step,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
   const toolsCsv = (step.tools ?? []).join(", ");
   const [maxTurnsDraft, setMaxTurnsDraft] = useState<string>(
     step.maxTurns == null ? "" : String(step.maxTurns),
@@ -259,167 +487,97 @@ function AssistantCallFields({
     if (clamped !== parsed) setMaxTurnsDraft(String(clamped));
     if (clamped !== step.maxTurns) onChange({ ...step, maxTurns: clamped });
   }
+
   return (
-    <>
+    <div className="flex flex-col gap-2.5">
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.assistantPickerLabel}
-        </label>
+        <FieldLabel label={b.stepModelLabel} hint={b.stepModelHint} />
         <Select
-          value={step.target.assistantId}
+          value={step.modelAlias ?? "pro"}
           onValueChange={(v) => {
-            if (v) onChange({ ...step, target: { ...step.target, assistantId: v } });
+            if (!v) return;
+            if (!MODEL_ALIASES.includes(v as WorkflowModelAlias)) return;
+            onChange({ ...step, modelAlias: v as WorkflowModelAlias });
           }}
           disabled={disabled}
-          // Label-map so the trigger shows the assistant's name, not its UUID.
           items={{
-            primary: t.workflowPage.builder.assistantPickerPrimary,
-            ...Object.fromEntries(assistants.map((a) => [a.id, a.name])),
+            standard: b.stepModelStandard,
+            pro: b.stepModelPro,
+            max: b.stepModelMax,
           }}
         >
-          <SelectTrigger className="w-full text-sm">
+          <SelectTrigger size="sm" className="w-full">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="primary">
-              {t.workflowPage.builder.assistantPickerPrimary}
-            </SelectItem>
-            {assistants.map((a) => (
-              <SelectItem key={a.id} value={a.id}>
-                {a.name}
-              </SelectItem>
-            ))}
+            <SelectItem value="standard">{b.stepModelStandard}</SelectItem>
+            <SelectItem value="pro">{b.stepModelPro}</SelectItem>
+            <SelectItem value="max">{b.stepModelMax}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <SwitchRow
+        label={b.stepResearchLabel}
+        hint={b.stepResearchHint}
+        control={
+          <Switch
+            checked={!!step.researchMode}
+            onCheckedChange={(checked) =>
+              onChange({ ...step, researchMode: checked })
+            }
+            disabled={disabled}
+            aria-label={b.stepResearchLabel}
+          />
+        }
+      />
+
+      <div className="flex items-center justify-between gap-3">
+        <FieldLabel label={b.stepMaxTurnsLabel} hint={b.stepMaxTurnsHint} />
+        <input
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={60}
+          value={maxTurnsDraft}
+          onChange={(e) => setMaxTurnsDraft(e.target.value)}
+          onBlur={commitMaxTurns}
+          disabled={disabled}
+          placeholder="-"
+          aria-label={b.stepMaxTurnsLabel}
+          className={cn(RAIL_INPUT_CLS, "w-20 text-right")}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <FieldLabel label={b.sessionLabel} hint={b.sessionHint} />
+        <Select
+          value={step.session ?? "per_run"}
+          onValueChange={(v) => {
+            if (!v) return;
+            onChange({
+              ...step,
+              session: v === "persistent" ? "persistent" : undefined,
+            });
+          }}
+          disabled={disabled}
+          items={{
+            per_run: b.sessionPerRun,
+            persistent: b.sessionPersistent,
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="per_run">{b.sessionPerRun}</SelectItem>
+            <SelectItem value="persistent">{b.sessionPersistent}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.promptLabel}
-        </label>
-        <textarea
-          value={step.prompt}
-          onChange={(e) => onChange({ ...step, prompt: e.target.value })}
-          placeholder={t.workflowPage.builder.promptPlaceholder}
-          disabled={disabled}
-          rows={4}
-          maxLength={8000}
-          className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring resize-y"
-        />
-      </div>
-
-      <PageAnchorField
-        step={step}
-        pages={pages}
-        steps={steps}
-        onChange={onChange}
-        disabled={disabled}
-        t={t}
-      />
-
-      <BlueprintField
-        step={step}
-        blueprints={blueprints}
-        onChange={onChange}
-        disabled={disabled}
-        t={t}
-      />
-
-      {/* Per-step run settings: model + research mode + max turns. Replaces
-          the workflow-global RUN SETTINGS panel — each step now picks its
-          own budget. */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.stepModelLabel}
-          </label>
-          <Select
-            value={step.modelAlias ?? "pro"}
-            onValueChange={(v) => {
-              if (!v) return;
-              if (!MODEL_ALIASES.includes(v as WorkflowModelAlias)) return;
-              onChange({ ...step, modelAlias: v as WorkflowModelAlias });
-            }}
-            disabled={disabled}
-            items={{
-              standard: t.workflowPage.builder.stepModelStandard,
-              pro: t.workflowPage.builder.stepModelPro,
-              max: t.workflowPage.builder.stepModelMax,
-            }}
-          >
-            <SelectTrigger className="w-full text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="standard">
-                {t.workflowPage.builder.stepModelStandard}
-              </SelectItem>
-              <SelectItem value="pro">
-                {t.workflowPage.builder.stepModelPro}
-              </SelectItem>
-              <SelectItem value="max">
-                {t.workflowPage.builder.stepModelMax}
-              </SelectItem>
-            </SelectContent>
-          </Select>
-          <div className="text-xs text-muted-foreground">
-            {t.workflowPage.builder.stepModelHint}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.stepMaxTurnsLabel}
-          </label>
-          <input
-            type="number"
-            inputMode="numeric"
-            min={1}
-            max={60}
-            value={maxTurnsDraft}
-            onChange={(e) => setMaxTurnsDraft(e.target.value)}
-            onBlur={commitMaxTurns}
-            disabled={disabled}
-            placeholder="-"
-            className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring"
-          />
-          <div className="text-xs text-muted-foreground">
-            {t.workflowPage.builder.stepMaxTurnsHint}
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-medium text-muted-foreground">
-            {t.workflowPage.builder.stepResearchLabel}
-          </label>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={!!step.researchMode}
-            disabled={disabled}
-            onClick={() => onChange({ ...step, researchMode: !step.researchMode })}
-            className={cn(
-              "relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50",
-              step.researchMode ? "bg-primary" : "bg-muted",
-            )}
-          >
-            <span
-              className={cn(
-                "inline-block h-4 w-4 transform rounded-full bg-background transition-transform",
-                step.researchMode ? "translate-x-6" : "translate-x-1",
-              )}
-            />
-          </button>
-          <div className="text-xs text-muted-foreground">
-            {t.workflowPage.builder.stepResearchHint}
-          </div>
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.toolsFilterLabel}
-        </label>
+        <FieldLabel label={b.toolsFilterLabel} hint={b.toolsFilterHint} />
         <input
           type="text"
           value={toolsCsv}
@@ -432,53 +590,10 @@ function AssistantCallFields({
           }}
           disabled={disabled}
           placeholder="webFetch, gmailSendMessage"
-          className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring"
+          className={RAIL_INPUT_CLS}
         />
-        <div className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.toolsFilterHint}
-        </div>
       </div>
-
-      <div className="flex flex-col gap-1.5">
-        <label className="text-xs font-medium text-muted-foreground">
-          {t.workflowPage.builder.sessionLabel}
-        </label>
-        <Select
-          value={step.session ?? "per_run"}
-          onValueChange={(v) => {
-            if (!v) return;
-            onChange({
-              ...step,
-              session: v === "persistent" ? "persistent" : undefined,
-            });
-          }}
-          disabled={disabled}
-          items={{
-            per_run: t.workflowPage.builder.sessionPerRun,
-            persistent: t.workflowPage.builder.sessionPersistent,
-          }}
-        >
-          <SelectTrigger className={SELECT_TRIGGER_CLASS}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="per_run">{t.workflowPage.builder.sessionPerRun}</SelectItem>
-            <SelectItem value="persistent">{t.workflowPage.builder.sessionPersistent}</SelectItem>
-          </SelectContent>
-        </Select>
-        <div className="text-xs text-muted-foreground">
-          {t.workflowPage.builder.sessionHint}
-        </div>
-      </div>
-
-      <DeliverField
-        step={step}
-        destinations={destinations}
-        onChange={onChange}
-        disabled={disabled}
-        t={t}
-      />
-    </>
+    </div>
   );
 }
 
@@ -564,9 +679,7 @@ function PageAnchorField({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-medium text-muted-foreground">
-        {b.pageAnchorLabel}
-      </label>
+      <FieldLabel label={b.pageAnchorLabel} hint={b.pageAnchorHint} />
       <Select
         value={mode}
         onValueChange={(v) => {
@@ -580,7 +693,7 @@ function PageAnchorField({
           fromStep: b.pageAnchorModeFromStep,
         }}
       >
-        <SelectTrigger className={SELECT_TRIGGER_CLASS}>
+        <SelectTrigger size="sm" className="w-full">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -594,7 +707,7 @@ function PageAnchorField({
       </Select>
 
       {mode === "edit" && (
-        <div className="flex flex-col gap-1.5 pl-6">
+        <>
           <SearchableSelect
             value={step.page && "id" in step.page ? step.page.id : ""}
             onValueChange={(v) => onChange({ ...step, page: { id: v } })}
@@ -604,19 +717,17 @@ function PageAnchorField({
             disabled={disabled}
           />
           {selectedPage?.state === "draft" && (
-            <div className="text-xs text-muted-foreground">
+            <div className="text-[11px] text-muted-foreground/80">
               {b.pageAnchorDraftHint}
             </div>
           )}
-        </div>
+        </>
       )}
 
       {mode === "create" && (
-        <div className="flex flex-col gap-2 pl-6">
+        <>
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {b.pageAnchorTitleLabel}
-            </label>
+            <FieldLabel label={b.pageAnchorTitleLabel} />
             <input
               type="text"
               value={step.page && "create" in step.page ? step.page.title ?? "" : ""}
@@ -633,13 +744,11 @@ function PageAnchorField({
               disabled={disabled}
               placeholder={b.pageAnchorTitlePlaceholder}
               maxLength={256}
-              className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring"
+              className={RAIL_INPUT_CLS}
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {b.pageAnchorNestUnderLabel}
-            </label>
+            <FieldLabel label={b.pageAnchorNestUnderLabel} />
             <SearchableSelect
               value={nestUnderId}
               onValueChange={(v) => {
@@ -660,36 +769,32 @@ function PageAnchorField({
               disabled={disabled}
             />
           </div>
-        </div>
+        </>
       )}
 
       {mode === "fromStep" && (
-        <div className="flex flex-col gap-1.5 pl-6">
-          <Select
-            value={step.page && "fromStep" in step.page ? step.page.fromStep : ""}
-            onValueChange={(v) => {
-              if (v) onChange({ ...step, page: { fromStep: v } });
-            }}
-            disabled={disabled}
-            items={Object.fromEntries(
-              createSteps.map((s) => [s.id, s.description || s.id]),
-            )}
-          >
-            <SelectTrigger className={SELECT_TRIGGER_CLASS}>
-              <SelectValue placeholder={b.pageAnchorFromStepPlaceholder} />
-            </SelectTrigger>
-            <SelectContent>
-              {createSteps.map((s) => (
-                <SelectItem key={s.id} value={s.id}>
-                  {s.description || s.id}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        <Select
+          value={step.page && "fromStep" in step.page ? step.page.fromStep : ""}
+          onValueChange={(v) => {
+            if (v) onChange({ ...step, page: { fromStep: v } });
+          }}
+          disabled={disabled}
+          items={Object.fromEntries(
+            createSteps.map((s) => [s.id, s.description || s.id]),
+          )}
+        >
+          <SelectTrigger size="sm" className="w-full">
+            <SelectValue placeholder={b.pageAnchorFromStepPlaceholder} />
+          </SelectTrigger>
+          <SelectContent>
+            {createSteps.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {s.description || s.id}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       )}
-
-      <div className="text-xs text-muted-foreground">{b.pageAnchorHint}</div>
     </div>
   );
 }
@@ -726,9 +831,7 @@ function BlueprintField({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-xs font-medium text-muted-foreground">
-        {b.blueprintLabel}
-      </label>
+      <FieldLabel label={b.blueprintLabel} hint={b.blueprintHint} />
       <SearchableSelect
         value={step.blueprintId ?? NO_BLUEPRINT_VALUE}
         onValueChange={(v) =>
@@ -742,38 +845,228 @@ function BlueprintField({
         searchPlaceholder={b.blueprintSearchPlaceholder}
         emptyMessage={b.blueprintEmpty}
         disabled={disabled}
-        className={SELECT_TRIGGER_CLASS}
       />
-      <div className="text-xs text-muted-foreground">{b.blueprintHint}</div>
+    </div>
+  );
+}
+
+type SkillMode = "off" | "offer" | "require";
+
+/**
+ * "Skills" subform - the per-step brain-skill picker. Each of the workspace's
+ * skills gets a tri-state: **Off** (in neither list), **Offer** (added to
+ * `step.skills` - the callee is offered `useSkill` over it and chooses), or
+ * **Require** (added to `step.enforcedSkills` - its instructions are injected
+ * into the callee prompt as mandatory, so it always runs). The two arrays are
+ * disjoint by construction (a slug is Offer XOR Require), so nothing is ever
+ * double-surfaced. Default = every skill Off (both arrays undefined), the
+ * historical no-skill behavior. Each still passes the assistant's own
+ * enablement + clearance in the backend. The list is filterable by a search
+ * bar and rendered as horizontal rows — [name] [description] [Off/Offer/Require
+ * select]. Slugs already on the step but absent from the fetched list (a
+ * built-in, or a deleted workspace skill) are kept as their own rows so editing
+ * never silently drops them.
+ * Spec: docs/architecture/features/workflow.md -> "assistant_call skills".
+ */
+function SkillsField({
+  step,
+  skills,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  skills: WorkspaceSkillSummary[];
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  const offered = step.skills ?? [];
+  const enforced = step.enforcedSkills ?? [];
+  const enforcedSet = new Set(enforced);
+  const offeredSet = new Set(offered);
+
+  const modeOf = (slug: string): SkillMode =>
+    enforcedSet.has(slug) ? "require" : offeredSet.has(slug) ? "offer" : "off";
+
+  function setMode(slug: string, mode: SkillMode) {
+    const nextOffered = offered.filter((s) => s !== slug);
+    const nextEnforced = enforced.filter((s) => s !== slug);
+    if (mode === "offer") nextOffered.push(slug);
+    if (mode === "require") nextEnforced.push(slug);
+    onChange({
+      ...step,
+      skills: nextOffered.length > 0 ? nextOffered : undefined,
+      enforcedSkills: nextEnforced.length > 0 ? nextEnforced : undefined,
+    });
+  }
+
+  const knownSlugs = new Set(skills.map((s) => s.slug));
+  const extraSelected = [...new Set([...offered, ...enforced])].filter(
+    (slug) => !knownSlugs.has(slug),
+  );
+
+  // Client-side search over the workspace skills (name / description / slug).
+  // Not the native <input type="search">; mirrors the doc template-gallery
+  // search bar (a lucide Search icon + bare input in a bordered pill).
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = (hay: string | null | undefined) =>
+    (hay ?? "").toLowerCase().includes(q);
+  const filteredSkills = q
+    ? skills.filter((s) => matches(s.name) || matches(s.description) || matches(s.slug))
+    : skills;
+  const filteredExtra = q ? extraSelected.filter((slug) => matches(slug)) : extraSelected;
+
+  // The per-row "[Option]" cell: a compact Off / Offer / Require select (base-ui
+  // `Select`, not a native <select>). Off removes the skill from both lists.
+  const MODE_ITEMS = {
+    off: b.skillsModeOff,
+    offer: b.skillsModeOffer,
+    require: b.skillsModeRequire,
+  };
+  function ModeSelect({ slug, mode }: { slug: string; mode: SkillMode }) {
+    return (
+      <Select
+        value={mode}
+        onValueChange={(v) => {
+          if (v) setMode(slug, v as SkillMode);
+        }}
+        disabled={disabled}
+        items={MODE_ITEMS}
+      >
+        <SelectTrigger size="sm" className="w-[6.75rem] shrink-0">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="off">{b.skillsModeOff}</SelectItem>
+          <SelectItem value="offer">{b.skillsModeOffer}</SelectItem>
+          <SelectItem value="require">{b.skillsModeRequire}</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+  }
+
+  return (
+    // Span the whole identity-strip grid (it is otherwise a single ~1/4-width
+    // cell): the skill rows need the full document-column width so the
+    // description column has room to show.
+    <div className="col-span-full flex flex-col gap-1.5">
+      <FieldLabel label={b.skillsLabel} hint={b.skillsHint} />
+      {skills.length === 0 && extraSelected.length === 0 ? (
+        <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
+      ) : (
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2">
+          {/* Search bar (template-gallery pattern) */}
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5">
+            <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={b.skillsSearchPlaceholder}
+              disabled={disabled}
+              className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+
+          {/* Horizontal rows: [Name] [Description] [Option] */}
+          <div className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
+            {filteredSkills.length === 0 && filteredExtra.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-muted-foreground">
+                {b.skillsSearchEmpty}
+              </div>
+            ) : (
+              <>
+                {filteredSkills.map((s) => (
+                  <div
+                    key={s.rowId}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-medium">
+                      {s.name}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {s.description}
+                    </span>
+                    <ModeSelect slug={s.slug} mode={modeOf(s.slug)} />
+                  </div>
+                ))}
+                {filteredExtra.map((slug) => (
+                  <div
+                    key={slug}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-mono text-xs text-muted-foreground">
+                      {slug}
+                    </span>
+                    <span className="min-w-0 flex-1" />
+                    <ModeSelect slug={slug} mode={modeOf(slug)} />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 /**
- * "Send output to a channel" subform. Replaces the old free-text channel ID
- * input with a dropdown of recent chat destinations (sessions-derived) plus
- * a "Custom ID..." escape hatch for platform IDs the bot hasn't talked in yet.
+ * "Send output to a channel" subform. A Switch reveals the channel-type +
+ * destination pickers: a dropdown of known destinations plus a "Custom ID..."
+ * escape hatch for platform IDs the bot hasn't talked in yet. Slack options
+ * come live from the workspace's real channels (by `#name`); the other types
+ * are sessions-derived recent chats, shape-filtered and (for Telegram)
+ * resolved to display names server-side — see
+ * docs/architecture/features/workflow.md → "Deliver destination picker
+ * (web builder)".
  */
 function DeliverField({
   step,
   destinations,
+  slackChannels,
   onChange,
   disabled,
   t,
 }: {
   step: Extract<WorkflowStep, { type: "assistant_call" }>;
   destinations: ChannelDestination[];
+  slackChannels: SlackChannelOption[];
   onChange: (s: WorkflowStep) => void;
   disabled?: boolean;
   t: Dictionary;
 }) {
+  const b = t.workflowPage.builder;
   const channelType = step.deliver?.channelType ?? "telegram";
   const channelId = step.deliver?.channelId ?? "";
 
-  // Destinations relevant to the picked channel type. 'web' has no sessions
-  // surface — destinations stays empty and the custom-ID input takes over.
+  // Known destinations for the picked channel type. Slack is sourced live from
+  // the workspace's real channels by NAME (`#dev-work`), so authors never see
+  // a raw id and a non-Slack id (a Telegram chat id, an internal channels.id)
+  // can never appear — it just isn't a real Slack channel. Other types fall
+  // back to the sessions-derived recent chats, which the server shape-filters
+  // per type and (for Telegram) names via Bot API `getChat` — `title` carries
+  // the chat/person name, so the label is human-readable with the raw id as
+  // hint. 'web' has no destination surface — the custom-ID input takes over.
+  const isSlack = channelType === "slack";
   const relevant = destinations.filter((d) => d.channelType === channelType);
-  const matchesKnown = relevant.some((d) => d.channelId === channelId);
+  const known: SearchableSelectItem[] = isSlack
+    ? slackChannels.map((c) => ({ value: c.id, label: `#${c.name}`, hint: c.id }))
+    : relevant.map((d) => ({
+        value: d.channelId,
+        label: d.title || d.channelId,
+        hint: d.title ? d.channelId : undefined,
+      }));
+  const matchesKnown = known.some((k) => k.value === channelId);
 
   // Custom-mode is sticky once toggled (so the input stays visible while
   // empty) — derived from data otherwise.
@@ -781,14 +1074,10 @@ function DeliverField({
   const showCustom = stickyCustom || (!matchesKnown && channelId !== "");
 
   const items: SearchableSelectItem[] = [
-    ...relevant.map((d) => ({
-      value: d.channelId,
-      label: d.title || d.channelId,
-      hint: d.title ? d.channelId : undefined,
-    })),
+    ...known,
     {
       value: CUSTOM_DESTINATION_VALUE,
-      label: t.workflowPage.builder.deliverDestinationCustomOption,
+      label: b.deliverDestinationCustomOption,
     },
   ];
 
@@ -799,27 +1088,29 @@ function DeliverField({
       : "";
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-        <input
-          type="checkbox"
-          checked={!!step.deliver}
-          onChange={(e) => {
-            setStickyCustom(false);
-            onChange({
-              ...step,
-              deliver: e.target.checked
-                ? { channelType: "telegram", channelId: "" }
-                : undefined,
-            });
-          }}
-          disabled={disabled}
-          className="h-3.5 w-3.5 rounded border-border"
-        />
-        {t.workflowPage.builder.deliverLabel}
-      </label>
+    <div className="flex flex-col gap-2">
+      <SwitchRow
+        label={b.deliverLabel}
+        hint={b.deliverHint}
+        control={
+          <Switch
+            checked={!!step.deliver}
+            onCheckedChange={(checked) => {
+              setStickyCustom(false);
+              onChange({
+                ...step,
+                deliver: checked
+                  ? { channelType: "telegram", channelId: "" }
+                  : undefined,
+              });
+            }}
+            disabled={disabled}
+            aria-label={b.deliverLabel}
+          />
+        }
+      />
       {step.deliver && (
-        <div className="flex flex-col gap-2 pl-6">
+        <div className="flex flex-col gap-2">
           <Select
             value={channelType}
             onValueChange={(v) => {
@@ -832,31 +1123,25 @@ function DeliverField({
             }}
             disabled={disabled}
             items={{
-              telegram: t.workflowPage.builder.deliverChannelTelegram,
-              slack: t.workflowPage.builder.deliverChannelSlack,
-              web: t.workflowPage.builder.deliverChannelWeb,
+              telegram: b.deliverChannelTelegram,
+              slack: b.deliverChannelSlack,
+              whatsapp: b.deliverChannelWhatsApp,
+              web: b.deliverChannelWeb,
             }}
           >
-            <SelectTrigger className={SELECT_TRIGGER_CLASS}>
+            <SelectTrigger size="sm" className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="telegram">
-                {t.workflowPage.builder.deliverChannelTelegram}
-              </SelectItem>
-              <SelectItem value="slack">
-                {t.workflowPage.builder.deliverChannelSlack}
-              </SelectItem>
-              <SelectItem value="web">
-                {t.workflowPage.builder.deliverChannelWeb}
-              </SelectItem>
+              <SelectItem value="telegram">{b.deliverChannelTelegram}</SelectItem>
+              <SelectItem value="slack">{b.deliverChannelSlack}</SelectItem>
+              <SelectItem value="whatsapp">{b.deliverChannelWhatsApp}</SelectItem>
+              <SelectItem value="web">{b.deliverChannelWeb}</SelectItem>
             </SelectContent>
           </Select>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-muted-foreground">
-              {t.workflowPage.builder.deliverDestinationLabel}
-            </label>
+            <FieldLabel label={b.deliverDestinationLabel} />
             <SearchableSelect
               value={selectValue}
               onValueChange={(v) => {
@@ -875,22 +1160,33 @@ function DeliverField({
                 });
               }}
               items={items}
-              placeholder={t.workflowPage.builder.deliverDestinationPlaceholder}
-              emptyMessage={t.workflowPage.builder.deliverDestinationEmpty}
+              placeholder={
+                isSlack
+                  ? b.deliverDestinationSlackPlaceholder
+                  : b.deliverDestinationPlaceholder
+              }
+              emptyMessage={
+                isSlack
+                  ? b.deliverDestinationSlackEmpty
+                  : b.deliverDestinationEmpty
+              }
               disabled={disabled || channelType === "web"}
             />
-            {relevant.length === 0 && channelType !== "web" && (
-              <div className="text-xs text-muted-foreground">
-                {t.workflowPage.builder.deliverDestinationEmpty}
+            {known.length === 0 && channelType !== "web" && (
+              <div className="text-[11px] text-muted-foreground/80">
+                {isSlack
+                  ? b.deliverDestinationSlackEmpty
+                  : b.deliverDestinationEmpty}
               </div>
             )}
           </div>
 
           {(showCustom || channelType === "web") && (
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-medium text-muted-foreground">
-                {t.workflowPage.builder.deliverDestinationCustomLabel}
-              </label>
+              <FieldLabel
+                label={b.deliverDestinationCustomLabel}
+                hint={b.deliverDestinationCustomHint}
+              />
               <input
                 type="text"
                 value={channelId}
@@ -901,19 +1197,12 @@ function DeliverField({
                   })
                 }
                 disabled={disabled}
-                placeholder={t.workflowPage.builder.deliverChannelIdPlaceholder}
+                placeholder={b.deliverChannelIdPlaceholder}
                 maxLength={256}
-                className="px-3 py-2 bg-background border border-border rounded-md text-sm outline-none focus:ring-2 focus:ring-ring"
+                className={RAIL_INPUT_CLS}
               />
-              <div className="text-xs text-muted-foreground">
-                {t.workflowPage.builder.deliverDestinationCustomHint}
-              </div>
             </div>
           )}
-
-          <div className="text-xs text-muted-foreground">
-            {t.workflowPage.builder.deliverHint}
-          </div>
         </div>
       )}
     </div>
@@ -945,13 +1234,13 @@ function RawJsonFields({
 
   const summary = stepSummary(step, t);
   return (
-    <div className="flex flex-col gap-2">
+    <div className="mt-3 flex flex-col gap-2">
       {/* Plain-language summary first, so a non-technical reader understands the
           step without parsing JSON. The raw config moves into the Advanced
           disclosure below (collapsed by default - one click, nothing removed). */}
-      {summary && <p className="text-sm text-foreground">{summary}</p>}
+      {summary && <p className="text-sm text-muted-foreground">{summary}</p>}
 
-      <details className="rounded-md border border-border bg-muted/20 px-3 py-2 [&[open]]:pb-3">
+      <details className="rounded-md bg-muted/40 px-3 py-2 [&[open]]:pb-3">
         <summary className="cursor-pointer select-none text-xs font-medium text-muted-foreground marker:text-muted-foreground">
           {t.workflowPage.builder.stepAdvancedLabel}
         </summary>
@@ -978,7 +1267,7 @@ function RawJsonFields({
             spellCheck={false}
             className="px-3 py-2 bg-background border border-border rounded-md text-xs font-mono outline-none focus:ring-2 focus:ring-ring resize-y"
           />
-          <div className="text-xs text-muted-foreground">
+          <div className="text-[11px] text-muted-foreground/80">
             {t.workflowPage.builder.stepRawJsonHint}
           </div>
         </div>
@@ -992,13 +1281,11 @@ function RawJsonFields({
 
 /**
  * Plain-language one-liner for a non-assistant step, shown above the Advanced
- * JSON so the editor reads for non-technical users. Prefers the author's
- * `description`; falls back to a per-type sentence.
+ * JSON so the editor reads for non-technical users. Falls back to a per-type
+ * sentence (the author's `description` is the document title now).
  */
 function stepSummary(step: WorkflowStep, t: Dictionary): string {
   const b = t.workflowPage.builder;
-  const desc = step.description?.trim();
-  if (desc) return desc;
   switch (step.type) {
     case "tool_call":
       return step.toolName
@@ -1010,6 +1297,20 @@ function stepSummary(step: WorkflowStep, t: Dictionary): string {
       return b.stepSummaryWait;
     default:
       return "";
+  }
+}
+
+function stepTypeLabel(type: WorkflowStep["type"], t: Dictionary): string {
+  const b = t.workflowPage.builder;
+  switch (type) {
+    case "assistant_call":
+      return b.stepTypeAssistantCall;
+    case "tool_call":
+      return b.stepTypeToolCall;
+    case "wait":
+      return b.stepTypeWait;
+    case "branch":
+      return b.stepTypeBranch;
   }
 }
 

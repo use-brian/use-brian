@@ -17,6 +17,7 @@ export const MATCH_CAPS = {
   fromActors: 128,
   inChannels: 128,
   mentions: 128,
+  tags: 64,
 } as const
 
 export type MatchField = keyof typeof MATCH_CAPS

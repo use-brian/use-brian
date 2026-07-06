@@ -1,10 +1,10 @@
 /**
  * WhatsApp group ingest UI for the Studio - Events page.
  *
- * `WhatsappEventSource` renders WhatsApp as one of the Events page's ingest
- * source cards (same chrome as GitHub/Slack/etc.), with the group enable/disable
- * list (`WhatsappGroupManager`) as its body. It self-hides for workspaces that
- * have never connected a WhatsApp number, and shows a "reconnect in Channels"
+ * `WhatsappGroupManager` is the body of WhatsApp's detail panel in the Events
+ * master-detail surface: the seen-group enable/disable list. The Events page
+ * itself fetches WhatsApp's pairing status (`getWhatsappIngest`) to place the
+ * WhatsApp pseudo-row in its rail and to render the "reconnect in Channels"
  * note when the linked device was logged out (pairing stays on the Channels
  * card, where the channel is added).
  *
@@ -18,9 +18,7 @@
 
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import {
@@ -29,95 +27,7 @@ import {
   disableWhatsappGroup,
   type WhatsappGroup,
   type WhatsappGroupRouting,
-  type WhatsappIngestStatus,
 } from "@/lib/api/whatsapp-ingest";
-
-/**
- * WhatsApp source card for the Events page. Self-fetches connection state and
- * renders null when the workspace has no WhatsApp integration (so it only
- * appears for WhatsApp users). `onPresence` lets the page suppress its generic
- * "no sources" empty state when this card is showing.
- */
-export function WhatsappEventSource({
-  workspaceId,
-  onPresence,
-}: {
-  workspaceId: string;
-  onPresence?: (present: boolean) => void;
-}) {
-  const t = useT();
-  const copy = t.studioPage.ingestRules;
-  const wa = copy.whatsapp;
-  const [status, setStatus] = useState<WhatsappIngestStatus | null>(null);
-
-  const load = useCallback(() => {
-    getWhatsappIngest(workspaceId)
-      .then(setStatus)
-      .catch(() => setStatus(null));
-  }, [workspaceId]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  // A WhatsApp integration exists once a number has ever been paired (connected
-  // now, or revoked but still on file). Never-connected workspaces see nothing.
-  const present =
-    status !== null && (status.connected || status.connectedNumber !== null);
-
-  useEffect(() => {
-    if (status !== null) onPresence?.(present);
-  }, [status, present, onPresence]);
-
-  if (!present || status === null) return null;
-
-  const enabledCount = status.groups.filter((g) => g.enabled).length;
-  const channelsHref = `/w/${workspaceId}/studio/channels`;
-
-  return (
-    <div className="overflow-hidden rounded-xl border border-border bg-card">
-      <div className="flex items-center gap-3 px-5 py-4">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted">
-          <ConnectorIcon connectorId="whatsapp" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{wa.sourceLabel}</span>
-            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-              {copy.scopeWorkspace}
-            </span>
-          </div>
-          <div className="truncate text-[11px] text-muted-foreground">
-            {status.connectedNumber ?? copy.natureEvents}
-          </div>
-        </div>
-        <span
-          className={
-            "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium " +
-            (enabledCount > 0
-              ? "bg-primary/10 text-primary"
-              : "bg-muted text-muted-foreground")
-          }
-        >
-          {enabledCount > 0 ? copy.statusOn : copy.statusOff}
-        </span>
-      </div>
-
-      {!status.connected ? (
-        <div className="px-5 pb-3 text-[11px] text-amber-600 dark:text-amber-400">
-          {wa.reconnectInChannels}{" "}
-          <Link href={channelsHref} className="font-medium underline">
-            {wa.reconnectInChannelsCta}
-          </Link>
-        </div>
-      ) : (
-        <div className="border-t border-border bg-muted/20 px-5 py-3">
-          <WhatsappGroupManager workspaceId={workspaceId} />
-        </div>
-      )}
-    </div>
-  );
-}
 
 /**
  * The group enable/disable list. A personal number can be in hundreds of

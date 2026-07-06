@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { blockSchema, type Block } from '../../views/blocks.js'
-import { blocksToExtractionSpec } from '../custom-template-types.js'
+import { blocksToExtractionSpec, extractionSpecToBlocks } from '../custom-template-types.js'
 
 describe('[COMP:doc/blocks-to-extraction-spec] extraction_slot block + spec deriver', () => {
   it('parses an extraction_slot block via the canonical block schema', () => {
@@ -41,5 +41,36 @@ describe('[COMP:doc/blocks-to-extraction-spec] extraction_slot block + spec deri
     const blocks: Block[] = [{ kind: 'extraction_slot', id: 's1', instruction: 'no heading above me' }]
     const spec = blocksToExtractionSpec(blocks)
     expect(spec?.sections[0]).toMatchObject({ heading: 'Section', outputType: 'prose' })
+  })
+
+  it('extractionSpecToBlocks builds a heading + extraction_slot pair per section (schema-valid)', () => {
+    const blocks = extractionSpecToBlocks({
+      sections: [
+        { heading: 'Discovery', instruction: 'who + needs', outputType: 'prose' },
+        { heading: 'Contacts', instruction: 'names + roles', outputType: 'table' },
+      ],
+      capture: ['contact'],
+    })
+    expect(blocks).toEqual([
+      { kind: 'heading', id: 'bp-sec-0-h', level: 2, text: 'Discovery' },
+      { kind: 'extraction_slot', id: 'bp-sec-0-s', instruction: 'who + needs', outputType: 'prose' },
+      { kind: 'heading', id: 'bp-sec-1-h', level: 2, text: 'Contacts' },
+      { kind: 'extraction_slot', id: 'bp-sec-1-s', instruction: 'names + roles', outputType: 'table' },
+    ])
+    // Every generated block parses under the canonical block schema.
+    blocks.forEach((b) => expect(() => blockSchema.parse(b)).not.toThrow())
+  })
+
+  it('round-trips: blocksToExtractionSpec(extractionSpecToBlocks(spec)) preserves the sections', () => {
+    const spec = {
+      sections: [
+        { heading: 'A', instruction: 'fill a', outputType: 'prose' as const },
+        { heading: 'B', instruction: 'fill b', outputType: 'list' as const },
+      ],
+      capture: ['company' as const],
+    }
+    const back = blocksToExtractionSpec(extractionSpecToBlocks(spec), spec.capture)
+    expect(back?.sections).toEqual(spec.sections)
+    expect(back?.capture).toEqual(spec.capture)
   })
 })

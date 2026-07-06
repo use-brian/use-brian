@@ -156,3 +156,25 @@ export function blocksToExtractionSpec(
   }
   return sections.length > 0 ? { sections, capture } : null
 }
+
+/**
+ * The inverse of {@link blocksToExtractionSpec}: build a blueprint's page skeleton
+ * from an extraction spec, one `heading` + `extraction_slot` pair per section.
+ * Used when a spec is minted programmatically (structural-synthesis Phase 2: a
+ * skill's `extraction` is turned into a `workspace_page_templates` blueprint on
+ * save), so the result opens in the WYSIWYG editor and round-trips back through
+ * `blocksToExtractionSpec`. Deterministic block ids keep re-mints stable.
+ */
+export function extractionSpecToBlocks(spec: ExtractionSpec): Block[] {
+  const blocks: Block[] = []
+  spec.sections.forEach((section, i) => {
+    blocks.push({ kind: 'heading', id: `bp-sec-${i}-h`, level: 2, text: section.heading })
+    blocks.push({
+      kind: 'extraction_slot',
+      id: `bp-sec-${i}-s`,
+      instruction: section.instruction,
+      outputType: section.outputType,
+    })
+  })
+  return blocks
+}

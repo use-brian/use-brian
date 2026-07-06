@@ -44,13 +44,14 @@ import type {
 } from '@sidanclaw/core'
 import { getPool, query } from './client.js'
 
-// CRM specialization tables that can carry a merge cascade. The merge
-// `sourceKind` is interpolated into SQL — this allowlist is the guard.
-const CASCADE_TABLES: Record<string, string> = {
-  contacts: 'contacts',
-  companies: 'companies',
-  deals: 'deals',
-}
+// Specialization tables that can carry a merge cascade. Post CRM↔entity
+// collapse (crm-entity-unification) there are no specialization tables
+// left — contacts/companies/deals folded into `entities` — so nothing
+// cascades and this allowlist is empty. `applyCascade` / `reverseCascade`
+// therefore reject every `sourceKind`; the merge orchestration no longer
+// emits a specialization pointer to cascade. Kept as the interpolation
+// guard so a future specialization table slots in injection-safe.
+const CASCADE_TABLES: Record<string, string> = {}
 
 // ── Snapshot (de)serialization ───────────────────────────────────────
 

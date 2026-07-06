@@ -11,6 +11,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyUploadResult,
+  imageFilesFromClipboard,
   markStagedError,
   readyFileIds,
   type Attachment,
@@ -80,5 +81,60 @@ describe("[COMP:app-web/file-attachments] upload reconciliation", () => {
       { ...staged("d"), status: "done", fileId: "file_d" },
     ];
     expect(readyFileIds(list)).toEqual(["file_a", "file_d"]);
+  });
+});
+
+function fakeFile(type: string, name = "file"): File {
+  return { type, name } as unknown as File;
+}
+
+function clipboard(opts: { text?: string; files?: File[] }): {
+  files: File[];
+  getData: (t: string) => string;
+} {
+  return {
+    files: opts.files ?? [],
+    getData: (t: string) => (t === "text/plain" ? opts.text ?? "" : ""),
+  };
+}
+
+describe("[COMP:app-web/file-attachments] paste image extraction", () => {
+  const png = fakeFile("image/png", "shot.png");
+
+  it("attaches a bare pasted image (a screenshot has no text/plain)", () => {
+    expect(imageFilesFromClipboard(clipboard({ files: [png] }))).toEqual([png]);
+  });
+
+  it("returns every pasted image when several ride the clipboard", () => {
+    const jpg = fakeFile("image/jpeg", "b.jpg");
+    expect(imageFilesFromClipboard(clipboard({ files: [png, jpg] }))).toEqual([png, jpg]);
+  });
+
+  it("skips images when the paste carries real text (rich text from Word/Excel)", () => {
+    // The tagalong rendered image must NOT hijack a text paste.
+    expect(imageFilesFromClipboard(clipboard({ text: "hello", files: [png] }))).toEqual([]);
+  });
+
+  it("treats a whitespace-only text payload as no text (still attaches)", () => {
+    expect(imageFilesFromClipboard(clipboard({ text: "   \n", files: [png] }))).toEqual([png]);
+  });
+
+  it("ignores non-image files (chat paste is for pictures)", () => {
+    const pdf = fakeFile("application/pdf", "doc.pdf");
+    expect(imageFilesFromClipboard(clipboard({ files: [pdf] }))).toEqual([]);
+  });
+
+  it("keeps only the image out of a mixed image + non-image clipboard", () => {
+    const pdf = fakeFile("application/pdf", "doc.pdf");
+    expect(imageFilesFromClipboard(clipboard({ files: [pdf, png] }))).toEqual([png]);
+  });
+
+  it("returns [] for a plain-text paste with no files", () => {
+    expect(imageFilesFromClipboard(clipboard({ text: "just text" }))).toEqual([]);
+  });
+
+  it("returns [] when there is no clipboard data", () => {
+    expect(imageFilesFromClipboard(null)).toEqual([]);
+    expect(imageFilesFromClipboard(undefined)).toEqual([]);
   });
 });

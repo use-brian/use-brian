@@ -9,12 +9,6 @@ import type {
   RowStatus,
 } from '@sidanclaw/core'
 import { queryWithRLS } from './client.js'
-import {
-  getCompanyHistory,
-  getContactHistory,
-  getDealHistory,
-  type CrmHistoryRow,
-} from './crm.js'
 import { getEntityHistory } from './entities-store.js'
 import { getMemoryHistory } from './memories.js'
 import { getWorkspaceFileHistory } from './workspace-files.js'
@@ -226,60 +220,16 @@ async function fetchEntityVersions(
   }))
 }
 
-function fromCrmRow(row: CrmHistoryRow): RawVersion {
-  return {
-    id: row.id,
-    validFrom: row.validFrom,
-    validTo: row.validTo,
-    supersededBy: row.supersededBy,
-    retractedAt: row.retractedAt,
-    retractedReason: row.retractedReason,
-    createdByUserId: row.createdByUserId,
-    createdByAssistantId: row.createdByAssistantId,
-    createdAt: row.createdAt,
-    display: row.display,
-  }
-}
-
-function actorToCtx(actor: RetrievalActor): {
-  workspaceId: string
-  userId: string
-  assistantId: string
-  assistantKind: RetrievalActor['assistantKind']
-  clearance?: RetrievalActor['clearance']
-} {
-  return {
-    workspaceId: actor.workspaceId,
-    userId: actor.userId,
-    assistantId: actor.assistantId,
-    assistantKind: actor.assistantKind,
-    clearance: actor.clearance,
-  }
-}
-
-async function fetchCompanyVersions(actor: RetrievalActor, rowId: string): Promise<RawVersion[]> {
-  const rows = await getCompanyHistory(actorToCtx(actor), rowId)
-  return rows.map(fromCrmRow)
-}
-
-async function fetchContactVersions(actor: RetrievalActor, rowId: string): Promise<RawVersion[]> {
-  const rows = await getContactHistory(actorToCtx(actor), rowId)
-  return rows.map(fromCrmRow)
-}
-
-async function fetchDealVersions(actor: RetrievalActor, rowId: string): Promise<RawVersion[]> {
-  const rows = await getDealHistory(actorToCtx(actor), rowId)
-  return rows.map(fromCrmRow)
-}
-
 const DISPATCH: Record<RowHistoryPrimitive, (actor: RetrievalActor, rowId: string) => Promise<RawVersion[]>> = {
   memories: fetchMemoryVersions,
   tasks: fetchTaskVersions,
   workspace_files: fetchWorkspaceFileVersions,
   entities: fetchEntityVersions,
-  companies: fetchCompanyVersions,
-  contacts: fetchContactVersions,
-  deals: fetchDealVersions,
+  // CRM records are entities post-unification (crm-entity-unification.md) —
+  // their history is the entity supersession chain.
+  companies: fetchEntityVersions,
+  contacts: fetchEntityVersions,
+  deals: fetchEntityVersions,
 }
 
 // ── Status + projection helpers ─────────────────────────────────────

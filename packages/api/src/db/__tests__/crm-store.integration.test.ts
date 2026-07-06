@@ -15,7 +15,7 @@ async function canConnect(): Promise<boolean> {
   try {
     const client = await p.connect()
     try {
-      await client.query('SELECT 1 FROM deals LIMIT 1')
+      await client.query('SELECT 1 FROM entities LIMIT 1')
     } finally {
       client.release()
     }
@@ -254,8 +254,9 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       const client = await pool!.connect()
       try {
         const result = await client.query<{ n: string }>(
-          `SELECT count(*)::text AS n FROM contacts
-            WHERE workspace_id = $1 AND lower(email) = lower($2) AND valid_to IS NULL`,
+          `SELECT count(*)::text AS n FROM entities
+            WHERE workspace_id = $1 AND kind = 'person'
+              AND lower(canonical_id) = lower($2) AND valid_to IS NULL`,
           [workspaceId, 'team@acme.example'],
         )
         expect(Number(result.rows[0]?.n)).toBe(1)
@@ -267,7 +268,7 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
     })
   })
 
-  describe('FK SET NULL behavior', () => {
+  describe('relationship links + cascade', () => {
     let userId: string
     let workspaceId: string
 
@@ -282,50 +283,30 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       }
     })
 
-    it('deleting a contact sets deals.contact_id to NULL (deal survives)', async () => {
-      const contact = await store.createContact({ userId, workspaceId, name: 'Sam' })
-      const deal = await store.createDeal({ userId, workspaceId, contactId: contact.id, stage: 'proposal' })
-
-      // Delete via raw SQL (no deleteContact tool in v1)
-      const client = await pool!.connect()
-      try {
-        await client.query("SET app.system_bypass = ''")
-        await client.query(`SET app.current_user_id = '${userId}'`)
-        await client.query('DELETE FROM contacts WHERE id = $1', [contact.id])
-        await client.query("SET app.system_bypass = 'true'")
-      } finally {
-        client.release()
-      }
-
-      const fetched = await store.getDealById({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' }, deal.id)
-      expect(fetched).not.toBeNull()
-      expect(fetched!.contactId).toBeNull()
-      expect(fetched!.stage).toBe('proposal')
-    })
-
-    it('deleting a company sets contacts.company_id and deals.company_id to NULL', async () => {
+    // Post CRM→entity unification: relationships are `attributes` FKs +
+    // graph edges, not table FK columns, so ON DELETE SET NULL is gone.
+    // The supported way to drop a link is to clear it through updateX.
+    it('updateContact can clear the company link', async () => {
       const company = await store.createCompany({ userId, workspaceId, name: 'Acme' })
       const contact = await store.createContact({ userId, workspaceId, name: 'Sam', companyId: company.id })
-      const deal = await store.createDeal({ userId, workspaceId, contactId: contact.id, companyId: company.id })
-
-      const client = await pool!.connect()
-      try {
-        await client.query("SET app.system_bypass = ''")
-        await client.query(`SET app.current_user_id = '${userId}'`)
-        await client.query('DELETE FROM companies WHERE id = $1', [company.id])
-        await client.query("SET app.system_bypass = 'true'")
-      } finally {
-        client.release()
-      }
-
-      const c = await store.getContactById({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' }, contact.id)
-      const d = await store.getDealById({ workspaceId, userId, assistantId: userId, assistantKind: 'standard' }, deal.id)
-      expect(c?.companyId).toBeNull()
-      expect(d?.companyId).toBeNull()
-      expect(d?.contactId).toBe(contact.id)
+      expect(contact.companyId).toBe(company.id)
+      const cleared = await store.updateContact(userId, contact.id, { companyId: null })
+      expect(cleared!.companyId).toBeNull()
     })
 
-    it('workspace delete cascades to all 3 entity tables', async () => {
+    it('updateDeal can clear the contact + company links (deal survives)', async () => {
+      const contact = await store.createContact({ userId, workspaceId, name: 'Sam' })
+      const company = await store.createCompany({ userId, workspaceId, name: 'Acme' })
+      const deal = await store.createDeal({
+        userId, workspaceId, contactId: contact.id, companyId: company.id, stage: 'proposal',
+      })
+      const cleared = await store.updateDeal(userId, deal.id, { contactId: null, companyId: null })
+      expect(cleared!.contactId).toBeNull()
+      expect(cleared!.companyId).toBeNull()
+      expect(cleared!.stage).toBe('proposal')
+    })
+
+    it('workspace delete cascades to CRM entities', async () => {
       const company = await store.createCompany({ userId, workspaceId, name: 'Acme' })
       const contact = await store.createContact({ userId, workspaceId, name: 'Sam', companyId: company.id })
       await store.createDeal({ userId, workspaceId, contactId: contact.id, companyId: company.id })
@@ -333,12 +314,12 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       const client = await pool!.connect()
       try {
         await client.query('DELETE FROM workspaces WHERE id = $1', [workspaceId])
-        const r1 = await client.query('SELECT count(*)::int AS n FROM contacts WHERE workspace_id = $1', [workspaceId])
-        const r2 = await client.query('SELECT count(*)::int AS n FROM companies WHERE workspace_id = $1', [workspaceId])
-        const r3 = await client.query('SELECT count(*)::int AS n FROM deals WHERE workspace_id = $1', [workspaceId])
-        expect(r1.rows[0].n).toBe(0)
-        expect(r2.rows[0].n).toBe(0)
-        expect(r3.rows[0].n).toBe(0)
+        const r = await client.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM entities
+            WHERE workspace_id = $1 AND kind IN ('person', 'company', 'deal')`,
+          [workspaceId],
+        )
+        expect(r.rows[0].n).toBe(0)
       } finally {
         client.release()
       }
@@ -376,6 +357,91 @@ describeIf('[COMP:api/crm-store] CRM store + RLS (integration)', () => {
       // A queries their own workspace — should see the row
       const aSeesA = await store.listCompanies({ workspaceId: aWs, userId: aUser, assistantId: aUser, assistantKind: 'standard' }, {})
       expect(aSeesA).toHaveLength(1)
+    })
+  })
+
+  describe('Dedupe access scoping', () => {
+    // Regression for the 2026-07-05 incident: saveContact's upsert-dedupe
+    // matched a same-name person entity owned by ANOTHER user in the same
+    // workspace, merged into it, and reported success — but every read
+    // path (access predicate: user_id IS NULL OR user_id = viewer) hid the
+    // row from the caller. The dedupe scan must only select rows the
+    // writer can read back.
+    let aUser: string
+    let bUser: string
+    let workspaceId: string
+
+    beforeEach(async () => {
+      const client = await pool!.connect()
+      try {
+        aUser = await makeUser(client)
+        bUser = await makeUser(client)
+        workspaceId = await makeWorkspace(client, aUser)
+        await addMember(client, workspaceId, aUser)
+        await addMember(client, workspaceId, bUser)
+      } finally {
+        client.release()
+      }
+    })
+
+    it('contact upsert does not merge into another user\'s private same-name row', async () => {
+      const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      const mine = await store.createContact({
+        userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+
+      // Fresh caller-owned row, not a merge into the invisible one.
+      expect(mine.id).not.toBe(theirs.id)
+
+      // Read-your-write: the caller's list shows the row it just wrote.
+      const visible = await store.listContacts(
+        { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+        { query: 'Ken' },
+      )
+      expect(visible.map((r) => r.id)).toContain(mine.id)
+      expect(visible.map((r) => r.id)).not.toContain(theirs.id)
+
+      // The other user's private row was not mutated.
+      const theirsAfter = await store.getContactById(
+        { workspaceId, userId: bUser, assistantId: bUser, assistantKind: 'standard' },
+        theirs.id,
+      )
+      expect(theirsAfter?.tags).toEqual([])
+    })
+
+    it('contact upsert still dedupes into the caller\'s own same-name row', async () => {
+      const first = await store.createContact({
+        userId: aUser, workspaceId, name: 'Ken Lau', tags: ['engineer'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      const second = await store.createContact({
+        userId: aUser, workspaceId, name: 'ken lau', tags: ['oss'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      expect(second.id).toBe(first.id)
+      expect(second.tags.sort()).toEqual(['engineer', 'oss'])
+    })
+
+    it('contact upsert without access falls back to the user axis (no cross-user merge)', async () => {
+      const theirs = await store.createContact({ userId: bUser, workspaceId, name: 'Ken Lau' })
+      const mine = await store.createContact({ userId: aUser, workspaceId, name: 'Ken Lau' })
+      expect(mine.id).not.toBe(theirs.id)
+    })
+
+    it('company upsert does not merge into another user\'s private same-name row', async () => {
+      const theirs = await store.createCompany({ userId: bUser, workspaceId, name: 'Acme' })
+      const mine = await store.createCompany({
+        userId: aUser, workspaceId, name: 'Acme', tags: ['vendor'],
+        access: { workspaceId, userId: aUser, assistantId: aUser, assistantKind: 'primary' },
+      })
+      expect(mine.id).not.toBe(theirs.id)
+
+      const theirsAfter = await store.getCompanyById(
+        { workspaceId, userId: bUser, assistantId: bUser, assistantKind: 'standard' },
+        theirs.id,
+      )
+      expect(theirsAfter?.tags).toEqual([])
     })
   })
 })
@@ -429,44 +495,11 @@ describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
     }
   }
 
-  async function readContactEntityId(id: string): Promise<string | null> {
-    const client = await pool!.connect()
-    try {
-      const r = await client.query<{ entityId: string | null }>(
-        `SELECT entity_id AS "entityId" FROM contacts WHERE id = $1`,
-        [id],
-      )
-      return r.rows[0]?.entityId ?? null
-    } finally {
-      client.release()
-    }
-  }
-
-  async function readCompanyEntityId(id: string): Promise<string | null> {
-    const client = await pool!.connect()
-    try {
-      const r = await client.query<{ entityId: string | null }>(
-        `SELECT entity_id AS "entityId" FROM companies WHERE id = $1`,
-        [id],
-      )
-      return r.rows[0]?.entityId ?? null
-    } finally {
-      client.release()
-    }
-  }
-
-  async function readDealEntityId(id: string): Promise<string | null> {
-    const client = await pool!.connect()
-    try {
-      const r = await client.query<{ entityId: string | null }>(
-        `SELECT entity_id AS "entityId" FROM deals WHERE id = $1`,
-        [id],
-      )
-      return r.rows[0]?.entityId ?? null
-    } finally {
-      client.release()
-    }
-  }
+  // Post CRM→entity unification the record id IS the entity id — there is
+  // no separate specialization row to resolve through.
+  async function readContactEntityId(id: string): Promise<string | null> { return id }
+  async function readCompanyEntityId(id: string): Promise<string | null> { return id }
+  async function readDealEntityId(id: string): Promise<string | null> { return id }
 
   it('createContact creates entity + contact atomically with matching entity_id', async () => {
     const contact = await store.createContact({
@@ -503,7 +536,7 @@ describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
     expect(entity!.canonicalId).toBe('acme.example')
   })
 
-  it('createDeal with companyId — display_name="Deal — {company.name}"', async () => {
+  it('createDeal with companyId — display_name="Deal - {company.name}"', async () => {
     const company = await store.createCompany({ userId, workspaceId, name: 'Acme' })
     const deal = await store.createDeal({
       userId, workspaceId, companyId: company.id, stage: 'proposal',
@@ -511,7 +544,7 @@ describeIf('[COMP:brain/crm-write-wrapper] CRM write wrapper (Q24)', () => {
     const entityId = await readDealEntityId(deal.id)
     const entity = await readEntity(entityId!)
     expect(entity!.kind).toBe('deal')
-    expect(entity!.displayName).toBe('Deal — Acme')
+    expect(entity!.displayName).toBe('Deal - Acme')
     expect(entity!.canonicalId).toBeNull()
   })
 

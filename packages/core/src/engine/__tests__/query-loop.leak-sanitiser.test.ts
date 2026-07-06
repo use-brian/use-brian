@@ -145,6 +145,26 @@ describe('[COMP:engine/leak-sanitiser] looksLikeInstructionLeak — plan-tail pa
     ).toBe(false)
   })
 
+  // Negative status reports open with "No <thing>" all the time — and a
+  // workflow step prompt that mandates a verbatim fallback ("If none are
+  // returned, output exactly: …") phrases it exactly that way. The 2026-07-02
+  // triplication incident (Daily GitHub Dev Work Summary, run 26d50608): the
+  // then-present `^no\b` opener anchor suppressed the mandated fallback,
+  // EMPTY_RETRY re-prompted twice, and the callee executor concatenated all
+  // three streamed attempts into "…hours.No recorded…hours.No recorded…".
+  it('does NOT fire on a negative status report opening with "No"', () => {
+    expect(
+      looksLikeInstructionLeak('No recorded GitHub activity in the last 24 hours.'),
+    ).toBe(false)
+    expect(looksLikeInstructionLeak('No meetings on your calendar today.')).toBe(false)
+    expect(looksLikeInstructionLeak('No new emails since yesterday evening.')).toBe(false)
+  })
+
+  it('still catches the genuine "No …" leaks via the substring pass', () => {
+    expect(looksLikeInstructionLeak('No further tool calls.')).toBe(true)
+    expect(looksLikeInstructionLeak('No sycophancy. No pre-announcements.')).toBe(true)
+  })
+
   it('does NOT fire on a normal multi-paragraph reply', () => {
     const real = [
       'I created three tasks in your GRI workspace:',

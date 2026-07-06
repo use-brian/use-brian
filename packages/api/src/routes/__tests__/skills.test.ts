@@ -14,16 +14,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
-vi.mock('@sidanclaw/core', () => ({
-  loadBuiltinSkills: vi.fn(() => [
-    { id: 'builtin-1', name: 'Built In', description: 'b', category: 'general', source: 'builtin' },
-  ]),
-  // routes/skills.ts constructs the POST /draft limiter at mount time.
-  createRateLimiter: vi.fn(() => ({ check: () => true })),
-  // draft-generator imports these; the draft path itself is tested without
-  // this mock in skills-draft.test.ts.
-  collectStream: vi.fn(),
-}))
+vi.mock('@sidanclaw/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@sidanclaw/core')>()
+  return {
+    loadBuiltinSkills: vi.fn(() => [
+      { id: 'builtin-1', name: 'Built In', description: 'b', category: 'general', source: 'builtin' },
+    ]),
+    // routes/skills.ts constructs the POST /draft limiter at mount time.
+    createRateLimiter: vi.fn(() => ({ check: () => true })),
+    // draft-generator imports these; the draft path itself is tested without
+    // this mock in skills-draft.test.ts.
+    collectStream: vi.fn(),
+    // draft-generator builds its reply schema from the real blueprint
+    // extraction-spec shape at module load — a zod schema, keep it real.
+    extractionSpecSchema: actual.extractionSpecSchema,
+  }
+})
 
 import { skillRoutes } from '../skills.js'
 

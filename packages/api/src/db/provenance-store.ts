@@ -64,15 +64,19 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * implicitly by source+target+type uniqueness over time per mig 126),
  * so its supersession lookups are skipped rather than crashing on a
  * missing column.
+ *
+ * This probe REPORTS the primitive of the found row (via `spec.table`),
+ * so unlike a pure dispatch map it must not have contact/company/deal
+ * entries pointing at `entities` — a company row would be mis-reported
+ * as a `contacts` primitive. Post CRM↔entity collapse
+ * (crm-entity-unification) those ids ARE `entities` rows, so the single
+ * `entities` probe finds them and reports them as `entities` correctly.
  */
 const PRIMITIVE_TABLES: ReadonlyArray<{ table: string; hasSupersededBy: boolean }> = [
   { table: 'memories', hasSupersededBy: true },
   { table: 'tasks', hasSupersededBy: true },
   { table: 'workspace_files', hasSupersededBy: true },
   { table: 'entities', hasSupersededBy: true },
-  { table: 'contacts', hasSupersededBy: true },
-  { table: 'companies', hasSupersededBy: true },
-  { table: 'deals', hasSupersededBy: true },
   { table: 'kb_chunks', hasSupersededBy: true },
   { table: 'entity_links', hasSupersededBy: false },
 ]

@@ -155,7 +155,7 @@ import { useT, format } from "@/lib/i18n/client";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import type { AssistantRunState } from "@sidanclaw/doc-model";
 import { cn } from "@/lib/utils";
-import { useFileAttachments } from "@/lib/use-file-attachments";
+import { imageFilesFromClipboard, useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -2441,6 +2441,19 @@ export function FloatingChat({
             disabled={!!pendingQuestion || offline}
             sendDisabled={isStreaming}
             allowEmptySend={att.hasReady}
+            // Paste a screenshot / copied image straight into the chat — it
+            // stages as an attachment chip exactly like the paperclip or a
+            // drag-drop and rides the next send (staging mid-stream is fine).
+            // Guarded so a text paste (even rich text carrying a tagalong
+            // image) still pastes as text; skipped while a clarifying question
+            // holds the composer, matching the drop hook's `disabled`.
+            onPaste={(e) => {
+              if (pendingQuestion) return;
+              const images = imageFilesFromClipboard(e.clipboardData);
+              if (images.length === 0) return;
+              e.preventDefault();
+              void att.upload(images);
+            }}
             placeholder={
               pendingQuestion
                 ? t.pendingQuestion.composerDisabled

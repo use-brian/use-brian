@@ -66,6 +66,9 @@ export type WorkspaceSkillSummary = {
   verifiedAt: string | null;
   /** Independent re-derivation count (the non-human confidence channel). */
   rederivationCount: number;
+  /** Structural-synthesis Phase 2: the v2 blueprint (page-template id) this skill
+   *  fills, if its draft carried a structured output shape; null ⇒ purely procedural. */
+  blueprintId: string | null;
   requiresConnectors: string[];
   /** Allowlist of assistant ids the skill is offered to (D4 semantics). */
   enabledAssistantIds: string[];

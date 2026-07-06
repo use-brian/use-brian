@@ -16,9 +16,11 @@
  */
 
 import type {
+  ClaimedRun,
   EventSubscription,
   EventTriggeredWorkflow,
   PageWorkflowRunSummary,
+  RunQueueStore,
   WorkflowDefinition,
   WorkflowModelAlias,
   WorkflowRecord,
@@ -45,6 +47,7 @@ const WORKFLOW_SELECT = `
   description,
   definition,
   enabled,
+  paused_reason       AS "pausedReason",
   trigger,
   webhook_slug        AS "webhookSlug",
   webhook_secret      AS "webhookSecret",
@@ -64,6 +67,7 @@ type WorkflowRow = {
   description: string | null
   definition: WorkflowDefinition
   enabled: boolean
+  pausedReason: string | null
   trigger: WorkflowTrigger | null
   webhookSlug: string | null
   webhookSecret: string | null
@@ -112,6 +116,7 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     description: row.description,
     definition: backfillStepRunSettings(row.definition, row),
     enabled: row.enabled,
+    pausedReason: row.pausedReason,
     trigger: row.trigger ?? { kind: 'manual' },
     webhookSlug: row.webhookSlug,
     webhookSecret: row.webhookSecret,
@@ -195,6 +200,9 @@ export function createDbWorkflowStore(): WorkflowStore {
       if (fields.description !== undefined) { sets.push(`description = $${idx}`); values.push(fields.description); idx++ }
       if (fields.definition !== undefined) { sets.push(`definition = $${idx}`); values.push(JSON.stringify(fields.definition)); idx++ }
       if (fields.enabled !== undefined) { sets.push(`enabled = $${idx}`); values.push(fields.enabled); idx++ }
+      // Re-enabling clears a storm-guard pause — the reason described why the
+      // workflow was disabled; once a member turns it back on it's stale.
+      if (fields.enabled === true) { sets.push('paused_reason = NULL') }
       if (fields.trigger !== undefined) { sets.push(`trigger = $${idx}::jsonb`); values.push(JSON.stringify(fields.trigger)); idx++ }
       if (fields.webhookSlug !== undefined) { sets.push(`webhook_slug = $${idx}`); values.push(fields.webhookSlug); idx++ }
       if (fields.webhookSecret !== undefined) { sets.push(`webhook_secret = $${idx}`); values.push(fields.webhookSecret); idx++ }
@@ -1047,4 +1055,146 @@ export function decodeRunCursor(cursor: string): { startedAt: Date; id: string }
   } catch {
     return null
   }
+}
+
+// ── Event run queue (mig 302) ───────────────────────────────────────────
+//
+// Event dispatch enqueues `pending` runs; the run-queue worker
+// (`@sidanclaw/core` → workflow/run-queue.ts) drains them through these
+// system-level methods. Spec: docs/architecture/features/workflow.md →
+// "Event run queue — enqueue, drain, storm guard".
+// [COMP:workflow/run-queue]
+
+/**
+ * The queue's persistence port. Claiming is one row at a time — claims are
+ * cheap next to the multi-step LLM run they admit, and per-claim selection
+ * keeps the fairness rules (per-workflow serialization, per-workspace cap)
+ * exact within a replica's own claims: a run this call just claimed (fresh
+ * `claimed_at`, still `pending`) already counts against its workflow and
+ * workspace in the next call's eligibility.
+ */
+export function createWorkflowRunQueueStore(): RunQueueStore {
+  return {
+    async claimNextPendingRunSystem({ leaseSeconds, maxClaimAttempts, workspaceCap }) {
+      const result = await query<{ id: string; workflowId: string; workspaceId: string }>(
+        `UPDATE workflow_runs
+            SET claimed_at = now(), claim_attempts = claim_attempts + 1
+          WHERE id = (
+            SELECT r.id FROM workflow_runs r
+             WHERE r.status = 'pending'
+               AND (r.claimed_at IS NULL OR r.claimed_at < now() - make_interval(secs => $1))
+               AND r.claim_attempts < $2
+               -- Per-workflow serialization: no sibling running or freshly claimed.
+               AND NOT EXISTS (
+                 SELECT 1 FROM workflow_runs s
+                  WHERE s.workflow_id = r.workflow_id
+                    AND s.id <> r.id
+                    AND (s.status = 'running'
+                         OR (s.status = 'pending'
+                             AND s.claimed_at IS NOT NULL
+                             AND s.claimed_at >= now() - make_interval(secs => $1)))
+               )
+               -- Per-workspace in-flight cap (running + freshly claimed).
+               AND (
+                 SELECT count(*) FROM workflow_runs w
+                  WHERE w.workspace_id = r.workspace_id
+                    AND w.id <> r.id
+                    AND (w.status = 'running'
+                         OR (w.status = 'pending'
+                             AND w.claimed_at IS NOT NULL
+                             AND w.claimed_at >= now() - make_interval(secs => $1)))
+               ) < $3
+             ORDER BY r.started_at
+             LIMIT 1
+             FOR UPDATE OF r SKIP LOCKED
+          )
+          RETURNING id, workflow_id AS "workflowId", workspace_id AS "workspaceId"`,
+        [leaseSeconds, maxClaimAttempts, workspaceCap],
+      )
+      const row = result.rows[0]
+      if (!row) return null
+      const claimed: ClaimedRun = {
+        runId: row.id,
+        workflowId: row.workflowId,
+        workspaceId: row.workspaceId,
+      }
+      return claimed
+    },
+
+    async failExhaustedPendingRunsSystem({ leaseSeconds, maxClaimAttempts }) {
+      const result = await query(
+        `UPDATE workflow_runs
+            SET status = 'failed', finished_at = now(),
+                error = jsonb_build_object(
+                  'message', 'Run queue gave up after repeated claim attempts.',
+                  'reason', 'run_queue_exhausted')
+          WHERE status = 'pending'
+            AND claim_attempts >= $2
+            AND claimed_at IS NOT NULL
+            AND claimed_at < now() - make_interval(secs => $1)`,
+        [leaseSeconds, maxClaimAttempts],
+      )
+      return result.rowCount ?? 0
+    },
+
+    async requeueStaleRunningRunsSystem({ staleSeconds, maxClaimAttempts }) {
+      // Attempts remaining → back to pending for a fresh claim
+      // (advanceWorkflowRun is re-entrant over persisted step state).
+      const requeued = await query(
+        `UPDATE workflow_runs
+            SET status = 'pending', claimed_at = NULL
+          WHERE status = 'running'
+            AND last_active_at < now() - make_interval(secs => $1)
+            AND claim_attempts < $2`,
+        [staleSeconds, maxClaimAttempts],
+      )
+      // Exhausted → fail visibly instead of poison-looping.
+      const failed = await query(
+        `UPDATE workflow_runs
+            SET status = 'failed', finished_at = now(),
+                error = jsonb_build_object(
+                  'message', 'Run stalled and exceeded retry attempts.',
+                  'reason', 'run_queue_stale')
+          WHERE status = 'running'
+            AND last_active_at < now() - make_interval(secs => $1)
+            AND claim_attempts >= $2`,
+        [staleSeconds, maxClaimAttempts],
+      )
+      return (requeued.rowCount ?? 0) + (failed.rowCount ?? 0)
+    },
+  }
+}
+
+/**
+ * Runs a workflow started inside the trailing window — the storm-guard
+ * counter (`started_at` defaults to the insert time, so this counts
+ * enqueues). System-level: the dispatcher has no acting user.
+ */
+export async function countRecentRunsForWorkflowSystem(
+  workflowId: string,
+  windowSeconds: number,
+): Promise<number> {
+  const result = await query<{ count: string }>(
+    `SELECT count(*) AS count FROM workflow_runs
+      WHERE workflow_id = $1 AND started_at > now() - make_interval(secs => $2)`,
+    [workflowId, windowSeconds],
+  )
+  return parseInt(result.rows[0]?.count ?? '0', 10)
+}
+
+/**
+ * Storm-guard pause: disable the workflow and record why. The
+ * `enabled = true` filter in `findEventTriggeredWorkflowsSystem` then drops
+ * subsequent events for free; a PATCH re-enable clears `paused_reason`
+ * (see `createDbWorkflowStore().update`).
+ */
+export async function pauseWorkflowSystem(
+  workflowId: string,
+  reason: string,
+): Promise<void> {
+  await query(
+    `UPDATE workflows SET enabled = false, paused_reason = $2, updated_at = now()
+      WHERE id = $1`,
+    [workflowId, reason],
+  )
 }

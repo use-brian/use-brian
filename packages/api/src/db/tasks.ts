@@ -1,8 +1,9 @@
-import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
+import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@sidanclaw/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
+import { publishTaskLifecycle } from '../task-event-fanout.js'
 
 const FULL_SELECT = `
   id, workspace_id as "workspaceId", title, status,
@@ -115,6 +116,10 @@ export async function createTask(
     /** Entity ids this task references — each gets a `mentioned` edge
      *  (WU-1.7). Optional; empty/absent means no edge emission. */
     linkedEntityIds?: readonly string[]
+    /** Write-actor marker for the workflow task-event self-loop guard
+     *  (`system` → bot-authored event, gated by `fromBots`). Default
+     *  `'user'`. Not persisted. */
+    writtenBy?: TaskWriteActor
   },
   entityLinks?: EntityLinksStore,
 ): Promise<TaskRecord> {
@@ -146,6 +151,27 @@ export async function createTask(
     ],
   )
   const task = toRecord(result.rows[0])
+
+  // Workflow task-event emit — fire-and-forget after the committed insert
+  // (single-statement autocommit above). The late-bound fanout is a no-op
+  // until bootOpenApi binds the dispatcher. [COMP:api/task-event-fanout]
+  publishTaskLifecycle({
+    workspaceId: task.workspaceId,
+    taskId: task.id,
+    kind: 'created',
+    title: task.title,
+    status: task.status,
+    previousStatus: null,
+    tags: task.tags,
+    previousTags: null,
+    assigneeId: task.assigneeId,
+    previousAssigneeId: null,
+    due: task.due,
+    parentId: task.parentId,
+    changedFields: [],
+    actorId: userId,
+    writtenBy: params.writtenBy,
+  })
 
   // Fire-and-forget `mentioned` edges — `void`, never awaited, never
   // able to throw into the task save.
@@ -266,6 +292,49 @@ type OldTaskRow = {
 }
 
 /**
+ * Which patchable fields the write actually changed (caller passed the key
+ * AND the value differs from the old row). Feeds the task lifecycle event's
+ * `changedFields` — keys use the `TaskUpdateFields` casing.
+ */
+function diffChangedFields(
+  old: OldTaskRow,
+  next: TaskRecord,
+  fields: TaskUpdateFields,
+): string[] {
+  const changed: string[] = []
+  if (fields.title !== undefined && next.title !== old.title) changed.push('title')
+  if (fields.status !== undefined && next.status !== old.status) changed.push('status')
+  if (fields.assigneeId !== undefined && next.assigneeId !== old.assignee_id) changed.push('assigneeId')
+  if (
+    fields.due !== undefined &&
+    (next.due?.getTime() ?? null) !== (old.due?.getTime() ?? null)
+  ) {
+    changed.push('due')
+  }
+  if (fields.tags !== undefined && !sameStringSet(next.tags, old.tags ?? [])) changed.push('tags')
+  if (fields.parentId !== undefined && next.parentId !== old.parent_id) changed.push('parentId')
+  if (
+    fields.externalRef !== undefined &&
+    JSON.stringify(next.externalRef) !== JSON.stringify(old.external_ref ?? {})
+  ) {
+    changed.push('externalRef')
+  }
+  if (
+    fields.attributes !== undefined &&
+    JSON.stringify(next.attributes) !== JSON.stringify(old.attributes ?? {})
+  ) {
+    changed.push('attributes')
+  }
+  return changed
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const bs = new Set(b)
+  return a.every((x) => bs.has(x))
+}
+
+/**
  * Forward-resolve a (possibly superseded) task id to its live head by
  * walking `superseded_by`. A bi-temporal edit rotates the id, so a caller
  * holding a pre-supersession id (e.g. an LLM working from a stale
@@ -309,6 +378,12 @@ export async function updateTask(
   id: string,
   fields: TaskUpdateFields,
   entityLinks?: EntityLinksStore,
+  opts?: {
+    /** Write-actor marker for the workflow task-event self-loop guard.
+     *  An opts arg, NOT a `fields` key, so it can never trip the
+     *  empty-patch no-op check or leak into the supersession write. */
+    writtenBy?: TaskWriteActor
+  },
 ): Promise<TaskRecord | null> {
   if (Object.keys(fields).length === 0) {
     // No-op short-circuit — read the current row without per-viewer
@@ -424,6 +499,28 @@ export async function updateTask(
 
       await client.query('COMMIT')
       const newTask = toRecord(newRow)
+
+      // Workflow task-event emit — fire-and-forget after COMMIT. The old
+      // row (already read for the supersession write) supplies the
+      // before-snapshot; the producer derives the action set from the
+      // diff. [COMP:api/task-event-fanout]
+      publishTaskLifecycle({
+        workspaceId: newTask.workspaceId,
+        taskId: newTask.id,
+        kind: 'updated',
+        title: newTask.title,
+        status: newTask.status,
+        previousStatus: old.status,
+        tags: newTask.tags,
+        previousTags: old.tags ?? [],
+        assigneeId: newTask.assigneeId,
+        previousAssigneeId: old.assignee_id,
+        due: newTask.due,
+        parentId: newTask.parentId,
+        changedFields: diffChangedFields(old, newTask, fields),
+        actorId: userId,
+        writtenBy: opts?.writtenBy,
+      })
 
       // Fire-and-forget `depends_on` edges from the new (active) task
       // id → each depended-on target. v1 append-only — does not remove

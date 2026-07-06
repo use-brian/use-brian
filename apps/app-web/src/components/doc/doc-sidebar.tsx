@@ -54,7 +54,6 @@ import {
 import {
   Brain,
   GitBranch,
-  Target,
   Home,
   Inbox,
   MoreHorizontal,
@@ -465,18 +464,9 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
-        <Tooltip label={t.iconGoals} shortcut="⌘5">
-          <Link
-            href={`/w/${workspaceId}/goals`}
-            aria-label={t.iconGoalsAria}
-            className={navItemCls(surfaceActive("goals"), !utilityPillOpen)}
-          >
-            <Target className="size-[17px] shrink-0" />
-            {surfacePill("goals") ? (
-              <span className="whitespace-nowrap">{t.iconGoals}</span>
-            ) : null}
-          </Link>
-        </Tooltip>
+        {/* Goals board (`/goals`) deliberately has NO nav slot — like Approvals,
+            it is attention-routed: the home-dock Autopilot card + the Brain task
+            panel are its entry points (docs/architecture/features/goals.md). */}
 
         {/* Utilities — Inbox (toggles the flyout) + Search (client-side filter).
             Either expands to its full label when open (and owns the single pill). */}
@@ -616,8 +606,9 @@ export function DocSidebar(props: Props) {
             onDragEnd={handleDragEnd}
           >
             {/* Home Dock — single "Suggested for you" entry, pinned above
-                Favorites. The suggestions render in the content pane
-                (SuggestedView). PREVIEW/MOCK (see docs/plans/home-dock.md). */}
+                Favorites, badged with the live needs-you total off the shared
+                dock. The suggestions render in the content pane
+                (SuggestedView). Spec: docs/architecture/features/home-dock.md. */}
             <HomeDock workspaceId={workspaceId} />
 
             {favoriteRoots.length > 0 && (

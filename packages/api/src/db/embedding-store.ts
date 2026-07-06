@@ -85,6 +85,16 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     table: 'transcript_segments',
     textExpr: 'segment_text',
   },
+  // workspace-file text segments — heading breadcrumb prefixed into the embed
+  // text (kb_chunks' title-prefix precedent) so "Report > Finance > Revenue"
+  // context rides the vector. The artifact-level descriptor embedding on
+  // workspace_files above still covers title-level matching; no cross-table
+  // join here (the claim SQL is single-table by design).
+  file_segment: {
+    table: 'file_segments',
+    textExpr:
+      "(CASE WHEN heading_path <> '{}' THEN array_to_string(heading_path, ' > ') || E'\\n' ELSE '' END) || content",
+  },
 }
 
 function sha256(text: string): string {

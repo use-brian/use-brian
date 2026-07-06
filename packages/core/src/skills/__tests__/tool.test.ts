@@ -60,6 +60,32 @@ describe('[COMP:skills/tool] createUseSkillTool', () => {
     })
   })
 
+  it('appends a blueprint-fill directive when the skill is bound to a blueprint', async () => {
+    const tool = createUseSkillTool({
+      getAvailableSkills: () => [
+        skillContent({ id: 'hktv-shops', content: 'Research the shops.', blueprintId: 'bp-42' }),
+      ],
+    })
+    const res = await tool.execute({ skill: 'hktv-shops' }, ctx)
+    expect(res.isError).toBeFalsy()
+    const instructions = (res.data as { instructions: string }).instructions
+    // The procedure is preserved, then a directive steers output into the
+    // linked blueprint via the fill tool (structural-synthesis Phase 2).
+    expect(instructions).toContain('Research the shops.')
+    expect(instructions).toContain('fillBlueprintFromBrain')
+    expect(instructions).toContain('bp-42')
+  })
+
+  it('leaves instructions untouched for a skill with no blueprint', async () => {
+    const tool = createUseSkillTool({
+      getAvailableSkills: () => [skillContent({ id: 'plain', content: 'Just do it.' })],
+    })
+    const res = await tool.execute({ skill: 'plain' }, ctx)
+    const instructions = (res.data as { instructions: string }).instructions
+    expect(instructions).toBe('Just do it.')
+    expect(instructions).not.toContain('fillBlueprintFromBrain')
+  })
+
   it('returns an error result naming the missing skill for an unknown id', async () => {
     const tool = createUseSkillTool({ getAvailableSkills: () => [skillContent()] })
     const res = await tool.execute({ skill: 'ghost-skill' }, ctx)

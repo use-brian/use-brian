@@ -73,11 +73,24 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
       ['entities', 'FROM entities'],
       ['kb_chunks', 'FROM kb_chunks'],
       ['workspace_files', 'FROM workspace_files'],
+      ['transcript_segment', 'FROM transcript_segments'],
+      ['file_segment', 'FROM file_segments'],
     ] as const) {
       queries.length = 0
       await store.withClaimedRows(primitive, 10, async () => undefined)
       expect(sql()).toContain(table)
     }
+  })
+
+  it('file_segment embed text prefixes the heading breadcrumb when present', async () => {
+    queries.length = 0
+    await store.withClaimedRows('file_segment', 10, async () => undefined)
+    const claim = queries.find((q) => q.text.includes('FROM file_segments'))
+    expect(claim).toBeDefined()
+    // Breadcrumb joined ' > ' + newline, empty when heading_path = '{}'.
+    expect(claim!.text).toContain("array_to_string(heading_path, ' > ')")
+    expect(claim!.text).toContain("heading_path <> '{}'")
+    expect(claim!.text).toContain('|| content')
   })
 
   it('derives a sha256 content hash from the assembled embed text', async () => {

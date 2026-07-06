@@ -28,10 +28,10 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const stateRaw = url.searchParams.get("state") ?? ""; // "gcal:<workspaceId>"
+  const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>"
   const error = url.searchParams.get("error");
 
-  const [connector, workspaceId] = parseState(stateRaw);
+  const { connector, createNew, workspaceId } = parseState(stateRaw);
 
   if (error || !code || !connector) {
     return NextResponse.redirect(
@@ -98,13 +98,21 @@ export async function GET(request: Request) {
       return NextResponse.redirect(new URL("/login", request.url));
     }
 
+    // `createNew` ("Add another" intent) makes the backend mint a FRESH
+    // connector_instance instead of updating the first — the connected
+    // email doubles as the new instance's nickname so two accounts are
+    // tellable apart on the rail.
     const storeRes = await fetch(`${API_URL}/api/connectors/${connector}/store-credentials`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({ refreshToken: tokens.refresh_token, email: connectedEmail }),
+      body: JSON.stringify({
+        refreshToken: tokens.refresh_token,
+        email: connectedEmail,
+        ...(createNew ? { createNew: true, label: connectedEmail } : {}),
+      }),
     });
 
     if (!storeRes.ok) {
@@ -114,8 +122,21 @@ export async function GET(request: Request) {
       );
     }
 
+    // Thread the minted/reconnected instance UUID back to the connectors
+    // page — the auto-expose must act on THIS instance, and a bare slug is
+    // ambiguous once the provider has a second account.
+    const stored = (await storeRes.json().catch(() => ({}))) as {
+      connectorInstanceId?: string;
+    };
+
     return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { connected: connector }), request.url),
+      new URL(
+        connectorsPath(workspaceId, {
+          connected: connector,
+          instance: stored.connectorInstanceId,
+        }),
+        request.url,
+      ),
     );
   } catch (err) {
     console.error("[google-connector] callback error:", err);
@@ -126,14 +147,22 @@ export async function GET(request: Request) {
 }
 
 /**
- * Parse the `state` param into `[connector, workspaceId]`. app-web threads
- * the active workspace id after the connector slug (`gcal:<workspaceId>`);
- * a bare slug (no `:`) keeps `workspaceId` undefined.
+ * Parse the `state` param — `<connector>[:add]:<workspaceId>` (the same
+ * shape the Notion/Fathom callbacks parse). `:add` is the "Add another"
+ * intent: store a NEW connector_instance rather than updating the first.
+ * A bare slug (no `:`) keeps `workspaceId` undefined.
  */
-function parseState(raw: string): [connector: string, workspaceId: string | undefined] {
+function parseState(raw: string): {
+  connector: string;
+  createNew: boolean;
+  workspaceId: string | undefined;
+} {
   const idx = raw.indexOf(":");
-  if (idx === -1) return [raw, undefined];
-  return [raw.slice(0, idx), raw.slice(idx + 1) || undefined];
+  if (idx === -1) return { connector: raw, createNew: false, workspaceId: undefined };
+  let rest = raw.slice(idx + 1);
+  const createNew = rest === "add" || rest.startsWith("add:");
+  if (createNew) rest = rest.slice("add".length + (rest.startsWith("add:") ? 1 : 0));
+  return { connector: raw.slice(0, idx), createNew, workspaceId: rest || undefined };
 }
 
 /**
@@ -142,11 +171,12 @@ function parseState(raw: string): [connector: string, workspaceId: string | unde
  */
 function connectorsPath(
   workspaceId: string | undefined,
-  query: { connected?: string; error?: string },
+  query: { connected?: string; instance?: string; error?: string },
 ): string {
   if (!workspaceId) return "/teams";
   const sp = new URLSearchParams();
   if (query.connected) sp.set("connected", query.connected);
+  if (query.instance) sp.set("instance", query.instance);
   if (query.error) sp.set("error", query.error);
   const qs = sp.toString();
   return `/w/${workspaceId}/studio/connectors${qs ? `?${qs}` : ""}`;

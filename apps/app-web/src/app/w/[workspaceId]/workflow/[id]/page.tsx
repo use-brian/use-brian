@@ -33,16 +33,17 @@ import {
   deleteWorkflow,
   getWorkflowFull,
   listChannelDestinations,
-  listWorkflowRuns,
+  listWorkspaceSlackChannels,
   runWorkflowNow,
   updateWorkflow,
   type ChannelDestination,
+  type SlackChannelOption,
   type WorkflowFull,
   type WorkflowIssue,
-  type WorkflowRunSummary,
   type WorkflowStep,
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
+import { useWorkflowLiveRun } from "@/lib/workflow-live-run";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
   listCustomPageTemplates,
@@ -50,11 +51,13 @@ import {
   type ViewListRow,
 } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
 import { RunHistory } from "@/components/workflow/run-history";
+import { LiveRunBanner } from "@/components/workflow/live-run-banner";
 import { cn } from "@/lib/utils";
 
 export default function WorkflowDetailPage({
@@ -72,9 +75,10 @@ export default function WorkflowDetailPage({
   const [draft, setDraft] = useState<WorkflowFull | null>(null);
   const [assistants, setAssistants] = useState<StudioAssistantSummary[]>([]);
   const [destinations, setDestinations] = useState<ChannelDestination[]>([]);
+  const [slackChannels, setSlackChannels] = useState<SlackChannelOption[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
-  const [runs, setRuns] = useState<WorkflowRunSummary[] | null>(null);
+  const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
   const [editing, setEditing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -84,18 +88,22 @@ export default function WorkflowDetailPage({
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [refetchTick, setRefetchTick] = useState(0);
 
-  // Load workflow + recent runs.
+  // Recent runs + live-run overlay. The hook owns the runs list (poll-based:
+  // 2.5 s while a run is executing, 15 s idle, so a schedule/webhook fire
+  // lights the board up too). `running` (the Run-now POST in flight) keeps
+  // the fast cadence through the gap before the new run row is visible.
+  const { runs, liveView, pollNow } = useWorkflowLiveRun(id, {
+    forceActive: running,
+  });
+
+  // Load the workflow.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [wf, runList] = await Promise.all([
-        getWorkflowFull(id),
-        listWorkflowRuns(id, 10),
-      ]);
+      const wf = await getWorkflowFull(id);
       if (cancelled) return;
       setWorkflow(wf);
       setDraft(wf);
-      setRuns(runList);
     })();
     return () => {
       cancelled = true;
@@ -124,6 +132,20 @@ export default function WorkflowDetailPage({
     void (async () => {
       const list = await listChannelDestinations(activeId);
       if (!cancelled) setDestinations(list);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
+
+  // Load the workspace's Slack channels (by name) for the deliver picker's
+  // Slack destination dropdown. Best-effort — empty when Slack isn't connected.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      const list = await listWorkspaceSlackChannels(activeId);
+      if (!cancelled) setSlackChannels(list);
     })();
     return () => {
       cancelled = true;
@@ -162,6 +184,25 @@ export default function WorkflowDetailPage({
       } catch {
         // The picker degrades to just the built-ins — non-fatal.
         if (!cancelled) setBlueprints([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
+
+  // Load the workspace brain skills once — backs the per-step skills allow-list
+  // picker (`SkillsField`). The picker hides itself when the list is empty.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await listWorkspaceSkills(activeId);
+        if (!cancelled) setSkills(list);
+      } catch {
+        // The picker just hides — non-fatal.
+        if (!cancelled) setSkills([]);
       }
     })();
     return () => {
@@ -372,8 +413,13 @@ export default function WorkflowDetailPage({
     setRunMessage(null);
     setError(null);
     setRunning(true);
+    // Light the live overlay up immediately — the POST holds until the run
+    // terminates, but the run row (and its step statuses) are visible to the
+    // poller right away.
+    pollNow();
     const result = await runWorkflowNow(workflow.id, {});
     setRunning(false);
+    pollNow();
     if (!result) {
       setError(t.workflowPage.builder.runFail);
       return;
@@ -383,7 +429,6 @@ export default function WorkflowDetailPage({
         status: t.workflowPage.builder.runStatus[result.status],
       }),
     );
-    refresh();
   };
 
   const onToggleEnabled = async () => {
@@ -470,10 +515,20 @@ export default function WorkflowDetailPage({
                 )}
               </>
             ) : (
-              <h1 className="text-xl font-semibold flex items-center gap-2">
-                {workflow.name}
-                <EnabledBadge enabled={workflow.enabled} t={t} />
-              </h1>
+              <>
+                <h1 className="text-xl font-semibold flex items-center gap-2">
+                  {workflow.name}
+                  <EnabledBadge enabled={workflow.enabled} t={t} />
+                </h1>
+                {!workflow.enabled && workflow.pausedReason ? (
+                  <p className="mt-1 text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
+                    <span className="font-medium">
+                      {t.workflowPage.builder.stormPausedTitle}
+                    </span>{" "}
+                    {workflow.pausedReason}
+                  </p>
+                ) : null}
+              </>
             )}
             {editing ? (
               <>
@@ -540,11 +595,24 @@ export default function WorkflowDetailPage({
           </div>
         </div>
 
-        {runMessage && (
+        {runMessage && !liveView && (
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
       </header>
+
+      {/* Live activity — visible whenever a run is in flight (Run now,
+          schedule, webhook or event), so the user sees which step the
+          assistant is working on instead of a silent board. */}
+      {liveView && (
+        <LiveRunBanner
+          workspaceId={workspaceId}
+          workflowId={workflow.id}
+          view={liveView}
+          definition={workflow.definition}
+          assistants={assistants}
+        />
+      )}
 
       {/* Board — the n8n-style illustration. Always visible; reflects the
           live draft. Clicking a node opens its editor. */}
@@ -554,6 +622,7 @@ export default function WorkflowDetailPage({
         assistants={assistants}
         pages={pages}
         selectedKey={editing ? selectedKey : null}
+        live={liveView}
         onSelectStep={selectStep}
         onSelectTrigger={selectTrigger}
       />
@@ -635,8 +704,10 @@ export default function WorkflowDetailPage({
                 step={selectedStep}
                 assistants={assistants}
                 destinations={destinations}
+                slackChannels={slackChannels}
                 pages={pages}
                 blueprints={blueprints}
+                skills={skills}
                 steps={draft.definition.steps}
                 onChange={(next) => updateStep(selectedStepIdx, next)}
                 onMoveUp={() => moveStep(selectedStepIdx, -1)}

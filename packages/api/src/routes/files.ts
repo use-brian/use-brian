@@ -5,7 +5,11 @@ import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import { parseFileContent, shouldInline, type FileStore } from '@sidanclaw/core'
 import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
+import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { resolveUser } from './route-helpers.js'
+
+/** Silent-path PDFs promote store-only above this (native inlineData stays the read path below). */
+const PDF_STORE_ONLY_MIN_BYTES = 2 * 1024 * 1024
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_FILES_PER_REQUEST = 10
@@ -64,7 +68,18 @@ export function isAllowedMime(mime: string): boolean {
  *
  * `ingestor` is null on a files-less deploy; the ingest route then 503s.
  */
-export function fileRoutes(fileStore: FileStore, ingestor?: FileIngestor | null): Router {
+export function fileRoutes(
+  fileStore: FileStore,
+  ingestor?: FileIngestor | null,
+  /**
+   * Silent large-upload promotion (large-content-artifacts §Phase 2.3): a
+   * text-extractable file over the inline threshold (or a big PDF, store-only)
+   * is ALSO written to workspace_files + chunked into file_segments, and the
+   * cache row carries the artifact link so the chat seam renders a manifest.
+   * Absent (files-less deploy) -> cache-only, exactly the legacy behavior.
+   */
+  artifactPromoter?: ArtifactPromoter | null,
+): Router {
   const router = Router()
 
   router.post('/upload', upload.array('files', MAX_FILES_PER_REQUEST), async (req, res) => {
@@ -162,13 +177,47 @@ export function fileRoutes(fileStore: FileStore, ingestor?: FileIngestor | null)
             sensitivity: 'internal',
           })
 
+          // ── Silent artifact promotion (large-content-artifacts §Phase 2.3) ──
+          // Text-extractable + over the inline threshold → durable artifact +
+          // segments (retrieval outlives the 7-day cache). Big PDFs promote
+          // store-only (chunking a PDF needs a model distill — explicit-ingest
+          // territory). Never fails the upload: null → cache-only fallback.
+          let artifact: { fileId: string; path: string; indexing: string } | null = null
+          const isPdf = file.mimetype === 'application/pdf'
+          const promotable =
+            artifactPromoter &&
+            fileWorkspaceId &&
+            ((!isInlineMedia && !shouldInline(text)) || (isPdf && file.size > PDF_STORE_ONLY_MIN_BYTES))
+          if (promotable) {
+            const promoted = await artifactPromoter!({
+              fileName,
+              mime: file.mimetype,
+              bytes: file.buffer,
+              parsedText: isPdf ? '' : text,
+              summary,
+              workspaceId: fileWorkspaceId!,
+              actingUserId: user.id,
+              assistantId: session.assistantId ?? null,
+              storeOnly: isPdf,
+            })
+            if (promoted) {
+              artifact = { fileId: promoted.fileId, path: promoted.path, indexing: promoted.status }
+              if (fileStore.linkArtifact) {
+                await fileStore
+                  .linkArtifact(cached.id, promoted.fileId, promoted.segmentCount)
+                  .catch((err) => console.error('[files/upload] artifact link failed:', err))
+              }
+            }
+          }
+
           results.push({
             id: cached.id,
             fileName: cached.fileName,
             mimeType: cached.mimeType,
             sizeBytes: cached.sizeBytes,
             summary,
-            inline: shouldInline(text.length),
+            inline: shouldInline(text),
+            artifact,
             // Send back the parsed text preview so the chat endpoint can inline it
             // without re-fetching (saves a round-trip)
             preview: text.slice(0, 200),

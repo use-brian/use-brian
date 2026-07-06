@@ -600,6 +600,38 @@ export async function deleteCustomPageTemplate(
   await json<{ ok: true }>(res);
 }
 
+// ── Generate from brain (structural-synthesis: fill a blueprint from memory) ──
+
+/** Cheap pre-flight: section-count → credit quote for the confirm dialog. */
+export async function estimateBlueprintGenerate(
+  workspaceId: string,
+  blueprintId: string,
+): Promise<{ blueprintId: string; name: string; sectionCount: number; surchargeCredits: number }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/blueprints/${blueprintId}/estimate`,
+    { method: "POST" },
+  );
+  return json(res);
+}
+
+/** Run the fill from the brain; charges the surcharge on success. `requestId`
+ *  is a client-minted idempotency key so a retry never double-charges. */
+export async function generateBlueprintFromBrain(
+  workspaceId: string,
+  blueprintId: string,
+  input: { subject: string; requestId: string; sensitivity?: string },
+): Promise<{ pageId: string | null; chargedCredits: number }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/blueprints/${blueprintId}/generate`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return json(res);
+}
+
 // ── Page sharing (migration 249) ──────────────────────────────────────
 
 export type PageGrant = {

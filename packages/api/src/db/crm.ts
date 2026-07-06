@@ -1,4 +1,3 @@
-import type { PoolClient } from 'pg'
 import type {
   AccessContext,
   CompanyListFilters, CompanyListRow, CompanyRecord, CompanyUpdateFields,
@@ -6,85 +5,199 @@ import type {
   CrmExternalRef,
   DealListFilters, DealListRow, DealRecord, DealStage, DealUpdateFields,
   EntityLinksStore,
+  EntityRecord,
   Sensitivity,
 } from '@sidanclaw/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
-import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
-import { emitCrmRelationEdge, superseedCrmRelationEdge } from './edge-hooks.js'
+import { query, queryGated, queryWithRLS } from './client.js'
+import { emitCrmRelationEdge, emitEdgeFireAndForget, superseedCrmRelationEdge } from './edge-hooks.js'
+import { createEntity, getEntityByIdSystem, updateEntity } from './entities-store.js'
+
+/**
+ * CRM SQL layer — post CRM→entity unification
+ * (docs/plans/crm-entity-unification.md).
+ *
+ * A contact / company / deal IS an `entities` row: `kind` ∈
+ * {person, company, deal}, name → `display_name`, email/domain →
+ * `canonical_id` (for dedup) + `attributes`, and the remaining typed
+ * fields (phone, tags, external_ref, stage, amount, close_date) live in
+ * `attributes`. The relationship FK (`company_id` / `contact_id`, each
+ * holding the referenced entity id) is the record's source of truth and
+ * also lives in `attributes`; the graph `works_at` / `engagement_of` /
+ * `represents` edges are emitted alongside as a best-effort projection
+ * for graph traversal, but the record never depends on an edge being
+ * present. The record `id` is the entity id; `entityId` aliases it for
+ * one release.
+ *
+ * Updates are IN PLACE (`updateEntity`) so the entity id — and therefore
+ * every inbound and outbound edge — stays valid. CRM field history is not
+ * preserved (plan decision D5). Frozen-v1 constraints that used to live in
+ * DB CHECKs / triggers (stage enum, amount ≥ 0, same-workspace FK) are now
+ * enforced here; their error messages keep the old `deals_stage_check` /
+ * `deals_amount_check` / "same workspace" tokens so callers and tests that
+ * matched them still match.
+ */
+
+const VALID_STAGES: readonly DealStage[] = [
+  'lead', 'qualified', 'proposal', 'negotiation', 'won', 'lost',
+]
+
+// ── Shared helpers ───────────────────────────────────────────────────
+
+function attrTags(a: Record<string, unknown>): string[] {
+  return Array.isArray(a.tags) ? (a.tags as string[]) : []
+}
+function attrRef(a: Record<string, unknown>): CrmExternalRef {
+  const r = a.external_ref
+  return r && typeof r === 'object' ? (r as CrmExternalRef) : {}
+}
+function attrStr(a: Record<string, unknown>, key: string): string | null {
+  const v = a[key]
+  return typeof v === 'string' && v.length > 0 ? v : null
+}
+
+/** Reject a cross-workspace relationship reference (replaces the
+ *  `contacts_company_workspace_match_trg` / `deals_links_workspace_match_trg`
+ *  triggers). A ref in another workspace throws; a non-existent ref is
+ *  left to the caller (the old FK would have rejected it, but v1 CRM
+ *  relationships are best-effort). Message keeps the "same workspace" token. */
+async function assertSameWorkspace(
+  refId: string | null | undefined,
+  workspaceId: string,
+  label: string,
+): Promise<void> {
+  if (!refId) return
+  const r = await query<{ workspaceId: string | null }>(
+    `SELECT workspace_id AS "workspaceId" FROM entities WHERE id = $1 AND valid_to IS NULL`,
+    [refId],
+  )
+  const ws = r.rows[0]?.workspaceId
+  if (ws && ws !== workspaceId) {
+    throw new Error(`${label} must reference a row in the same workspace`)
+  }
+}
+
+/**
+ * Viewer projection for the upsert-dedupe candidate scan. The dedupe must
+ * never select a row the writer cannot read back — merging into an invisible
+ * row breaks read-your-write (the tool reports success, every subsequent
+ * list/get hides the row) and mutates another principal's private record.
+ * See docs/architecture/features/crm.md → "Upsert dedupe is access-scoped"
+ * (2026-07-05 incident: saveContact merged into another user's private
+ * person entity; Brain → People never showed it).
+ *
+ * Chat tools pass their full viewer context via `params.access`. Writers
+ * that only hold a user id (ingest pipeline-B, classification composer)
+ * fall back to the primary-reflector shape for that user — workspace +
+ * user axes only — which still excludes other users' private rows.
+ * `assistantId` is unread for kind='primary' (the reflector drops the
+ * assistant axis); the empty string is never bound into SQL.
+ */
+function dedupeAccessContext(
+  userId: string,
+  workspaceId: string,
+  access?: AccessContext,
+): AccessContext {
+  if (access) return access
+  return { workspaceId, userId, assistantId: '', assistantKind: 'primary' }
+}
+
+function assertValidStage(stage: DealStage | undefined): void {
+  if (stage !== undefined && !VALID_STAGES.includes(stage)) {
+    throw new Error(`deals_stage_check: invalid deal stage "${stage}"`)
+  }
+}
+function assertNonNegativeAmount(amount: number | null | undefined): void {
+  if (amount != null && amount < 0) {
+    throw new Error('deals_amount_check: amount must be greater than or equal to 0')
+  }
+}
+
+/** Emit / re-point the best-effort graph edge for a CRM relationship.
+ *  Fire-and-forget; a missing entityLinks store or edge failure never
+ *  affects the record write (the FK already lives in `attributes`). */
+function repointGraphEdge(
+  entityLinks: EntityLinksStore | undefined,
+  userId: string,
+  params: {
+    sourceEntityId: string; targetEntityId: string | null
+    edgeType: 'works_at' | 'engagement_of'; workspaceId: string
+  },
+): void {
+  if (!entityLinks) return
+  void superseedCrmRelationEdge(entityLinks, userId, {
+    sourceEntityId: params.sourceEntityId, targetEntityId: params.targetEntityId,
+    edgeType: params.edgeType, workspaceId: params.workspaceId, source: 'user', userId,
+  })
+}
+
+// ── Projections from a fetched entity row (create / update return) ────
+
+function companyFromEntity(e: EntityRecord): CompanyRecord {
+  const a = e.attributes
+  return {
+    id: e.id, workspaceId: e.workspaceId, entityId: e.id,
+    name: e.displayName,
+    domain: attrStr(a, 'domain') ?? e.canonicalId ?? null,
+    tags: attrTags(a), externalRef: attrRef(a),
+    createdAt: e.createdAt, updatedAt: e.updatedAt,
+  }
+}
+function contactFromEntity(e: EntityRecord): ContactRecord {
+  const a = e.attributes
+  return {
+    id: e.id, workspaceId: e.workspaceId, entityId: e.id,
+    name: e.displayName,
+    email: attrStr(a, 'email') ?? e.canonicalId ?? null,
+    phone: attrStr(a, 'phone'),
+    companyId: attrStr(a, 'company_id'),
+    tags: attrTags(a), externalRef: attrRef(a),
+    createdAt: e.createdAt, updatedAt: e.updatedAt,
+  }
+}
+function dealFromEntity(e: EntityRecord): DealRecord {
+  const a = e.attributes
+  const amount = a.amount
+  const closeDate = a.close_date
+  return {
+    id: e.id, workspaceId: e.workspaceId, entityId: e.id,
+    contactId: attrStr(a, 'contact_id'),
+    companyId: attrStr(a, 'company_id'),
+    stage: (attrStr(a, 'stage') as DealStage) ?? 'lead',
+    amount: typeof amount === 'number' ? amount : amount != null ? Number(amount) : null,
+    closeDate: typeof closeDate === 'string' ? new Date(closeDate) : null,
+    externalRef: attrRef(a),
+    createdAt: e.createdAt, updatedAt: e.updatedAt,
+  }
+}
 
 // ── Companies ────────────────────────────────────────────────────────
 
-const COMPANY_FULL_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  name, domain, tags,
-  external_ref as "externalRef",
-  created_at as "createdAt", updated_at as "updatedAt"
-`
+type CompanyRow = Omit<CompanyRecord, 'tags' | 'externalRef'> & {
+  tags: string[] | null; externalRef: CrmExternalRef | null
+}
+const COMPANY_SELECT = `
+  e.id, e.id AS "entityId", e.workspace_id AS "workspaceId",
+  e.display_name AS name,
+  COALESCE(e.attributes->>'domain', e.canonical_id) AS domain,
+  e.attributes->'tags' AS tags,
+  e.attributes->'external_ref' AS "externalRef",
+  e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
-const COMPANY_COMPACT_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  name, domain, tags,
-  updated_at as "updatedAt"
-`
-
-type CompanyRow = {
-  id: string
-  workspaceId: string
-  entityId: string | null
-  name: string
-  domain: string | null
-  tags: string[]
-  externalRef: CrmExternalRef
-  createdAt: Date
-  updatedAt: Date
+function toCompanyRow(row: CompanyRow): CompanyRecord {
+  return { ...row, tags: row.tags ?? [], externalRef: row.externalRef ?? {} }
 }
 
-type CompanyCompactRow = Pick<CompanyRow, 'id' | 'workspaceId' | 'entityId' | 'name' | 'domain' | 'tags' | 'updatedAt'>
-
-function toCompany(row: CompanyRow): CompanyRecord {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    name: row.name,
-    domain: row.domain,
-    tags: row.tags,
-    externalRef: row.externalRef ?? {},
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
+function companyAttributes(p: {
+  domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef
+}): Record<string, unknown> {
+  const a: Record<string, unknown> = { tags: p.tags ?? [] }
+  if (p.domain) a.domain = p.domain
+  if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  return a
 }
 
-function toCompanyListRow(row: CompanyCompactRow): CompanyListRow {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    name: row.name,
-    domain: row.domain,
-    tags: row.tags,
-    updatedAt: row.updatedAt,
-  }
-}
-
-// Q24 — CRM create wraps two writes in one transaction: insert into
-// `entities` first, then the specialization row with entity_id set.
-// Direct entity inserts for kind='company' MUST come through here —
-// `createEntity` in `entities-store.ts` rejects `kind='person'|
-// 'company'|'deal'` (WU-1.5 Q24 guard). This raw `INSERT INTO entities`
-// is the sanctioned write path; it runs on a pooled connection with
-// the transaction below, not through the guarded store helper.
-//
-// Upsert-by-name: before inserting, this looks up an active company in
-// the workspace with a matching lower(name). If one exists, the existing
-// row is superseded via `updateCompany` with the new fields merged in
-// (tags union, non-null domain wins, external_ref shallow-merged). This
-// makes the tool callable repeatedly during research without producing
-// duplicate (entity, company) pairs — the user only ever sees one
-// "SIDAN Lab" row no matter how many times the model re-records it.
 export async function createCompany(
   userId: string,
   params: {
@@ -93,393 +206,172 @@ export async function createCompany(
     domain?: string | null
     tags?: string[]
     externalRef?: CrmExternalRef
-    /**
-     * Sensitivity tier for the fresh entity + companies pair. Omitted by
-     * default → DB column default (`internal`). Research-mode saves pass
-     * `public` (public-web provenance); see researchWriteFloor. Only the
-     * fresh-insert path honours it — the dedupe/merge path preserves the
-     * existing row's tier.
-     */
     sensitivity?: Sensitivity
-    /** Compartment set (MLS category axis) for the fresh entity + company pair. Default '{}'. */
     compartments?: string[]
-    /**
-     * Fresh-insert `source` for the entity + companies pair. Default `'user'`
-     * (interactive chat / API writes). The structural-synthesis engine passes
-     * `'extracted'` so synthesis-captured companies surface in Brain Reviews
-     * (`?includeExtracted=true`). Only the fresh-insert path honours it — the
-     * dedupe/merge path preserves the existing row's source.
-     */
     source?: 'user' | 'extracted'
+    access?: AccessContext
   },
 ): Promise<CompanyRecord> {
-  // WU-4.5 — the `userId` arg is both RLS actor and row author for
-  // the entity + companies pair. Guard before the transaction opens.
   assertAuthorshipPresent('createCompany', userId)
 
-  // Dedupe pass — look up an active row with a matching lower(name) in
-  // the same workspace under the caller's RLS. A workspace-foreign hit
-  // would be invisible (and unmergeable) so RLS is the right gate here.
+  // Upsert-by-name: dedupe against a live company entity in the workspace
+  // — but only among rows the caller can read (see dedupeAccessContext).
+  const ap = buildAccessPredicate(
+    dedupeAccessContext(userId, params.workspaceId, params.access),
+    { startIdx: 3 },
+  )
   const existing = await queryWithRLS<{ id: string }>(
     userId,
-    `SELECT id FROM companies
-      WHERE workspace_id = $1
-        AND lower(name) = lower($2)
-        AND valid_to IS NULL
-        AND retracted_at IS NULL
-      ORDER BY created_at ASC
-      LIMIT 1`,
-    [params.workspaceId, params.name],
+    `SELECT id FROM entities
+      WHERE workspace_id = $1 AND kind = 'company'
+        AND lower(display_name) = lower($2)
+        AND valid_to IS NULL AND retracted_at IS NULL
+        AND ${ap.sql}
+      ORDER BY created_at ASC LIMIT 1`,
+    [params.workspaceId, params.name, ...ap.params],
   )
   if (existing.rows[0]) {
     const merged = await mergeCompanyFields(userId, existing.rows[0].id, {
-      domain: params.domain ?? null,
-      tags: params.tags,
-      externalRef: params.externalRef,
+      domain: params.domain ?? null, tags: params.tags, externalRef: params.externalRef,
     })
     if (merged) return merged
-    // Match vanished mid-flight (rare: concurrent retraction). Fall
-    // through to the insert path — better to write a fresh row than to
-    // drop the user's data.
   }
 
-  const client = await getAppPool().connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-
-    // user_id is set to the creator to satisfy the Q11 visibility CHECK
-    // (entities require user_id OR assistant_id non-null). Workspace-shared
-    // CRM entities are a deferred Q11/SV alignment — see WU-1.5 gap notes.
-    const entityResult = await client.query<{ id: string }>(
-      `INSERT INTO entities
-         (kind, display_name, canonical_id, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('company', $1, $2, $3, $4, $4, $7, $5, $6)
-       RETURNING id`,
-      [params.name, params.domain ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
-    )
-    const entityId = entityResult.rows[0].id
-
-    // WU-4.5 — stamp `created_by_user_id` on the specialization row too.
-    // Migration 128 added the column; the entity write already carries
-    // it, but the companies row was previously landing with NULL.
-    const result = await client.query<CompanyRow>(
-      `INSERT INTO companies (workspace_id, name, domain, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-       RETURNING ${COMPANY_FULL_SELECT}`,
-      [
-        params.workspaceId,
-        params.name,
-        params.domain ?? null,
-        params.tags ?? [],
-        JSON.stringify(params.externalRef ?? {}),
-        entityId,
-        userId,
-        params.sensitivity ?? 'internal',
-        params.compartments ?? [],
-        params.source ?? 'user',
-      ],
-    )
-
-    await client.query('COMMIT')
-    return toCompany(result.rows[0])
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    await rollbackAndRelease(client)
-  }
+  const entity = await createEntity({
+    kind: 'company',
+    displayName: params.name,
+    canonicalId: params.domain ?? null,
+    attributes: companyAttributes(params),
+    sensitivity: params.sensitivity ?? 'internal',
+    workspaceId: params.workspaceId,
+    userId,
+    createdByUserId: userId,
+    source: params.source ?? 'user',
+    compartments: params.compartments ?? [],
+  })
+  return companyFromEntity(entity)
 }
 
-// Merge new fields into an existing company via the supersession path.
-// Returns the new (superseding) record, the unchanged record if the
-// incoming fields add nothing, or null if the row vanished between the
-// dedupe lookup and this merge call.
 async function mergeCompanyFields(
   userId: string,
   id: string,
-  incoming: {
-    domain?: string | null
-    tags?: string[]
-    externalRef?: CrmExternalRef
-  },
+  incoming: { domain?: string | null; tags?: string[]; externalRef?: CrmExternalRef },
 ): Promise<CompanyRecord | null> {
-  const currentResult = await queryWithRLS<CompanyRow>(
-    userId,
-    `SELECT ${COMPANY_FULL_SELECT} FROM companies
-      WHERE id = $1 AND valid_to IS NULL`,
-    [id],
-  )
-  if (currentResult.rows.length === 0) return null
-  const current = toCompany(currentResult.rows[0])
-
+  const cur = await getCompanyByIdSystem(userId, id)
+  if (!cur) return null
   const fields: CompanyUpdateFields = {}
-  // Domain: only overwrite when incoming has a non-empty value. We never
-  // clear a previously-known domain just because the new call omitted it.
-  if (incoming.domain && incoming.domain !== current.domain) {
-    fields.domain = incoming.domain
-  }
-  // Tags: union (case-sensitive). Skip if no new tags add anything.
+  if (incoming.domain && incoming.domain !== cur.domain) fields.domain = incoming.domain
   if (incoming.tags && incoming.tags.length > 0) {
-    const merged = Array.from(new Set([...current.tags, ...incoming.tags]))
-    if (merged.length !== current.tags.length) fields.tags = merged
+    const merged = Array.from(new Set([...cur.tags, ...incoming.tags]))
+    if (merged.length !== cur.tags.length) fields.tags = merged
   }
-  // external_ref: shallow merge, incoming wins on key collisions.
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
-    fields.externalRef = { ...current.externalRef, ...incoming.externalRef }
+    fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
-
-  if (Object.keys(fields).length === 0) {
-    // No effective change — return the existing row unchanged.
-    return current
-  }
+  if (Object.keys(fields).length === 0) return cur
   return updateCompany(userId, id, fields)
 }
 
+async function getCompanyByIdSystem(userId: string, id: string): Promise<CompanyRecord | null> {
+  const e = await getEntityByIdSystem(userId, id)
+  if (!e || e.kind !== 'company') return null
+  return companyFromEntity(e)
+}
+
 export async function getCompanyById(ctx: AccessContext, id: string): Promise<CompanyRecord | null> {
-  // Universal access projection (WU-4.2b) + `valid_to IS NULL` to hide
-  // superseded versions; historical versions are reachable through the
-  // supersession chain via `getCompanyHistory`.
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const result = await queryWithRLS<CompanyRow>(
     ctx.userId,
-    `SELECT ${COMPANY_FULL_SELECT} FROM companies
-     WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL`,
+    `SELECT ${COMPANY_SELECT} FROM entities e
+      WHERE ${ap.sql} AND e.kind = 'company'
+        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
     [...ap.params, id],
   )
   if (result.rows.length === 0) return null
-  return toCompany(result.rows[0])
+  return toCompanyRow(result.rows[0])
 }
 
 export async function listCompanies(ctx: AccessContext, filters: CompanyListFilters): Promise<CompanyListRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL']
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const wheres: string[] = [ap.sql, `e.kind = 'company'`, 'e.valid_to IS NULL']
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
 
   if (filters.query) {
-    wheres.push(`(name ILIKE $${idx} OR domain ILIKE $${idx})`)
-    values.push(`%${filters.query}%`)
-    idx++
+    wheres.push(`(e.display_name ILIKE $${idx} OR e.attributes->>'domain' ILIKE $${idx})`)
+    values.push(`%${filters.query}%`); idx++
   }
   if (filters.tag) {
-    wheres.push(`$${idx} = ANY(tags)`)
-    values.push(filters.tag)
-    idx++
+    wheres.push(`e.attributes->'tags' ? $${idx}`)
+    values.push(filters.tag); idx++
   }
-
   const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
   values.push(limit)
 
-  const result = await queryGated<CompanyCompactRow>(
+  const result = await queryGated<CompanyRow>(
     ctx,
-    `SELECT ${COMPANY_COMPACT_SELECT} FROM companies
-     WHERE ${wheres.join(' AND ')}
-     ORDER BY updated_at DESC
-     LIMIT $${idx}`,
+    `SELECT ${COMPANY_SELECT} FROM entities e
+      WHERE ${wheres.join(' AND ')}
+      ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toCompanyListRow)
+  return result.rows.map(toCompanyRow)
 }
 
-// Supersession-on-write (company-brain WU-2.5 / D.7): edits to a company
-// tombstone the active row (`valid_to=now()`, `superseded_by=<new_id>`) and
-// insert a fresh row carrying merged typed fields plus the old row's
-// entity link, authorship, visibility, and trust columns.
-//
-// `entity_id` is column-UNIQUE on `companies` (mig 127); the new row needs
-// the old entity_id to retain the brain-link, so the tombstoned row's
-// entity_id is set to NULL inside the same transaction. Historical CRM
-// rows reach the entity via the `superseded_by` chain. The proper fix is
-// to convert that UNIQUE to a partial unique index — flagged as a
-// follow-up for the coordinator.
-//
-// Returns the **new** CompanyRecord, or `null` when the id isn't an
-// active row (already tombstoned, never existed, or hidden by RLS).
 export async function updateCompany(
   userId: string,
   id: string,
   fields: CompanyUpdateFields,
 ): Promise<CompanyRecord | null> {
-  type CompanyOldRow = {
-    workspaceId: string
-    entityId: string | null
-    name: string
-    domain: string | null
-    tags: string[]
-    externalRef: CrmExternalRef | null
-    sensitivity: string
-    rowUserId: string | null
-    rowAssistantId: string | null
-    source: string
-    createdByUserId: string | null
-    createdByAssistantId: string | null
-    sourceEpisodeId: string | null
-    verifiedByUserId: string | null
-    verifiedAt: Date | null
+  const old = await getEntityByIdSystem(userId, id)
+  if (!old || old.kind !== 'company') return null
+  const a = { ...old.attributes }
+  if (fields.domain !== undefined) {
+    if (fields.domain) a.domain = fields.domain; else delete a.domain
   }
+  if (fields.tags !== undefined) a.tags = fields.tags
+  if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
 
-  const client = await getAppPool().connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-    try {
-      const lockResult = await client.query<CompanyOldRow>(
-        `SELECT workspace_id  as "workspaceId",
-                entity_id     as "entityId",
-                name, domain, tags,
-                external_ref  as "externalRef",
-                sensitivity,
-                user_id       as "rowUserId",
-                assistant_id  as "rowAssistantId",
-                source,
-                created_by_user_id      as "createdByUserId",
-                created_by_assistant_id as "createdByAssistantId",
-                source_episode_id       as "sourceEpisodeId",
-                verified_by_user_id     as "verifiedByUserId",
-                verified_at             as "verifiedAt"
-           FROM companies
-          WHERE id = $1 AND valid_to IS NULL
-          FOR UPDATE`,
-        [id],
-      )
-      const old = lockResult.rows[0]
-      if (!old) {
-        await client.query('ROLLBACK')
-        return null
-      }
-
-      const next = {
-        name: fields.name ?? old.name,
-        domain: fields.domain !== undefined ? fields.domain : old.domain,
-        tags: fields.tags ?? old.tags,
-        externalRef: fields.externalRef ?? old.externalRef ?? {},
-      }
-
-      // Release the old row's entity_id BEFORE inserting the new row so the
-      // column-UNIQUE (mig 127) admits the same entity link on the new row.
-      // Safe inside the transaction with FOR UPDATE held on the old row.
-      await client.query(`UPDATE companies SET entity_id = NULL WHERE id = $1`, [id])
-
-      const insertResult = await client.query<CompanyRow>(
-        `INSERT INTO companies (
-           workspace_id, entity_id, name, domain, tags, external_ref,
-           sensitivity, user_id, assistant_id, source,
-           created_by_user_id, created_by_assistant_id, source_episode_id,
-           verified_by_user_id, verified_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING ${COMPANY_FULL_SELECT}`,
-        [
-          old.workspaceId, old.entityId,
-          next.name, next.domain, next.tags, JSON.stringify(next.externalRef),
-          old.sensitivity, old.rowUserId, old.rowAssistantId, old.source,
-          old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
-          old.verifiedByUserId, old.verifiedAt,
-        ],
-      )
-      const newRow = insertResult.rows[0]
-
-      await client.query(
-        `UPDATE companies
-            SET valid_to = now(),
-                superseded_by = $2,
-                updated_at = now()
-          WHERE id = $1`,
-        [id, newRow.id],
-      )
-
-      await client.query('COMMIT')
-      return toCompany(newRow)
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    }
-  } finally {
-    await rollbackAndRelease(client)
-  }
+  const e = await updateEntity(userId, id, {
+    displayName: fields.name,
+    canonicalId: fields.domain !== undefined ? (fields.domain ?? null) : undefined,
+    attributes: a,
+  })
+  if (!e) return null
+  return companyFromEntity(e)
 }
 
 // ── Contacts ─────────────────────────────────────────────────────────
 
-const CONTACT_FULL_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  name, email, phone,
-  company_id as "companyId", tags, external_ref as "externalRef",
-  created_at as "createdAt", updated_at as "updatedAt"
-`
+type ContactRow = Omit<ContactRecord, 'tags' | 'externalRef'> & {
+  tags: string[] | null; externalRef: CrmExternalRef | null
+}
+const CONTACT_SELECT = `
+  e.id, e.id AS "entityId", e.workspace_id AS "workspaceId",
+  e.display_name AS name,
+  COALESCE(e.attributes->>'email', e.canonical_id) AS email,
+  e.attributes->>'phone' AS phone,
+  e.attributes->>'company_id' AS "companyId",
+  e.attributes->'tags' AS tags,
+  e.attributes->'external_ref' AS "externalRef",
+  e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
-const CONTACT_COMPACT_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  name, email,
-  company_id as "companyId", tags, updated_at as "updatedAt"
-`
-
-type ContactRow = {
-  id: string
-  workspaceId: string
-  entityId: string | null
-  name: string
-  email: string | null
-  phone: string | null
-  companyId: string | null
-  tags: string[]
-  externalRef: CrmExternalRef
-  createdAt: Date
-  updatedAt: Date
+function toContactRow(row: ContactRow): ContactRecord {
+  return { ...row, tags: row.tags ?? [], externalRef: row.externalRef ?? {} }
 }
 
-type ContactCompactRow = Pick<
-  ContactRow,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'companyId' | 'tags' | 'updatedAt'
->
-
-function toContact(row: ContactRow): ContactRecord {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    name: row.name,
-    email: row.email,
-    phone: row.phone,
-    companyId: row.companyId,
-    tags: row.tags,
-    externalRef: row.externalRef ?? {},
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  }
+function contactAttributes(p: {
+  email?: string | null; phone?: string | null; companyId?: string | null
+  tags?: string[]; externalRef?: CrmExternalRef
+}): Record<string, unknown> {
+  const a: Record<string, unknown> = { tags: p.tags ?? [] }
+  if (p.email) a.email = p.email
+  if (p.phone) a.phone = p.phone
+  if (p.companyId) a.company_id = p.companyId
+  if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  return a
 }
 
-function toContactListRow(row: ContactCompactRow): ContactListRow {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    name: row.name,
-    email: row.email,
-    companyId: row.companyId,
-    tags: row.tags,
-    updatedAt: row.updatedAt,
-  }
-}
-
-// Q24 — see createCompany. Entity carries kind='person' and canonical_id=email.
-//
-// WU-1.7 edge hook: when `companyId` is supplied AND an `entityLinks`
-// store is passed, a `works_at` edge (person entity → company entity)
-// is emitted fire-and-forget after the transaction commits. The edge is
-// best-effort — its failure never affects the contact save (see
-// `edge-hooks.ts`). The `entityLinks` arg is optional so existing call
-// sites that don't carry the graph layer keep compiling unchanged.
-//
-// Upsert-by-name (mirrors createCompany): look for an active contact in
-// the workspace by lower(name) — fall back to lower(email) if name
-// doesn't match but the email does. On a hit, supersede via
-// `updateContact` with merged tags/phone/company/external_ref so
-// repeated research turns never produce duplicate contacts.
 export async function createContact(
   userId: string,
   params: {
@@ -490,448 +382,225 @@ export async function createContact(
     companyId?: string | null
     tags?: string[]
     externalRef?: CrmExternalRef
-    /** See createCompany — fresh-insert tier; defaults to DB `internal`. */
     sensitivity?: Sensitivity
-    /** Compartment set (MLS category axis) for the fresh entity + contact pair. Default '{}'. */
     compartments?: string[]
-    /** See createCompany — fresh-insert source; default 'user'; synthesis passes 'extracted'. */
     source?: 'user' | 'extracted'
+    access?: AccessContext
   },
   entityLinks?: EntityLinksStore,
 ): Promise<ContactRecord> {
-  // WU-4.5 — see createCompany; same author-stamp invariant applies.
   assertAuthorshipPresent('createContact', userId)
+  await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
-  // Dedupe pass — prefer email match (high confidence), fall back to
-  // lower(name) (the user's chosen key). The COALESCE/UNION below picks
-  // the email hit first when present.
+  // Upsert-by-email (high confidence) then by name, scoped to rows the
+  // caller can read (see dedupeAccessContext) — an invisible same-name
+  // contact belonging to another principal is NOT a merge target; the
+  // caller gets their own visible row instead. Self entities
+  // (`attributes.self=true`) are excluded — you are not your own contact.
+  const ap = buildAccessPredicate(
+    dedupeAccessContext(userId, params.workspaceId, params.access),
+    { startIdx: 4 },
+  )
   const existing = await queryWithRLS<{ id: string }>(
     userId,
-    `(
-       SELECT id, 1 AS pri FROM contacts
-        WHERE workspace_id = $1
-          AND $2::text IS NOT NULL
-          AND lower(email) = lower($2)
-          AND valid_to IS NULL
-          AND retracted_at IS NULL
-        ORDER BY created_at ASC
-        LIMIT 1
-     )
+    `(SELECT id, 1 AS pri FROM entities
+       WHERE workspace_id = $1 AND kind = 'person'
+         AND $2::text IS NOT NULL AND lower(canonical_id) = lower($2)
+         AND valid_to IS NULL AND retracted_at IS NULL
+         AND NOT COALESCE((attributes->>'self')::boolean, false)
+         AND ${ap.sql}
+       ORDER BY created_at ASC LIMIT 1)
      UNION ALL
-     (
-       SELECT id, 2 AS pri FROM contacts
-        WHERE workspace_id = $1
-          AND lower(name) = lower($3)
-          AND valid_to IS NULL
-          AND retracted_at IS NULL
-        ORDER BY created_at ASC
-        LIMIT 1
-     )
-     ORDER BY pri ASC
-     LIMIT 1`,
-    [params.workspaceId, params.email ?? null, params.name],
+     (SELECT id, 2 AS pri FROM entities
+       WHERE workspace_id = $1 AND kind = 'person'
+         AND lower(display_name) = lower($3)
+         AND valid_to IS NULL AND retracted_at IS NULL
+         AND NOT COALESCE((attributes->>'self')::boolean, false)
+         AND ${ap.sql}
+       ORDER BY created_at ASC LIMIT 1)
+     ORDER BY pri ASC LIMIT 1`,
+    [params.workspaceId, params.email ?? null, params.name, ...ap.params],
   )
   if (existing.rows[0]) {
     const merged = await mergeContactFields(userId, existing.rows[0].id, {
-      email: params.email ?? null,
-      phone: params.phone ?? null,
-      companyId: params.companyId ?? null,
-      tags: params.tags,
-      externalRef: params.externalRef,
-    })
+      email: params.email ?? null, phone: params.phone ?? null,
+      companyId: params.companyId ?? null, tags: params.tags, externalRef: params.externalRef,
+    }, entityLinks)
     if (merged) return merged
-    // Match vanished mid-flight — fall through and insert fresh.
   }
 
-  const client = await getAppPool().connect()
-  let contactEntityId: string
-  let companyEntityId: string | null = null
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+  const entity = await createEntity({
+    kind: 'person',
+    displayName: params.name,
+    canonicalId: params.email ?? null,
+    attributes: contactAttributes(params),
+    sensitivity: params.sensitivity ?? 'internal',
+    workspaceId: params.workspaceId,
+    userId,
+    createdByUserId: userId,
+    source: params.source ?? 'user',
+    compartments: params.compartments ?? [],
+  })
 
-    // See createCompany — user_id mirrors creator to satisfy Q11 CHECK.
-    const entityResult = await client.query<{ id: string }>(
-      `INSERT INTO entities
-         (kind, display_name, canonical_id, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('person', $1, $2, $3, $4, $4, $7, $5, $6)
-       RETURNING id`,
-      [params.name, params.email ?? null, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
-    )
-    const entityId = entityResult.rows[0].id
-    contactEntityId = entityId
-
-    // WU-4.5 — stamp `created_by_user_id` on the contacts row; see
-    // createCompany for the matching note.
-    const result = await client.query<ContactRow>(
-      `INSERT INTO contacts (workspace_id, name, email, phone, company_id, tags, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       RETURNING ${CONTACT_FULL_SELECT}`,
-      [
-        params.workspaceId,
-        params.name,
-        params.email ?? null,
-        params.phone ?? null,
-        params.companyId ?? null,
-        params.tags ?? [],
-        JSON.stringify(params.externalRef ?? {}),
-        entityId,
-        userId,
-        params.sensitivity ?? 'internal',
-        params.compartments ?? [],
-        params.source ?? 'user',
-      ],
-    )
-
-    // Read the linked company's entity id inside the same transaction
-    // so the post-commit edge hook has both endpoints. A company with
-    // no `entity_id` (legacy brain-blind row, Q24 forward-only) yields
-    // null and the edge is simply skipped.
-    if (params.companyId) {
-      const companyEntity = await client.query<{ entityId: string | null }>(
-        `SELECT entity_id AS "entityId" FROM companies WHERE id = $1`,
-        [params.companyId],
-      )
-      companyEntityId = companyEntity.rows[0]?.entityId ?? null
-    }
-
-    await client.query('COMMIT')
-    const contact = toContact(result.rows[0])
-
-    // Fire-and-forget `works_at` edge — runs after COMMIT, never awaited
-    // on the caller's hot path, never able to fail the contact save.
-    if (entityLinks && companyEntityId) {
+  if (params.companyId) {
+    if (entityLinks) {
       void emitCrmRelationEdge(entityLinks, userId, {
-        sourceEntityId: contactEntityId,
-        targetEntityId: companyEntityId,
-        edgeType: 'works_at',
-        workspaceId: params.workspaceId,
-        source: 'user',
-        userId,
+        sourceEntityId: entity.id, targetEntityId: params.companyId,
+        edgeType: 'works_at', workspaceId: params.workspaceId, source: 'user', userId,
       })
     }
-    return contact
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    await rollbackAndRelease(client)
   }
+  return contactFromEntity(entity)
 }
 
-// Merge new contact fields into an existing row via supersession.
-// Mirrors mergeCompanyFields: nullable scalar fields only overwrite when
-// the incoming value is non-empty (never clear a known value silently),
-// tags union, external_ref shallow-merged.
 async function mergeContactFields(
   userId: string,
   id: string,
   incoming: {
-    email?: string | null
-    phone?: string | null
-    companyId?: string | null
-    tags?: string[]
-    externalRef?: CrmExternalRef
+    email?: string | null; phone?: string | null; companyId?: string | null
+    tags?: string[]; externalRef?: CrmExternalRef
   },
+  entityLinks?: EntityLinksStore,
 ): Promise<ContactRecord | null> {
-  const currentResult = await queryWithRLS<ContactRow>(
-    userId,
-    `SELECT ${CONTACT_FULL_SELECT} FROM contacts
-      WHERE id = $1 AND valid_to IS NULL`,
-    [id],
-  )
-  if (currentResult.rows.length === 0) return null
-  const current = toContact(currentResult.rows[0])
-
+  const cur = await getContactByIdSystem(userId, id)
+  if (!cur) return null
   const fields: ContactUpdateFields = {}
-  if (incoming.email && incoming.email !== current.email) fields.email = incoming.email
-  if (incoming.phone && incoming.phone !== current.phone) fields.phone = incoming.phone
-  if (incoming.companyId && incoming.companyId !== current.companyId) {
-    fields.companyId = incoming.companyId
-  }
+  if (incoming.email && incoming.email !== cur.email) fields.email = incoming.email
+  if (incoming.phone && incoming.phone !== cur.phone) fields.phone = incoming.phone
+  if (incoming.companyId && incoming.companyId !== cur.companyId) fields.companyId = incoming.companyId
   if (incoming.tags && incoming.tags.length > 0) {
-    const merged = Array.from(new Set([...current.tags, ...incoming.tags]))
-    if (merged.length !== current.tags.length) fields.tags = merged
+    const merged = Array.from(new Set([...cur.tags, ...incoming.tags]))
+    if (merged.length !== cur.tags.length) fields.tags = merged
   }
   if (incoming.externalRef && Object.keys(incoming.externalRef).length > 0) {
-    fields.externalRef = { ...current.externalRef, ...incoming.externalRef }
+    fields.externalRef = { ...cur.externalRef, ...incoming.externalRef }
   }
+  if (Object.keys(fields).length === 0) return cur
+  return updateContact(userId, id, fields, entityLinks)
+}
 
-  if (Object.keys(fields).length === 0) return current
-  return updateContact(userId, id, fields)
+async function getContactByIdSystem(userId: string, id: string): Promise<ContactRecord | null> {
+  const e = await getEntityByIdSystem(userId, id)
+  if (!e || e.kind !== 'person') return null
+  return contactFromEntity(e)
 }
 
 export async function getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const result = await queryWithRLS<ContactRow>(
     ctx.userId,
-    `SELECT ${CONTACT_FULL_SELECT} FROM contacts
-     WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL`,
+    `SELECT ${CONTACT_SELECT} FROM entities e
+      WHERE ${ap.sql} AND e.kind = 'person'
+        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
     [...ap.params, id],
   )
   if (result.rows.length === 0) return null
-  return toContact(result.rows[0])
+  return toContactRow(result.rows[0])
 }
 
 export async function listContacts(ctx: AccessContext, filters: ContactListFilters): Promise<ContactListRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL']
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const wheres: string[] = [
+    ap.sql, `e.kind = 'person'`, 'e.valid_to IS NULL',
+    `NOT COALESCE((e.attributes->>'self')::boolean, false)`,
+  ]
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
 
   if (filters.query) {
-    wheres.push(`(name ILIKE $${idx} OR email ILIKE $${idx})`)
-    values.push(`%${filters.query}%`)
-    idx++
+    wheres.push(`(e.display_name ILIKE $${idx} OR e.attributes->>'email' ILIKE $${idx})`)
+    values.push(`%${filters.query}%`); idx++
   }
   if (filters.tag) {
-    wheres.push(`$${idx} = ANY(tags)`)
-    values.push(filters.tag)
-    idx++
+    wheres.push(`e.attributes->'tags' ? $${idx}`)
+    values.push(filters.tag); idx++
   }
   if (filters.companyId) {
-    wheres.push(`company_id = $${idx}`)
-    values.push(filters.companyId)
-    idx++
+    wheres.push(`e.attributes->>'company_id' = $${idx}`)
+    values.push(filters.companyId); idx++
   }
-
   const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
   values.push(limit)
 
-  const result = await queryGated<ContactCompactRow>(
+  const result = await queryGated<ContactRow>(
     ctx,
-    `SELECT ${CONTACT_COMPACT_SELECT} FROM contacts
-     WHERE ${wheres.join(' AND ')}
-     ORDER BY updated_at DESC
-     LIMIT $${idx}`,
+    `SELECT ${CONTACT_SELECT} FROM entities e
+      WHERE ${wheres.join(' AND ')}
+      ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toContactListRow)
+  return result.rows.map(toContactRow)
 }
 
-// Supersession-on-write — see updateCompany for the full design notes.
-// The contact-specific carry-forward column is `company_id`.
-//
-// When `companyId` changes (FK supersession), the post-commit edge hook
-// closes the prior `works_at` edge from the contact's entity and opens a
-// new one to the incoming company. Same fire-and-forget invariant as
-// `createContact` — edge failures log but never affect the contact write.
 export async function updateContact(
   userId: string,
   id: string,
   fields: ContactUpdateFields,
   entityLinks?: EntityLinksStore,
 ): Promise<ContactRecord | null> {
-  type ContactOldRow = {
-    workspaceId: string
-    entityId: string | null
-    name: string
-    email: string | null
-    phone: string | null
-    companyId: string | null
-    tags: string[]
-    externalRef: CrmExternalRef | null
-    sensitivity: string
-    rowUserId: string | null
-    rowAssistantId: string | null
-    source: string
-    createdByUserId: string | null
-    createdByAssistantId: string | null
-    sourceEpisodeId: string | null
-    verifiedByUserId: string | null
-    verifiedAt: Date | null
+  const old = await getEntityByIdSystem(userId, id)
+  if (!old || old.kind !== 'person') return null
+  if (fields.companyId !== undefined) {
+    await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
   }
+  const a = { ...old.attributes }
+  if (fields.email !== undefined) { if (fields.email) a.email = fields.email; else delete a.email }
+  if (fields.phone !== undefined) { if (fields.phone) a.phone = fields.phone; else delete a.phone }
+  if (fields.companyId !== undefined) { if (fields.companyId) a.company_id = fields.companyId; else delete a.company_id }
+  if (fields.tags !== undefined) a.tags = fields.tags
+  if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
 
-  const client = await getAppPool().connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-    try {
-      const lockResult = await client.query<ContactOldRow>(
-        `SELECT workspace_id  as "workspaceId",
-                entity_id     as "entityId",
-                name, email, phone,
-                company_id    as "companyId",
-                tags,
-                external_ref  as "externalRef",
-                sensitivity,
-                user_id       as "rowUserId",
-                assistant_id  as "rowAssistantId",
-                source,
-                created_by_user_id      as "createdByUserId",
-                created_by_assistant_id as "createdByAssistantId",
-                source_episode_id       as "sourceEpisodeId",
-                verified_by_user_id     as "verifiedByUserId",
-                verified_at             as "verifiedAt"
-           FROM contacts
-          WHERE id = $1 AND valid_to IS NULL
-          FOR UPDATE`,
-        [id],
-      )
-      const old = lockResult.rows[0]
-      if (!old) {
-        await client.query('ROLLBACK')
-        return null
-      }
-
-      const next = {
-        name: fields.name ?? old.name,
-        email: fields.email !== undefined ? fields.email : old.email,
-        phone: fields.phone !== undefined ? fields.phone : old.phone,
-        companyId: fields.companyId !== undefined ? fields.companyId : old.companyId,
-        tags: fields.tags ?? old.tags,
-        externalRef: fields.externalRef ?? old.externalRef ?? {},
-      }
-
-      // Release entity_id on the old row first; see updateCompany for why.
-      await client.query(`UPDATE contacts SET entity_id = NULL WHERE id = $1`, [id])
-
-      const insertResult = await client.query<ContactRow>(
-        `INSERT INTO contacts (
-           workspace_id, entity_id, name, email, phone, company_id, tags, external_ref,
-           sensitivity, user_id, assistant_id, source,
-           created_by_user_id, created_by_assistant_id, source_episode_id,
-           verified_by_user_id, verified_at
-         )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-         RETURNING ${CONTACT_FULL_SELECT}`,
-        [
-          old.workspaceId, old.entityId,
-          next.name, next.email, next.phone, next.companyId, next.tags, JSON.stringify(next.externalRef),
-          old.sensitivity, old.rowUserId, old.rowAssistantId, old.source,
-          old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
-          old.verifiedByUserId, old.verifiedAt,
-        ],
-      )
-      const newRow = insertResult.rows[0]
-
-      await client.query(
-        `UPDATE contacts
-            SET valid_to = now(),
-                superseded_by = $2,
-                updated_at = now()
-          WHERE id = $1`,
-        [id, newRow.id],
-      )
-
-      await client.query('COMMIT')
-      const newContact = toContact(newRow)
-
-      // FK-supersession: if the company FK changed, close the prior
-      // `works_at` edge from the contact's entity and open a new one
-      // to the incoming company. Skipped when the entity has no
-      // backing entityId (legacy brain-blind rows) or both old and
-      // new companyId resolve to the same entity. Always runs after
-      // COMMIT, never awaited on the hot path.
-      const fkChanged =
-        fields.companyId !== undefined && fields.companyId !== old.companyId
-      if (entityLinks && newContact.entityId && fkChanged) {
-        let newCompanyEntityId: string | null = null
-        if (newContact.companyId) {
-          const r = await query<{ entityId: string | null }>(
-            `SELECT entity_id AS "entityId" FROM companies WHERE id = $1`,
-            [newContact.companyId],
-          )
-          newCompanyEntityId = r.rows[0]?.entityId ?? null
-        }
-        void superseedCrmRelationEdge(entityLinks, userId, {
-          sourceEntityId: newContact.entityId,
-          targetEntityId: newCompanyEntityId,
-          edgeType: 'works_at',
-          workspaceId: old.workspaceId,
-          source: 'user',
-          userId,
-        })
-      }
-      return newContact
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    }
-  } finally {
-    await rollbackAndRelease(client)
+  const e = await updateEntity(userId, id, {
+    displayName: fields.name,
+    canonicalId: fields.email !== undefined ? (fields.email ?? null) : undefined,
+    attributes: a,
+  })
+  if (!e) return null
+  if (fields.companyId !== undefined) {
+    repointGraphEdge(entityLinks, userId, {
+      sourceEntityId: id, targetEntityId: fields.companyId ?? null,
+      edgeType: 'works_at', workspaceId: old.workspaceId,
+    })
   }
+  return contactFromEntity(e)
 }
 
 // ── Deals ────────────────────────────────────────────────────────────
 
-const DEAL_FULL_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  contact_id as "contactId",
-  company_id as "companyId", stage, amount, close_date as "closeDate",
-  external_ref as "externalRef",
-  created_at as "createdAt", updated_at as "updatedAt"
-`
-
-const DEAL_COMPACT_SELECT = `
-  id, workspace_id as "workspaceId",
-  entity_id as "entityId",
-  contact_id as "contactId",
-  company_id as "companyId", stage, amount, close_date as "closeDate",
-  updated_at as "updatedAt"
-`
-
-type DealRow = {
-  id: string
-  workspaceId: string
-  entityId: string | null
-  contactId: string | null
-  companyId: string | null
-  stage: DealStage
-  // pg returns NUMERIC as string by default — coerce in toDeal.
-  amount: string | null
-  closeDate: Date | null
-  externalRef: CrmExternalRef
-  createdAt: Date
-  updatedAt: Date
+type DealRow = Omit<DealRecord, 'amount' | 'externalRef'> & {
+  amount: string | number | null; externalRef: CrmExternalRef | null
 }
+const DEAL_SELECT = `
+  e.id, e.id AS "entityId", e.workspace_id AS "workspaceId",
+  e.attributes->>'contact_id' AS "contactId",
+  e.attributes->>'company_id' AS "companyId",
+  COALESCE(e.attributes->>'stage', 'lead') AS stage,
+  e.attributes->>'amount' AS amount,
+  (e.attributes->>'close_date')::date AS "closeDate",
+  e.attributes->'external_ref' AS "externalRef",
+  e.created_at AS "createdAt", e.updated_at AS "updatedAt"`
 
-type DealCompactRow = Pick<
-  DealRow,
-  'id' | 'workspaceId' | 'entityId' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
->
-
-function toDeal(row: DealRow): DealRecord {
+function toDealRow(row: DealRow): DealRecord {
   return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    contactId: row.contactId,
-    companyId: row.companyId,
-    stage: row.stage,
+    ...row,
     amount: row.amount === null ? null : Number(row.amount),
-    closeDate: row.closeDate,
     externalRef: row.externalRef ?? {},
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
   }
 }
 
-function toDealListRow(row: DealCompactRow): DealListRow {
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    entityId: row.entityId,
-    contactId: row.contactId,
-    companyId: row.companyId,
-    stage: row.stage,
-    amount: row.amount === null ? null : Number(row.amount),
-    closeDate: row.closeDate,
-    updatedAt: row.updatedAt,
-  }
+function dealAttributes(p: {
+  contactId?: string | null; companyId?: string | null
+  stage?: DealStage; amount?: number | null; closeDate?: Date | null; externalRef?: CrmExternalRef
+}): Record<string, unknown> {
+  const a: Record<string, unknown> = { stage: p.stage ?? 'lead' }
+  if (p.contactId) a.contact_id = p.contactId
+  if (p.companyId) a.company_id = p.companyId
+  if (p.amount != null) a.amount = p.amount
+  if (p.closeDate) a.close_date = p.closeDate.toISOString().slice(0, 10)
+  if (p.externalRef && Object.keys(p.externalRef).length) a.external_ref = p.externalRef
+  return a
 }
 
-// Q24 — see createCompany. Deals have no `name` column, so the entity's
-// display_name is derived from the linked company inside the transaction
-// (falling back to 'Deal' when companyId is absent).
-//
-// WU-1.7 edge hook: when `companyId` is supplied AND an `entityLinks`
-// store is passed, an `engagement_of` edge (deal entity → company
-// entity) is emitted fire-and-forget after COMMIT. Best-effort — its
-// failure never affects the deal save. `entityLinks` is optional so
-// pre-WU-1.7 call sites keep compiling unchanged.
 export async function createDeal(
   userId: string,
   params: {
@@ -942,249 +611,99 @@ export async function createDeal(
     amount?: number | null
     closeDate?: Date | null
     externalRef?: CrmExternalRef
-    /** See createCompany — fresh-insert tier; defaults to DB `internal`. */
     sensitivity?: Sensitivity
-    /** Compartment set (MLS category axis) for the fresh entity + deal pair. Default '{}'. */
     compartments?: string[]
-    /** See createCompany — fresh-insert source; default 'user'; synthesis passes 'extracted'. */
     source?: 'user' | 'extracted'
   },
   entityLinks?: EntityLinksStore,
 ): Promise<DealRecord> {
-  // WU-4.5 — see createCompany; same author-stamp invariant applies.
   assertAuthorshipPresent('createDeal', userId)
-  const client = await getAppPool().connect()
-  let dealEntityId: string
-  let companyEntityId: string | null = null
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
+  assertValidStage(params.stage)
+  assertNonNegativeAmount(params.amount)
+  await assertSameWorkspace(params.contactId, params.workspaceId, 'contact_id')
+  await assertSameWorkspace(params.companyId, params.workspaceId, 'company_id')
 
-    let displayName = 'Deal'
-    if (params.companyId) {
-      // One lookup serves both the display-name derivation and the
-      // post-commit `engagement_of` edge hook.
-      const companyLookup = await client.query<{ name: string; entityId: string | null }>(
-        `SELECT name, entity_id AS "entityId" FROM companies WHERE id = $1`,
-        [params.companyId],
-      )
-      if (companyLookup.rows.length > 0) {
-        displayName = `Deal — ${companyLookup.rows[0].name}`
-        companyEntityId = companyLookup.rows[0].entityId ?? null
-      }
-    }
-
-    // See createCompany — user_id mirrors creator to satisfy Q11 CHECK.
-    const entityResult = await client.query<{ id: string }>(
-      `INSERT INTO entities
-         (kind, display_name, workspace_id, user_id, created_by_user_id, source, sensitivity, compartments)
-       VALUES ('deal', $1, $2, $3, $3, $6, $4, $5)
-       RETURNING id`,
-      [displayName, params.workspaceId, userId, params.sensitivity ?? 'internal', params.compartments ?? [], params.source ?? 'user'],
+  let displayName = 'Deal'
+  if (params.companyId) {
+    const c = await query<{ name: string }>(
+      `SELECT display_name AS name FROM entities WHERE id = $1 AND valid_to IS NULL`,
+      [params.companyId],
     )
-    const entityId = entityResult.rows[0].id
-    dealEntityId = entityId
-
-    // WU-4.5 — stamp `created_by_user_id` on the deals row; see
-    // createCompany for the matching note.
-    const result = await client.query<DealRow>(
-      `INSERT INTO deals (workspace_id, contact_id, company_id, stage, amount, close_date, external_ref, entity_id, created_by_user_id, sensitivity, compartments, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       RETURNING ${DEAL_FULL_SELECT}`,
-      [
-        params.workspaceId,
-        params.contactId ?? null,
-        params.companyId ?? null,
-        params.stage ?? 'lead',
-        params.amount ?? null,
-        params.closeDate ?? null,
-        JSON.stringify(params.externalRef ?? {}),
-        entityId,
-        userId,
-        params.sensitivity ?? 'internal',
-        params.compartments ?? [],
-        params.source ?? 'user',
-      ],
-    )
-
-    await client.query('COMMIT')
-    const deal = toDeal(result.rows[0])
-
-    // Fire-and-forget `engagement_of` edge — post-COMMIT, never awaited,
-    // never able to fail the deal save.
-    if (entityLinks && companyEntityId) {
-      void emitCrmRelationEdge(entityLinks, userId, {
-        sourceEntityId: dealEntityId,
-        targetEntityId: companyEntityId,
-        edgeType: 'engagement_of',
-        workspaceId: params.workspaceId,
-        source: 'user',
-        userId,
-      })
-    }
-    return deal
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    await rollbackAndRelease(client)
+    if (c.rows[0]) displayName = `Deal - ${c.rows[0].name}`
   }
+
+  const entity = await createEntity({
+    kind: 'deal',
+    displayName,
+    attributes: dealAttributes(params),
+    sensitivity: params.sensitivity ?? 'internal',
+    workspaceId: params.workspaceId,
+    userId,
+    createdByUserId: userId,
+    source: params.source ?? 'user',
+    compartments: params.compartments ?? [],
+  })
+
+  if (entityLinks && params.companyId) {
+    void emitCrmRelationEdge(entityLinks, userId, {
+      sourceEntityId: entity.id, targetEntityId: params.companyId,
+      edgeType: 'engagement_of', workspaceId: params.workspaceId, source: 'user', userId,
+    })
+  }
+  if (entityLinks && params.contactId) {
+    void emitEdgeFireAndForget(entityLinks, userId, {
+      sourceKind: 'entity', sourceId: params.contactId,
+      targetKind: 'entity', targetId: entity.id,
+      edgeType: 'represents', workspaceId: params.workspaceId, source: 'user', userId,
+    })
+  }
+  return dealFromEntity(entity)
 }
 
 export async function getDealById(ctx: AccessContext, id: string): Promise<DealRecord | null> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const result = await queryWithRLS<DealRow>(
     ctx.userId,
-    `SELECT ${DEAL_FULL_SELECT} FROM deals
-     WHERE ${ap.sql}
-       AND id = $${ap.nextIdx} AND valid_to IS NULL`,
+    `SELECT ${DEAL_SELECT} FROM entities e
+      WHERE ${ap.sql} AND e.kind = 'deal'
+        AND e.id = $${ap.nextIdx} AND e.valid_to IS NULL`,
     [...ap.params, id],
   )
   if (result.rows.length === 0) return null
-  return toDeal(result.rows[0])
+  return toDealRow(result.rows[0])
 }
 
 export async function listDeals(ctx: AccessContext, filters: DealListFilters): Promise<DealListRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL']
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
+  const wheres: string[] = [ap.sql, `e.kind = 'deal'`, 'e.valid_to IS NULL']
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
 
   if (filters.stage) {
     if (Array.isArray(filters.stage)) {
-      wheres.push(`stage = ANY($${idx})`)
-      values.push(filters.stage)
+      wheres.push(`e.attributes->>'stage' = ANY($${idx})`); values.push(filters.stage)
     } else {
-      wheres.push(`stage = $${idx}`)
-      values.push(filters.stage)
+      wheres.push(`e.attributes->>'stage' = $${idx}`); values.push(filters.stage)
     }
     idx++
   }
   if (filters.contactId) {
-    wheres.push(`contact_id = $${idx}`)
-    values.push(filters.contactId)
-    idx++
+    wheres.push(`e.attributes->>'contact_id' = $${idx}`); values.push(filters.contactId); idx++
   }
   if (filters.companyId) {
-    wheres.push(`company_id = $${idx}`)
-    values.push(filters.companyId)
-    idx++
+    wheres.push(`e.attributes->>'company_id' = $${idx}`); values.push(filters.companyId); idx++
   }
-
   const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
   values.push(limit)
 
-  const result = await queryGated<DealCompactRow>(
+  const result = await queryGated<DealRow>(
     ctx,
-    `SELECT ${DEAL_COMPACT_SELECT} FROM deals
-     WHERE ${wheres.join(' AND ')}
-     ORDER BY updated_at DESC
-     LIMIT $${idx}`,
+    `SELECT ${DEAL_SELECT} FROM entities e
+      WHERE ${wheres.join(' AND ')}
+      ORDER BY e.updated_at DESC LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toDealListRow)
-}
-
-// Supersession-on-write — see updateCompany for the full design notes.
-// Both `updateDeal` and `setDealStage` follow the same pattern. The Q24
-// lock calls out deal stage transitions explicitly
-// (qualified → proposal → negotiation), but every typed-field edit
-// supersedes so `getRowHistory('deals', id)` reconstructs a clean chain.
-async function supersedeDeal(
-  client: PoolClient,
-  id: string,
-  apply: (old: DealOldRow) => DealNextFields,
-): Promise<DealRecord | null> {
-  const lockResult = await client.query<DealOldRow>(
-    `SELECT workspace_id  as "workspaceId",
-            entity_id     as "entityId",
-            contact_id    as "contactId",
-            company_id    as "companyId",
-            stage,
-            amount,
-            close_date    as "closeDate",
-            external_ref  as "externalRef",
-            sensitivity,
-            user_id       as "rowUserId",
-            assistant_id  as "rowAssistantId",
-            source,
-            created_by_user_id      as "createdByUserId",
-            created_by_assistant_id as "createdByAssistantId",
-            source_episode_id       as "sourceEpisodeId",
-            verified_by_user_id     as "verifiedByUserId",
-            verified_at             as "verifiedAt"
-       FROM deals
-      WHERE id = $1 AND valid_to IS NULL
-      FOR UPDATE`,
-    [id],
-  )
-  const old = lockResult.rows[0]
-  if (!old) return null
-
-  const next = apply(old)
-
-  // Release entity_id on the old row first; see updateCompany for why.
-  await client.query(`UPDATE deals SET entity_id = NULL WHERE id = $1`, [id])
-
-  const insertResult = await client.query<DealRow>(
-    `INSERT INTO deals (
-       workspace_id, entity_id, contact_id, company_id, stage, amount, close_date, external_ref,
-       sensitivity, user_id, assistant_id, source,
-       created_by_user_id, created_by_assistant_id, source_episode_id,
-       verified_by_user_id, verified_at
-     )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-     RETURNING ${DEAL_FULL_SELECT}`,
-    [
-      old.workspaceId, old.entityId,
-      next.contactId, next.companyId, next.stage, next.amount, next.closeDate,
-      JSON.stringify(next.externalRef),
-      old.sensitivity, old.rowUserId, old.rowAssistantId, old.source,
-      old.createdByUserId, old.createdByAssistantId, old.sourceEpisodeId,
-      old.verifiedByUserId, old.verifiedAt,
-    ],
-  )
-  const newRow = insertResult.rows[0]
-
-  await client.query(
-    `UPDATE deals
-        SET valid_to = now(),
-            superseded_by = $2,
-            updated_at = now()
-      WHERE id = $1`,
-    [id, newRow.id],
-  )
-
-  return toDeal(newRow)
-}
-
-type DealOldRow = {
-  workspaceId: string
-  entityId: string | null
-  contactId: string | null
-  companyId: string | null
-  stage: DealStage
-  amount: string | null
-  closeDate: Date | null
-  externalRef: CrmExternalRef | null
-  sensitivity: string
-  rowUserId: string | null
-  rowAssistantId: string | null
-  source: string
-  createdByUserId: string | null
-  createdByAssistantId: string | null
-  sourceEpisodeId: string | null
-  verifiedByUserId: string | null
-  verifiedAt: Date | null
-}
-
-type DealNextFields = {
-  contactId: string | null
-  companyId: string | null
-  stage: DealStage
-  amount: string | number | null
-  closeDate: Date | null
-  externalRef: CrmExternalRef
+  return result.rows.map(toDealRow)
 }
 
 export async function updateDeal(
@@ -1193,221 +712,57 @@ export async function updateDeal(
   fields: DealUpdateFields,
   entityLinks?: EntityLinksStore,
 ): Promise<DealRecord | null> {
-  const client = await getAppPool().connect()
-  let oldCompanyId: string | null | undefined = undefined
-  let workspaceId: string | null = null
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-    try {
-      const result = await supersedeDeal(client, id, (old) => {
-        oldCompanyId = old.companyId
-        workspaceId = old.workspaceId
-        return {
-          contactId: fields.contactId !== undefined ? fields.contactId : old.contactId,
-          companyId: fields.companyId !== undefined ? fields.companyId : old.companyId,
-          stage: old.stage,
-          amount: fields.amount !== undefined ? fields.amount : old.amount,
-          closeDate: fields.closeDate !== undefined ? fields.closeDate : old.closeDate,
-          externalRef: fields.externalRef ?? old.externalRef ?? {},
-        }
-      })
-      if (!result) {
-        await client.query('ROLLBACK')
-        return null
-      }
-      await client.query('COMMIT')
-      // FK-supersession for engagement_of — same shape as updateContact.
-      const fkChanged =
-        fields.companyId !== undefined && fields.companyId !== oldCompanyId
-      if (entityLinks && result.entityId && fkChanged && workspaceId) {
-        let newCompanyEntityId: string | null = null
-        if (result.companyId) {
-          const r = await query<{ entityId: string | null }>(
-            `SELECT entity_id AS "entityId" FROM companies WHERE id = $1`,
-            [result.companyId],
-          )
-          newCompanyEntityId = r.rows[0]?.entityId ?? null
-        }
-        void superseedCrmRelationEdge(entityLinks, userId, {
-          sourceEntityId: result.entityId,
-          targetEntityId: newCompanyEntityId,
-          edgeType: 'engagement_of',
-          workspaceId,
-          source: 'user',
-          userId,
-        })
-      }
-      return result
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    }
-  } finally {
-    await rollbackAndRelease(client)
+  assertNonNegativeAmount(fields.amount)
+  const old = await getEntityByIdSystem(userId, id)
+  if (!old || old.kind !== 'deal') return null
+  if (fields.companyId !== undefined) await assertSameWorkspace(fields.companyId, old.workspaceId, 'company_id')
+  if (fields.contactId !== undefined) await assertSameWorkspace(fields.contactId, old.workspaceId, 'contact_id')
+
+  const a = { ...old.attributes }
+  if (fields.contactId !== undefined) { if (fields.contactId) a.contact_id = fields.contactId; else delete a.contact_id }
+  if (fields.companyId !== undefined) { if (fields.companyId) a.company_id = fields.companyId; else delete a.company_id }
+  if (fields.amount !== undefined) { if (fields.amount != null) a.amount = fields.amount; else delete a.amount }
+  if (fields.closeDate !== undefined) {
+    if (fields.closeDate) a.close_date = fields.closeDate.toISOString().slice(0, 10); else delete a.close_date
   }
+  if (fields.externalRef !== undefined) a.external_ref = fields.externalRef
+
+  const e = await updateEntity(userId, id, { attributes: a })
+  if (!e) return null
+
+  if (fields.companyId !== undefined) {
+    repointGraphEdge(entityLinks, userId, {
+      sourceEntityId: id, targetEntityId: fields.companyId ?? null,
+      edgeType: 'engagement_of', workspaceId: old.workspaceId,
+    })
+  }
+  if (entityLinks && fields.contactId !== undefined && fields.contactId) {
+    // represents is inbound (contact → deal); append a fresh edge (the
+    // FK truth lives in attributes, so the edge is graph-only).
+    void emitEdgeFireAndForget(entityLinks, userId, {
+      sourceKind: 'entity', sourceId: fields.contactId,
+      targetKind: 'entity', targetId: id,
+      edgeType: 'represents', workspaceId: old.workspaceId, source: 'user', userId,
+    })
+  }
+  return dealFromEntity(e)
 }
 
 export async function setDealStage(userId: string, id: string, stage: DealStage): Promise<DealRecord | null> {
-  const client = await getAppPool().connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(`SET LOCAL app.current_user_id = '${userId.replace(/'/g, "''")}'`)
-    try {
-      const result = await supersedeDeal(client, id, (old) => ({
-        contactId: old.contactId,
-        companyId: old.companyId,
-        stage,
-        amount: old.amount,
-        closeDate: old.closeDate,
-        externalRef: old.externalRef ?? {},
-      }))
-      if (!result) {
-        await client.query('ROLLBACK')
-        return null
-      }
-      await client.query('COMMIT')
-      return result
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      throw err
-    }
-  } finally {
-    await rollbackAndRelease(client)
-  }
-}
-
-// ── D.7 history walkers (WU-6.9) ─────────────────────────────────────
-//
-// Each walker projects the universal columns the unified row-history
-// surface (`packages/api/src/db/row-history-store.ts`) needs to derive
-// status and render compact identity. Public CRM record types remain
-// unchanged — these rows are a history-specific shape.
-
-export type CrmHistoryRow = {
-  id: string
-  workspaceId: string
-  validFrom: Date
-  validTo: Date | null
-  supersededBy: string | null
-  retractedAt: Date | null
-  retractedReason: string | null
-  createdByUserId: string | null
-  createdByAssistantId: string | null
-  createdAt: Date
-  display: Record<string, unknown>
-}
-
-const COMPANY_HISTORY_SELECT = `
-  id,
-  workspace_id              AS "workspaceId",
-  valid_from                AS "validFrom",
-  valid_to                  AS "validTo",
-  superseded_by             AS "supersededBy",
-  retracted_at              AS "retractedAt",
-  retracted_reason          AS "retractedReason",
-  created_by_user_id        AS "createdByUserId",
-  created_by_assistant_id   AS "createdByAssistantId",
-  created_at                AS "createdAt",
-  jsonb_build_object('name', name, 'domain', domain, 'tags', tags) AS display
-`
-
-const CONTACT_HISTORY_SELECT = `
-  id,
-  workspace_id              AS "workspaceId",
-  valid_from                AS "validFrom",
-  valid_to                  AS "validTo",
-  superseded_by             AS "supersededBy",
-  retracted_at              AS "retractedAt",
-  retracted_reason          AS "retractedReason",
-  created_by_user_id        AS "createdByUserId",
-  created_by_assistant_id   AS "createdByAssistantId",
-  created_at                AS "createdAt",
-  jsonb_build_object('name', name, 'email', email, 'companyId', company_id) AS display
-`
-
-const DEAL_HISTORY_SELECT = `
-  id,
-  workspace_id              AS "workspaceId",
-  valid_from                AS "validFrom",
-  valid_to                  AS "validTo",
-  superseded_by             AS "supersededBy",
-  retracted_at              AS "retractedAt",
-  retracted_reason          AS "retractedReason",
-  created_by_user_id        AS "createdByUserId",
-  created_by_assistant_id   AS "createdByAssistantId",
-  created_at                AS "createdAt",
-  jsonb_build_object('stage', stage, 'amount', amount, 'companyId', company_id, 'contactId', contact_id) AS display
-`
-
-export async function getCompanyHistory(ctx: AccessContext, id: string): Promise<CrmHistoryRow[]> {
-  // D.7 invariant: chain rows share the universal-column tuple, so the
-  // predicate gates the anchor only (WU-4.2b).
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryWithRLS<CrmHistoryRow>(
-    ctx.userId,
-    `WITH RECURSIVE chain AS (
-       SELECT id, superseded_by FROM companies
-        WHERE ${ap.sql} AND id = $${ap.nextIdx}
-       UNION
-       SELECT c.id, c.superseded_by
-         FROM companies c, chain ch
-        WHERE c.id = ch.superseded_by OR c.superseded_by = ch.id
-     )
-     SELECT ${COMPANY_HISTORY_SELECT} FROM companies
-      WHERE id IN (SELECT id FROM chain)
-      ORDER BY valid_from ASC, created_at ASC`,
-    [...ap.params, id],
-  )
-  return result.rows
-}
-
-export async function getContactHistory(ctx: AccessContext, id: string): Promise<CrmHistoryRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryWithRLS<CrmHistoryRow>(
-    ctx.userId,
-    `WITH RECURSIVE chain AS (
-       SELECT id, superseded_by FROM contacts
-        WHERE ${ap.sql} AND id = $${ap.nextIdx}
-       UNION
-       SELECT c.id, c.superseded_by
-         FROM contacts c, chain ch
-        WHERE c.id = ch.superseded_by OR c.superseded_by = ch.id
-     )
-     SELECT ${CONTACT_HISTORY_SELECT} FROM contacts
-      WHERE id IN (SELECT id FROM chain)
-      ORDER BY valid_from ASC, created_at ASC`,
-    [...ap.params, id],
-  )
-  return result.rows
-}
-
-export async function getDealHistory(ctx: AccessContext, id: string): Promise<CrmHistoryRow[]> {
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  const result = await queryWithRLS<CrmHistoryRow>(
-    ctx.userId,
-    `WITH RECURSIVE chain AS (
-       SELECT id, superseded_by FROM deals
-        WHERE ${ap.sql} AND id = $${ap.nextIdx}
-       UNION
-       SELECT d.id, d.superseded_by
-         FROM deals d, chain ch
-        WHERE d.id = ch.superseded_by OR d.superseded_by = ch.id
-     )
-     SELECT ${DEAL_HISTORY_SELECT} FROM deals
-      WHERE id IN (SELECT id FROM chain)
-      ORDER BY valid_from ASC, created_at ASC`,
-    [...ap.params, id],
-  )
-  return result.rows
+  assertValidStage(stage)
+  const old = await getEntityByIdSystem(userId, id)
+  if (!old || old.kind !== 'deal') return null
+  const a = { ...old.attributes, stage }
+  const e = await updateEntity(userId, id, { attributes: a })
+  if (!e) return null
+  return dealFromEntity(e)
 }
 
 // ── Relation label resolution (Phase 1 — Notion-feel) ────────────────
 //
-// View bindings emit `RelationWidget` cells (`{ entityType, id, label }`)
-// for company/contact/deal references. `batchLabels` resolves a mixed
-// set of ids to display labels in one pass, scoped by the caller's
-// access context — ids the caller cannot see are silently omitted.
+// View bindings emit `RelationWidget` cells for company/contact/deal
+// references (now all entity ids). Resolve a mixed set to display labels
+// in one pass, scoped by the caller's access context.
 
 export async function batchLabels(
   ctx: AccessContext,
@@ -1425,27 +780,16 @@ async function resolveLabels(
   out: Map<string, string>,
 ): Promise<void> {
   if (ids.length === 0) return
-  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  if (entity === 'deal') {
-    const result = await queryGated<{ id: string }>(
-      ctx,
-      `SELECT id FROM deals
-        WHERE ${ap.sql} AND valid_to IS NULL AND id = ANY($${ap.nextIdx}::uuid[])`,
-      [...ap.params, ids],
-    )
-    for (const row of result.rows) {
-      out.set(`deal:${row.id}`, `Deal #${row.id.slice(0, 8)}`)
-    }
-    return
-  }
-  const table = entity === 'company' ? 'companies' : 'contacts'
+  const kind = entity === 'company' ? 'company' : entity === 'contact' ? 'person' : 'deal'
+  const ap = buildAccessPredicate(ctx, { alias: 'e', startIdx: 1 })
   const result = await queryGated<{ id: string; name: string }>(
     ctx,
-    `SELECT id, name FROM ${table}
-      WHERE ${ap.sql} AND valid_to IS NULL AND id = ANY($${ap.nextIdx}::uuid[])`,
-    [...ap.params, ids],
+    `SELECT e.id, e.display_name AS name FROM entities e
+      WHERE ${ap.sql} AND e.kind = $${ap.nextIdx}
+        AND e.valid_to IS NULL AND e.id = ANY($${ap.nextIdx + 1}::uuid[])`,
+    [...ap.params, kind, ids],
   )
   for (const row of result.rows) {
-    out.set(`${entity}:${row.id}`, row.name)
+    out.set(`${entity}:${row.id}`, entity === 'deal' ? `Deal #${row.id.slice(0, 8)}` : row.name)
   }
 }

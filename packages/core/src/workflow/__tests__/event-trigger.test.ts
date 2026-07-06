@@ -467,3 +467,77 @@ describe('[COMP:workflow/event-trigger] goal subscriber (until:event)', () => {
     expect(errCtx).toEqual({ workspaceId: 'ws1' })
   })
 })
+
+describe('[COMP:workflow/event-trigger] matcher extensions — actions set + tags', () => {
+  const TASK_EVENT: DispatchEvent = {
+    workspaceId: 'ws1',
+    source: { type: 'task' },
+    text: 'Follow up with Acme',
+    actorId: 'user1',
+    channelId: 'completed',
+    actions: ['completed', 'tagged', 'updated'],
+    mentions: ['u-assignee'],
+    tags: ['crm'],
+    isBot: false,
+    payload: { taskId: 't1', action: 'completed' },
+  }
+  const taskSub = (match?: EventSubscription['match']): EventSubscription => ({
+    source: { type: 'task' },
+    match,
+  })
+
+  it('an id-less task subscription matches any task event in the workspace', () => {
+    expect(matchesEvent(TASK_EVENT, taskSub())).toBe(true)
+  })
+
+  it('a task subscription never matches a non-task event, and vice versa', () => {
+    expect(matchesEvent(SLACK_EVENT, taskSub())).toBe(false)
+    expect(matchesEvent(TASK_EVENT, slackSub())).toBe(false)
+  })
+
+  it('inChannels matches the action SET, not just the primary channelId', () => {
+    expect(matchesEvent(TASK_EVENT, taskSub({ inChannels: ['tagged'] }))).toBe(true)
+    expect(matchesEvent(TASK_EVENT, taskSub({ inChannels: ['created'] }))).toBe(false)
+  })
+
+  it('single-action producers fall back to [channelId] — Slack matching unchanged', () => {
+    expect(matchesEvent(SLACK_EVENT, slackSub({ inChannels: ['C_INCIDENTS'] }))).toBe(true)
+    expect(matchesEvent(SLACK_EVENT, slackSub({ inChannels: ['C_OTHER'] }))).toBe(false)
+  })
+
+  it('tags filter is overlap on the event tag set', () => {
+    expect(matchesEvent(TASK_EVENT, taskSub({ tags: ['crm', 'other'] }))).toBe(true)
+    expect(matchesEvent(TASK_EVENT, taskSub({ tags: ['urgent'] }))).toBe(false)
+  })
+
+  it('a tags filter on a source whose events carry no tags never matches', () => {
+    expect(matchesEvent(SLACK_EVENT, slackSub({ tags: ['crm'] }))).toBe(false)
+  })
+
+  it('tags AND-combines with the other fields', () => {
+    expect(
+      matchesEvent(TASK_EVENT, taskSub({ inChannels: ['completed'], tags: ['crm'] })),
+    ).toBe(true)
+    expect(
+      matchesEvent(TASK_EVENT, taskSub({ inChannels: ['completed'], tags: ['urgent'] })),
+    ).toBe(false)
+  })
+
+  it('dispatcher builds a task run input with sourceType task', async () => {
+    const started: WorkflowEventInput[] = []
+    const dispatcher = createWorkflowEventDispatcher({
+      findEventTriggeredWorkflows: async () => [
+        { workflowId: 'wf1', workspaceId: 'ws1', sources: [taskSub()] },
+      ],
+      startWorkflowRun: async ({ input }) => {
+        started.push(input)
+      },
+    })
+    await dispatcher.dispatch(TASK_EVENT)
+    expect(started).toHaveLength(1)
+    expect(started[0].trigger.sourceType).toBe('task')
+    expect(started[0].trigger.provider).toBe('task')
+    expect(started[0].trigger.channelId).toBe('completed')
+    expect(started[0].event.taskId).toBe('t1')
+  })
+})

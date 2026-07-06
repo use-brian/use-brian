@@ -299,6 +299,14 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     opts?: { mimeHint?: string },
   ): Promise<{ buffer: Buffer; mime: string; name: string }>
   /**
+   * Resolve a `file_id` to its authenticated Bot API file URL (cloud host,
+   * `https://api.telegram.org/file/bot<token>/<file_path>`). Lets a caller
+   * STREAM the bytes (e.g. `streamUrlToGcs` in the channel-media intake)
+   * instead of buffering via `downloadMedia`. Same 20MB `getFile` cloud cap
+   * applies. See large-content-artifacts §Phase 0.3.
+   */
+  resolveFileUrl(fileId: string): Promise<string>
+  /**
    * Remove the bot from the given group/supergroup/channel. Silently swallows
    * "chat not found" errors so a best-effort leave never surfaces to the caller.
    */
@@ -329,10 +337,6 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
         e.type === 'mention' &&
         msg.text?.slice(e.offset, e.offset + e.length).toLowerCase() === `@${options.botUsername!.toLowerCase()}`,
     )
-  }
-
-  function isReplyToBot(msg: TelegramMessage): boolean {
-    return !!msg.reply_to_message?.from?.is_bot
   }
 
   function isGroupChat(msg: TelegramMessage): boolean {
@@ -371,15 +375,19 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     const isGroup = isGroupChat(msg)
     const mentioned = isBotMentioned(msg)
 
-    // In groups, respond when mentioned or when replying to the bot's message
-    // (unless requireMention is explicitly set to false for this chat/topic)
+    // In groups, respond only when @mentioned (unless requireMention is
+    // explicitly set to false for this chat/topic via override). Replying to
+    // the bot's message is deliberately NOT an addressing trigger: in a
+    // multi-bot group (e.g. one BYO bot per forum topic, all receiving every
+    // message) reply-based triggering caused cross-bot replies — the Claw
+    // Center rotating-replies incident (2026-07-04). The requireMention rule
+    // alone decides.
     const chatIdStr = String(msg.chat.id)
     const topicId = (msg.chat.is_forum === true && msg.message_thread_id != null)
       ? msg.message_thread_id
       : undefined
     const requireMention = resolveRequireMention(chatIdStr, topicId)
-    const replyToBot = isReplyToBot(msg)
-    if (isGroup && requireMention && !mentioned && !replyToBot) return null
+    if (isGroup && requireMention && !mentioned) return null
 
     // Skip service messages
     if (msg.new_chat_members || msg.left_chat_member) return null
@@ -457,7 +465,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
       mediaSizeBytes,
       replyToMessageId: msg.reply_to_message ? String(msg.reply_to_message.message_id) : undefined,
       isGroupChat: isGroup,
-      isMentioned: mentioned || replyToBot,
+      isMentioned: mentioned,
       timestamp: msg.date * 1000,
       raw: msg,
     }
@@ -929,6 +937,14 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     },
 
     downloadMedia: downloadMediaImpl,
+
+    async resolveFileUrl(fileId: string): Promise<string> {
+      const file = await api.getFile(fileId)
+      if (!file.file_path) {
+        throw new Error(`Telegram getFile returned no file_path for ${fileId}`)
+      }
+      return `https://api.telegram.org/file/bot${options.token}/${file.file_path}`
+    },
 
     async leaveChat(chatId: string): Promise<void> {
       try {

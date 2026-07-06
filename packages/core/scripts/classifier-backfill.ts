@@ -8,10 +8,14 @@
  *                         canonical_id matches a GitHub repo URL pattern
  *                         to `kind='repository'`.
  *
- *   bare-domain-as-project — promote `kind='project'` entities whose
- *                         canonical_id is a bare domain to `kind='company'`
- *                         via promoteEntityToCrm (creates the companies
- *                         specialization row atomically).
+ *   bare-domain-as-project — OBSOLETE post CRM→entity unification. Once
+ *                         promoted `kind='project'` entities with a bare-
+ *                         domain canonical_id to `kind='company'` by
+ *                         inserting a `companies` specialization row. That
+ *                         table is gone (companies folded into `entities`,
+ *                         domain in `attributes`), so this subcommand is
+ *                         now a no-op; retained only so the CLI still
+ *                         accepts the argument.
  *
  *   cross-kind-collisions — find entities sharing
  *                         (workspace_id, canonical_id) across kinds and
@@ -65,8 +69,6 @@ function parseArgs(argv: string[]): Args {
   return args
 }
 
-const BARE_DOMAIN_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i
-
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const pool = new Pool({ connectionString: process.env.DATABASE_URL })
@@ -114,84 +116,16 @@ async function runGithubAsProject(pool: Pool, args: Args): Promise<void> {
   console.log(`[classifier-backfill] github-as-project: ${args.apply ? 'applied' : 'dry-run'} ${matches.length} updates`)
 }
 
-async function runBareDomainAsProject(pool: Pool, args: Args): Promise<void> {
-  const wsClause = args.workspaceId ? `AND e.workspace_id = $1` : ''
-  const params = args.workspaceId ? [args.workspaceId] : []
-  // Join workspaces to get owner_user_id — promoteEntityToCrm runs under
-  // queryWithRLS and needs an actor.
-  const { rows } = await pool.query<{
-    id: string
-    workspace_id: string
-    canonical_id: string
-    display_name: string
-    owner_user_id: string
-  }>(
-    `SELECT e.id, e.workspace_id, e.canonical_id, e.display_name, w.owner_user_id
-     FROM entities e
-     JOIN workspaces w ON w.id = e.workspace_id
-     WHERE e.valid_to IS NULL AND e.retracted_at IS NULL
-       AND e.kind = 'project'
-       AND e.canonical_id IS NOT NULL
-       AND e.canonical_id !~ '^https?://'
-       AND e.canonical_id !~ '@'
-       ${wsClause}`,
-    params,
+async function runBareDomainAsProject(_pool: Pool, _args: Args): Promise<void> {
+  // Obsolete post CRM→entity unification. This subcommand promoted
+  // bare-domain `project` entities to `company` by inserting a row into
+  // the `companies` specialization table. That table no longer exists —
+  // companies are folded into `entities` (kind='company', domain in
+  // `attributes`). Reclassification is now handled by the entity-kind
+  // classifier and the dedupe/merge tooling, so this path is a no-op.
+  console.log(
+    '[classifier-backfill] bare-domain-as-project: obsolete post CRM→entity unification (companies folded into entities); no rows written.',
   )
-  const matches = rows.filter((r) => BARE_DOMAIN_RE.test(r.canonical_id))
-  console.log(`[classifier-backfill] bare-domain-as-project: ${matches.length} candidates`)
-  for (const m of matches) {
-    console.log(`  ${m.workspace_id}/${m.id} "${m.display_name}" (${m.canonical_id}) -> promote to company`)
-  }
-  if (!args.apply) {
-    console.log(`[classifier-backfill] bare-domain-as-project: dry-run; pass --apply to promote`)
-    return
-  }
-
-  // Apply path — uses the same atomic specialization-row-creation
-  // pattern as `promoteEntityToCrm` (entities-store.ts:1564) directly
-  // in SQL so the script stays self-contained.
-  let promoted = 0
-  let failed = 0
-  for (const m of matches) {
-    const client = await pool.connect()
-    try {
-      // Connects as the owner (DATABASE_URL), which bypasses RLS — no GUC needed.
-      await client.query('BEGIN')
-      // Idempotency: skip if there's already a companies row.
-      const existing = await client.query(
-        `SELECT id FROM companies WHERE entity_id = $1 LIMIT 1`,
-        [m.id],
-      )
-      if (existing.rows.length > 0) {
-        await client.query('COMMIT')
-        console.log(`  -- ${m.id}: already has companies row (id=${existing.rows[0].id}), kind flip only`)
-        await client.query(
-          `UPDATE entities SET kind = 'company', updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
-          [m.id],
-        )
-        promoted++
-        continue
-      }
-      await client.query(
-        `UPDATE entities SET kind = 'company', updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
-        [m.id],
-      )
-      await client.query(
-        `INSERT INTO companies (entity_id, workspace_id, name, domain, tags, created_by_user_id)
-         VALUES ($1, $2, $3, $4, '{}'::text[], $5)`,
-        [m.id, m.workspace_id, m.display_name, m.canonical_id, m.owner_user_id],
-      )
-      await client.query('COMMIT')
-      promoted++
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      console.warn(`  ! ${m.id}: ${err instanceof Error ? err.message : String(err)}`)
-      failed++
-    } finally {
-      client.release()
-    }
-  }
-  console.log(`[classifier-backfill] bare-domain-as-project: promoted=${promoted} failed=${failed}`)
 }
 
 async function runCrossKindCollisions(pool: Pool, args: Args): Promise<void> {

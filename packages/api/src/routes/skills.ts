@@ -31,9 +31,10 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { loadBuiltinSkills, createRateLimiter, shouldInline } from '@sidanclaw/core'
+import { loadBuiltinSkills, createRateLimiter, shouldInline, extractionSpecSchema, extractionSpecToBlocks } from '@sidanclaw/core'
 import type { SkillContent, LLMProvider, FileStore, ContentBlock } from '@sidanclaw/core'
 import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skill-store.js'
+import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspacePlan as getWorkspacePlanDb, type WorkspaceStore } from '../db/workspace-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
 
@@ -67,6 +68,10 @@ type SkillRouteOptions = {
   workspaceSkillStore?: WorkspaceSkillStore
   /** Workspace-membership gate for the workspace-scoped Brain endpoints. */
   workspaceStore?: WorkspaceStore
+  /** Page-template store — mints + links a v2 blueprint when a saved skill's
+   *  draft carries an `extraction` spec (structural-synthesis Phase 2). Optional:
+   *  without it a skill with an extraction spec still saves, just unlinked. */
+  pageTemplateStore?: PageTemplateStore
   /**
    * Per-assistant enablement (brain-skill-management plan §4) — backs the D4
    * all-assistants default at create and the skill-centric Access endpoints.
@@ -148,6 +153,7 @@ export function skillRoutes({
   communityRegistry = [],
   workspaceSkillStore,
   workspaceStore,
+  pageTemplateStore,
   workspaceSkillEnablementStore,
   listWorkspaceAssistants,
   draftProvider,
@@ -191,6 +197,7 @@ export function skillRoutes({
       verifiedAt: s.verifiedAt ? s.verifiedAt.toISOString() : null,
       rederivationCount: s.rederivationCount,
       requiresConnectors: s.requiresConnectors,
+      blueprintId: s.blueprintId ?? null,
       // Library columns + governance panel (brain-skill-management plan §4).
       enabledAssistantIds,
       lastInvokedAt: s.lastInvokedAt ? s.lastInvokedAt.toISOString() : null,
@@ -355,7 +362,7 @@ export function skillRoutes({
 
     const {
       name, description, whenToUse, content, category, requiresConnectors,
-      workspaceId, enabledAssistantIds, sensitivity,
+      workspaceId, enabledAssistantIds, sensitivity, extraction,
     } = req.body as {
       name?: string
       description?: string
@@ -371,6 +378,9 @@ export function skillRoutes({
        *  enablement is an allowlist, so no rows = a dead skill. */
       enabledAssistantIds?: string[] | 'all'
       sensitivity?: string
+      /** Structural-synthesis Phase 2: the draft's output shape. Minted into a
+       *  linked v2 blueprint when present (validated with extractionSpecSchema). */
+      extraction?: unknown
     }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -420,6 +430,31 @@ export function skillRoutes({
         if (!role) { res.status(404).json({ error: 'Not found' }); return }
 
         const skill = await workspaceSkillStore.create(userId, workspaceId, input)
+
+        // Structural-synthesis Phase 2: if the draft carried a structured output
+        // shape, mint a v2 blueprint from it and link the skill, so the skill
+        // FILLS the blueprint instead of baking the layout into its body.
+        // Failure-isolated: a blueprint mint error never fails the skill save.
+        if (extraction !== undefined && pageTemplateStore) {
+          const parsedSpec = extractionSpecSchema.safeParse(extraction)
+          if (parsedSpec.success) {
+            try {
+              const template = await pageTemplateStore.create(userId, {
+                workspaceId,
+                name: `${input.name} blueprint`,
+                description: input.description,
+                icon: null,
+                category: 'knowledge',
+                blocks: extractionSpecToBlocks(parsedSpec.data),
+                extraction: parsedSpec.data,
+              })
+              await workspaceSkillStore.setBlueprint(userId, workspaceId, skill.rowId, template.id)
+              skill.blueprintId = template.id
+            } catch (err) {
+              console.error('[skills] blueprint mint/link failed (skill kept):', err)
+            }
+          }
+        }
 
         let enabledIds: string[] = []
         if (workspaceSkillEnablementStore && listWorkspaceAssistants) {
@@ -557,7 +592,7 @@ export function skillRoutes({
         } else {
           // Text-like: inline when small; hard-truncate otherwise (this
           // path has no readFileContent tool to page through a cache ref).
-          const body = shouldInline(file.content.length)
+          const body = shouldInline(file.content)
             ? file.content
             : `${file.content.slice(0, 20_000)}\n…(truncated)`
           textParts.push(

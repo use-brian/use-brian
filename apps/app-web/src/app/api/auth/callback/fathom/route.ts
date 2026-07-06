@@ -134,8 +134,21 @@ export async function GET(request: Request) {
       );
     }
 
+    // Thread the minted/reconnected instance UUID back to the connectors
+    // page — the auto-expose must act on THIS instance, and a bare slug is
+    // ambiguous once the provider has a second account.
+    const stored = (await storeRes.json().catch(() => ({}))) as {
+      connectorInstanceId?: string;
+    };
+
     return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { connected: "fathom" }), request.url),
+      new URL(
+        connectorsPath(workspaceId, {
+          connected: "fathom",
+          instance: stored.connectorInstanceId,
+        }),
+        request.url,
+      ),
     );
   } catch (err) {
     console.error("[fathom] callback error:", err);
@@ -167,11 +180,12 @@ function parseState(raw: string): {
 
 function connectorsPath(
   workspaceId: string | undefined,
-  query: { connected?: string; error?: string },
+  query: { connected?: string; instance?: string; error?: string },
 ): string {
   if (!workspaceId) return "/teams";
   const sp = new URLSearchParams();
   if (query.connected) sp.set("connected", query.connected);
+  if (query.instance) sp.set("instance", query.instance);
   if (query.error) sp.set("error", query.error);
   const qs = sp.toString();
   return `/w/${workspaceId}/studio/connectors${qs ? `?${qs}` : ""}`;

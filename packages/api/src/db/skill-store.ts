@@ -125,6 +125,8 @@ export type WorkspaceSkillRow = {
   sensitivity_overridden: boolean
   verified_by_user_id: string | null
   verified_at: Date | null
+  // Structural-synthesis Phase 2 (mig 301): the v2 blueprint this skill fills.
+  blueprint_id: string | null
 }
 
 /** App-shape view returned by curator / lifecycle methods. */
@@ -174,6 +176,8 @@ export type WorkspaceSkill = {
   sensitivityOverridden: boolean
   verifiedByUserId?: string
   verifiedAt?: Date
+  /** The v2 blueprint (workspace_page_templates id) this skill fills, if any. */
+  blueprintId?: string
 }
 
 // ── Mappers ────────────────────────────────────────────────────────
@@ -189,6 +193,7 @@ function rowToSkillContent(row: WorkspaceSkillRow): SkillContent {
     requiresConnectors: row.requires_connectors ?? [],
     source: row.source as SkillContent['source'],
     authorId: row.author_id ?? undefined,
+    blueprintId: row.blueprint_id ?? undefined,
   }
 }
 
@@ -250,6 +255,7 @@ function rowToWorkspaceSkill(row: WorkspaceSkillRow): WorkspaceSkill {
     sensitivityOverridden: row.sensitivity_overridden,
     verifiedByUserId: row.verified_by_user_id ?? undefined,
     verifiedAt: row.verified_at ?? undefined,
+    blueprintId: row.blueprint_id ?? undefined,
   }
 }
 
@@ -270,6 +276,10 @@ export type WorkspaceSkillStore = {
     skillId: string,
     updates: UpdateSkillInput,
   ): Promise<WorkspaceSkill | null>
+  /** Structural-synthesis Phase 2: link (or clear) the v2 blueprint this skill
+   * fills. Side-effect-free (no verify stamp / write_origin flip) — it records a
+   * structural pairing, not a substance edit. */
+  setBlueprint(userId: string, workspaceId: string, skillId: string, blueprintId: string | null): Promise<void>
   /** Bi-temporal close. Sets `valid_to = now()` rather than DELETE. */
   delete(userId: string, workspaceId: string, skillId: string): Promise<boolean>
 
@@ -580,6 +590,15 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       const skill = rowToWorkspaceSkill(result.rows[0])
       fireOnWritten(skill)
       return skill
+    },
+
+    async setBlueprint(userId, workspaceId, skillId, blueprintId) {
+      await queryWithRLS(
+        userId,
+        `UPDATE workspace_skills SET blueprint_id = $1, updated_at = now()
+          WHERE id = $2 AND workspace_id = $3`,
+        [blueprintId, skillId, workspaceId],
+      )
     },
 
     async delete(userId, workspaceId, skillId) {
@@ -1013,5 +1032,6 @@ function rowToSkillContentFromWorkspaceSkill(skill: WorkspaceSkill): SkillConten
     // callers that need provenance must read the workspace surface.
     source: (skill.source === 'auto-generated' ? 'user' : skill.source) as SkillContent['source'],
     authorId: skill.authorId,
+    blueprintId: skill.blueprintId,
   }
 }

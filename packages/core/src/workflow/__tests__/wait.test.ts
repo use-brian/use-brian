@@ -41,7 +41,7 @@ function makeStores() {
       const now = new Date()
       const r: WorkflowRecord = {
         id: id(), workspaceId, createdBy: userId, name, description: description ?? null,
-        definition, enabled: true,
+        definition, enabled: true, pausedReason: null,
         trigger: trigger ?? { kind: 'manual' },
         webhookSlug: webhookSlug ?? null,
         webhookSecret: webhookSecret ?? null,

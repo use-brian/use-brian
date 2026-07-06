@@ -1137,8 +1137,8 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
           <div className="flex-1 min-h-0 overflow-y-auto">
             {/* Home IS the assistant's full-width "Suggested for you" surface;
                 its slim build bar (onBuild) keeps the type-a-prompt page-build
-                flow that the old centered hero used to own. PREVIEW/MOCK
-                (see docs/plans/home-dock.md + suggested-view.tsx). */}
+                flow that the old centered hero used to own. Spec:
+                docs/architecture/features/home-dock.md. */}
             <SuggestedView
               workspaceId={workspaceId}
               assistantId={assistantId}

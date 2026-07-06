@@ -35,7 +35,7 @@ import {
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
   createSchedulingTools, createPollWorker,
-  startJitteredInterval,
+  startJitteredInterval, stopJitteredInterval,
   createCacheTool, createReadFileTool, distillFileToText,
   createRateLimiter, sanitizeDeep,
   AnalyticsLogger, sanitize as sanitizeAnalytics,
@@ -61,6 +61,7 @@ import {
   advanceWorkflowRun,
   createWorkflowEventDispatcher,
   type WorkflowEventDispatcher,
+  createRunQueueWorker,
   createTaskTools,
   createGoalTools,
   buildOneStepReminderWorkflow,
@@ -197,6 +198,10 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createSearchFileContentTool } from './files/file-artifact-tools.js'
+import { createArtifactPromoter } from './files/artifact-promote.js'
+import { createFileIngestWorker } from './files/file-ingest-worker.js'
+import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
 import { sweepStaleByoBindings } from './files/byo-staleness.js'
 import {
@@ -206,6 +211,9 @@ import {
   findEventTriggeredWorkflowsSystem,
   getWorkflowCreatorSystem,
   getPrimaryAssistantForWorkspace,
+  createWorkflowRunQueueStore,
+  countRecentRunsForWorkflowSystem,
+  pauseWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -231,8 +239,11 @@ import { internalIngestRoutes } from './doc/internal-ingest-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
+import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
+import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
+import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
@@ -551,6 +562,8 @@ export interface BootContext {
   usageStore: UsageStore | undefined
   /** Structural-synthesis callback for the recording path (blueprint → brief page). */
   recordingSynthesize?: RecordingSynthesizeFn
+  /** Structural-synthesis GENERATE callback (fill a blueprint from the brain). */
+  generateSynthesize?: GenerateSynthesizeFn
   workspaceStoreRefForRouter: ReturnType<typeof workspaceRoutes>
   workflowStore: ReturnType<typeof createDbWorkflowStore>
   workflowRunStore: ReturnType<typeof createDbWorkflowRunStore>
@@ -1053,6 +1066,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
     tools.set('retrieveCachedResults', createCacheTool(cacheStore))
     tools.set('readFileContent', createReadFileTool(fileStore))
+    // Per-file segment retrieval over stored artifacts (large-content-artifacts
+    // §Phase 1.4). Registered in the base toolset so chat, the callee executor,
+    // and workflows all carry it by construction; the actor is rebuilt from the
+    // ToolContext per call, so read ceilings hold on every path.
+    tools.set(
+      'searchFileContent',
+      createSearchFileContentTool({ embedder: createGeminiEmbedder(env.GEMINI_API_KEY) }),
+    )
 
     // Bug report tool — the create sink is a port; open default returns a
     // synthetic id (no persistence). The platform injects its bug-report store.
@@ -1125,10 +1146,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       })
     : undefined
 
+  // Structural-synthesis GENERATE fill (brain → blueprint) + the in-chat /
+  // in-workflow tool that wraps it. Built HERE (before the executor + chat route
+  // consume it) with the embedder for brain vector search. Undefined without a
+  // Gemini key. The standalone Blueprints-UI route meters its own credit
+  // (synthesis_surcharge); the tool rides the chat turn's per-message credit.
+  const generateSynthesize: GenerateSynthesizeFn | undefined = env.GEMINI_API_KEY
+    ? createGenerateSynthesizer({
+        provider,
+        model: 'gemini-flash',
+        savedViewStore,
+        docPageStore: createDbDocPageStore(),
+        crmStore,
+        taskStore,
+        workflowRunStore,
+        workspaceDirectory: workspaceDirectoryStore,
+        embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+        usageStore,
+        pageTemplateStore,
+        computeCostUsd: (model, usage) => calculateCost(model, usage),
+      })
+    : undefined
+  const generateBlueprintTool: Tool | undefined = generateSynthesize
+    ? createGenerateBlueprintTool({ generateSynthesize, pageTemplateStore })
+    : undefined
+
+  // Declared here (assigned in the workspace-filesystem block below) so the
+  // lazy references in the callee executor + workflow tool registry are
+  // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
+  let filesApi: ReturnType<typeof createFilesApi> | null = null
+
   const calleeExecutor = createCalleeExecutor({
     provider,
     tools: allTools,
     memoryStore,
+    // Lazy getter: `filesApi` is assigned further down (the workspace-
+    // filesystem block) — a direct reference here would freeze `null`.
+    // The executor reads `options.filesApi` per call, post-boot.
+    get filesApi() { return filesApi ?? undefined },
+    // Brain retrieval store — enables the 6 read tools (recentEpisodes/search/
+    // getEntity/...) on workflow `assistant_call` + free-mode consults, the
+    // same surface the interactive chat route injects per-turn.
+    retrievalStore,
     connectorStore,
     mcpSettingsStore,
     assistantConnectorStore,
@@ -1156,6 +1215,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Structural-synthesis P4 — fills a blueprint into the anchored page from the
     // research gather on a research step carrying a `blueprintId`.
     researchSynthesize,
+    // Brain-skill surface for workflow `assistant_call` steps carrying a
+    // `skills` allow-list — the callee gets `useSkill` over exactly those
+    // skills via the shared `injectSkills` path. Absent → the step runs with
+    // no skill surface. See workflow.md → "assistant_call skills".
+    skillStore,
+    workspaceSkillStore,
+    workspaceSkillEnablementStore,
+    workspaceSkillFilesStore,
+    // Generate mode as a consult tool — fill a blueprint from the brain in a
+    // workflow/callee run (same tool the chat route injects).
+    generateBlueprintTool,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -1203,6 +1273,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerSessionId: '',
         sessionKey: request.contextId,
         allowedTools: request.allowedTools,
+        skills: request.skills,
+        enforcedSkills: request.enforcedSkills,
         depth: request.depth,
         modelAlias: request.modelAlias,
         deliverTarget: request.deliver,
@@ -1289,6 +1361,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore,
         knowledgeStore,
         gdriveFilesStore,
+        // Evaluated per-run (this closure fires post-boot), so the late
+        // `filesApi` initialization below is already done.
+        filesApi: filesApi ?? undefined,
       },
       { workspaceId, assistantId, userId },
     ),
@@ -1328,10 +1403,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         details.reason = event.reason; details.streak = event.streak
       } else if (event.type === 'workflow.step_delivered') {
         details.workflowId = event.workflowId; details.stepId = event.stepId; details.delivery = event.delivery
+      } else if (event.type === 'workflow.storm_paused') {
+        details.workflowId = event.workflowId
+        details.recentRuns = event.recentRuns; details.windowSeconds = event.windowSeconds
       }
       await workspaceAuditStore.append({
         workspaceId: event.workspaceId, actorUserId: event.actorUserId,
-        eventType: event.type, subjectId: event.runId, details,
+        // storm_paused has no run — the guard fired INSTEAD of enqueueing one;
+        // key the audit row on the workflow instead.
+        eventType: event.type,
+        subjectId: event.type === 'workflow.storm_paused' ? event.workflowId : event.runId,
+        details,
       })
     },
     deliverToChannel: createWorkflowChannelDelivery({
@@ -1954,7 +2036,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (filesBlobClient && !env.GCS_FILES_BUCKET) {
     console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${LOCAL_FILES_DIR} (dev only).`)
   }
-  let filesApi: ReturnType<typeof createFilesApi> | null = null
   let brainFileTools:
     | Pick<
         ReturnType<typeof createFileTools>,
@@ -2078,8 +2159,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Brain-inspection tools need the closed InspectionStore; open default = none.
   const brainInspectionTools = ports.inspectionTools
 
+  // ── Silent artifact promotion (large-content-artifacts §2.3/§3.1) ──
+  // One promoter instance shared by /upload, the web-chat paste intercept,
+  // and (via the platform routes) the channel paste intercept. Pipeline B
+  // decomposition rides file_ingest_jobs (worker below); a files-less deploy
+  // gets null and every caller degrades to legacy behavior.
+  const artifactPromoter = filesApi
+    ? createArtifactPromoter({
+        filesApi,
+        enqueue: (job) => enqueueFileIngestJob(job),
+      })
+    : null
+
   app.use('/api/chat', optionalAuth(env.JWT_SECRET), chatRoutes({
     provider,
+    artifactPromoter,
     checkCreditBudget: ports.checkCreditBudget,
     publishSessionEvent,
     isPlaceholderTitle: ports.isPlaceholderTitle,
@@ -2102,6 +2196,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     chatEpisodeIngestor,
     fileStore,
     workspaceFilesStore,
+    filesApi: filesApi ?? undefined,
     usageStore,
     // Doc-page → brain distillation runner — backs the `ingestPage` chat tool.
     ingestPage: ingestPageRunner
@@ -2140,6 +2235,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     memoryRecallEventsStore,
     retrievalMissDetector,
     inspectionTools: brainInspectionTools,
+    generateBlueprintTool,
   }))
 
   app.use('/api/v1', publicApiRoutes({
@@ -2161,6 +2257,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorInstanceStore,
     gdriveFilesStore,
+    filesApi: filesApi ?? undefined,
     assistantConnectorGrantsStore,
     engineHooks: ports.engineHooks,
   }))
@@ -2216,7 +2313,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/feedback', optionalAuth(env.JWT_SECRET), feedbackRoutes())
 
-  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never))
+  app.use('/api/files', optionalAuth(env.JWT_SECRET), fileRoutes(fileStore, fileIngestor as never, artifactPromoter))
   if (filesApi && filesBlobClient) {
     app.use('/api/doc-files', requireAuth(env.JWT_SECRET), docFilesRoutes({
       filesApi,
@@ -2380,6 +2477,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     communityRegistry: communitySkillRegistry,
     workspaceSkillStore,
     workspaceStore,
+    pageTemplateStore,
     workspaceSkillEnablementStore,
     listWorkspaceAssistants: async (userId, workspaceId) =>
       (await listAccessibleAssistants(userId, workspaceId)).map((a) => ({ id: a.id, name: a.name })),
@@ -2620,19 +2718,71 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // workflow (the OSS regression this fixes). Mirrors the webhook receiver:
   // event runs are attributed to the workflow creator and recorded
   // `triggerKind='manual'` (the `trigger_kind` enum has no `event` member).
+  // Event run queue — the bounded drain behind event-triggered runs. Event
+  // dispatch ENQUEUES (a `pending` workflow_runs row) and never inline-
+  // executes; this worker drains with per-workflow serialization, a per-
+  // workspace in-flight cap, lease/stale reclaim, and an attempts cap
+  // (mig 302). Producers nudge it right after enqueueing so a quiet system
+  // keeps near-inline latency; the interval is the durable fallback.
+  // Spec: docs/architecture/features/workflow.md → "Event run queue".
+  const runQueueWorker = createRunQueueWorker({
+    store: createWorkflowRunQueueStore(),
+    advance: (runId) => advanceWorkflowRun(workflowExecutorDeps, runId),
+    onError: (err, errCtx) => {
+      console.warn(
+        `[run-queue] ${errCtx.runId ?? '(tick)'} failed:`,
+        err instanceof Error ? err.message : err,
+      )
+    },
+  })
+
+  // Storm guard — the spend circuit-breaker at enqueue time. Queuing bounds
+  // stability, not cost: at the threshold the workflow is PAUSED (enabled =
+  // false + human-readable paused_reason, surfaced by the builder) instead
+  // of enqueueing, and the enabled=true finder filter then drops subsequent
+  // events for free. Re-enabling via PATCH clears the reason.
+  const RUN_STORM_WINDOW_SECONDS = 300
+  const RUN_STORM_THRESHOLD = 25
+
   const workflowEventDispatcher: WorkflowEventDispatcher = createWorkflowEventDispatcher({
     findEventTriggeredWorkflows: ({ workspaceId }) =>
       findEventTriggeredWorkflowsSystem(workspaceId),
     startWorkflowRun: async ({ workflowId, workspaceId, input }) => {
+      const recent = await countRecentRunsForWorkflowSystem(
+        workflowId,
+        RUN_STORM_WINDOW_SECONDS,
+      )
+      if (recent >= RUN_STORM_THRESHOLD) {
+        await pauseWorkflowSystem(
+          workflowId,
+          `Paused automatically: this workflow's event trigger started ${recent} runs in the last ${Math.round(RUN_STORM_WINDOW_SECONDS / 60)} minutes. Review the trigger's match filter, then re-enable the workflow to resume.`,
+        )
+        void Promise.resolve(
+          workflowExecutorDeps.emitAudit?.({
+            type: 'workflow.storm_paused',
+            workspaceId,
+            actorUserId: null,
+            workflowId,
+            recentRuns: recent,
+            windowSeconds: RUN_STORM_WINDOW_SECONDS,
+          }),
+        ).catch(() => {})
+        console.warn(
+          `[workflow-event] storm guard paused workflow ${workflowId} (${recent} runs / ${RUN_STORM_WINDOW_SECONDS}s)`,
+        )
+        return
+      }
       const triggeredBy = await getWorkflowCreatorSystem(workflowId)
-      const run = await workflowRunStore.createRun({
+      await workflowRunStore.createRun({
         workflowId,
         workspaceId,
         triggeredBy,
         triggerKind: 'manual',
         input,
       })
-      await advanceWorkflowRun(workflowExecutorDeps, run.id)
+      // Enqueue-only: the run row (status `pending`) IS the queue entry.
+      // Nudge the local drain for near-inline latency on quiet systems.
+      runQueueWorker.nudge()
     },
     // Second subscriber (additive): goals parked on `until:event`. The finder
     // reads the workspace's non-terminal goals carrying an `awaiting_event`
@@ -2658,6 +2808,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   setPageEventDispatcher(workflowEventDispatcher)
+  // Task lifecycle events ride the same dispatcher — the late-bound seam
+  // `db/tasks.ts` publishes into (no-op until this bind). Both editions.
+  setTaskEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -2775,6 +2928,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) pollWorker.start()
+  if (runWorkers) runQueueWorker.start()
 
   const cleanupWorker = createCleanupWorker({ jobStore })
   if (runWorkers) cleanupWorker.start()
@@ -3110,6 +3264,36 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) embeddingWorker.start()
 
+  // ── File-ingest worker (large-content-artifacts §Phase 2.2) ──
+  // Drains file_ingest_jobs: readBytes → parse → chunk (idempotent) →
+  // Pipeline B (when the platform passed an episode-ingestor port; OSS
+  // without one runs store-only) → stamp source_episode_id + indexing status.
+  // Same single-service model as every worker: runs only where runWorkers is
+  // set (prod: sidanclaw-api-workers).
+  const fileIngestWorker = filesApi
+    ? createFileIngestWorker({
+        claim: claimNextFileIngestJob,
+        markDone: markFileIngestJobDone,
+        markFailed: markFileIngestJobFailed,
+        filesApi,
+        ...(brainEpisodeIngestor ? { brainIngest: brainEpisodeIngestor } : {}),
+      })
+    : null
+  if (runWorkers && fileIngestWorker) fileIngestWorker.start()
+
+  // ── file_cache reaper ──
+  // Cached files are read with an `expires_at > now()` filter, so a lapsed row
+  // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
+  // `runWorkers` and wrapped so a failing tick never crashes boot. Stopped in
+  // `shutdown()` like the workers above.
+  const fileCacheReaper = runWorkers
+    ? startJitteredInterval(() => {
+        void Promise.resolve(fileStore.sweepExpired?.())
+          .then((n) => { if (n && n > 0) console.log(`[file-cache-reaper] deleted ${n} expired file(s)`) })
+          .catch((err) => console.error('[file-cache-reaper] sweep failed:', err))
+      }, 6 * 60 * 60 * 1000)
+    : null
+
   // ── Knowledge sync worker ──
   // Uses the `syncCredentials` resolver built once above (platform closed
   // factory, or the open resolver over the connector stores).
@@ -3209,6 +3393,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     crmStore,
     taskStore,
     recordingSynthesize,
+    generateSynthesize,
     connectorStore,
     connectorInstanceStore,
     mcpSettingsStore,
@@ -3282,8 +3467,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     skillReviewWorker.stop()
     embeddingWorker.stop()
     pollWorker.stop()
+    runQueueWorker.stop()
     knowledgeSyncWorker.stop()
     stuckSessionSweeper.stop()
+    fileIngestWorker?.stop()
+    if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
   }

@@ -54,8 +54,8 @@ export function createDbTaskStore(
     list(ctx, filters) {
       return listTasks(ctx, filters)
     },
-    async update(userId, id, fields) {
-      const record = await updateTask(userId, id, fields, entityLinks)
+    async update(userId, id, fields, opts) {
+      const record = await updateTask(userId, id, fields, entityLinks, opts)
       // Fire the rollup only on an actual close (status set to terminal) of a
       // task that has a parent to roll up to. Fire-and-forget: a goal rollup
       // must never block or break a task write (the goal also re-checks itself

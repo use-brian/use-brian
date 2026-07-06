@@ -83,6 +83,23 @@ function FathomIcon() {
   );
 }
 
+function GcsIcon() {
+  // Google Cloud Storage product mark — the two stacked storage slabs on the
+  // 24px grid, in the official Google blues (dot + dash cut-outs rendered as
+  // white shapes, matching the on-white console rendering). Hand-inlined like
+  // the rest of the official set.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <rect x="2" y="4.5" width="20" height="6.5" rx="0.75" fill="#4285F4" />
+      <rect x="2" y="13" width="20" height="6.5" rx="0.75" fill="#669DF6" />
+      <circle cx="6.2" cy="7.75" r="1.3" fill="#fff" />
+      <circle cx="6.2" cy="16.25" r="1.3" fill="#fff" />
+      <rect x="11" y="6.9" width="7.8" height="1.7" rx="0.85" fill="#fff" />
+      <rect x="11" y="15.4" width="7.8" height="1.7" rx="0.85" fill="#fff" />
+    </svg>
+  );
+}
+
 function FilesIcon() {
   // Workspace Files — folder + document glyph. Strokes only, no fill, so it
   // inherits the surrounding text color in both dark and light themes.
@@ -160,6 +177,7 @@ export function ConnectorIcon({
     case "fathom": return <FathomIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
+    case "gcs": return <GcsIcon />;
     default:
       if (iconUrl) {
         return (

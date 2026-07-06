@@ -44,6 +44,7 @@ import {
   filterToolsByAllowList,
   filterToolsByCapabilities,
   createMemoryTools,
+  createRetrievalTools,
   createConfirmationResolver,
   resolveResearchBudget,
   ASSISTANT_CALL_DEFAULT_BUDGET,
@@ -62,14 +63,14 @@ import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
 import { findAssistantById, findUserById } from '../db/users.js'
-import { getConnectorUserId } from '../db/workspace-store.js'
+import { getConnectorUserId, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type {
   McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
-  EpisodicStore, UsageStore, AnalyticsLogger,
+  EpisodicStore, UsageStore, AnalyticsLogger, RetrievalStore,
 } from '@sidanclaw/core'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
@@ -81,6 +82,16 @@ export type CalleeExecutorOptions = {
   /** Base tool set (will be cloned + MCP-injected per callee). */
   tools: Map<string, Tool>
   memoryStore: MemoryStore
+  /**
+   * Company-brain retrieval store. When set (and the callee is workspace-
+   * scoped, free-mode), the 6 brain read tools (`recentEpisodes`, `search`,
+   * `getEntity`, `provenance`, `aggregate`, `getRowHistory`) are injected —
+   * mirroring the per-turn injection the interactive chat route does. Absent
+   * here was the structural hole behind a workflow `assistant_call` that reads
+   * the brain (e.g. "summarize github_sync episodes") having no brain-read tool
+   * at all: the model, told to call `recentEpisodes`, could never find it.
+   */
+  retrievalStore?: RetrievalStore
   /** MCP injection dependencies. */
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
@@ -91,6 +102,13 @@ export type CalleeExecutorOptions = {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
+  /**
+   * Workspace-files byte layer — `gmailSendMessage` attachments on the callee
+   * path (`docs/architecture/integrations/gmail.md`). Boot passes a lazy
+   * getter (the executor is constructed before the files block), so read it
+   * from `options` at call time — never destructure it at executor creation.
+   */
+  filesApi?: import('@sidanclaw/core').FilesApi
   /**
    * Tool-use interception port (remote MCP only), forwarded to the callee's
    * `injectMcpTools`. Open default = unset. See
@@ -176,6 +194,24 @@ export type CalleeExecutorOptions = {
    * docs/architecture/brain/structural-synthesis.md → "The three fill modes".
    */
   researchSynthesize?: ResearchSynthesizeFn
+  /**
+   * Skill-injection stores. When present, a workflow `assistant_call` step
+   * carrying a `skills` allow-list (→ `CalleeQueryParams.skills`) offers the
+   * callee the `useSkill` tool over exactly those brain skills — the same
+   * `injectSkills` path the interactive chat route uses, restricted to the
+   * step's slugs. All optional: omit them (Phase-A boots, tests) and a
+   * `skills`-carrying step simply runs without a skill surface. `skillStore`
+   * gates the injection — the others enrich it (workspace skills, per-assistant
+   * enablement, support-file pointer expansion). See
+   * docs/architecture/features/workflow.md → "assistant_call skills".
+   */
+  skillStore?: import('../db/skill-store.js').SkillStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
+  /** Generate mode as a consult tool (fill a blueprint from the brain). Same
+   *  tool the chat route injects; workspace-scoped, requiresConfirmation. */
+  generateBlueprintTool?: Tool
 }
 
 export type CalleeQueryParams = {
@@ -204,6 +240,24 @@ export type CalleeQueryParams = {
    * extra filtering.
    */
   allowedTools?: string[]
+  /**
+   * Brain skill allow-list for this consult. When non-empty (a workflow
+   * `assistant_call` step's `skills` field), the callee is offered the
+   * `useSkill` tool over exactly these skill slugs — each still gated by the
+   * callee assistant's enablement + clearance. Requires the skill stores on
+   * `CalleeExecutorOptions`; absent stores or empty list → no skill surface.
+   * Injected after the `allowedTools` filter, so a `tools` restriction never
+   * strips `useSkill`.
+   */
+  skills?: string[]
+  /**
+   * Brain skill slugs the callee is FORCED to run (a workflow `assistant_call`
+   * step's `enforcedSkills`). Each governance-passing skill's instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Requires the skill stores; same
+   * enablement + clearance gating as `skills`.
+   */
+  enforcedSkills?: string[]
   /**
    * Research-depth override for this consult's agentic loop. Resolved against
    * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call / wall-clock
@@ -393,6 +447,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           connectorInstanceStore: options.connectorInstanceStore,
           assistantTeamId: calleeAssistant.workspaceId ?? null,
           engineHooks: options.engineHooks,
+          filesApi: options.filesApi,
         })
       } catch (err) {
         console.error('[inter-assistant] MCP injection failed for callee:', err)
@@ -477,6 +532,14 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // Ordinary askAssistant free-mode consults keep read-only memory; write
     // stays workflow-scoped. For restricted mode the mode's exposedTools list
     // is the source of truth (the owner lists `getMemory` / `saveMemory`).
+    //
+    // Read ceilings are resolved once here when brain retrieval tools are
+    // injected below, and threaded onto the query-loop ToolContext so the
+    // retrieval actor is workspace + clearance + compartment scoped (same
+    // `min(member, assistant)` ceiling the interactive chat route applies).
+    let retrievalReadCeilings:
+      | Awaited<ReturnType<typeof resolveReadCeilingsSystem>>
+      | null = null
     if (params.mode === null) {
       // Workflow-origin consults auto-tag every created memory `workflow:<id>`
       // (memory continuity — the deterministic key prior-run visibility reads
@@ -490,6 +553,47 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       if (params.callerChannelType === 'workflow') {
         modeTools.set('saveMemory', saveMemory)
       }
+
+      // Company-brain READ tools — the 6 retrieval tools the interactive chat
+      // route injects per-turn (`recentEpisodes`, `search`, `getEntity`,
+      // `provenance`, `aggregate`, `getRowHistory`). Without them a workflow
+      // step that reads the brain (e.g. "summarize the last 24h of github_sync
+      // episodes") had no tool to call — the model, prompted to call
+      // `recentEpisodes`, hunted via mcp_search, failed, and delivered a
+      // fallback (the "recentEpisodes not present in my toolset" incident).
+      // Workspace-scoped only: the actor's permission predicate filters every
+      // read on the workspace partition, so a personal (no-workspace) callee
+      // would only error in `actorFromContext`. Reads are clearance +
+      // compartment projected via the ceilings set on the ToolContext below.
+      if (options.retrievalStore && calleeAssistant.workspaceId) {
+        retrievalReadCeilings = await resolveReadCeilingsSystem(
+          calleeActorUserId,
+          calleeAssistant.workspaceId,
+          calleeAssistant.clearance,
+          calleeAssistant.compartments,
+        )
+        const retrievalTools = createRetrievalTools(options.retrievalStore, {
+          onEvent: (evt) => {
+            options.analytics?.logEvent({
+              userId: calleeActorUserId,
+              assistantId: params.calleeAssistantId,
+              sessionId: session.id,
+              eventName: `brain_${evt.type}`,
+              channelType: 'workflow',
+              metadata: {},
+            })
+          },
+        })
+        for (const [name, tool] of Object.entries(retrievalTools)) {
+          modeTools.set(name, tool)
+        }
+      }
+    }
+
+    // Generate mode as a consult tool — fill a blueprint from the brain. Added
+    // for any workspace-scoped consult; the leaf filter below still applies.
+    if (options.generateBlueprintTool && calleeAssistant.workspaceId) {
+      modeTools.set(options.generateBlueprintTool.name, options.generateBlueprintTool)
     }
 
     // 4b. Per-consult tool allow-list. When the caller pins `allowedTools`
@@ -515,6 +619,54 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // See docs/architecture/channels/inter-assistant.md → "Callee Execution".
     finalTools.delete('askAssistant')
     finalTools.delete('listConnectedAssistants')
+
+    // 4d. Brain-skill surface. A workflow `assistant_call` step can carry two
+    // skill lists: `skills` (DISCOVERY — offered via `useSkill`, the model
+    // chooses) and `enforcedSkills` (ENFORCEMENT — their instructions injected
+    // into the system prompt as mandatory, so the callee runs them regardless).
+    // Both go through the SAME `injectSkills` path the interactive chat route
+    // uses, each still gated by the callee assistant's own enablement +
+    // clearance. Injected AFTER the tool allow-list + leaf deletes so a `tools`
+    // restriction never strips `useSkill`, and after the confirmation strip so
+    // skill-driven tool calls inherit the same governance as the rest of the
+    // step. Requires the skill stores on the executor options; absent stores or
+    // both lists empty → no skill surface (unchanged). Failure-isolated: an
+    // injection throw leaves the step running without skills rather than
+    // failing it. `restrictToSlugs: params.skills ?? []` — an empty discovery
+    // list offers NOTHING (a step that only enforces), never everything.
+    // See docs/architecture/features/workflow.md → "assistant_call skills".
+    let skillPromptFragment = ''
+    const hasSkills = (params.skills?.length ?? 0) > 0 || (params.enforcedSkills?.length ?? 0) > 0
+    if (hasSkills && options.skillStore) {
+      try {
+        const skillConnectorUserId = await getConnectorUserId(
+          calleeActorUserId,
+          calleeAssistant.workspaceId,
+        )
+        const { injectSkills } = await import('../routes/route-helpers.js')
+        const { promptFragment, enforcedPromptFragment } = await injectSkills({
+          skillStore: options.skillStore,
+          connectorUserId: skillConnectorUserId,
+          assistantId: params.calleeAssistantId,
+          assistantClearance: calleeAssistant.clearance,
+          tools: finalTools,
+          connectorStore: options.connectorStore,
+          unavailableCapabilities: [],
+          channel: 'workflow',
+          assistantKind: calleeAssistant.kind,
+          assistantAppType: calleeAssistant.appType ?? null,
+          workspaceSkillStore: options.workspaceSkillStore,
+          workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
+          workspaceSkillFilesStore: options.workspaceSkillFilesStore,
+          workspaceId: calleeAssistant.workspaceId ?? undefined,
+          restrictToSlugs: params.skills ?? [],
+          enforceSlugs: params.enforcedSkills,
+        })
+        skillPromptFragment = `${promptFragment}${enforcedPromptFragment}`
+      } catch (err) {
+        console.error('[inter-assistant] skill injection failed for callee:', err)
+      }
+    }
 
     // 5. Build callee system prompt with memory context.
     // App callees (doc, feed) run under their OWN soul so they actually
@@ -645,7 +797,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
         : ''
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${skillPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //
@@ -704,7 +856,17 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // the modest default. Absent → ASSISTANT_CALL_DEFAULT_BUDGET (5 turns,
     // 30s) — unchanged from before depth config existed.
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
+    // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
+    // partialOutput (operator-facing, never delivered). The returned consult
+    // text is assembled from `turnTexts` instead: deltas re-stream on
+    // empty-turn retries and include text the turn-boundary leak sanitiser
+    // strips, so summing them duplicates/leaks (the 2026-07-02 "No recorded
+    // GitHub activity" ×3 triplication, run 26d50608). See
+    // docs/architecture/channels/inter-assistant.md → "Final-text assembly".
     let responseText = ''
+    // Finalised per-turn text (post leak-sanitiser), one entry per turn that
+    // produced visible text — the source of the returned consult text.
+    const turnTexts: string[] = []
     const abortController = new AbortController()
     // A scheduled-origin step may suspend up to 5 min on a tool confirmation;
     // an ordinary A2A consult must not hang. Give the former headroom past
@@ -850,7 +1012,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         if (result) {
           synthesisHandled = true
           // The page IS the deliverable; the step's text output is a short receipt.
-          responseText = 'Filled the blueprint into the anchored page from the gathered research.'
+          turnTexts.push('Filled the blueprint into the anchored page from the gathered research.')
         }
       } catch (err) {
         console.error(
@@ -887,11 +1049,20 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           channelId: params.callerAssistantId,
           // A page anchor already passed the workspace gate above — the doc
           // tools need workspaceId regardless of the memory-mode conditional.
+          // Brain retrieval tools (when injected) likewise require a
+          // workspace-scoped actor, so `retrievalReadCeilings` being set forces
+          // the bind too.
           workspaceId:
-            params.pageAnchorId || includeWorkspaceMemories
+            params.pageAnchorId || includeWorkspaceMemories || retrievalReadCeilings
               ? (calleeAssistant.workspaceId ?? undefined)
               : undefined,
           assistantKind: calleeAssistant.kind,
+          // Read ceilings for the brain retrieval actor — the `min(member,
+          // assistant)` clearance + compartment grant. Set only when retrieval
+          // tools were injected; absent otherwise (passthrough, unchanged for
+          // callees without brain reads).
+          clearance: retrievalReadCeilings?.clearance,
+          compartments: retrievalReadCeilings?.compartments,
           // Doc anchor: renderView/renderChart append to this page instead
           // of minting drafts; patchPage/getCurrentPage target it.
           docViewId: params.pageAnchorId ?? null,
@@ -905,6 +1076,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       })) {
         if (event.type === 'text_delta') {
           responseText += event.text
+        } else if (event.type === 'assistant_turn') {
+          // Finalised turn content — a leak-suppressed turn has its text
+          // blocks stripped and contributes nothing; a retried turn
+          // contributes only the attempt that landed.
+          const turnText = event.response.content
+            .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
+            .map((b) => b.text)
+            .join('')
+            .trim()
+          if (turnText.length > 0) turnTexts.push(turnText)
         } else if (event.type === 'tool_confirmation_required') {
           // A scheduled-origin step's inner query loop hit an `ask`-policy
           // MCP tool. Park the confirmation: register the resolver so the
@@ -1027,6 +1208,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    return responseText.trim() || 'The assistant did not produce a response.'
+    return turnTexts.join('\n').trim() || 'The assistant did not produce a response.'
   }
 }

@@ -102,6 +102,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   fileDelete: 'Delete workspace file',
   saveFileToBrain: 'Save uploaded file to brain',
   saveFileBytes: 'Save file bytes to brain',
+  sendFile: 'Send a file to the chat',
 
   // Knowledge base
   searchKnowledge: 'Search knowledge base',

@@ -136,7 +136,7 @@ export function EventTriggerFields({
   };
 
   return (
-    <div className="ml-6 pl-3 border-l border-border flex flex-col gap-3">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <label className="text-xs font-medium text-muted-foreground">
           {t.workflowPage.builder.eventSourcesHeading}
@@ -196,6 +196,50 @@ export function EventTriggerFields({
                   />
                 </>
               )}
+              {sub.source.type === "task" && (
+                <>
+                  <TaskWatchFor
+                    match={sub.match ?? {}}
+                    onChange={(next) =>
+                      updateSource(idx, {
+                        ...sub,
+                        match: anyMatchSet(next) ? next : undefined,
+                      })
+                    }
+                    disabled={disabled}
+                  />
+                  <ChipInput
+                    field="tags"
+                    label={t.workflowPage.builder.eventTaskTagsLabel}
+                    hint={t.workflowPage.builder.eventTaskTagsHint}
+                    values={sub.match?.tags ?? []}
+                    onChange={(next) =>
+                      updateSource(idx, {
+                        ...sub,
+                        match: {
+                          ...(sub.match ?? {}),
+                          tags: next.length ? next : undefined,
+                        },
+                      })
+                    }
+                    disabled={disabled}
+                  />
+                  <TaskAssigneePicker
+                    value={sub.match?.mentions ?? []}
+                    options={members}
+                    onChange={(next) =>
+                      updateSource(idx, {
+                        ...sub,
+                        match: {
+                          ...(sub.match ?? {}),
+                          mentions: next.length ? next : undefined,
+                        },
+                      })
+                    }
+                    disabled={disabled}
+                  />
+                </>
+              )}
               <MatchEditor
                 match={sub.match ?? {}}
                 onChange={(next) =>
@@ -207,10 +251,19 @@ export function EventTriggerFields({
                 // For a page source: `inChannels` is owned by the `PageWatchFor`
                 // toggle, `fromActors` by the member-name `PageActorPicker`, and
                 // `mentions` has no page meaning — hide all three so the generic
-                // match form keeps only `keywords` + `fromBots`.
-                hideInChannels={sub.source.type === "page"}
-                hideFromActors={sub.source.type === "page"}
-                hideMentions={sub.source.type === "page"}
+                // match form keeps only `keywords` + `fromBots`. A task source
+                // hides the same three: `inChannels` is owned by `TaskWatchFor`,
+                // `mentions` by the assignee picker, and raw actor UUIDs have a
+                // dedicated picker on pages only (keywords match the task title).
+                hideInChannels={
+                  sub.source.type === "page" || sub.source.type === "task"
+                }
+                hideFromActors={
+                  sub.source.type === "page" || sub.source.type === "task"
+                }
+                hideMentions={
+                  sub.source.type === "page" || sub.source.type === "task"
+                }
                 disabled={disabled}
               />
             </li>
@@ -227,6 +280,7 @@ function anyMatchSet(m: EventMatch): boolean {
     !!m.fromActors?.length ||
     !!m.inChannels?.length ||
     !!m.mentions?.length ||
+    !!m.tags?.length ||
     m.fromBots === true
   );
 }
@@ -253,13 +307,24 @@ function SourceRow({
   const t = useT();
   const kind = sub.source.type;
 
-  const setKind = (next: "connector" | "channel" | "page") => {
+  const setKind = (next: "connector" | "channel" | "page" | "task") => {
     if (next === kind) return;
     // `inChannels` is kind-specific (channel ids for connector/channel, the
-    // lifecycle-action mode for page), so reset it on a kind switch.
+    // lifecycle-action mode for page/task), so reset it on a kind switch;
+    // `tags` is task-only, so drop it too.
     const carriedMatch = sub.match
-      ? { ...sub.match, inChannels: undefined }
+      ? { ...sub.match, inChannels: undefined, tags: undefined }
       : undefined;
+    if (next === "task") {
+      onChange({
+        source: { type: "task" },
+        // Default to the routing-tag headline case: fires when a task is
+        // created with (or later gains) a matching tag. `TaskWatchFor` and
+        // the tags chips refine it.
+        match: { ...carriedMatch, inChannels: ["created", "tagged"] },
+      });
+      return;
+    }
     if (next === "connector") {
       const first = connectors.find((c) => c.connected) ?? connectors[0];
       onChange({
@@ -318,6 +383,12 @@ function SourceRow({
           active={kind === "page"}
           disabled={disabled}
           onClick={() => setKind("page")}
+        />
+        <KindPill
+          label={t.workflowPage.builder.eventSourceKindTask}
+          active={kind === "task"}
+          disabled={disabled}
+          onClick={() => setKind("task")}
         />
         <button
           type="button"
@@ -380,6 +451,11 @@ function SourceRow({
           }
           disabled={disabled}
         />
+      )}
+      {kind === "task" && (
+        <div className="text-[11px] text-muted-foreground/80">
+          {t.workflowPage.builder.eventTaskSourceHint}
+        </div>
       )}
     </div>
   );
@@ -726,6 +802,173 @@ function WatchForOption({
         {label}
       </span>
     </label>
+  );
+}
+
+/** The task lifecycle actions the `TaskWatchFor` control offers, in display
+ *  order. Mirrors `TASK_LIFECYCLE_ACTIONS` (core task-event-trigger.ts). */
+const TASK_WATCH_ACTIONS = [
+  "created",
+  "tagged",
+  "completed",
+  "blocked",
+  "reopened",
+  "assigned",
+  "updated",
+] as const;
+type TaskWatchAction = (typeof TASK_WATCH_ACTIONS)[number];
+
+/**
+ * The "Watch for" multi-select on a task source. It owns the lifecycle
+ * actions, stored as `match.inChannels`. Matching is set-intersection on the
+ * server (one write can carry several actions), so any checked action fires.
+ * Nothing checked = no action constraint (any task activity). The raw
+ * `inChannels` chips are hidden for task sources — this is the only control.
+ */
+function TaskWatchFor({
+  match,
+  onChange,
+  disabled,
+}: {
+  match: EventMatch;
+  onChange: (next: EventMatch) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const labels: Record<TaskWatchAction, string> = {
+    created: t.workflowPage.builder.eventTaskActionCreated,
+    tagged: t.workflowPage.builder.eventTaskActionTagged,
+    completed: t.workflowPage.builder.eventTaskActionCompleted,
+    blocked: t.workflowPage.builder.eventTaskActionBlocked,
+    reopened: t.workflowPage.builder.eventTaskActionReopened,
+    assigned: t.workflowPage.builder.eventTaskActionAssigned,
+    updated: t.workflowPage.builder.eventTaskActionUpdated,
+  };
+  const selected = new Set(match.inChannels ?? []);
+  const toggle = (action: TaskWatchAction) => {
+    const next = new Set(selected);
+    if (next.has(action)) next.delete(action);
+    else next.add(action);
+    const list = TASK_WATCH_ACTIONS.filter((a) => next.has(a));
+    onChange({ ...match, inChannels: list.length ? list : undefined });
+  };
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-muted-foreground">
+        {t.workflowPage.builder.eventTaskWatchForLabel}
+      </div>
+      <p className="text-[11px] text-muted-foreground/80">
+        {t.workflowPage.builder.eventTaskWatchForHint}
+      </p>
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+        {TASK_WATCH_ACTIONS.map((action) => (
+          <label
+            key={action}
+            className="flex items-center gap-1.5 text-xs cursor-pointer"
+          >
+            <input
+              type="checkbox"
+              checked={selected.has(action)}
+              onChange={() => toggle(action)}
+              disabled={disabled}
+              className="accent-primary"
+            />
+            <span
+              className={
+                selected.has(action) ? "text-foreground" : "text-muted-foreground"
+              }
+            >
+              {labels[action]}
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * "Assigned to" picker on a task source — a member-name dropdown that stores
+ * the selected workspace user ids in `match.mentions` (a task event's
+ * `mentions` carry its current assignee). Mirrors `PageActorPicker`'s
+ * name-over-uuid pattern; the raw `mentions` chips are hidden for task
+ * sources.
+ */
+function TaskAssigneePicker({
+  value,
+  options,
+  onChange,
+  disabled,
+}: {
+  value: string[];
+  options: WorkspaceMemberOption[];
+  onChange: (next: string[]) => void;
+  disabled?: boolean;
+}) {
+  const t = useT();
+  const labelFor = (id: string) =>
+    options.find((o) => o.id === id)?.label ?? id;
+  const remaining = options.filter((o) => !value.includes(o.id));
+  const items = remaining.map((o) => ({ value: o.id, label: o.label }));
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="text-xs font-medium text-muted-foreground">
+        {t.workflowPage.builder.eventTaskAssigneeLabel}
+      </div>
+      <p className="text-[11px] text-muted-foreground/80">
+        {t.workflowPage.builder.eventTaskAssigneeHint}
+      </p>
+      {value.length > 0 && (
+        <ul className="flex flex-wrap gap-1">
+          {value.map((id) => (
+            <li
+              key={id}
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20"
+            >
+              <span>{labelFor(id)}</span>
+              <button
+                type="button"
+                onClick={() => onChange(value.filter((x) => x !== id))}
+                disabled={disabled}
+                aria-label={t.workflowPage.builder.eventMatchChipRemove}
+                className="text-primary/70 hover:text-primary disabled:opacity-50"
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {options.length === 0 ? (
+        <div className="text-xs text-muted-foreground/80 italic">
+          {t.workflowPage.builder.eventPageChangedByEmpty}
+        </div>
+      ) : (
+        remaining.length > 0 && (
+          <Select
+            items={items}
+            value={undefined}
+            onValueChange={(v) => {
+              if (v) onChange([...value, v]);
+            }}
+            disabled={disabled}
+          >
+            <SelectTrigger className="w-full max-w-md text-sm">
+              <SelectValue
+                placeholder={t.workflowPage.builder.eventTaskAssigneeAdd}
+              />
+            </SelectTrigger>
+            <SelectContent>
+              {remaining.map((o) => (
+                <SelectItem key={o.id} value={o.id}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )
+      )}
+    </div>
   );
 }
 

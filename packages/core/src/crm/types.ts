@@ -168,6 +168,13 @@ export type CrmStore = {
     compartments?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /**
+     * Viewer projection for the upsert-dedupe scan: candidates are selected
+     * under this access context so the write never merges into a row the
+     * caller cannot read back (read-your-write). Omitted → the store falls
+     * back to the user-axis projection derived from `userId`.
+     */
+    access?: AccessContext
   }): Promise<CompanyRecord>
 
   getCompanyById(ctx: AccessContext, id: string): Promise<CompanyRecord | null>
@@ -192,6 +199,13 @@ export type CrmStore = {
     compartments?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /**
+     * Viewer projection for the upsert-dedupe scan: candidates are selected
+     * under this access context so the write never merges into a row the
+     * caller cannot read back (read-your-write). Omitted → the store falls
+     * back to the user-axis projection derived from `userId`.
+     */
+    access?: AccessContext
   }): Promise<ContactRecord>
 
   getContactById(ctx: AccessContext, id: string): Promise<ContactRecord | null>

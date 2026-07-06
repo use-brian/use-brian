@@ -147,13 +147,28 @@ describe('[COMP:files/parsers] parseFileContent', () => {
 })
 
 describe('[COMP:files/parsers] shouldInline', () => {
-  it('returns true for small files (<= 20K chars)', () => {
-    expect(shouldInline(1000)).toBe(true)
-    expect(shouldInline(20_000)).toBe(true)
+  it('inlines small Latin text', () => {
+    expect(shouldInline('a'.repeat(1000))).toBe(true)
+    // 19K Latin chars ≈ 4,750 tokens, under the 5,000-token line.
+    expect(shouldInline('a'.repeat(19_000))).toBe(true)
   })
 
-  it('returns false for large files (> 20K chars)', () => {
-    expect(shouldInline(20_001)).toBe(false)
-    expect(shouldInline(100_000)).toBe(false)
+  it('does not inline large Latin text', () => {
+    expect(shouldInline('a'.repeat(100_000))).toBe(false)
+  })
+
+  it('keeps ASCII boundary parity with the old length*4 gate', () => {
+    // Old gate: length <= 20_000 inline. estimateStringTokens on ASCII is
+    // ceil(len/4), so the same 20_000-char boundary must hold.
+    expect(shouldInline('a'.repeat(20_000))).toBe(true) // 5,000 tokens
+    expect(shouldInline('a'.repeat(20_001))).toBe(false) // 5,001 tokens
+  })
+
+  it('does not inline CJK text the old char-count gate would have inlined', () => {
+    // 6,000 CJK codepoints ≈ 6,000 tokens (1 token each), over the line —
+    // even though 6,000 chars sits well under the old 20K-char threshold.
+    expect(shouldInline('中'.repeat(6_000))).toBe(false)
+    // A short CJK note still inlines.
+    expect(shouldInline('中'.repeat(1_000))).toBe(true)
   })
 })

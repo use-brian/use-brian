@@ -11,9 +11,10 @@
  * always-on Built-in group for first-party workspace primitives like
  * Workspace Files, which carry no connect/disconnect state), with the
  * selected connector's management panel beside it. Every connector is
- * personal; connecting one auto-exposes it to the active shared workspace,
- * and the detail panel's "Workspace access" card states the sharing status
- * explicitly (incl. the solo-workspace explainer). See
+ * personal; connecting one auto-exposes it to the active workspace (solo
+ * included — exposure is what surfaces it on workspace config pickers), and
+ * the detail panel's "Workspace access" card states the sharing status
+ * explicitly with the expose / revoke pair. See
  * docs/architecture/integrations/mcp.md → "Unified connectors — the
  * master-detail Studio surface".
  *
@@ -57,6 +58,7 @@ import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
 import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
+import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { groupConnectors } from "@/lib/connector-groups";
@@ -64,7 +66,7 @@ import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@sidanclaw/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
-import { resolveAutoExpose } from "@/lib/connector-auto-expose";
+import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -573,8 +575,8 @@ function ConnectorAuthSection(props: {
 //
 // The single unified Studio -> Connectors list. Backed by `GET /api/connectors`
 // (scope='user' rows). Every connector is personal; connecting one
-// auto-exposes it to the active *shared* workspace (a `connector_grant` at the
-// member's clearance, computed server-side). Each exposed row carries a
+// auto-exposes it to the active workspace, solo included (a `connector_grant`
+// at the member's clearance, computed server-side). Each exposed row carries a
 // "Workspace" badge and a control to stop sharing.
 function ConnectorsList() {
   const t = useT();
@@ -586,8 +588,9 @@ function ConnectorsList() {
   const [loading, setLoading] = useState(true);
   const [connecting, setConnecting] = useState<string | null>(null);
   // Master-detail selection — a rowId (instance UUID, slug for placeholders)
-  // OR a bare provider slug from the OAuth `?connected=` return (resolution
-  // below tries both). Null = no explicit pick yet → first rail row.
+  // OR a bare provider slug from the OAuth `?connected=` return when the
+  // callback didn't carry `?instance=` (resolution below tries both).
+  // Null = no explicit pick yet → first rail row.
   const [selected, setSelected] = useState<string | null>(null);
   const [expandTab, setExpandTab] = useState<"tools" | "settings">("tools");
   const [toolsMap, setToolsMap] = useState<Record<string, { tools: ToolPermission[]; serverName: string; loading: boolean }>>({});
@@ -630,9 +633,11 @@ function ConnectorsList() {
   // connector_instance id whose last expose/revoke failed — drives the
   // inline error shown under that row's Share control.
   const [exposeError, setExposeError] = useState<string | null>(null);
-  // Slug of a connector the user JUST connected — drives the one-time
-  // auto-expose to the active shared workspace.
-  const [justConnectedId, setJustConnectedId] = useState<string | null>(null);
+  // The connector the user JUST connected — drives the one-time auto-expose
+  // to the active workspace. Carries the instance UUID whenever the connect
+  // path returned one; a slug-only arm only resolves while the provider has
+  // a single instance (resolveAutoExpose fails closed on ambiguity).
+  const [justConnected, setJustConnected] = useState<AutoExposeArm | null>(null);
 
   // PAT input state (for connectors like GitHub that use API keys)
   const [patInput, setPatInput] = useState("");
@@ -790,40 +795,47 @@ function ConnectorsList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, connectors, autoTriggered]);
 
-  // ── Arm the post-connect nudge from `?connected=<id>` ───────────
+  // ── Arm the post-connect nudge from `?connected=<slug>` ─────────
   //
   // The OAuth callbacks (google-connector / notion / fathom) redirect back to
-  // `?connected=<id>` on success. Read it once on mount, arm the auto-expose
-  // for that connector, expand its row, and strip the param so a refresh /
-  // bfcache restore can't re-fire it.
+  // `?connected=<slug>&instance=<uuid>` on success (the UUID is whatever
+  // store-credentials minted or reconnected — absent only on the legacy
+  // single-account path). Read it once on mount, arm the auto-expose for that
+  // instance, expand its row, and strip the params so a refresh / bfcache
+  // restore can't re-fire it.
   useEffect(() => {
     const sp = new URLSearchParams(window.location.search);
-    const justConnected = sp.get("connected");
-    if (!justConnected) return;
-    setJustConnectedId(justConnected);
-    setSelected(justConnected);
+    const connectedSlug = sp.get("connected");
+    if (!connectedSlug) return;
+    const instanceId = sp.get("instance") ?? undefined;
+    setJustConnected({ slug: connectedSlug, instanceId });
+    setSelected(instanceId ?? connectedSlug);
     const url = new URL(window.location.href);
     url.searchParams.delete("connected");
+    url.searchParams.delete("instance");
     window.history.replaceState({}, "", url.toString());
   }, []);
 
   // ── Auto-expose a just-connected connector to the active workspace ──
   useEffect(() => {
-    if (!justConnectedId) return;
-    const c = connectors.find((x) => x.id === justConnectedId);
-    // Not in the list yet (post-OAuth refetch pending) — wait for a later run.
-    if (!c) return;
-    const decision = resolveAutoExpose({ connector: c, workspace: active, exposedGrants });
+    if (!justConnected) return;
+    const decision = resolveAutoExpose({
+      connectors,
+      arm: justConnected,
+      workspace: active,
+      exposedGrants,
+    });
     if (decision.expose) {
-      setJustConnectedId(null);
+      setJustConnected(null);
       void handleExpose(decision.connectorInstanceId);
-    } else if (c.connected && c.connectorInstanceId) {
-      // Resolved + connected but ineligible — clear so the effect doesn't spin.
-      setJustConnectedId(null);
+    } else if (!decision.pending) {
+      // Terminal no (no workspace / ambiguous slug / already exposed) —
+      // clear so the effect doesn't spin. Pending waits for the refetch.
+      setJustConnected(null);
     }
     // handleExpose is stable for this one-shot.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [justConnectedId, connectors, active, exposedGrants]);
+  }, [justConnected, connectors, active, exposedGrants]);
 
   const loadTools = useCallback(async (connectorId: string) => {
     setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: [], serverName: "", loading: true } }));
@@ -921,7 +933,9 @@ function ConnectorsList() {
     }
 
     // Google OAuth connectors — build Google OAuth URL client-side. The
-    // connector id + workspaceId ride in `state` (`gcal:<workspaceId>`).
+    // connector id + workspaceId ride in `state` (`gcal[:add]:<workspaceId>`,
+    // the same `:add` intent Notion/Fathom carry — the callback creates a
+    // fresh instance instead of overwriting the first).
     const scopes = OAUTH_SCOPES_WITH_EMAIL[id];
     if (scopes) {
       const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
@@ -932,7 +946,7 @@ function ConnectorsList() {
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: `${id}:${workspaceId}`,
+        state: `${id}${addState}:${workspaceId}`,
       });
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;
@@ -953,9 +967,9 @@ function ConnectorsList() {
         setSelected(rid);
         loadTools(id);
         // Refetch so the new connector_instance UUID lands in state, then arm
-        // the auto-expose.
+        // the auto-expose (with the UUID when the row already carries one).
         fetchConnectors();
-        setJustConnectedId(id);
+        setJustConnected({ slug: id, instanceId: c.connectorInstanceId });
       }
     } catch {
       // silently fail
@@ -998,10 +1012,19 @@ function ConnectorsList() {
         body: JSON.stringify({ pat: addPat.trim(), createNew: true, label: addLabel.trim() || undefined }),
       });
       if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
         setAddAnotherFor(null);
         setAddPat("");
         setAddLabel("");
         fetchConnectors();
+        // Connect-in-context: the NEW instance auto-exposes to the active
+        // workspace, same as a first connect. The createNew response always
+        // names the minted instance, so the arm can never hit the ambiguous
+        // multi-instance case.
+        if (data.connectorInstanceId) {
+          setSelected(data.connectorInstanceId);
+          setJustConnected({ slug: provider, instanceId: data.connectorInstanceId });
+        }
       }
     } catch {
       // silently fail
@@ -1043,13 +1066,21 @@ function ConnectorsList() {
         body: JSON.stringify(body),
       });
       if (res.ok) {
+        // The multi-instance paths name the instance they minted/reconnected;
+        // arming with it keeps the auto-expose off any OTHER instance of the
+        // same provider. The legacy path returns none — slug-only arm, which
+        // resolveAutoExpose only honors while the provider has one instance.
+        const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
         setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
         setSelected(rid);
         loadTools(c.id);
         // Refetch so the new connector_instance UUID lands in state, then arm
         // the auto-expose.
         fetchConnectors();
-        setJustConnectedId(c.id);
+        setJustConnected({
+          slug: c.id,
+          instanceId: data.connectorInstanceId ?? c.connectorInstanceId,
+        });
       }
     } catch {}
     setPatInput("");
@@ -1081,7 +1112,8 @@ function ConnectorsList() {
         setShowGcsForm(null);
         setGcsKey(""); setGcsBucket(""); setGcsProjectId("");
         fetchConnectors();
-        setJustConnectedId(c.id);
+        // gcs is single_instance, so the slug-only arm is never ambiguous.
+        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
       } else {
         const data = (await res.json().catch(() => ({}))) as { code?: string };
         setGcsError(
@@ -1437,6 +1469,10 @@ function ConnectorsList() {
         open={showBrowse}
         onClose={() => setShowBrowse(false)}
         onConnectorAdded={() => fetchConnectors()}
+        // OAuth entries (Google/Notion/Fathom) connect + "Add another"
+        // through this page's per-provider OAuth flow, which threads the
+        // `[:add]:<workspaceId>` state the callbacks expect.
+        onOauthConnect={(entry, opts) => handleConnect({ id: entry.id } as Connector, opts)}
       />
 
       {gdriveError && (
@@ -1964,10 +2000,11 @@ function ConnectorsList() {
                 )}
 
                 {/* Workspace access — the ONE place sharing state is stated
-                    instead of implied. Shared workspace: the expose / revoke
-                    pair over the connector_grant. Solo workspace: an explainer
-                    (connected tools auto-load for the member's assistants; no
-                    audience to share with until teammates join). */}
+                    instead of implied: the expose / revoke pair over the
+                    connector_grant. Shown in solo workspaces too — exposure is
+                    what surfaces a connector on this workspace's config
+                    pickers (the Knowledge GitHub picker), not just what
+                    teammates see. */}
                 {sel.connected && !builtin && (
                   <div className="rounded-lg border border-border px-4 py-3">
                     <div className="flex items-start justify-between gap-3">
@@ -1975,11 +2012,7 @@ function ConnectorsList() {
                         <div className="text-[13px] font-medium">
                           {tc.workspaceAccessTitle}
                         </div>
-                        {!sharedWorkspace ? (
-                          <p className="mt-0.5 text-[12px] text-muted-foreground">
-                            {tc.soloShareNote}
-                          </p>
-                        ) : instanceId && exposedGrants[instanceId] ? (
+                        {instanceId && exposedGrants[instanceId] ? (
                           <p className="mt-0.5 text-[12px] text-muted-foreground">
                             {tc.exposeRowExposed}
                           </p>
@@ -1999,7 +2032,7 @@ function ConnectorsList() {
                           </div>
                         )}
                       </div>
-                      {sharedWorkspace && instanceId && (
+                      {instanceId && (
                         exposedGrants[instanceId] ? (
                           <button
                             type="button"
@@ -2137,6 +2170,13 @@ function ConnectorsList() {
                             initial={configMap[sel.id]?.sendActorIdentity === true}
                             hasAuth={!!sel.authType && sel.authType !== "none"}
                             onSave={(enabled) => saveConfig(sel.id, { sendActorIdentity: enabled })}
+                          />
+                        )}
+                        {configMap[sel.id] !== undefined && (
+                          <MediaTokenToggle
+                            key={`media-${sel.id}`}
+                            initial={configMap[sel.id]?.sendMediaToken === true}
+                            onSave={(enabled) => saveConfig(sel.id, { sendMediaToken: enabled })}
                           />
                         )}
                       </div>

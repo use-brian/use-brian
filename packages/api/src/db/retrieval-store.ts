@@ -101,6 +101,15 @@ const KNOWN_SCOPES = [
   // bi-temporal / sensitivity / trust columns, so it takes a dedicated
   // scope handler instead of the shared `visibilityPredicate` path.
   'entity_instance',
+  // Workspace-file body chunks (`file_segments`, migration 297 —
+  // large-content-artifacts hybrid discoverability). UNLIKE
+  // transcript_segments (deliberately out so recordings never flood), this
+  // scope participates in unscoped search BUT is hard-capped per source
+  // artifact: ROW_NUMBER ≤ FILE_SEGMENT_ARM_CAP per file inside each arm,
+  // and ≤ FILE_SEGMENT_GROUP_CAP per file in the final fused page
+  // (groupKey in fuseAndDiversifyTraced). Precision retrieval inside one
+  // file is the dedicated searchFileSegments handler.
+  'file_segment',
 ] as const
 type Scope = (typeof KNOWN_SCOPES)[number]
 
@@ -118,6 +127,7 @@ const ALLOWED_FILTERS_BY_SCOPE: Record<Scope, ReadonlySet<string>> = {
   company:  new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
   deal:     new Set(['since', 'sensitivity', 'source']),
   kb_chunk: new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
+  file_segment: new Set(['tag', 'tags', 'since', 'sensitivity', 'source']),
   // `entity_instances` has no bi-temporal / sensitivity / tags columns;
   // `since` filters on `created_at`, `entity_type_id` narrows the search
   // to one user-defined type, and `source_app` matches the provenance
@@ -457,6 +467,13 @@ export type ScoredRow = {
   trust: { source: string; verified_by_user_id: string | null; retracted_at: string | null }
   /** Tags carried for the MMR diversity similarity. */
   tags: readonly string[]
+  /**
+   * Per-source-cap group for the fused page (large-content-artifacts): set
+   * ONLY by the file_segment handlers (`file:{file_id}`) so one artifact's
+   * chunks hold at most FILE_SEGMENT_GROUP_CAP slots in the final results.
+   * Rows without a groupKey are never capped.
+   */
+  groupKey?: string
 }
 
 /**
@@ -478,6 +495,8 @@ function scoredRow(args: {
   tags?: readonly string[]
   /** Set only by the vector arm; omitted ⇒ null. */
   vectorDistance?: number | null
+  /** Set only by the file_segment handlers (per-source fused-page cap). */
+  groupKey?: string
 }): ScoredRow {
   return {
     row: args.row,
@@ -490,6 +509,7 @@ function scoredRow(args: {
       retracted_at: args.trust.retracted_at?.toISOString() ?? null,
     },
     tags: args.tags ?? [],
+    ...(args.groupKey ? { groupKey: args.groupKey } : {}),
   }
 }
 
@@ -778,9 +798,9 @@ async function searchContactsScope(
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
   const visibility = visibilityPredicate(actor, opts.asOf, values)
+  // No tagsColumn: entity tags live in `attributes`, not a column.
   const filters = applyFlatFilters(opts.filters, values, {
     sinceColumn: 'valid_from',
-    tagsColumn: 'tags',
     sourceColumn: 'source',
     sensitivityColumn: 'sensitivity',
   })
@@ -801,11 +821,17 @@ async function searchContactsScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, name, email, sensitivity, valid_from,
+    // Post CRM→entity unification: contacts are `entities` of kind=person;
+    // typed fields live in `attributes`. Self entity excluded.
+    `SELECT id AS row_id, display_name AS name,
+            COALESCE(attributes->>'email', canonical_id) AS email,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM contacts
+       FROM entities
       WHERE ${visibility}${filters}
-        AND (name ILIKE $${likeIdx} OR email ILIKE $${likeIdx} OR phone ILIKE $${likeIdx})
+        AND kind = 'person'
+        AND NOT COALESCE((attributes->>'self')::boolean, false)
+        AND (display_name ILIKE $${likeIdx} OR attributes->>'email' ILIKE $${likeIdx} OR attributes->>'phone' ILIKE $${likeIdx})
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,
@@ -834,9 +860,9 @@ async function searchCompaniesScope(
 ): Promise<ScoredRow[]> {
   const values: unknown[] = []
   const visibility = visibilityPredicate(actor, opts.asOf, values)
+  // No tagsColumn: entity tags live in `attributes`, not a column.
   const filters = applyFlatFilters(opts.filters, values, {
     sinceColumn: 'valid_from',
-    tagsColumn: 'tags',
     sourceColumn: 'source',
     sensitivityColumn: 'sensitivity',
   })
@@ -857,11 +883,15 @@ async function searchCompaniesScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, name, domain, sensitivity, valid_from,
+    // Companies are `entities` of kind=company; domain in attributes.
+    `SELECT id AS row_id, display_name AS name,
+            COALESCE(attributes->>'domain', canonical_id) AS domain,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM companies
+       FROM entities
       WHERE ${visibility}${filters}
-        AND (name ILIKE $${likeIdx} OR domain ILIKE $${likeIdx})
+        AND kind = 'company'
+        AND (display_name ILIKE $${likeIdx} OR attributes->>'domain' ILIKE $${likeIdx})
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,
@@ -914,10 +944,13 @@ async function searchDealsScope(
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, stage, sensitivity, valid_from,
+    // Deals are `entities` of kind=deal; stage in attributes.
+    `SELECT id AS row_id, COALESCE(attributes->>'stage', 'lead') AS stage,
+            sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
-       FROM deals
+       FROM entities
       WHERE ${visibility}${filters}
+        AND kind = 'deal'
       ORDER BY valid_from DESC, id DESC
       LIMIT $${limIdx} OFFSET $${offIdx}`,
     values,
@@ -1055,6 +1088,93 @@ async function searchKbChunksScope(
   )
 }
 
+/** How many segments of ONE file each ARM may contribute as candidates
+ *  (candidate hygiene — one artifact must not consume the fetch depth). */
+const FILE_SEGMENT_ARM_CAP = 4
+/** How many segments of ONE file survive into the final fused page. */
+export const FILE_SEGMENT_GROUP_CAP = 2
+
+/**
+ * Workspace-file body chunks (`file_segments`, migration 297) — the
+ * large-content-artifacts hybrid-discoverability arm. ILIKE over segment
+ * content + the heading breadcrumb, LEFT JOIN to workspace_files for the
+ * display name, window-capped at FILE_SEGMENT_ARM_CAP rows per file so a
+ * 40-chunk document cannot monopolize the candidate fetch. Hits carry
+ * `file_id` + `segment_index` so the model can hand off to the per-file
+ * searchFileContent tool; the fused-page guarantee is the groupKey cap in
+ * fuseAndDiversifyTraced.
+ */
+async function searchFileSegmentsScope(
+  actor: RetrievalActor,
+  opts: FetchOpts,
+): Promise<ScoredRow[]> {
+  const values: unknown[] = []
+  const visibility = visibilityPredicate(actor, opts.asOf, values, { tableAlias: 'fs' })
+  const filters = applyFlatFilters(opts.filters, values, {
+    sinceColumn: 'fs.valid_from',
+    tagsColumn: 'fs.tags',
+    sourceColumn: 'fs.source',
+    sensitivityColumn: 'fs.sensitivity',
+  })
+
+  values.push(`%${opts.query}%`)
+  const likeIdx = values.length
+  values.push(opts.take)
+  const limIdx = values.length
+  values.push(opts.skip)
+  const offIdx = values.length
+  const result = await queryWithRLS<
+    TrustCols & {
+      row_id: string
+      file_id: string
+      file_name: string | null
+      segment_index: number
+      heading_path: string[] | null
+      snippet: string
+      tags: string[] | null
+      sensitivity: string
+      valid_from: Date
+    }
+  >(
+    actor.userId,
+    `SELECT * FROM (
+       SELECT fs.id AS row_id, fs.file_id, fs.segment_index, fs.heading_path,
+              left(fs.content, 240) AS snippet, fs.tags, fs.sensitivity, fs.valid_from,
+              fs.source, fs.verified_by_user_id, fs.retracted_at,
+              (SELECT coalesce(wf.title, wf.name) FROM workspace_files wf WHERE wf.id = fs.file_id) AS file_name,
+              ROW_NUMBER() OVER (PARTITION BY fs.file_id ORDER BY fs.segment_index) AS grp_rn
+         FROM file_segments fs
+        WHERE ${visibility}${filters}
+          AND (fs.content ILIKE $${likeIdx} OR array_to_string(fs.heading_path, ' > ') ILIKE $${likeIdx})
+     ) sub
+      WHERE sub.grp_rn <= ${FILE_SEGMENT_ARM_CAP}
+      ORDER BY sub.valid_from DESC, sub.row_id DESC
+      LIMIT $${limIdx} OFFSET $${offIdx}`,
+    values,
+  )
+  return result.rows.map((r) =>
+    scoredRow({
+      row: {
+        primitive: 'file_segment',
+        row_id: r.row_id,
+        file_id: r.file_id,
+        file_name: r.file_name,
+        segment_index: Number(r.segment_index),
+        heading_path: r.heading_path ?? [],
+        snippet: r.snippet,
+        tags: r.tags ?? [],
+        sensitivity: r.sensitivity,
+        valid_from: r.valid_from.toISOString(),
+      },
+      validFrom: r.valid_from,
+      ftsRank: null,
+      trust: r,
+      tags: r.tags ?? [],
+      groupKey: `file:${r.file_id}`,
+    }),
+  )
+}
+
 /**
  * Doc v1 user-defined entity rows (`entity_instances`, migration 200) —
  * title-only text index per `docs/plans/doc-v1-execution.md` §5.2 open
@@ -1180,6 +1300,7 @@ const SCOPE_DISPATCH: Record<
   deal: searchDealsScope,
   kb_chunk: searchKbChunksScope,
   entity_instance: searchEntityInstancesScope,
+  file_segment: searchFileSegmentsScope,
 }
 
 // ── Vector arm (WU-8.5) ──────────────────────────────────────────────
@@ -1192,8 +1313,9 @@ const SCOPE_DISPATCH: Record<
 // merge into the candidate set so the vector list surfaces rows FTS
 // missed — and a row found by both arms carries both signals into RRF.
 //
-// Only `memories` / `entities` / `workspace_files` / `kb_chunks` carry
-// an `embedding` column; `tasks` and the CRM tables do not.
+// `memories` / `entities` / `workspace_files` / `kb_chunks` /
+// `file_segments` carry an `embedding` column; `tasks` and the CRM
+// tables do not.
 
 /**
  * Optional deps for `createDbRetrievalStore`. The embedder powers the
@@ -1234,7 +1356,14 @@ type VectorScopeConfig = {
    *  so the same row isn't surfaced via both the `entity` branch and its
    *  proper `contact` / `company` / `deal` branch. */
   extraWhere?: string
-  toRow: (r: Record<string, unknown>) => { row: SearchResultRow; tags: readonly string[] }
+  /**
+   * Candidate hygiene for chunked primitives (file_segment only today): keep
+   * at most `cap` nearest rows per `column` value inside this arm, via a
+   * ROW_NUMBER window wrap, so one source can't consume the whole `take`.
+   * Undefined for every row-level scope — zero behavior change there.
+   */
+  perGroupCap?: { column: string; cap: number }
+  toRow: (r: Record<string, unknown>) => { row: SearchResultRow; tags: readonly string[]; groupKey?: string }
 }
 
 const VECTOR_SCOPES: readonly VectorScopeConfig[] = [
@@ -1308,6 +1437,32 @@ const VECTOR_SCOPES: readonly VectorScopeConfig[] = [
       tags: (r.tags as string[]) ?? [],
     }),
   },
+  {
+    scope: 'file_segment',
+    table: 'file_segments',
+    projection:
+      "file_id, segment_index, heading_path, left(content, 240) AS snippet, tags, (SELECT coalesce(wf.title, wf.name) FROM workspace_files wf WHERE wf.id = file_id) AS file_name",
+    filterCols: { sinceColumn: 'valid_from', tagsColumn: 'tags', sourceColumn: 'source', sensitivityColumn: 'sensitivity' },
+    // Candidate hygiene: at most FILE_SEGMENT_ARM_CAP nearest segments per
+    // file inside the vector arm, so one artifact can't consume `take`.
+    perGroupCap: { column: 'file_id', cap: FILE_SEGMENT_ARM_CAP },
+    toRow: (r) => ({
+      row: {
+        primitive: 'file_segment',
+        row_id: r.row_id as string,
+        file_id: r.file_id as string,
+        file_name: (r.file_name as string | null) ?? null,
+        segment_index: Number(r.segment_index),
+        heading_path: (r.heading_path as string[]) ?? [],
+        snippet: r.snippet as string,
+        tags: (r.tags as string[]) ?? [],
+        sensitivity: r.sensitivity as string,
+        valid_from: (r.valid_from as Date).toISOString(),
+      },
+      tags: (r.tags as string[]) ?? [],
+      groupKey: `file:${r.file_id as string}`,
+    }),
+  },
 ]
 
 /**
@@ -1341,20 +1496,35 @@ async function runVectorScope(
   values.push(opts.take)
   const limIdx = values.length
   const extra = config.extraWhere ? ` AND ${config.extraWhere}` : ''
-  const result = await queryWithRLS<VectorRow>(
-    actor.userId,
-    `SELECT id AS row_id, ${config.projection}, sensitivity, valid_from,
+  // Chunked primitives wrap in a ROW_NUMBER window so one source (e.g. one
+  // file's 40 segments) keeps at most `cap` nearest candidates in this arm.
+  const sql = config.perGroupCap
+    ? `SELECT * FROM (
+         SELECT id AS row_id, ${config.projection}, sensitivity, valid_from,
+                source, verified_by_user_id, retracted_at,
+                embedding <=> $${vecIdx}::vector AS distance,
+                ROW_NUMBER() OVER (
+                  PARTITION BY ${config.perGroupCap.column}
+                  ORDER BY embedding <=> $${vecIdx}::vector
+                ) AS grp_rn
+           FROM ${config.table}
+          WHERE ${visibility}${filters}${extra}
+            AND embedding IS NOT NULL
+       ) sub
+        WHERE sub.grp_rn <= ${config.perGroupCap.cap}
+        ORDER BY sub.distance
+        LIMIT $${limIdx}`
+    : `SELECT id AS row_id, ${config.projection}, sensitivity, valid_from,
             source, verified_by_user_id, retracted_at,
             embedding <=> $${vecIdx}::vector AS distance
        FROM ${config.table}
       WHERE ${visibility}${filters}${extra}
         AND embedding IS NOT NULL
       ORDER BY embedding <=> $${vecIdx}::vector
-      LIMIT $${limIdx}`,
-    values,
-  )
+      LIMIT $${limIdx}`
+  const result = await queryWithRLS<VectorRow>(actor.userId, sql, values)
   return result.rows.map((r) => {
-    const { row, tags } = config.toRow(r as unknown as Record<string, unknown>)
+    const { row, tags, groupKey } = config.toRow(r as unknown as Record<string, unknown>)
     return scoredRow({
       row,
       validFrom: r.valid_from,
@@ -1362,6 +1532,7 @@ async function runVectorScope(
       trust: r,
       tags,
       vectorDistance: r.distance,
+      ...(groupKey ? { groupKey } : {}),
     })
   })
 }
@@ -1558,10 +1729,25 @@ export function fuseAndDiversifyTraced(
   })
   weighted.sort((a, b) => b.relevance - a.relevance)
 
+  // Per-source group cap (large-content-artifacts hybrid discoverability):
+  // rows carrying a groupKey (file_segment handlers only) keep at most
+  // FILE_SEGMENT_GROUP_CAP slots per group. Applied after trust-weighting
+  // (each artifact's BEST segments survive) and before MMR so the diversity
+  // rerank can never resurrect capped rows. Rows without a groupKey are
+  // untouched by construction.
+  const groupCounts = new Map<string, number>()
+  const groupCapped = weighted.filter((w) => {
+    const g = w.cand.groupKey
+    if (!g) return true
+    const n = (groupCounts.get(g) ?? 0) + 1
+    groupCounts.set(g, n)
+    return n <= FILE_SEGMENT_GROUP_CAP
+  })
+
   // MMR diversification rerank — λ default 0.6. Similarity is tag /
   // primitive Jaccard overlap (embedding cosine is WS-8); diversifying
   // on tags still prevents the top-N from collapsing to one cluster.
-  const reranked = mmrRerank(weighted, {
+  const reranked = mmrRerank(groupCapped, {
     k,
     lambda: DEFAULT_MMR_LAMBDA,
     sim: (a, b) => {
@@ -1887,6 +2073,162 @@ export async function readRecordingRange(
     values,
   )
   return res.rows.map(toRecordingHit)
+}
+
+// ── searchFileSegments() — dedicated single-file scoped retrieval ──
+//
+// The file twin of searchRecording (large-content-artifacts §Phase 1.3): a
+// large document's chunked body lives in `file_segments` (migration 297).
+// Vector + ILIKE arms fused, scoped to ONE file_id, through queryWithRLS + the
+// shared visibility/access predicate. MMR disabled — inside one document,
+// ordered coverage beats diversity. UNLIKE transcript_segments, file_segment
+// ALSO participates in general search() via a capped scope (hybrid
+// discoverability); this handler is the precision surface behind the
+// searchFileContent tool.
+
+export type FileSegmentHit = {
+  segment_index: number
+  char_start: number
+  char_end: number
+  heading_path: string[]
+  content: string
+}
+
+const FILE_SEGMENT_TOPK_DEFAULT = 8
+const FILE_SEGMENT_TOPK_MAX = 20
+
+type FileSegmentRow = {
+  segment_index: number
+  char_start: string | number
+  char_end: string | number
+  heading_path: string[] | null
+  content: string
+  distance?: number | null
+}
+
+function toFileSegmentHit(r: FileSegmentRow): FileSegmentHit {
+  return {
+    segment_index: Number(r.segment_index),
+    char_start: Number(r.char_start),
+    char_end: Number(r.char_end),
+    heading_path: r.heading_path ?? [],
+    content: r.content,
+  }
+}
+
+export async function searchFileSegments(
+  actor: RetrievalActor,
+  input: { fileId: string; query: string; topK?: number },
+  deps?: RetrievalStoreDeps,
+): Promise<FileSegmentHit[]> {
+  const topK = Math.min(Math.max(input.topK ?? FILE_SEGMENT_TOPK_DEFAULT, 1), FILE_SEGMENT_TOPK_MAX)
+  const query = input.query.trim()
+
+  // Vector arm — soft-fails to [] (no embedder, empty query, embed error) so we
+  // degrade to the ILIKE arm; works before embeddings land.
+  const vectorHits: Array<FileSegmentHit & { distance: number }> = []
+  if (deps?.embedder && query.length > 0) {
+    try {
+      const [embedding] = await deps.embedder.embed([query])
+      if (embedding && embedding.length > 0) {
+        const values: unknown[] = []
+        const visibility = visibilityPredicate(actor, undefined, values, { tableAlias: 'fs' })
+        values.push(input.fileId)
+        const fidIdx = values.length
+        values.push(toVectorLiteral(embedding))
+        const vecIdx = values.length
+        values.push(topK)
+        const limIdx = values.length
+        const res = await queryWithRLS<FileSegmentRow>(
+          actor.userId,
+          `SELECT fs.segment_index, fs.char_start, fs.char_end, fs.heading_path, fs.content,
+                  fs.embedding <=> $${vecIdx}::vector AS distance
+             FROM file_segments fs
+            WHERE ${visibility}
+              AND fs.file_id = $${fidIdx}
+              AND fs.embedding IS NOT NULL
+            ORDER BY fs.embedding <=> $${vecIdx}::vector
+            LIMIT $${limIdx}`,
+          values,
+        )
+        for (const r of res.rows) {
+          vectorHits.push({ ...toFileSegmentHit(r), distance: Number(r.distance ?? Infinity) })
+        }
+      }
+    } catch (err) {
+      console.warn(
+        '[searchFileSegments] vector arm failed; ILIKE-only:',
+        err instanceof Error ? err.message : String(err),
+      )
+    }
+  }
+
+  // ILIKE arm — immediate (no embeddings needed). Empty query matches every
+  // segment in the file (ordered browse).
+  const ftsValues: unknown[] = []
+  const ftsVisibility = visibilityPredicate(actor, undefined, ftsValues, { tableAlias: 'fs' })
+  ftsValues.push(input.fileId)
+  const fFidIdx = ftsValues.length
+  ftsValues.push(`%${query}%`)
+  const likeIdx = ftsValues.length
+  ftsValues.push(topK)
+  const fLimIdx = ftsValues.length
+  const ftsRes = await queryWithRLS<FileSegmentRow>(
+    actor.userId,
+    `SELECT fs.segment_index, fs.char_start, fs.char_end, fs.heading_path, fs.content
+       FROM file_segments fs
+      WHERE ${ftsVisibility}
+        AND fs.file_id = $${fFidIdx}
+        AND fs.content ILIKE $${likeIdx}
+      ORDER BY fs.segment_index
+      LIMIT $${fLimIdx}`,
+    ftsValues,
+  )
+
+  // Fuse: dedupe by segment_index; vector hits (by distance) first, then
+  // ILIKE-only hits by segment_index (distance = Infinity). MMR disabled.
+  const byIndex = new Map<number, FileSegmentHit & { distance: number }>()
+  for (const v of vectorHits) byIndex.set(v.segment_index, v)
+  for (const r of ftsRes.rows) {
+    const hit = toFileSegmentHit(r)
+    if (!byIndex.has(hit.segment_index)) byIndex.set(hit.segment_index, { ...hit, distance: Infinity })
+  }
+  return [...byIndex.values()]
+    .sort((a, b) => a.distance - b.distance || a.segment_index - b.segment_index)
+    .slice(0, topK)
+    .map(({ distance: _distance, ...hit }) => hit)
+}
+
+/**
+ * Non-vector ordered read of a `segment_index` range — whole-section recall
+ * for summarize/overview intents (page sequential windows rather than top-K).
+ * Each call is independently bounded by the caller's tool-result cap.
+ */
+export async function readFileSegmentRange(
+  actor: RetrievalActor,
+  input: { fileId: string; fromIndex: number; toIndex: number },
+): Promise<FileSegmentHit[]> {
+  const from = Math.max(0, Math.floor(input.fromIndex))
+  const to = Math.max(from, Math.floor(input.toIndex))
+  const values: unknown[] = []
+  const visibility = visibilityPredicate(actor, undefined, values, { tableAlias: 'fs' })
+  values.push(input.fileId)
+  const fidIdx = values.length
+  values.push(from)
+  const fromIdx = values.length
+  values.push(to)
+  const toIdx = values.length
+  const res = await queryWithRLS<FileSegmentRow>(
+    actor.userId,
+    `SELECT fs.segment_index, fs.char_start, fs.char_end, fs.heading_path, fs.content
+       FROM file_segments fs
+      WHERE ${visibility}
+        AND fs.file_id = $${fidIdx}
+        AND fs.segment_index BETWEEN $${fromIdx} AND $${toIdx}
+      ORDER BY fs.segment_index`,
+    values,
+  )
+  return res.rows.map(toFileSegmentHit)
 }
 
 // ── recentEpisodes() ────────────────────────────────────────────────

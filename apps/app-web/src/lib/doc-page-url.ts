@@ -95,6 +95,9 @@ export function pageIdFromInAppHref(
  *   - `'brain'`         `/brain` (+ `/brain/<entityId>`)
  *   - `'studio'`        `/studio/...`
  *   - `'workflow'`      `/workflow` (+ `/workflow/<id>`)
+ *   - `'goals'`         `/goals` (+ `/goals/<goalId>`) — attention-routed
+ *                       (home-dock Autopilot card / Brain task panel), no
+ *                       sidebar slot, same pattern as `'approvals'`
  *   - `'approvals'`     `/approvals`
  *   - `'knowledge-base'``/knowledge-base/...`
  *   - `'inbox'`         the legacy `/inbox` route (now a flyout; the route
