@@ -380,6 +380,12 @@ export interface EpisodeIngestorDeps {
   taskStore: ReturnType<typeof createDbTaskStore>
   episodesStore: ReturnType<typeof createDbEpisodesStore>
   analytics: AnalyticsLogger
+  /**
+   * Usage recorder threaded into Pipeline B so extraction LLM calls land
+   * as `overhead:extraction` rows. Absent in OSS (no usage store) — the
+   * pipeline then skips recording.
+   */
+  usageStore?: UsageStore
 }
 
 /**
@@ -1120,6 +1126,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   //    (open default: no-op chat ingest, undefined brain ingest). ──
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
+    usageStore,
   })
   const chatEpisodeIngestor: ChatEpisodeIngestor =
     builtIngestors?.chatEpisodeIngestor ?? (async () => {})

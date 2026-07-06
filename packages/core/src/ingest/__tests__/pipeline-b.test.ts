@@ -1567,3 +1567,80 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(memories.created).toHaveLength(0)
   })
 })
+
+// ── overhead:extraction usage attribution ────────────────────────────
+//
+// The extraction call is metered INSIDE processEpisode (next to the only
+// place the usage exists), so no caller — batch drain, chat compaction,
+// brain-MCP, slack/whatsapp realtime — can ship an unmetered ingest path.
+// Pre-fix, this spend was computed and discarded: unbounded free ingestion,
+// invisible to the cost dashboard (WS8 validated finding).
+
+describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
+  function usageSpy(impl?: () => Promise<void>) {
+    const recordUsage = vi.fn(async (_params: Record<string, unknown>) => {
+      if (impl) await impl()
+    })
+    return {
+      recordUsage,
+      store: { recordUsage } as unknown as import('../../billing/cost-tracker.js').UsageStore,
+    }
+  }
+
+  it('records an overhead:extraction row for a successful extraction', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
+
+    expect(usage.recordUsage).toHaveBeenCalledTimes(1)
+    const row = usage.recordUsage.mock.calls[0]![0]
+    expect(row).toMatchObject({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      sessionId: null,
+      model: 'mock',
+      inputTokens: 10,
+      outputTokens: 20,
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_extraction',
+    })
+    expect(row.actualCostUsd).toBeGreaterThan(0)
+  })
+
+  it('still records when the model output fails to parse — the tokens were spent', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider(['this is not json'])
+    await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
+    expect(usage.recordUsage).toHaveBeenCalledTimes(1)
+  })
+
+  it('tolerates a null assistant (workspace-scoped batch) as a blank-assistant row', async () => {
+    const usage = usageSpy()
+    const provider = sequencedProvider(['nope'])
+    await processEpisode(
+      baseEpisode({ assistantId: null }),
+      'note',
+      makeDeps({ provider, usage: usage.store }),
+    )
+    expect(usage.recordUsage.mock.calls[0]![0]).toMatchObject({ assistantId: '' })
+  })
+
+  it('a recorder failure logs and never breaks ingestion', async () => {
+    const usage = usageSpy(async () => {
+      throw new Error('usage db down')
+    })
+    const provider = sequencedProvider([
+      JSON.stringify({ summary: 'A note.', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ])
+    const result = await processEpisode(
+      baseEpisode(),
+      'note',
+      makeDeps({ provider, usage: usage.store }),
+    )
+    expect(result.episodeId).toBe('ep-1')
+  })
+})

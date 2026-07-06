@@ -37,6 +37,7 @@
 import { z } from 'zod'
 
 import type { AnalyticsLogger } from '../analytics/logger.js'
+import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
 import { createClassificationAnalytics, type ClassificationAnalytics } from '../classification/analytics.js'
 import type { CircuitBreaker } from '../classification/circuit-breaker.js'
 import { validateEdgeKindTriple } from '../classification/rules/edge-type/index.js'
@@ -215,6 +216,18 @@ export type PipelineBDeps = {
     candidateLimit?: number
     llm?: { provider: LLMProvider; model: string }
   }
+  /**
+   * Optional usage recorder for the extraction LLM call. When present,
+   * the call is attributed as an `overhead:extraction` row (`triggerKey:
+   * 'pipeline_b_extraction'`) — excluded from billing math but visible on
+   * cost dashboards (cost-and-pricing.md → "Overhead accounting"). The
+   * recording lives INSIDE `processEpisode`, next to the only place
+   * extraction usage is produced, so no caller can ship an unmetered
+   * ingest path. Best-effort: absent store / missing usage skip silently;
+   * failures log and never break ingestion. OSS builds without a usage
+   * store simply omit it.
+   */
+  usage?: UsageStore
 }
 
 export type PipelineBResult = {
@@ -527,6 +540,44 @@ function dedupTags(...lists: (string[] | undefined)[]): string[] {
   return out
 }
 
+/**
+ * Attribute one extraction LLM call as an `overhead:extraction` usage row
+ * (billing-math-excluded, dashboard-visible; `sessionId` null — ingest has
+ * no chat session). Billing party is the episode's creating user; a blank
+ * assistant is tolerated for workspace-scoped batches (the consolidation
+ * precedent). Best-effort by design: no store / no usage / no resolvable
+ * user → skip; a store failure logs and never breaks ingestion.
+ */
+async function recordExtractionUsage(
+  deps: PipelineBDeps,
+  episode: PipelineBEpisode,
+  usage: TokenUsage | null,
+): Promise<void> {
+  if (!deps.usage || !usage) return
+  const userId = episode.createdByUserId || episode.userId
+  if (!userId) return
+  try {
+    await deps.usage.recordUsage({
+      userId,
+      assistantId: episode.assistantId ?? '',
+      sessionId: null,
+      model: deps.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      cacheWriteTokens: usage.cacheWriteTokens,
+      actualCostUsd: calculateCost(deps.model, usage),
+      source: 'overhead:extraction',
+      triggerKey: 'pipeline_b_extraction',
+    })
+  } catch (err) {
+    console.warn(
+      `[pipeline-b] extraction usage recording failed for episode ${episode.id}:`,
+      err instanceof Error ? err.message : err,
+    )
+  }
+}
+
 // ── Main entrypoint ──────────────────────────────────────────────────
 
 /**
@@ -607,6 +658,9 @@ export async function processEpisode(
       }),
     )
     extractionUsage = response.usage
+    // Attribute the spend the moment usage is known — the parse-failure
+    // paths below still consumed these tokens.
+    await recordExtractionUsage(deps, episode, extractionUsage)
     rawText = response.content
       .filter((b) => b.type === 'text')
       .map((b) => (b.type === 'text' ? b.text : ''))

@@ -80,6 +80,8 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
     tasks: deps.taskStore,
     episodes: deps.episodesStore,
     analytics: deps.analytics,
+    // overhead:extraction attribution — absent in OSS (no usage store).
+    usage: deps.usageStore,
   })
 
   const brainEpisodeIngestor: BrainEpisodeIngestor = async (input) => {
