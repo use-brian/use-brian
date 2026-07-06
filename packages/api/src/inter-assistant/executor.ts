@@ -248,6 +248,14 @@ export type CalleeQueryParams = {
    */
   skills?: string[]
   /**
+   * Brain skill slugs the callee is FORCED to run (a workflow `assistant_call`
+   * step's `enforcedSkills`). Each governance-passing skill's instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Requires the skill stores; same
+   * enablement + clearance gating as `skills`.
+   */
+  enforcedSkills?: string[]
+  /**
    * Research-depth override for this consult's agentic loop. Resolved against
    * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call / wall-clock
    * caps for a deep-research step (or a scheduled job authored with `depth`).
@@ -603,27 +611,31 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     finalTools.delete('askAssistant')
     finalTools.delete('listConnectedAssistants')
 
-    // 4d. Brain-skill surface. A workflow `assistant_call` step that pins a
-    // `skills` allow-list gets the `useSkill` tool over exactly those skills,
-    // via the SAME `injectSkills` path the interactive chat route uses —
-    // restricted to the step's slugs and still gated by the callee assistant's
-    // own enablement + clearance. Injected AFTER the tool allow-list + leaf
-    // deletes so a `tools` restriction never strips `useSkill`, and after the
-    // confirmation strip so skill-driven tool calls inherit the same governance
-    // as the rest of the step. Requires the skill stores on the executor
-    // options; absent stores or an empty list → no skill surface (unchanged).
-    // Failure-isolated: an injection throw leaves the step running without
-    // skills rather than failing it. See
-    // docs/architecture/features/workflow.md → "assistant_call skills".
+    // 4d. Brain-skill surface. A workflow `assistant_call` step can carry two
+    // skill lists: `skills` (DISCOVERY — offered via `useSkill`, the model
+    // chooses) and `enforcedSkills` (ENFORCEMENT — their instructions injected
+    // into the system prompt as mandatory, so the callee runs them regardless).
+    // Both go through the SAME `injectSkills` path the interactive chat route
+    // uses, each still gated by the callee assistant's own enablement +
+    // clearance. Injected AFTER the tool allow-list + leaf deletes so a `tools`
+    // restriction never strips `useSkill`, and after the confirmation strip so
+    // skill-driven tool calls inherit the same governance as the rest of the
+    // step. Requires the skill stores on the executor options; absent stores or
+    // both lists empty → no skill surface (unchanged). Failure-isolated: an
+    // injection throw leaves the step running without skills rather than
+    // failing it. `restrictToSlugs: params.skills ?? []` — an empty discovery
+    // list offers NOTHING (a step that only enforces), never everything.
+    // See docs/architecture/features/workflow.md → "assistant_call skills".
     let skillPromptFragment = ''
-    if (params.skills && params.skills.length > 0 && options.skillStore) {
+    const hasSkills = (params.skills?.length ?? 0) > 0 || (params.enforcedSkills?.length ?? 0) > 0
+    if (hasSkills && options.skillStore) {
       try {
         const skillConnectorUserId = await getConnectorUserId(
           calleeActorUserId,
           calleeAssistant.workspaceId,
         )
         const { injectSkills } = await import('../routes/route-helpers.js')
-        const { promptFragment } = await injectSkills({
+        const { promptFragment, enforcedPromptFragment } = await injectSkills({
           skillStore: options.skillStore,
           connectorUserId: skillConnectorUserId,
           assistantId: params.calleeAssistantId,
@@ -638,9 +650,10 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
           workspaceSkillFilesStore: options.workspaceSkillFilesStore,
           workspaceId: calleeAssistant.workspaceId ?? undefined,
-          restrictToSlugs: params.skills,
+          restrictToSlugs: params.skills ?? [],
+          enforceSlugs: params.enforcedSkills,
         })
-        skillPromptFragment = promptFragment
+        skillPromptFragment = `${promptFragment}${enforcedPromptFragment}`
       } catch (err) {
         console.error('[inter-assistant] skill injection failed for callee:', err)
       }

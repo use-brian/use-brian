@@ -86,4 +86,60 @@ describe('[COMP:api/skill-injection-gate] injectSkills restrictToSlugs', () => {
     expect(tools.has('useSkill')).toBe(false)
     expect(promptFragment).toBe('')
   })
+
+  it('offers NOTHING when the allow-list is an explicit empty array', async () => {
+    // `restrictToSlugs: []` is distinct from `undefined` (chat = offer all):
+    // an empty allow-list must offer no skills, even though real built-ins
+    // exist. This is the "enforce-only step" case.
+    const tools = new Map<string, Tool>()
+    const { promptFragment } = await injectSkills({
+      skillStore: emptySkillStore,
+      connectorUserId: 'u1',
+      assistantId: 'a1',
+      tools,
+      unavailableCapabilities: [],
+      channel: 'workflow',
+      restrictToSlugs: [],
+    })
+
+    expect(tools.has('useSkill')).toBe(false)
+    expect(promptFragment).toBe('')
+  })
+
+  it('injects enforced skills as a Required Skills prompt block without offering them', async () => {
+    // Enforce a governance-passing built-in with an empty discovery allow-list:
+    // no `useSkill` surface, but the skill's instructions ride in the enforced
+    // fragment so the callee always runs them.
+    const tools = new Map<string, Tool>()
+    const { promptFragment, enforcedPromptFragment } = await injectSkills({
+      skillStore: emptySkillStore,
+      connectorUserId: 'u1',
+      assistantId: 'a1',
+      tools,
+      unavailableCapabilities: [],
+      channel: 'workflow',
+      restrictToSlugs: [], // offer nothing for discovery
+      enforceSlugs: ['doc-architect'], // a built-in with no connector/app-type gate
+    })
+
+    expect(tools.has('useSkill')).toBe(false)
+    expect(promptFragment).toBe('')
+    expect(enforcedPromptFragment).toContain('# Required Skills')
+    expect(enforcedPromptFragment).toContain('doc-architect')
+  })
+
+  it('does not produce an enforced block when the enforced slug is not a real skill', async () => {
+    const tools = new Map<string, Tool>()
+    const { enforcedPromptFragment } = await injectSkills({
+      skillStore: emptySkillStore,
+      connectorUserId: 'u1',
+      assistantId: 'a1',
+      tools,
+      unavailableCapabilities: [],
+      channel: 'workflow',
+      enforceSlugs: ['definitely-not-a-real-skill-slug'],
+    })
+
+    expect(enforcedPromptFragment).toBe('')
+  })
 })

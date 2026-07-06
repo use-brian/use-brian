@@ -1237,6 +1237,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         sessionKey: request.contextId,
         allowedTools: request.allowedTools,
         skills: request.skills,
+        enforcedSkills: request.enforcedSkills,
         depth: request.depth,
         modelAlias: request.modelAlias,
         deliverTarget: request.deliver,
