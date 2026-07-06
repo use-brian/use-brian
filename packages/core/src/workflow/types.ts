@@ -109,6 +109,21 @@ export type AssistantCallStep = WorkflowStepCommon & {
    */
   skills?: string[]
   /**
+   * Optional list of brain skill slugs the callee is FORCED to run this step.
+   * Unlike `skills` (discovery — offered via `useSkill`, the model chooses),
+   * each enforced skill's instructions are loaded (with support-file pointer
+   * expansion) and injected directly into the callee's system prompt under a
+   * `# Required Skills` block, so the assistant follows them regardless of
+   * whether it would have picked them. Same governance as `skills`: a slug the
+   * callee assistant is not entitled to (disabled / out of clearance / wrong
+   * app_type / missing connector) is silently dropped — a workflow step cannot
+   * escalate a skill the assistant could not otherwise run. A slug that is
+   * enforced is not also offered for discovery (no double surface). Threaded
+   * via `ConsultRequest.enforcedSkills`.
+   * See `docs/architecture/features/workflow.md` → "assistant_call skills".
+   */
+  enforcedSkills?: string[]
+  /**
    * Optional page anchor — the bounded "edit page X" / "create a page"
    * configuration. See `PageAnchor`. Composes with `tools`: the allow-list
    * is applied AFTER doc-tool injection, so it can pin an anchored callee

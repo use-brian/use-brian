@@ -129,6 +129,15 @@ const assistantCallStepSchema = z.object({
    */
   skills: z.array(z.string().min(1).max(128)).max(64).optional(),
   /**
+   * Optional list of brain skill slugs the callee is FORCED to run: their
+   * instructions are injected into the callee system prompt (a `# Required
+   * Skills` block) instead of being offered via `useSkill`. Same enablement +
+   * clearance gates as `skills`; an enforced slug is not also offered for
+   * discovery. Threaded via `ConsultRequest.enforcedSkills`. See
+   * docs/architecture/features/workflow.md → "assistant_call skills".
+   */
+  enforcedSkills: z.array(z.string().min(1).max(128)).max(64).optional(),
+  /**
    * Optional page anchor. When set, the callee runs doc-anchored (doc tools
    * injected, `ToolContext.docViewId` set) against the resolved page.
    * See docs/architecture/features/workflow.md → "assistant_call page anchor".

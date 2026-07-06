@@ -767,6 +767,59 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(seenSkills).toEqual([['deep-research', 'crm-enrich'], undefined])
   })
 
+  it('passes an assistant_call `enforcedSkills` list through as the consult enforcedSkills', async () => {
+    const stores = makeFakeStores()
+    const seen: Array<{ skills?: string[]; enforced?: string[] }> = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: {
+        async send(request: ConsultRequest): Promise<ConsultResponse> {
+          seen.push({ skills: request.skills, enforced: request.enforcedSkills })
+          const task: Task = {
+            taskId: 't',
+            contextId: request.contextId ?? 'c',
+            status: { state: 'completed', timestamp: new Date().toISOString() },
+            artifacts: [],
+            history: [{ messageId: 'm', role: 'agent', parts: [{ kind: 'text', text: 'ok' }] }],
+          }
+          return { task }
+        },
+      },
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+    }
+
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        {
+          id: 's1',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'a',
+          // A step can enforce some skills and offer others independently.
+          skills: ['deep-research'],
+          enforcedSkills: ['brand-voice', 'compliance-check'],
+        },
+        {
+          id: 's2',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'b',
+        },
+      ],
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    await advanceWorkflowRun(deps, run.id)
+
+    expect(seen).toEqual([
+      { skills: ['deep-research'], enforced: ['brand-voice', 'compliance-check'] },
+      { skills: undefined, enforced: undefined },
+    ])
+  })
+
   it('parses JSON responses from assistant_call into structured output for branch', async () => {
     const stores = makeFakeStores()
     const tools = new Map<string, Tool>([
