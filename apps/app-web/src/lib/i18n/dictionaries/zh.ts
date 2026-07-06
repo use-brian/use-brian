@@ -2012,6 +2012,10 @@ export const zh: Dictionary = {
       blueprintEmpty: "此工作區尚無藍圖。",
       blueprintHint:
         "在此步驟填滿一份藍圖：助理會從蒐集到的內容產生各區段，而非自由格式輸出。",
+      skillsLabel: "技能（選填）",
+      skillsEmpty: "此工作區尚無技能。",
+      skillsHint:
+        "讓此步驟的助理啟用所選的大腦技能。全部不勾選則不使用技能；每項技能仍套用該助理本身的存取規則。",
       triggerJobsHeading: "生效中的觸發器",
       triggerJobsDriftManual:
         "設定上的觸發方式並未排程這個工作流程，但下方的觸發器正在啟動它。實際執行的是這些觸發器；若非預期，請將其移除。",

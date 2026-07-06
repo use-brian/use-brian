@@ -2209,6 +2209,10 @@ export const en = {
       blueprintEmpty: "No blueprints in this workspace yet.",
       blueprintHint:
         "Fill a blueprint on this step: the assistant produces its sections from what it gathers, instead of free-form output.",
+      skillsLabel: "Skills (optional)",
+      skillsEmpty: "No skills in this workspace yet.",
+      skillsHint:
+        "Let this step's assistant activate the selected brain skills. Leave all unchecked for no skills; each skill still applies the assistant's own access rules.",
       triggerJobsHeading: "Active triggers",
       triggerJobsDriftManual:
         "The configured trigger does not schedule this workflow, but the triggers below are firing it. They are what actually runs; remove them if that is unintended.",

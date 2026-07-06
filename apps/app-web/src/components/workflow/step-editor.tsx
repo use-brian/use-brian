@@ -28,6 +28,7 @@ import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { ViewListRow } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { WorkspaceSkillSummary } from "@/lib/api/skills";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
@@ -101,6 +102,12 @@ type Props = {
    */
   blueprints: CustomPageTemplateSummary[];
   /**
+   * Workspace brain skills — backs the per-step skills allow-list picker
+   * (`SkillsField`). Empty when the fetch failed or none exist; the field
+   * hides itself and any already-selected slugs are preserved.
+   */
+  skills: WorkspaceSkillSummary[];
+  /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
    */
@@ -121,6 +128,7 @@ export function StepEditor({
   slackChannels,
   pages,
   blueprints,
+  skills,
   steps,
   onChange,
   onMoveUp,
@@ -290,6 +298,13 @@ export function StepEditor({
                 <BlueprintField
                   step={step}
                   blueprints={blueprints}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+                <SkillsField
+                  step={step}
+                  skills={skills}
                   onChange={onChange}
                   disabled={disabled}
                   t={t}
@@ -830,6 +845,99 @@ function BlueprintField({
         emptyMessage={b.blueprintEmpty}
         disabled={disabled}
       />
+    </div>
+  );
+}
+
+/**
+ * "Skills" subform - the per-step brain-skill allow-list. A multi-select over
+ * the workspace's skills: checking a skill adds its slug to `step.skills`, so
+ * the callee is offered the `useSkill` tool over exactly those skills at run
+ * time (each still gated by the assistant's own enablement + clearance in the
+ * backend). Default = none selected (`skills: undefined`), which keeps the
+ * historical no-skill behavior. Slugs already on the step but absent from the
+ * fetched list (a built-in, or a deleted workspace skill) are preserved as
+ * read-only chips so editing never silently drops them.
+ * Spec: docs/architecture/features/workflow.md -> "assistant_call skills".
+ */
+function SkillsField({
+  step,
+  skills,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  skills: WorkspaceSkillSummary[];
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  const selected = step.skills ?? [];
+  const selectedSet = new Set(selected);
+  const knownSlugs = new Set(skills.map((s) => s.slug));
+  const extraSelected = selected.filter((slug) => !knownSlugs.has(slug));
+
+  function toggle(slug: string, on: boolean) {
+    const next = on ? [...selected, slug] : selected.filter((s) => s !== slug);
+    onChange({ ...step, skills: next.length > 0 ? next : undefined });
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <FieldLabel label={b.skillsLabel} hint={b.skillsHint} />
+      {skills.length === 0 && extraSelected.length === 0 ? (
+        <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
+      ) : (
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-background p-2 max-h-56 overflow-y-auto">
+          {skills.map((s) => {
+            const checked = selectedSet.has(s.slug);
+            return (
+              <label
+                key={s.rowId}
+                className={cn(
+                  "flex items-start gap-2 rounded-md px-2 py-1.5 text-sm cursor-pointer hover:bg-muted/50",
+                  disabled && "cursor-not-allowed opacity-60",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(e) => toggle(s.slug, e.target.checked)}
+                  className="mt-0.5 size-4 shrink-0 accent-primary"
+                />
+                <span className="flex flex-col gap-0.5">
+                  <span className="font-medium leading-tight">{s.name}</span>
+                  {s.description ? (
+                    <span className="text-xs text-muted-foreground leading-tight">
+                      {s.description}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            );
+          })}
+          {extraSelected.map((slug) => (
+            <label
+              key={slug}
+              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
+            >
+              <input
+                type="checkbox"
+                checked
+                disabled={disabled}
+                onChange={(e) => toggle(slug, e.target.checked)}
+                className="size-4 shrink-0 accent-primary"
+              />
+              <span className="font-mono text-xs text-muted-foreground">
+                {slug}
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -148,6 +148,14 @@ export type AssistantCallStep = {
   target: { assistantId: string; capabilityId?: string };
   prompt: string;
   tools?: string[];
+  /**
+   * Allow-list of brain skill slugs the callee may activate on this step
+   * (built-in ids or workspace skill slugs). When non-empty the callee is
+   * offered the `useSkill` tool over exactly these skills, each still gated by
+   * the assistant's own enablement + clearance. Absent / empty = no skills.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  skills?: string[];
   /** Page anchor — the callee runs doc-anchored against the resolved page. */
   page?: PageAnchor;
   /**

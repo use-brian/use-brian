@@ -51,6 +51,7 @@ import {
   type ViewListRow,
 } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
@@ -77,6 +78,7 @@ export default function WorkflowDetailPage({
   const [slackChannels, setSlackChannels] = useState<SlackChannelOption[]>([]);
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
+  const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
   const [editing, setEditing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -182,6 +184,25 @@ export default function WorkflowDetailPage({
       } catch {
         // The picker degrades to just the built-ins — non-fatal.
         if (!cancelled) setBlueprints([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId]);
+
+  // Load the workspace brain skills once — backs the per-step skills allow-list
+  // picker (`SkillsField`). The picker hides itself when the list is empty.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await listWorkspaceSkills(activeId);
+        if (!cancelled) setSkills(list);
+      } catch {
+        // The picker just hides — non-fatal.
+        if (!cancelled) setSkills([]);
       }
     })();
     return () => {
@@ -676,6 +697,7 @@ export default function WorkflowDetailPage({
                 slackChannels={slackChannels}
                 pages={pages}
                 blueprints={blueprints}
+                skills={skills}
                 steps={draft.definition.steps}
                 onChange={(next) => updateStep(selectedStepIdx, next)}
                 onMoveUp={() => moveStep(selectedStepIdx, -1)}
