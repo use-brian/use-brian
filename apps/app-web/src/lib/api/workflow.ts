@@ -156,6 +156,14 @@ export type AssistantCallStep = {
    * See docs/architecture/features/workflow.md -> "assistant_call skills".
    */
   skills?: string[];
+  /**
+   * Brain skill slugs the callee is FORCED to run: their instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Same enablement + clearance gates as
+   * `skills`; an enforced slug is not also offered for discovery.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  enforcedSkills?: string[];
   /** Page anchor — the callee runs doc-anchored against the resolved page. */
   page?: PageAnchor;
   /**

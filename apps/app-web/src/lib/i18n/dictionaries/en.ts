@@ -2212,7 +2212,9 @@ export const en = {
       skillsLabel: "Skills (optional)",
       skillsEmpty: "No skills in this workspace yet.",
       skillsHint:
-        "Let this step's assistant activate the selected brain skills. Leave all unchecked for no skills; each skill still applies the assistant's own access rules.",
+        "Pick brain skills for this step. Offer lets the assistant use a skill when it decides to; Require runs the skill's instructions every time. Leave all unchecked for no skills; each still applies the assistant's own access rules.",
+      skillsModeOffer: "Offer",
+      skillsModeRequire: "Require",
       triggerJobsHeading: "Active triggers",
       triggerJobsDriftManual:
         "The configured trigger does not schedule this workflow, but the triggers below are firing it. They are what actually runs; remove them if that is unintended.",

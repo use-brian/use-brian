@@ -849,15 +849,20 @@ function BlueprintField({
   );
 }
 
+type SkillMode = "off" | "offer" | "require";
+
 /**
- * "Skills" subform - the per-step brain-skill allow-list. A multi-select over
- * the workspace's skills: checking a skill adds its slug to `step.skills`, so
- * the callee is offered the `useSkill` tool over exactly those skills at run
- * time (each still gated by the assistant's own enablement + clearance in the
- * backend). Default = none selected (`skills: undefined`), which keeps the
- * historical no-skill behavior. Slugs already on the step but absent from the
- * fetched list (a built-in, or a deleted workspace skill) are preserved as
- * read-only chips so editing never silently drops them.
+ * "Skills" subform - the per-step brain-skill picker. Each of the workspace's
+ * skills gets a tri-state: **Off** (in neither list), **Offer** (added to
+ * `step.skills` - the callee is offered `useSkill` over it and chooses), or
+ * **Require** (added to `step.enforcedSkills` - its instructions are injected
+ * into the callee prompt as mandatory, so it always runs). The two arrays are
+ * disjoint by construction (a slug is Offer XOR Require), so nothing is ever
+ * double-surfaced. Default = every skill Off (both arrays undefined), the
+ * historical no-skill behavior. Each still passes the assistant's own
+ * enablement + clearance in the backend. Slugs already on the step but absent
+ * from the fetched list (a built-in, or a deleted workspace skill) are
+ * preserved as read-only chips so editing never silently drops them.
  * Spec: docs/architecture/features/workflow.md -> "assistant_call skills".
  */
 function SkillsField({
@@ -874,14 +879,55 @@ function SkillsField({
   t: Dictionary;
 }) {
   const b = t.workflowPage.builder;
-  const selected = step.skills ?? [];
-  const selectedSet = new Set(selected);
-  const knownSlugs = new Set(skills.map((s) => s.slug));
-  const extraSelected = selected.filter((slug) => !knownSlugs.has(slug));
+  const offered = step.skills ?? [];
+  const enforced = step.enforcedSkills ?? [];
+  const enforcedSet = new Set(enforced);
+  const offeredSet = new Set(offered);
 
-  function toggle(slug: string, on: boolean) {
-    const next = on ? [...selected, slug] : selected.filter((s) => s !== slug);
-    onChange({ ...step, skills: next.length > 0 ? next : undefined });
+  const modeOf = (slug: string): SkillMode =>
+    enforcedSet.has(slug) ? "require" : offeredSet.has(slug) ? "offer" : "off";
+
+  function setMode(slug: string, mode: SkillMode) {
+    const nextOffered = offered.filter((s) => s !== slug);
+    const nextEnforced = enforced.filter((s) => s !== slug);
+    if (mode === "offer") nextOffered.push(slug);
+    if (mode === "require") nextEnforced.push(slug);
+    onChange({
+      ...step,
+      skills: nextOffered.length > 0 ? nextOffered : undefined,
+      enforcedSkills: nextEnforced.length > 0 ? nextEnforced : undefined,
+    });
+  }
+
+  const knownSlugs = new Set(skills.map((s) => s.slug));
+  const extraSelected = [...new Set([...offered, ...enforced])].filter(
+    (slug) => !knownSlugs.has(slug),
+  );
+
+  // Compact two-segment toggle shown once a skill is included: Offer / Require.
+  function ModeToggle({ slug, mode }: { slug: string; mode: SkillMode }) {
+    return (
+      <div className="flex shrink-0 overflow-hidden rounded-md border border-border text-xs">
+        {(["offer", "require"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            disabled={disabled}
+            aria-pressed={mode === m}
+            onClick={() => setMode(slug, m)}
+            className={cn(
+              "px-2 py-0.5 transition-colors",
+              m === "require" && "border-l border-border",
+              mode === m
+                ? "bg-primary text-primary-foreground"
+                : "bg-background text-muted-foreground hover:bg-muted/60",
+            )}
+          >
+            {m === "offer" ? b.skillsModeOffer : b.skillsModeRequire}
+          </button>
+        ))}
+      </div>
+    );
   }
 
   return (
@@ -892,23 +938,24 @@ function SkillsField({
       ) : (
         <div className="flex flex-col gap-1 rounded-lg border border-border bg-background p-2 max-h-56 overflow-y-auto">
           {skills.map((s) => {
-            const checked = selectedSet.has(s.slug);
+            const mode = modeOf(s.slug);
+            const on = mode !== "off";
             return (
-              <label
+              <div
                 key={s.rowId}
                 className={cn(
-                  "flex items-start gap-2 rounded-md px-2 py-1.5 text-sm cursor-pointer hover:bg-muted/50",
-                  disabled && "cursor-not-allowed opacity-60",
+                  "flex items-start gap-2 rounded-md px-2 py-1.5 text-sm",
+                  disabled && "opacity-60",
                 )}
               >
                 <input
                   type="checkbox"
-                  checked={checked}
+                  checked={on}
                   disabled={disabled}
-                  onChange={(e) => toggle(s.slug, e.target.checked)}
+                  onChange={(e) => setMode(s.slug, e.target.checked ? "offer" : "off")}
                   className="mt-0.5 size-4 shrink-0 accent-primary"
                 />
-                <span className="flex flex-col gap-0.5">
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <span className="font-medium leading-tight">{s.name}</span>
                   {s.description ? (
                     <span className="text-xs text-muted-foreground leading-tight">
@@ -916,25 +963,30 @@ function SkillsField({
                     </span>
                   ) : null}
                 </span>
-              </label>
+                {on ? <ModeToggle slug={s.slug} mode={mode} /> : null}
+              </div>
             );
           })}
           {extraSelected.map((slug) => (
-            <label
+            <div
               key={slug}
-              className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm"
+              className={cn(
+                "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+                disabled && "opacity-60",
+              )}
             >
               <input
                 type="checkbox"
                 checked
                 disabled={disabled}
-                onChange={(e) => toggle(slug, e.target.checked)}
+                onChange={() => setMode(slug, "off")}
                 className="size-4 shrink-0 accent-primary"
               />
-              <span className="font-mono text-xs text-muted-foreground">
+              <span className="min-w-0 flex-1 font-mono text-xs text-muted-foreground">
                 {slug}
               </span>
-            </label>
+              <ModeToggle slug={slug} mode={modeOf(slug)} />
+            </div>
           ))}
         </div>
       )}
