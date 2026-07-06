@@ -1181,6 +1181,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // Structural-synthesis P4 — fills a blueprint into the anchored page from the
     // research gather on a research step carrying a `blueprintId`.
     researchSynthesize,
+    // Brain-skill surface for workflow `assistant_call` steps carrying a
+    // `skills` allow-list — the callee gets `useSkill` over exactly those
+    // skills via the shared `injectSkills` path. Absent → the step runs with
+    // no skill surface. See workflow.md → "assistant_call skills".
+    skillStore,
+    workspaceSkillStore,
+    workspaceSkillEnablementStore,
+    workspaceSkillFilesStore,
   })
 
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
@@ -1228,6 +1236,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         callerSessionId: '',
         sessionKey: request.contextId,
         allowedTools: request.allowedTools,
+        skills: request.skills,
+        enforcedSkills: request.enforcedSkills,
         depth: request.depth,
         modelAlias: request.modelAlias,
         deliverTarget: request.deliver,

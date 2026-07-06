@@ -194,6 +194,21 @@ export type CalleeExecutorOptions = {
    * docs/architecture/brain/structural-synthesis.md → "The three fill modes".
    */
   researchSynthesize?: ResearchSynthesizeFn
+  /**
+   * Skill-injection stores. When present, a workflow `assistant_call` step
+   * carrying a `skills` allow-list (→ `CalleeQueryParams.skills`) offers the
+   * callee the `useSkill` tool over exactly those brain skills — the same
+   * `injectSkills` path the interactive chat route uses, restricted to the
+   * step's slugs. All optional: omit them (Phase-A boots, tests) and a
+   * `skills`-carrying step simply runs without a skill surface. `skillStore`
+   * gates the injection — the others enrich it (workspace skills, per-assistant
+   * enablement, support-file pointer expansion). See
+   * docs/architecture/features/workflow.md → "assistant_call skills".
+   */
+  skillStore?: import('../db/skill-store.js').SkillStore
+  workspaceSkillStore?: import('../db/skill-store.js').WorkspaceSkillStore
+  workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
+  workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
 }
 
 export type CalleeQueryParams = {
@@ -222,6 +237,24 @@ export type CalleeQueryParams = {
    * extra filtering.
    */
   allowedTools?: string[]
+  /**
+   * Brain skill allow-list for this consult. When non-empty (a workflow
+   * `assistant_call` step's `skills` field), the callee is offered the
+   * `useSkill` tool over exactly these skill slugs — each still gated by the
+   * callee assistant's enablement + clearance. Requires the skill stores on
+   * `CalleeExecutorOptions`; absent stores or empty list → no skill surface.
+   * Injected after the `allowedTools` filter, so a `tools` restriction never
+   * strips `useSkill`.
+   */
+  skills?: string[]
+  /**
+   * Brain skill slugs the callee is FORCED to run (a workflow `assistant_call`
+   * step's `enforcedSkills`). Each governance-passing skill's instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Requires the skill stores; same
+   * enablement + clearance gating as `skills`.
+   */
+  enforcedSkills?: string[]
   /**
    * Research-depth override for this consult's agentic loop. Resolved against
    * `ASSISTANT_CALL_DEFAULT_BUDGET`; raises the turn / tool-call / wall-clock
@@ -578,6 +611,54 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     finalTools.delete('askAssistant')
     finalTools.delete('listConnectedAssistants')
 
+    // 4d. Brain-skill surface. A workflow `assistant_call` step can carry two
+    // skill lists: `skills` (DISCOVERY — offered via `useSkill`, the model
+    // chooses) and `enforcedSkills` (ENFORCEMENT — their instructions injected
+    // into the system prompt as mandatory, so the callee runs them regardless).
+    // Both go through the SAME `injectSkills` path the interactive chat route
+    // uses, each still gated by the callee assistant's own enablement +
+    // clearance. Injected AFTER the tool allow-list + leaf deletes so a `tools`
+    // restriction never strips `useSkill`, and after the confirmation strip so
+    // skill-driven tool calls inherit the same governance as the rest of the
+    // step. Requires the skill stores on the executor options; absent stores or
+    // both lists empty → no skill surface (unchanged). Failure-isolated: an
+    // injection throw leaves the step running without skills rather than
+    // failing it. `restrictToSlugs: params.skills ?? []` — an empty discovery
+    // list offers NOTHING (a step that only enforces), never everything.
+    // See docs/architecture/features/workflow.md → "assistant_call skills".
+    let skillPromptFragment = ''
+    const hasSkills = (params.skills?.length ?? 0) > 0 || (params.enforcedSkills?.length ?? 0) > 0
+    if (hasSkills && options.skillStore) {
+      try {
+        const skillConnectorUserId = await getConnectorUserId(
+          calleeActorUserId,
+          calleeAssistant.workspaceId,
+        )
+        const { injectSkills } = await import('../routes/route-helpers.js')
+        const { promptFragment, enforcedPromptFragment } = await injectSkills({
+          skillStore: options.skillStore,
+          connectorUserId: skillConnectorUserId,
+          assistantId: params.calleeAssistantId,
+          assistantClearance: calleeAssistant.clearance,
+          tools: finalTools,
+          connectorStore: options.connectorStore,
+          unavailableCapabilities: [],
+          channel: 'workflow',
+          assistantKind: calleeAssistant.kind,
+          assistantAppType: calleeAssistant.appType ?? null,
+          workspaceSkillStore: options.workspaceSkillStore,
+          workspaceSkillEnablementStore: options.workspaceSkillEnablementStore,
+          workspaceSkillFilesStore: options.workspaceSkillFilesStore,
+          workspaceId: calleeAssistant.workspaceId ?? undefined,
+          restrictToSlugs: params.skills ?? [],
+          enforceSlugs: params.enforcedSkills,
+        })
+        skillPromptFragment = `${promptFragment}${enforcedPromptFragment}`
+      } catch (err) {
+        console.error('[inter-assistant] skill injection failed for callee:', err)
+      }
+    }
+
     // 5. Build callee system prompt with memory context.
     // App callees (doc, feed) run under their OWN soul so they actually
     // exercise their authoring/publishing tools when consulted — not merely
@@ -707,7 +788,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
         : ''
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${skillPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //

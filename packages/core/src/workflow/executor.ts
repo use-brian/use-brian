@@ -808,6 +808,16 @@ async function dispatchAssistantCall(
     // callee executor, which filters the callee's tool surface to exactly
     // this set. Undefined = the callee's normal tool surface.
     allowedTools: step.tools,
+    // Per-step skill allow-list: a `skills` list rides through to the callee
+    // executor, which offers `useSkill` over exactly these brain skills (each
+    // still gated by the callee's enablement + clearance). Injected after the
+    // tool allow-list, so `tools` never strips `useSkill`. Undefined/empty =
+    // no skill surface.
+    skills: step.skills,
+    // Per-step ENFORCED skills: injected into the callee prompt as mandatory
+    // instructions (not offered via `useSkill`). Same governance as `skills`.
+    // Undefined/empty = no enforced skills.
+    enforcedSkills: step.enforcedSkills,
     // Research depth: step-level `depth` always wins; otherwise derive from
     // the step-level `researchMode` + `maxTurns` knobs (step-level evolution
     // of mig 196). Legacy workflow-row columns are backfilled onto each

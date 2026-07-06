@@ -239,6 +239,26 @@ export type ConsultRequest = {
    */
   allowedTools?: string[]
   /**
+   * Optional allow-list of brain skill slugs to offer the callee. Set by a
+   * workflow `assistant_call` step carrying a `skills` field. When non-empty
+   * the callee executor injects the `useSkill` tool over exactly these skills
+   * (each still gated by the callee assistant's enablement + clearance) and
+   * appends the matching "Available Skills" prompt fragment. Absent / empty =
+   * no skill surface (the historical A2A behavior). Independent of
+   * `allowedTools` — skills are injected after that filter.
+   */
+  skills?: string[]
+  /**
+   * Optional list of brain skill slugs the callee is FORCED to run. Set by a
+   * workflow `assistant_call` step carrying an `enforcedSkills` field. Each
+   * (governance-passing) skill's instructions are injected into the callee
+   * system prompt under a `# Required Skills` block instead of being offered
+   * via `useSkill`, so the callee runs them regardless of its own choice.
+   * Same enablement + clearance gating as `skills`; an enforced slug is not
+   * also offered for discovery. Absent / empty = no enforced skills.
+   */
+  enforcedSkills?: string[]
+  /**
    * Optional research-depth override for the callee's agentic loop. Set by a
    * workflow `assistant_call` step (or a scheduled job, via its one-step
    * workflow) carrying a `depth` field. Absent = the callee's default budget.

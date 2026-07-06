@@ -23,11 +23,13 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { Search } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { ViewListRow } from "@/lib/api/views";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { WorkspaceSkillSummary } from "@/lib/api/skills";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
   ChannelDestination,
@@ -101,6 +103,12 @@ type Props = {
    */
   blueprints: CustomPageTemplateSummary[];
   /**
+   * Workspace brain skills — backs the per-step skills allow-list picker
+   * (`SkillsField`). Empty when the fetch failed or none exist; the field
+   * hides itself and any already-selected slugs are preserved.
+   */
+  skills: WorkspaceSkillSummary[];
+  /**
    * All steps in the draft definition — backs the page-anchor "from
    * earlier step" picker (steps with `page.create` other than this one).
    */
@@ -121,6 +129,7 @@ export function StepEditor({
   slackChannels,
   pages,
   blueprints,
+  skills,
   steps,
   onChange,
   onMoveUp,
@@ -290,6 +299,13 @@ export function StepEditor({
                 <BlueprintField
                   step={step}
                   blueprints={blueprints}
+                  onChange={onChange}
+                  disabled={disabled}
+                  t={t}
+                />
+                <SkillsField
+                  step={step}
+                  skills={skills}
                   onChange={onChange}
                   disabled={disabled}
                   t={t}
@@ -830,6 +846,176 @@ function BlueprintField({
         emptyMessage={b.blueprintEmpty}
         disabled={disabled}
       />
+    </div>
+  );
+}
+
+type SkillMode = "off" | "offer" | "require";
+
+/**
+ * "Skills" subform - the per-step brain-skill picker. Each of the workspace's
+ * skills gets a tri-state: **Off** (in neither list), **Offer** (added to
+ * `step.skills` - the callee is offered `useSkill` over it and chooses), or
+ * **Require** (added to `step.enforcedSkills` - its instructions are injected
+ * into the callee prompt as mandatory, so it always runs). The two arrays are
+ * disjoint by construction (a slug is Offer XOR Require), so nothing is ever
+ * double-surfaced. Default = every skill Off (both arrays undefined), the
+ * historical no-skill behavior. Each still passes the assistant's own
+ * enablement + clearance in the backend. The list is filterable by a search
+ * bar and rendered as horizontal rows — [name] [description] [Off/Offer/Require
+ * select]. Slugs already on the step but absent from the fetched list (a
+ * built-in, or a deleted workspace skill) are kept as their own rows so editing
+ * never silently drops them.
+ * Spec: docs/architecture/features/workflow.md -> "assistant_call skills".
+ */
+function SkillsField({
+  step,
+  skills,
+  onChange,
+  disabled,
+  t,
+}: {
+  step: Extract<WorkflowStep, { type: "assistant_call" }>;
+  skills: WorkspaceSkillSummary[];
+  onChange: (s: WorkflowStep) => void;
+  disabled?: boolean;
+  t: Dictionary;
+}) {
+  const b = t.workflowPage.builder;
+  const offered = step.skills ?? [];
+  const enforced = step.enforcedSkills ?? [];
+  const enforcedSet = new Set(enforced);
+  const offeredSet = new Set(offered);
+
+  const modeOf = (slug: string): SkillMode =>
+    enforcedSet.has(slug) ? "require" : offeredSet.has(slug) ? "offer" : "off";
+
+  function setMode(slug: string, mode: SkillMode) {
+    const nextOffered = offered.filter((s) => s !== slug);
+    const nextEnforced = enforced.filter((s) => s !== slug);
+    if (mode === "offer") nextOffered.push(slug);
+    if (mode === "require") nextEnforced.push(slug);
+    onChange({
+      ...step,
+      skills: nextOffered.length > 0 ? nextOffered : undefined,
+      enforcedSkills: nextEnforced.length > 0 ? nextEnforced : undefined,
+    });
+  }
+
+  const knownSlugs = new Set(skills.map((s) => s.slug));
+  const extraSelected = [...new Set([...offered, ...enforced])].filter(
+    (slug) => !knownSlugs.has(slug),
+  );
+
+  // Client-side search over the workspace skills (name / description / slug).
+  // Not the native <input type="search">; mirrors the doc template-gallery
+  // search bar (a lucide Search icon + bare input in a bordered pill).
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = (hay: string | null | undefined) =>
+    (hay ?? "").toLowerCase().includes(q);
+  const filteredSkills = q
+    ? skills.filter((s) => matches(s.name) || matches(s.description) || matches(s.slug))
+    : skills;
+  const filteredExtra = q ? extraSelected.filter((slug) => matches(slug)) : extraSelected;
+
+  // The per-row "[Option]" cell: a compact Off / Offer / Require select (base-ui
+  // `Select`, not a native <select>). Off removes the skill from both lists.
+  const MODE_ITEMS = {
+    off: b.skillsModeOff,
+    offer: b.skillsModeOffer,
+    require: b.skillsModeRequire,
+  };
+  function ModeSelect({ slug, mode }: { slug: string; mode: SkillMode }) {
+    return (
+      <Select
+        value={mode}
+        onValueChange={(v) => {
+          if (v) setMode(slug, v as SkillMode);
+        }}
+        disabled={disabled}
+        items={MODE_ITEMS}
+      >
+        <SelectTrigger size="sm" className="w-[6.75rem] shrink-0">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="off">{b.skillsModeOff}</SelectItem>
+          <SelectItem value="offer">{b.skillsModeOffer}</SelectItem>
+          <SelectItem value="require">{b.skillsModeRequire}</SelectItem>
+        </SelectContent>
+      </Select>
+    );
+  }
+
+  return (
+    // Span the whole identity-strip grid (it is otherwise a single ~1/4-width
+    // cell): the skill rows need the full document-column width so the
+    // description column has room to show.
+    <div className="col-span-full flex flex-col gap-1.5">
+      <FieldLabel label={b.skillsLabel} hint={b.skillsHint} />
+      {skills.length === 0 && extraSelected.length === 0 ? (
+        <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
+      ) : (
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2">
+          {/* Search bar (template-gallery pattern) */}
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5">
+            <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={b.skillsSearchPlaceholder}
+              disabled={disabled}
+              className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+
+          {/* Horizontal rows: [Name] [Description] [Option] */}
+          <div className="flex max-h-56 flex-col gap-0.5 overflow-y-auto">
+            {filteredSkills.length === 0 && filteredExtra.length === 0 ? (
+              <div className="px-2 py-2 text-xs text-muted-foreground">
+                {b.skillsSearchEmpty}
+              </div>
+            ) : (
+              <>
+                {filteredSkills.map((s) => (
+                  <div
+                    key={s.rowId}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-medium">
+                      {s.name}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {s.description}
+                    </span>
+                    <ModeSelect slug={s.slug} mode={modeOf(s.slug)} />
+                  </div>
+                ))}
+                {filteredExtra.map((slug) => (
+                  <div
+                    key={slug}
+                    className={cn(
+                      "flex items-center gap-3 rounded-md px-2 py-1.5 text-sm hover:bg-muted/40",
+                      disabled && "opacity-60",
+                    )}
+                  >
+                    <span className="max-w-[10rem] shrink-0 truncate font-mono text-xs text-muted-foreground">
+                      {slug}
+                    </span>
+                    <span className="min-w-0 flex-1" />
+                    <ModeSelect slug={slug} mode={modeOf(slug)} />
+                  </div>
+                ))}
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -148,6 +148,22 @@ export type AssistantCallStep = {
   target: { assistantId: string; capabilityId?: string };
   prompt: string;
   tools?: string[];
+  /**
+   * Allow-list of brain skill slugs the callee may activate on this step
+   * (built-in ids or workspace skill slugs). When non-empty the callee is
+   * offered the `useSkill` tool over exactly these skills, each still gated by
+   * the assistant's own enablement + clearance. Absent / empty = no skills.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  skills?: string[];
+  /**
+   * Brain skill slugs the callee is FORCED to run: their instructions are
+   * injected into the callee system prompt as mandatory `# Required Skills`,
+   * rather than offered via `useSkill`. Same enablement + clearance gates as
+   * `skills`; an enforced slug is not also offered for discovery.
+   * See docs/architecture/features/workflow.md -> "assistant_call skills".
+   */
+  enforcedSkills?: string[];
   /** Page anchor — the callee runs doc-anchored against the resolved page. */
   page?: PageAnchor;
   /**
