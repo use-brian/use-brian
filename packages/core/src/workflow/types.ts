@@ -447,7 +447,15 @@ export const WORKFLOW_STEP_RUN_STATUSES = [
 ] as const
 export type WorkflowStepRunStatus = (typeof WORKFLOW_STEP_RUN_STATUSES)[number]
 
-export type WorkflowTriggerKind = 'manual' | 'schedule'
+// The RUN's trigger kind (how a `workflow_runs` row was started), distinct
+// from a workflow's declared `trigger.kind` (manual/schedule/webhook/event).
+// `'event'` is load-bearing: it is the ONLY kind the run-queue drainer claims,
+// so event-dispatched runs MUST be distinguishable from the inline-advanced
+// manual/schedule/goal runs that momentarily share `status='pending'`. Storing
+// `'manual'` for event runs (the old shortcut) let the drainer resurrect
+// orphaned inline runs — the 2026-07-06 reminder storm. See workflow-store.ts
+// → claimNextPendingRunSystem and docs → "Event run queue".
+export type WorkflowTriggerKind = 'manual' | 'schedule' | 'event'
 
 // ── Records ─────────────────────────────────────────────────────────────
 

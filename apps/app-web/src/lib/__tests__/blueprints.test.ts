@@ -18,9 +18,11 @@ import {
   initialRecordingBlueprint,
   isBlueprint,
   recordingBlueprintToSlug,
+  templateExtractionFromBlocks,
   RECORDING_INGEST_ONLY,
   RECORDING_UNSET,
 } from "../blueprints";
+import type { Block } from "@/lib/api/views";
 
 /** Minimal template-summary factory — only the fields the helpers read. */
 function tpl(
@@ -151,6 +153,35 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
       // The slot is what makes this fillable — `blocksToExtractionSpec` (core)
       // pairs it with the heading to derive the spec.
       expect(blocks.some((b) => b.kind === "extraction_slot")).toBe(true);
+    });
+  });
+
+  describe("templateExtractionFromBlocks (Save-as-template blueprint derivation)", () => {
+    it("derives the spec so a WYSIWYG blueprint saves as a blueprint, not a skeleton", () => {
+      // A page authored with heading + extraction_slot pairs must persist an
+      // extraction spec — without it the saved template is a plain skeleton
+      // (extraction null) and is hidden from the Blueprints library + pickers.
+      const blocks = [
+        { kind: "heading", id: "h1", level: 2, text: "Website" },
+        { kind: "extraction_slot", id: "s1", instruction: "Pull the merchant site", outputType: "table" },
+        { kind: "heading", id: "h2", level: 2, text: "Contacts" },
+        { kind: "extraction_slot", id: "s2", instruction: "Verified contacts", outputType: "list" },
+      ] as unknown as Block[];
+      expect(templateExtractionFromBlocks(blocks)).toEqual({
+        sections: [
+          { heading: "Website", instruction: "Pull the merchant site", outputType: "table" },
+          { heading: "Contacts", instruction: "Verified contacts", outputType: "list" },
+        ],
+        capture: [],
+      });
+    });
+
+    it("returns undefined for a slot-free page (stays a plain template)", () => {
+      const blocks = [
+        { kind: "heading", id: "h1", level: 1, text: "Notes" },
+        { kind: "paragraph", id: "p1", text: "just prose" },
+      ] as unknown as Block[];
+      expect(templateExtractionFromBlocks(blocks)).toBeUndefined();
     });
   });
 });

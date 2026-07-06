@@ -71,10 +71,18 @@ export {
   type CustomPageTemplate,
   type CustomPageTemplateSummary,
   type CustomTemplateCreateInput,
+  type ExtractionSpec,
+  type ExtractionSection,
+  type BlueprintCaptureKind,
   PAGE_TEMPLATE_CATEGORIES,
   pageTemplateCategorySchema,
   customTemplateCreateInputSchema,
   withFreshBlockIds,
+  // Derives a blueprint's `extraction` spec from authored blocks (each
+  // extraction_slot paired with its preceding heading). The editor's
+  // "Save as template" path calls this so a WYSIWYG blueprint persists as a
+  // blueprint (extraction != null) instead of a plain skeleton.
+  blocksToExtractionSpec,
 } from '@sidanclaw/core/dist/doc/custom-template-types.js'
 
 export {

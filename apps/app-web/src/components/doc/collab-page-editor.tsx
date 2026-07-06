@@ -431,6 +431,16 @@ function CollabEditorInner({
           ...(viewId ? { nestParentId: viewId } : {}),
         });
         insertChildPageEmbed(ed, insertPos, draft.id);
+        // Surface the new child in the sidebar tree — the hoisted provider
+        // only refetches on `doc:draft-created`, not on the `router.push`
+        // below, so without this the subpage stays invisible until a reload.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("doc:draft-created", {
+              detail: { viewId: draft.id, action: "created" },
+            }),
+          );
+        }
         router.push(`/w/${ws.workspaceId}/p/${draft.id}`);
       } catch {
         // Soft-fail: a failed create leaves the line untouched (no orphan link).

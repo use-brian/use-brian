@@ -69,6 +69,7 @@ type Fixture = {
     claimedAgoSeconds?: number | null
     claimAttempts?: number
     lastActiveAgoSeconds?: number
+    triggerKind?: string
   }): Promise<string>
   cleanup(): Promise<void>
 }
@@ -120,13 +121,17 @@ async function makeFixture(): Promise<Fixture> {
         claimedAgoSeconds = null,
         claimAttempts = 0,
         lastActiveAgoSeconds = 0,
+        // Default to the queue-owned kind — event dispatch is the only producer
+        // whose runs the drainer claims. Inline kinds ('manual','schedule') are
+        // passed explicitly by the tests that assert the queue ignores them.
+        triggerKind = 'event',
       }) {
         const c = await pool!.connect()
         try {
           const r = await c.query(
             `INSERT INTO workflow_runs
                (id, workflow_id, workspace_id, trigger_kind, status, started_at, last_active_at, claimed_at, claim_attempts)
-             VALUES (gen_random_uuid(), $1, $2, 'manual', $3,
+             VALUES (gen_random_uuid(), $1, $2, $8, $3,
                      now() - make_interval(secs => $4),
                      now() - make_interval(secs => $5),
                      CASE WHEN $6::float8 IS NULL THEN NULL ELSE now() - make_interval(secs => $6::float8) END,
@@ -140,6 +145,7 @@ async function makeFixture(): Promise<Fixture> {
               lastActiveAgoSeconds,
               claimedAgoSeconds,
               claimAttempts,
+              triggerKind,
             ],
           )
           runIds.push(r.rows[0].id as string)
@@ -194,6 +200,97 @@ describeIf('[COMP:workflow/run-queue] claimNextPendingRunSystem (mig 302)', () =
       expect(state.status).toBe('pending') // advance flips it, not the claim
       expect(state.claimed_at).not.toBeNull()
       expect(state.claim_attempts).toBe(1)
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  // Regression — 2026-07-06 medication-reminder storm. The queue owns ONLY
+  // event-dispatched runs (stamped trigger_kind='event'). Every inline kind
+  // ('manual' "Run now" / webhook / goal, and 'schedule') is ALSO created
+  // status='pending' but advances inline; the drainer must never claim, fail,
+  // or re-queue them. Before the gate, ~70 stale 'schedule' runs orphaned in
+  // 'pending' since 2026-05 were drained oldest-first, re-firing a reminder.
+  it('never claims an inline-path run (schedule OR manual), even as oldest pending', async () => {
+    const f = await makeFixture()
+    try {
+      // Both inline runs are older than the event run — FIFO would pick one
+      // first if the trigger_kind gate were missing or too narrow (the old
+      // '=manual' band-aid would still have grabbed the manual one).
+      const scheduled = await f.addRun({
+        workflowId: f.wfA,
+        triggerKind: 'schedule',
+        startedAgoSeconds: 100,
+      })
+      const manual = await f.addRun({
+        workflowId: f.wfA,
+        triggerKind: 'manual',
+        startedAgoSeconds: 90,
+      })
+      const eventRun = await f.addRun({
+        workflowId: f.wfB,
+        triggerKind: 'event',
+        startedAgoSeconds: 10,
+      })
+
+      // Claim skips both older inline runs and takes the event run.
+      const claimed = await queue.claimNextPendingRunSystem(DEFAULTS)
+      expect(claimed!.runId).toBe(eventRun)
+      // Nothing else is claimable — the inline runs are invisible to the queue.
+      expect(await queue.claimNextPendingRunSystem(DEFAULTS)).toBeNull()
+      for (const id of [scheduled, manual]) {
+        const s = await rowState(id)
+        expect(s.status).toBe('pending')
+        expect(s.claimed_at).toBeNull()
+        expect(s.claim_attempts).toBe(0)
+      }
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it('reapers ignore inline-path runs (schedule + manual), both exhausted-fail and stale-requeue', async () => {
+    const f = await makeFixture()
+    try {
+      // Lease-expired, attempts-exhausted inline PENDING runs: the event
+      // exhausted-reaper would fail an event run here, but not these.
+      const schedPending = await f.addRun({
+        workflowId: f.wfA,
+        triggerKind: 'schedule',
+        claimedAgoSeconds: 600,
+        claimAttempts: 3,
+      })
+      const manualPending = await f.addRun({
+        workflowId: f.wfA,
+        triggerKind: 'manual',
+        claimedAgoSeconds: 600,
+        claimAttempts: 3,
+      })
+      // Stale RUNNING inline runs: a long inline run must not be yanked back to
+      // pending by the event queue's stale reaper (it would then be re-claimed
+      // and re-delivered — a stale reminder resurrected hours late).
+      const schedRunning = await f.addRun({
+        workflowId: f.wfB,
+        triggerKind: 'schedule',
+        status: 'running',
+        lastActiveAgoSeconds: 3600,
+        claimAttempts: 1,
+      })
+      const manualRunning = await f.addRun({
+        workflowId: f.wfB,
+        triggerKind: 'manual',
+        status: 'running',
+        lastActiveAgoSeconds: 3600,
+        claimAttempts: 1,
+      })
+
+      await queue.failExhaustedPendingRunsSystem({ leaseSeconds: 120, maxClaimAttempts: 3 })
+      await queue.requeueStaleRunningRunsSystem({ staleSeconds: 1800, maxClaimAttempts: 3 })
+
+      expect((await rowState(schedPending)).status).toBe('pending') // untouched
+      expect((await rowState(manualPending)).status).toBe('pending') // untouched
+      expect((await rowState(schedRunning)).status).toBe('running') // untouched
+      expect((await rowState(manualRunning)).status).toBe('running') // untouched
     } finally {
       await f.cleanup()
     }

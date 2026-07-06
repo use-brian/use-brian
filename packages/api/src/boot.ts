@@ -2715,9 +2715,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // longer constructs or binds its own. `setPageEventDispatcher` wires the
   // late-bound seam the store published into (page-event-fanout.ts) — without
   // this bind, `publishPageLifecycle` is a no-op and page events never fire a
-  // workflow (the OSS regression this fixes). Mirrors the webhook receiver:
-  // event runs are attributed to the workflow creator and recorded
-  // `triggerKind='manual'` (the `trigger_kind` enum has no `event` member).
+  // workflow (the OSS regression this fixes). Event runs are attributed to the
+  // workflow creator and recorded `triggerKind='event'` — the marker the
+  // run-queue drainer claims on, so its enqueued runs are distinguishable from
+  // the inline-advanced manual/schedule/goal runs that share `status='pending'`
+  // (see workflow-store.ts → claimNextPendingRunSystem; storing `'manual'` here
+  // let the drainer resurrect orphaned inline runs — the 2026-07-06 storm).
   // Event run queue — the bounded drain behind event-triggered runs. Event
   // dispatch ENQUEUES (a `pending` workflow_runs row) and never inline-
   // executes; this worker drains with per-workflow serialization, a per-
@@ -2777,7 +2780,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         workflowId,
         workspaceId,
         triggeredBy,
-        triggerKind: 'manual',
+        // The ONLY producer that stamps 'event': this run is drained by the
+        // run-queue, not advanced inline. The gate in claimNextPendingRunSystem
+        // depends on this value.
+        triggerKind: 'event',
         input,
       })
       // Enqueue-only: the run row (status `pending`) IS the queue entry.

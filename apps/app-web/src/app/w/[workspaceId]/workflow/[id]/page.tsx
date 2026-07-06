@@ -29,6 +29,7 @@ import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { requestWorkflowRefresh } from "@/lib/workflow-events";
 import {
   deleteWorkflow,
   getWorkflowFull,
@@ -386,6 +387,7 @@ export default function WorkflowDetailPage({
     setDraft(result.workflow);
     setEditing(false);
     setSelectedKey(null);
+    requestWorkflowRefresh(result.workflow.workspaceId);
     refresh();
   };
 
@@ -406,7 +408,10 @@ export default function WorkflowDetailPage({
     });
     if (!ok) return;
     const deleted = await deleteWorkflow(workflow.id);
-    if (deleted) router.push(listHref);
+    if (deleted) {
+      requestWorkflowRefresh(workflow.workspaceId);
+      router.push(listHref);
+    }
   };
 
   const onRunNow = async () => {
@@ -442,6 +447,7 @@ export default function WorkflowDetailPage({
     }
     setWorkflow(result.workflow);
     setDraft(result.workflow);
+    requestWorkflowRefresh(result.workflow.workspaceId);
   };
 
   // The "Edit" button has no node context — focus the start step so the

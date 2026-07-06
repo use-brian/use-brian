@@ -29,6 +29,7 @@ import {
   type WorkflowDefinition,
 } from "@/lib/api/workflow";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
+import { requestWorkflowRefresh } from "@/lib/workflow-events";
 import {
   Select,
   SelectContent,
@@ -124,6 +125,7 @@ export function CreateWorkflowModal({ onClose }: Props) {
       setError(result.error || t.workflowPage.builder.createError);
       return;
     }
+    requestWorkflowRefresh(activeId);
     router.push(
       `/w/${activeId}/workflow/${encodeURIComponent(result.workflow.id)}`,
     );

@@ -1082,6 +1082,21 @@ export function createWorkflowRunQueueStore(): RunQueueStore {
           WHERE id = (
             SELECT r.id FROM workflow_runs r
              WHERE r.status = 'pending'
+               -- Queue-owned runs ONLY. Event dispatch is the sole producer
+               -- that enqueues (status='pending') without inline-advancing, and
+               -- stamps trigger_kind='event' precisely so its runs are
+               -- distinguishable here. Every OTHER path (schedule, manual/
+               -- "Run now", webhook, goal tick, wait-wakeup) creates its run
+               -- status='pending' too — the column default — then advances it
+               -- INLINE; a crash can orphan one in 'pending' forever. Claiming
+               -- those re-runs their delivery side-effects: the 2026-07-06
+               -- storm was ~70 stale trigger_kind='schedule' runs orphaned
+               -- since 2026-05 being drained oldest-first, re-firing a user's
+               -- reminder. The trigger_kind='event' gate — mirrored on the two
+               -- reapers below — is the invariant that keeps the queue's reach
+               -- to the runs it owns, across the pending→running transition.
+               -- See docs → "Event run queue".
+               AND r.trigger_kind = 'event'
                AND (r.claimed_at IS NULL OR r.claimed_at < now() - make_interval(secs => $1))
                AND r.claim_attempts < $2
                -- Per-workflow serialization: no sibling running or freshly claimed.
@@ -1129,6 +1144,9 @@ export function createWorkflowRunQueueStore(): RunQueueStore {
                   'message', 'Run queue gave up after repeated claim attempts.',
                   'reason', 'run_queue_exhausted')
           WHERE status = 'pending'
+            -- Queue-owned runs only (see claimNextPendingRunSystem) — never
+            -- fail an inline-path run the queue does not own.
+            AND trigger_kind = 'event'
             AND claim_attempts >= $2
             AND claimed_at IS NOT NULL
             AND claimed_at < now() - make_interval(secs => $1)`,
@@ -1144,6 +1162,13 @@ export function createWorkflowRunQueueStore(): RunQueueStore {
         `UPDATE workflow_runs
             SET status = 'pending', claimed_at = NULL
           WHERE status = 'running'
+            -- Queue-owned runs only (see claimNextPendingRunSystem). This is
+            -- why the marker is trigger_kind, not status: once a run is
+            -- 'running' its origin is otherwise indistinguishable, and an
+            -- inline schedule/manual run re-queued to 'pending' would be
+            -- re-claimed and re-delivered. A stale reminder must stay dead,
+            -- never be resurrected hours late.
+            AND trigger_kind = 'event'
             AND last_active_at < now() - make_interval(secs => $1)
             AND claim_attempts < $2`,
         [staleSeconds, maxClaimAttempts],
@@ -1156,6 +1181,8 @@ export function createWorkflowRunQueueStore(): RunQueueStore {
                   'message', 'Run stalled and exceeded retry attempts.',
                   'reason', 'run_queue_stale')
           WHERE status = 'running'
+            -- Queue-owned runs only (see claimNextPendingRunSystem).
+            AND trigger_kind = 'event'
             AND last_active_at < now() - make_interval(secs => $1)
             AND claim_attempts >= $2`,
         [staleSeconds, maxClaimAttempts],

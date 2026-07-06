@@ -24,6 +24,10 @@ import { useT, useLocale, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { listWorkflows, type WorkflowSummary } from "@/lib/api/workflow";
 import { workflowNextRun, compareByNextRun } from "@/lib/workflow-next-run";
+import {
+  WORKFLOW_REFRESH_EVENT,
+  type WorkflowRefreshDetail,
+} from "@/lib/workflow-events";
 
 /** Largest-unit relative time ("in 3 hours", "tomorrow"), locale-aware. */
 function relativeWhen(target: Date, locale: string): string {
@@ -44,6 +48,8 @@ export function WorkflowSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const pathname = usePathname() ?? "";
   const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
 
+  // Initial load (and reload on workspace switch): show the "…" placeholder
+  // while the first list resolves.
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
@@ -53,6 +59,29 @@ export function WorkflowSidebarPanel({ workspaceId }: { workspaceId: string }) {
     });
     return () => {
       cancelled = true;
+    };
+  }, [workspaceId]);
+
+  // Silent re-fetch driven by the workflow event bus — fired after a
+  // create / update / enable-toggle / delete on another surface. The panel
+  // otherwise only fetches on `workspaceId` change, so a mutation followed
+  // by `router.push` (create -> board, delete -> list) would leave the
+  // deleted/new/renamed workflow stale until a full reload. No "…" flash:
+  // the current list stays put until the fresh one swaps in.
+  useEffect(() => {
+    if (!workspaceId) return;
+    let cancelled = false;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<WorkflowRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      void listWorkflows(workspaceId).then((list) => {
+        if (!cancelled) setWorkflows(list);
+      });
+    };
+    window.addEventListener(WORKFLOW_REFRESH_EVENT, handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(WORKFLOW_REFRESH_EVENT, handler);
     };
   }, [workspaceId]);
 

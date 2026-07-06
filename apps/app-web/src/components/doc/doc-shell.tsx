@@ -94,6 +94,7 @@ import {
 import { EmptyPageLanding } from "./empty-page-landing";
 import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
+import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
@@ -780,8 +781,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
       throw new Error(t.saveTemplateDialog.emptyError);
     }
     // The client `Block` is a narrow local shape; the server re-validates the
-    // snapshot with the canonical block schema, so the cast is safe.
-    await createCustomPageTemplate(workspaceId, { ...input, blocks: blocks as never });
+    // snapshot with the canonical block schema, so the cast is safe. Derive the
+    // blueprint `extraction` spec from the blocks so a WYSIWYG-authored blueprint
+    // (heading + extraction_slot) persists as a blueprint (extraction != null)
+    // rather than a plain skeleton — otherwise it never surfaces in the
+    // Blueprints library or the blueprint pickers. Undefined for a slot-free
+    // page keeps it a plain template. See structural-synthesis.md.
+    const extraction = templateExtractionFromBlocks(blocks as never);
+    await createCustomPageTemplate(workspaceId, { ...input, blocks: blocks as never, extraction });
     setSaveTemplateFor(null);
     if (target.transient) {
       setTemplateAuthoringId((cur) => (cur === target.pageId ? null : cur));

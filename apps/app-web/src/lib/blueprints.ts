@@ -16,7 +16,8 @@
  * [COMP:web/blueprints-library]
  */
 
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary, ExtractionSpec } from "@sidanclaw/doc-model";
+import { blocksToExtractionSpec } from "@sidanclaw/doc-model";
 import type { Block } from "@/lib/api/views";
 import { newBlockId } from "@/lib/api/views";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
@@ -131,4 +132,21 @@ export function blankBlueprintBlocks(genId: () => string = newBlockId): Block[] 
     { kind: "heading", id: genId(), level: 2, text: "" },
     { kind: "extraction_slot", id: genId(), instruction: "" },
   ];
+}
+
+/**
+ * The `extraction` spec to attach when SAVING a page as a template. A page with
+ * `extraction_slot` blocks (a WYSIWYG-authored blueprint) yields the derived
+ * spec so the saved `workspace_page_templates` row is a BLUEPRINT
+ * (`extraction != null`) — otherwise it persists as a plain skeleton and never
+ * appears in the Blueprints library or the blueprint pickers (workflow step,
+ * recording upload). A page with no slots yields `undefined` (a plain
+ * template). `capture` is authoring metadata the doc save flow does not yet
+ * surface, so it defaults to `[]`. See structural-synthesis.md ->
+ * "The blueprint object".
+ */
+export function templateExtractionFromBlocks(
+  blocks: Block[],
+): ExtractionSpec | undefined {
+  return blocksToExtractionSpec(blocks as never) ?? undefined;
 }

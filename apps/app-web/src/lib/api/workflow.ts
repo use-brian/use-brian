@@ -302,7 +302,7 @@ export type WorkflowFull = {
 export type WorkflowRunSummary = {
   id: string;
   workflowId: string;
-  triggerKind: "manual" | "schedule";
+  triggerKind: "manual" | "schedule" | "event";
   status:
     | "pending"
     | "running"

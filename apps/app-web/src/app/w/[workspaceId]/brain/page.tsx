@@ -387,6 +387,15 @@ function BrainPageInner() {
         name: t.brainPage.blueprints.newBlueprintTitle,
         blocks: blankBlueprintBlocks() as never,
       });
+      // Surface the new draft in the doc sidebar — the hoisted provider only
+      // refetches on `doc:draft-created`, not on the `router.push` below.
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("doc:draft-created", {
+            detail: { viewId: created.id, action: "created" },
+          }),
+        );
+      }
       router.push(docPagePath(activeId, created.id));
     } catch {
       // Surface nothing destructive — a failed draft create is a no-op; the
