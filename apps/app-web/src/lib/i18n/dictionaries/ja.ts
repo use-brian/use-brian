@@ -1986,6 +1986,8 @@ export const ja: Dictionary = {
       webhookCopied: "コピーしました",
       webhookHint:
         "リクエスト本文を署名シークレットで HMAC-SHA256 署名し、`X-Workflow-Signature: sha256=<hex>` ヘッダーで送信してください。",
+      webhookPendingCallout:
+        "ワークフローを保存すると、Webhook URL と署名シークレットが生成されます。",
       addStepBtn: "+ ステップを追加",
       stepNumber: "ステップ {n}",
       stepTypeLabel: "種類",

@@ -1974,6 +1974,8 @@ export const zh: Dictionary = {
       webhookCopied: "已複製",
       webhookHint:
         "使用簽章密鑰以 HMAC-SHA256 簽署請求主體，並透過 `X-Workflow-Signature: sha256=<hex>` 標頭送出。",
+      webhookPendingCallout:
+        "儲存工作流程後，系統會產生 Webhook URL 與簽章密鑰。",
       addStepBtn: "+ 新增步驟",
       stepNumber: "步驟 {n}",
       stepTypeLabel: "類型",

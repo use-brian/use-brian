@@ -2172,6 +2172,8 @@ export const en = {
       webhookCopied: "Copied",
       webhookHint:
         "Sign the request body with HMAC-SHA256 using the signing secret and send it in the `X-Workflow-Signature: sha256=<hex>` header.",
+      webhookPendingCallout:
+        "Save the workflow to generate the webhook URL and signing secret.",
       addStepBtn: "+ Add step",
       stepNumber: "Step {n}",
       stepTypeLabel: "Type",

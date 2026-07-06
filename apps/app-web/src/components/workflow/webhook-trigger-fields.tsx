@@ -63,8 +63,6 @@ export function WebhookTriggerFields({
   onRotate,
   disabled,
 }: Props) {
-  const t = useT();
-
   const setCondition = (condition: unknown) =>
     onChange(
       condition === undefined
@@ -74,11 +72,8 @@ export function WebhookTriggerFields({
 
   return (
     <div className="flex flex-col gap-3">
-      <WebhookMatchEditor
-        condition={trigger.match?.condition}
-        onChange={setCondition}
-        disabled={disabled}
-      />
+      {/* Endpoint first (mirrors the Manual panel's Run-endpoint block),
+          then the optional payload filter below a divider. */}
       {slug && secret ? (
         <WebhookCredentials
           slug={slug}
@@ -87,10 +82,45 @@ export function WebhookTriggerFields({
           disabled={disabled}
         />
       ) : (
-        <div className="text-xs text-muted-foreground pt-1 border-t border-border/60">
-          {t.workflowPage.builder.saveChanges} →
-        </div>
+        <WebhookPendingCallout />
       )}
+      <div className="pt-3 border-t border-border/60">
+        <WebhookMatchEditor
+          condition={trigger.match?.condition}
+          onChange={setCondition}
+          disabled={disabled}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ── Pending (unsaved) callout ───────────────────────────────────────────────
+//
+// The webhook URL + signing secret are minted server-side on the first save
+// of a `webhook` trigger, so they can't be shown before that. Rather than a
+// bare "Save changes" hint (which reads like the panel is missing its
+// endpoint), preview the URL shape with a placeholder slug and spell out that
+// saving generates the real value.
+
+function WebhookPendingCallout() {
+  const t = useT();
+  // A masked slug the same visual length as a real one (base64url of 12
+  // bytes ≈ 16 chars) so the previewed URL matches the eventual shape. Same
+  // layout as the Manual panel's Run-endpoint block (label / `POST <url>` /
+  // hint), muted + dashed to read as "not generated yet".
+  const previewUrl = webhookUrlForSlug("••••••••••••••••");
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="text-xs font-medium text-muted-foreground">
+        {t.workflowPage.builder.webhookUrlLabel}
+      </label>
+      <code className="px-3 py-1.5 bg-muted/40 border border-dashed border-border rounded-md text-xs font-mono text-muted-foreground/70 break-all select-none">
+        POST {previewUrl}
+      </code>
+      <p className="text-xs text-muted-foreground">
+        {t.workflowPage.builder.webhookPendingCallout}
+      </p>
     </div>
   );
 }
@@ -432,10 +462,11 @@ function WebhookCredentials({
   } as const;
 
   return (
-    <div className="flex flex-col gap-3 pt-1 border-t border-border/60">
+    <div className="flex flex-col gap-3">
       <FieldWithCopy
         label={t.workflowPage.builder.webhookUrlLabel}
         value={url}
+        displayPrefix="POST "
         copied={copied === "url"}
         onCopy={() => copy(url, "url")}
         copyLabel={t.workflowPage.builder.webhookCopyUrl}
@@ -628,6 +659,7 @@ function FieldWithCopy({
   copyLabel,
   copiedLabel,
   masked,
+  displayPrefix,
 }: {
   label: string;
   value: string;
@@ -636,6 +668,9 @@ function FieldWithCopy({
   copyLabel: string;
   copiedLabel: string;
   masked?: boolean;
+  /** Shown before the value (e.g. `POST `) but never copied — matches the
+   *  Manual panel, which displays `POST <url>` yet copies the bare URL. */
+  displayPrefix?: string;
 }) {
   const display = masked
     ? `${value.slice(0, 4)}••••••••${value.slice(-4)}`
@@ -647,6 +682,7 @@ function FieldWithCopy({
       </label>
       <div className="flex items-center gap-2">
         <code className="flex-1 px-3 py-1.5 bg-background border border-border rounded-md text-xs font-mono break-all">
+          {displayPrefix}
           {display}
         </code>
         <button
