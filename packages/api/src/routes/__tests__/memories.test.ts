@@ -214,6 +214,10 @@ describe('[COMP:api/memories-route] Memory routes', () => {
 
     it('returns 200 on success', async () => {
       setupAuth()
+      // WS3: the edit route now builds resolveViewerCtx and passes it to
+      // updateMemory so the write is access-scoped (the read/write-asymmetry
+      // fix) — queue its one-row assistant→workspace query.
+      mockResolveViewerCtx('w_1')
       mockUpdateMemory.mockResolvedValueOnce({ id: 'mem_1', workspaceId: 'w_1', summary: 'Updated' } as never)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
@@ -225,6 +229,22 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       // Realtime: a PATCH emits an 'update' NOTIFY for the (superseded) row id,
       // scoped to the row's workspace.
       expect(mockNotifyBrainInboxChange).toHaveBeenCalledWith('w_1', 'memory', 'mem_1', 'update')
+      // The update is scoped: updateMemory received a viewer ctx as its 3rd arg.
+      const call = mockUpdateMemory.mock.calls[0]
+      expect(call).toHaveLength(3)
+      expect(call[2]).toBeTruthy()
+    })
+
+    it('returns 404 when the caller cannot access the assistant (no viewer ctx)', async () => {
+      setupAuth()
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // resolveViewerCtx → null
+
+      const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
+      const res = await request(app)
+        .patch('/api/assistants/a_1/memories/mem_1')
+        .send({ summary: 'Updated' })
+      expect(res.status).toBe(404)
+      expect(mockUpdateMemory).not.toHaveBeenCalled()
     })
   })
 
