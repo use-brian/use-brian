@@ -39,6 +39,7 @@ import {
 } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
 import { routeProgress } from "@/lib/route-progress";
+import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
@@ -230,7 +231,11 @@ export function WorkspaceChrome({
   // right in toolbar order: ⌘1 is Home (the `/p` page surface), then Brain /
   // Studio / Workflow on 2 / 3 / 4. Ignored while typing in an
   // input/textarea/contenteditable so it never hijacks editor or form keystrokes;
-  // Shift/Alt-modified combos are left alone too.
+  // Shift/Alt-modified combos are left alone too. The modifier is
+  // browser-dependent (`surfaceShortcutModifierPressed`): Firefox reserves
+  // Accel+digit for tab switching and ignores preventDefault on it, so there
+  // the binding is plain Ctrl+digit and ⌘+digit is left to the browser's tab
+  // switch (never both at once).
   useEffect(() => {
     if (typeof window === "undefined") return;
     const SURFACE_BY_KEY: Record<string, string> = {
@@ -240,7 +245,7 @@ export function WorkspaceChrome({
       "4": "workflow",
     };
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (!surfaceShortcutModifierPressed(e)) return;
       const surface = SURFACE_BY_KEY[e.key];
       if (!surface) return;
       const el = document.activeElement as HTMLElement | null;
