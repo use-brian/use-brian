@@ -55,6 +55,10 @@ type Fixture = {
     entity_names_substr?: string[]
     task_text_substr?: string[]
     memory_count_max?: number
+    /** At least this many memory writes must happen — the "true memory" tier is asserted, not just bounded. */
+    memory_count_min?: number
+    /** Every listed substring must appear (CI) in some emitted memory summary. */
+    memory_text_substr?: string[]
     ephemeral_count_min?: number
   }
 }
@@ -77,11 +81,14 @@ describeIf('[COMP:brain/classifier-golden-set] Pipeline B v2 classifier (integra
       expect(result.extracted).toBe(true)
 
       const exp = fixture.expected
+      // Self-explaining failures: every assert carries what the model
+      // actually emitted, so a red run is diagnosable from the log alone.
+      const got = `got ${JSON.stringify({ ...recorded, ephemeralCount: result.ephemeralCount })}`
 
       if (exp.entity_kinds) {
         const seenKinds = new Set(recorded.entities.map((e) => e.kind))
         for (const kind of exp.entity_kinds) {
-          expect(seenKinds, `expected entity kind=${kind}`).toContain(kind)
+          expect(seenKinds, `expected entity kind=${kind}; ${got}`).toContain(kind)
         }
       }
 
@@ -89,7 +96,7 @@ describeIf('[COMP:brain/classifier-golden-set] Pipeline B v2 classifier (integra
         const seenNames = recorded.entities.map((e) => e.displayName.toLowerCase())
         for (const needle of exp.entity_names_substr) {
           const found = seenNames.some((n) => n.includes(needle.toLowerCase()))
-          expect(found, `expected entity name containing "${needle}"`).toBe(true)
+          expect(found, `expected entity name containing "${needle}"; ${got}`).toBe(true)
         }
       }
 
@@ -97,21 +104,36 @@ describeIf('[COMP:brain/classifier-golden-set] Pipeline B v2 classifier (integra
         const seenTasks = recorded.tasks.map((t) => t.title.toLowerCase())
         for (const needle of exp.task_text_substr) {
           const found = seenTasks.some((t) => t.includes(needle.toLowerCase()))
-          expect(found, `expected task containing "${needle}"`).toBe(true)
+          expect(found, `expected task containing "${needle}"; ${got}`).toBe(true)
         }
       }
 
       if (exp.memory_count_max !== undefined) {
         expect(
           recorded.memories.length,
-          `expected ≤ ${exp.memory_count_max} memory writes, got ${recorded.memories.length}`,
+          `expected ≤ ${exp.memory_count_max} memory writes; ${got}`,
         ).toBeLessThanOrEqual(exp.memory_count_max)
+      }
+
+      if (exp.memory_count_min !== undefined) {
+        expect(
+          recorded.memories.length,
+          `expected ≥ ${exp.memory_count_min} memory writes; ${got}`,
+        ).toBeGreaterThanOrEqual(exp.memory_count_min)
+      }
+
+      if (exp.memory_text_substr) {
+        const seenMemories = recorded.memories.map((m) => m.summary.toLowerCase())
+        for (const needle of exp.memory_text_substr) {
+          const found = seenMemories.some((m) => m.includes(needle.toLowerCase()))
+          expect(found, `expected memory containing "${needle}"; ${got}`).toBe(true)
+        }
       }
 
       if (exp.ephemeral_count_min !== undefined) {
         expect(
           result.ephemeralCount,
-          `expected ≥ ${exp.ephemeral_count_min} ephemeral items, got ${result.ephemeralCount}`,
+          `expected ≥ ${exp.ephemeral_count_min} ephemeral items; ${got}`,
         ).toBeGreaterThanOrEqual(exp.ephemeral_count_min)
       }
     }, 30_000)
@@ -134,7 +156,12 @@ async function runExtraction(provider: LLMProvider, content: string) {
       recorded.entities.push({ kind: params.kind, displayName: params.displayName })
       return { id: `ent-${recorded.entities.length}`, ...params, attributes: params.attributes ?? {}, canonicalId: params.canonicalId ?? null, sourceEpisodeId: null, validFrom: new Date(), validTo: null, retractedAt: null, supersededBy: null, createdByUserId: 'u', createdByAssistantId: null, createdAt: new Date(), workspaceId: 'ws', userId: null, assistantId: null, source: 'extracted', sensitivity: 'internal', verifiedAt: null, verifiedByUserId: null } as never
     }),
-    findByCanonicalIdSystem: vi.fn(async () => null),
+    // NB: findByCanonicalIdSystem returns an ARRAY (writeEntity does
+    // `existing.length`). A `null` mock here crashed the write path for
+    // every canonical_id-carrying entity (companies/repositories), was
+    // swallowed by per-entity failure isolation, and masqueraded as the
+    // model "systematically dropping companies" — 2026-07-07.
+    findByCanonicalIdSystem: vi.fn(async () => []),
     findByNameSystem: vi.fn(async () => null),
     supersedeAttributes: vi.fn(async () => null),
   } as unknown as EntityStore
@@ -187,7 +214,10 @@ async function runExtraction(provider: LLMProvider, content: string) {
 
   const deps: PipelineBDeps = {
     provider,
-    model: 'gemini-2.5-flash',
+    // Keep in lockstep with EXTRACTION_MODEL in
+    // packages/api/src/build-episode-ingestors.ts — the golden set must
+    // eval the model prod extraction actually runs, not a sibling tier.
+    model: 'gemini-3-flash-standard',
     crm,
     entities,
     entityLinks,

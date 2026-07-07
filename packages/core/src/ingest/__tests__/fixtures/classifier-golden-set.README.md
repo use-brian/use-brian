@@ -19,7 +19,7 @@ interface Fixture {
 
   expected: {
     /** Every listed entity kind must appear in the emitted entities/CRM rows. */
-    entity_kinds?: ('person' | 'company' | 'project' | 'product')[]
+    entity_kinds?: ('person' | 'company' | 'project' | 'product' | 'repository')[]
 
     /** Every listed substring must appear (case-insensitive) in some emitted entity display_name. */
     entity_names_substr?: string[]
@@ -29,6 +29,12 @@ interface Fixture {
 
     /** The count of memory writes must NOT exceed this. Use 0 to assert "this should NOT land as a memory". */
     memory_count_max?: number
+
+    /** At least this many memory writes must happen — asserts the "true memory" tier positively. */
+    memory_count_min?: number
+
+    /** Every listed substring must appear (case-insensitive) in some emitted memory summary. */
+    memory_text_substr?: string[]
 
     /** At least this many items must land in `ephemeral` (proof the LLM is using the slot). */
     ephemeral_count_min?: number

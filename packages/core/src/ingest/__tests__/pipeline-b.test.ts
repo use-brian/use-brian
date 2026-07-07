@@ -919,6 +919,146 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(requests[0]?.responseFormat).toBe('json')
   })
 
+  it('tolerates explicit nulls in every optional slot (JSON-mode idiom)', async () => {
+    // With responseFormat 'json' the model emits `"detail": null` /
+    // `"assignee_ref": null` / even `"ephemeral": null` instead of omitting
+    // keys — the prompt itself documents nullable fields. One nulled
+    // optional must never fail the payload and archive the Episode empty.
+    // (Golden-set live run 2026-07-07: `Expected string, received null` ×6.)
+    const world = makeWorld()
+    const crm = spyCrm(world)
+    const entities = spyEntities(world)
+    const links = spyLinks()
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+
+    const taskRows: Array<{ title: string }> = []
+    const tasks = {
+      create: async (params: { title: string }) => {
+        taskRows.push({ title: params.title })
+        return { id: `task-${taskRows.length}`, title: params.title }
+      },
+    } as unknown as PipelineBDeps['tasks']
+
+    const extraction = JSON.stringify({
+      summary: 'Nulls everywhere.',
+      entities: [
+        { kind: 'person', display_name: 'Nul Person', canonical_id: null, attributes: null },
+        { kind: 'project', display_name: 'Nul Project', canonical_id: null, attributes: null },
+      ],
+      edges: null,
+      tasks: [{ text: 'Do the thing', due_iso: null, assignee_ref: null }],
+      memories: [
+        {
+          scope: null,
+          summary: 'A durable note.',
+          detail: null,
+          tags: null,
+          why_not_entity: 'no recurring subject',
+          why_not_task: 'descriptive only',
+        },
+      ],
+      ephemeral: null,
+      tags: null,
+    })
+    const classification = JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' })
+
+    const provider = sequencedProvider([extraction, classification])
+    const deps = makeDeps({
+      provider,
+      crm: crm.store,
+      entities: entities.store,
+      entityLinks: links.store,
+      memories: memories.store,
+      episodes: episodes.port,
+      tasks,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'note with nulls', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(result.summaryText).toBe('Nulls everywhere.')
+    expect(crm.contacts).toHaveLength(1)
+    expect(entities.created).toHaveLength(1)
+    expect(taskRows).toHaveLength(1)
+    expect(memories.created).toHaveLength(1)
+    expect(result.ephemeralCount).toBe(0)
+  })
+
+  it('retries once with the validation error when the first extraction output fails to parse', async () => {
+    // JSON mode reduces malformed output but does not eliminate it (live
+    // golden-set run 2026-07-07). One bounded retry recovers the tail; the
+    // retry turn carries the parse reason, never an echo of the bad output.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const requests: ProviderRequest[] = []
+    const responses = [
+      'this is not json',
+      JSON.stringify({ summary: 'recovered', entities: [], edges: [], memories: [], tags: [] }),
+      JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'routine' }),
+    ]
+    let call = 0
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        const text = responses[Math.min(call, responses.length - 1)] ?? ''
+        call++
+        yield { type: 'text_delta', text } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider }))
+
+    expect(result.extracted).toBe(true)
+    expect(result.summaryText).toBe('recovered')
+    // extraction ×2 + classification ×1
+    expect(requests).toHaveLength(3)
+    // Retry turn: original prompt + a validation-error user message, no echo.
+    expect(requests[1]?.messages).toHaveLength(2)
+    const retryMsg = requests[1]?.messages[1]
+    expect(typeof retryMsg?.content === 'string' ? retryMsg.content : '').toContain('failed validation')
+    warn.mockRestore()
+  })
+
+  it('archives empty after two failed parse attempts (no infinite retry)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const requests: ProviderRequest[] = []
+    const provider = {
+      name: 'mock',
+      models: ['mock'],
+      createSession() {
+        return {} as never
+      },
+      async *stream(req: ProviderRequest): AsyncGenerator<StreamChunk> {
+        requests.push(req)
+        yield { type: 'text_delta', text: 'still not json' } as StreamChunk
+        yield {
+          type: 'message_end',
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 20 },
+        } as StreamChunk
+      },
+    } as unknown as LLMProvider
+    const episodes = spyEpisodes()
+
+    const result = await processEpisode(baseEpisode(), 'note', makeDeps({ provider, episodes: episodes.port }))
+
+    expect(result.extracted).toBe(false)
+    expect(requests).toHaveLength(2)
+    expect(episodes.checkpointCalls).toEqual([{ id: 'ep-1', summaryText: '' }])
+    expect(episodes.statusCalls).toEqual([{ id: 'ep-1', next: 'archived' }])
+    warn.mockRestore()
+  })
+
   it('recovers when the LLM emits a raw control character inside a string literal', async () => {
     // Regression: production logs at 2026-05-27 showed
     //   `JSON.parse failed: Bad control character in string literal in JSON at position 1225`
@@ -1652,7 +1792,8 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     const usage = usageSpy()
     const provider = sequencedProvider(['this is not json'])
     await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
-    expect(usage.recordUsage).toHaveBeenCalledTimes(1)
+    // Two attempts (parse-failure retry), both consumed tokens, both metered.
+    expect(usage.recordUsage).toHaveBeenCalledTimes(2)
   })
 
   it('tolerates a null assistant (workspace-scoped batch) as a blank-assistant row', async () => {

@@ -57,7 +57,7 @@ import { resolveEntity } from '../entities/resolver.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
 import { collectStream } from '../providers/accumulator.js'
-import type { LLMProvider, TokenUsage } from '../providers/types.js'
+import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import { RANK, type Sensitivity } from '../security/sensitivity.js'
 
 import { scrubCredentials } from './credential-scrubber.js'
@@ -300,18 +300,27 @@ const EPHEMERAL_REASONS = [
   'other',
 ] as const
 
+// JSON-mode null tolerance: with `responseFormat: 'json'` the model emits
+// explicit `null` for empty optional slots (idiomatic JSON — and the prompt
+// itself documents nullable fields like `canonical_id` / `due_iso`). Every
+// optional below accepts `null` and canonicalizes it to `undefined` (or the
+// slot's default), so ONE nulled optional can no longer fail the whole
+// payload and archive the Episode empty. Caught by the golden set's first
+// live run: `schema mismatch: Expected string, received null` ×6/18.
+const emptyToUndef = <T>(v: T | null | undefined): T | undefined => v ?? undefined
+
 const extractedEntitySchema = z.object({
   kind: z.enum(EXTRACT_ENTITY_KINDS),
   display_name: z.string().min(1).max(200),
   canonical_id: z.string().min(1).max(200).nullable().optional(),
-  attributes: z.record(z.unknown()).optional(),
+  attributes: z.record(z.unknown()).nullish().transform(emptyToUndef),
 })
 
 const extractedEdgeSchema = z.object({
   source_ref: z.string().min(1),
   target_ref: z.string().min(1),
   edge_type: z.enum(EDGE_TYPES),
-  attributes: z.record(z.unknown()).optional(),
+  attributes: z.record(z.unknown()).nullish().transform(emptyToUndef),
 })
 
 // v2 (brain_extraction_v2_enabled) — actionable items get their own slot
@@ -322,7 +331,7 @@ const extractedTaskSchema = z.object({
   due_iso: z.string().nullable().optional(),
   // Reference to an entity display_name from this same extraction; the
   // emission loop resolves to a workspace_members.id where possible.
-  assignee_ref: z.string().optional(),
+  assignee_ref: z.string().nullish().transform(emptyToUndef),
 })
 
 // v2 — explicit drop-with-reason slot. Persisted to analytics only
@@ -338,10 +347,10 @@ const extractedMemorySchema = z.object({
   // Post-Phase-4 (retire-memory-type): `type` removed from the
   // extraction schema. The LLM extraction prompt should encode any
   // categorical signal via `tags` instead.
-  scope: z.enum(MEMORY_SCOPES).optional(),
+  scope: z.enum(MEMORY_SCOPES).nullish().transform(emptyToUndef),
   summary: z.string().min(1).max(500),
-  detail: z.string().max(2000).optional(),
-  tags: z.array(z.string().min(1).max(64)).max(20).optional(),
+  detail: z.string().max(2000).nullish().transform(emptyToUndef),
+  tags: z.array(z.string().min(1).max(64)).max(20).nullish().transform(emptyToUndef),
   // v2 — REQUIRED justification fields. Every memory must explain why
   // it's not better expressed as an entity attribute or a task. Forces
   // the model to confront the alternative explicitly rather than
@@ -353,13 +362,13 @@ const extractedMemorySchema = z.object({
 })
 
 const extractionOutputSchema = z.object({
-  summary: z.string().max(2000).default(''),
-  entities: z.array(extractedEntitySchema).max(50).default([]),
-  edges: z.array(extractedEdgeSchema).max(100).default([]),
-  tasks: z.array(extractedTaskSchema).max(30).default([]),
-  memories: z.array(extractedMemorySchema).max(30).default([]),
-  ephemeral: z.array(extractedEphemeralSchema).max(30).default([]),
-  tags: z.array(z.string().min(1).max(64)).max(20).default([]),
+  summary: z.string().max(2000).nullish().transform((v) => v ?? ''),
+  entities: z.array(extractedEntitySchema).max(50).nullish().transform((v) => v ?? []),
+  edges: z.array(extractedEdgeSchema).max(100).nullish().transform((v) => v ?? []),
+  tasks: z.array(extractedTaskSchema).max(30).nullish().transform((v) => v ?? []),
+  memories: z.array(extractedMemorySchema).max(30).nullish().transform((v) => v ?? []),
+  ephemeral: z.array(extractedEphemeralSchema).max(30).nullish().transform((v) => v ?? []),
+  tags: z.array(z.string().min(1).max(64)).max(20).nullish().transform((v) => v ?? []),
 })
 
 type ExtractionOutput = z.infer<typeof extractionOutputSchema>
@@ -659,55 +668,78 @@ export async function processEpisode(
   const scrubbed = scrubCredentials(resolvedContent)
   const extractableContent = scrubbed.text
 
-  // 1. Call extraction LLM.
-  let rawText = ''
+  // 1+2. Call extraction LLM and parse — up to two attempts.
+  //
+  // The stream call carries the decoder-level JSON constraint (Gemini
+  // responseMimeType via `responseFormat: 'json'`), but the live golden-set
+  // run (2026-07-07) showed the preview-tier model still intermittently
+  // emits malformed or schema-mismatching output even with the hint. A parse
+  // failure archives the Episode EMPTY — silent knowledge loss — so one
+  // bounded retry with the validation error fed back recovers that tail.
+  // LLM *throws* (network/provider errors) keep single-shot semantics: they
+  // have their own retry layers upstream. Every attempt's spend is metered
+  // the moment usage is known; `extractionUsage` in the result is the final
+  // attempt's usage (per-attempt metering is authoritative for billing).
   let extractionUsage: TokenUsage | null = null
-  try {
-    const response = await collectStream(
-      deps.provider.stream({
-        model: deps.model,
-        systemPrompt: SYSTEM_PROMPT,
-        messages: [
-          { role: 'user', content: buildExtractionPrompt(episode, extractableContent) },
-        ],
-        maxTokens: 4000,
-        temperature: 0.1,
-        // Decoder-level JSON constraint (Gemini responseMimeType). A parse
-        // failure below archives the episode EMPTY — silent knowledge loss —
-        // so malformed output is eliminated at generation where the provider
-        // supports it. parseExtraction's sanitizers + Zod gate stay as the
-        // real boundary (providers without JSON mode ignore the hint).
-        responseFormat: 'json',
-      }),
-    )
-    extractionUsage = response.usage
-    // Attribute the spend the moment usage is known — the parse-failure
-    // paths below still consumed these tokens.
-    await recordExtractionUsage(deps, episode, extractionUsage)
-    rawText = response.content
-      .filter((b) => b.type === 'text')
-      .map((b) => (b.type === 'text' ? b.text : ''))
-      .join('')
-  } catch (err) {
-    console.warn(
-      `[pipeline-b] extraction LLM failed for episode ${episode.id}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    )
-    await archiveWithEmptySummary(episode, deps, actorUserId)
-    return emptyResult(episode, extractionUsage, false)
-  }
+  let payload: ExtractionOutput | null = null
+  const extractionMessages: Message[] = [
+    { role: 'user', content: buildExtractionPrompt(episode, extractableContent) },
+  ]
+  for (let attempt = 1; attempt <= 2 && !payload; attempt++) {
+    let rawText = ''
+    try {
+      const response = await collectStream(
+        deps.provider.stream({
+          model: deps.model,
+          systemPrompt: SYSTEM_PROMPT,
+          messages: extractionMessages,
+          maxTokens: 4000,
+          temperature: 0.1,
+          responseFormat: 'json',
+        }),
+      )
+      extractionUsage = response.usage
+      // Attribute the spend the moment usage is known — failed-parse
+      // attempts still consumed these tokens.
+      await recordExtractionUsage(deps, episode, response.usage)
+      rawText = response.content
+        .filter((b) => b.type === 'text')
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('')
+    } catch (err) {
+      console.warn(
+        `[pipeline-b] extraction LLM failed for episode ${episode.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+      await archiveWithEmptySummary(episode, deps, actorUserId)
+      return emptyResult(episode, extractionUsage, false)
+    }
 
-  // 2. Parse model output.
-  const parseRes = parseExtraction(rawText)
-  if (!parseRes.ok) {
+    const parseRes = parseExtraction(rawText)
+    if (parseRes.ok) {
+      payload = parseRes.payload
+      break
+    }
     console.warn(
-      `[pipeline-b] extraction parse failed for episode ${episode.id}: ${parseRes.reason}`,
+      `[pipeline-b] extraction parse failed for episode ${episode.id} (attempt ${attempt}/2): ${parseRes.reason}`,
     )
+    if (attempt === 1) {
+      // No echo of the bad output — re-anchoring on garbage hurts more than
+      // the reason string helps. Fresh sampling + the validation error is
+      // what recovers the intermittent failures.
+      extractionMessages.push({
+        role: 'user',
+        content:
+          `Your previous response failed validation: ${parseRes.reason}. ` +
+          'Respond again with ONLY the JSON object, exactly matching the requested shape. No commentary.',
+      })
+    }
+  }
+  if (!payload) {
     await archiveWithEmptySummary(episode, deps, actorUserId)
     return emptyResult(episode, extractionUsage, false)
   }
-  const payload = parseRes.payload
 
   // 3. Merge tags.
   const tags = dedupTags(episode.preStampedTags, payload.tags)

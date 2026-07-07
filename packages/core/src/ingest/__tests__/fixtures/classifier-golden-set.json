@@ -1,1 +1,155 @@
-[]
+[
+  {
+    "name": "person + company routes to CRM, not memory (prompt negative example)",
+    "content": "Just met Elena Vargas — she's the new CTO at Meridian Labs (meridianlabs.io).",
+    "expected": {
+      "entity_kinds": ["person", "company"],
+      "entity_names_substr": ["elena", "meridian"],
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "explicit action items become tasks",
+    "content": "Reminder: send the revised proposal to Marcus by Thursday, and book the demo call for next week.",
+    "expected": {
+      "task_text_substr": ["proposal"],
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "ack-only reply is ephemeral",
+    "content": "Got it, thanks! 👍",
+    "expected": {
+      "ephemeral_count_min": 1,
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "waiting-on status + follow-up counter is ephemeral",
+    "content": "Still waiting on the vendor's security questionnaire. Third follow-up sent this morning.",
+    "expected": {
+      "ephemeral_count_min": 1,
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "durable user preference is a memory",
+    "content": "For the record: I strongly prefer async written updates over recurring status meetings. Please default to written summaries in the future.",
+    "expected": {
+      "memory_count_min": 1,
+      "memory_text_substr": ["async"]
+    }
+  },
+  {
+    "name": "meeting notes mix entities, task, and at most light memory",
+    "content": "Sync with Priya Nair from Bluewater Analytics (bluewater.io): they will pilot the API in August. Action item: send sandbox keys by Friday.",
+    "expected": {
+      "entity_kinds": ["person", "company"],
+      "entity_names_substr": ["priya", "bluewater"],
+      "task_text_substr": ["sandbox"],
+      "memory_count_max": 2
+    }
+  },
+  {
+    "name": "code repo mention mints a repository entity",
+    "content": "Pushed the retry-queue fix to acme/edge-gateway on GitHub. Next step: cut release v2.4 once review lands.",
+    "expected": {
+      "entity_kinds": ["repository"],
+      "entity_names_substr": ["edge-gateway"]
+    }
+  },
+  {
+    "name": "named initiative mints a project entity",
+    "content": "Kicking off Project Northwind next sprint — the data-warehouse migration for the finance team.",
+    "expected": {
+      "entity_kinds": ["project"],
+      "entity_names_substr": ["northwind"]
+    }
+  },
+  {
+    "name": "product feedback mints a product entity",
+    "content": "Feedback from the trial cohort: users love the QuickBooks sync in LedgerLite but keep asking for bulk invoice export.",
+    "expected": {
+      "entity_kinds": ["product"],
+      "entity_names_substr": ["ledgerlite"],
+      "memory_count_max": 2
+    }
+  },
+  {
+    "name": "relative-time announcement must not become a memory",
+    "content": "Heads up — the quarterly review is tomorrow at 10:00.",
+    "expected": {
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "per-cycle attempt counter is ephemeral",
+    "content": "2nd attempt to reach Daniel about the contract — no response yet.",
+    "expected": {
+      "ephemeral_count_min": 1,
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "team tooling fact is a memory (prompt positive example)",
+    "content": "FYI for everyone: our team tracks all engineering work in Linear now — Jira is fully retired as of this month.",
+    "expected": {
+      "memory_count_min": 1,
+      "memory_text_substr": ["linear"]
+    }
+  },
+  {
+    "name": "intro email thread yields two people, a company, and a task",
+    "content": "Forwarding the intro from Hana Suzuki: she connected me with Viktor Reyes, procurement lead at Coreline Systems (coreline.io). Viktor asked for our SOC 2 report — need to send it over before their review on the 15th.",
+    "expected": {
+      "entity_kinds": ["person", "company"],
+      "entity_names_substr": ["viktor", "coreline"],
+      "task_text_substr": ["soc 2"],
+      "memory_count_max": 2
+    }
+  },
+  {
+    "name": "sales call notes: contacts, company, follow-up task",
+    "content": "Call with Tomás Rivera at Vantage Freight (vantagefreight.com) went well — they want a pilot in Q4. Follow up with the pricing deck by Monday.",
+    "expected": {
+      "entity_kinds": ["person", "company"],
+      "entity_names_substr": ["tom", "vantage"],
+      "task_text_substr": ["pricing"],
+      "memory_count_max": 2
+    }
+  },
+  {
+    "name": "job-change note is entity data plus a task, not a memory",
+    "content": "Reminder that Sofia Lindqvist moved from Datawell over to Northbeam last month — update the CRM record.",
+    "expected": {
+      "entity_kinds": ["person"],
+      "entity_names_substr": ["sofia", "northbeam"],
+      "memory_count_max": 1
+    }
+  },
+  {
+    "name": "rescheduled standup is ephemeral, never a memory",
+    "content": "Team standup moved to 9:30 tomorrow; calendar invite already updated.",
+    "expected": {
+      "ephemeral_count_min": 1,
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "small talk carries nothing durable",
+    "content": "haha yeah exactly 😂 wild week honestly",
+    "expected": {
+      "memory_count_max": 0
+    }
+  },
+  {
+    "name": "long mixed note: entities + two tasks, status noise stays out of memory",
+    "content": "Notes from the partner review: Camille Fontaine (Helios Grid, heliosgrid.energy) confirmed their board approved the integration project, codename Lantern. Two things on us — draft the joint security addendum by Wednesday, and schedule the kickoff workshop for early next month. Their infra team is still migrating regions, so expect slow replies this week.",
+    "expected": {
+      "entity_kinds": ["person", "company"],
+      "entity_names_substr": ["camille", "helios"],
+      "task_text_substr": ["addendum", "kickoff"],
+      "memory_count_max": 3
+    }
+  }
+]
