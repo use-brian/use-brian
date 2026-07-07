@@ -422,7 +422,8 @@ export function createCrmTools(
     requiresCapability: 'crm',
     description:
       'Upsert a contact in the current workspace. Dedupes on email first (case-insensitive), falling back to display name — an existing active contact with the same email or name is superseded with merged tags (union), non-empty phone / email / company_id (incoming wins), and external_ref (shallow merge). Dedupe and reads are scoped to entities visible to you: a same-name contact another member keeps private is never merged into — you get your own row. Use updateContact when you have an explicit id and need to patch other fields. ' +
-      'Pass company_id only after listCompanies confirms the company exists in this workspace; cross-workspace links are rejected by the DB. ' +
+      'When asked to save a contact, call saveContact FIRST with whatever fields you have — name and email alone are enough; company_id is optional. Never let a company lookup or company creation block the contact save: save the contact, then link the company afterwards (via updateContact) once its id is known. ' +
+      'If you do pass company_id, it must be an existing company in this workspace (use listCompanies to confirm); cross-workspace links are rejected by the DB. ' +
       'Pass `links` to record relationship edges from this contact (e.g. cofounder_of a company, attended an event, mentioned in a deal). Use the `entityId` returned from prior saveCompany / saveContact / saveDeal / createEntity calls (or read from list*).',
     inputSchema: z.object({
       name: z.string().min(1).max(256).describe('Full display name (e.g. "Sam Lee").'),
@@ -430,7 +431,7 @@ export function createCrmTools(
       phone: z.string().max(64).optional(),
       company_id: idShape.optional().describe('UUID of an existing company in this workspace. Omit if unknown or unaffiliated. Setting this auto-writes a works_at edge — do NOT also pass a duplicate works_at in `links`.'),
       tags: tagShape.optional(),
-      external_ref: externalRefShape.optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless mirroring an existing Attio/HubSpot record.'),
+      external_ref: externalRefShape.optional().describe('Reserved for sync-engine round-tripping ({provider, id, url}). Leave empty unless mirroring a record from an external system.'),
       links: explicitLinksField,
     }),
     async execute(input, context) {
@@ -1152,7 +1153,7 @@ export function createCrmTools(
     requiresCapability: 'crm',
     description:
       'Move a deal to a new pipeline stage. Valid stages: lead, qualified, proposal, negotiation, won, lost. ' +
-      'This is the canonical verb for stage transitions — use it instead of updateDeal so the brain has a clean cut-point for stage-change events (when sync ships, this is what pushes to Attio/HubSpot).',
+      'This is the canonical verb for stage transitions - use it instead of updateDeal so the brain has a clean cut-point for stage-change events (when sync ships, this is the transition an external system is notified of).',
     inputSchema: z.object({
       id: idShape,
       stage: stageEnum,

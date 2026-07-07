@@ -599,4 +599,44 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
       expect(tool.requiresCapability).toBe('crm')
     }
   })
+
+  // WS2 eval finding: the SUT lifted third-party product names (Attio,
+  // HubSpot) straight out of a field description and recommended them to
+  // users as if they were sidanclaw connectors. Model-visible CRM text
+  // (top-level tool description + every input-field .describe()) must name
+  // no external product — describe capabilities generically instead.
+  it('no CRM tool description names a third-party CRM product', () => {
+    const tools = createCrmTools(makeFakeStore())
+    const surface = [
+      tools.saveContact, tools.getContact, tools.listContacts, tools.updateContact,
+      tools.saveCompany, tools.getCompany, tools.listCompanies, tools.updateCompany,
+      tools.saveDeal, tools.getDeal, tools.listDeals, tools.updateDeal, tools.advanceDealStage,
+    ]
+    // Walk a Zod schema and collect every attached .describe() string, so the
+    // sweep reaches field-level descriptions (where the leak actually was),
+    // not just the top-level tool description.
+    const collectDescriptions = (schema: unknown, out: string[]): void => {
+      if (!schema || typeof schema !== 'object') return
+      const def = (schema as { _def?: Record<string, unknown> })._def
+      if (!def) return
+      if (typeof def.description === 'string') out.push(def.description)
+      const shape = def.shape
+      const shapeObj = typeof shape === 'function' ? (shape as () => Record<string, unknown>)() : shape
+      if (shapeObj && typeof shapeObj === 'object') {
+        for (const child of Object.values(shapeObj as Record<string, unknown>)) collectDescriptions(child, out)
+      }
+      for (const key of ['innerType', 'schema', 'type'] as const) {
+        if (def[key]) collectDescriptions(def[key], out)
+      }
+      if (Array.isArray(def.options)) for (const opt of def.options) collectDescriptions(opt, out)
+    }
+
+    const banned = /attio|hubspot|salesforce|pipedrive/i
+    for (const tool of surface) {
+      const texts: string[] = [tool.description]
+      collectDescriptions(tool.inputSchema, texts)
+      const offender = texts.find((t) => banned.test(t))
+      expect(offender, `${tool.name} description names a third-party CRM product`).toBeUndefined()
+    }
+  })
 })
