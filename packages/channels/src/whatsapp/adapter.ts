@@ -26,6 +26,13 @@ export type WhatsAppIncomingPayload = {
   channelId: string
   chatJid: string
   senderJid: string
+  /**
+   * The sender's phone-number JID when `senderJid` is a LID (WhatsApp privacy
+   * addressing) and the connector could resolve the PN twin (key alt fields or
+   * the Baileys v7 LID mapping store). Absent when the sender is already
+   * PN-addressed or the mapping is unknown.
+   */
+  senderPnJid?: string
   senderName?: string
   text: string
   isGroup: boolean

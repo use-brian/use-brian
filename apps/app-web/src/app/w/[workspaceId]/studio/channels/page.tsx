@@ -1954,6 +1954,9 @@ function WhatsappAccessControl({
               ? acc.groupMembersDesc
               : acc.everyoneDesc}
       </p>
+      {(mode === "allowlist" || mode === "group_members") && (
+        <p className="text-xs text-muted-foreground">{acc.lidNote}</p>
+      )}
       {showNumbers && (
         <div className="flex flex-col gap-1.5">
           {numbers.length > 0 && (

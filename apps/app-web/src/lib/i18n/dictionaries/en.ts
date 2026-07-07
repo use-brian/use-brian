@@ -3476,6 +3476,8 @@ export const en = {
             removeNumber: "Remove number",
             numberHint:
               "Enter a phone number with country code, digits only (no + or spaces).",
+            lidNote:
+              "Some contacts hide their number with WhatsApp privacy addressing. They are matched once WhatsApp shares the number mapping; until then their messages will not get replies.",
           },
         },
       },

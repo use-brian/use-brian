@@ -3258,6 +3258,8 @@ export const zh: Dictionary = {
             blockNumber: "封鎖",
             removeNumber: "移除號碼",
             numberHint: "請輸入含國碼的電話號碼，只填數字（不含 + 或空格）。",
+            lidNote:
+              "部分聯絡人使用 WhatsApp 隱私位址功能隱藏了電話號碼。待 WhatsApp 同步號碼對應後即可比對；在此之前他們的訊息不會收到回覆。",
           },
         },
       },
