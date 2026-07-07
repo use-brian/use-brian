@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import {
+  CONNECTOR_OAUTH_STATE_COOKIE,
+  parseConnectorState,
+  verifyConnectorState,
+} from "@/lib/connector-oauth-state";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
@@ -30,15 +35,26 @@ const FATHOM_API_BASE = "https://api.fathom.ai/external/v1";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const stateRaw = url.searchParams.get("state") ?? ""; // "fathom[:add]:<workspaceId>"
+  const stateRaw = url.searchParams.get("state") ?? ""; // "fathom[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { intent, createNew, workspaceId } = parseState(stateRaw);
+  const { connector: intent, createNew, workspaceId, nonce } = parseConnectorState(stateRaw);
   const validIntent = intent === "fathom";
 
   if (error || !code || !validIntent) {
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "consent_denied" }), request.url),
+    );
+  }
+
+  // CSRF gate (WS3 #5): the `state` nonce must match the companion cookie set
+  // before the provider redirect; reject a forged callback before token
+  // exchange so an attacker's token can't be bound to the victim.
+  const cookieStore = await cookies();
+  const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
+  if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
+    return NextResponse.redirect(
+      new URL(connectorsPath(workspaceId, { error: "invalid_state" }), request.url),
     );
   }
 
@@ -100,7 +116,6 @@ export async function GET(request: Request) {
       console.error("[fathom] users/me fetch failed:", err);
     }
 
-    const cookieStore = await cookies();
     const accessToken = cookieStore.get("access_token")?.value;
     if (!accessToken) {
       return NextResponse.redirect(new URL("/login", request.url));
@@ -156,26 +171,6 @@ export async function GET(request: Request) {
       new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
     );
   }
-}
-
-/**
- * Parse `state` of the form `fathom[:add]:<workspaceId>` into its parts.
- * `:add` → connect a SECOND Fathom account (create a new instance).
- */
-function parseState(raw: string): {
-  intent: string;
-  createNew: boolean;
-  workspaceId: string | undefined;
-} {
-  const lastColon = raw.lastIndexOf(":");
-  if (lastColon === -1) {
-    return { intent: raw, createNew: false, workspaceId: undefined };
-  }
-  const prefix = raw.slice(0, lastColon);
-  const workspaceId = raw.slice(lastColon + 1) || undefined;
-  const createNew = prefix.endsWith(":add");
-  const intent = createNew ? prefix.slice(0, -":add".length) : prefix;
-  return { intent, createNew, workspaceId };
 }
 
 function connectorsPath(

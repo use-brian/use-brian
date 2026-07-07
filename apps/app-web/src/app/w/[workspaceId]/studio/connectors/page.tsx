@@ -67,6 +67,8 @@ import { OFFICIAL_OAUTH_SCOPES, type ConnectorAuthType } from "@sidanclaw/shared
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@sidanclaw/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
+import { buildConnectorState } from "@/lib/connector-oauth-state";
+import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -883,7 +885,6 @@ function ConnectorsList() {
   async function handleConnect(c: Connector, opts?: { addAnother?: boolean }) {
     const id = c.id;
     const rid = rowId(c);
-    const addState = opts?.addAnother ? ":add" : "";
     setConnecting(rid);
 
     // PAT connectors — show inline token input instead of connecting immediately
@@ -904,15 +905,17 @@ function ConnectorsList() {
 
     // Notion OAuth — separate flow (different auth URL, no scopes). The
     // workspaceId is threaded through `state` so the server callback can
-    // redirect back to this workspace-scoped route.
+    // redirect back to this workspace-scoped route. `armConnectorOauthState`
+    // mints a CSRF nonce into `state` + a companion cookie the callback checks.
     if (id === "notion") {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/notion`;
       const sp = new URLSearchParams({
         client_id: NOTION_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: "code",
         owner: "user",
-        state: `notion${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `https://api.notion.com/v1/oauth/authorize?${sp}`;
       return;
@@ -920,13 +923,14 @@ function ConnectorsList() {
 
     // Fathom OAuth — single coarse `public_api` scope, refresh-token rotation.
     if (id === "fathom") {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/fathom`;
       const sp = new URLSearchParams({
         client_id: FATHOM_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: "code",
         scope: "public_api",
-        state: `fathom${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
       return;
@@ -938,6 +942,7 @@ function ConnectorsList() {
     // fresh instance instead of overwriting the first).
     const scopes = OAUTH_SCOPES_WITH_EMAIL[id];
     if (scopes) {
+      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
       const sp = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
@@ -946,7 +951,7 @@ function ConnectorsList() {
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: `${id}${addState}:${workspaceId}`,
+        state: buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, nonce }),
       });
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;

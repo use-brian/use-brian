@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import {
+  CONNECTOR_OAUTH_STATE_COOKIE,
+  parseConnectorState,
+  verifyConnectorState,
+} from "@/lib/connector-oauth-state";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const NOTION_CLIENT_ID = process.env.NOTION_CLIENT_ID ?? "";
@@ -27,15 +32,26 @@ const NOTION_CLIENT_SECRET = process.env.NOTION_CLIENT_SECRET ?? "";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const stateRaw = url.searchParams.get("state") ?? ""; // "notion[:add]:<workspaceId>"
+  const stateRaw = url.searchParams.get("state") ?? ""; // "notion[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { intent, createNew, workspaceId } = parseState(stateRaw);
+  const { connector: intent, createNew, workspaceId, nonce } = parseConnectorState(stateRaw);
   const validIntent = intent === "notion";
 
   if (error || !code || !validIntent) {
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "consent_denied" }), request.url),
+    );
+  }
+
+  // CSRF gate (WS3 #5): the `state` nonce must match the companion cookie set
+  // before the provider redirect; reject a forged callback before token
+  // exchange so an attacker's token can't be bound to the victim.
+  const cookieStore = await cookies();
+  const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
+  if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
+    return NextResponse.redirect(
+      new URL(connectorsPath(workspaceId, { error: "invalid_state" }), request.url),
     );
   }
 
@@ -83,7 +99,6 @@ export async function GET(request: Request) {
     }
 
     // Get JWT from cookie to authenticate with Express backend
-    const cookieStore = await cookies();
     const accessToken = cookieStore.get("access_token")?.value;
     if (!accessToken) {
       return NextResponse.redirect(new URL("/login", request.url));
@@ -135,28 +150,6 @@ export async function GET(request: Request) {
       new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
     );
   }
-}
-
-/**
- * Parse `state` of the form `notion[:add]:<workspaceId>` into its parts.
- * `:add` → connect a SECOND Notion workspace (create a new instance).
- */
-function parseState(raw: string): {
-  intent: string;
-  createNew: boolean;
-  workspaceId: string | undefined;
-} {
-  // The connector slug (and optional `:add`) precede the trailing workspace id.
-  // Workspace ids are UUIDs (no colon), so the last `:`-segment is the id.
-  const lastColon = raw.lastIndexOf(":");
-  if (lastColon === -1) {
-    return { intent: raw, createNew: false, workspaceId: undefined };
-  }
-  const prefix = raw.slice(0, lastColon);
-  const workspaceId = raw.slice(lastColon + 1) || undefined;
-  const createNew = prefix.endsWith(":add");
-  const intent = createNew ? prefix.slice(0, -":add".length) : prefix;
-  return { intent, createNew, workspaceId };
 }
 
 function connectorsPath(

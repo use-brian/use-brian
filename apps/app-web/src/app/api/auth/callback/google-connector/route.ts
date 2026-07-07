@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
+import {
+  CONNECTOR_OAUTH_STATE_COOKIE,
+  parseConnectorState,
+  verifyConnectorState,
+} from "@/lib/connector-oauth-state";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -28,14 +33,26 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const code = url.searchParams.get("code");
-  const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>"
+  const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { connector, createNew, workspaceId } = parseState(stateRaw);
+  const { connector, createNew, workspaceId, nonce } = parseConnectorState(stateRaw);
 
   if (error || !code || !connector) {
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "consent_denied" }), request.url),
+    );
+  }
+
+  // CSRF gate (WS3 #5): the `state` nonce must match the companion cookie the
+  // connect handler set before redirecting. A forged callback (attacker-planted
+  // `code`, absent/mismatched nonce) is rejected here BEFORE any token exchange
+  // or store, so an attacker cannot bind their token to the victim's account.
+  const cookieStore = await cookies();
+  const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
+  if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
+    return NextResponse.redirect(
+      new URL(connectorsPath(workspaceId, { error: "invalid_state" }), request.url),
     );
   }
 
@@ -92,7 +109,6 @@ export async function GET(request: Request) {
     }
 
     // Send refresh token to Express backend to store in the connector row
-    const cookieStore = await cookies();
     const accessToken = cookieStore.get("access_token")?.value;
     if (!accessToken) {
       return NextResponse.redirect(new URL("/login", request.url));
@@ -144,25 +160,6 @@ export async function GET(request: Request) {
       new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
     );
   }
-}
-
-/**
- * Parse the `state` param — `<connector>[:add]:<workspaceId>` (the same
- * shape the Notion/Fathom callbacks parse). `:add` is the "Add another"
- * intent: store a NEW connector_instance rather than updating the first.
- * A bare slug (no `:`) keeps `workspaceId` undefined.
- */
-function parseState(raw: string): {
-  connector: string;
-  createNew: boolean;
-  workspaceId: string | undefined;
-} {
-  const idx = raw.indexOf(":");
-  if (idx === -1) return { connector: raw, createNew: false, workspaceId: undefined };
-  let rest = raw.slice(idx + 1);
-  const createNew = rest === "add" || rest.startsWith("add:");
-  if (createNew) rest = rest.slice("add".length + (rest.startsWith("add:") ? 1 : 0));
-  return { connector: raw.slice(0, idx), createNew, workspaceId: rest || undefined };
 }
 
 /**
