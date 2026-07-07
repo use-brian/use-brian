@@ -85,6 +85,16 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).toContain('Google Calendar')
       expect(result).toContain('NOT available')
     })
+
+    it('scopes the Settings suggestion to the listed services (closed world)', () => {
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail'])
+      // The template must be scoped to the list, not a general habit the
+      // model extends to arbitrary services (the invented-Jira-connector
+      // class caught by the WS2 probe battery).
+      expect(result).toContain('listed above')
+      expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
+      expect(result).not.toContain('an unavailable service')
+    })
   })
 
   describe('requireAssistantMember', () => {

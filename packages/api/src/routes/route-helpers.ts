@@ -197,10 +197,16 @@ export function isValidDateString(date: string): boolean {
 /**
  * Build the "unavailable capabilities" system prompt section.
  * Tells the model what's NOT available so it doesn't waste turns searching.
+ *
+ * Closed-world framing: the suggest-Settings template is scoped to the
+ * listed services only. Without the scoping, models extend the template to
+ * arbitrary services ("enable the Jira connector in Settings") and invent
+ * integrations that do not exist (caught by the WS2 probe battery,
+ * conn-jira-post / wf-crm-deal-won).
  */
 export function buildUnavailableCapabilitiesPrompt(capabilities: string[]): string {
   if (capabilities.length === 0) return ''
-  return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires an unavailable service, tell them directly that it's not connected and suggest they enable it in Settings.`
+  return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead). This list plus your tools is the complete integration surface: for a service in neither, sidanclaw has no integration to enable. Say so plainly and offer the nearest supported alternative. Never point the user to a Settings toggle or connector for a service that is not listed here.`
 }
 
 // ── MCP injection (shared across channel routes) ──────────────

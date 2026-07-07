@@ -26,7 +26,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
     const r = runHardChecks(
       probe({ verdict: 'act', mustCallToolOneOf: ['saveTask'] }),
       'd',
-      { text: 'Saving that as a task.', toolCalls: [{ name: 'saveTask', input: { title: 'x' } }] },
+      { text: 'Saving that as a task.', toolCalls: [{ name: 'saveTask', input: { title: 'x' } }], toolResults: [] },
       INJECTED,
     )
     expect(r.pass).toBe(true)
@@ -36,7 +36,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
     const r = runHardChecks(
       probe({ verdict: 'act', mustCallToolOneOf: ['saveTask'] }),
       'd',
-      { text: 'I could save a task if you like.', toolCalls: [] },
+      { text: 'I could save a task if you like.', toolCalls: [], toolResults: [] },
       INJECTED,
     )
     expect(r.pass).toBe(false)
@@ -47,7 +47,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
     const r = runHardChecks(
       probe({ verdict: 'act' }),
       'd',
-      { text: '', toolCalls: [{ name: 'jiraCreateIssue', input: {} }] },
+      { text: '', toolCalls: [{ name: 'jiraCreateIssue', input: {} }], toolResults: [] },
       INJECTED,
     )
     expect(r.pass).toBe(false)
@@ -58,7 +58,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
     const r = runHardChecks(
       probe({ verdict: 'refuse', forbiddenPatterns: ["posted (it )?to (your )?jira"] }),
       'd',
-      { text: "Done — I've posted it to your Jira board.", toolCalls: [] },
+      { text: "Done — I've posted it to your Jira board.", toolCalls: [], toolResults: [] },
       INJECTED,
     )
     expect(r.pass).toBe(false)
@@ -69,7 +69,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
     const r = runHardChecks(
       probe({ verdict: 'redirect', replyMustMentionOneOf: ['schedule', 'task'] }),
       'd',
-      { text: 'Sorry, that is not possible.', toolCalls: [] },
+      { text: 'Sorry, that is not possible.', toolCalls: [], toolResults: [] },
       INJECTED,
     )
     expect(r.pass).toBe(false)
@@ -82,7 +82,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
       'd',
       {
         text: '',
-        toolCalls: [{ name: 'proposeWorkflow', input: { trigger: { kind: 'crm_deal_won' } } }],
+        toolCalls: [{ name: 'proposeWorkflow', input: { trigger: { kind: 'crm_deal_won' } } }], toolResults: [],
       },
       INJECTED,
     )
@@ -96,7 +96,7 @@ describe('[COMP:evals/capability-probes] hard-check grading rules', () => {
         text: '',
         toolCalls: [
           { name: 'proposeWorkflow', input: { trigger: { kind: 'manual' } } },
-        ],
+        ], toolResults: [],
       },
       INJECTED,
     )
@@ -126,7 +126,35 @@ describe('[COMP:evals/capability-probes] fixture workspace', () => {
     const fixture = buildFixtureWorkspace()
     for (const tool of fixture.tools.values()) {
       const out = await tool.execute({} as never, {} as never)
-      expect(String(out.data)).toMatch(/eval fixture|no data yet/)
+      expect(String(out.data)).toMatch(/^Done\.$|no data yet|shown to the user/)
+      // The write ack must read as a plain success: meta framing ("no real
+      // write occurred") reads as a blocked write and manufactures
+      // phantom-permission narratives in the SUT.
+      expect(String(out.data)).not.toMatch(/no real write|eval fixture|disabled|not granted/i)
+      // Confirmation flow is bypassed: the eval context has no confirmation
+      // channel, so a requiresConfirmation tool would be visible-but-rejected
+      // (the approval-gate phantom wall, same class as the capability gate).
+      expect(tool.requiresConfirmation).toBeFalsy()
+      expect(tool.resolveConfirmation).toBeUndefined()
+    }
+  })
+
+  it('grants every capability a fixture tool requires (executor gate parity)', () => {
+    const fixture = buildFixtureWorkspace()
+    // The fixture bypasses the route-level visibility filter, but the tool
+    // executor's capability gate still runs per call. Any injected tool
+    // whose requiresCapability is missing from activeCapabilities would be
+    // visible-but-rejected: the SUT honestly reports "capability not
+    // granted" and the judged tiers misread it as confabulation (the
+    // 2026-07-07 phantom-permission mis-finding).
+    const needed = new Set<string>()
+    for (const tool of fixture.tools.values()) {
+      const cap = (tool as { requiresCapability?: string }).requiresCapability
+      if (cap) needed.add(cap)
+    }
+    expect(needed.size).toBeGreaterThan(0)
+    for (const cap of needed) {
+      expect(fixture.activeCapabilities.has(cap), `capability '${cap}' required by an injected tool but not granted`).toBe(true)
     }
   })
 })

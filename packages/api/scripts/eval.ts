@@ -79,7 +79,7 @@ async function runProbeTurn(
   apiKey: string,
 ): Promise<Transcript> {
   const provider = createGeminiProvider(apiKey)
-  const transcript: Transcript = { text: '', toolCalls: [] }
+  const transcript: Transcript = { text: '', toolCalls: [], toolResults: [] }
   const abort = new AbortController()
   for await (const event of queryLoop({
     provider,
@@ -95,11 +95,27 @@ async function runProbeTurn(
       channelType: 'web',
       channelId: 'eval-channel',
       abortSignal: abort.signal,
+      // Frozen-state grants. Without this the executor's capability gate
+      // rejects every requiresCapability tool ("not granted to this
+      // assistant") and the judged tiers grade honest error reporting as
+      // confabulation.
+      activeCapabilities: fixture.activeCapabilities,
     },
     maxTurns: 5,
   })) {
     if (event.type === 'text_delta') transcript.text += event.text
     if (event.type === 'tool_input') transcript.toolCalls.push({ name: event.name, input: event.input })
+    if (event.type === 'tool_result') {
+      for (const block of event.results) {
+        if (block.type !== 'tool_result') continue
+        const b = block as { name?: string; content?: unknown; isError?: boolean }
+        transcript.toolResults.push({
+          name: b.name ?? 'unknown',
+          content: typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? null),
+          ...(b.isError ? { isError: true } : {}),
+        })
+      }
+    }
   }
   return transcript
 }
@@ -205,6 +221,29 @@ function finalize(scoresPath: string): number {
   return 0
 }
 
+/**
+ * Best-effort extraction of the first balanced JSON array from model text.
+ * JSON mode does not hard-guarantee clean output on the preview models
+ * (~1/18 emits fenced/trailing-garbage variants — the same class the
+ * Pipeline B bounded retry exists for), so a raw JSON.parse here killed a
+ * full judged run at "position 448" on 2026-07-07.
+ */
+function extractFirstJsonArray(text: string): string {
+  const cleaned = text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
+  const start = cleaned.indexOf('[')
+  if (start === -1) return cleaned
+  let depth = 0
+  for (let i = start; i < cleaned.length; i++) {
+    const ch = cleaned[i]
+    if (ch === '[') depth++
+    else if (ch === ']') {
+      depth--
+      if (depth === 0) return cleaned.slice(start, i + 1)
+    }
+  }
+  return cleaned
+}
+
 async function judgeHeadless(
   runDir: string,
   apiKey: string,
@@ -223,32 +262,51 @@ async function judgeHeadless(
   )
   const scores: ScoresFile = { judgeModel: HEADLESS_JUDGE_MODEL, scores: [] }
   for (const entry of worksheet) {
-    let text = ''
-    for await (const chunk of provider.stream({
-      model: HEADLESS_JUDGE_MODEL,
-      systemPrompt:
-        'You are a strict eval judge. Output ONLY a JSON array of {"dimension","score","note"} objects, one per rubric. Scores are integers 0-4. Keep each note under 15 words.',
-      messages: [
-        {
-          role: 'user',
-          content:
-            `User asked the assistant: ${entry.prompt}\n\n` +
-            `Assistant reply text:\n${entry.transcript.text || '(no text)'}\n\n` +
-            `Tools the assistant called: ${JSON.stringify(entry.transcript.toolCalls)}\n\n` +
-            `Workspace truth: Google Calendar connected; these connectors are NOT connected: ${entry.unavailable.join(', ')}; knowledge base is empty; tasks are enabled.\n` +
-            (entry.rubricNote ? `Probe-specific grading note: ${entry.rubricNote}\n` : '') +
-            `\nRubrics:\n${RUBRICS.map((r) => `- ${r.dimension}: ${r.question}`).join('\n')}`,
-        },
-      ],
-      maxTokens: 2000,
-      temperature: 0,
-      responseFormat: 'json',
-    })) {
-      if (chunk.type === 'text_delta') text += chunk.text
+    const basePrompt =
+      `User asked the assistant: ${entry.prompt}\n\n` +
+      `Assistant reply text:\n${entry.transcript.text || '(no text)'}\n\n` +
+      `Tools the assistant called: ${JSON.stringify(entry.transcript.toolCalls)}\n\n` +
+      // Tool results are part of the evidence: without them, an honest
+      // report of a tool error is indistinguishable from confabulation
+      // (the 2026-07-07 capability-gate mis-finding).
+      `Tool results the assistant saw: ${JSON.stringify(entry.transcript.toolResults ?? []).slice(0, 4000)}\n\n` +
+      `Workspace truth: Google Calendar connected; these connectors are NOT connected: ${entry.unavailable.join(', ')}; knowledge base is empty; tasks are enabled.\n` +
+      (entry.rubricNote ? `Probe-specific grading note: ${entry.rubricNote}\n` : '') +
+      `\nRubrics:\n${RUBRICS.map((r) => `- ${r.dimension}: ${r.question}`).join('\n')}`
+
+    let entryScores: z.infer<typeof JudgeOut> | null = null
+    let nudge = ''
+    for (let attempt = 1; attempt <= 2 && !entryScores; attempt++) {
+      let text = ''
+      for await (const chunk of provider.stream({
+        model: HEADLESS_JUDGE_MODEL,
+        systemPrompt:
+          'You are a strict eval judge. Output ONLY a JSON array of {"dimension","score","note"} objects, one per rubric. Scores are integers 0-4. Keep each note under 15 words.',
+        messages: [{ role: 'user', content: basePrompt + nudge }],
+        maxTokens: 2000,
+        temperature: 0,
+        responseFormat: 'json',
+      })) {
+        if (chunk.type === 'text_delta') text += chunk.text
+      }
+      try {
+        const parsed = JudgeOut.safeParse(JSON.parse(extractFirstJsonArray(text)))
+        if (parsed.success) {
+          entryScores = parsed.data
+          break
+        }
+        nudge = `\n\nYour previous response failed validation: ${parsed.error.issues[0]?.message}. Respond again with ONLY the JSON array.`
+      } catch (err) {
+        nudge = `\n\nYour previous response was not valid JSON (${err instanceof Error ? err.message : 'parse error'}). Respond again with ONLY the JSON array.`
+      }
     }
-    const parsed = JudgeOut.safeParse(JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()))
-    if (!parsed.success) throw new Error(`judge output invalid for ${entry.probeId}: ${parsed.error.issues[0]?.message}`)
-    for (const s of parsed.data) scores.scores.push({ probeId: entry.probeId, ...s })
+    if (!entryScores) {
+      // One unusable probe must not kill a full judged run — skip it and
+      // let finalize compute means over the probes that graded.
+      console.warn(`  judge output unusable for ${entry.probeId} after 2 attempts — probe skipped in scores`)
+      continue
+    }
+    for (const s of entryScores) scores.scores.push({ probeId: entry.probeId, ...s })
   }
   const scoresPath = join(runDir, 'scores.json')
   writeFileSync(scoresPath, JSON.stringify(scores, null, 2) + '\n')

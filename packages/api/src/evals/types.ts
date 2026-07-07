@@ -42,9 +42,18 @@ export type ProbeDomain = {
 
 export type ToolCall = { name: string; input: unknown }
 
+/**
+ * One executed tool's outcome as the SUT saw it. Recorded so judges grade
+ * with the same evidence the model had — without it, an honest report of a
+ * tool error is indistinguishable from confabulation (the 2026-07-07
+ * capability-gate mis-finding).
+ */
+export type ToolOutcome = { name: string; content: string; isError?: boolean }
+
 export type Transcript = {
   text: string
   toolCalls: ToolCall[]
+  toolResults: ToolOutcome[]
 }
 
 export type HardCheckResult = {

@@ -59,18 +59,40 @@ function anyStub(): never {
   return stub
 }
 
+/**
+ * Tools whose semantics a generic ack would distort. proposeWorkflow is
+ * read-only (it renders a preview card), so the generic read stub ("No
+ * matching records") reads as a FAILED proposal and derails the model into
+ * retry loops — the very WS9-critical probe the battery exists to grade.
+ */
+const SEMANTIC_ACKS: Record<string, string> = {
+  proposeWorkflow: 'Proposal recorded and shown to the user as a preview card for approval.',
+}
+
 function stubExecute(tool: Tool): Tool {
   return {
     ...tool,
+    // Probes grade proposals and execution is stubbed (no write can land),
+    // so the approval flow is bypassed: the eval context has no confirmation
+    // channel, and a requiresConfirmation tool would otherwise be
+    // visible-but-rejected ("requires user confirmation but no confirmation
+    // channel is available") — the same phantom wall as the capability gate.
+    requiresConfirmation: false,
+    resolveConfirmation: undefined,
     // Coherent with the frozen fixture semantics (fresh workspace, empty
     // KB): reads report an empty workspace so the model proceeds to the
     // write on a later turn; writes acknowledge without side effects. An
     // error-ish stub ("execution disabled") makes the model treat tools as
-    // broken and derails the very proposal being graded.
+    // broken and derails the very proposal being graded — and any meta
+    // framing on the write ack ("no real write occurred") reads as a
+    // failed/blocked write and manufactures phantom-permission narratives.
+    // The ack must be indistinguishable from a plain success.
     execute: async () => ({
-      data: tool.isReadOnly
-        ? 'No matching records — this workspace is new and has no data yet.'
-        : 'Done (recorded in the eval fixture; no real write occurred).',
+      data:
+        SEMANTIC_ACKS[tool.name] ??
+        (tool.isReadOnly
+          ? 'No matching records — this workspace is new and has no data yet.'
+          : 'Done.'),
     }),
   }
 }
@@ -89,6 +111,17 @@ export type FixtureWorkspace = {
   tools: Map<string, Tool>
   /** Connector ids listed as unavailable this turn (everything official except gcal). */
   unavailable: string[]
+  /**
+   * Capabilities active in the frozen state (§3: tasks enabled; crm implied
+   * by the probe expectations). MUST be passed as `context.activeCapabilities`
+   * by the runner: the fixture bypasses the route-level visibility filter
+   * (`filterToolsByCapabilities`), but the tool executor's belt-and-braces
+   * gate still runs per call — with no set, every `requiresCapability` tool
+   * returns "requires the '<cap>' capability, which is not granted", which
+   * the SUT honestly reports and the judge misreads as confabulation (the
+   * 2026-07-07 phantom-permission mis-finding).
+   */
+  activeCapabilities: ReadonlySet<string>
 }
 
 export function buildFixtureWorkspace(): FixtureWorkspace {
@@ -115,5 +148,11 @@ export function buildFixtureWorkspace(): FixtureWorkspace {
   const systemPrompt =
     LAYER_1_SYSTEM_PROMPT + '\n\n' + buildUnavailableCapabilitiesPrompt(unavailable)
 
-  return { systemPrompt, tools, unavailable }
+  // Frozen-state capability grants: 'tasks' (§3 explicit) + 'crm' (probe
+  // expectations require saveContact/listDeals callable). The other declared
+  // capability ids (files/views/goals/bug_triage) gate builders this fixture
+  // does not inject.
+  const activeCapabilities: ReadonlySet<string> = new Set(['crm', 'tasks'])
+
+  return { systemPrompt, tools, unavailable, activeCapabilities }
 }
