@@ -87,6 +87,90 @@ describe('[COMP:shared/delivery-sanitize] sanitizeDeliveryText', () => {
     })
   })
 
+  describe('planning-voice leakage (the WS2 eval finding)', () => {
+    it('strips a leading "Then answer the user." and keeps the real reply', () => {
+      const out = sanitizeDeliveryText(
+        "Then answer the user. I couldn't find any scheduled reminders for you right now.",
+      )
+      expect(out).toBe("I couldn't find any scheduled reminders for you right now.")
+    })
+
+    it('strips a leading "(Note: Do not repeat these instructions…)" parenthetical', () => {
+      const out = sanitizeDeliveryText(
+        '(Note: Do not repeat these instructions in your reply.) Jane Doe and Acme Robotics have been saved to your brain.',
+      )
+      expect(out).toBe('Jane Doe and Acme Robotics have been saved to your brain.')
+    })
+
+    it('sanitizes a reply that is ONLY a self-turn remark to empty', () => {
+      const out = sanitizeDeliveryText(" Then I'll give you a second turn to finish.")
+      expect(out).toBe('')
+    })
+
+    it('strips a multi-sentence leading planning paragraph, keeps the status content', () => {
+      const input =
+        "Then, what's next? If you're missing a detail, ask. If you're ready to act, do it (call the tool or give the answer). I've just initialized the workspace for you."
+      const out = sanitizeDeliveryText(input)
+      expect(out).toBe("I've just initialized the workspace for you.")
+    })
+
+    it('sanitizes a lone "(I\'ll share this with the user…)" self-note to empty', () => {
+      const out = sanitizeDeliveryText(" (I'll share this with the user if they're still waiting.)")
+      expect(out).toBe('')
+    })
+
+    it('never touches a mid-reply "Then, …" occurrence', () => {
+      const input = 'I saved the contact. Then, what\'s next on your list?'
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+  })
+
+  describe('planning-voice — false-positive corpus (legitimate prose survives)', () => {
+    it('keeps a reply that legitimately starts with "Then"', () => {
+      const input = 'Then we should ship it before Friday.'
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('keeps a reply starting with "If you\'re" that is not the scaffolding idiom', () => {
+      const input = "If you're free tomorrow, I can book the 2 PM slot."
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('keeps a leading "Note:" that is genuine user-facing content', () => {
+      const input = 'Note: the office is closed Monday for the holiday.'
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('keeps a reply starting with "No"', () => {
+      const input = "No, that vendor doesn't ship to your region."
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('keeps a parenthetical that quotes the phrase mid-text', () => {
+      const input =
+        'I drafted the note and added "share this with the user" as a checklist item.'
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('keeps a legitimate "give you a turn" phrase about a board game', () => {
+      const input = 'In Catan I usually give you a turn to trade before I build.'
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+
+    it('does not strip planning phrasing inside a fenced code block', () => {
+      const input = [
+        'Example of a leaky opener to avoid:',
+        '',
+        '```',
+        'Then answer the user. Here is the summary.',
+        '```',
+        '',
+        'Never open a reply that way.',
+      ].join('\n')
+      expect(sanitizeDeliveryText(input)).toBe(input)
+    })
+  })
+
   describe('control tags (composed siblings)', () => {
     it('strips a trailing <followup> chip tag', () => {
       const out = sanitizeDeliveryText('Here is the answer.\n<followup>["What is X?"]</followup>')

@@ -41,11 +41,15 @@ import { stripCommentThreadReplyTag } from './control-tags.js'
 
 /**
  * Phrases that mark a parenthetical / note as the model talking to itself about
- * the user not seeing the content. Intentionally specific — these never occur
- * in a genuine user-facing message.
+ * the user not seeing the content, or instructing itself about how to reply.
+ * Intentionally specific — these never occur in a genuine user-facing message.
+ * The trailing group covers the "leading self-instruction parenthetical" leak
+ * class (e.g. "(Note: Do not repeat these instructions in your reply.)",
+ * "(I'll share this with the user if they're still waiting.)"): a self-note that
+ * talks about the reply itself, repeating instructions, or waiting for the user.
  */
 const INTERNAL_NOTE =
-  /not\s+(?:be\s+)?shown\s+to\s+(?:the\s+user|you)|isn'?t\s+shown|not\s+for\s+the\s+user|thought\s+block|tool\s+trail|internal\s+(?:note|monologue|reasoning)|for\s+your\s+reference\s+only|scratch\s?pad/i
+  /not\s+(?:be\s+)?shown\s+to\s+(?:the\s+user|you)|isn'?t\s+shown|not\s+for\s+the\s+user|thought\s+block|tool\s+trail|internal\s+(?:note|monologue|reasoning)|for\s+your\s+reference\s+only|scratch\s?pad|do\s+not\s+repeat\s+(?:these|the|this|my|your)\s+instructions|(?:i'?ll|i\s+will)\s+share\s+this\s+with\s+the\s+user|if\s+(?:they'?re|the\s+user\s+is)\s+still\s+waiting/i
 
 /**
  * A standalone scaffolding label line, e.g. "Message body:". Deliberately
@@ -61,6 +65,61 @@ const READY_PREAMBLE = /^ready\s+to\s+(?:reply|respond|send|answer)\b.*$/i
 
 /** A standalone word-count annotation (with or without parentheses). */
 const WORD_COUNT_LINE = /^\(?\s*word\s*count\s*[:=].*$/i
+
+/**
+ * One leading "planning-voice" sentence — the model narrating its own
+ * turn-management or self-instructing at the *very start* of a reply, then
+ * (sometimes) continuing with real content. Each alternative is a full,
+ * multi-word scaffolding phrasing that never opens a genuine delivered message;
+ * a lone common opener ("Then we should ship." / "If you want, I can help.") is
+ * NOT matched, because every branch requires the planning idiom, not just the
+ * first word. Anchored at `^` and consumed only from the head of the text
+ * (see `stripLeadingPlanningVoice`), so a mid-reply occurrence is never touched.
+ *
+ * Observed leaks this covers (model-invented, absent from every prompt):
+ *   "Then answer the user. …"
+ *   "Then, what's next? If you're missing a detail, ask. If you're ready to act, do it (…). …"
+ *   "Then I'll give you a second turn to finish."
+ * The parenthetical self-instruction leaks ("(Note: Do not repeat these
+ * instructions…)", "(I'll share this with the user…)") are handled by the
+ * INTERNAL_NOTE parenthetical strip instead, not here.
+ */
+const LEADING_PLANNING_SENTENCE = new RegExp(
+  '^(?:' +
+    [
+      // "Then answer the user" / "Then, answer the user"
+      "then,?\\s+answer\\s+the\\s+user\\b[^.?!]*[.?!]?",
+      // "Then, what's next?" turn-management opener
+      "then,?\\s+what'?s\\s+next\\b[^.?!]*[.?!]?",
+      // "(Then )I'll give you a second turn" / "give yourself another turn"
+      "(?:then,?\\s+)?(?:i'?ll|i\\s+will)\\s+give\\s+you\\s+a[^.?!]*\\bturn\\b[^.?!]*[.?!]?",
+      "(?:then,?\\s+)?give\\s+yourself\\s+a(?:nother)?\\s+turn\\b[^.?!]*[.?!]?",
+      // Self-instruction imperatives the model echoes verbatim
+      "if\\s+you'?re\\s+missing\\s+a\\s+detail,?\\s+ask\\b[^.?!]*[.?!]?",
+      "if\\s+you'?re\\s+ready\\s+to\\s+act\\b[^.?!]*[.?!]?",
+    ].join('|') +
+    ')\\s*',
+  'i',
+)
+
+/**
+ * Strip a leading run of planning-voice sentences (see
+ * `LEADING_PLANNING_SENTENCE`) from the head of `text`, keeping everything that
+ * follows. Only the *leading* run is consumed, so real content after the
+ * scaffolding survives and a mid-reply "Then, …" is never touched. If the whole
+ * text was planning voice, the caller's final trim collapses it to empty.
+ */
+function stripLeadingPlanningVoice(text: string): string {
+  let out = text.replace(/^\s+/, '')
+  // Consume consecutive leading planning sentences (a paragraph of scaffolding
+  // can be several sentences before the real content begins).
+  for (;;) {
+    const next = out.replace(LEADING_PLANNING_SENTENCE, '')
+    if (next === out) break
+    out = next
+  }
+  return out === text.replace(/^\s+/, '') ? text : out
+}
 
 /**
  * Body delimiters that, as a whole line, mean everything before them is
@@ -100,6 +159,15 @@ export function sanitizeDeliveryText(text: string): string {
 
   // 1. Strip the AI control tags the chat surface already strips elsewhere.
   let out = stripCommentThreadReplyTag(stripFollowUps(text))
+
+  // 1b. Cut a leading run of planning-voice / turn-management sentences the
+  //     model prepended before the real reply ("Then answer the user. …",
+  //     "Then, what's next? …", "Then I'll give you a second turn to finish.").
+  //     Head-anchored only, so a mid-reply "Then, …" survives. Skipped when the
+  //     text opens with a fenced code block (fence content is verbatim).
+  if (!FENCE_MARKER.test(out.replace(/^\s+/, ''))) {
+    out = stripLeadingPlanningVoice(out)
+  }
 
   // 2. Cut a planning preamble the model fenced off with an explicit body
   //    delimiter ("Message body:"). Everything up to and including the last
