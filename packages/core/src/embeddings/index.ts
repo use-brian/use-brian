@@ -1,4 +1,4 @@
-export { createEmbeddingWorker } from './worker.js'
+export { createEmbeddingWorker, createEmbeddingUsageRecorder } from './worker.js'
 export type {
   EmbeddingPrimitive,
   EmbeddingCandidate,
@@ -6,6 +6,8 @@ export type {
   EmbeddingFailure,
   EmbeddingStore,
   EmbeddingWorkerOptions,
+  EmbeddingUsageBatch,
+  EmbeddingUsageRecorder,
 } from './worker.js'
 export {
   createGeminiEmbedder,

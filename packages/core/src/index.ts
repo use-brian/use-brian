@@ -61,12 +61,15 @@ export * from './ingest/adapters/whatsapp/index.js'
 export {
   EMBEDDED_PRIMITIVES,
   createEmbeddingWorker,
+  createEmbeddingUsageRecorder,
   type EmbeddingPrimitive,
   type EmbeddingCandidate,
   type EmbeddingResult,
   type EmbeddingFailure,
   type EmbeddingStore,
   type EmbeddingWorkerOptions,
+  type EmbeddingUsageBatch,
+  type EmbeddingUsageRecorder,
 } from './embeddings/worker.js'
 export {
   createGeminiEmbedder,

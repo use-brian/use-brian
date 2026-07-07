@@ -23,9 +23,26 @@ describe('[COMP:billing/cost-tracker] isOverheadSource', () => {
     expect(isOverheadSource('my-overhead')).toBe(false)
     expect(isOverheadSource('')).toBe(false)
   })
+
+  it('enumerates the migration-305 additions (CHECK-constraint parity)', () => {
+    for (const src of [
+      'overhead:embedding',
+      'overhead:synthesis',
+      'overhead:goal-clarity',
+      'overhead:goal-verify',
+    ]) {
+      expect(OVERHEAD_SOURCES).toContain(src)
+    }
+  })
 })
 
 describe('[COMP:billing/cost-tracker] calculateCost', () => {
+  it('prices the embedding model at input-only $0.025/M via its namespaced alias', () => {
+    const usage = { inputTokens: 1_000_000, outputTokens: 0 }
+    expect(calculateCost('gemini-embedding-001', usage)).toBeCloseTo(0.025, 6)
+    expect(calculateCost('gemini:gemini-embedding-001', usage)).toBeCloseTo(0.025, 6)
+  })
+
   it('calculates Gemini Flash cost', () => {
     const cost = calculateCost('gemini-flash', {
       inputTokens: 1000,

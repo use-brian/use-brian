@@ -544,9 +544,11 @@ function dedupTags(...lists: (string[] | undefined)[]): string[] {
  * Attribute one extraction LLM call as an `overhead:extraction` usage row
  * (billing-math-excluded, dashboard-visible; `sessionId` null — ingest has
  * no chat session). Billing party is the episode's creating user; a blank
- * assistant is tolerated for workspace-scoped batches (the consolidation
- * precedent). Best-effort by design: no store / no usage / no resolvable
- * user → skip; a store failure logs and never breaks ingestion.
+ * assistant rides the store's workspace-fallback attribution (the episode's
+ * `workspaceId` resolves a representative assistant — connector-drip
+ * episodes carry no assistant of their own). Best-effort by design: no
+ * store / no usage / no resolvable user → skip; a store failure logs and
+ * never breaks ingestion.
  */
 async function recordExtractionUsage(
   deps: PipelineBDeps,
@@ -560,6 +562,7 @@ async function recordExtractionUsage(
     await deps.usage.recordUsage({
       userId,
       assistantId: episode.assistantId ?? '',
+      workspaceId: episode.workspaceId,
       sessionId: null,
       model: deps.model,
       inputTokens: usage.inputTokens,

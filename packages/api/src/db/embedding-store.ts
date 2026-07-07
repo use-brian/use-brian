@@ -101,7 +101,12 @@ function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
-type ClaimedRow = { id: string; embed_text: string | null }
+type ClaimedRow = {
+  id: string
+  embed_text: string | null
+  workspace_id: string | null
+  user_id: string | null
+}
 
 export function createDbEmbeddingStore(): EmbeddingStore {
   return {
@@ -136,8 +141,12 @@ export function createDbEmbeddingStore(): EmbeddingStore {
         // within each class. The content-hash-mismatch re-embed class is a
         // follow-up — it requires `embedding IS NOT NULL` rows and a
         // hash recheck pass; v1 drains only the never-embedded backlog.
+        // `workspace_id` / `user_id` ride along for COGS attribution
+        // (`overhead:embedding` — embeddings.md §"Cost model"). Every
+        // embedded table carries both columns; user_id is NULL on
+        // workspace-shared rows.
         const claimed = await client.query<ClaimedRow>(
-          `SELECT id, (${textExpr}) AS embed_text
+          `SELECT id, (${textExpr}) AS embed_text, workspace_id, user_id
              FROM ${table}
             WHERE embedding IS NULL
               AND embedding_failed_at IS NULL
@@ -151,7 +160,14 @@ export function createDbEmbeddingStore(): EmbeddingStore {
 
         const rows: EmbeddingCandidate[] = claimed.rows.map((r) => {
           const text = (r.embed_text ?? '').trim()
-          return { id: r.id, primitive, text, contentHash: sha256(text) }
+          return {
+            id: r.id,
+            primitive,
+            text,
+            contentHash: sha256(text),
+            workspaceId: r.workspace_id,
+            userId: r.user_id,
+          }
         })
 
         const result = await handler(rows, {

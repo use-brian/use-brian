@@ -41,6 +41,7 @@ import {
   AnalyticsLogger, sanitize as sanitizeAnalytics,
   createConsolidationWorker,
   createEmbeddingWorker,
+  createEmbeddingUsageRecorder,
   createCommitmentLifecycleWorker,
   createSprintVarianceResolver,
   createCompositeCommitmentResolver,
@@ -3270,10 +3271,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // ── Embedding worker ──
   // primitivesWithVectorColumn is closed (api-platform/admin). Open uses the
-  // default primitive set from the embedding store.
+  // default primitive set from the embedding store. `usage` records each
+  // committed batch as `overhead:embedding` COGS (workspace-fallback
+  // attribution) — absent in OSS, embedding runs unmetered locally.
   const embeddingWorker = createEmbeddingWorker({
     store: createDbEmbeddingStore(),
     embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+    ...(usageStore ? { usage: createEmbeddingUsageRecorder(usageStore) } : {}),
   })
   if (runWorkers) embeddingWorker.start()
 

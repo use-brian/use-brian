@@ -20,7 +20,8 @@
  * store's concern; the worker exposes `intervalMs` + `batchLimit` knobs).
  */
 
-import type { Embedder } from './embedder.js'
+import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
+import { GEMINI_EMBEDDING_MODEL_ID, type Embedder } from './embedder.js'
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000
 const DEFAULT_BATCH_LIMIT = 100
@@ -80,6 +81,16 @@ export type EmbeddingCandidate = {
   text: string
   /** sha256 of `text`; passed through to commit so the store can persist it. */
   contentHash: string
+  /**
+   * COGS attribution axes (`embeddings.md` §"Cost model"). Every embedded
+   * primitive is workspace-scoped, so stores fill `workspaceId` from the
+   * row; `userId` is the row's owning user where the table has one (NULL
+   * on workspace-shared rows like kb_chunks). Optional so store fakes in
+   * tests stay minimal; rows without a `workspaceId` are skipped by the
+   * usage recorder, never dropped from embedding itself.
+   */
+  workspaceId?: string | null
+  userId?: string | null
 }
 
 export type EmbeddingResult = {
@@ -120,6 +131,48 @@ export type EmbeddingStore = {
   ) => Promise<T>
 }
 
+/**
+ * One per-(workspace, user) usage group from a successfully committed
+ * embed batch. `inputTokensEstimated` uses the ~4-chars/token heuristic —
+ * Gemini's `batchEmbedContents` response carries no usage metadata
+ * (`embeddings.md` §"Cost model"), so the estimate IS the recorded value.
+ */
+export type EmbeddingUsageBatch = {
+  primitive: EmbeddingPrimitive
+  workspaceId: string
+  /** Owning user of the grouped rows, or null for workspace-shared rows. */
+  userId: string | null
+  rowCount: number
+  inputTokensEstimated: number
+}
+
+export type EmbeddingUsageRecorder = (batches: EmbeddingUsageBatch[]) => Promise<void>
+
+/**
+ * Default `usage` recorder: one `overhead:embedding` usage row per group,
+ * priced at the embedding model's input rate. Passes a blank assistant +
+ * the group's `workspaceId` so the store's workspace-fallback attribution
+ * resolves a representative assistant (see `UsageStore.recordUsage`).
+ */
+export function createEmbeddingUsageRecorder(usage: UsageStore): EmbeddingUsageRecorder {
+  return async (batches) => {
+    for (const b of batches) {
+      const tokens = { inputTokens: b.inputTokensEstimated, outputTokens: 0 }
+      await usage.recordUsage({
+        userId: b.userId ?? '',
+        assistantId: '',
+        workspaceId: b.workspaceId,
+        sessionId: null,
+        model: GEMINI_EMBEDDING_MODEL_ID,
+        ...tokens,
+        actualCostUsd: calculateCost(GEMINI_EMBEDDING_MODEL_ID, tokens),
+        source: 'overhead:embedding',
+        triggerKey: 'embedding_batch',
+      })
+    }
+  }
+}
+
 export type EmbeddingWorkerOptions = {
   store: EmbeddingStore
   embedder: Embedder
@@ -127,6 +180,12 @@ export type EmbeddingWorkerOptions = {
   primitives?: readonly EmbeddingPrimitive[]
   intervalMs?: number
   batchLimit?: number
+  /**
+   * COGS recorder invoked after each successfully committed batch with the
+   * per-(workspace, user) groups. Absent in OSS (no usage store) — embedding
+   * runs unmetered locally. Failures are logged and never fail the drain.
+   */
+  usage?: EmbeddingUsageRecorder
 }
 
 export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
@@ -136,6 +195,7 @@ export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
     primitives = DEFAULT_PRIMITIVES,
     intervalMs = DEFAULT_TICK_INTERVAL_MS,
     batchLimit = DEFAULT_BATCH_LIMIT,
+    usage,
   } = options
   let timer: ReturnType<typeof setInterval> | undefined
   let running = false
@@ -166,6 +226,16 @@ export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
           contentHash: r.contentHash,
         }))
         await apply.commit(results)
+        if (usage) {
+          try {
+            const batches = groupUsageBatches(primitive, rows)
+            if (batches.length > 0) await usage(batches)
+          } catch (err) {
+            // COGS attribution is best-effort — a recorder failure must
+            // never fail (or retry) an already-committed embed batch.
+            console.warn(`[embedding-worker] usage recording (${primitive}) failed:`, err)
+          }
+        }
       })
     } catch (err) {
       // Store-side failure (claim error, commit/fail throw). Log loudly and
@@ -209,6 +279,39 @@ export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
       return timer !== undefined
     },
   }
+}
+
+/**
+ * Group a committed batch's rows into per-(workspace, user) usage entries.
+ * Rows without a `workspaceId` are skipped — there is no billing axis to
+ * attribute them to (should not happen: every embedded primitive is
+ * workspace-scoped).
+ */
+function groupUsageBatches(
+  primitive: EmbeddingPrimitive,
+  rows: EmbeddingCandidate[],
+): EmbeddingUsageBatch[] {
+  const groups = new Map<string, EmbeddingUsageBatch>()
+  for (const row of rows) {
+    if (!row.workspaceId) continue
+    const userId = row.userId ?? null
+    const key = `${row.workspaceId}::${userId ?? ''}`
+    const group = groups.get(key)
+    const tokens = Math.ceil(row.text.length / 4)
+    if (group) {
+      group.rowCount += 1
+      group.inputTokensEstimated += tokens
+    } else {
+      groups.set(key, {
+        primitive,
+        workspaceId: row.workspaceId,
+        userId,
+        rowCount: 1,
+        inputTokensEstimated: tokens,
+      })
+    }
+  }
+  return [...groups.values()]
 }
 
 function errMessage(err: unknown): string {

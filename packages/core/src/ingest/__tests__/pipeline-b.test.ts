@@ -1600,6 +1600,7 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     expect(row).toMatchObject({
       userId: 'u-1',
       assistantId: 'a-1',
+      workspaceId: 'ws-1',
       sessionId: null,
       model: 'mock',
       inputTokens: 10,
@@ -1625,7 +1626,9 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
       'note',
       makeDeps({ provider, usage: usage.store }),
     )
-    expect(usage.recordUsage.mock.calls[0]![0]).toMatchObject({ assistantId: '' })
+    // The episode's workspaceId rides along so the store's workspace-fallback
+    // attribution can resolve a representative assistant for the row.
+    expect(usage.recordUsage.mock.calls[0]![0]).toMatchObject({ assistantId: '', workspaceId: 'ws-1' })
   })
 
   it('a recorder failure logs and never breaks ingestion', async () => {

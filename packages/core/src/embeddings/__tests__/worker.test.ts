@@ -1,12 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { createEmbeddingWorker } from '../worker.js'
+import { createEmbeddingWorker, createEmbeddingUsageRecorder } from '../worker.js'
 import type {
   EmbeddingCandidate,
   EmbeddingFailure,
   EmbeddingPrimitive,
   EmbeddingResult,
   EmbeddingStore,
+  EmbeddingUsageBatch,
 } from '../worker.js'
+import type { UsageStore } from '../../billing/cost-tracker.js'
 
 function makeCandidate(
   overrides: Partial<EmbeddingCandidate> & { id: string; primitive: EmbeddingPrimitive },
@@ -271,5 +273,135 @@ describe('[COMP:brain/embedding-worker] createEmbeddingWorker', () => {
     expect(worker.isRunning).toBe(true)
     worker.stop()
     expect(worker.isRunning).toBe(false)
+  })
+
+  // ── COGS attribution (overhead:embedding — embeddings.md §"Cost model") ──
+
+  it('reports committed batches to the usage recorder grouped by (workspace, user)', async () => {
+    const fake = makeFakeStore({
+      memories: [
+        makeCandidate({ id: 'm1', primitive: 'memories', workspaceId: 'ws-1', userId: 'u-1', text: 'abcd'.repeat(10) }),
+        makeCandidate({ id: 'm2', primitive: 'memories', workspaceId: 'ws-1', userId: 'u-1', text: 'abcd'.repeat(5) }),
+        makeCandidate({ id: 'm3', primitive: 'memories', workspaceId: 'ws-1', userId: null, text: 'xyz' }),
+        makeCandidate({ id: 'm4', primitive: 'memories', workspaceId: 'ws-2', userId: 'u-2', text: 'q' }),
+      ],
+    })
+    const { embedder } = makeFakeEmbedder()
+    const usage = vi.fn(async (_batches: EmbeddingUsageBatch[]) => {})
+    const worker = createEmbeddingWorker({
+      store: fake.store,
+      embedder,
+      primitives: ['memories'],
+      intervalMs: 60_000,
+      usage,
+    })
+
+    worker.start()
+    await vi.waitFor(() => expect(usage).toHaveBeenCalledTimes(1))
+    worker.stop()
+
+    const batches: EmbeddingUsageBatch[] = usage.mock.calls[0][0]
+    const byKey = new Map(batches.map((b) => [`${b.workspaceId}::${b.userId ?? ''}`, b]))
+    expect(byKey.size).toBe(3)
+    // 40 chars + 20 chars at ~4 chars/token → 10 + 5 tokens.
+    expect(byKey.get('ws-1::u-1')).toMatchObject({ rowCount: 2, inputTokensEstimated: 15, primitive: 'memories' })
+    expect(byKey.get('ws-1::')).toMatchObject({ rowCount: 1, userId: null, inputTokensEstimated: 1 })
+    expect(byKey.get('ws-2::u-2')).toMatchObject({ rowCount: 1, inputTokensEstimated: 1 })
+  })
+
+  it('skips usage rows without a workspaceId and never calls the recorder on embed failure', async () => {
+    const failing = makeFakeStore({
+      memories: [makeCandidate({ id: 'm1', primitive: 'memories', workspaceId: 'ws-1', userId: 'u-1' })],
+    })
+    const { embedder: failEmbedder } = makeFakeEmbedder({ fail: new Error('quota') })
+    const usage = vi.fn(async (_batches: EmbeddingUsageBatch[]) => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const failWorker = createEmbeddingWorker({
+      store: failing.store,
+      embedder: failEmbedder,
+      primitives: ['memories'],
+      intervalMs: 60_000,
+      usage,
+    })
+    failWorker.start()
+    await vi.waitFor(() => expect(failing.failures).toHaveLength(1))
+    failWorker.stop()
+    expect(usage).not.toHaveBeenCalled()
+    errSpy.mockRestore()
+
+    // Attribution-less rows (no workspaceId) embed fine but produce no batch.
+    const bare = makeFakeStore({
+      entities: [makeCandidate({ id: 'e1', primitive: 'entities' })],
+    })
+    const { embedder } = makeFakeEmbedder()
+    const bareWorker = createEmbeddingWorker({
+      store: bare.store,
+      embedder,
+      primitives: ['entities'],
+      intervalMs: 60_000,
+      usage,
+    })
+    bareWorker.start()
+    await vi.waitFor(() => expect(bare.commits).toHaveLength(1))
+    bareWorker.stop()
+    expect(usage).not.toHaveBeenCalled()
+  })
+
+  it('logs and keeps the committed batch when the usage recorder throws', async () => {
+    const fake = makeFakeStore({
+      memories: [makeCandidate({ id: 'm1', primitive: 'memories', workspaceId: 'ws-1', userId: 'u-1' })],
+    })
+    const { embedder } = makeFakeEmbedder()
+    const usage = vi.fn(async () => {
+      throw new Error('usage store down')
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const worker = createEmbeddingWorker({
+      store: fake.store,
+      embedder,
+      primitives: ['memories'],
+      intervalMs: 60_000,
+      usage,
+    })
+
+    worker.start()
+    await vi.waitFor(() => expect(usage).toHaveBeenCalledTimes(1))
+    worker.stop()
+
+    // The commit stands — the recorder failure is logged, not propagated.
+    expect(fake.commits.map((c) => c.id)).toEqual(['m1'])
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('usage recording (memories) failed'),
+      expect.any(Error),
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('createEmbeddingUsageRecorder records one overhead:embedding row per group with workspace fallback', async () => {
+    const recordUsage = vi.fn(async (_params: Parameters<UsageStore['recordUsage']>[0]) => {})
+    const usageStore = { recordUsage } as unknown as UsageStore
+    const recorder = createEmbeddingUsageRecorder(usageStore)
+
+    await recorder([
+      { primitive: 'memories', workspaceId: 'ws-1', userId: 'u-1', rowCount: 2, inputTokensEstimated: 1_000_000 },
+      { primitive: 'kb_chunks', workspaceId: 'ws-1', userId: null, rowCount: 1, inputTokensEstimated: 40 },
+    ])
+
+    expect(recordUsage).toHaveBeenCalledTimes(2)
+    expect(recordUsage.mock.calls[0][0]).toMatchObject({
+      userId: 'u-1',
+      assistantId: '',
+      workspaceId: 'ws-1',
+      sessionId: null,
+      model: 'gemini:gemini-embedding-001',
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      source: 'overhead:embedding',
+      triggerKey: 'embedding_batch',
+    })
+    // $0.025 per million input tokens (cost-tracker PRICING via the alias).
+    expect(recordUsage.mock.calls[0][0].actualCostUsd).toBeCloseTo(0.025, 6)
+    // Workspace-shared rows pass a blank userId — the store fallback resolves it.
+    expect(recordUsage.mock.calls[1][0]).toMatchObject({ userId: '', workspaceId: 'ws-1' })
   })
 })

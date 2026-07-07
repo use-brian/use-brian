@@ -51,6 +51,10 @@ const PRICING: Record<string, ModelPricing> = {
   // xAI does not charge for cache writes on the Responses API.
   'grok-4-1-fast':                { inputPerM: 0.20, outputPerM: 0.50, cacheReadPerM: 0.05, cacheWritePerM: 0 },
   'grok-4-1-fast-non-reasoning':  { inputPerM: 0.20, outputPerM: 0.50, cacheReadPerM: 0.05, cacheWritePerM: 0 },
+  // Gemini embedding model (brain vectors — embeddings.md §"Cost model").
+  // Input-only pricing; the batchEmbedContents response carries no usage
+  // metadata, so callers record the ~4-chars/token estimate as inputTokens.
+  'gemini-embedding-001':         { inputPerM: 0.025, outputPerM: 0, cacheReadPerM: 0, cacheWritePerM: 0 },
 }
 
 // Alias mapping
@@ -70,6 +74,9 @@ const MODEL_ALIASES: Record<string, string> = {
   // `usage_tracking` rows continue to resolve.
   'gemini-3.1-flash-lite-preview': 'gemini-3.1-flash-lite',
   'gemma-4-26b': 'gemma-4-26b-a4b-it',
+  // The embedder's namespaced model_id (`GEMINI_EMBEDDING_MODEL_ID`) — the
+  // embedding worker records usage under this string.
+  'gemini:gemini-embedding-001': 'gemini-embedding-001',
 }
 
 /**
@@ -96,9 +103,11 @@ export function calculateCost(model: string, usage: TokenUsage): number {
 // SUM, the daily aggregate) — see UsageStore.recordUsage, getWeeklyCost,
 // and packages/api/src/billing/credit-gate.ts (overhead never debits credits).
 //
-// Migration 050 (initial four) and migration 067 (five new) enshrine
-// these exact strings in the usage_tracking CHECK constraint; keep the
-// list in sync with the latest migration when adding new subsystems.
+// The `usage_tracking` `valid_source` CHECK (000_overlay_v1.sql baseline,
+// last extended by migration 305) enshrines these exact strings; keep the
+// list in sync with the latest migration when adding new subsystems — a
+// source missing from the CHECK makes its INSERTs fail 23514 silently
+// (the exact failure class migration 305 closed for synthesis + goals).
 
 export const OVERHEAD_SOURCES = [
   'overhead:compaction',
@@ -113,7 +122,17 @@ export const OVERHEAD_SOURCES = [
   'overhead:session-state-diff',
   'overhead:recovery-message',
   'overhead:empty-turn-synthesis',
+  'overhead:distribution-classifier',
+  'overhead:distribution-safety',
+  'overhead:distribution-draft',
   'overhead:skill-review',
+  // Migration 305 additions (2026-07-07): async embedding-worker batches,
+  // the GENERATE/blueprint synthesis engine, and the goal clarity gate +
+  // completion verifier.
+  'overhead:embedding',
+  'overhead:synthesis',
+  'overhead:goal-clarity',
+  'overhead:goal-verify',
 ] as const
 
 export type OverheadSource = typeof OVERHEAD_SOURCES[number]
@@ -160,6 +179,16 @@ export type UsageStore = {
      * session. Migration 067 widened the DB column to allow NULL.
      */
     sessionId: string | null
+    /**
+     * Fallback attribution axis for recorders that have no assistant in
+     * hand (embedding batches, connector-drip ingest extraction). When
+     * `assistantId` is blank, implementations resolve a representative
+     * assistant from this workspace (the DB row requires a real one) and
+     * may also fall back `userId` to that assistant's owner when blank.
+     * Ignored when `assistantId` is set. Optional — recorders with a real
+     * assistant never need it.
+     */
+    workspaceId?: string
     model: string
     inputTokens: number
     outputTokens: number
