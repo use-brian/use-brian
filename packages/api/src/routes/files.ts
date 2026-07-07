@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import multer from 'multer'
+import { z } from 'zod'
 import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import { parseFileContent, shouldInline, type FileStore } from '@sidanclaw/core'
@@ -7,12 +8,17 @@ import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
 import { resolveUser } from './route-helpers.js'
+import { mintFilePreviewToken, verifyFilePreviewToken } from './file-preview-token.js'
 
 /** Silent-path PDFs promote store-only above this (native inlineData stays the read path below). */
 const PDF_STORE_ONLY_MIN_BYTES = 2 * 1024 * 1024
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_FILES_PER_REQUEST = 10
+// Preview capability-URL TTL. The browser fetches the signed `<img src>` /
+// download URL promptly after the mint round-trip, so a few minutes is ample
+// and bounds the replay window on a leaked URL. See file-preview-token.ts.
+const PREVIEW_URL_TTL_MS = 5 * 60_000
 // Ingest does a model distill + a Pipeline B pass per file, synchronously, so
 // the per-request fan-out is capped tighter than the plain cache upload. A
 // background job queue is the documented scale follow-up (files.md).
@@ -79,6 +85,14 @@ export function fileRoutes(
    * Absent (files-less deploy) -> cache-only, exactly the legacy behavior.
    */
   artifactPromoter?: ArtifactPromoter | null,
+  /**
+   * HMAC secret for signed preview capability URLs (WS3 #8). When set, the
+   * `/preview` GET requires a valid `?sig` and gains an authenticated
+   * `/preview-url` mint route; when absent (secret-less test/deploy) the mint
+   * route 503s and `/preview` falls back to the legacy unsigned read. Prod
+   * always passes `JWT_SECRET`. See file-preview-token.ts.
+   */
+  previewSecret?: string | null,
 ): Router {
   const router = Router()
 
@@ -330,12 +344,107 @@ export function fileRoutes(
   })
 
   /**
-   * GET /api/files/:id/preview — serve a previously cached file.
+   * GET /api/files/:id/preview-url?workspaceId=… — mint a short-lived signed
+   * preview URL (WS3 #8). AUTHENTICATED + access-scoped: the caller must be
+   * able to read the `file_cache` row through the universal access predicate
+   * (`fileStore.get(id, ctx)`), so a bare id from another user/workspace mints
+   * nothing (404, existence-hiding). Returns `{ url }` — a relative
+   * `/api/files/:id/preview?sig=…` the browser uses cross-origin as `<img src>`
+   * without needing the SameSite=Lax cookie.
+   *
+   * This is the mint half; the `/preview` GET below is the (unauthenticated)
+   * verify half. Requires `previewSecret`; 503s without it.
+   */
+  const PreviewUrlQuery = z.object({ workspaceId: z.string().min(1) })
+  router.get('/:id/preview-url', async (req, res) => {
+    if (!previewSecret) {
+      res.status(503).json({ error: 'Signed preview URLs are not available on this deployment.' })
+      return
+    }
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const parsed = PreviewUrlQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return
+    }
+
+    // Access gate: mirror the chat/skill-draft `file_cache` read ctx
+    // (skills.ts "Gate each client-supplied fileId by the turn's identity").
+    // A non-assistant caller echoes its userId into assistantId so
+    // workspace-shared rows (assistant_id IS NULL) still match; the
+    // workspace + user visibility axes are the real gate. `fileStore.get`
+    // with a ctx runs the access-predicate branch, so a foreign-workspace or
+    // foreign-user id returns null → 404.
+    const ctx = {
+      workspaceId: parsed.data.workspaceId,
+      userId,
+      assistantId: userId,
+      assistantKind: 'standard' as const,
+    }
+    let file
+    try {
+      file = await fileStore.get(req.params.id, ctx)
+    } catch (err) {
+      console.error('File preview-url mint error:', err)
+      res.status(500).json({ error: 'Failed to mint preview URL' })
+      return
+    }
+    if (!file) {
+      res.status(404).json({ error: 'File not found or expired' })
+      return
+    }
+
+    const token = mintFilePreviewToken({
+      fid: file.id,
+      ttlMs: PREVIEW_URL_TTL_MS,
+      secret: previewSecret,
+    })
+    res.json({
+      url: `/api/files/${encodeURIComponent(file.id)}/preview?sig=${encodeURIComponent(token)}`,
+      expiresInMs: PREVIEW_URL_TTL_MS,
+    })
+  })
+
+  /**
+   * GET /api/files/:id/preview?sig=… — serve a previously cached file.
    * For images: streams the image bytes inline so <img src="..."> works.
    * For other files: returns JSON metadata.
+   *
+   * UNAUTHENTICATED but signature-gated (WS3 #8): mounted `optionalAuth`, so
+   * this used to be a bare-UUID IDOR (any holder of a live `file_cache` id got
+   * the bytes). It now requires a valid `?sig` minted by `/preview-url` for an
+   * authorized viewer — id-bound, short-TTL, HMAC-signed, constant-time
+   * verified. No cookie is needed (that's the point — the cross-origin `<img>`
+   * can't send the SameSite=Lax cookie). When no `previewSecret` is configured
+   * the check is skipped (legacy unsigned behavior for secret-less deploys).
    */
+  const PreviewSigQuery = z.object({ sig: z.string().min(1).optional() })
   router.get('/:id/preview', async (req, res) => {
     try {
+      if (previewSecret) {
+        const parsed = PreviewSigQuery.safeParse(req.query)
+        const sig = parsed.success ? parsed.data.sig : undefined
+        if (!sig) {
+          res.status(401).json({ error: 'Missing preview signature' })
+          return
+        }
+        const verified = verifyFilePreviewToken({
+          token: sig,
+          fid: req.params.id,
+          secret: previewSecret,
+        })
+        if (!verified.ok) {
+          // 403 (not 404) — the id may be valid; it's the capability that's
+          // rejected. Reason stays server-side (never leak which check failed).
+          res.status(403).json({ error: 'Invalid or expired preview signature' })
+          return
+        }
+      }
+
       const file = await fileStore.get(req.params.id)
       if (!file) {
         res.status(404).json({ error: 'File not found or expired' })

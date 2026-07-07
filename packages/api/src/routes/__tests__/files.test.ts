@@ -164,6 +164,129 @@ describe('[COMP:api/files-route] File routes', () => {
   })
 })
 
+// ── WS3 #8: signed preview capability URLs ───────────────────────────
+// When `previewSecret` is configured, the bare-UUID IDOR is closed: `/preview`
+// requires a valid `?sig` minted by the authenticated, access-scoped
+// `/preview-url` route. Without the secret the legacy unsigned behavior holds
+// (the describe above covers that path).
+describe('[COMP:api/files-route] Signed preview URLs', () => {
+  const SECRET = 'test-preview-secret'
+  const fileStore = {
+    cache: vi.fn(),
+    get: vi.fn(),
+    getBySession: vi.fn(),
+  }
+
+  beforeEach(() => {
+    vi.resetAllMocks()
+  })
+
+  // ── Mint route: GET /:id/preview-url ──────────────────────────
+
+  it('mints a signed URL for an authorized viewer (access-scoped get succeeds)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET), {
+      userId: 'u_owner',
+    })
+    fileStore.get.mockResolvedValueOnce({ id: 'f_1', mimeType: 'image/png' })
+
+    const res = await request(app).get('/api/files/f_1/preview-url?workspaceId=ws_1')
+    expect(res.status).toBe(200)
+    expect(res.body.url).toMatch(/^\/api\/files\/f_1\/preview\?sig=/)
+    // The gate ran the access-scoped read (ctx passed), not the unscoped branch.
+    expect(fileStore.get).toHaveBeenCalledWith(
+      'f_1',
+      expect.objectContaining({ workspaceId: 'ws_1', userId: 'u_owner' }),
+    )
+  })
+
+  it('refuses to mint when the viewer cannot read the file (foreign workspace/user → 404)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET), {
+      userId: 'u_attacker',
+    })
+    // Access-scoped get returns null (predicate filtered it out).
+    fileStore.get.mockResolvedValueOnce(null)
+
+    const res = await request(app).get('/api/files/f_victim/preview-url?workspaceId=ws_other')
+    expect(res.status).toBe(404)
+  })
+
+  it('mint route requires auth (401 without a user)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET))
+    const res = await request(app).get('/api/files/f_1/preview-url?workspaceId=ws_1')
+    expect(res.status).toBe(401)
+    expect(fileStore.get).not.toHaveBeenCalled()
+  })
+
+  it('mint route requires workspaceId (400)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET), {
+      userId: 'u_owner',
+    })
+    const res = await request(app).get('/api/files/f_1/preview-url')
+    expect(res.status).toBe(400)
+  })
+
+  it('mint route 503s when no preview secret is configured', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never), { userId: 'u_owner' })
+    const res = await request(app).get('/api/files/f_1/preview-url?workspaceId=ws_1')
+    expect(res.status).toBe(503)
+  })
+
+  // ── Preview route enforces the signature ──────────────────────
+
+  it('serves the image bytes with a valid minted signature', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET), {
+      userId: 'u_owner',
+    })
+    const imageData = Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')
+    // Mint (image mime), then serve.
+    fileStore.get.mockResolvedValueOnce({ id: 'f_img', mimeType: 'image/png' })
+    const mint = await request(app).get('/api/files/f_img/preview-url?workspaceId=ws_1')
+    expect(mint.status).toBe(200)
+    const url: string = mint.body.url
+
+    fileStore.get.mockResolvedValueOnce({
+      id: 'f_img',
+      fileName: 'photo.png',
+      mimeType: 'image/png',
+      content: `data:image/png;base64,${imageData}`,
+      sizeBytes: 4,
+    })
+    const res = await request(app).get(url)
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toMatch(/image\/png/)
+    // The serve read is the UNSCOPED branch — no ctx (the signature is the gate).
+    expect(fileStore.get).toHaveBeenLastCalledWith('f_img')
+  })
+
+  it('rejects /preview with no signature (401) — closes the bare-UUID IDOR', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET))
+    const res = await request(app).get('/api/files/f_1/preview')
+    expect(res.status).toBe(401)
+    // Never even touches the store — no bytes leak on an unsigned request.
+    expect(fileStore.get).not.toHaveBeenCalled()
+  })
+
+  it('rejects /preview with a forged signature (403)', async () => {
+    const app = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET))
+    const res = await request(app).get('/api/files/f_1/preview?sig=not.a.valid.sig')
+    expect(res.status).toBe(403)
+    expect(fileStore.get).not.toHaveBeenCalled()
+  })
+
+  it('rejects a signature minted for a DIFFERENT file id (403 cross-id replay)', async () => {
+    const mintApp = createTestApp('/api/files', fileRoutes(fileStore as never, null, null, SECRET), {
+      userId: 'u_owner',
+    })
+    fileStore.get.mockResolvedValueOnce({ id: 'f_a', mimeType: 'image/png' })
+    const mint = await request(mintApp).get('/api/files/f_a/preview-url?workspaceId=ws_1')
+    const sig = new URL(`http://x${mint.body.url}`).searchParams.get('sig') as string
+
+    // Replay f_a's sig against f_b.
+    const res = await request(mintApp).get(`/api/files/f_b/preview?sig=${encodeURIComponent(sig)}`)
+    expect(res.status).toBe(403)
+  })
+})
+
 // ── large-content-artifacts §Phase 2.3: silent upload promotion ──────
 describe('[COMP:api/files-upload-promotion] /upload silent artifact promotion', () => {
   const fileStore = {
