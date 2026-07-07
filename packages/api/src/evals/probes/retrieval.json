@@ -1,0 +1,94 @@
+[
+  {
+    "id": "retr-topic-lookup-search",
+    "bucket": "supported",
+    "prompt": "What do we know about Acme Corp?",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["search", "getEntity"],
+      "forbiddenPatterns": ["can'?t (search|look ?up|find)"]
+    },
+    "rubricNote": "Topic lookup with no id in hand. `search` is the canonical first call (`search` clause: 'find something by topic across every brain primitive'); `getEntity` by display_name is also defensible ('Fetch a brain entity by id or display_name') — both listed. The discrimination: the model reaches for a brain-read tool on the FIRST call rather than fabricating an answer or hunting a connector. Frozen-empty tolerant: an honest 'nothing on Acme yet' is a pass; the graded artifact is the tool choice, not found data."
+  },
+  {
+    "id": "retr-entity-by-id-getentity",
+    "bucket": "supported",
+    "prompt": "Show me everything we have on the entity with id fx-getentity-1.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["getEntity"],
+      "mustNotCallTools": ["search"],
+      "forbiddenPatterns": ["can'?t (fetch|open|find) (that )?entity"]
+    },
+    "rubricNote": "An id is in hand, so `getEntity` is the exact route ('Use this when you already have an entity id or name and want its full rollup'). Calling `search` here is the wrong tool the WS1 clause is meant to prevent ('To find an entity by topic first, use search' — the inverse case), so search is a hard mustNotCall. Discrimination measured: id-in-hand -> getEntity, not the topic searcher."
+  },
+  {
+    "id": "retr-memory-by-topic-search-not-getmemory",
+    "bucket": "supported",
+    "prompt": "What memories do we have about the pricing decision?",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["search"],
+      "mustNotCallTools": ["getMemory"],
+      "forbiddenPatterns": ["can'?t (search|find|recall) (memories|anything)"]
+    },
+    "rubricNote": "The sharpest WS1 discrimination: memory lookup BY TOPIC with no id. `getMemory`'s own clause says 'To find memories by topic, use search ... reach for getMemory once you have the id', and `search` 'returns memory rows alongside every other brain primitive'. So the correct first call is `search`; reaching for `getMemory` (which needs an id) is the exact miss the clause targets -> getMemory is a hard mustNotCall. Frozen-empty tolerant."
+  },
+  {
+    "id": "retr-memory-by-id-getmemory",
+    "bucket": "supported",
+    "prompt": "Pull up the full detail of memory 5794afc9.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["getMemory"],
+      "forbiddenPatterns": ["can'?t (open|fetch|find) (that )?memory"]
+    },
+    "rubricNote": "The complement of retr-memory-by-topic: a concrete memory id (the 8-char prefix the memory index shows) is in hand, so `getMemory` is the exact route ('Retrieve one memory's full detail when you have its ID'). `search` is not banned here (search also accepts an id-prefix and is a defensible fallback), but getMemory is the intended pick. Discrimination: id-in-hand routes to getMemory, mirroring the topic case routing to search."
+  },
+  {
+    "id": "retr-source-provenance",
+    "bucket": "supported",
+    "prompt": "Where did this fact about the launch date come from? Trace it back to the source.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["provenance", "getEntity", "search"],
+      "mustNotCallTools": ["getRowHistory"],
+      "forbiddenPatterns": ["can'?t (trace|find (the )?source)"]
+    },
+    "rubricNote": "'Where did this come from / trace to source' is the `provenance` clause verbatim ('Trace a row to its source Episode ... Use this to trace where a row you retrieved came from'). Because the fixture is empty the model has no row_id yet, so a first `search`/`getEntity` to LOCATE the row before tracing it is legitimate — hence both listed alongside `provenance`. `getRowHistory` (the version-timeline sibling) is the wrong tool for 'where from' and is banned ('To trace where a row came from use provenance instead'). NOTE: the inspection-family sibling `inspectRowProvenance` is a genuinely-correct alternative in prod but is NOT injected in this fixture, so it is intentionally omitted; if the fixture later injects createInspectionTools, add it to mustCallToolOneOf."
+  },
+  {
+    "id": "retr-change-over-time-rowhistory",
+    "bucket": "supported",
+    "prompt": "How has the Acme renewal deal's stage changed over time?",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["getRowHistory", "getEntity", "search"],
+      "mustNotCallTools": ["provenance"],
+      "forbiddenPatterns": ["can'?t (see|trace) (the )?(history|changes)"]
+    },
+    "rubricNote": "'How did this change over time' is the `getRowHistory` clause verbatim ('Use to answer how did this fact change over time'). As with provenance, the empty fixture forces a locate-first step, so `search`/`getEntity` to resolve the deal row before reading its history are legitimate first calls and are listed. `provenance` (source-episode tracer) is the wrong sibling and is banned ('To trace where a row came from use provenance instead' — the inverse of this case). Discrimination: change-timeline -> getRowHistory, not the source tracer."
+  },
+  {
+    "id": "retr-recent-activity-episodes",
+    "bucket": "supported",
+    "prompt": "What are the most recent things that have happened in the brain lately?",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["recentEpisodes", "search"],
+      "forbiddenPatterns": ["can'?t (list|show) (recent )?(activity|episodes)"]
+    },
+    "rubricNote": "A recency-ordered listing with no topic anchor is the `recentEpisodes` route ('List recent Episodes ordered by recency'). `search` fuses a recency signal too and is a defensible alternative for an unanchored 'what's new', so both are listed; recentEpisodes is the intended pick. Discrimination: 'most recent, no topic' -> recentEpisodes rather than a keyword search. Frozen-empty tolerant (an honest 'nothing recent' passes)."
+  },
+  {
+    "id": "retr-why-saved-memory-provenance",
+    "bucket": "supported",
+    "prompt": "Why did we save the memory about standardizing on PostgreSQL, and what were we discussing at the time?",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["provenance", "getMemory", "search"],
+      "forbiddenPatterns": ["can'?t (tell|see) (why|when) (it|that) was saved"]
+    },
+    "rubricNote": "'Why was this saved / what was the conversation' is the `inspectMemoryProvenance` clause verbatim ('Use this when the user asks why was this saved? or what was the conversation?') — BUT createInspectionTools is not injected in this fixture, so the closest injected routes are `provenance` (source Episode + authorship) plus a locate-first `search`/`getMemory` to resolve the memory row. All three are listed because none is wrong given the injected surface; the graded intent is that the model picks a provenance/trace-family read, not a fabricated recollection of the conversation. This probe is the before/after instrument for injecting the inspection family into the fixture (v1.1): once inspectMemoryProvenance is present it becomes the sole expected tool and this note's alternatives collapse."
+  }
+]

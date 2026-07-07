@@ -1,8 +1,14 @@
+import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { describe, it, expect } from 'vitest'
 
 import { runHardChecks } from '../assertions.js'
 import { buildFixtureWorkspace } from '../fixture.js'
 import { ProbeSchema, type Probe } from '../types.js'
+
+const PROBES_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'probes')
 
 /**
  * Deterministic-check logic with canned transcripts — no API key, no model.
@@ -221,6 +227,66 @@ describe('[COMP:evals/capability-probes] fixture workspace', () => {
     expect(needed.size).toBeGreaterThan(0)
     for (const cap of needed) {
       expect(fixture.activeCapabilities.has(cap), `capability '${cap}' required by an injected tool but not granted`).toBe(true)
+    }
+  })
+})
+
+describe('[COMP:evals/capability-probes] probe files', () => {
+  // The live battery (`pnpm eval`) is the only place that loads probes/*.json
+  // (it needs an API key and is orchestrator-run), so a malformed or drifted
+  // probe file would otherwise ship uncaught. These no-API guards parse every
+  // committed domain file through the real ProbeSchema and cross-check that
+  // each act-probe's expected tools are actually injected by the fixture — an
+  // expected tool the fixture never injects makes a probe unwinnable (the
+  // hard check flags the model's only correct call as an "invented tool").
+  const domainFiles = readdirSync(PROBES_DIR).filter((f) => f.endsWith('.json'))
+
+  it('discovers the committed domain files, retrieval among them', () => {
+    expect(domainFiles.length).toBeGreaterThan(0)
+    expect(domainFiles).toContain('retrieval.json')
+  })
+
+  for (const file of domainFiles) {
+    it(`parses every probe in ${file} through ProbeSchema with unique ids`, () => {
+      const raw = JSON.parse(readFileSync(join(PROBES_DIR, file), 'utf-8'))
+      expect(Array.isArray(raw)).toBe(true)
+      const probes = raw.map((p: unknown) => ProbeSchema.parse(p))
+      expect(probes.length).toBeGreaterThan(0)
+      const ids = probes.map((p: Probe) => p.id)
+      expect(new Set(ids).size, `duplicate probe id in ${file}`).toBe(ids.length)
+      // Every forbidden-pattern string must be a valid regex — a broken one
+      // silently never matches, turning a success-claim trap into a no-op.
+      for (const p of probes as Probe[]) {
+        for (const rx of p.expected.forbiddenPatterns ?? []) {
+          expect(() => new RegExp(rx, 'i'), `bad forbidden regex in ${file}/${p.id}: /${rx}/`).not.toThrow()
+        }
+      }
+    })
+  }
+
+  it('every act-probe expected tool is injected by the fixture (no unwinnable probe)', () => {
+    // The retrieval domain measures first-call tool choice, so its
+    // mustCallToolOneOf tools must all be visible in the fixture — otherwise
+    // the model cannot call the correct tool and the probe grades false-fail.
+    // A require/ban contradiction (a tool in both lists) is likewise a bug.
+    const injected = new Set(buildFixtureWorkspace().tools.keys())
+    for (const file of domainFiles) {
+      const probes = (JSON.parse(readFileSync(join(PROBES_DIR, file), 'utf-8')) as unknown[]).map((p) =>
+        ProbeSchema.parse(p),
+      )
+      for (const p of probes) {
+        if (p.expected.verdict !== 'act') continue
+        const must = p.expected.mustCallToolOneOf ?? []
+        expect(must.length, `act probe ${file}/${p.id} has no mustCallToolOneOf`).toBeGreaterThan(0)
+        expect(
+          must.some((t) => injected.has(t)),
+          `act probe ${file}/${p.id}: none of [${must.join(', ')}] is injected by the fixture — unwinnable`,
+        ).toBe(true)
+        const mustSet = new Set(must)
+        for (const banned of p.expected.mustNotCallTools ?? []) {
+          expect(mustSet.has(banned), `probe ${file}/${p.id} both requires and bans "${banned}"`).toBe(false)
+        }
+      }
     }
   })
 })
