@@ -31,7 +31,7 @@ import {
   type AssistantRunChannel,
 } from '@sidanclaw/doc-model'
 import { resolveAuth } from './auth-hook.js'
-import { assertPageAccess, type RlsQuery } from './clearance-gate.js'
+import { assertPageAccess, isReadOnlyRole, type RlsQuery } from './clearance-gate.js'
 import {
   loadPageUpdate,
   maybeEnqueueBrainIngest,
@@ -118,8 +118,9 @@ const hocuspocus = new Hocuspocus({
     // READ-ONLY — Hocuspocus's MessageReceiver drops their doc-mutating updates
     // server-side (awareness/presence still flow; comments go via REST, not
     // Yjs). edit/full stay read-write; the service connection (returned above)
-    // is never gated.
-    data.connectionConfig.readOnly = access.role === 'view' || access.role === 'comment'
+    // is never gated. The read-only predicate lives with the role resolver so
+    // the write-filter and the role vocabulary never drift.
+    data.connectionConfig.readOnly = isReadOnlyRole(access.role)
     return {
       userId: auth.userId,
       workspaceId: access.workspaceId,
