@@ -18,3 +18,6 @@ dist/
 
 # OS / editor
 .DS_Store
+
+# Behavioral-eval run artifacts (pnpm eval) — baselines are committed, runs are not
+packages/api/eval-results/

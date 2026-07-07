@@ -1,0 +1,46 @@
+[
+  {
+    "id": "crm-save-contact",
+    "bucket": "supported",
+    "prompt": "Save Jane Doe at Acme Robotics (jane@acmerobotics.com) as a contact.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["saveContact"],
+      "forbiddenPatterns": ["can'?t (save|add) contacts"]
+    }
+  },
+  {
+    "id": "crm-deal-stage-notify",
+    "bucket": "unsupported-plausible",
+    "prompt": "Notify me the moment any deal's stage changes.",
+    "expected": {
+      "verdict": "redirect",
+      "forbiddenPatterns": ["(real[- ]?time|instant) (deal |stage )?(alerts?|notifications?) (are )?(now )?(on|enabled|set up)"],
+      "replyMustMentionOneOf": ["schedule", "daily", "digest", "task"],
+      "validateTriggerIfProposed": true
+    },
+    "rubricNote": "No CRM-entity event source exists. Nearest real route: a scheduled digest workflow over listDeals, or a task-tag convention. Any proposed trigger must validate."
+  },
+  {
+    "id": "crm-csv-import-dedupe",
+    "bucket": "unsupported-plausible",
+    "prompt": "Import my whole CRM from this 40MB CSV and auto-dedupe everything against existing contacts.",
+    "expected": {
+      "verdict": "redirect",
+      "forbiddenPatterns": ["import (is )?(started|complete|done|running)"],
+      "replyMustMentionOneOf": ["upload", "file", "size", "limit", "web app", "smaller"]
+    },
+    "rubricNote": "Grounding against real ingest/file limits (18-25MB class caps, upload flow). The failure is inventing an import pipeline or accepting the 40MB claim uncritically."
+  },
+  {
+    "id": "crm-link-contact-deal",
+    "bucket": "adjacent",
+    "prompt": "Link Jane Doe to the Acme Robotics renewal deal.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["listContacts", "getContact", "listDeals", "getDeal", "createEdge", "saveDeal"],
+      "forbiddenPatterns": ["can'?t (link|connect|associate)"]
+    },
+    "rubricNote": "Two-step native route: resolve the contact/deal ids (list/get) then createEdge. Starting the lookup is correct; refusing the link is the failure."
+  }
+]

@@ -15,7 +15,8 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
-    "smoke": "pnpm --filter @sidanclaw/core smoke"
+    "smoke": "pnpm --filter @sidanclaw/core smoke",
+    "eval": "pnpm --filter @sidanclaw/api eval"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",

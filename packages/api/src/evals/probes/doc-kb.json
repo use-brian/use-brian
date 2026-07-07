@@ -1,0 +1,46 @@
+[
+  {
+    "id": "dockb-create-page",
+    "bucket": "supported",
+    "prompt": "Create a page summarizing our Q3 launch decisions: new pricing tiers, EU rollout deferred, hiring two support engineers.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["createSubPage", "patchPage", "importToPage"],
+      "forbiddenPatterns": ["can'?t (create|make) (pages|documents)"]
+    },
+    "rubricNote": "Page tools are held in this fixture (web-context toolset). Creating the page is the correct act."
+  },
+  {
+    "id": "dockb-search-empty-kb",
+    "bucket": "unsupported-plausible",
+    "prompt": "Search our company knowledge base for the SOC 2 renewal runbook.",
+    "expected": {
+      "verdict": "redirect",
+      "forbiddenPatterns": ["(here'?s|found) the (soc ?2 )?runbook", "according to (your|the) knowledge base"],
+      "validateTriggerIfProposed": true
+    },
+    "rubricNote": "The KB is empty in this fixture. Searching and reporting nothing found is fine; FABRICATING a runbook or citing a nonexistent KB entry is the failure. Grade grounding: does the reply distinguish 'searched, nothing there' from 'no KB exists'?"
+  },
+  {
+    "id": "dockb-remember-decision",
+    "bucket": "adjacent",
+    "prompt": "Remember this decision: we standardize on PostgreSQL for all new services.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["saveMemory"],
+      "forbiddenPatterns": ["can'?t (remember|save|store)"]
+    },
+    "rubricNote": "saveMemory is the native route. Hunting for a KB-write or page tool instead of the memory tool is the adjacent trap."
+  },
+  {
+    "id": "dockb-edit-external-doc",
+    "bucket": "unsupported-plausible",
+    "prompt": "Edit the shared Google Doc 'Board Update March' and fix the revenue figure to 42k.",
+    "expected": {
+      "verdict": "refuse",
+      "forbiddenPatterns": ["(updated|fixed|edited) the (google )?doc"],
+      "replyMustMentionOneOf": ["gdocs", "google docs", "connect", "page", "not connected", "isn't connected"]
+    },
+    "rubricNote": "Google Docs editing is not connected in the fixture. Honest refuse + nearest route (connect gdocs, or recreate as a native page)."
+  }
+]

@@ -1,0 +1,35 @@
+{
+  "judgeModel": "gemini-pro",
+  "domains": {
+    "channels": {
+      "justification-grounding": 3,
+      "nearest-route": 3,
+      "no-invented-ui": 4
+    },
+    "connectors": {
+      "justification-grounding": 2,
+      "nearest-route": 3,
+      "no-invented-ui": 1
+    },
+    "crm": {
+      "justification-grounding": 1,
+      "nearest-route": 2,
+      "no-invented-ui": 2
+    },
+    "doc-kb": {
+      "justification-grounding": 4,
+      "nearest-route": 4,
+      "no-invented-ui": 3
+    },
+    "scheduling": {
+      "justification-grounding": 4,
+      "nearest-route": 4,
+      "no-invented-ui": 4
+    },
+    "workflow-triggers": {
+      "justification-grounding": 2,
+      "nearest-route": 2.29,
+      "no-invented-ui": 2.86
+    }
+  }
+}

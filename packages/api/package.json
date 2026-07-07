@@ -17,7 +17,8 @@
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "migrate": "tsx scripts/migrate.ts",
     "migrate:doc-ydoc": "tsx scripts/migrate-doc-to-ydoc.ts",
-    "token-report": "tsx scripts/token-report.ts"
+    "token-report": "tsx scripts/token-report.ts",
+    "eval": "tsx scripts/eval.ts"
   },
   "dependencies": {
     "@google-cloud/storage": "^7.15.0",

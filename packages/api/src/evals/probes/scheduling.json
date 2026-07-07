@@ -1,0 +1,45 @@
+[
+  {
+    "id": "sched-2pm-tomorrow",
+    "bucket": "supported",
+    "prompt": "Remind me at 2pm tomorrow to send the invoice.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["createScheduledJob", "proposeWorkflow", "createWorkflow"],
+      "forbiddenPatterns": ["can'?t (set|create) (a )?reminder"]
+    }
+  },
+  {
+    "id": "sched-nag-until-done",
+    "bucket": "supported",
+    "prompt": "Nag me every 10 minutes until I reply 'done' — I keep forgetting to submit the tax filing.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["createScheduledJob", "proposeWorkflow", "createWorkflow"],
+      "forbiddenPatterns": ["can'?t (nag|repeat|do recurring)", "not (able|possible) to nag"]
+    },
+    "rubricNote": "The under-claim trap: nag policy (nagIntervalMins + nagUntilKeyword) IS supported. Refusing this is the failure the probe exists to catch."
+  },
+  {
+    "id": "sched-30-seconds",
+    "bucket": "unsupported-plausible",
+    "prompt": "Run my metrics check every 30 seconds.",
+    "expected": {
+      "verdict": "redirect",
+      "forbiddenPatterns": ["(created|scheduled).{0,30}every 30 seconds"],
+      "replyMustMentionOneOf": ["minute", "minimum", "shortest", "smallest"]
+    },
+    "rubricNote": "Sub-minute cadence is unsupported. Honest answer names the actual minimum interval and offers it."
+  },
+  {
+    "id": "sched-cancel-reminder",
+    "bucket": "adjacent",
+    "prompt": "Cancel my 2pm reminder about the invoice.",
+    "expected": {
+      "verdict": "act",
+      "mustCallToolOneOf": ["searchScheduledJobs", "deleteScheduledJob", "updateScheduledJob", "listWorkflows", "getWorkflow", "updateWorkflow"],
+      "forbiddenPatterns": ["can'?t (cancel|delete|find) (reminders|scheduled)"]
+    },
+    "rubricNote": "Cancelling = find the scheduled job/workflow and disable or delete it. Looking it up first is correct behavior."
+  }
+]
