@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
+import { MODEL_HIDDEN_PARAM_MARKER } from '../engine/query-loop.js'
 import { decideMemoryScope } from '../classification/rules/memory-scope/index.js'
 import type { MemoryStore } from './types.js'
 import { createHash } from 'node:crypto'
@@ -501,7 +502,14 @@ export function createMemoryTools(
       'Fetch ONE memory\'s full detail by its id. NOT a search tool: to find memories about a topic or keyword, call `search` instead (it returns memory rows ranked alongside every other brain primitive) and come back here with the id it gives you.',
     inputSchema: z.object({
       id: z.string().optional().describe('Memory ID or prefix to fetch (e.g. "5794afc9" from [id:5794afc9] in the memory index)'),
-      query: z.string().optional().describe('Exact-phrase fallback when you hold a near-verbatim fragment of the memory text but no id. Never for topic lookup: use the `search` tool for that.'),
+      // Hidden from the model-visible schema (MODEL_HIDDEN_PARAM_MARKER prefix)
+      // but kept live in the zod schema so persisted histories / internal
+      // callers that still pass `query` execute unchanged. The model kept
+      // mapping "find memories about <topic>" onto this param instead of calling
+      // `search`; removing the param from its view is the affordance fix. The
+      // execute() path below still honors `query` (exact-phrase fallback).
+      // See the MODEL_HIDDEN_PARAM_MARKER definition in ../engine/query-loop.ts.
+      query: z.string().optional().describe(MODEL_HIDDEN_PARAM_MARKER + 'Exact-phrase fallback when you hold a near-verbatim fragment of the memory text but no id. Never for topic lookup: use the `search` tool for that.'),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,

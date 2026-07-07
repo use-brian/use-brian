@@ -1693,10 +1693,34 @@ function extractCitationsFromToolResults(
 }
 
 /**
+ * Prefix marker on a field's `.describe()` text that hides the field from the
+ * MODEL-visible JSON schema while leaving it a real, runtime-validated field in
+ * the zod object. `jsonSchemaFromZod` drops any field whose resolved description
+ * starts with this sentinel, so the model never sees the parameter — but
+ * `inputSchema.parse()` still accepts it, so persisted histories and internal
+ * callers that pass the field keep executing unchanged (back-compat).
+ *
+ * Use it for an affordance the model should stop reaching for even though the
+ * runtime must keep honoring it: e.g. `getMemory`'s legacy `query` fallback,
+ * which the model kept mapping "memories about X" onto instead of calling
+ * `search`. The reference application is `packages/core/src/memory/tools.ts`
+ * (the getMemory tool's `query` field).
+ *
+ * The marker text itself is never shown to the model (the whole field is
+ * dropped), so it needs no human-readable prose — the ` ` prefix keeps it
+ * from ever colliding with a real description a tool author writes.
+ */
+export const MODEL_HIDDEN_PARAM_MARKER = ' model-hidden '
+
+/**
  * Convert a Zod schema to the JSON-Schema shape Gemini's tool definitions
  * (and `mcp_search` result formatter) expect. Exported because the tool-search
  * index needs the same shape for local-source tools — see
  * `packages/core/src/mcp/tool-search.ts` → "Local source schema derivation".
+ *
+ * Fields whose resolved description begins with `MODEL_HIDDEN_PARAM_MARKER` are
+ * omitted entirely (from both `properties` and `required`) so the model never
+ * sees them; the field stays live in the zod schema for runtime parsing.
  */
 export function jsonSchemaFromZod(schema: { _def: unknown }): {
   type: 'object'
@@ -1712,7 +1736,16 @@ export function jsonSchemaFromZod(schema: { _def: unknown }): {
     const required: string[] = []
 
     for (const [key, fieldSchema] of Object.entries(shape)) {
-      properties[key] = zodFieldToJsonSchema(fieldSchema) as TP
+      const converted = zodFieldToJsonSchema(fieldSchema) as TP
+      // Drop model-hidden fields: the resolved description carries the sentinel
+      // (ZodOptional/ZodEffects wrappers surface their inner or own description
+      // through the same merge the model would see). The field is excluded from
+      // properties AND required, so it vanishes from the model's tool schema
+      // while `inputSchema.parse` still accepts it at runtime.
+      if (typeof converted.description === 'string' && converted.description.startsWith(MODEL_HIDDEN_PARAM_MARKER)) {
+        continue
+      }
+      properties[key] = converted
       if (fieldSchema._def.typeName !== 'ZodOptional') {
         required.push(key)
       }

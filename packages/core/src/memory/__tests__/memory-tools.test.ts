@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createMemoryTools, type MemoryToolEvent } from '../tools.js'
+import { jsonSchemaFromZod } from '../../engine/query-loop.js'
 import type { MemoryStore } from '../types.js'
 import type {
   EntityKind,
@@ -623,6 +624,50 @@ describe('[COMP:memory/tools] getMemory', () => {
     await getMemory.execute({ query: 'ramen' }, ctx)
     expect(events).toHaveLength(1)
     expect(events[0].type).toBe('memory_retrieved')
+  })
+
+  // Affordance fix (WS2 retrieval battery): the model kept mapping "find
+  // memories about <topic>" onto getMemory's `query` param instead of calling
+  // `search`, oscillating ~50/50 across runs. The description hardening (commit
+  // 2711aee) wasn't enough because the model could still SEE a query param. The
+  // fix hides `query` from the model-visible schema via MODEL_HIDDEN_PARAM_MARKER
+  // (jsonSchemaFromZod drops marker-prefixed fields) while keeping it live in the
+  // zod schema for runtime back-compat.
+  it('hides the query param from the model-visible tool schema', () => {
+    // Assert via the SAME conversion path the provider receives — query-loop.ts
+    // builds each tool's provider declaration with `jsonSchemaFromZod(inputSchema)`
+    // (query-loop.ts:414-415). If `query` is absent here, the model never sees it.
+    const { getMemory } = createMemoryTools(makeFakeStore())
+    const modelSchema = jsonSchemaFromZod(getMemory.inputSchema)
+    expect(Object.keys(modelSchema.properties)).toContain('id')
+    expect(Object.keys(modelSchema.properties)).not.toContain('query')
+    // The hidden field must not leak into `required` either (it was optional,
+    // but guard against a regression that flips the required derivation).
+    expect(modelSchema.required ?? []).not.toContain('query')
+  })
+
+  it('still accepts a legacy query call through inputSchema.parse (runtime back-compat)', async () => {
+    // Persisted histories / internal callers still pass `query`. The tool
+    // executor validates with `inputSchema.parse(input)` before calling
+    // execute (tool-executor.ts:535,598); z.object strips unknown keys, so this
+    // only holds because `query` remains a real field in the zod schema. Route
+    // the call through parse → execute exactly as the executor does.
+    const store = makeFakeStore()
+    await store.create({
+      assistantId: ctx.assistantId,
+      userId: ctx.userId,
+      createdByUserId: ctx.userId,
+      createdByAssistantId: ctx.assistantId,
+      summary: 'Loves Japanese ramen',
+      sensitivity: 'internal',
+    })
+    const { getMemory } = createMemoryTools(store)
+    const validated = getMemory.inputSchema.parse({ query: 'ramen' })
+    expect(validated).toMatchObject({ query: 'ramen' })
+    const result = await getMemory.execute(validated, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(Array.isArray(result.data)).toBe(true)
+    expect(result.data as Array<{ summary: string }>).toHaveLength(1)
   })
 })
 

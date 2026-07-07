@@ -1,6 +1,12 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createSelfProfileTool } from '../self-profile-tool.js'
-import type { EntityStore, EntityRecord } from '../../entities/types.js'
+import type {
+  EntityLinkCreateParams,
+  EntityLinkRecord,
+  EntityLinksStore,
+  EntityRecord,
+  EntityStore,
+} from '../../entities/types.js'
 
 // ── Fake EntityStore — only implements the calls the tool reaches ──
 
@@ -53,6 +59,27 @@ function makeFakeEntityStore(initialAttrs: Record<string, unknown> = {}): {
     },
   }
   return { store: store as EntityStore, state }
+}
+
+// ── Fake EntityLinksStore — records edge creates ──────────────────
+
+function makeFakeLinksStore(): Pick<EntityLinksStore, 'create' | 'walkOutbound'> & {
+  create: ReturnType<typeof vi.fn>
+} {
+  return {
+    create: vi.fn(
+      async (params: EntityLinkCreateParams): Promise<EntityLinkRecord> =>
+        ({
+          id: 'edge-1',
+          sourceKind: params.sourceKind,
+          sourceId: params.sourceId,
+          targetKind: params.targetKind,
+          targetId: params.targetId,
+          edgeType: params.edgeType,
+        }) as unknown as EntityLinkRecord,
+    ),
+    walkOutbound: vi.fn(async () => []),
+  }
 }
 
 const ctx = {
@@ -134,5 +161,87 @@ describe('[COMP:brain/self-profile-tool] updateSelfProfile', () => {
     )
     expect(result.isError).toBe(true)
     expect(String(result.data)).toContain('workspace context')
+  })
+})
+
+// ── Explicit-links path (self → entity edges) ─────────────────────
+// Spec: docs/architecture/brain/explicit-links.md — `updateSelfProfile`
+// carries the shared `links` / `closeLinks` fields; a self → org edge
+// ("I work at SIDAN" → works_at) anchors from the self entity.
+
+describe('[COMP:brain/self-profile-tool] explicit links', () => {
+  const COMPANY_ID = '44444444-4444-4444-8444-444444444444'
+
+  it('writes a self → entity edge anchored on the self entity id', async () => {
+    const { store } = makeFakeEntityStore()
+    const links = makeFakeLinksStore()
+    const tool = createSelfProfileTool(store, links as unknown as EntityLinksStore)
+    const result = await tool.execute(
+      {
+        role: 'Co-founder/CEO',
+        links: [{ targetEntityId: COMPANY_ID, edgeType: 'works_at' }],
+      },
+      ctx,
+    )
+    expect(result.isError).toBeFalsy()
+    expect(links.create).toHaveBeenCalledTimes(1)
+    const edge = links.create.mock.calls[0][0]
+    expect(edge.sourceKind).toBe('entity')
+    expect(edge.sourceId).toBe('self-entity-uuid')
+    expect(edge.targetId).toBe(COMPANY_ID)
+    expect(edge.edgeType).toBe('works_at')
+    expect(String(result.data)).toContain('1 edge linked')
+  })
+
+  it('materialises the self entity for a links-only call without an attribute write', async () => {
+    const { store } = makeFakeEntityStore()
+    const getOrCreateSelf = vi.spyOn(store, 'getOrCreateSelf')
+    const updateSelfProfile = vi.spyOn(store, 'updateSelfProfile')
+    const links = makeFakeLinksStore()
+    const tool = createSelfProfileTool(store, links as unknown as EntityLinksStore)
+    const result = await tool.execute(
+      { links: [{ targetEntityId: COMPANY_ID, edgeType: 'works_at' }] },
+      ctx,
+    )
+    expect(result.isError).toBeFalsy()
+    // No attribute payload → getOrCreateSelf, never updateSelfProfile.
+    expect(getOrCreateSelf).toHaveBeenCalledTimes(1)
+    expect(updateSelfProfile).not.toHaveBeenCalled()
+    expect(links.create).toHaveBeenCalledTimes(1)
+    expect(links.create.mock.calls[0][0].sourceId).toBe('self-entity-uuid')
+  })
+
+  it('still writes attributes when a links store is absent (edge is a fire-and-forget no-op)', async () => {
+    const { store, state } = makeFakeEntityStore()
+    const tool = createSelfProfileTool(store)
+    const result = await tool.execute(
+      {
+        role: 'Co-founder/CEO',
+        links: [{ targetEntityId: COMPANY_ID, edgeType: 'works_at' }],
+      },
+      ctx,
+    )
+    expect(result.isError).toBeFalsy()
+    expect(state.attributes.role).toBe('Co-founder/CEO')
+  })
+
+  it('rejects a non-UUID link target at the Zod layer', () => {
+    const { store } = makeFakeEntityStore()
+    const tool = createSelfProfileTool(store)
+    const parsed = tool.inputSchema.safeParse({
+      name: 'Hinson Wong',
+      links: [{ targetEntityId: 'not-a-uuid', edgeType: 'works_at' }],
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('rejects an unknown edgeType at the Zod layer', () => {
+    const { store } = makeFakeEntityStore()
+    const tool = createSelfProfileTool(store)
+    const parsed = tool.inputSchema.safeParse({
+      name: 'Hinson Wong',
+      links: [{ targetEntityId: COMPANY_ID, edgeType: 'invented_verb' }],
+    })
+    expect(parsed.success).toBe(false)
   })
 })
