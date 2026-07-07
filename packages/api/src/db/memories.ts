@@ -284,6 +284,7 @@ export async function updateMemory(
     scope?: 'shared' | 'workspace'
     workspaceId?: string | null
   },
+  access?: AccessContext,
 ): Promise<Memory | null> {
   const client = await getPool().connect()
   try {
@@ -291,11 +292,19 @@ export async function updateMemory(
     try {
       // Lock the active version. If none matches (already tombstoned, or
       // id doesn't exist), nothing to supersede — bail before the INSERT.
+      //
+      // Access scoping: this store runs on the owner pool (getPool), which
+      // BYPASSES RLS, so when a viewer context is supplied the lock SELECT
+      // carries `buildAccessPredicate` — a full-UUID update can't supersede a
+      // memory the caller can't read (the write sibling of getMemoryById's
+      // projection). Omitting `access` keeps the system-wide path for trusted
+      // background workers. WS3 memory read/write-asymmetry fix, 2026-07-07.
+      const ap = access ? buildAccessPredicate(access, { startIdx: 2 }) : null
       const lockResult = await client.query<Memory>(
         `SELECT ${MEMORY_SELECT} FROM memories
-         WHERE id = $1 AND valid_to IS NULL
+         WHERE id = $1 AND valid_to IS NULL${ap ? ` AND ${ap.sql}` : ''}
          FOR UPDATE`,
-        [id],
+        [id, ...(ap ? ap.params : [])],
       )
       const old = lockResult.rows[0]
       if (!old) {

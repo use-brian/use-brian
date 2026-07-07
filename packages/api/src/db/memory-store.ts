@@ -48,8 +48,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
     },
 
-    async update(id, updates) {
-      const m = await updateMemory(id, updates)
+    async update(id, updates, access) {
+      const m = await updateMemory(id, updates, access)
       if (!m) return null
       return { id: m.id, scope: m.scope, summary: m.summary, detail: m.detail, tags: m.tags, confidence: m.confidence, sensitivity: m.sensitivity, workspaceId: m.workspaceId }
     },

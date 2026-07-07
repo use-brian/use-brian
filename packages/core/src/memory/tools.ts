@@ -216,6 +216,11 @@ export function createMemoryTools(
           })
           if (results[0]) resolvedId = results[0].id
         }
+        // Pass the viewer context so the update is scoped to memories this
+        // caller may read — a full UUID (length >= 36) skips the scoped search
+        // above, so without this the write could supersede another user's or
+        // workspace's memory by id (WS3 read/write-asymmetry fix). Ingested
+        // third-party content reaches this tool, so the scope is load-bearing.
 
         // Update existing — only include defined fields.
         const updates: Record<string, unknown> = {}
@@ -229,7 +234,7 @@ export function createMemoryTools(
         // retry sensibly instead of seeing a Postgres internal error.
         let updated
         try {
-          updated = await store.update(resolvedId, updates)
+          updated = await store.update(resolvedId, updates, viewerCtx(context))
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           if (msg.includes('invalid input syntax for type uuid')) {

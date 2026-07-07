@@ -98,12 +98,20 @@ export type MemoryStore = {
     linkedEntityIds?: readonly string[]
   }): Promise<MemoryRecord>
 
+  /**
+   * Supersede the active version of a memory. `access` scopes the write to
+   * rows the caller may see — the model tool and the Memory-tab edit route
+   * pass the viewer's context so a full-UUID update can't touch a memory the
+   * viewer can't read (the write sibling of `getById`'s access projection).
+   * Omitted only by trusted background workers (commitment-lifecycle), which
+   * operate system-wide. See docs/architecture/context-engine/memory-system.md.
+   */
   update(id: string, updates: {
     summary?: string
     detail?: string
     confidence?: number
     tags?: string[]
-  }): Promise<MemoryRecord | null>
+  }, access?: AccessContext): Promise<MemoryRecord | null>
 
   getById(ctx: AccessContext, id: string): Promise<MemoryRecord | null>
 

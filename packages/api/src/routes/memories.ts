@@ -556,7 +556,18 @@ export function memoryRoutes(): Router {
     }
 
     try {
-      const memory = await updateMemory(req.params.memoryId, { summary, detail, tags, sensitivity: sensitivityTier })
+      // Scope the edit to memories this caller may read — unlike the promote/
+      // demote and reclassify handlers, this route went straight to
+      // updateMemory with no prior getMemoryById(ctx) check, so a member could
+      // edit another user's/workspace's memory by id (WS3 read/write
+      // asymmetry). resolveViewerCtx returns null for an assistant the user
+      // can't access → 404.
+      const ctx = await resolveViewerCtx(userId, req.params.assistantId)
+      if (!ctx) {
+        res.status(404).json({ error: 'Memory not found' })
+        return
+      }
+      const memory = await updateMemory(req.params.memoryId, { summary, detail, tags, sensitivity: sensitivityTier }, ctx)
       if (!memory) {
         res.status(404).json({ error: 'Memory not found' })
         return

@@ -14,13 +14,16 @@ import {
   getIdentityMemories,
   getMemoryIndex,
   listMemoriesWithMetrics,
+  updateMemory,
 } from '../memories.js'
-import { query } from '../client.js'
+import { query, getPool } from '../client.js'
 
 const mockQuery = vi.mocked(query)
+const mockGetPool = vi.mocked(getPool)
 
 beforeEach(() => {
   mockQuery.mockReset()
+  mockGetPool.mockReset()
 })
 
 describe('[COMP:api/memory-store] createMemory', () => {
@@ -162,6 +165,59 @@ describe('[COMP:memory/bi-temporal-reads] reads filter valid_to IS NULL (SQL sha
   it('listMemoriesWithMetrics', async () => {
     await listMemoriesWithMetrics('a', 'u')
     expect(mockQuery.mock.calls[0][0]).toContain('valid_to IS NULL')
+  })
+})
+
+describe('[COMP:api/memory-store] updateMemory access scoping', () => {
+  // WS3 read/write-asymmetry regression: getMemoryById scopes reads with
+  // buildAccessPredicate, but updateMemory superseded by id on the owner pool
+  // (RLS-bypassing) with no scope — so a full-UUID edit from the model tool or
+  // the Memory-tab PATCH route could overwrite another user's/workspace's
+  // memory. When a viewer ctx is passed the lock SELECT must carry the
+  // predicate; workers omit it and stay system-wide.
+  function makeClient(lockRows: unknown[]) {
+    const calls: Array<[string, unknown[]?]> = []
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        calls.push([sql, params])
+        if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
+        if (sql.includes('FOR UPDATE')) return { rows: lockRows, rowCount: lockRows.length }
+        return { rows: [], rowCount: 0 }
+      }),
+      release: vi.fn(),
+    }
+    mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
+    return calls
+  }
+
+  const ctx = {
+    workspaceId: 'w_1',
+    userId: 'u_1',
+    assistantId: 'a_1',
+    assistantKind: 'standard' as const,
+    clearance: 'confidential' as const,
+  }
+
+  it('scopes the lock SELECT with the access predicate when a viewer ctx is passed', async () => {
+    const calls = makeClient([]) // no row visible to the viewer → returns null
+    const result = await updateMemory('11111111-1111-1111-1111-111111111111', { summary: 'x' }, ctx)
+    expect(result).toBeNull()
+    const lock = calls.find((c) => (c[0] as string).includes('FOR UPDATE'))!
+    // The bare form is `WHERE id = $1 AND valid_to IS NULL FOR UPDATE`; the
+    // scoped form inserts the projection between valid_to and FOR UPDATE and
+    // appends the ctx params after the id.
+    expect(lock[0]).not.toMatch(/valid_to IS NULL\s+FOR UPDATE/)
+    expect(lock[1]).toContain('w_1')
+    expect((lock[1] as unknown[]).length).toBeGreaterThan(1)
+  })
+
+  it('runs unscoped (system path) when no access is passed', async () => {
+    const calls = makeClient([])
+    await updateMemory('11111111-1111-1111-1111-111111111111', { summary: 'x' })
+    const lock = calls.find((c) => (c[0] as string).includes('FOR UPDATE'))!
+    expect(lock[0]).toContain('WHERE id = $1 AND valid_to IS NULL')
+    expect(lock[0]).toMatch(/valid_to IS NULL\s+FOR UPDATE/)
+    expect(lock[1]).toEqual(['11111111-1111-1111-1111-111111111111'])
   })
 })
 
