@@ -2519,9 +2519,6 @@ export const ja: Dictionary = {
       confirmWithoutEditing: "編集せずに承認",
       notFoundTitle: "スキルが見つかりません",
       notFoundBody: "削除されたか、別のワークスペースのものかもしれません。",
-      railTabsLabel: "スキルパネル",
-      railAboutTab: "概要",
-      railChatTab: "チャット",
     },
     skillCreator: {
       intro:

@@ -2501,9 +2501,6 @@ export const zh: Dictionary = {
       confirmWithoutEditing: "不編輯直接確認",
       notFoundTitle: "找不到技能",
       notFoundBody: "它可能已被刪除，或屬於其他工作區。",
-      railTabsLabel: "技能面板",
-      railAboutTab: "關於",
-      railChatTab: "對話",
     },
     skillCreator: {
       intro: "描述你想要的流程，或直接貼上要提煉的資料，助理會根據團隊的做事方式幫你起草。",

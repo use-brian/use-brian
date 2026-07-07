@@ -2707,9 +2707,6 @@ export const en = {
       confirmWithoutEditing: "Confirm without editing",
       notFoundTitle: "Skill not found",
       notFoundBody: "It may have been deleted, or it belongs to another workspace.",
-      railTabsLabel: "Skill panel",
-      railAboutTab: "About",
-      railChatTab: "Chat",
     },
     skillCreator: {
       intro:

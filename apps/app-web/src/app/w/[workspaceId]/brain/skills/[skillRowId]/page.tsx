@@ -59,9 +59,7 @@ import {
 import { buildSkillPatch, skillStatus } from "@/lib/skills-view";
 import { SKILL_BODY_MAX_CHARS } from "@/lib/skill-markdown";
 import { requestBrainRefresh } from "@/lib/brain-events";
-import { chatDockSuppression } from "@/lib/chat-dock-suppress";
 import { SkillDocument } from "@/components/brain/skill-document";
-import { SkillIterationChat } from "@/components/brain/skill-iteration-chat";
 import { Button } from "@/components/ui/button";
 import { BackButton } from "@/components/ui/back-button";
 import { BrainTopbar } from "@/components/brain/brain-topbar";
@@ -80,11 +78,6 @@ function SkillEditorInner({ skillRowId }: { skillRowId: string }) {
   const { activeId } = useWorkspaces();
   const copy = t.brainPage.skillEditor;
   const backHref = activeId ? `/w/${activeId}/brain?view=skills` : "/";
-
-  // The editor embeds its own iteration chat (rail Chat tab) — hold the
-  // floating-dock suppression for the whole route so two docks never
-  // coexist (chat-dock-suppress.ts).
-  useEffect(() => chatDockSuppression.suppress(), []);
 
   // undefined = loading, null = not found, value = loaded.
   const [skill, setSkill] = useState<WorkspaceSkillSummary | null | undefined>(
@@ -177,10 +170,6 @@ function SkillEditor({
   const [content, setContent] = useState(skill.content);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Rail segment: the properties (About) or the iteration chat. The chat
-  // revises the SAME drafts the document edits — Save stays the one commit
-  // (PATCH + D2 trust stamp), so an AI revision is always human-reviewed.
-  const [railTab, setRailTab] = useState<"about" | "chat">("about");
 
   // Resync drafts when the loaded row changes (a reload after save/confirm).
   useEffect(() => {
@@ -279,82 +268,30 @@ function SkillEditor({
           />
         </div>
 
-        {/* ── Right rail — a two-segment pill switches it between the
-            properties (About: Suggested decision first, then About + Access
-            soft cards, destructive Delete last) and the iteration CHAT,
-            which revises the same document drafts (Save stays the one
-            commit). ─────────────────────────────────────────────────────── */}
+        {/* ── Right rail — the properties: Suggested decision first, then
+            About + Access soft cards, destructive Delete last. AI iteration
+            on a skill happens through the shared floating assistant dock,
+            which sees the skill the user is viewing (viewingSkillRowId on
+            /api/chat) — the embedded rail chat is creator-only now. ──────── */}
         <aside className="mt-10 flex flex-col gap-4 text-sm lg:mt-0">
-          <div
-            role="tablist"
-            aria-label={copy.railTabsLabel}
-            className="flex shrink-0 rounded-lg bg-muted/40 p-0.5"
-          >
-            {(["about", "chat"] as const).map((tab) => (
-              <button
-                key={tab}
-                type="button"
-                role="tab"
-                aria-selected={railTab === tab}
-                onClick={() => setRailTab(tab)}
-                className={cn(
-                  "flex-1 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                  railTab === tab
-                    ? "bg-background text-foreground shadow-xs"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {tab === "about" ? copy.railAboutTab : copy.railChatTab}
-              </button>
-            ))}
-          </div>
-
-          {railTab === "about" ? (
-            <>
-              {suggested && (
-                <SuggestedCard
-                  workspaceId={workspaceId}
-                  skill={skill}
-                  onConfirmed={onSaved}
-                />
-              )}
-              <AboutGroup skill={skill} status={status} />
-              <AccessGroup
-                workspaceId={workspaceId}
-                skill={skill}
-                onChanged={onSaved}
-              />
-              <DangerZone
-                workspaceId={workspaceId}
-                skill={skill}
-                onDeleted={() => router.push(backHref)}
-              />
-            </>
-          ) : (
-            // Sticky under the brain topbar (h-11) on lg so the chat rides
-            // along while the document scrolls. Sensitivity is governance
-            // (the About tab's Access group) — an agent revision never
-            // changes it here, only the four document fields.
-            <div className="lg:sticky lg:top-[60px]">
-              <SkillIterationChat
-                workspaceId={workspaceId}
-                getDraft={() => ({
-                  name,
-                  description,
-                  whenToUse,
-                  content,
-                  sensitivity: skill.sensitivity,
-                })}
-                onDraft={(draft) => {
-                  setName(draft.name);
-                  setDescription(draft.description);
-                  setWhenToUse(draft.whenToUse);
-                  setContent(draft.content);
-                }}
-                className="h-[60vh] lg:h-[calc(100vh-7rem)]"
-              />
-            </div>
+          {suggested && (
+            <SuggestedCard
+              workspaceId={workspaceId}
+              skill={skill}
+              onConfirmed={onSaved}
+            />
           )}
+          <AboutGroup skill={skill} status={status} />
+          <AccessGroup
+            workspaceId={workspaceId}
+            skill={skill}
+            onChanged={onSaved}
+          />
+          <DangerZone
+            workspaceId={workspaceId}
+            skill={skill}
+            onDeleted={() => router.push(backHref)}
+          />
         </aside>
       </div>
     </>

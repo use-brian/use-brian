@@ -5,6 +5,7 @@ import {
   filterSkillsForLibrary,
   hasLibraryFilter,
   partitionSkillsForLanding,
+  skillRowIdFromPathname,
   skillStatus,
   suggestedSkillCount,
   type SkillLibraryFilter,
@@ -264,5 +265,30 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         content: "  ",
       }),
     ).toEqual({});
+  });
+});
+
+describe("[COMP:app-web/brain-skill-editor] skillRowIdFromPathname", () => {
+  it("extracts the row id from the skill editor route", () => {
+    expect(
+      skillRowIdFromPathname(
+        "/w/ws-1/brain/skills/6f4a2c9e-1234-4abc-9def-0123456789ab",
+      ),
+    ).toBe("6f4a2c9e-1234-4abc-9def-0123456789ab");
+  });
+
+  it("ignores query and hash", () => {
+    expect(skillRowIdFromPathname("/w/ws-1/brain/skills/row-9?x=1#top")).toBe(
+      "row-9",
+    );
+  });
+
+  it("returns null off the skill editor route", () => {
+    expect(skillRowIdFromPathname(null)).toBeNull();
+    expect(skillRowIdFromPathname(undefined)).toBeNull();
+    expect(skillRowIdFromPathname("/w/ws-1/brain")).toBeNull();
+    expect(skillRowIdFromPathname("/w/ws-1/brain/skills")).toBeNull();
+    expect(skillRowIdFromPathname("/w/ws-1/p/page-1")).toBeNull();
+    expect(skillRowIdFromPathname("/brain/skills/row-1")).toBeNull();
   });
 });

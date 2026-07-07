@@ -96,6 +96,7 @@ import {
   type ChatTarget,
   type ChatTargetPage,
 } from "@/lib/chat-target";
+import { skillRowIdFromPathname } from "@/lib/skills-view";
 import {
   ArrowRight,
   Check,
@@ -773,6 +774,15 @@ export function FloatingChat({
     activeViewIdRef.current = pageIdFromPathname(pathname);
   }, [pathname]);
 
+  // Tracks the workspace skill open in the Brain skill editor, the same
+  // path-derived way. Sent as `viewingSkillRowId` so the assistant knows
+  // which skill the user is looking at — the server injects the skill's
+  // saved contents as turn context ("this skill" resolves to it).
+  const viewingSkillRowIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    viewingSkillRowIdRef.current = skillRowIdFromPathname(pathname);
+  }, [pathname]);
+
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
   const turnTextRef = useRef("");
@@ -1178,6 +1188,11 @@ export function FloatingChat({
           // (chat.ts → patchPage `add { after }`). Doc-only.
           ...(isDocOrigin && anchorBlockId
             ? { docAnchorBlockId: anchorBlockId }
+            : {}),
+          // The Brain skill editor route: tell the server which skill the
+          // user is viewing so its saved contents ride the turn context.
+          ...(viewingSkillRowIdRef.current
+            ? { viewingSkillRowId: viewingSkillRowIdRef.current }
             : {}),
           // The custom theme the user currently has applied (a per-user
           // localStorage value). Lets the server inject `refineActiveTheme` so

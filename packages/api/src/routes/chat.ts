@@ -701,6 +701,52 @@ export function buildActivePageInstruction(args: {
 }
 
 /**
+ * The `# Currently viewing — workspace skill` turn-context block for a turn
+ * whose request carried `viewingSkillRowId` (the app-web floating dock on
+ * the Brain skill editor route sends it, path-derived). Gives the model the
+ * skill's SAVED contents so "this skill" resolves to what the user is
+ * looking at. Deliberately tool-agnostic (tool-awareness rule): it never
+ * promises an edit capability — the honest default is proposing revised
+ * text in chat for the user to apply and save. Kept pure + exported so
+ * `chat.test.ts` asserts the shape without booting the route.
+ */
+export function buildViewingSkillBlock(skill: {
+  rowId: string
+  name: string
+  description: string
+  whenToUse?: string
+  content: string
+  state: 'active' | 'stale' | 'archived'
+  activatedAt?: Date
+}): string {
+  const status =
+    skill.state === 'stale'
+      ? 'stale (needs re-review)'
+      : skill.activatedAt
+        ? 'active'
+        : 'suggested (awaiting the user’s confirmation)'
+  // The store caps bodies at 5000 chars on write; the slice is a guard for
+  // legacy over-cap rows so one skill can never flood the envelope.
+  const body =
+    skill.content.length > 6000
+      ? `${skill.content.slice(0, 6000)}\n…(truncated)`
+      : skill.content
+  return (
+    `# Currently viewing — workspace skill\n` +
+    `The user has this workspace skill open in the Brain skill editor right now. ` +
+    `When they say "this skill" — or ask about the skill they are looking at — they mean this one.\n\n` +
+    `Skill: ${JSON.stringify(skill.name)} (row id: ${skill.rowId}, status: ${status})\n` +
+    `Description: ${skill.description}\n` +
+    (skill.whenToUse ? `When to use: ${skill.whenToUse}\n` : '') +
+    `\nSaved instructions (markdown):\n` +
+    `\`\`\`\`markdown\n${body}\n\`\`\`\`\n\n` +
+    `This is the last SAVED version — edits the user has typed in the editor but not saved ` +
+    `are not visible to you, and you cannot type into their editor. When they ask for ` +
+    `changes, propose the exact revised text in chat so they can apply and save it themselves.`
+  )
+}
+
+/**
  * Attach the per-turn `<turn_context>` envelope to the newest user message.
  *
  * Returns the new messages array, or `null` when no plain trailing user
@@ -1093,7 +1139,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1138,6 +1184,16 @@ export function chatRoutes(options: WebChatOptions): Router {
        * the page end. Absent on every non-empty-line turn.
        */
       docAnchorBlockId?: string
+      /**
+       * Brain-surface anchor: the `workspace_skills` row id of the skill the
+       * user is viewing in the Brain skill editor (`/w/<ws>/brain/skills/<id>`,
+       * path-derived by the app-web floating dock). When present, the skill's
+       * saved contents are injected as turn context so "this skill" resolves
+       * to what the user is looking at. Read RLS-scoped through the same
+       * workspace list the editor uses — never leaks a row the requesting
+       * user couldn't open.
+       */
+      viewingSkillRowId?: string
       /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
@@ -2662,6 +2718,33 @@ export function chatRoutes(options: WebChatOptions): Router {
           if (section) turnContextParts.push(section)
         } catch (err) {
           console.error('[chat] doc thread discovery injection failed:', err)
+        }
+      }
+
+      // ── Viewing-skill context (Brain skill editor) ──────────────
+      // The app-web floating dock sends `viewingSkillRowId` while the user
+      // is on the skill editor route. Inject the skill's saved contents as
+      // turn context so "this skill" resolves to what they are looking at.
+      // Read through the same RLS-scoped workspace list the editor itself
+      // uses (`listForWorkspace` + actingUserId), so the chat can never
+      // surface a skill the requesting user couldn't open in the editor.
+      if (
+        typeof requestedViewingSkillRowId === 'string' &&
+        requestedViewingSkillRowId &&
+        assistant.workspaceId
+      ) {
+        try {
+          const { createDbWorkspaceSkillStore } = await import('../db/skill-store.js')
+          const workspaceSkills = await createDbWorkspaceSkillStore().listForWorkspace(
+            assistant.workspaceId,
+            { actingUserId: user.id },
+          )
+          const viewedSkill = workspaceSkills.find(
+            (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
+          )
+          if (viewedSkill) turnContextParts.push(buildViewingSkillBlock(viewedSkill))
+        } catch (err) {
+          console.error('[chat] viewing-skill context injection failed:', err)
         }
       }
 

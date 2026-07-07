@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
 import type { Message } from '@sidanclaw/core'
 
 describe('[COMP:api/chat-route] sanitizeTitle', () => {
@@ -251,6 +251,54 @@ describe('[COMP:api/chat-route] buildActivePageInstruction', () => {
     const thread = buildActivePageInstruction({ isEmptyPage: true, isCommentThread: true })
     const noThread = buildActivePageInstruction({ isEmptyPage: true, isCommentThread: false })
     expect(thread).toBe(noThread)
+  })
+})
+
+describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
+  const base = {
+    rowId: 'row-1',
+    name: 'Research HKTV Mall Shop Contacts',
+    description: 'Finds decision-maker contacts for HKTV Mall shops',
+    whenToUse: 'Use when researching a specific HKTV Mall shop',
+    content: '1. Establish the anchor.\n2. Verify identity.',
+    state: 'active' as const,
+    activatedAt: new Date('2026-06-01T00:00:00Z'),
+  }
+
+  it('carries the identity, the saved body, and the "this skill" resolution line', () => {
+    const out = buildViewingSkillBlock(base)
+    expect(out).toContain('# Currently viewing — workspace skill')
+    expect(out).toContain('"Research HKTV Mall Shop Contacts"')
+    expect(out).toContain('row id: row-1')
+    expect(out).toContain('status: active')
+    expect(out).toContain('When to use: Use when researching a specific HKTV Mall shop')
+    expect(out).toContain('1. Establish the anchor.')
+    expect(out).toContain('this skill')
+  })
+
+  it('is tool-agnostic and honest about the editor: last SAVED version, propose text in chat', () => {
+    const out = buildViewingSkillBlock(base)
+    // Tool-awareness rule: never name a tool that may not be injected.
+    expect(out).not.toMatch(/skill_manage|proposeSkill|patchPage|useSkill/)
+    expect(out).toContain('last SAVED version')
+    expect(out).toContain('propose the exact revised text in chat')
+  })
+
+  it('derives status: stale wins, never-activated reads as suggested', () => {
+    expect(
+      buildViewingSkillBlock({ ...base, state: 'stale' }),
+    ).toContain('status: stale (needs re-review)')
+    expect(
+      buildViewingSkillBlock({ ...base, activatedAt: undefined }),
+    ).toContain('status: suggested')
+  })
+
+  it('omits the when-to-use line when absent and truncates an over-cap legacy body', () => {
+    const noWhen = buildViewingSkillBlock({ ...base, whenToUse: undefined })
+    expect(noWhen).not.toContain('When to use:')
+    const long = buildViewingSkillBlock({ ...base, content: 'x'.repeat(7000) })
+    expect(long).toContain('…(truncated)')
+    expect(long.length).toBeLessThan(7000)
   })
 })
 

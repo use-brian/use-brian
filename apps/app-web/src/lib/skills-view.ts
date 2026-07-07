@@ -141,6 +141,24 @@ export function suggestedSkillCount(
   return skills.filter((s) => skillStatus(s) === "suggested").length;
 }
 
+/** The skill editor route — `/w/<workspaceId>/brain/skills/<skillRowId>`. */
+const SKILL_EDITOR_PATH_RE = /^\/w\/[^/]+\/brain\/skills\/([^/?#]+)/;
+
+/**
+ * The workspace-skill row id when `pathname` is the Brain skill editor
+ * route, else `null`. The floating assistant dock derives it per pathname
+ * change (the `pageIdFromPathname` recipe) and sends it as
+ * `viewingSkillRowId` on `/api/chat`, so the model knows which skill the
+ * user is looking at — "this skill" resolves server-side, RLS-scoped.
+ */
+export function skillRowIdFromPathname(
+  pathname: string | null | undefined,
+): string | null {
+  if (!pathname) return null;
+  const match = SKILL_EDITOR_PATH_RE.exec(pathname);
+  return match ? match[1] : null;
+}
+
 /**
  * The PATCH body for an Instructions save: only the fields that actually
  * changed (trim-compared against the loaded skill). An empty object means
