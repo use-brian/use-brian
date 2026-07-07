@@ -239,7 +239,7 @@ const deleteEntityInputSchema: z.ZodType<DeleteEntityInput> = z.object({
 const queryEntitiesInputSchema: z.ZodType<QueryEntitiesInput> = z.object({
   workspaceId: idSchema,
   entityTypeId: idSchema.describe(
-    'UUID of the user-defined entity type (or a `builtin:*` id once Phase 2 lands the adapter). Phase 1: only user-defined types are queried through this tool — for built-ins use the typed tools (`listTasks`, `crmListContacts`, ...).',
+    'UUID of the user-defined entity type. Only user-defined types are queried through this tool — for built-ins use the typed tools (`listTasks`, `crmListContacts`, ...).',
   ),
   filters: z
     .array(entityFilterSchema)
@@ -750,7 +750,7 @@ export function createQueryEntitiesTool(
       'Use when the user asks a question that needs schema-aware row access — e.g. "show me Recipes with prep_time under 20 minutes sorted by title". ' +
       'For full-text or semantic search over the brain, use `search` instead. For data block rows on a doc page, use `queryDataBlock`. ' +
       '\n\n' +
-      'Built-in ids (`builtin:task`, etc.) are NOT supported by this tool in Phase 1 — use the typed list tools (`listTasks`, `crmListContacts`, ...) which already understand the dedicated tables. ' +
+      'Built-in ids (`builtin:task`, etc.) are NOT supported by this tool — use the typed list tools (`listTasks`, `crmListContacts`, ...) which already understand the dedicated tables. ' +
       '\n\n' +
       'Returns `{ rows: DocEntityInstance[], nextCursor?: string }`.',
     inputSchema: queryEntitiesInputSchema,

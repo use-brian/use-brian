@@ -34,7 +34,8 @@ export function createInspectionTools(store: InspectionStore): {
       'Returns the saving assistant name, the originating session id, ' +
       'and ~6 surrounding messages so you can see what was being ' +
       'discussed when the save happened. Use this when the user asks ' +
-      '"why was this saved?" or "what was the conversation?".',
+      '"why was this saved?" or "what was the conversation?". ' +
+      'For the row\'s source episode and version history rather than the chat around it, use `inspectRowProvenance`.',
     inputSchema: z.object({
       memoryId: z
         .string()
@@ -113,7 +114,8 @@ export function createInspectionTools(store: InspectionStore): {
       'Walk the provenance chain for any brain row — entity / edge / ' +
       'task / contact / company / deal / file / memory. Returns the ' +
       'source episode (where the row was derived from) and a shallow ' +
-      'supersession history.',
+      'supersession history. ' +
+      'Use this for a deep audit walk over any row kind. For the chat conversation around when a memory was saved use `inspectMemoryProvenance`.',
     inputSchema: z.object({
       primitive: z
         .enum(['memory', 'entity', 'entity_link', 'task', 'contact', 'company', 'deal', 'workspace_file'])

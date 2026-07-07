@@ -920,7 +920,7 @@ export function createCrmTools(
     description:
       'Create a new deal in the current workspace. A deal is a sales-pipeline opportunity (lead → qualified → proposal → negotiation → won/lost). ' +
       'Stage defaults to `lead` if omitted. At least one of `contact_id` or `company_id` is required — a deal must be linked to who it\'s with. ' +
-      'Amount is in dollars (NUMERIC), not cents — pass 50000 for $50k. close_date is a calendar date in YYYY-MM-DD format. ' +
+      'Amount is a number of dollars, not cents — pass 50000 for $50k. close_date is a calendar date in YYYY-MM-DD format. ' +
       'To change stage later, use advanceDealStage (the canonical stage-transition verb), not updateDeal.',
     inputSchema: z
       .object({
@@ -1153,7 +1153,7 @@ export function createCrmTools(
     requiresCapability: 'crm',
     description:
       'Move a deal to a new pipeline stage. Valid stages: lead, qualified, proposal, negotiation, won, lost. ' +
-      'This is the canonical verb for stage transitions - use it instead of updateDeal so the brain has a clean cut-point for stage-change events (when sync ships, this is the transition an external system is notified of).',
+      'This is the canonical verb for stage transitions - use it instead of updateDeal so the brain has a clean cut-point for stage-change events.',
     inputSchema: z.object({
       id: idShape,
       stage: stageEnum,

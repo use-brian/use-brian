@@ -215,7 +215,8 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
       'Apply a pending brain reclassifier suggestion. Today this is used for ' +
       'attribute candidates — the reclassifier saw a memory that looks like ' +
       'a structured fact about an entity (e.g. "Alice is CEO"), and accepting ' +
-      'promotes the fact into the entity\'s attributes via D.7 supersession. ' +
+      'promotes the fact into the entity\'s attributes as a new version in ' +
+      'the prior-version chain. ' +
       'The original memory stays as provenance. Caller must be the memory\'s ' +
       'original author (existing promoteMemoryToEntity gate).',
     inputSchema: z.object({
@@ -312,7 +313,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
       'recreates the memory; `edge` retracts the entity_link. Use when the ' +
       'user says "undo that change", "put that memory back", or wants to ' +
       'roll back a self-healing decision. Attribute promotions cannot be ' +
-      'undone via this tool — they go through D.7 supersession; revert by ' +
+      'undone via this tool — they go through the prior-version chain; revert by ' +
       'using the existing entity-correction tools to supersede again.',
     inputSchema: z.object({
       candidate_id: z.string().uuid(),
@@ -398,7 +399,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           case 'attribute': {
             return {
               data:
-                'Attribute promotions cannot be undone via this tool. The D.7 supersession ' +
+                'Attribute promotions cannot be undone via this tool. The prior-version ' +
                 'chain is itself reversible — use the existing entity-correction surface to ' +
                 'supersede again with the prior attribute set.',
               isError: true,
@@ -572,7 +573,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         .optional()
         .describe(
           'Opt-in: run a third LLM-clustering pass that catches semantic ' +
-            'aliases the lexical passes miss (e.g. "DD" ↔ "DeltaDeFi"). ' +
+            'aliases the lexical passes miss (e.g. "AC" ↔ "Acme Corp"). ' +
             'Costs one Flash-class LLM call per invocation. Default false.',
         ),
       llm_auto_apply_threshold: z
@@ -645,10 +646,10 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     description:
       'Register an alternate name for an existing entity. After this, ' +
       'every extraction or chat mention of the alias resolves to the ' +
-      'same entity row — Pipeline B no longer creates a duplicate. ' +
-      'Use when the user says "DD is the same as DeltaDeFi", "tonic ' +
-      'is short for deltadefi-protocol/tonic", or "MeshJS/multisig ' +
-      'is the multisig repo". Aliases are stored lowercase but ' +
+      'same entity row — ingest no longer creates a duplicate. ' +
+      'Use when the user says "AC is the same as Acme Corp", "tonic ' +
+      'is short for acme-labs/tonic", or "acme-labs/gateway ' +
+      'is the gateway repo". Aliases are stored lowercase but ' +
       'case-insensitively matched. Returns a conflict error (with the ' +
       'other entity id) if the alias is already bound to a different ' +
       'live entity in this workspace; resolve via dedupeEntities or ' +
@@ -719,7 +720,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     name: 'splitAlias',
     description:
       'Remove a previously-registered alias from an entity. Use when ' +
-      'the user says "actually DD is NOT DeltaDeFi" or "stop treating ' +
+      'the user says "actually AC is NOT Acme Corp" or "stop treating ' +
       'X as Y". The next extraction of the removed alias will resolve ' +
       'as a new entity (or whatever else matches it). Idempotent — ' +
       'removing an alias that was not registered is a no-op.',

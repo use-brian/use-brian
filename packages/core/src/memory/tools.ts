@@ -157,8 +157,8 @@ export function createMemoryTools(
         .array(z.string())
         .optional()
         .describe(
-          'Tags — the single semantic axis for memories post Phase 4 ' +
-            "(retire-memory-type). Use `voice` ONLY for brand voice rules " +
+          'Tags — the single semantic axis for memories. ' +
+            'Use `voice` ONLY for brand voice rules ' +
             'on a team-scoped distribution assistant (they render in a ' +
             'dedicated `## Voice Rules` block). Use `operational-state` ' +
             'for short-lived snapshots that should be pruned when stale. ' +
@@ -497,7 +497,9 @@ export function createMemoryTools(
 
   const getMemory = buildTool({
     name: 'getMemory',
-    description: 'Retrieve memory details. Use with an ID from the memory index, or search by keywords.',
+    description:
+      'Retrieve one memory\'s full detail when you have its ID from the memory index. ' +
+      'To find memories by topic, use `search` (it returns memory rows alongside every other brain primitive); reach for `getMemory` once you have the id.',
     inputSchema: z.object({
       id: z.string().optional().describe('Memory ID or prefix to fetch (e.g. "5794afc9" from [id:5794afc9] in the memory index)'),
       query: z.string().optional().describe('Keyword search (if no specific ID)'),

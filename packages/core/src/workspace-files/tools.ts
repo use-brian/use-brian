@@ -207,10 +207,10 @@ export function createFileTools(
 'Use this to author NEW text content (you provide the body). To save an UPLOADED file the user attached (an image, PDF, document), use saveFileToBrain instead — it preserves the original bytes; fileWrite would only store text. ' +
       'Path is required and must be unique in the workspace; an overwrite of an existing path returns a conflict error — pass the existing id to fileSetMeta or call fileDelete first. ' +
       'Title and summary are optional but improve discovery — they appear in the # Workspace Files L1 block. The agent should call fileSetMeta later if it learns enough to label a file it wrote without one. ' +
-      'Iterating documents (drafts) tag with `draft` while in progress; substantive content edits supersede via the staged_write approval flow (not via this tool). To lock in a draft, call fileSetMeta to remove the `draft` tag and optionally add `final` or `final:<commit_sha>`.',
+      'Iterating documents (drafts) tag with `draft` while in progress; substantive content edits supersede via the draft-approval flow (not via this tool). To lock in a draft, call fileSetMeta to remove the `draft` tag and optionally add `final` or `final:<commit_sha>`.',
     inputSchema: z.object({
       path: z.string().min(1).max(1024).describe('Workspace-relative path, e.g. "/reports/2026-Q1/recap.md". Forward slashes; leading slash optional.'),
-      content: z.string().describe('Full file content. Plain text; agents that need binary should defer to user-driven uploads (Phase B feature).'),
+      content: z.string().describe('Full file content. Plain text; agents that need binary should defer to user-driven uploads.'),
       mime: z.string().min(1).max(128).optional().describe('Defaults to inferred-from-extension or text/plain.'),
       title: z.string().min(1).max(256).optional().describe('Display label for L1 surface and search. Distinct from filename.'),
       summary: z.string().min(1).max(512).optional().describe('One-line description visible in the L1 # Workspace Files block.'),
@@ -347,7 +347,7 @@ export function createFileTools(
     requiresConfirmation: true,
     description:
       'Update metadata on an existing file: title, summary, tags, related_ids, sensitivity. Path / name / content are not editable here — to rename, fileDelete + fileWrite at the new path. Use this opportunistically when you read or write a file and learn enough to label it well. ' +
-      'For the SV(2) draft lifecycle: to lock in a draft, remove the `draft` tag and optionally add `final` (or `final:<commit_sha>`) — tag-only edits stay in-place. Substantive content edits route through the staged_write approval flow, not this tool.',
+      'For the draft lifecycle: to lock in a draft, remove the `draft` tag and optionally add `final` (or `final:<commit_sha>`) — tag-only edits stay in-place. Substantive content edits route through the draft-approval flow, not this tool.',
     inputSchema: z.object({
       file: idOrPathShape.describe('UUID or absolute workspace path of the file.'),
       title: z.string().min(1).max(256).nullable().optional().describe('Pass null to clear, omit to leave unchanged.'),
@@ -434,7 +434,7 @@ export function createFileTools(
     requiresCapability: 'files',
     requiresConfirmation: true,
     description:
-      'Permanently delete a workspace file. Both the metadata row and the GCS blob are removed. Workspace members can recover within the bucket\'s 30-day soft-delete window via ops, but no in-product undo. Default policy is `block` — a workspace owner must opt in to allow this from chat.',
+      'Permanently delete a workspace file. Both the metadata row and the stored file are removed. Workspace members can recover within a 30-day soft-delete window through support, but there is no in-product undo. Default policy is `block` — a workspace owner must opt in to allow this from chat.',
     inputSchema: z.object({
       file: idOrPathShape.describe('UUID or absolute workspace path of the file.'),
     }),

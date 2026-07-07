@@ -173,7 +173,8 @@ export function createRetrievalTools(
     description:
       'Fetch a brain entity by id or display_name with a rich rollup (summary counts + embedded recent_episodes, recent_memory, open_tasks, edges). ' +
       'Supports `as_of` for point-in-time reads, `walk_depth` / `walk_edge_types` for edge expansion, and `include` / `exclude` / `limits` to narrow the embedded sections. ' +
-      'Auto-follows merged-entity supersession; the breadcrumb surfaces in `meta.followed_supersession`.',
+      'Auto-follows merged-entity supersession; the breadcrumb surfaces in `meta.followed_supersession`. ' +
+      'Use this when you already have an entity id or name and want its full rollup. To find an entity by topic first, use `search`.',
     inputSchema: getEntitySchema,
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -204,9 +205,10 @@ export function createRetrievalTools(
     description:
       'Hybrid search across the company brain. Returns matched rows keyed by `primitive` + `row_id`. ' +
       'Supports `scope` (primitive kind), `filters` (flat key-value, per-primitive allowlist), `limit`, and opaque `cursor` pagination. ' +
-      'Bi-temporal `as_of` defaults to now. Vector fusion ships with WS-8; v1 uses FTS + graph + recency. ' +
+      'Bi-temporal `as_of` defaults to now. Combines full-text, graph, and recency signals. ' +
       'Rows with `primitive: "file_segment"` are passages inside a stored document (capped per file here); ' +
-      'follow up with the per-file content tool using their `file_id` to search or read that document in depth.',
+      'follow up with the per-file content tool using their `file_id` to search or read that document in depth. ' +
+      'Use this to find something by topic across every brain primitive (memories, entities, tasks, files). To fetch one entity by id/name use `getEntity`; to fetch one memory by id use `getMemory`; for typed rows of a user-defined type use `queryEntities`.',
     inputSchema: searchSchema,
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -275,7 +277,8 @@ export function createRetrievalTools(
     description:
       'Trace a row to its source Episode, authorship, supersession chain, and derived-from references. ' +
       'One level deep — the model can call again on returned `row_id`s to follow further. ' +
-      'Inaccessible sources surface as `source_episode: null` and inaccessible `derived_from` entries are omitted (silent redaction, P1-8).',
+      'Inaccessible sources surface as `source_episode: null` and inaccessible `derived_from` entries are omitted (silently redacted). ' +
+      'Use this to trace where a row you retrieved came from. For the full version-change timeline of a row use `getRowHistory`; for a deep multi-hop chain walk in an audit context use `inspectRowProvenance`.',
     inputSchema: provenanceSchema,
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -304,7 +307,7 @@ export function createRetrievalTools(
   const markUseful = buildTool({
     name: 'markUseful',
     description:
-      'Record an opt-in usefulness signal for a retrieved row (CL-7 raw-retrieval feedback). Idempotent; repeated calls do not error.',
+      'Record an opt-in usefulness signal for a retrieved row. Idempotent; repeated calls do not error.',
     inputSchema: markUsefulSchema,
     isConcurrencySafe: true,
     isReadOnly: false,
@@ -356,10 +359,10 @@ export function createRetrievalTools(
   const getRowHistory = buildTool({
     name: 'getRowHistory',
     description:
-      'Trace the full bi-temporal version chain of a brain row (D.7 supersession audit). ' +
+      'Trace the full bi-temporal version chain of a brain row. ' +
       'Returns every version oldest→newest with status (active / superseded / retracted), validity window, ' +
       'authorship, and `current_id` — the version active now or at `as_of`. ' +
-      'Use to answer "how did this fact change over time" or "who created/edited this row". ' +
+      'Use to answer "how did this fact change over time" or "who created/edited this row". To trace where a row came from (source episode) use `provenance` instead. ' +
       '`include_retracted` defaults to true.',
     inputSchema: rowHistorySchema,
     isConcurrencySafe: true,

@@ -452,7 +452,7 @@ const queryDataBlockInputSchema = z.object({
     .max(512)
     .optional()
     .describe(
-      'Opaque pagination cursor from a prior call. Phase 1 returns the full set in one call; the parameter is reserved for the Phase 3 paginated bindings.',
+      'Opaque pagination cursor from a prior call. The full set is returned in one call today; this parameter is reserved for paginated bindings that are not yet available.',
     ),
 })
 
@@ -1188,7 +1188,7 @@ export function createQueryDataBlockTool(deps: DocToolDeps): Tool {
       '\n\n' +
       'The page outline carries the data block\'s shape (entity, properties, row count) but NOT the rows themselves. This tool fetches the rows by re-running the block\'s binding against the live store. ' +
       '\n\n' +
-      'Returns `{ rows: <unknown[]>, nextCursor?: string }`. Phase 1 returns the full set in one call — `cursor` / `limit` are accepted but unused; Phase 3 wires pagination.',
+      'Returns `{ rows: <unknown[]>, nextCursor?: string }`. The full set is returned in one call today — `cursor` / `limit` are accepted but unused; pagination is not yet available.',
     inputSchema: queryDataBlockInputSchema,
     isConcurrencySafe: true,
     isReadOnly: true,
