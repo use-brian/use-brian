@@ -1,0 +1,35 @@
+{
+  "judgeModel": "claude-fable-5",
+  "domains": {
+    "channels": {
+      "justification-grounding": 3.25,
+      "nearest-route": 3,
+      "no-invented-ui": 4
+    },
+    "connectors": {
+      "justification-grounding": 2.5,
+      "nearest-route": 2.75,
+      "no-invented-ui": 3.25
+    },
+    "crm": {
+      "justification-grounding": 1,
+      "nearest-route": 1.25,
+      "no-invented-ui": 2.5
+    },
+    "doc-kb": {
+      "justification-grounding": 2.75,
+      "nearest-route": 3,
+      "no-invented-ui": 3.25
+    },
+    "scheduling": {
+      "justification-grounding": 3.5,
+      "nearest-route": 3.75,
+      "no-invented-ui": 4
+    },
+    "workflow-triggers": {
+      "justification-grounding": 3.14,
+      "nearest-route": 2.86,
+      "no-invented-ui": 3.71
+    }
+  }
+}
