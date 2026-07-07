@@ -51,6 +51,10 @@ const workspaceSkillStore = {
   confirmSkill: vi.fn(),
   create: vi.fn(),
   getByIdSystem: vi.fn(),
+  update: vi.fn(),
+  delete: vi.fn(),
+  publish: vi.fn(),
+  unpublish: vi.fn(),
 }
 
 const workspaceStore = {
@@ -441,6 +445,62 @@ describe('[COMP:api/skills-route] PATCH /:id — D2 trust + sensitivity', () => 
       's-1',
       expect.objectContaining({ content: '# new body', sensitivity: 'public' }),
     )
+  })
+})
+
+// Regression for the fls.com.hk incident: a skill lives in a TEAM workspace
+// that is not the editor's personal/primary workspace. The legacy userId-keyed
+// store pinned resolvePrimaryWorkspace() (personal first), so the UPDATE/DELETE
+// matched zero rows → 404 "Skill not found" and Delete silently no-op'd. When
+// the workspace stores are injected the mutation routes must derive the
+// workspace from the skill ROW (getByIdSystem) + gate on membership.
+describe('[COMP:api/skills-route] PATCH / DELETE — workspace derived from the skill row', () => {
+  it('PATCH updates in the SKILL workspace, not the caller primary workspace', async () => {
+    workspaceSkillStore.getByIdSystem.mockResolvedValueOnce(
+      wsSkill({ rowId: 'row-1', workspaceId: 'w-team' }),
+    )
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceSkillStore.update.mockResolvedValueOnce(
+      wsSkill({ rowId: 'row-1', workspaceId: 'w-team' }),
+    )
+    const res = await request(wsApp())
+      .patch('/api/skills/row-1')
+      .send({ content: '# new body' })
+    expect(res.status).toBe(200)
+    expect(res.body.rowId).toBe('row-1')
+    expect(workspaceSkillStore.update).toHaveBeenCalledWith(
+      'u-1',
+      'w-team',
+      'row-1',
+      expect.objectContaining({ content: '# new body' }),
+    )
+    // The legacy primary-workspace path must NOT be taken when ws stores exist.
+    expect(skillStore.update).not.toHaveBeenCalled()
+  })
+
+  it('PATCH 404s on a missing row and on a non-member (never touches update)', async () => {
+    workspaceSkillStore.getByIdSystem.mockResolvedValueOnce(null)
+    const gone = await request(wsApp()).patch('/api/skills/ghost').send({ name: 'X' })
+    expect(gone.status).toBe(404)
+
+    workspaceSkillStore.getByIdSystem.mockResolvedValueOnce(wsSkill({ workspaceId: 'w-team' }))
+    workspaceStore.getRole.mockResolvedValueOnce(null)
+    const notMember = await request(wsApp()).patch('/api/skills/row-1').send({ name: 'X' })
+    expect(notMember.status).toBe(404)
+
+    expect(workspaceSkillStore.update).not.toHaveBeenCalled()
+  })
+
+  it('DELETE hard-deletes in the SKILL workspace (was a silent no-op before)', async () => {
+    workspaceSkillStore.getByIdSystem.mockResolvedValueOnce(
+      wsSkill({ rowId: 'row-1', workspaceId: 'w-team' }),
+    )
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceSkillStore.delete.mockResolvedValueOnce(true)
+    const res = await request(wsApp()).delete('/api/skills/row-1')
+    expect(res.status).toBe(204)
+    expect(workspaceSkillStore.delete).toHaveBeenCalledWith('u-1', 'w-team', 'row-1')
+    expect(skillStore.delete).not.toHaveBeenCalled()
   })
 })
 

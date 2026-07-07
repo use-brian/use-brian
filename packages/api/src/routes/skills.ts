@@ -634,6 +634,35 @@ export function skillRoutes({
     }
   })
 
+  /**
+   * Resolve a skill's workspace from its ROW id, then gate on membership — the
+   * workspace-aware scope shared by the mutation routes (PATCH / DELETE /
+   * publish / unpublish). A skill lives in exactly ONE workspace
+   * (`workspace_skills.workspace_id`), which is NOT necessarily the caller's
+   * personal/primary workspace. The legacy userId-keyed store pinned
+   * `resolvePrimaryWorkspace()` (personal workspace first), so a team-workspace
+   * skill matched zero rows and 404'd "Skill not found" for anyone whose
+   * personal workspace wasn't the skill's — a save/delete on any team skill was
+   * unreachable. Mirrors `resolveAccessContext` + the `/:id/confirm` gate.
+   * Returns a `legacy` sentinel when the workspace stores aren't injected so
+   * minimal mounts fall back to the userId-keyed store.
+   */
+  async function resolveSkillMutationScope(
+    userId: string,
+    skillRowId: string,
+  ): Promise<
+    | { kind: 'workspace'; workspaceId: string }
+    | { kind: 'legacy' }
+    | { kind: 'not-found' }
+  > {
+    if (!workspaceSkillStore || !workspaceStore) return { kind: 'legacy' }
+    const skill = await workspaceSkillStore.getByIdSystem(skillRowId)
+    if (!skill) return { kind: 'not-found' }
+    const role = await workspaceStore.getRole(userId, skill.workspaceId)
+    if (!role) return { kind: 'not-found' }
+    return { kind: 'workspace', workspaceId: skill.workspaceId }
+  }
+
   // ── PATCH /:id — update a skill ─────────────────────────────
 
   router.patch('/:id', async (req, res) => {
@@ -661,18 +690,40 @@ export function skillRoutes({
       res.status(400).json({ error: 'sensitivity must be public, internal, or confidential' }); return
     }
 
+    // D2 (brain-skill-management plan): name/content edits carry the
+    // confirm-grade trust stamp inside the store update.
+    const updates = {
+      name: name?.trim(),
+      description: description?.trim(),
+      whenToUse: whenToUse === null ? null : whenToUse?.trim(),
+      content: content?.trim(),
+      category,
+      requiresConnectors,
+      sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
+    }
+
     try {
-      // D2 (brain-skill-management plan): name/content edits carry the
-      // confirm-grade trust stamp inside the store update.
-      const skill = await skillStore.update(userId, req.params.id, {
-        name: name?.trim(),
-        description: description?.trim(),
-        whenToUse: whenToUse === null ? null : whenToUse?.trim(),
-        content: content?.trim(),
-        category,
-        requiresConnectors,
-        sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
-      })
+      const scope = await resolveSkillMutationScope(userId, req.params.id)
+      if (scope.kind === 'not-found') { res.status(404).json({ error: 'Skill not found' }); return }
+
+      if (scope.kind === 'workspace') {
+        const updated = await workspaceSkillStore!.update(userId, scope.workspaceId, req.params.id, updates)
+        if (!updated) { res.status(404).json({ error: 'Skill not found' }); return }
+        // Return the Brain projection (rowId-shaped, matching create's 201) —
+        // the enablement rows are unchanged by an edit, re-read for the shape.
+        let enabledAssistantIds: string[] = []
+        if (workspaceSkillEnablementStore) {
+          const rows = await workspaceSkillEnablementStore.listForSkill(updated.rowId, {
+            actingUserId: userId,
+          })
+          enabledAssistantIds = rows.map((r) => r.assistantId)
+        }
+        res.json(projectWorkspaceSkill(updated, enabledAssistantIds))
+        return
+      }
+
+      // Legacy fallback — workspace stores not injected (minimal mounts / tests).
+      const skill = await skillStore.update(userId, req.params.id, updates)
       if (!skill) { res.status(404).json({ error: 'Skill not found' }); return }
       res.json(skill)
     } catch (err) {
@@ -688,7 +739,12 @@ export function skillRoutes({
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
 
     try {
-      const deleted = await skillStore.delete(userId, req.params.id)
+      const scope = await resolveSkillMutationScope(userId, req.params.id)
+      if (scope.kind === 'not-found') { res.status(404).json({ error: 'Skill not found' }); return }
+      const deleted =
+        scope.kind === 'workspace'
+          ? await workspaceSkillStore!.delete(userId, scope.workspaceId, req.params.id)
+          : await skillStore.delete(userId, req.params.id)
       if (!deleted) { res.status(404).json({ error: 'Skill not found' }); return }
       res.status(204).end()
     } catch (err) {
@@ -840,7 +896,12 @@ export function skillRoutes({
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
 
     try {
-      const ok = await skillStore.publish(userId, req.params.id)
+      const scope = await resolveSkillMutationScope(userId, req.params.id)
+      if (scope.kind === 'not-found') { res.status(404).json({ error: 'Skill not found' }); return }
+      const ok =
+        scope.kind === 'workspace'
+          ? await workspaceSkillStore!.publish(userId, scope.workspaceId, req.params.id)
+          : await skillStore.publish(userId, req.params.id)
       if (!ok) { res.status(404).json({ error: 'Skill not found' }); return }
       res.json({ ok: true })
     } catch (err) {
@@ -856,7 +917,12 @@ export function skillRoutes({
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
 
     try {
-      const ok = await skillStore.unpublish(userId, req.params.id)
+      const scope = await resolveSkillMutationScope(userId, req.params.id)
+      if (scope.kind === 'not-found') { res.status(404).json({ error: 'Skill not found' }); return }
+      const ok =
+        scope.kind === 'workspace'
+          ? await workspaceSkillStore!.unpublish(userId, scope.workspaceId, req.params.id)
+          : await skillStore.unpublish(userId, req.params.id)
       if (!ok) { res.status(404).json({ error: 'Skill not found' }); return }
       res.json({ ok: true })
     } catch (err) {
