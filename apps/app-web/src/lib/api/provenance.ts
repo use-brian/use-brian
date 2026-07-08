@@ -61,29 +61,6 @@ export type Episode = {
 };
 
 /**
- * Fetch a derived row by id+kind for the provenance sheet. The sheet
- * calls this when opened from a citation pill or a Brain row.
- *
- * Backend: dispatches to the appropriate per-kind store
- * (memory-store / kb-store / crm-store / etc.) via a future
- * `/api/provenance/[kind]/[id]` route. Until that lands, callers should
- * pass the already-loaded row to the sheet directly to avoid a network
- * round-trip.
- */
-export async function getProvenanceRow(
-  kind: ProvenanceSourceKind,
-  id: string,
-  workspaceId: string,
-): Promise<ProvenanceRow | null> {
-  const q = new URLSearchParams({ workspaceId });
-  const res = await authFetch(
-    `${API_URL}/api/provenance/${encodeURIComponent(kind)}/${encodeURIComponent(id)}?${q.toString()}`,
-  );
-  if (!res.ok) return null;
-  return (await res.json()) as ProvenanceRow;
-}
-
-/**
  * Fetch a single episode for the side-sheet's source-episode card.
  *
  * Backend gap: HTTP route not yet mounted. Returns null until then.
@@ -98,30 +75,4 @@ export async function getEpisode(
   );
   if (!res.ok) return null;
   return (await res.json()) as Episode;
-}
-
-/**
- * Retract a derived row. Maps to the corrections flow in
- * docs/architecture/brain/corrections.md.
- *
- * Behaviour depends on row kind: memory/CRM rows set `valid_to=now()`;
- * KB rows from synced sources are read-only and surface as ✗ in the
- * verb-availability matrix.
- */
-export async function retractRow(
-  kind: ProvenanceSourceKind,
-  id: string,
-  workspaceId: string,
-  reason?: string,
-): Promise<{ ok: boolean; blastRadius?: { rollupsAffected: number } }> {
-  const res = await authFetch(
-    `${API_URL}/api/provenance/${encodeURIComponent(kind)}/${encodeURIComponent(id)}/retract`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ workspaceId, reason }),
-    },
-  );
-  if (!res.ok) return { ok: false };
-  return (await res.json()) as { ok: boolean; blastRadius?: { rollupsAffected: number } };
 }

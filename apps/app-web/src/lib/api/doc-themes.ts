@@ -17,7 +17,7 @@ import type { DocThemeTokens } from "@/lib/theme";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type ThemeMoodSeed = "light" | "dark" | "vivid" | "muted";
+type ThemeMoodSeed = "light" | "dark" | "vivid" | "muted";
 export type ThemeAppearance = "light" | "dark";
 
 export type DocThemeSeed = {

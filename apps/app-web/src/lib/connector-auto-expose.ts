@@ -66,7 +66,7 @@ export type AutoExposeArm = {
 };
 
 /** The active workspace, as carried by `useWorkspaces()`. */
-export type AutoExposeWorkspace = {
+type AutoExposeWorkspace = {
   id: string;
   /**
    * Live member count. Not part of the expose decision (solo workspaces

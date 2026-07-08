@@ -22,7 +22,7 @@ export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000
 export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
-export type ChannelStatus = "active" | "revoked" | "invalid";
+type ChannelStatus = "active" | "revoked" | "invalid";
 export type ChannelModelAlias = "standard" | "pro" | "max";
 export type UserAccessMode =
   | "allow_all"

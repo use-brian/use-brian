@@ -19,7 +19,7 @@
 
 import type { BrainGraph } from "@/lib/api/brain";
 
-export const EGO_NEIGHBOR_CAP = 8;
+const EGO_NEIGHBOR_CAP = 8;
 
 export function buildEgoGraph(
   graph: BrainGraph,

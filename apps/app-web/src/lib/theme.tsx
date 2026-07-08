@@ -89,7 +89,7 @@ function tokensToCss(map: Record<string, string>): string {
 }
 
 /** Build the `<style>` text that applies a custom theme's light + dark tokens. */
-export function buildCustomThemeCss(tokens: DocThemeTokens): string {
+function buildCustomThemeCss(tokens: DocThemeTokens): string {
   return (
     `html[data-palette="custom"]{${tokensToCss(tokens.light ?? {})}}` +
     `html.dark[data-palette="custom"]{${tokensToCss(tokens.dark ?? {})}}`

@@ -789,7 +789,7 @@ SlashMenuPopup.displayName = "SlashMenuPopup";
  * current block). This component only strips the `/` + query from the
  * editor; everything else is a page-state operation.
  */
-export type SlashMenuOnSelect = (
+type SlashMenuOnSelect = (
   item: SlashMenuItem,
   context: {
     /**
@@ -951,11 +951,3 @@ export function createSlashMenuExtension(options: SlashMenuExtensionOptions = {}
     },
   });
 }
-
-/**
- * Default-export shorthand for the common case (no options). Most call
- * sites will use `createSlashMenuExtension({ onSelect })` instead so
- * the consumer can wire transform-vs-insert; this no-op variant exists
- * for storybook / smoke contexts.
- */
-export const slashMenuExtension = createSlashMenuExtension();

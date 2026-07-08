@@ -456,7 +456,7 @@ export async function createInspectionSession(
 // this module. Memory cards consume these; non-memory cards consume
 // the generic functions above.
 
-export type UnverifiedMemory = {
+type UnverifiedMemory = {
   id: string;
   assistantId: string;
   userId: string;
@@ -483,7 +483,7 @@ export type UnverifiedMemory = {
 /** Project a brain-inbox memory row into the legacy UnverifiedMemory
  *  shape — used by the memory card during the rename window so the
  *  existing card props keep working. */
-export function projectMemoryRow(row: BrainInboxRow): UnverifiedMemory | null {
+function projectMemoryRow(row: BrainInboxRow): UnverifiedMemory | null {
   if (row.primitive !== "memory") return null;
   const b = row.body as Record<string, unknown>;
   return {

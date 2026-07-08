@@ -66,7 +66,7 @@ import {
  *   - Return a small "recent" set for `query === ""` (empty trigger).
  *   - Surface their own loading state by retaining the previous list.
  */
-export type FetchMembersFn = (
+type FetchMembersFn = (
   workspaceId: string,
   query: string,
 ) => Promise<PersonMentionItem[]>;
@@ -75,7 +75,7 @@ export type FetchMembersFn = (
  * Pages fetcher. Same calling convention. Optional — when omitted, the
  * Pages tab is hidden and the popup is single-tab.
  */
-export type FetchPagesFn = (
+type FetchPagesFn = (
   workspaceId: string,
   query: string,
 ) => Promise<PageMentionItem[]>;

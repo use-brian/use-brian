@@ -22,7 +22,7 @@
  * [COMP:app-web/build-events]
  */
 
-export type BuildEventKind = "reasoning" | "step";
+type BuildEventKind = "reasoning" | "step";
 
 export type BuildEvent = {
   /**

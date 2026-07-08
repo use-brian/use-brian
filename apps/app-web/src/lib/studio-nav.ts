@@ -16,13 +16,13 @@ import { isOssEdition } from "@/lib/edition";
 
 export type StudioSectionKey =
   keyof ReturnType<typeof useT>["studioPage"]["sections"];
-export type StudioGroupKey =
+type StudioGroupKey =
   keyof ReturnType<typeof useT>["studioPage"]["groups"];
 
 /** `hostedOnly` sections are dropped from the nav in the OSS edition (see
  *  `visibleStudioGroups`). Mini-apps is the only one today: its sole installable
  *  mini-apps are Feed (hosted-only) and Doc (hidden), so OSS has nothing here. */
-export type StudioSection = {
+type StudioSection = {
   key: StudioSectionKey;
   segment: string;
   hostedOnly?: boolean;

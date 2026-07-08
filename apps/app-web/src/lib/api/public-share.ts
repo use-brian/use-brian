@@ -96,7 +96,7 @@ export function buildShareMetadata(page: PublicPage | null, fallbackTitle = "Sha
   };
 }
 
-export type GuestComment = { body: string; createdAt: string };
+type GuestComment = { body: string; createdAt: string };
 export type GuestThreadView = {
   threadId: string;
   anchorBlockId: string | null;
@@ -113,20 +113,20 @@ function pageScope(pageId?: string): string {
 }
 
 /** Absolute URL for a shared page's media (image/file) byte stream. */
-export function publicMediaUrl(token: string, blockId: string, pageId?: string): string {
+function publicMediaUrl(token: string, blockId: string, pageId?: string): string {
   return `${API_URL}/api/public/pages/${encodeURIComponent(token)}/media/${encodeURIComponent(blockId)}${pageScope(pageId)}`;
 }
 
 /** Absolute URL for the shared page's SSE stream (grant + refresh signals). */
-export function publicStreamUrl(token: string, pageId?: string): string {
+function publicStreamUrl(token: string, pageId?: string): string {
   return `${API_URL}/api/public/pages/${encodeURIComponent(token)}/stream${pageScope(pageId)}`;
 }
 
 /** Media/stream URLs for a page published by id (the "one universal URL" model). */
-export function publishedMediaUrl(pageId: string, blockId: string): string {
+function publishedMediaUrl(pageId: string, blockId: string): string {
   return `${API_URL}/api/public/published/${encodeURIComponent(pageId)}/media/${encodeURIComponent(blockId)}`;
 }
-export function publishedStreamUrl(pageId: string): string {
+function publishedStreamUrl(pageId: string): string {
   return `${API_URL}/api/public/published/${encodeURIComponent(pageId)}/stream`;
 }
 
@@ -222,28 +222,6 @@ export async function postGuestComment(
     return (await res.json()) as { threadId: string; guestSessionToken: string };
   } catch {
     return null;
-  }
-}
-
-/** Reply to one of the guest's own threads. */
-export async function replyGuestComment(
-  token: string,
-  threadId: string,
-  args: { guestSessionToken: string; body: string },
-  pageId?: string,
-): Promise<boolean> {
-  try {
-    const res = await fetch(
-      pub(token, `/comment-threads/${encodeURIComponent(threadId)}/messages`, { page: pageId }),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(args),
-      },
-    );
-    return res.ok;
-  } catch {
-    return false;
   }
 }
 

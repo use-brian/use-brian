@@ -11,9 +11,9 @@
  * so the pill port is drop-in.)
  */
 
-export const KB_GAP_REFRESH_EVENT = "sidan:kb-gap-refresh";
+const KB_GAP_REFRESH_EVENT = "sidan:kb-gap-refresh";
 
-export type KbGapRefreshDetail = {
+type KbGapRefreshDetail = {
   /** Scopes the refresh to a specific workspace. */
   workspaceId: string | null;
 };

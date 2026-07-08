@@ -81,7 +81,7 @@ export type DocOpEvent = {
 };
 
 /** The window CustomEvent name the bridge dispatches on. */
-export const DOC_OP_EVENT = "doc:op-applied" as const;
+const DOC_OP_EVENT = "doc:op-applied" as const;
 
 export type DocSseHandlers = {
   /**

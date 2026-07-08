@@ -40,7 +40,7 @@ export type ApprovalKind =
   | "staged_skill_update";
 
 /** Provenance surface for `staged_write` rows — which credential class the agent used. */
-export type StagedWriteSurface = "brain_mcp" | "assistant_mcp" | "public_api";
+type StagedWriteSurface = "brain_mcp" | "assistant_mcp" | "public_api";
 
 export type PendingApprovalRow = {
   id: string;
@@ -83,22 +83,13 @@ export async function listApprovals(
   return Array.isArray(data.approvals) ? data.approvals : [];
 }
 
-/** Pending count for the workspace — backs the chrome badge. */
-export async function approvalCount(workspaceId: string): Promise<number> {
-  const q = new URLSearchParams({ workspaceId });
-  const res = await authFetch(`${API_URL}/api/approvals/count?${q.toString()}`);
-  if (!res.ok) return 0;
-  const data = (await res.json()) as { pending?: number };
-  return typeof data.pending === "number" ? data.pending : 0;
-}
-
 /**
  * Approve or reject. Resolves `workflow_step` and `tool_invocation` in
  * place; for the other kinds the backend replies 422 with a
  * `nativeSurface` directive, returned here as `{ ok: false,
  * nativeSurface }` so the caller can deep-link.
  */
-export async function respondToApproval(
+async function respondToApproval(
   id: string,
   decision: "approved" | "rejected",
   reason?: string,
@@ -141,7 +132,7 @@ export function isSkillApprovalKind(kind: ApprovalKind): kind is SkillApprovalKi
 }
 
 /** Snapshot of a staged update's target skill, joined server-side. */
-export type SkillApprovalTargetSkill = {
+type SkillApprovalTargetSkill = {
   id: string;
   name: string;
   slug: string;

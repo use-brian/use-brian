@@ -174,7 +174,7 @@ export function isPanelId(value: string | null | undefined): value is PanelId {
 }
 
 /** Query param naming the open doc-shell panel tab (`/p?panel=approvals`). */
-export const PANEL_PARAM = "panel";
+const PANEL_PARAM = "panel";
 
 /**
  * Read the active panel id off a location search string / `URLSearchParams`,
@@ -229,7 +229,7 @@ export function docEntryPath(
 }
 
 /** Query param the desktop quick-capture hotkey sets to request a fresh draft. */
-export const CAPTURE_PARAM = "capture";
+const CAPTURE_PARAM = "capture";
 
 /**
  * True if a location carries the desktop quick-capture request (`?capture=1`).

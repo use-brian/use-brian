@@ -41,7 +41,7 @@
 export const NODE_RADIUS_MIN = 2.5;
 export const NODE_RADIUS_MAX = 7;
 /** Degree at which the radius curve saturates. */
-export const NODE_DEGREE_CAP = 12;
+const NODE_DEGREE_CAP = 12;
 
 /**
  * Node radius in graph units — log curve so the visual difference between
@@ -60,7 +60,7 @@ export function nodeRadius(degree: number): number {
  * draw their labels into each other when the discs are merely
  * non-overlapping.
  */
-export const COLLIDE_PADDING = 4;
+const COLLIDE_PADDING = 4;
 
 type ForceNode = { x?: number; y?: number; degree?: number };
 
@@ -125,7 +125,7 @@ export function makeCollideForce(
 }
 
 /** Default member-to-centroid strength for `makeClusterForce`. */
-export const CLUSTER_STRENGTH = 0.3;
+const CLUSTER_STRENGTH = 0.3;
 /** Communities below this size get no gravity (anchor handles strays). */
 export const CLUSTER_MIN_SIZE = 3;
 
@@ -181,7 +181,7 @@ export function makeClusterForce(
 }
 
 /** Default pull-to-origin strength for `makeAnchorForce`. */
-export const ANCHOR_STRENGTH = 0.12;
+const ANCHOR_STRENGTH = 0.12;
 
 /**
  * Weak radial pull toward the origin (the d3 `forceX`/`forceY` pattern,
@@ -280,7 +280,7 @@ export function clusterLabelAlpha(zoomRel: number): number {
 /** On-screen label font size in CSS px (divide by globalScale to draw). */
 export const LABEL_FONT_PX = 11;
 export const LABEL_FONT_PX_EMPHASIZED = 12.5;
-export const LABEL_MAX_CHARS = 28;
+const LABEL_MAX_CHARS = 28;
 
 /** On-screen cluster-heading font size in CSS px — larger than the node
  *  label so the group topic reads as a banner over the blob. */
@@ -294,7 +294,7 @@ export function truncateLabel(name: string, max: number = LABEL_MAX_CHARS): stri
 }
 
 /** Per-frame easing rate for dim transitions (fraction of remaining gap). */
-export const ALPHA_EASE_RATE = 0.25;
+const ALPHA_EASE_RATE = 0.25;
 /** Snap-to-target threshold — below this the transition is "done". */
 export const ALPHA_EASE_EPSILON = 0.02;
 

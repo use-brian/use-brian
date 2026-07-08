@@ -51,12 +51,6 @@ export async function listKbGaps(workspaceId: string): Promise<ListKbGapsResult>
   };
 }
 
-/** Lightweight count for the chrome pill. Reuses `listKbGaps` internally. */
-export async function kbGapsCount(workspaceId: string): Promise<number> {
-  const { count } = await listKbGaps(workspaceId);
-  return count;
-}
-
 /** Dismiss a candidate. Idempotent — already-dismissed candidates return
  *  `ok: false`. */
 export async function dismissKbGap(

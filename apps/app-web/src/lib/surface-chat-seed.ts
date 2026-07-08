@@ -52,7 +52,7 @@ export const SURFACE_CHAT_SEED_EVENT = "doc:surface-chat-seed";
  * on SSR. Returns immediately — the panel handles the rest on the next
  * tick. An empty `prefill` is dropped.
  */
-export function requestSurfaceChatSeed(seed: SurfaceChatSeed): void {
+function requestSurfaceChatSeed(seed: SurfaceChatSeed): void {
   if (typeof window === "undefined") return;
   if (!seed.prefill.trim()) return;
   window.dispatchEvent(

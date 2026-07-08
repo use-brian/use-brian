@@ -29,7 +29,7 @@ export type StatusGroup = {
 };
 
 /** Per-kind config. Loose — only the fields the table UI sets are typed. */
-export type PropertyConfig = {
+type PropertyConfig = {
   kind: PropertyKind;
   format?: "int" | "decimal" | "percent" | "dollar" | "comma";
   options?: SelectOption[];

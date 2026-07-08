@@ -72,7 +72,7 @@ export const REVIEW_FILTERS: ReviewFilter[] = [
 /** Map a Reviews filter token to its inbox primitive. `relationships` ⇒
  *  `entity_link`; every other token defers to `brainToInboxPrimitive`
  *  (knowledge / sessions map to null and never appear as review chips). */
-export function reviewFilterToInboxPrimitive(
+function reviewFilterToInboxPrimitive(
   f: ReviewFilter,
 ): InboxPrimitive | null {
   return f === "relationships" ? "entity_link" : brainToInboxPrimitive(f);

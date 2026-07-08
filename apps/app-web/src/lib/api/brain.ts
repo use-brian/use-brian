@@ -112,7 +112,7 @@ export type BrainRow = {
  * "Show completed" reveal); `all` returns every status. Tasks-only — ignored
  * by every other primitive. See packages/api/src/routes/brain.ts `/list`.
  */
-export type TaskStatusFilter = "active" | "completed" | "all";
+type TaskStatusFilter = "active" | "completed" | "all";
 
 export type EntityRollup = {
   id: string;
@@ -320,7 +320,7 @@ export type KnowledgeRelatedRef = {
 };
 
 /** Provenance of a GitHub-synced entry (null for manual entries). */
-export type KnowledgeEntrySource = {
+type KnowledgeEntrySource = {
   id: string;
   repo: string;
   branch: string;
@@ -662,24 +662,4 @@ export function projectInboxRowToBrainRow(row: BrainInboxRow): BrainRow {
         summary: typeof b.mime_type === "string" ? b.mime_type : null,
       };
   }
-}
-
-/**
- * Pending changes (staged_write approvals) affecting a specific entity.
- *
- * Backend gap: `pending_approvals.approval_payload` needs an
- * `entity_ids: UUID[]` field to enable this query. Until then this
- * returns an empty array.
- */
-export async function listPendingForEntity(
-  entityId: string,
-  workspaceId: string,
-): Promise<BrainRow[]> {
-  const q = new URLSearchParams({ workspaceId, entityId });
-  const res = await authFetch(
-    `${API_URL}/api/approvals/pending?${q.toString()}`,
-  );
-  if (!res.ok) return [];
-  const data = (await res.json()) as { approvals?: BrainRow[] };
-  return Array.isArray(data.approvals) ? data.approvals : [];
 }

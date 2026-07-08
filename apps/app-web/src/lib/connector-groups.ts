@@ -33,8 +33,6 @@
  * [COMP:app-web/connector-groups]
  */
 
-export type ConnectorGroupId = "shared" | "personal" | "available" | "workspace" | "builtin";
-
 export type GroupableConnector = {
   /** Provider slug — matches the registry id (e.g. "files"). */
   id?: string;

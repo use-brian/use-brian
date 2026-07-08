@@ -56,7 +56,7 @@ export type DocSession = {
  * `session_messages.attachments`). Soft-references a `workspace_files`
  * row; download resolves through `GET /api/doc-files/:workspaceId/:fileId`.
  */
-export type SessionFileAttachment = {
+type SessionFileAttachment = {
   fileId: string;
   workspaceId: string;
   path: string;

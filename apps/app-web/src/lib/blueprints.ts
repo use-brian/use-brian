@@ -29,7 +29,6 @@ import type { SearchableSelectItem } from "@/components/ui/searchable-select";
  * See structural-synthesis.md -> "The blueprint object".
  */
 export const BUILTIN_BLUEPRINT_SLUGS = [] as const;
-export type BuiltinBlueprintSlug = (typeof BUILTIN_BLUEPRINT_SLUGS)[number];
 
 /** A page template is a BLUEPRINT iff it carries a non-null extraction spec. */
 export function isBlueprint(template: CustomPageTemplateSummary): boolean {
