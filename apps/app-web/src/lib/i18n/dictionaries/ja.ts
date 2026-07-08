@@ -1804,14 +1804,7 @@ export const ja: Dictionary = {
       },
     },
     detail: {
-      stepStatus: {
-        awaitingApproval: "承認待ち",
-      },
-      approveAction: "承認",
-      rejectAction: "却下",
-      approveComment: "コメント（任意）",
       backToList: "すべてのワークフロー",
-      approveError: "処理できませんでした。もう一度お試しください。",
       notFound: "ワークフローが見つかりません",
     },
     board: {
@@ -2270,13 +2263,6 @@ export const ja: Dictionary = {
       blocked: "ブロック中",
       done: "完了",
       archived: "アーカイブ済み",
-    },
-    unconfirmedBanner: {
-      headingOne: "未確認の項目が1件あります",
-      headingMany: "未確認の項目が{count}件あります",
-      review: "確認する",
-      dismiss: "閉じる",
-      dismissAria: "この通知を閉じる",
     },
     graphView: {
       empty: "つながりのあるエンティティはまだありません。",

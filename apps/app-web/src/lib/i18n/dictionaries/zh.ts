@@ -1788,14 +1788,7 @@ export const zh: Dictionary = {
       },
     },
     detail: {
-      stepStatus: {
-        awaitingApproval: "等待你核准",
-      },
-      approveAction: "核准",
-      rejectAction: "駁回",
-      approveComment: "備註（選填）",
       backToList: "所有工作流程",
-      approveError: "無法處理，請再試一次。",
       notFound: "找不到此工作流程",
     },
     board: {
@@ -2249,13 +2242,6 @@ export const zh: Dictionary = {
       blocked: "受阻",
       done: "已完成",
       archived: "已封存",
-    },
-    unconfirmedBanner: {
-      headingOne: "有 1 個項目待確認",
-      headingMany: "有 {count} 個項目待確認",
-      review: "查看",
-      dismiss: "關閉",
-      dismissAria: "關閉此提醒",
     },
     graphView: {
       empty: "尚未有相互連結的實體。",

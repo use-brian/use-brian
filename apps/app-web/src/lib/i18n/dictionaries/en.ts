@@ -1992,14 +1992,7 @@ export const en = {
       },
     },
     detail: {
-      stepStatus: {
-        awaitingApproval: "Awaiting your approval",
-      },
-      approveAction: "Approve",
-      rejectAction: "Reject",
-      approveComment: "Comment (optional)",
       backToList: "All workflows",
-      approveError: "Could not resolve. Please retry.",
       notFound: "Workflow not found",
     },
     board: {
@@ -2459,13 +2452,6 @@ export const en = {
       blocked: "Blocked",
       done: "Done",
       archived: "Archived",
-    },
-    unconfirmedBanner: {
-      headingOne: "1 entry needs your OK",
-      headingMany: "{count} entries need your OK",
-      review: "Review",
-      dismiss: "Dismiss",
-      dismissAria: "Dismiss this reminder",
     },
     graphView: {
       empty: "No connected entities yet.",
