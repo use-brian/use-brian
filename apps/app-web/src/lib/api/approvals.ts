@@ -2,7 +2,7 @@
  * SDK for the unified approval queue (app-web).
  *
  * Ported from `apps/web/src/lib/api/approvals.ts` as part of the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §5a). Identical
+ * consolidation (docs/architecture/features/doc.md §5a). Identical
  * wire contract — wraps `authFetch` with typed signatures matching the REST
  * routes mounted at `/api/approvals` in `apps/api/src/index.ts`. Kept as its
  * own file (not imported from apps/web) per the same convention as

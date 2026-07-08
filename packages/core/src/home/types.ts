@@ -2,7 +2,7 @@
  * Home dock — types + the layout artifact schema.
  *
  * The "Suggested for you" surface (apps/app-web Home content pane) is built
- * from two layers (docs/plans/home-dock.md, docs/architecture/features/home-dock.md):
+ * from two layers (docs/architecture/features/home-dock.md):
  *
  *   - **Live signals** (`HomeSignals`) — assembled server-side per request from
  *     the brain inbox, approvals, autopilot goals, workflows, drafts, and brain
@@ -31,6 +31,14 @@ export type HomeSignals = {
   /** Autopilot goals needing the user: unconfirmed drafts + blocked goals.
    *  (A confirmed goal in `awaiting_approval` counts under `approvalsCount`.) */
   autopilotCount: number
+  /** Workspace connectors whose credentials stopped working
+   *  (`health_status = 'auth_failed'`) — ingestion/tools are dead until the
+   *  user reconnects. 0 in the OSS edition (no connector surface). */
+  connectorAttentionCount: number
+  /** Workflow runs that ended `failed`/`timeout` in the last 48 hours.
+   *  (`awaiting_input` runs are excluded: each one already has a pending
+   *  approval, so it is counted by `approvalsCount` — one item, one card.) */
+  workflowAttentionCount: number
   /** Soonest-first upcoming scheduled workflow runs (pre-capped). */
   upcomingWorkflows: { id: string; name: string; nextRunAt: string }[]
   /** Most-recently-edited drafts to resume (pre-capped). */
@@ -39,6 +47,9 @@ export type HomeSignals = {
   brainEntryCount: number
   /** Brain entries created in the last 7 days. */
   brainGrowth7d: number
+  /** Daily new-entry counts for the last 14 days, oldest first — the brain
+   *  card's sparkline. Empty when the source query fails (renders flat). */
+  brainSparkline: number[]
   onboarding: {
     /** Whether the workspace has at least one connected connector. */
     hasConnector: boolean
@@ -48,8 +59,23 @@ export type HomeSignals = {
 // ── Layout artifact (what `setHomeDock` writes) ───────────────────────────
 
 /** The action-card kinds the assistant may order in the "Needs you" group. */
-export const NEED_CARD_KINDS = ['brain_review', 'approvals', 'autopilot'] as const
+export const NEED_CARD_KINDS = [
+  'brain_review',
+  'approvals',
+  'autopilot',
+  'connector_attention',
+  'workflow_attention',
+] as const
 export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
+
+/** Attention-class kinds the merge ALWAYS surfaces while their signal is live,
+ *  even when the artifact omits them — a stale artifact may reorder or caption
+ *  a broken connector / failed run, but never hide it. The assistant's "include
+ *  only the kinds worth surfacing" latitude applies to the other kinds. */
+export const URGENT_NEED_KINDS: ReadonlySet<NeedCardKind> = new Set([
+  'connector_attention',
+  'workflow_attention',
+])
 
 export const homeDockLayoutSchema = z.object({
   version: z.literal(1),

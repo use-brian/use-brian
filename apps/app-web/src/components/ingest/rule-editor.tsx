@@ -4,7 +4,7 @@
  * Inline editor for one connector instance's `ingest_rules` rows.
  *
  * Ported from `apps/web/src/components/ingest/rule-editor.tsx` for the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §9 #5, CHUNK 4).
+ * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
  *
  * app-web deltas vs apps/web:
  *   - Native `<select>`/`<option>` dropdowns are replaced with the project's

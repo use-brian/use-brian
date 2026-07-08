@@ -37,6 +37,7 @@ function instance(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
     sensitivity: 'internal',
     connected: true,
     ingestionEnabled: false,
+    ingestWorkspaceId: null,
     credentialsType: 'oauth',
     healthStatus: 'ok',
     lastError: null,

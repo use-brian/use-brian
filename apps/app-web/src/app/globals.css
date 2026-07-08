@@ -1749,6 +1749,42 @@ html[data-vt-back="true"]::view-transition-new(root) {
   }
 }
 
+/* Chat activity header — the "what the assistant is doing" status label
+   (chat-activity.tsx). A brighter band sweeps left→right through muted
+   text via background-clip, the pattern the current generation of AI chat
+   UIs uses instead of bouncing-dot loaders. Theme-token driven so it holds
+   in both modes; the reduced-motion block below pins it to a static muted
+   label. */
+.chat-shimmer-text {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--muted-foreground) 72%, transparent) 0%,
+    var(--foreground) 50%,
+    color-mix(in srgb, var(--muted-foreground) 72%, transparent) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: chat-shimmer 2.2s linear infinite;
+}
+@keyframes chat-shimmer {
+  from {
+    background-position: 200% 50%;
+  }
+  to {
+    background-position: -100% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-shimmer-text {
+    animation: none;
+    background: none;
+    color: var(--muted-foreground);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in,
   .animate-rise-in,

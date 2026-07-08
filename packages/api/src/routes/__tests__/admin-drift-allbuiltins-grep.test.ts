@@ -66,7 +66,7 @@ const PLANNED_FOLLOWUP_ALLOWLIST = new Set([
   // Remove-button policy, NOT a registry mirror, so reshaping it from
   // OFFICIAL_CONNECTORS needs design intent + browser QA. Deferred to the same
   // follow-up as the apps/web copy — tracked in
-  // docs/plans/doc-web-app-consolidation.md §5b.
+  // docs/architecture/features/doc.md §5b.
   'apps/app-web/src/app/w/[workspaceId]/studio/connectors/page.tsx',
 ])
 

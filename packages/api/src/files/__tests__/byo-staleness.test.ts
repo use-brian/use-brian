@@ -9,7 +9,7 @@ function inst(over: Partial<ConnectorInstance>): ConnectorInstance {
   return {
     id: 'inst', scope: 'workspace', userId: null, workspaceId: 'ws_1', provider: 'gcs',
     label: 'GCS', connectedEmail: null, url: null, custom: false, config: {},
-    sensitivity: 'internal', connected: false, ingestionEnabled: false,
+    sensitivity: 'internal', connected: false, ingestionEnabled: false, ingestWorkspaceId: null,
     credentialsType: 'none', healthStatus: 'ok', lastError: null, lastCheckedAt: null,
     createdBy: 'u', createdAt: new Date(NOW), updatedAt: new Date(NOW),
     ...over,

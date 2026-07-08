@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/app/(app)/workflow/page.tsx` as the workflow
  * surface migration of the app consolidation
- * (docs/plans/doc-web-app-consolidation.md §5a, after KB-gaps and
+ * (docs/architecture/features/doc.md §5a, after KB-gaps and
  * approvals). Workspace workflows as a card grid; clicking one opens the
  * board view (steps + trigger + runs). "Create workflow" opens an inline
  * modal rather than navigating to a separate route.

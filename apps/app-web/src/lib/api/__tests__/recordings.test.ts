@@ -1,6 +1,6 @@
 /**
  * [COMP:web/recording-upload] Recordings SDK (app-web) — the 3-step upload flow.
- * Spec: docs/plans/recording-to-brain.md.
+ * Spec: docs/architecture/media/transcription.md.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

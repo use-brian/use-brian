@@ -21,7 +21,7 @@
  * page the resolved owner can see. The `/internal/ingest-page` endpoint resolves
  * the owner (`getBrainSyncStateSystem` → `created_by`) before calling here.
  *
- * Spec: docs/plans/canvas-brain-distillation.md.
+ * Spec: docs/architecture/brain/ingest-pipeline.md.
  *
  * [COMP:api/doc-ingest-page-runner]
  */

@@ -31,6 +31,7 @@ import {
   RefreshCw,
   Sparkles,
   Target,
+  Workflow,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -43,7 +44,7 @@ import { refreshHomeDock, type ResolvedNeed } from "@/lib/api/home-dock";
 import { type PanelId } from "@/lib/doc-page-url";
 import { useSidebarData } from "./doc-sidebar-data";
 
-type AccentKey = "review" | "approve" | "resume" | "workflow";
+type AccentKey = "review" | "approve" | "resume" | "workflow" | "alert" | "runs";
 
 // Full literal class strings (Tailwind JIT can't see constructed names).
 const ACCENT: Record<AccentKey, { text: string; chip: string; hover: string }> = {
@@ -66,6 +67,16 @@ const ACCENT: Record<AccentKey, { text: string; chip: string; hover: string }> =
     text: "text-violet-600 dark:text-violet-400",
     chip: "bg-violet-500/12 text-violet-600 dark:text-violet-400",
     hover: "hover:border-violet-500/40",
+  },
+  alert: {
+    text: "text-orange-600 dark:text-orange-400",
+    chip: "bg-orange-500/12 text-orange-600 dark:text-orange-400",
+    hover: "hover:border-orange-500/40",
+  },
+  runs: {
+    text: "text-sky-600 dark:text-sky-400",
+    chip: "bg-sky-500/12 text-sky-600 dark:text-sky-400",
+    hover: "hover:border-sky-500/40",
   },
 };
 
@@ -321,10 +332,16 @@ export function SuggestedView({
                     </span>
                   </div>
                   <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-                    <span className="font-bold text-emerald-600 dark:text-emerald-400">
-                      +{brain.growth7d}
-                    </span>{" "}
-                    {t.thisWeek} {"·"} {t.growingSteadily}
+                    {brain.growth7d > 0 ? (
+                      <>
+                        <span className="font-bold text-emerald-600 dark:text-emerald-400">
+                          +{brain.growth7d}
+                        </span>{" "}
+                        {t.thisWeek} {"·"} {t.growingSteadily}
+                      </>
+                    ) : (
+                      t.quietWeek
+                    )}
                   </div>
                   <svg
                     className="my-3.5 block w-full"
@@ -335,7 +352,7 @@ export function SuggestedView({
                     aria-hidden
                   >
                     <polyline
-                      points="0,38 43,33 86,34 128,26 171,21 213,17 256,10 300,5"
+                      points={sparklinePoints(brain.sparkline, brain.entryCount)}
                       className="stroke-sky-500 dark:stroke-sky-400"
                       strokeWidth="2.5"
                       strokeLinecap="round"
@@ -428,47 +445,14 @@ function ActionCard({
   t: SuggestedT;
   onOpenPanel?: (panel: PanelId) => void;
 }) {
-  const cfg =
-    card.kind === "brain_review"
-      ? {
-          accent: "review" as const,
-          Icon: Brain,
-          // Deep-link straight into the Reviews section (brain/page.tsx seeds
-          // section='reviews' from ?pending=true), not the grouped overview.
-          href: `/w/${workspaceId}/brain?pending=true`,
-          // Brain is a full surface, not a doc-shell panel.
-          panel: null as PanelId | null,
-          title: t.reviewTitle,
-          fallbackCaption: t.reviewCaption,
-          cta: t.reviewCta,
-        }
-      : card.kind === "approvals"
-        ? {
-            accent: "approve" as const,
-            Icon: CheckCircle2,
-            // The route redirects to the panel; `onOpenPanel` opens it as a tab
-            // directly (the href is the no-JS / other-host fallback).
-            href: `/w/${workspaceId}/approvals`,
-            panel: "approvals" as PanelId | null,
-            title: t.approvalsTitle,
-            fallbackCaption: t.approvalsCaption,
-            cta: t.approvalsCta,
-          }
-        : {
-            // Autopilot — draft goals awaiting a confirm + blocked goals. The
-            // goals board has no sidebar slot (Approvals precedent): this card
-            // and the Brain task panel are its entry points.
-            accent: "workflow" as const,
-            Icon: Target,
-            href: `/w/${workspaceId}/goals`,
-            panel: "goals" as PanelId | null,
-            title: t.autopilotTitle,
-            fallbackCaption: t.autopilotCaption,
-            cta: t.autopilotCta,
-          };
+  const cfg = cardConfig(card.kind, workspaceId, t);
   const a = ACCENT[cfg.accent];
+  // `items-stretch` is load-bearing: panel cards render as <button>, and the
+  // browser UA stylesheet gives buttons `align-items: flex-start`, which
+  // shrink-wraps the header row so the count's ml-auto has nothing to push
+  // against (the Link cards stretch fine — that's why only they looked right).
   const cardClass = cn(
-    "group relative flex flex-col rounded-2xl border border-border bg-card p-4 text-left transition-all hover:shadow-md",
+    "group relative flex flex-col items-stretch rounded-2xl border border-border bg-card p-4 text-left transition-all hover:shadow-md",
     a.hover,
   );
   const inner = (
@@ -512,6 +496,74 @@ function ActionCard({
       {inner}
     </Link>
   );
+}
+
+/** Per-kind card chrome: accent, icon, destination, copy. `panel` is set for
+ *  kinds that open as a doc-shell tab; the href is the no-JS / other-host
+ *  fallback (and the real destination for full-surface kinds). */
+function cardConfig(kind: ResolvedNeed["kind"], workspaceId: string, t: SuggestedT) {
+  switch (kind) {
+    case "brain_review":
+      return {
+        accent: "review" as const,
+        Icon: Brain,
+        // Deep-link straight into the Reviews section (brain/page.tsx seeds
+        // section='reviews' from ?pending=true), not the grouped overview.
+        href: `/w/${workspaceId}/brain?pending=true`,
+        // Brain is a full surface, not a doc-shell panel.
+        panel: null as PanelId | null,
+        title: t.reviewTitle,
+        fallbackCaption: t.reviewCaption,
+        cta: t.reviewCta,
+      };
+    case "approvals":
+      return {
+        accent: "approve" as const,
+        Icon: CheckCircle2,
+        // The route redirects to the panel; `onOpenPanel` opens it as a tab
+        // directly (the href is the no-JS / other-host fallback).
+        href: `/w/${workspaceId}/approvals`,
+        panel: "approvals" as PanelId | null,
+        title: t.approvalsTitle,
+        fallbackCaption: t.approvalsCaption,
+        cta: t.approvalsCta,
+      };
+    case "autopilot":
+      // Autopilot — draft goals awaiting a confirm + blocked goals. The
+      // goals board has no sidebar slot (Approvals precedent): this card
+      // and the Brain task panel are its entry points.
+      return {
+        accent: "workflow" as const,
+        Icon: Target,
+        href: `/w/${workspaceId}/goals`,
+        panel: "goals" as PanelId | null,
+        title: t.autopilotTitle,
+        fallbackCaption: t.autopilotCaption,
+        cta: t.autopilotCta,
+      };
+    case "connector_attention":
+      // A connected tool's credentials died at call time (health_status =
+      // 'auth_failed') — ingestion is silently paused until reconnected.
+      return {
+        accent: "alert" as const,
+        Icon: Cable,
+        href: `/w/${workspaceId}/studio/connectors`,
+        panel: null as PanelId | null,
+        title: t.connectorTitle,
+        fallbackCaption: t.connectorCaption,
+        cta: t.connectorCta,
+      };
+    case "workflow_attention":
+      return {
+        accent: "runs" as const,
+        Icon: Workflow,
+        href: `/w/${workspaceId}/workflow`,
+        panel: null as PanelId | null,
+        title: t.workflowRunsTitle,
+        fallbackCaption: t.workflowRunsCaption,
+        cta: t.workflowRunsCta,
+      };
+  }
 }
 
 function GroupLabel({
@@ -591,6 +643,30 @@ function DockSkeleton() {
       </div>
     </div>
   );
+}
+
+// The brain card's growth curve: cumulative entry total over the daily
+// new-entry counts the signals provide, normalized into the 300x44 viewBox.
+// No data (older API response, empty workspace) or a flat window renders a
+// level line rather than a fake upward one.
+function sparklinePoints(daily: number[] | undefined, entryCount: number): string {
+  const MID = "0,22 300,22";
+  if (!daily || daily.length < 2) return MID;
+  const added = daily.reduce((sum, d) => sum + d, 0);
+  let running = Math.max(0, entryCount - added);
+  const series = daily.map((d) => (running += d));
+  const min = Math.min(...series);
+  const span = Math.max(...series) - min;
+  if (span === 0) return MID;
+  const TOP = 5;
+  const BOTTOM = 39;
+  return series
+    .map((v, i) => {
+      const x = (i * 300) / (daily.length - 1);
+      const y = BOTTOM - ((v - min) / span) * (BOTTOM - TOP);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
 }
 
 function formatEdited(iso: string): string {

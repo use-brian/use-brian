@@ -4,7 +4,7 @@
  * `verified_by_user_id` column.
  *
  * Ported verbatim from `apps/web/src/lib/api/brain-inbox.ts` as part of
- * the brain surface migration (docs/plans/doc-web-app-consolidation.md
+ * the brain surface migration (docs/architecture/features/doc.md
  * §5a). Identical wire contract — only the doc header differs; the
  * imports (`@/lib/auth-fetch`, `NEXT_PUBLIC_API_URL`) already resolve in
  * app-web.

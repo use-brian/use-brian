@@ -13,6 +13,6 @@ export { createWhatsAppAdapter, type WhatsAppAdapterOptions, type WhatsAppIncomi
  * is live as a read-only ingest source. The legacy responder remains dormant
  * (disabled for BYON channels; untouched for pre-existing integrations) — see
  * docs/architecture/channels/whatsapp.md and
- * docs/plans/whatsapp-bring-your-own-number.md.
+ * docs/architecture/channels/whatsapp.md.
  */
 export const WHATSAPP_CHANNEL_LIFECYCLE = 'active' as const

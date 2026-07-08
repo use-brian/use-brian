@@ -48,7 +48,7 @@ const CHANNEL = 'session_event'
  * neither the dedicated `LISTEN` connection nor the `pg_notify` round-trips —
  * both would only hold/contend the single PGLite connection for fan-out that
  * has no second instance to reach. The launcher sets SIDANCLAW_SINGLE_PROCESS=1.
- * See docs/plans/oss-local-brain-wedge.md §12.4/§12.7.
+ * See the open-core split (repo CLAUDE.md; plan in git history) §12.4/§12.7.
  */
 const SINGLE_PROCESS = process.env.SIDANCLAW_SINGLE_PROCESS === '1'
 

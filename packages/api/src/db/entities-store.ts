@@ -45,7 +45,7 @@ import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js
  */
 
 // (Removed) `CRM_SPECIALIZED_KINDS` guard. Post CRM→entity unification
-// (docs/plans/crm-entity-unification.md) there is no `contacts` /
+// (docs/architecture/features/crm.md) there is no `contacts` /
 // `companies` / `deals` specialization row to orphan — a person / company
 // / deal IS just an `entities` row with its typed fields in `attributes`.
 // `createEntity` accepts every kind directly; the CRM tools in `crm.ts`

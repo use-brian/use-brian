@@ -11,7 +11,7 @@
  * RLS-gated). Connector facts derive from `OFFICIAL_CONNECTORS`, never a
  * hardcoded id set (registry-drift rule in CLAUDE.md).
  *
- * Spec: docs/plans/agent-facing-capability-surface.md §4 (Tier 1).
+ * Spec: docs/architecture/integrations/agent-capability-surface.md §4 (Tier 1).
  * Component tag: [COMP:control-plane/read-tools] (adapter half).
  */
 

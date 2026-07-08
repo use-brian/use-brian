@@ -16,7 +16,7 @@
  * idempotent ticks, never throws past the catch.
  *
  * Component tag: [COMP:scheduling/views-prune-worker].
- * Doc: docs/plans/a2ui-notion-feel.md.
+ * Doc: docs/architecture/features/views.md.
  */
 
 import type { SavedViewStore } from '@sidanclaw/core'

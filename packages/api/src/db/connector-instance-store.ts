@@ -56,6 +56,15 @@ export type ConnectorInstance = {
   /** Pipeline C opt-in — flipped by the Studio ▸ Ingestion control plane (migration 145). */
   ingestionEnabled: boolean
   /**
+   * Explicit ingest routing target (migration 311). When set, this instance's
+   * episodes route to THIS workspace — the seam that lets a personal connector
+   * exposed to a team workspace feed that workspace's brain. NULL → legacy
+   * routing (workspace-scoped → workspace_id; user-scoped → owner's personal
+   * workspace). Set on ingestion-enable from a workspace's Events page, cleared
+   * on disable / exposure-revoke. See `resolveInstanceWorkspaceId`.
+   */
+  ingestWorkspaceId: string | null
+  /**
    * Non-secret discriminator for the encrypted credentials blob
    * (migration 261). Display/query metadata only — the runtime switches on
    * the decrypted blob's `type`, never this column.
@@ -107,6 +116,8 @@ export type UpdateInstanceParams = {
   sensitivity?: SensitivityTier
   connected?: boolean
   ingestionEnabled?: boolean
+  /** Ingest routing target (migration 311). `null` clears it (disable / revoke). */
+  ingestWorkspaceId?: string | null
   credentials?: ConnectorCredentials | OAuthCredentials | null
 }
 
@@ -204,6 +215,7 @@ const PUBLIC_COLS = `
   connected_email AS "connectedEmail",
   url, custom, config, sensitivity, connected,
   ingestion_enabled AS "ingestionEnabled",
+  ingest_workspace_id AS "ingestWorkspaceId",
   credentials_type AS "credentialsType",
   health_status AS "healthStatus",
   last_error AS "lastError",
@@ -360,6 +372,7 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
       if (updates.sensitivity !== undefined) { sets.push(`sensitivity = $${idx}`); values.push(updates.sensitivity); idx++ }
       if (updates.connected !== undefined) { sets.push(`connected = $${idx}`); values.push(updates.connected); idx++ }
       if (updates.ingestionEnabled !== undefined) { sets.push(`ingestion_enabled = $${idx}`); values.push(updates.ingestionEnabled); idx++ }
+      if (updates.ingestWorkspaceId !== undefined) { sets.push(`ingest_workspace_id = $${idx}`); values.push(updates.ingestWorkspaceId); idx++ }
       if (updates.credentials !== undefined) {
         const encrypted = encryptOrNull(updates.credentials, encryptionKey)
         sets.push(`credentials = $${idx}`); values.push(encrypted); idx++

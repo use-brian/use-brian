@@ -1,7 +1,8 @@
 /**
  * Home signals assembler — the live source of truth for every NUMBER the
  * "Suggested for you" dock shows. Assembled per request from the brain inbox,
- * approvals, autopilot goals, workflows, drafts, and brain counts. The merge
+ * approvals, autopilot goals, connector health, workflow run failures,
+ * workflows, drafts, and brain counts + growth history. The merge
  * (`mergeHomeDock`, core) folds the assistant's curation artifact over THIS.
  *
  * Every source is wrapped so one failing query degrades to a zero/empty value
@@ -22,6 +23,9 @@ import { isOssEdition } from '../routes/local-session.js'
 
 const UPCOMING_CAP = 4
 const DRAFTS_CAP = 4
+const SPARKLINE_DAYS = 14
+/** How far back a failed/timeout run still counts as "needs attention". */
+const RUN_ATTENTION_WINDOW = '48 hours'
 
 type WorkflowLister = {
   list(
@@ -50,11 +54,25 @@ export async function assembleHomeSignals(
   deps: HomeSignalsDeps,
   now: Date = new Date(),
 ): Promise<HomeSignals> {
-  const [review, approvalsCount, autopilotCount, brain, workflows, drafts, hasConnector] = await Promise.all([
+  const [
+    review,
+    approvalsCount,
+    autopilotCount,
+    connectorAttentionCount,
+    workflowAttentionCount,
+    brain,
+    sparkline,
+    workflows,
+    drafts,
+    hasConnector,
+  ] = await Promise.all([
     safe(() => countBrainInbox(workspaceId).then((r) => r.total), 0),
     safe(() => countPendingApprovals(workspaceId), 0),
     safe(() => countAutopilotAttention(workspaceId), 0),
+    safe(() => countConnectorAttention(workspaceId), 0),
+    safe(() => countWorkflowAttention(workspaceId), 0),
     safe(() => countBrainEntries(workspaceId), { total: 0, last7: 0 }),
+    safe(() => brainSparkline(workspaceId, now), [] as number[]),
     safe(() => deps.workflowStore.list(userId, workspaceId), [] as Awaited<ReturnType<WorkflowLister['list']>>),
     safe(
       () => deps.savedViewStore.list({ userId, workspaceId, state: 'draft', limit: DRAFTS_CAP }),
@@ -67,6 +85,8 @@ export async function assembleHomeSignals(
     brainReviewCount: review,
     approvalsCount,
     autopilotCount,
+    connectorAttentionCount,
+    workflowAttentionCount,
     upcomingWorkflows: computeUpcoming(workflows, now),
     recentDrafts: drafts.map((d) => ({
       id: d.id,
@@ -75,6 +95,7 @@ export async function assembleHomeSignals(
     })),
     brainEntryCount: brain.total,
     brainGrowth7d: brain.last7,
+    brainSparkline: sparkline,
     onboarding: { hasConnector },
   }
 }
@@ -126,6 +147,37 @@ async function countAutopilotAttention(workspaceId: string): Promise<number> {
   return Number.parseInt(res.rows[0]?.count ?? '0', 10)
 }
 
+/** Workspace connectors whose credentials stopped working at call time
+ *  (`health_status = 'auth_failed'`, migration 294) — ingestion and tools are
+ *  dead until the user reconnects. Deliberately scoped to `connected = true`:
+ *  a connector the user turned off is intent, not breakage. */
+async function countConnectorAttention(workspaceId: string): Promise<number> {
+  // Closed/overlay table — absent in the OSS edition (same guard as
+  // `workspaceHasConnector` below).
+  if (isOssEdition()) return 0
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM connector_instance
+     WHERE workspace_id = $1 AND scope = 'workspace'
+       AND connected = true AND health_status = 'auth_failed'`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
+/** Workflow runs that ended `failed`/`timeout` recently. `awaiting_input` runs
+ *  are excluded — each carries a pending approval already counted by
+ *  `countPendingApprovals` (one item, one card). */
+async function countWorkflowAttention(workspaceId: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM workflow_runs
+     WHERE workspace_id = $1
+       AND status IN ('failed', 'timeout')
+       AND COALESCE(finished_at, last_active_at) >= NOW() - INTERVAL '${RUN_ATTENTION_WINDOW}'`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
 /** Brain entries = current entities + current (non-retracted) memories. */
 async function countBrainEntries(workspaceId: string): Promise<{ total: number; last7: number }> {
   const res = await query<{ total: string; last7: string }>(
@@ -141,6 +193,32 @@ async function countBrainEntries(workspaceId: string): Promise<{ total: number; 
     total: Number.parseInt(row?.total ?? '0', 10),
     last7: Number.parseInt(row?.last7 ?? '0', 10),
   }
+}
+
+/** Daily new-entry counts (entities + memories) for the last SPARKLINE_DAYS
+ *  UTC days, oldest first — the brain card draws the real growth curve from
+ *  this instead of a decorative one. Days with no rows fill as 0. */
+async function brainSparkline(workspaceId: string, now: Date): Promise<number[]> {
+  const res = await query<{ day: string; count: string }>(
+    `SELECT to_char(day, 'YYYY-MM-DD') AS day, COUNT(*)::text AS count FROM (
+       SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day FROM entities
+        WHERE workspace_id = $1 AND valid_to IS NULL
+          AND created_at >= NOW() - INTERVAL '${SPARKLINE_DAYS} days'
+       UNION ALL
+       SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') FROM memories
+        WHERE workspace_id = $1 AND valid_to IS NULL AND retracted_at IS NULL
+          AND created_at >= NOW() - INTERVAL '${SPARKLINE_DAYS} days'
+     ) t GROUP BY 1 ORDER BY 1`,
+    [workspaceId],
+  )
+  const byDay = new Map(res.rows.map((r) => [r.day, Number.parseInt(r.count, 10)]))
+  const days: number[] = []
+  for (let i = SPARKLINE_DAYS - 1; i >= 0; i--) {
+    const d = new Date(now.getTime() - i * 86_400_000)
+    const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+    days.push(byDay.get(key) ?? 0)
+  }
+  return days
 }
 
 async function workspaceHasConnector(workspaceId: string): Promise<boolean> {

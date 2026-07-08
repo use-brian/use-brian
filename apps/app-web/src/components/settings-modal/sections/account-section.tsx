@@ -3,7 +3,7 @@
 // Ported from apps/web/src/app/(app)/settings/account/page.tsx
 // (AccountPage → AccountSection). The earlier app-web port was a thinner
 // stub (initials bubble, no name-save, no avatar upload); this gap-fills it
-// to parity with apps/web — see docs/plans/doc-web-app-consolidation.md §5a.
+// to parity with apps/web — see docs/architecture/features/doc.md §5a.
 
 import { useState, useEffect, useRef } from "react";
 import {

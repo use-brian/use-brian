@@ -5,7 +5,7 @@
  * Two pieces:
  *   - `segmentTranscript`: a PURE function that packs diarized utterances into
  *     embedding/retrieval-sized segments (the rules from
- *     docs/plans/recording-to-brain.md §"Segment granularity").
+ *     docs/architecture/media/transcription.md §"Segment granularity").
  *   - `insertTranscriptSegments`: writes segments into `transcript_segments`
  *     (migration 280), stamping every universal column so the dedicated
  *     `searchRecording` access predicate can read them back, leaving

@@ -166,7 +166,7 @@ describe('[COMP:brain/authorship-enforcement] insert helpers reject missing auth
 })
 
 // (Removed) "createEntity Q24 direct-insert block" tests. Post CRM→entity
-// unification (docs/plans/crm-entity-unification.md) `createEntity` no
+// unification (docs/architecture/features/crm.md) `createEntity` no
 // longer rejects kind='person'|'company'|'deal' — a person/company/deal IS
 // a plain entity with typed fields in `attributes`. The CRM tools in
 // crm.ts create these entities directly; their behaviour is covered by

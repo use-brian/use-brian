@@ -1,7 +1,7 @@
 /**
  * Legacy bare-path resolver — pure mapping for pre-consolidation app paths.
  *
- * Before the single-app cutover (docs/plans/single-app-cutover.md) the
+ * Before the single-app cutover (docs/architecture/features/web-ui.md) the
  * authenticated surfaces lived at root paths on the marketing origin
  * (`sidan.ai/brain`, `/studio`, …). The marketing proxy now 308s those to
  * this app **path-preserved** (`app.sidan.ai/brain`), but every route here

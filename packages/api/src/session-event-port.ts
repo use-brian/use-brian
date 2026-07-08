@@ -9,7 +9,7 @@
  * event TYPES + the injectable function shapes + safe no-op defaults so a route
  * builder can take the bus as an injected dependency (the default no-op keeps
  * unit tests DB-free; the composition root injects the real bus). See
- * docs/plans/oss-local-brain-wedge.md §12.5.
+ * the open-core split (repo CLAUDE.md; plan in git history) §12.5.
  */
 
 export type SessionEvent =

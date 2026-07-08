@@ -5,7 +5,7 @@
  *
  * Ported verbatim from `apps/web/src/components/sensitivity-badge.tsx`
  * as part of the Studio → Assistants surface migration
- * (docs/plans/doc-web-app-consolidation.md §9 #5). Color-coded to
+ * (docs/architecture/features/doc.md §9 #5). Color-coded to
  * match the spec:
  *   public       → green (safe for external output)
  *   internal     → amber (team-scoped)

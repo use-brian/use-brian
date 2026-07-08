@@ -2,7 +2,7 @@
  * SDK for the CL-9 KB-gap candidate surface (app-web).
  *
  * Ported from `apps/web/src/lib/api/kb-gaps.ts` as part of the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §5a). Identical
+ * consolidation (docs/architecture/features/doc.md §5a). Identical
  * wire contract — wraps `authFetch` with typed signatures matching the routes
  * in `packages/api/src/routes/kb-gaps.ts`. Kept as its own file (not imported
  * from apps/web) per the same convention as `lib/api/views.ts`.

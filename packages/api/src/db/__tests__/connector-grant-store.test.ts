@@ -124,14 +124,35 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
   })
 
   describe('revoke', () => {
-    it('deletes through RLS — succeeds for grantor or team member', async () => {
+    it('deletes through RLS and stops ingestion routing to the revoked workspace', async () => {
+      // 1) pre-delete SELECT of the grant's instance + target
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [{ connectorInstanceId: 'ci_1', targetType: 'workspace', targetId: 't_1' }],
+        rowCount: 1,
+      } as never)
+      // 2) DELETE (RLS-scoped)
       mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+      // 3) stop-ingestion UPDATE (system query)
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
       expect(await store.revoke('u_alice', 'cg_1')).toBe(true)
+
+      // The connector that was ingesting into the revoked workspace is stood
+      // down (scoped to instances actually targeting it).
+      const updateCall = mockQuery.mock.calls.find(([sql]) =>
+        String(sql).includes('ingestion_enabled = false'),
+      )
+      expect(updateCall).toBeDefined()
+      expect(updateCall![1]).toEqual(['t_1', ['ci_1']])
     })
 
-    it('returns false when RLS hides the row from the caller', async () => {
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    it('returns false and stops nothing when RLS hides the row from the caller', async () => {
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // SELECT hidden
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // DELETE 0
       expect(await store.revoke('u_stranger', 'cg_1')).toBe(false)
+      expect(
+        mockQuery.mock.calls.some(([sql]) => String(sql).includes('ingestion_enabled = false')),
+      ).toBe(false)
     })
   })
 
@@ -192,14 +213,29 @@ describe('[COMP:api/connector-grant-store] createConnectorGrantStore', () => {
   })
 
   describe('deleteByGrantorAndTargetSystem', () => {
-    it('cascade on team-member removal — deletes all grants from user to team', async () => {
+    it('cascade on team-member removal — deletes all grants and stops their ingestion', async () => {
+      // 1) SELECT affected instance ids (before delete)
+      mockQuery.mockResolvedValueOnce({
+        rows: [{ connectorInstanceId: 'ci_1' }, { connectorInstanceId: 'ci_2' }],
+        rowCount: 2,
+      } as never)
+      // 2) DELETE
       mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 3 } as never)
+      // 3) stop-ingestion UPDATE
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
       const n = await store.deleteByGrantorAndTargetSystem('u_alice', 'workspace', 't_1')
       expect(n).toBe(3)
 
-      const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]]
-      expect(sql).toContain('DELETE FROM connector_grant')
-      expect(params).toEqual(['u_alice', 'workspace', 't_1'])
+      const deleteCall = mockQuery.mock.calls.find(([sql]) =>
+        String(sql).includes('DELETE FROM connector_grant'),
+      )
+      expect(deleteCall![1]).toEqual(['u_alice', 'workspace', 't_1'])
+      // Every connector the departing member had feeding this workspace stops.
+      const updateCall = mockQuery.mock.calls.find(([sql]) =>
+        String(sql).includes('ingestion_enabled = false'),
+      )
+      expect(updateCall![1]).toEqual(['t_1', ['ci_1', 'ci_2']])
     })
   })
 

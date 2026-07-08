@@ -4,7 +4,7 @@
  * Studio → Knowledge management (app-web).
  *
  * Ported from `apps/web/src/app/(app)/studio/knowledge/page.tsx` for the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §9 #5, CHUNK 4).
+ * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
  * Rendered inside the Studio full-page layout, NOT the doc three-column
  * page shell.
  *

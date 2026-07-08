@@ -52,6 +52,7 @@ function fakeRow(overrides: Partial<ConnectorInstance> = {}): ConnectorInstance 
     sensitivity: 'internal',
     connected: true,
     ingestionEnabled: false,
+    ingestWorkspaceId: null,
     credentialsType: 'none',
     healthStatus: 'ok',
     lastError: null,

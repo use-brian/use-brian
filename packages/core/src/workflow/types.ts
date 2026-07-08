@@ -72,7 +72,7 @@ type WorkflowStepCommon = {
  *  - `{ fromStep }` — anchor to the page a prior `{ create }` step made in
  *                     THIS run (read from `vars.__pageAnchor_<fromStep>`).
  *
- * See docs/plans/workflow-page-anchor.md and
+ * See docs/architecture/features/workflow.md and
  * docs/architecture/features/workflow.md → "assistant_call page anchor".
  */
 type PageAnchor =
@@ -151,8 +151,9 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * Optional research-depth override for this step's agentic loop — a tier
    * preset and/or numeric overrides (`{ tier?, maxTurns?, maxToolCalls?,
    * timeoutMs? }`). Resolved by the callee executor against
-   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the historical 5-turn / 30s
-   * step budget. See `packages/core/src/engine/research-depth.ts`.
+   * `ASSISTANT_CALL_DEFAULT_BUDGET`. Absent = the 5-turn default (90s
+   * wall-clock, `ASSISTANT_CALL_TIMEOUT_MS`-configurable). See
+   * `packages/core/src/engine/research-depth.ts`.
    */
   depth?: ResearchDepthConfig
   /** Per-step model alias. Falls back to executor default ('standard') when absent. */
@@ -380,7 +381,7 @@ export type WorkflowTrigger =
        * Authoring sugar — a delivery channel TYPE the create/update path
        * resolves to a concrete chat id + Telegram topic and stamps onto the
        * sole/terminal `assistant_call` step's `deliver`. See
-       * docs/plans/scheduling-authoring-unification.md §3.
+       * docs/architecture/features/workflow.md §3.
        */
       delivery?: { channel: 'telegram' | 'slack' | 'whatsapp' }
       /**

@@ -17,7 +17,7 @@
  * host translates widget-shaped commit values (e.g. PersonWidget →
  * `{ assigneeId: id }`) before calling these.
  *
- * Spec: docs/plans/a2ui-notion-feel.md § Phase 2 + § Phase 3.
+ * Spec: docs/architecture/features/views.md § Phase 2 + § Phase 3.
  *
  * [COMP:app-web/block-data]
  */

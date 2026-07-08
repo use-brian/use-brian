@@ -9,7 +9,7 @@ import type {
 import { parseSkillReferences } from '@sidanclaw/core'
 
 /**
- * Skill edge derivation (`docs/plans/skills-as-procedural-brain-primitive.md` §6).
+ * Skill edge derivation (`docs/architecture/engine/skill-system.md` §6).
  *
  * Materializes a skill's DERIVED-FROM-FACTS edges in `entity_links` and keeps
  * them self-healing on every skill edit:

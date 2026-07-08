@@ -5,7 +5,7 @@
  * The Notion-parity structural keymap — Tab / Shift-Tab / Backspace / Enter
  * block semantics, plus the "caret is never invisible" guard. Spec:
  * `docs/architecture/features/doc.md` → "Editing affordances"; audit + parity
- * contract: `docs/plans/doc-editor-notion-parity-audit.md` (finding IDs like
+ * contract: `docs/architecture/features/doc.md` (finding IDs like
  * B1/T2/E3 below refer to its §3 tables).
  *
  *   - **Tab** → list `sinkListItem` (with the separate-sibling-wrapper join),

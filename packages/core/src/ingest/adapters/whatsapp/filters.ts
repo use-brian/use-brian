@@ -16,7 +16,7 @@
  * variant that matches any participant in the window (the universal one
  * only reads a single `sender`).
  *
- * Spec: docs/plans/whatsapp-bring-your-own-number.md §"The gate".
+ * Spec: docs/architecture/channels/whatsapp.md §"The gate".
  *
  * [COMP:brain/source-adapters/whatsapp]
  */

@@ -55,7 +55,7 @@
  * pass `skipIfHashUnchanged` to make the function itself a no-op when the page's
  * authored content matches a previously-ingested hash.
  *
- * Spec: docs/plans/canvas-brain-distillation.md (architecture LOCKED).
+ * Spec: docs/architecture/brain/ingest-pipeline.md (architecture LOCKED).
  *
  * [COMP:ingest/doc-page-distillation]
  */

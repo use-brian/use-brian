@@ -1,6 +1,6 @@
 /**
  * Blueprint RECORD helpers — the pure half of the blueprint-as-output-contract
- * primitive (docs/plans/blueprint-output-contract.md; spec home
+ * primitive (docs/architecture/brain/structural-synthesis.md; spec home
  * docs/architecture/brain/structural-synthesis.md).
  *
  * A blueprint's `ExtractionSpec` is a typed contract; a RECORD is one filled

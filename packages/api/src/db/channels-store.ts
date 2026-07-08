@@ -78,7 +78,7 @@ export type ChannelAssistant = {
  * source (the assistant silently reads enabled groups into the brain and
  * never replies); `chat`/`broadcast` stay listed so the dormant responder
  * can be switched on later by enabling `'chat'` — see
- * docs/plans/whatsapp-bring-your-own-number.md §"Leave room for later".
+ * docs/architecture/channels/whatsapp.md §"Leave room for later".
  */
 export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   slack: ['chat', 'broadcast', 'ingest'],

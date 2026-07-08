@@ -6,6 +6,8 @@ import {
   RESEARCH_BUDGET_CEILING,
   RESEARCH_BUDGET_FLOOR,
   ASSISTANT_CALL_DEFAULT_BUDGET,
+  DEFAULT_ASSISTANT_CALL_TIMEOUT_MS,
+  parseAssistantCallTimeoutMs,
 } from '../research-depth.js'
 
 describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
@@ -73,12 +75,31 @@ describe('[COMP:engine/research-depth] resolveResearchBudget', () => {
     expect(resolved).toEqual(RESEARCH_BUDGET_FLOOR)
   })
 
-  it('ASSISTANT_CALL_DEFAULT_BUDGET is the historical 5-turn / 30s step budget', () => {
+  it('ASSISTANT_CALL_DEFAULT_BUDGET is the 5-turn step budget with the 90s default wall-clock', () => {
     expect(ASSISTANT_CALL_DEFAULT_BUDGET).toEqual({
       maxTurns: 5,
       maxToolCalls: 10,
-      timeoutMs: 30_000,
+      timeoutMs: DEFAULT_ASSISTANT_CALL_TIMEOUT_MS,
     })
+    expect(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS).toBe(90_000)
+  })
+})
+
+describe('[COMP:engine/research-depth] parseAssistantCallTimeoutMs', () => {
+  it('falls back to the 90s default when unset, blank, or non-numeric', () => {
+    expect(parseAssistantCallTimeoutMs(undefined)).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
+    expect(parseAssistantCallTimeoutMs('')).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
+    expect(parseAssistantCallTimeoutMs('   ')).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
+    expect(parseAssistantCallTimeoutMs('soon')).toBe(DEFAULT_ASSISTANT_CALL_TIMEOUT_MS)
+  })
+
+  it('honours a valid numeric override', () => {
+    expect(parseAssistantCallTimeoutMs('120000')).toBe(120_000)
+  })
+
+  it('clamps to the same [FLOOR, CEILING] as every other budget', () => {
+    expect(parseAssistantCallTimeoutMs('999999999')).toBe(RESEARCH_BUDGET_CEILING.timeoutMs)
+    expect(parseAssistantCallTimeoutMs('1')).toBe(RESEARCH_BUDGET_FLOOR.timeoutMs)
   })
 })
 

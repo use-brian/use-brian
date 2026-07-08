@@ -1,7 +1,7 @@
 /**
  * Skill edge recompute service — the `onWritten` adapter that wires every
  * skill write (`create` / `update`) into the graph
- * (`docs/plans/skills-as-procedural-brain-primitive.md` §5.1, §5.4, §6).
+ * (`docs/architecture/engine/skill-system.md` §5.1, §5.4, §6).
  *
  * `makeSkillEdgeRecomputer` closes over the workspace stores and returns a
  * function compatible with `WorkspaceSkillStoreHooks.onWritten`. Given a

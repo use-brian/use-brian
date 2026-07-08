@@ -2,7 +2,7 @@
  * Assistant MCP endpoint — `POST /api/v1/assistants/:assistantId/mcp`.
  *
  * The deterministic single-tool surface of the agent capability toolset
- * (docs/plans/agent-facing-capability-surface.md §7.2, locked §12.4):
+ * (docs/architecture/integrations/agent-capability-surface.md §7.2, locked §12.4):
  * an external agent points the same MCP client at this endpoint that it
  * points at the brain MCP, authed with the assistant's `sk_live_` key, and
  * calls capability tools directly — no chat turn.

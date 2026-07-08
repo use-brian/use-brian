@@ -3,7 +3,7 @@ import pg from 'pg'
 
 /**
  * Integration test for the entity-backed CRM invariants after the
- * CRM→entity unification (docs/plans/crm-entity-unification.md). A
+ * CRM→entity unification (docs/architecture/features/crm.md). A
  * contact/company/deal IS an `entities` row: kind ∈ {person,company,deal},
  * name → display_name, email/domain → canonical_id + attributes, remaining
  * typed fields + relationship FKs in `attributes`. (Replaces the old

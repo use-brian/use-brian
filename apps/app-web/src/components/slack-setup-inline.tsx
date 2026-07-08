@@ -12,7 +12,7 @@ import { DISPLAY_API_URL } from "@/lib/display-api-url";
  * instead of navigating to a separate page.
  *
  * Ported from `apps/web/src/components/slack-setup-inline.tsx` for the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §9 #5, CHUNK 4).
+ * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
  * `buildManifest` is the load-bearing export here: Studio → Channels imports
  * it to pre-generate a Slack app manifest for the "+ Add channel" flow.
  *

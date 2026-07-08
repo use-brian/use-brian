@@ -8,7 +8,7 @@
  * pure (it takes the injected resolver / deliverer as an argument rather than
  * closing over a `deps` object), so both tool sets import the identical logic.
  *
- * See docs/plans/scheduling-authoring-unification.md §3 and
+ * See docs/architecture/features/workflow.md §3 and
  * docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
  *
  * [COMP:scheduling/delivery-resolution]
@@ -130,7 +130,6 @@ export async function describeDelivery(
  * Telegram chat id (`880211324`) as the Slack channel, which fails on every
  * fire. On an empty id the caller guides the model (e.g. `listSlackChannels`,
  * or set the step's `deliver.channelId`) instead of persisting a bad target.
- * See docs/plans/slack-native-delivery-target.md.
  */
 export function resolveDeliveryChannel(
   context: {

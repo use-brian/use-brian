@@ -57,7 +57,7 @@ export const INTERACTIVE_CHANNEL_TYPES: ReadonlySet<string> = new Set([
 /**
  * True when this turn is running on an autonomous / headless path — no
  * live human to confirm a write. This is the honest discriminator the
- * Tier-C write-gate (Posture A, `docs/plans/write-gating-decision-brief.md`
+ * Tier-C write-gate (Posture A, `docs/architecture/engine/tool-executor.md`
  * §3) keys off: a destructive-but-recoverable tool (`deleteEntity`,
  * `healMemories`, …) gates ONLY here — interactive chat stays silent
  * because the user sees the turn and the write is soft/reversible, but a

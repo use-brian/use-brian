@@ -10,7 +10,7 @@
  * browser's focus traversal; with PM defaults, Backspace wrapped paragraphs
  * into lists/toggles and Enter split into a collapsed toggle's hidden body.
  * Finding IDs (B1/T1/E1/S1…) refer to
- * `docs/plans/doc-editor-notion-parity-audit.md` §3.
+ * `docs/architecture/features/doc.md` §3.
  */
 
 import { describe, expect, it, afterEach } from "vitest";

@@ -124,7 +124,7 @@ export type PublicApiRouteOptions = {
    * Per-assistant connector WRITE grants — `assertActionAllowed` in the
    * Gmail/GCal write callbacks fires only when this store is present (the
    * gate is fail-open when absent). Wired by apps/api for channel parity
-   * with web chat; see docs/plans/agent-facing-capability-surface.md §11.2.
+   * with web chat; see docs/architecture/integrations/agent-capability-surface.md §11.2.
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
   /**

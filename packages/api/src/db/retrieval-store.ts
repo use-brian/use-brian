@@ -1927,7 +1927,7 @@ export async function search(
 // recording_id, through queryWithRLS + the shared visibility/access predicate
 // (so the sensitivity ladder + visibility double are enforced, not just
 // workspace RLS). MMR is disabled — for a single recording, ordered coverage
-// beats diversity. See docs/plans/recording-to-brain.md §"Segmentation & Indexing".
+// beats diversity. See docs/architecture/media/transcription.md §"Segmentation & Indexing".
 
 export type RecordingSegmentHit = {
   segment_index: number

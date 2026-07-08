@@ -11,7 +11,7 @@
  * exists, so the shell renders for every workspace and the chat offers a
  * switcher to any other accessible assistant.
  *
- * Spec: docs/plans/a2ui-notion-feel.md § Phase 1 → Full-screen UI +
+ * Spec: docs/architecture/features/views.md § Phase 1 → Full-screen UI +
  * Doc app.
  */
 

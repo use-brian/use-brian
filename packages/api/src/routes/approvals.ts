@@ -194,7 +194,7 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
 
     // Agent-surface staged write — apply the staged control-plane tool,
     // then settle the row. Rejection settles without applying. See
-    // docs/plans/agent-facing-capability-surface.md §6.1 and
+    // docs/architecture/integrations/agent-capability-surface.md §6.1 and
     // packages/api/src/agent-surface/staged-write.ts.
     if (approval.kind === 'staged_write' && opts.stagedWriteDeps) {
       if (decision === 'rejected') {

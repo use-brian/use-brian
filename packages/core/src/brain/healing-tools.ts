@@ -322,7 +322,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
-    // Tier-C write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // Tier-C write-gate (Posture A, docs/architecture/engine/tool-executor.md
     // §3): recreates memories / archives tasks / retracts edges. Itself an
     // undo of soft ops, so interactive stays silent; the autonomous path
     // gates so a headless loop can't silently roll changes back and forth.
@@ -601,7 +601,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
-    // Tier-D write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // Tier-D write-gate (Posture A, docs/architecture/engine/tool-executor.md
     // §3): dedupeEntities is the ONE genuinely irreversible tool —
     // survivor-wins merge collapses the loser's identity and cannot be
     // cheaply undone (it IS the fixed CRM-dedupe incident class). Gate

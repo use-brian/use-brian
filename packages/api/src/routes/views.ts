@@ -166,7 +166,7 @@ export type ViewsRouteOptions = {
    * runner in the BACKGROUND (never blocks the response). Optional: when absent
    * (minimal / open build with no Pipeline B), the route returns 503. The auto-
    * on-save path uses the separate `/internal/ingest-page` endpoint, not this
-   * route. See docs/plans/canvas-brain-distillation.md.
+   * route. See docs/architecture/brain/ingest-pipeline.md.
    */
   ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
   /**
@@ -1404,7 +1404,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   // `*UpdateFields` types already allowlist columns; this is the
   // outer guard at the route boundary.
   //
-  // Spec: docs/plans/a2ui-notion-feel.md § Phase 2.
+  // Spec: docs/architecture/features/views.md § Phase 2.
 
   function isoOrNullish(input: unknown): Date | null | undefined {
     if (input === undefined) return undefined

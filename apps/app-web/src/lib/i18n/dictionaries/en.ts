@@ -365,6 +365,26 @@ export const en = {
       creatingTitled: "Creating \"{title}\"",
       callingTool: "Calling {name}",
     },
+    // Streaming activity feed + the post-turn receipt (chat-activity.tsx).
+    // See docs/architecture/engine/live-streaming.md → "Chat: the activity feed".
+    activity: {
+      writing: "Writing reply…",
+      workedFor: "Worked for {duration}",
+      workedForWithSteps: "Worked for {duration} · {count} steps",
+      workedForWithStep: "Worked for {duration} · 1 step",
+      stepsOnly: "{count} steps",
+      stepOnly: "1 step",
+      show: "Show activity",
+      hide: "Hide activity",
+      retried: "Retried",
+    },
+    // Research-mode status phases (SSE `status` events): the activity
+    // header shows the latest phase while no tool narration outranks it.
+    researchStatus: {
+      detected: "Deep research detected",
+      starting: "Starting deep research",
+      parallel: "Working on parallel tracks",
+    },
   },
   sharedPage: {
     footer: "Shared with sidanclaw",
@@ -556,11 +576,18 @@ export const en = {
       autopilotTitle: "Autopilot needs you",
       autopilotCaption: "Goals waiting on your confirm or unblock",
       autopilotCta: "Open autopilot",
+      connectorTitle: "Reconnect a connector",
+      connectorCaption: "A connected tool lost access, so syncing is paused",
+      connectorCta: "Open connectors",
+      workflowRunsTitle: "Workflow runs failed",
+      workflowRunsCaption: "Recent runs stopped with an error and may need a fix",
+      workflowRunsCta: "Open workflows",
       resume: "Resume",
       open: "Open",
       entries: "entries",
       thisWeek: "this week",
       growingSteadily: "growing steadily",
+      quietWeek: "Quiet this week: nothing new yet",
       connect: "Connect a source to grow faster",
       buildPlaceholder: "Ask anything, or describe a view to build",
       assistant: "Your assistant",
@@ -1525,6 +1552,11 @@ export const en = {
       workspaceSharedTeamNative: "Workspace connector",
       workspaceSharedReadonlyNote:
         "This connector is shared with the workspace, so you can use it to set up knowledge and assistants here. Only the member who connected it can manage or remove it. Per-assistant tool permissions are set in Assistant, Tools, Connectors.",
+      workspaceNativeNote:
+        "This is a workspace connector, shared with everyone here. Any workspace member can remove it below. Per-assistant tool permissions are set in Assistant, Tools, Connectors.",
+      workspaceNativeRemoveTitle: "Remove workspace connector",
+      workspaceNativeRemoveDesc:
+        "Remove this connector from the workspace? Assistants here lose access to its tools, and any ingestion it feeds stops. This cannot be undone.",
       railAriaLabel: "Your connectors",
       selectPrompt: "Select a connector to manage it.",
       workspaceAccessTitle: "Workspace access",

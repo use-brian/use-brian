@@ -97,7 +97,7 @@ export async function syncWorkflowScheduleTrigger(
      * authoring-unification). All optional and additive — omitted fields leave
      * the existing row value untouched on the update arm and default on create.
      * `mode` defaults to 'local'; the nag pair + silent + viewId mirror the
-     * `scheduled_jobs` columns. See docs/plans/scheduling-authoring-unification.md.
+     * `scheduled_jobs` columns. See docs/architecture/features/workflow.md.
      */
     mode?: ScheduledJobMode
     silentUntilFire?: boolean

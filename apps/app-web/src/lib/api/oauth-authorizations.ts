@@ -3,7 +3,7 @@
  * "Connected apps".
  *
  * Ported from `apps/web/src/lib/api/oauth-authorizations.ts` as part of the
- * studio surface migration (docs/plans/doc-web-app-consolidation.md §9 #5).
+ * studio surface migration (docs/architecture/features/doc.md §9 #5).
  * Lists and revokes the OAuth grants third-party MCP clients (Claude.ai,
  * Claude Desktop, ChatGPT) have against this workspace's brain. Identical wire
  * contract; kept as its own file (not imported from apps/web), same convention

@@ -25,7 +25,7 @@ import {
 // Back-compat re-export: the delivery-target + view-resolver types moved to
 // delivery-resolution.ts (shared with the workflow authoring path), but
 // external callers (apps/api wiring, scheduling/index.ts) import them here.
-// See docs/plans/scheduling-authoring-unification.md §3.
+// See docs/architecture/features/workflow.md §3.
 export type { DeliveryTargetLabel, DeliveryTargetResolver, ViewWorkspaceResolver }
 
 const scheduleSchema = z.discriminatedUnion('type', [
@@ -156,7 +156,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
     // Folded into the workflow surface: scheduling is a workflow trigger, not a
     // separate concept. Hidden from the model (it creates/schedules via
     // createWorkflow with `trigger`), but kept callable for back-compat / tests
-    // / the forwarding path. See docs/plans/scheduling-authoring-unification.md.
+    // / the forwarding path. See docs/architecture/features/workflow.md.
     hiddenFromModel: true,
     name: 'createScheduledJob',
     // Hidden legacy verb — never read by the model (hiddenFromModel); kept

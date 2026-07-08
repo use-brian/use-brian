@@ -60,7 +60,7 @@ type SkillRouteOptions = {
   communityRegistry?: SkillContent[]
   /**
    * V2 workspace-aware store — backs the Brain procedural-primitive surface
-   * (`docs/plans/skills-as-procedural-brain-primitive.md` §5, §7.1): the
+   * (`docs/architecture/engine/skill-system.md` §5, §7.1): the
    * governance-aware workspace skill list and the human-confirmation trust
    * action. Optional so existing call sites / tests that only need the legacy
    * userId-keyed catalog continue to mount without it.
@@ -308,7 +308,7 @@ export function skillRoutes({
   // ── GET /workspace — governance-aware workspace skill list (Brain) ──
   //
   // Backs the Brain procedural-primitive surface
-  // (`docs/plans/skills-as-procedural-brain-primitive.md` §5, §7.1). Returns
+  // (`docs/architecture/engine/skill-system.md` §5, §7.1). Returns
   // every non-archived, bi-temporally-alive workspace skill projected with its
   // governance fields (state, confidence, activation, induction source,
   // sensitivity, verifier). Workspace-membership gated.

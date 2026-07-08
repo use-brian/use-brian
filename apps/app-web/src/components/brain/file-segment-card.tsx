@@ -9,7 +9,7 @@
  * which assumes a meaningful `name`. The general brain `search()` surface can
  * return primitives that predate this build:
  *   - `file_segment` — a chunk of an ingested document
- *     (docs/plans/large-content-artifacts.md §Phase 1.4), whose content is a
+ *     (docs/architecture/brain/file-artifacts.md §Phase 1.4), whose content is a
  *     file name + heading breadcrumb + snippet, not a `name`.
  *   - any FUTURE primitive a newer server ships before app-web learns it.
  *

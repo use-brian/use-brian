@@ -339,7 +339,7 @@ describe('[COMP:channels/telegram] createTelegramAdapter', () => {
 
   // Audio tracks ("as audio", music-note UI) were previously unhandled and
   // silently dropped. Regression for the "1h45m recording" footgun —
-  // see docs/plans/recording-to-brain.md Phase 1.
+  // see docs/architecture/media/transcription.md Phase 1.
   it('parses an audio track (msg.audio) with duration, size, and name', () => {
     const update = {
       update_id: 51,

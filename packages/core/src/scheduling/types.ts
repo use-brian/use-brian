@@ -257,7 +257,7 @@ export type JobStore = {
    * System-level (same authorization model as the sibling). Used by
    * `updateWorkflow` to reconcile a reminder reschedule to exactly one firing
    * row — scheduling is a workflow trigger, so editing the workflow must own
-   * the reminder row too. See docs/plans/scheduling-authoring-unification.md §3.
+   * the reminder row too. See docs/architecture/features/workflow.md §3.
    */
   listFiringJobsForWorkflowSystem(workflowId: string): Promise<ScheduledJob[]>
 

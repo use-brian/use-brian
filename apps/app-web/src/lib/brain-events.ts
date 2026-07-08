@@ -3,7 +3,7 @@
  * (app-web).
  *
  * Ported verbatim from `apps/web/src/lib/brain-events.ts` as part of the
- * brain surface migration (docs/plans/doc-web-app-consolidation.md
+ * brain surface migration (docs/architecture/features/doc.md
  * §5a). The brain detail-drawer / unverified-nudge fire this after a
  * successful brain-write (verify / adjust / delete / alias); the brain
  * page subscribes, re-fetches, and fades in any rows it hadn't seen

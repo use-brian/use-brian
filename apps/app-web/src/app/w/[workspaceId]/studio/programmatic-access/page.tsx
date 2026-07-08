@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/app/(app)/studio/programmatic-access/page.tsx` as
  * part of the studio surface migration
- * (docs/plans/doc-web-app-consolidation.md §9 #5). Workspace-admin
+ * (docs/architecture/features/doc.md §9 #5). Workspace-admin
  * management of `sk_brain_` keys — the credentials external MCP clients
  * (Claude Code, Claude Desktop, ChatGPT) use to read from and write to the
  * workspace brain over `POST /api/brain/mcp`.

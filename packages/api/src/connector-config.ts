@@ -15,7 +15,7 @@
  *   3. undefined  → the connector injector no-ops (connector-less boot)
  *
  * The open single-player product boots connector-less by default (no file, no
- * env). See docs/plans/oss-local-brain-wedge.md §12.2 / §12.7.
+ * env). See the open-core split (repo CLAUDE.md; plan in git history) §12.2 / §12.7.
  */
 
 import { readFileSync } from 'node:fs'

@@ -15,7 +15,7 @@ import { join } from 'node:path'
  * (small future migrations) apply whole. Idempotent: tracks applied files in
  * `_migrations`, mirroring the node-pg runner (`packages/api/scripts/migrate.ts`).
  *
- * See docs/plans/oss-local-brain-wedge.md §12.7.
+ * See the open-core split (repo CLAUDE.md; plan in git history) §12.7.
  */
 export async function migratePglite(db: PGlite, migrationsDir: string): Promise<number> {
   await db.exec(

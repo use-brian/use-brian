@@ -11,7 +11,7 @@ export type TelegramApiOptions = {
  * Telegram Bot API hard limit on `getFile` downloads: a bot can only download
  * files up to 20 MB. A larger inbound file (e.g. a multi-hour recording) cannot
  * be pulled through the bot at all — callers should refuse it up front rather
- * than attempt a doomed `getFile`. See docs/plans/recording-to-brain.md.
+ * than attempt a doomed `getFile`. See docs/architecture/media/transcription.md.
  */
 export const TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024
 

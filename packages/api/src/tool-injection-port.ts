@@ -5,7 +5,7 @@
  * tools; it does not know what they are or which assistants get them. The closed
  * platform wires an impl that gates on `assistant.kind`/`appType` and merges its
  * tools (e.g. a distribution app's publishing tools). Open default: unset — no
- * extra tools. See docs/plans/oss-local-brain-wedge.md §12.5.
+ * extra tools. See the open-core split (repo CLAUDE.md; plan in git history) §12.5.
  */
 
 import type { Tool } from '@sidanclaw/core'

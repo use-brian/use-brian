@@ -21,7 +21,9 @@
  *   │ header: title + collapse button                        │
  *   │ messages: empty-state OR <MessageList> with inline     │
  *   │   <ViewRenderer> blocks + "Open in this doc" pill   │
- *   │ tool-timeline (compact) above the streaming text       │
+ *   │ activity feed (shimmer status + reasoning/tool steps)  │
+ *   │   above the streaming text; committed bubbles keep a   │
+ *   │   collapsed "Worked for Ns · k steps" receipt          │
  *   │ tool-confirmation cards inline between bubbles         │
  *   │ inline citations bar under each finalised assistant    │
  *   │ composer: textarea + Send (Stop while streaming)       │
@@ -126,15 +128,26 @@ import {
 } from "@sidanclaw/chat-ui";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
+import {
+  ChatActivityFeed,
+  ChatActivitySummary,
+  type ResearchPhase,
+} from "@/components/chrome/chat-activity";
 import { authFetch } from "@/lib/auth-fetch";
 import { publishBuildActivity } from "@/lib/build-activity";
 import {
   appendReasoning,
   appendStep,
   EMPTY_LOG,
+  removeToolSteps,
+  updateStepText,
   type BuildEvent,
   type EventLog,
 } from "@/lib/build-events";
+import {
+  describeToolFromInput,
+  type NarrationDict,
+} from "@/lib/tool-narration";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import {
   SURFACE_CHAT_SEED_EVENT,
@@ -142,6 +155,7 @@ import {
 } from "@/lib/surface-chat-seed";
 import {
   extractMessageText,
+  extractToolUses,
   fetchLatestSession,
   fetchSessionMessages,
 } from "@/lib/api/sessions";
@@ -806,6 +820,16 @@ export function FloatingChat({
   const eventedToolIdsRef = useRef<Set<string>>(new Set());
   const [streamingEvents, setStreamingEvents] = useState<BuildEvent[]>([]);
   const mintEventId = useCallback(() => `ev-${eventSeqRef.current++}`, []);
+  // Per-tool call timing (performance.now at `tool_start`, closed at
+  // `tool_result` into `durationMs`) — the activity feed's per-step readout.
+  const toolStartTimesRef = useRef<Map<string, number>>(new Map());
+  // Turn t0 (epoch ms) — drives the live elapsed counter and the committed
+  // message's "Worked for Ns" receipt.
+  const turnStartedAtRef = useRef<number | null>(null);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  // Latest research/coordinator `status` phase for this turn — the activity
+  // header shows it while no tool narration outranks it.
+  const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
   // Server-assigned assistant message id (from `assistant_message_saved`).
   const assistantIdRef = useRef<string | null>(null);
   // Set when this turn emitted an askQuestion confirmation (the suspend
@@ -1007,7 +1031,7 @@ export function FloatingChat({
       });
       if (cancelled) return;
 
-      const messages = mapSessionRows(rows);
+      const messages = mapSessionRows(rows, t.toolNarration);
 
       if (messages.length === 0) {
         // Empty session — treat as no resume so a fresh send still
@@ -1050,7 +1074,7 @@ export function FloatingChat({
       }
       void fetchSessionMessages(sid, { signal: controller.signal })
         .then((rows) => {
-          const mapped = mapSessionRows(rows);
+          const mapped = mapSessionRows(rows, t.toolNarration);
           if (mapped.length <= baseline) return;
           sessionDispatchRef.current({ type: "messages/load", messages: mapped });
           setResumePolling(false);
@@ -1077,12 +1101,16 @@ export function FloatingChat({
     eventLogRef.current = EMPTY_LOG;
     eventSeqRef.current = 0;
     eventedToolIdsRef.current = new Set();
+    toolStartTimesRef.current = new Map();
+    turnStartedAtRef.current = Date.now();
     assistantIdRef.current = null;
     turnAskedQuestionRef.current = false;
     setCitations([]);
     setToolTimeline([]);
     setStreamingReasoning("");
     setStreamingEvents([]);
+    setTurnStartedAt(turnStartedAtRef.current);
+    setResearchPhase(null);
   }, []);
 
   const sendMessage = useCallback(
@@ -1275,6 +1303,7 @@ export function FloatingChat({
               // Dedup — re-emits keep the existing row (status may already
               // be `done` from a retry replay).
               if (turnToolsRef.current.some((t) => t.id === id)) break;
+              toolStartTimesRef.current.set(id, performance.now());
               const workerId =
                 typeof payload.workerId === "string"
                   ? payload.workerId
@@ -1282,15 +1311,30 @@ export function FloatingChat({
               const workerDescription = workerId
                 ? turnWorkerDescriptionsRef.current.get(workerId)
                 : undefined;
+              // Seed the friendliest label we can before the input parses —
+              // the static per-tool map ("Checking your calendar") beats a
+              // raw "Running gmailListMessages" placeholder. `tool_input`
+              // upgrades it to the input-aware line moments later.
+              const seeded = describeToolFromInput(name, {}, t.toolNarration);
               const entry: ToolUsedWithOps = {
                 id,
                 name,
                 status: "running",
+                description: seeded.description,
                 ...(workerId ? { workerId } : {}),
                 ...(workerDescription ? { workerDescription } : {}),
               };
               turnToolsRef.current = [...turnToolsRef.current, entry];
               setToolTimeline(turnToolsRef.current);
+              // Mint the step row now so the feed shows the call the moment
+              // it starts; `tool_input` rewrites the text in place.
+              eventLogRef.current = appendStep(
+                eventLogRef.current,
+                seeded.description,
+                mintEventId,
+                { toolId: id },
+              );
+              setStreamingEvents(eventLogRef.current.events);
               break;
             }
             case "tool_dropped": {
@@ -1304,6 +1348,11 @@ export function FloatingChat({
                 (tool) => tool.id !== id,
               );
               setToolTimeline(turnToolsRef.current);
+              // Retract the phantom rows from the event feed too.
+              eventLogRef.current = removeToolSteps(eventLogRef.current, id);
+              setStreamingEvents(eventLogRef.current.events);
+              eventedToolIdsRef.current.delete(id);
+              toolStartTimesRef.current.delete(id);
               break;
             }
             case "tool_input": {
@@ -1336,21 +1385,31 @@ export function FloatingChat({
                   : tool,
               );
               setToolTimeline(turnToolsRef.current);
-              // Add the narration to the chronological event log as build
-              // step(s) — one row per `patchPage` op (so the feed reads like a
-              // live build log), else the single tool description. Dedup a
-              // re-emitted `tool_input` for the same tool id.
+              // Upgrade the tool's placeholder row (minted at `tool_start`)
+              // to the input-aware narration, then append one extra row per
+              // remaining `patchPage` op so the feed reads like a live build
+              // log. Dedup a re-emitted `tool_input` for the same tool id.
               if (!eventedToolIdsRef.current.has(id)) {
                 eventedToolIdsRef.current.add(id);
                 const stepLines =
                   narration.opLines && narration.opLines.length > 0
                     ? narration.opLines
                     : [narration.description];
-                for (const line of stepLines) {
+                const [first, ...rest] = stepLines;
+                if (first) {
+                  eventLogRef.current = updateStepText(
+                    eventLogRef.current,
+                    id,
+                    first,
+                    narration.url,
+                  );
+                }
+                for (const line of rest) {
                   eventLogRef.current = appendStep(
                     eventLogRef.current,
                     line,
                     mintEventId,
+                    { toolId: id },
                   );
                 }
                 setStreamingEvents(eventLogRef.current.events);
@@ -1365,11 +1424,18 @@ export function FloatingChat({
                 typeof payload.errorMessage === "string"
                   ? payload.errorMessage
                   : undefined;
+              const startedAtMs = toolStartTimesRef.current.get(id);
+              const durationMs =
+                startedAtMs != null
+                  ? Math.max(0, Math.round(performance.now() - startedAtMs))
+                  : undefined;
               turnToolsRef.current = turnToolsRef.current.map((tool) =>
                 tool.id === id
                   ? {
                       ...tool,
                       status: isError ? "retried" : "done",
+                      ...(durationMs != null ? { durationMs } : {}),
+                      ...(isError && errorMessage ? { errorMessage } : {}),
                     }
                   : tool,
               );
@@ -1410,6 +1476,17 @@ export function FloatingChat({
                 ];
               }
               setCitations(turnCitationsRef.current);
+              break;
+            }
+            case "status": {
+              // Research / coordinator phase codes only — `message`-only
+              // statuses (connection retry, turn limit) stay silent. See
+              // docs/architecture/engine/live-streaming.md → research banner.
+              const phase =
+                typeof payload.phase === "string" ? payload.phase : "";
+              if (phase === "research_detected") setResearchPhase("detected");
+              else if (phase === "research_starting") setResearchPhase("starting");
+              else if (phase === "research_parallel") setResearchPhase("parallel");
               break;
             }
             case "tool_confirmation_required": {
@@ -1804,6 +1881,12 @@ export function FloatingChat({
           const tools = turnToolsRef.current;
           const citations = turnCitationsRef.current;
           const fileAttachments = turnFileAttachmentsRef.current;
+          // Total wall-clock for the "Worked for Ns · k steps" receipt —
+          // only meaningful when the turn actually ran tools.
+          const activityDurationMs =
+            tools.length > 0 && turnStartedAtRef.current != null
+              ? Math.max(0, Date.now() - turnStartedAtRef.current)
+              : undefined;
           const finalMessage: MessageWithViews = {
             id: assistantIdRef.current ?? `assistant-${Date.now()}`,
             role: "assistant",
@@ -1811,6 +1894,7 @@ export function FloatingChat({
             timestamp: new Date(),
             ...(views.length > 0 ? { views } : {}),
             ...(tools.length > 0 ? { toolsUsed: tools } : {}),
+            ...(activityDurationMs != null ? { activityDurationMs } : {}),
             ...(citations.length > 0 ? { citations } : {}),
             ...(fileAttachments.length > 0 ? { fileAttachments } : {}),
           };
@@ -2331,9 +2415,13 @@ export function FloatingChat({
                 </div>
               )}
               <div className="flex-1 min-w-0 pt-0.5 space-y-2">
-                {toolTimeline.length > 0 ? (
-                  <ToolTimelineSlim tools={toolTimeline} narration={t.toolNarration} />
-                ) : null}
+                <ChatActivityFeed
+                  events={streamingEvents}
+                  tools={toolTimeline}
+                  replyStreaming={streamingText.length > 0}
+                  researchPhase={researchPhase}
+                  startedAt={turnStartedAt}
+                />
                 {streamingText ? (
                   <div className="chat-markdown prose prose-sm dark:prose-invert max-w-none text-[14px] leading-[1.6] text-foreground break-words">
                     <ChatMarkdownWithLinks
@@ -2345,14 +2433,6 @@ export function FloatingChat({
                       aria-hidden
                       className="ml-0.5 inline-block h-[16px] w-[2px] align-text-bottom rounded-full bg-primary animate-pulse shadow-[0_0_8px_var(--primary)]"
                     />
-                  </div>
-                ) : toolTimeline.length === 0 ? (
-                  <div className="flex items-center gap-2 py-1 text-xs text-primary italic font-medium">
-                    <span aria-hidden className="relative inline-flex h-3 w-3 items-center justify-center">
-                      <span className="absolute inset-0 animate-ping rounded-full bg-primary/25" />
-                      <span className="relative inline-block h-3 w-3 animate-spin rounded-full border-2 border-primary/40 border-t-primary" />
-                    </span>
-                    {t.thinking}
                   </div>
                 ) : null}
                 {citations.length > 0 ? (
@@ -2646,26 +2726,51 @@ function coercePayload(data: unknown): Record<string, unknown> {
  * Map persisted session rows to renderable chat messages. Shared by the
  * resume-on-mount seed and the post-answer resume poll. Drops empty
  * user/assistant rows (legacy / aborted turns) and non-text roles.
+ *
+ * Assistant rows also restore their `tool_use` blocks as a done-status
+ * `toolsUsed[]` (re-narrated from each call's input) so the activity
+ * receipt survives a reload. Timings are live-only and not restored.
  */
 function mapSessionRows(
   rows: Awaited<ReturnType<typeof fetchSessionMessages>>,
+  narration: NarrationDict,
 ): Message[] {
   return rows
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({
-      id: m.id,
-      role: m.role as "user" | "assistant",
-      // Strip `<followup>` from restored assistant rows — pre-fix history may
-      // carry the volunteered tag (the server now strips before persist).
-      text:
+    .map((m) => {
+      const toolsUsed =
         m.role === "assistant"
-          ? stripFollowUps(extractMessageText(m.content))
-          : extractMessageText(m.content),
-      timestamp: new Date(m.timestamp),
-      ...(m.attachments && m.attachments.length > 0
-        ? { fileAttachments: m.attachments }
-        : {}),
-    }))
+          ? extractToolUses(m.content).map((use): ToolUsed => {
+              const described = describeToolFromInput(
+                use.name,
+                use.input,
+                narration,
+              );
+              return {
+                id: use.id,
+                name: use.name,
+                status: "done" as const,
+                description: described.description,
+                ...(described.url ? { url: described.url } : {}),
+              };
+            })
+          : [];
+      return {
+        id: m.id,
+        role: m.role as "user" | "assistant",
+        // Strip `<followup>` from restored assistant rows — pre-fix history may
+        // carry the volunteered tag (the server now strips before persist).
+        text:
+          m.role === "assistant"
+            ? stripFollowUps(extractMessageText(m.content))
+            : extractMessageText(m.content),
+        timestamp: new Date(m.timestamp),
+        ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
+        ...(m.attachments && m.attachments.length > 0
+          ? { fileAttachments: m.attachments }
+          : {}),
+      };
+    })
     .filter((m) => m.text.trim().length > 0 || m.fileAttachments?.length);
 }
 
@@ -2700,171 +2805,9 @@ function collapseToOneLine(text: string): string | undefined {
 }
 
 // ── Tool narration ───────────────────────────────────────────────────────
-
-type NarrationDict = ReturnType<typeof useT>["chat"]["toolNarration"];
-
-/**
- * Build a short human-readable description for a tool from its input.
- * Returns `undefined` if no narration is known — the caller falls back
- * to the static map. For `patchPage`, also returns per-op narration lines
- * so the build indicator can show a live log of what the model is writing.
- */
-function describeToolFromInput(
-  name: string,
-  input: Record<string, unknown>,
-  dict: NarrationDict,
-): { description: string; url?: string; opLines?: string[] } | undefined {
-  if (name === "renderView") {
-    return { description: dict.renderView };
-  }
-  if (name === "renderPage") {
-    return { description: dict.renderPage };
-  }
-  if (name === "patchPage") {
-    const ops = Array.isArray(input.ops) ? (input.ops as Array<Record<string, unknown>>) : [];
-    const opLines = derivePatchPageOpLines(ops, dict);
-    return {
-      description: opLines.length > 0 ? dict.patchPageActive : dict.patchPage,
-      ...(opLines.length > 0 ? { opLines } : {}),
-    };
-  }
-  if (name === "createSubPage") {
-    return { description: dict.createSubPage };
-  }
-  if (name === "webSearch") {
-    const query = input.query as string | undefined;
-    return query
-      ? { description: format(dict.webSearchQuery, { query }) }
-      : { description: dict.webSearch };
-  }
-  if (name === "urlReader") {
-    const url = input.url as string | undefined;
-    if (url) {
-      try {
-        const host = new URL(url).hostname.replace(/^www\./, "");
-        return { description: format(dict.readingHost, { host }), url };
-      } catch {
-        return { description: dict.urlReader, url };
-      }
-    }
-    return { description: dict.urlReader };
-  }
-  if (name === "mcp_search") {
-    return { description: dict.mcp_search };
-  }
-  if (name === "mcp_call") {
-    return { description: dict.mcp_call };
-  }
-  if (name === "spawnWorker") {
-    const description = input.description as string | undefined;
-    if (description?.trim()) {
-      const trimmed = description.trim();
-      return {
-        description: trimmed.length > 80 ? trimmed.slice(0, 77) + "…" : trimmed,
-      };
-    }
-    return { description: dict.worker };
-  }
-  if (name === "notes" || name === "saveMemory" || name === "getMemory") {
-    return { description: dict[name as keyof NarrationDict] as string };
-  }
-  return { description: format(dict.generic, { name }) };
-}
-
-/**
- * Derive one human-readable narration line per op in a `patchPage` ops array.
- * The build indicator renders these as a live "what's being written" log,
- * expanding the single timeline row into a per-op sub-list.
- *
- * Only `add` ops are narrated (the interesting ones from the user's POV).
- * `edit` / `delete` / `move` / `setTitle` keep a short summary. Falls back to
- * the generic patchPage label when nothing useful can be derived.
- */
-function derivePatchPageOpLines(
-  ops: Array<Record<string, unknown>>,
-  dict: NarrationDict,
-): string[] {
-  const lines: string[] = [];
-  for (const op of ops) {
-    const opKind = typeof op.op === "string" ? op.op : "";
-    if (opKind === "add") {
-      const block = op.block && typeof op.block === "object" ? (op.block as Record<string, unknown>) : {};
-      const kind = typeof block.kind === "string" ? block.kind : "";
-      // Extract a short title / text excerpt to make the line concrete.
-      const title = extractBlockTitle(block);
-      lines.push(narratePatchOp(kind, title, dict));
-    } else if (opKind === "edit") {
-      lines.push(dict.patchOpEdit);
-    } else if (opKind === "delete") {
-      lines.push(dict.patchOpDelete);
-    } else if (opKind === "move") {
-      lines.push(dict.patchOpMove);
-    } else if (opKind === "setTitle") {
-      const title = typeof op.title === "string" ? op.title.trim().slice(0, 40) : "";
-      lines.push(title ? format(dict.patchOpSetTitle, { title }) : dict.patchOpSetTitleGeneric);
-    }
-  }
-  return lines;
-}
-
-/**
- * Pull a short human-friendly label out of a block's content fields.
- * Tries `text` (rich-text), `heading` level, table title, etc.
- * Returns empty string when nothing useful is found.
- */
-function extractBlockTitle(block: Record<string, unknown>): string {
-  // Rich-text content — first segment's `text` field.
-  if (Array.isArray(block.content)) {
-    for (const seg of block.content as Array<Record<string, unknown>>) {
-      const t = typeof seg.text === "string" ? seg.text.trim() : "";
-      if (t) return t.slice(0, 40);
-    }
-  }
-  // Direct text string (some block kinds use this).
-  if (typeof block.text === "string" && block.text.trim()) {
-    return block.text.trim().slice(0, 40);
-  }
-  return "";
-}
-
-/**
- * Build one narration line for a single `add` op block.
- */
-function narratePatchOp(kind: string, title: string, dict: NarrationDict): string {
-  const label = title ? `"${title}${title.length >= 40 ? "…" : ""}"` : "";
-  switch (kind) {
-    case "heading":
-      return label ? format(dict.patchOpAddHeading, { title: label }) : dict.patchOpAddHeadingGeneric;
-    case "text":
-      return label ? format(dict.patchOpAddParagraph, { text: label }) : dict.patchOpAddParagraphGeneric;
-    case "data":
-      return dict.patchOpAddTable;
-    case "chart":
-      return dict.patchOpAddChart;
-    case "to_do":
-      return label ? format(dict.patchOpAddTodo, { text: label }) : dict.patchOpAddTodoGeneric;
-    case "bulleted_list_item":
-      return label ? format(dict.patchOpAddBullet, { text: label }) : dict.patchOpAddBulletGeneric;
-    case "numbered_list_item":
-      return label ? format(dict.patchOpAddBullet, { text: label }) : dict.patchOpAddBulletGeneric;
-    case "callout":
-      return dict.patchOpAddCallout;
-    case "code":
-      return dict.patchOpAddCode;
-    case "toggle":
-      return label ? format(dict.patchOpAddToggle, { text: label }) : dict.patchOpAddToggleGeneric;
-    case "image":
-      return dict.patchOpAddImage;
-    case "divider":
-      return dict.patchOpAddDivider;
-    case "quote":
-      return label ? format(dict.patchOpAddQuote, { text: label }) : dict.patchOpAddQuoteGeneric;
-    case "child_page":
-      return dict.patchOpAddChildPage;
-    default:
-      return dict.patchOpAddGeneric;
-  }
-}
+// The describers (input-aware narration, patchPage op lines, static label
+// map) live in `@/lib/tool-narration` — shared with the session-history
+// restore path and unit-testable without React. [COMP:app-web/tool-narration]
 
 type ChatTargetDict = ReturnType<typeof useT>["chat"]["target"];
 
@@ -3122,6 +3065,12 @@ function MessageBubble({
         </div>
       )}
       <div className="flex-1 min-w-0 pt-0.5 space-y-2.5">
+        {message.toolsUsed?.length ? (
+          <ChatActivitySummary
+            tools={message.toolsUsed}
+            durationMs={message.activityDurationMs}
+          />
+        ) : null}
         {message.text ? (
           <div className="chat-markdown prose prose-sm dark:prose-invert max-w-none text-[14px] leading-[1.6] text-foreground break-words">
             <ChatMarkdownWithLinks
@@ -3249,139 +3198,6 @@ function ViewBlock({
       <span className="text-muted-foreground">{actionLabel}</span>
       <ArrowRight className="size-3 text-muted-foreground" aria-hidden />
     </button>
-  );
-}
-
-/**
- * Slim, single-row-per-tool timeline. No nesting / expand-collapse —
- * app-web's chat panel is narrow and short turns rarely have more
- * than a handful of tools.
- */
-function ToolTimelineSlim({
-  tools,
-  narration,
-}: {
-  tools: ToolUsed[];
-  narration: NarrationDict;
-}) {
-  // This component is only rendered inside the active streaming bubble
-  // (see line ~980), so we treat everything here as `streaming`. Done
-  // steps render as subtle dim dots, not the bold green check.
-  const runningTool = tools.find((t) => t.status === "running");
-  const hasCompleted = tools.some((t) => t.status !== "running");
-  // No tool currently running + at least one completed → model is
-  // between tools (generating text or planning). Show "Working…" so
-  // the panel never reads as "all checked off, nothing happening".
-  const showWorking = !runningTool && hasCompleted;
-  return (
-    <div className="flex flex-col gap-1 text-xs">
-      {tools.map((tool) => {
-        const description =
-          tool.description ?? format(narration.generic, { name: tool.name });
-        // Streaming colour semantics (shared with the editor build log in
-        // page-build-indicator.tsx): the in-progress step reads in the active
-        // brand colour; a finished step — done OR a failed/retried attempt —
-        // settles to the muted/disabled colour, so the row reads as a live
-        // progression rather than a checklist that already looks done.
-        const tone =
-          tool.status === "running"
-            ? "text-primary font-medium"
-            : "text-muted-foreground";
-        return (
-          <div
-            key={tool.id}
-            className={cn("flex items-center gap-2 min-w-0", tone)}
-          >
-            <ToolStatusIcon status={tool.status} streaming />
-            <span
-              className={cn(
-                "truncate min-w-0",
-                tool.status === "retried" && "line-through",
-              )}
-            >
-              {tool.url ? (
-                <a
-                  href={tool.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={tool.url}
-                  className="hover:underline inline-flex items-center gap-1"
-                >
-                  {description}
-                  <ExternalLink className="size-2.5" aria-hidden />
-                </a>
-              ) : (
-                description
-              )}
-            </span>
-          </div>
-        );
-      })}
-      {showWorking && <WorkingIndicator label={narration.working} />}
-    </div>
-  );
-}
-
-// `streaming` differentiates a step done mid-turn (subtle dot — "more is
-// coming") from a step in a fully-completed turn (bold checkmark — "all
-// done"). The unified bold-check across both states was the source of
-// the "looks all done already" confusion.
-function ToolStatusIcon({ status, streaming }: { status: ToolUsed["status"]; streaming?: boolean }) {
-  if (status === "running") {
-    return (
-      <span aria-hidden className="relative inline-flex h-3 w-3 shrink-0 items-center justify-center">
-        <span className="absolute inset-0 rounded-full bg-primary/25 animate-ping" />
-        <span className="relative inline-block h-3 w-3 rounded-full border-2 border-primary/40 border-t-primary animate-spin" />
-      </span>
-    );
-  }
-  if (status === "retried") {
-    // A failed/retried attempt is de-emphasised to the disabled colour (not an
-    // alarming destructive red) — the model recovered and moved on.
-    return (
-      <span
-        aria-hidden
-        className="inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground"
-      >
-        <X className="size-2" />
-      </span>
-    );
-  }
-  if (streaming) {
-    return (
-      <span
-        aria-hidden
-        className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
-      </span>
-    );
-  }
-  return (
-    <span
-      aria-hidden
-      className="inline-flex h-3 w-3 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"
-    >
-      <Check className="size-2" strokeWidth={3} />
-    </span>
-  );
-}
-
-function WorkingIndicator({ label }: { label: string }) {
-  return (
-    <div className="flex items-center gap-2 min-w-0 animate-in fade-in duration-300">
-      <span
-        aria-hidden
-        className="inline-flex h-3 w-3 shrink-0 items-center justify-center"
-      >
-        <span className="flex gap-0.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "0ms" }} />
-          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "150ms" }} />
-          <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: "300ms" }} />
-        </span>
-      </span>
-      <span className="text-primary italic text-xs font-medium">{label}</span>
-    </div>
   );
 }
 

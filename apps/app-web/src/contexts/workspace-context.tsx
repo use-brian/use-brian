@@ -24,7 +24,7 @@
  * `useWorkspaceFetch`, etc. Keeping the same surface means a surface port is a
  * file move, not an import rewrite.
  *
- * Spec: docs/plans/doc-web-app-consolidation.md §5a → "The hard prerequisite".
+ * Spec: docs/architecture/features/doc.md §5a → "The hard prerequisite".
  * [COMP:app-web/workspaces-adapter]
  */
 

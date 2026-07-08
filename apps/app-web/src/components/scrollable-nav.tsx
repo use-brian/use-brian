@@ -8,7 +8,7 @@ import { useRef, useState, useEffect, useCallback } from "react";
  * and hide when scrolled to the edge.
  *
  * Ported verbatim from `apps/web/src/components/scrollable-nav.tsx` for the
- * studio sub-nav's mobile rail (docs/plans/doc-web-app-consolidation.md
+ * studio sub-nav's mobile rail (docs/architecture/features/doc.md
  * §9 #5). No app-local deps, so it's a clean lift.
  */
 export function ScrollableNav({

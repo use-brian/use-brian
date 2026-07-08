@@ -5,7 +5,7 @@
  * EVERY `/w/[workspaceId]/*` surface (Brain / Studio / Workflow / Approvals /
  * Knowledge-base / the doc page tree).
  *
- * THE HOIST (docs/plans/doc-web-app-consolidation.md §4). The sidebar used
+ * THE HOIST (docs/architecture/features/doc.md §4). The sidebar used
  * to live inside `DocShell`, which only mounts on `/p` — so it was
  * doc-only chrome. This component is mounted by `/w/[workspaceId]/layout.tsx`
  * (a parent of every surface) and renders the same `DocSidebar` +

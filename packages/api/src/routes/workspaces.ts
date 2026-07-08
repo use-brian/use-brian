@@ -413,7 +413,7 @@ export function workspaceRoutes({
   // (it routes to `setDefaultRecordingBlueprint`, which validates the template
   // is a same-workspace blueprint). Validate the field at the boundary with Zod:
   // a string id sets it, `null` clears it (ingest-only). `undefined` (absent)
-  // leaves it untouched. See docs/plans/workspace-default-recording-blueprint.md §D4.
+  // leaves it untouched. See docs/architecture/brain/structural-synthesis.md §D4.
   const defaultBlueprintFieldSchema = z.object({
     defaultRecordingBlueprintId: z.string().uuid().nullable().optional(),
   })

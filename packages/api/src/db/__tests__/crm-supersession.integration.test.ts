@@ -3,7 +3,7 @@ import pg from 'pg'
 
 /**
  * Integration test for CRM update semantics post CRM→entity unification
- * (docs/plans/crm-entity-unification.md). A contact/company/deal IS an
+ * (docs/architecture/features/crm.md). A contact/company/deal IS an
  * `entities` row; updates are IN PLACE (updateEntity) — the id is stable
  * (so inbound + outbound edges stay valid) and CRM field history is not
  * preserved (decision D5). This replaces the old dual-table

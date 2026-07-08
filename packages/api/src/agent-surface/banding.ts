@@ -1,6 +1,6 @@
 /**
  * Agent-surface write banding — the Auto / Approve split for Tier-2
- * control-plane writes (docs/plans/agent-facing-capability-surface.md §6.1,
+ * control-plane writes (docs/architecture/integrations/agent-capability-surface.md §6.1,
  * locked decision §12.3: conservative bands).
  *
  * Applies ONLY on the agent surfaces (brain MCP / assistant MCP /

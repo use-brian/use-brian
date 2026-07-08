@@ -1,6 +1,6 @@
 /**
  * Control-plane read tools — the Tier-1 "describe my workspace" surface of
- * the agent capability toolset (docs/plans/agent-facing-capability-surface.md
+ * the agent capability toolset (docs/architecture/integrations/agent-capability-surface.md
  * §4). Six reads over apparatus: assistants, connectors, skills, channels,
  * modes. Clearance-bounded by membership scoping inside the reader; no
  * capability grant required (Tier-1 reads are deliberately ungated — an

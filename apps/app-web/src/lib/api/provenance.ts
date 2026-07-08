@@ -2,7 +2,7 @@
  * SDK for the provenance side-sheet (app-web).
  *
  * Ported verbatim from `apps/web/src/lib/api/provenance.ts` as part of the
- * brain surface migration (docs/plans/doc-web-app-consolidation.md
+ * brain surface migration (docs/architecture/features/doc.md
  * §5a). Backed by the retrieval `provenance` tool + episode store (see
  * docs/architecture/brain/retrieval-layer.md). Imports
  * (`@/lib/auth-fetch`, `@/lib/api/brain`) already resolve in app-web.

@@ -12,7 +12,7 @@
  * front-end drag-drop reorder loop and the PATCH route. Server-side
  * factories use `randomUUID()` so the ids are stable.
  *
- * See docs/plans/a2ui-notion-feel.md (Notion architecture) and
+ * See docs/architecture/features/views.md (Notion architecture) and
  * docs/architecture/features/views.md.
  *
  * [COMP:views/blocks]

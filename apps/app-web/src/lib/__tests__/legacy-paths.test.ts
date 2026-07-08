@@ -10,7 +10,7 @@
  * with no index route (knowledge-base → gaps, memories → review), and
  * the null fallthrough that keeps unknown paths 404ing.
  *
- * Spec: docs/plans/single-app-cutover.md → Phase C ("old links, bookmarks,
+ * Spec: docs/architecture/features/web-ui.md → Phase C ("old links, bookmarks,
  * and deep-links keep working").
  */
 

@@ -36,7 +36,7 @@ export type SkillApprovalRouteOptions = {
   enablementStore: WorkspaceSkillEnablementStore
   /** Optional — when present, induction governance (re-derivation matching +
    *  `learned_from` provenance edges) is wired on staged-creation approval
-   *  (`docs/plans/skills-as-procedural-brain-primitive.md` §5.1, §5.4, §6). */
+   *  (`docs/architecture/engine/skill-system.md` §5.1, §5.4, §6). */
   entityLinks?: EntityLinksStore
 }
 
@@ -420,7 +420,7 @@ async function applyStagedSkillCreation(
 
 /**
  * Emit a `learned_from` induction-provenance edge (skill → assistant), fire-
- * and-forget (`docs/plans/skills-as-procedural-brain-primitive.md` §6). The
+ * and-forget (`docs/architecture/engine/skill-system.md` §6). The
  * edge records WHERE the skill was induced and doubles as the re-derivation
  * audit trail. Provenance target is the originating assistant; with no
  * originating assistant there is no provenance to record, so we skip. A

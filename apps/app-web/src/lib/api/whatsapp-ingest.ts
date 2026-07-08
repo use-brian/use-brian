@@ -4,7 +4,7 @@
  * Backs the Studio -> Ingestion "Connect WhatsApp (your number)" panel
  * ([COMP:app-web/studio-whatsapp-ingest]). The assistant silently reads
  * owner-enabled team groups into the brain and never sends - see
- * docs/plans/whatsapp-bring-your-own-number.md.
+ * docs/architecture/channels/whatsapp.md.
  *
  * Backend: packages/api-platform/src/routes/whatsapp-ingest-admin.ts
  *   - GET  /api/workspaces/:workspaceId/whatsapp            status + group inventory

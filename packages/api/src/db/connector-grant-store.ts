@@ -59,6 +59,7 @@ const INSTANCE_COLS_AS = `
   ci.sensitivity AS "instance_sensitivity",
   ci.connected AS "instance_connected",
   ci.ingestion_enabled AS "instance_ingestionEnabled",
+  ci.ingest_workspace_id AS "instance_ingestWorkspaceId",
   ci.credentials_type AS "instance_credentialsType",
   ci.health_status AS "instance_healthStatus",
   ci.last_error AS "instance_lastError",
@@ -82,6 +83,7 @@ type FlatGrantInstanceRow = ConnectorGrant & {
   instance_sensitivity: 'public' | 'internal' | 'confidential'
   instance_connected: boolean
   instance_ingestionEnabled: boolean
+  instance_ingestWorkspaceId: string | null
   instance_credentialsType: ConnectorInstance['credentialsType']
   instance_healthStatus: ConnectorInstance['healthStatus']
   instance_lastError: ConnectorInstance['lastError']
@@ -113,6 +115,7 @@ function unflatten(row: FlatGrantInstanceRow): GrantWithInstance {
       sensitivity: row.instance_sensitivity,
       connected: row.instance_connected,
       ingestionEnabled: row.instance_ingestionEnabled,
+      ingestWorkspaceId: row.instance_ingestWorkspaceId,
       credentialsType: row.instance_credentialsType,
       healthStatus: row.instance_healthStatus,
       lastError: row.instance_lastError,
@@ -170,6 +173,29 @@ export type ConnectorGrantStore = {
   deleteByGrantorAndTargetSystem(grantedByUserId: string, targetType: ConnectorGrantTarget, targetId: string): Promise<number>
 }
 
+/**
+ * After an exposure to `workspaceId` is revoked, stop any ingestion that was
+ * routing there: a personal connector enabled for a workspace it is no longer
+ * shared with must not keep feeding that brain (exposed-connector ingestion,
+ * docs/plans/exposed-connector-ingestion.md → §D). System-level UPDATE — the
+ * revocation may be team-admin-initiated (not the connector owner) and the
+ * team-member-removal cascade holds no session user. Scoped + idempotent: it
+ * only flips an instance that was actually targeting `workspaceId`; the
+ * connector's already-ingested episodes are kept.
+ */
+async function stopIngestionForRevokedWorkspace(
+  connectorInstanceIds: string[],
+  workspaceId: string,
+): Promise<void> {
+  if (connectorInstanceIds.length === 0) return
+  await query(
+    `UPDATE connector_instance
+       SET ingestion_enabled = false, ingest_workspace_id = NULL
+     WHERE ingest_workspace_id = $1 AND id = ANY($2::uuid[])`,
+    [workspaceId, connectorInstanceIds],
+  )
+}
+
 export function createConnectorGrantStore(): ConnectorGrantStore {
   return {
     async create(params) {
@@ -210,6 +236,15 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
     },
 
     async revoke(actingUserId, grantId) {
+      // Capture the grant's instance + target before deleting so a connector
+      // that was ingesting into the now-revoked workspace can be stood down.
+      const before = await queryWithRLS<{ connectorInstanceId: string; targetType: string; targetId: string }>(
+        actingUserId,
+        `SELECT connector_instance_id AS "connectorInstanceId",
+                target_type AS "targetType", target_id AS "targetId"
+           FROM connector_grant WHERE id = $1`,
+        [grantId],
+      )
       // RLS allows grantor (cg_grantor_see_own) or team member
       // (cg_target_member); the route layer additionally gates team-admin
       // revocation via requireTeamRole before calling this.
@@ -218,7 +253,12 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
         `DELETE FROM connector_grant WHERE id = $1`,
         [grantId],
       )
-      return (result.rowCount ?? 0) > 0
+      const deleted = (result.rowCount ?? 0) > 0
+      const g = before.rows[0]
+      if (deleted && g && g.targetType === 'workspace') {
+        await stopIngestionForRevokedWorkspace([g.connectorInstanceId], g.targetId)
+      }
+      return deleted
     },
 
     async listForTargetSystem(targetType, targetId) {
@@ -250,6 +290,7 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            ci.connected_email AS "connectedEmail",
            ci.url, ci.custom, ci.config, ci.sensitivity, ci.connected,
            ci.ingestion_enabled AS "ingestionEnabled",
+           ci.ingest_workspace_id AS "ingestWorkspaceId",
            ci.credentials_type AS "credentialsType",
            ci.health_status AS "healthStatus",
            ci.last_error AS "lastError",
@@ -280,6 +321,17 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
     },
 
     async deleteByGrantorAndTargetSystem(grantedByUserId, targetType, targetId) {
+      // Capture affected instances before the delete so any that were ingesting
+      // into this workspace stop when the grantor loses access to it.
+      const affected =
+        targetType === 'workspace'
+          ? await query<{ connectorInstanceId: string }>(
+              `SELECT connector_instance_id AS "connectorInstanceId"
+                 FROM connector_grant
+                WHERE granted_by_user_id = $1 AND target_type = $2 AND target_id = $3`,
+              [grantedByUserId, targetType, targetId],
+            )
+          : { rows: [] as { connectorInstanceId: string }[] }
       const result = await query(
         `DELETE FROM connector_grant
          WHERE granted_by_user_id = $1
@@ -287,6 +339,12 @@ export function createConnectorGrantStore(): ConnectorGrantStore {
            AND target_id = $3`,
         [grantedByUserId, targetType, targetId],
       )
+      if (targetType === 'workspace') {
+        await stopIngestionForRevokedWorkspace(
+          affected.rows.map((r) => r.connectorInstanceId),
+          targetId,
+        )
+      }
       return result.rowCount ?? 0
     },
   }

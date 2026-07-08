@@ -4,7 +4,7 @@
  * Canonical "up to parent" back control (app-web).
  *
  * Ported from `apps/web/src/components/ui/back-button.tsx` as part of the
- * app consolidation (docs/plans/doc-web-app-consolidation.md §5a
+ * app consolidation (docs/architecture/features/doc.md §5a
  * "Foundation" / Phase 0 — shared UI primitives). An `ArrowLeft` icon +
  * label rendered as a flush-left ghost button (the negative margin lines
  * the label up with the heading below it; the arrow nudges left on hover).

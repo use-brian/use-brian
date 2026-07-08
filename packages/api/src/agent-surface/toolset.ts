@@ -1,7 +1,7 @@
 /**
  * The shared AGENT CAPABILITY TOOLSET — the one toolset both agent surfaces
  * inject, each capped at its bound assistant
- * (docs/plans/agent-facing-capability-surface.md §3):
+ * (docs/architecture/integrations/agent-capability-surface.md §3):
  *
  *   brain MCP      → bound to the workspace primary assistant
  *   assistant MCP  → bound to the keyed assistant

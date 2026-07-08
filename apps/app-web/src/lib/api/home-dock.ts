@@ -15,7 +15,12 @@ import { authFetch } from "@/lib/auth-fetch";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type ResolvedNeed = {
-  kind: "brain_review" | "approvals" | "autopilot";
+  kind:
+    | "brain_review"
+    | "approvals"
+    | "autopilot"
+    | "connector_attention"
+    | "workflow_attention";
   count: number;
   caption: string | null;
 };
@@ -28,14 +33,21 @@ export type ResolvedDock = {
   needsYou: ResolvedNeed[];
   pickUp: { id: string; name: string; updatedAt: string }[];
   comingUp: { id: string; name: string; nextRunAt: string }[];
-  brain: { entryCount: number; growth7d: number; hasConnector: boolean };
+  brain: {
+    entryCount: number;
+    growth7d: number;
+    /** Daily new-entry counts, oldest first. Optional: a pre-sparkline API
+     *  response simply renders the flat fallback line. */
+    sparkline?: number[];
+    hasConnector: boolean;
+  };
 };
 
 /**
- * Total items across the "Needs you" cards — the sidebar badge number
- * (approvals + brain reviews + autopilot as one inbox-style count). The merge
- * already drops zero-count cards server-side; the clamp just keeps a buggy
- * negative signal from eating the others.
+ * Total items across the "Needs you" cards — the sidebar badge number (every
+ * live needs-you count summed as one inbox-style number). The merge already
+ * drops zero-count cards server-side; the clamp just keeps a buggy negative
+ * signal from eating the others.
  */
 export function needsYouTotal(dock: ResolvedDock | null): number {
   if (!dock) return 0;

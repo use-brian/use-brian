@@ -13,7 +13,7 @@
  * assemble the message list and hand it here. Real Baileys payloads carry
  * many more fields; the normalizer reads only what is declared here.
  *
- * Spec: docs/plans/whatsapp-bring-your-own-number.md §"How they combine";
+ * Spec: docs/architecture/channels/whatsapp.md §"How they combine";
  * docs/architecture/brain/ingest-pipeline.md §Source adapters (WhatsApp).
  *
  * [COMP:brain/source-adapters/whatsapp]

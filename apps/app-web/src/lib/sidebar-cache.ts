@@ -3,7 +3,7 @@
  * `apps/web/src/lib/sidebar-cache.ts` the brain surface depends on.
  *
  * Ported as part of the brain surface migration
- * (docs/plans/doc-web-app-consolidation.md §5a). The brain page reads
+ * (docs/architecture/features/doc.md §5a). The brain page reads
  * `getActiveAssistantId()` to scope its rows by the active assistant's
  * `clearance` (the server's `resolveBrainCtx` uses it as the visibility
  * ceiling), and subscribes via `onActiveAssistantChanged` so the list
@@ -29,7 +29,7 @@ const activeAssistantListeners = new Set<AssistantIdListener>();
 // ── Assistant list cache ─────────────────────────────────────────
 //
 // Added for the Studio surface migration
-// (docs/plans/doc-web-app-consolidation.md §9 #5): the Studio
+// (docs/architecture/features/doc.md §9 #5): the Studio
 // Assistants rail + <AssistantDetail> mirror apps/web's behaviour of
 // reading and broadcasting the cached assistant list so a rename / icon
 // regenerate / clearance change in the detail flips the rail row without

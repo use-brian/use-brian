@@ -14,7 +14,7 @@
  * and `packages/core/src/views/types.ts`; the Zod validators on the
  * server are the authoritative contract.
  *
- * See `docs/plans/a2ui-notion-feel.md` § Phase 1 → HTTP routes.
+ * See `docs/architecture/features/views.md` § Phase 1 → HTTP routes.
  *
  * [COMP:app-web/views-sdk]
  */

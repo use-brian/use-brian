@@ -35,6 +35,15 @@ export type BuildEvent = {
   kind: BuildEventKind;
   /** One-line, human-readable text — already localized at the producer. */
   text: string;
+  /**
+   * Join key to the tool timeline for step events minted by a tool call —
+   * lets the chat activity feed (`chat-activity.tsx`) attach live status /
+   * duration / error detail to the row. Absent on reasoning events and on
+   * steps with no backing tool.
+   */
+  toolId?: string;
+  /** Optional external link for the step (e.g. the URL being read). */
+  url?: string;
 };
 
 /**
@@ -104,14 +113,62 @@ export function appendStep(
   log: EventLog,
   text: string,
   mintId: () => string,
+  meta?: { toolId?: string; url?: string },
 ): EventLog {
   const trimmed = text.trim();
   if (!trimmed) return log;
   const id = mintId();
   return {
     openReasoningId: null,
-    events: [...log.events, { id, kind: "step", text: trimmed }],
+    events: [
+      ...log.events,
+      {
+        id,
+        kind: "step" as const,
+        text: trimmed,
+        ...(meta?.toolId ? { toolId: meta.toolId } : {}),
+        ...(meta?.url ? { url: meta.url } : {}),
+      },
+    ],
   };
+}
+
+/**
+ * Upgrade the text (and optionally url) of the **last** step event carrying
+ * `toolId` — a tool's placeholder row (minted at `tool_start`) replaced by
+ * its input-aware narration once `tool_input` parses. No-op when no such
+ * step exists or nothing changes.
+ */
+export function updateStepText(
+  log: EventLog,
+  toolId: string,
+  text: string,
+  url?: string,
+): EventLog {
+  const trimmed = text.trim();
+  if (!trimmed) return log;
+  for (let i = log.events.length - 1; i >= 0; i--) {
+    const e = log.events[i]!;
+    if (e.kind !== "step" || e.toolId !== toolId) continue;
+    if (e.text === trimmed && e.url === url) return log;
+    const events = log.events.slice();
+    events[i] = { ...e, text: trimmed, ...(url ? { url } : {}) };
+    return { openReasoningId: log.openReasoningId, events };
+  }
+  return log;
+}
+
+/**
+ * Retract every step event carrying `toolId` — the engine dropped the tool
+ * call from the persisted turn (`tool_dropped`), so the feed must not keep
+ * the phantom rows. Reasoning events never carry a toolId and are untouched.
+ */
+export function removeToolSteps(log: EventLog, toolId: string): EventLog {
+  const events = log.events.filter(
+    (e) => !(e.kind === "step" && e.toolId === toolId),
+  );
+  if (events.length === log.events.length) return log;
+  return { openReasoningId: log.openReasoningId, events };
 }
 
 /**

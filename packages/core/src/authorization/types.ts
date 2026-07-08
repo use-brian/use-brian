@@ -24,7 +24,7 @@ export type ActiveGrantRow = CapabilityGrant & {
 
 /**
  * The control-plane capability for the agent-facing surfaces (brain MCP /
- * assistant MCP) — see docs/plans/agent-facing-capability-surface.md §5.
+ * assistant MCP) — see docs/architecture/integrations/agent-capability-surface.md §5.
  * Tier-2 control-plane write tools carry `requiresCapability:
  * CONFIGURE_CAPABILITY`; an agent surface exposes them only when the bound
  * assistant holds an active grant. Off by default, granted by a workspace

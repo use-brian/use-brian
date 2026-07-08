@@ -379,9 +379,15 @@ export default function StudioIngestRulesPage() {
     setToggleError(null);
     const action = s.ingestionEnabled ? "disable" : "enable";
     try {
+      // The active workspace is the ingest target: a personal connector exposed
+      // here routes its episodes to THIS workspace (exposed-connector ingestion).
       const res = await authFetch(
         `${API_URL}/api/ingest/sources/${s.instanceId}/${action}`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId: activeId }),
+        },
       );
       if (!res.ok) throw new Error();
       const data = (await res.json()) as { source: IngestSource };

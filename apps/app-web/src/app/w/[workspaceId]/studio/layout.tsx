@@ -5,7 +5,7 @@
  * section strip, and the section page pane, in one scroll container.
  *
  * Ported from `apps/web/src/app/(app)/studio/layout.tsx` as part of the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §9 #5 — Studio
+ * consolidation (docs/architecture/features/doc.md §9 #5 — Studio
  * unified in app-web with its OWN full-page layout/sub-nav, NOT the doc
  * three-column page shell). The persistent `/w/[workspaceId]` layout `<main>`
  * hosts this shell.

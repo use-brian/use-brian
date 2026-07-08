@@ -257,6 +257,33 @@ export function extractMessageText(content: unknown): string {
   return "";
 }
 
+/**
+ * The `tool_use` blocks of a persisted assistant turn — name + parsed input,
+ * in call order. Feeds the post-turn activity receipt on session reload
+ * (`chat-activity.tsx`): the client re-narrates each call from its input the
+ * same way the live stream does. Durations are live-only and not restored.
+ */
+export function extractToolUses(
+  content: unknown,
+): Array<{ id: string; name: string; input: Record<string, unknown> }> {
+  if (!Array.isArray(content)) return [];
+  const uses: Array<{ id: string; name: string; input: Record<string, unknown> }> = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as { type?: unknown; id?: unknown; name?: unknown; input?: unknown };
+    if (b.type !== "tool_use" || typeof b.name !== "string") continue;
+    uses.push({
+      id: typeof b.id === "string" ? b.id : `tool_${uses.length}`,
+      name: b.name,
+      input:
+        b.input && typeof b.input === "object"
+          ? (b.input as Record<string, unknown>)
+          : {},
+    });
+  }
+  return uses;
+}
+
 /** Join the text blocks of a message verbatim (wrappers NOT stripped). */
 function rawMessageText(content: unknown): string {
   if (typeof content === "string") return content;

@@ -414,7 +414,7 @@ export function createTelegramAdapter(options: TelegramAdapterOptions): ChannelA
     } else if (msg.audio) {
       // Audio track ("as audio", music-note UI). Previously unhandled — the
       // message fell through to `return null` and was silently dropped (the
-      // "1h45m recording" footgun). See docs/plans/recording-to-brain.md Phase 1.
+      // "1h45m recording" footgun). See docs/architecture/media/transcription.md Phase 1.
       mediaUrl = msg.audio.file_id
       mediaType = 'audio'
       mediaMime = msg.audio.mime_type ?? 'audio/mpeg'

@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/app/(app)/brain/page.tsx` as the brain surface
  * migration of the app consolidation
- * (docs/plans/doc-web-app-consolidation.md §5a — brain is XL). Primary
+ * (docs/architecture/features/doc.md §5a — brain is XL). Primary
  * "browse your stuff" reading/trust surface over the company brain, organised
  * into THREE TOP-LEVEL SECTIONS (the sidebar's Entries / Skills / Reviews
  * rows — brain-skill-management-ux follow-up IA):

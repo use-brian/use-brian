@@ -151,7 +151,7 @@ describe('[COMP:brain/default-rules] Default ingest rule templates', () => {
       // catch-all like Slack's — would ingest personal DMs and unrelated
       // groups. Default-drop: nothing is ingested until the owner enables
       // a group, which appends a `group_match` rule. See
-      // docs/plans/whatsapp-bring-your-own-number.md §"The gate".
+      // docs/architecture/channels/whatsapp.md §"The gate".
       expect(DEFAULT_INGEST_RULES.whatsapp).toEqual([])
     })
   })

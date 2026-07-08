@@ -181,7 +181,7 @@ type Props = {
   row: BrainRow | null;
   /** When set (and `row` is null), the drawer renders the skill detail panel —
    *  the procedural-brain primitive
-   *  (docs/plans/skills-as-procedural-brain-primitive.md §7.1): body + governance
+   *  (docs/architecture/engine/skill-system.md §7.1): body + governance
    *  block + trust actions (Confirm / Edit / Delete). Skills are a different data
    *  shape than `BrainRow`, so they arrive fully-formed rather than being
    *  re-fetched by id. */
@@ -2735,7 +2735,7 @@ function FormActions({
 
 /**
  * Drawer shell for a skill node/row (the procedural-brain primitive,
- * docs/plans/skills-as-procedural-brain-primitive.md §7.1). Mirrors the
+ * docs/architecture/engine/skill-system.md §7.1). Mirrors the
  * entity/primitive drawer chrome (slide-in aside + backdrop + header) but
  * renders the skill body + governance block + trust actions instead of the
  * brain-inbox review flow.

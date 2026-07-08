@@ -12,7 +12,7 @@
  * channel by default. WhatsApp must NOT have a catch-all: the number sits
  * in personal DMs and unrelated groups the owner never meant to share.
  *
- * Spec: docs/plans/whatsapp-bring-your-own-number.md §"The gate" (1.
+ * Spec: docs/architecture/channels/whatsapp.md §"The gate" (1.
  * Default-drop), §"Decisions (locked)" 3.
  *
  * [COMP:brain/source-adapters/whatsapp]

@@ -64,6 +64,7 @@ import { ActorIdentityToggle } from "@/components/connectors/actor-identity-togg
 import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { isSharedWorkspace } from "@/lib/workspace-permissions";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
@@ -1290,6 +1291,24 @@ function ConnectorsList() {
     fetchConnectors();
   }
 
+  // Remove a WORKSPACE-native connector (scope='workspace') from the read-only
+  // panel. Unlike a personal connector, this one is owned by the workspace, so
+  // any member can delete it (backend RLS `ci_workspace_member`) — but it is a
+  // shared resource whose removal stops the tools + any ingestion it feeds for
+  // the whole workspace, so confirm first. Reuses `handleRemove` (DELETE
+  // /instances/:id + refetch). This is the affordance the read-only panel was
+  // missing, which left a dead workspace connector unremovable by anyone.
+  async function handleRemoveWorkspaceConnector(c: Connector) {
+    const ok = await confirmDialog({
+      title: tc.workspaceNativeRemoveTitle,
+      description: tc.workspaceNativeRemoveDesc,
+      confirmLabel: tc.removeBtn,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    await handleRemove(c);
+  }
+
   // Returns true on success so callers (e.g. the post-connect nudge) can
   // clear their own UI only when the grant actually landed.
   async function handleExpose(connectorInstanceId: string): Promise<boolean> {
@@ -1592,8 +1611,23 @@ function ConnectorsList() {
                     )}
                   </div>
                   <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-                    {tc.workspaceSharedReadonlyNote}
+                    {sel.source === "team_native"
+                      ? tc.workspaceNativeNote
+                      : tc.workspaceSharedReadonlyNote}
                   </div>
+                  {/* A workspace-native connector is owned by the workspace, so
+                      a member can remove it (a teammate-granted personal one
+                      cannot be removed here — only its owner can). This is the
+                      management affordance the read-only panel used to omit,
+                      which stranded dead workspace connectors as unremovable. */}
+                  {sel.source === "team_native" && sel.connectorInstanceId && (
+                    <button
+                      onClick={() => handleRemoveWorkspaceConnector(sel)}
+                      className="text-xs font-medium text-destructive/60 hover:text-destructive transition-colors px-2 py-1"
+                    >
+                      {tc.removeBtn}
+                    </button>
+                  )}
                 </div>
               );
             }

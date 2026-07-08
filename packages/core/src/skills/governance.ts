@@ -1,5 +1,5 @@
 /**
- * Skill activation governance (`docs/plans/skills-as-procedural-brain-primitive.md`
+ * Skill activation governance (`docs/architecture/engine/skill-system.md`
  * §5.2-5.3).
  *
  * Confidence-gated activation is the moat: authored skills are born active;

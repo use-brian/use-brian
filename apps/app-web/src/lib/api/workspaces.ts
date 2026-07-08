@@ -11,7 +11,7 @@
  * The settings/members sections still fetch the broader detail shape inline via
  * `authFetch`; this client is the typed seam for the blueprint-default round-
  * trips (get to pre-select, patch to persist). See
- * docs/plans/workspace-default-recording-blueprint.md §D3/§D4.
+ * docs/architecture/brain/structural-synthesis.md §D3/§D4.
  */
 import { authFetch } from "@/lib/auth-fetch";
 

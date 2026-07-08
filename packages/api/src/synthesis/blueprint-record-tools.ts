@@ -16,7 +16,7 @@
 // workspace-visible object).
 //
 // See docs/architecture/brain/structural-synthesis.md → "The record" and
-// docs/plans/blueprint-output-contract.md §6.
+// docs/architecture/brain/structural-synthesis.md §6.
 
 import { z } from 'zod'
 import {

@@ -30,7 +30,7 @@ type TeamApiResponse = {
  * page-mutation handlers live in `DocSidebarDataProvider`, also mounted here
  * so the lists survive every `/w/[id]/*` navigation (a parent layout does not
  * remount on a child route change — including a `/p/<pageId>` soft swap). See
- * docs/plans/doc-web-app-consolidation.md §4 (the chrome hoist). The
+ * docs/architecture/features/doc.md §4 (the chrome hoist). The
  * doc page shell (`DocShell`, under `p/layout.tsx`) now renders only the
  * centre page + chat inside this chrome's `{children}` slot.
  */

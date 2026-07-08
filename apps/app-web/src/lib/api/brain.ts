@@ -3,7 +3,7 @@
  *
  * Ported verbatim from `apps/web/src/lib/api/brain.ts` as part of the
  * brain surface migration of the app consolidation
- * (docs/plans/doc-web-app-consolidation.md §5a — brain is XL). Wraps
+ * (docs/architecture/features/doc.md §5a — brain is XL). Wraps
  * `authFetch` with typed signatures over the company-brain retrieval
  * routes (docs/architecture/brain/retrieval-layer.md). The wire contract
  * is identical to apps/web; this file diverges only in its import paths
@@ -71,7 +71,7 @@ export type BrainRow = {
   id: string;
   /**
    * `file_segment` is the retrieval-only primitive from general `search()`
-   * (a chunk of an ingested document — docs/plans/large-content-artifacts.md
+   * (a chunk of an ingested document — docs/architecture/brain/file-artifacts.md
    * §Phase 1.4), NOT a `BrainPrimitive` filter chip. The grouped view has no
    * first-class single-line row for it, so it (and any FUTURE primitive this
    * build predates) renders through `BrainFallbackCard`
@@ -235,7 +235,7 @@ export async function getEntity(
 /** Node kind on the brain graph. Mirrors `EntityKind` plus the synthetic
  *  node kinds the graph route projects: `'knowledge'` (a `knowledge_entries`
  *  document), `'skill'` (a `workspace_skills` row — procedural-brain primitive,
- *  see docs/plans/skills-as-procedural-brain-primitive.md §6/§7.1),
+ *  see docs/architecture/engine/skill-system.md §6/§7.1),
  *  `'connector'` (a connector a skill requires), and `'memory'` (a `memories`
  *  row — only present when the caller opts in via `showMemory`; rendered for the
  *  entity it's linked to). None of these are entity rows, but all render as

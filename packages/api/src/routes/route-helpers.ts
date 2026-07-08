@@ -13,7 +13,7 @@ import type { ActorIdentity } from '../mcp/auth-headers.js'
 // is NOT imported here — that would couple this OPEN helper to closed code.
 // It is injected into `checkUsageBudget` as `creditGate` by the platform; the
 // open build omits it and every turn runs uncapped (billing-out = don't-wire,
-// docs/plans/oss-local-brain-wedge.md §12.3).
+// the open-core split (repo CLAUDE.md; plan in git history) §12.3).
 import type { SkillStore, WorkspaceSkillStore } from '../db/skill-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'

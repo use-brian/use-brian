@@ -296,7 +296,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // channel (scheduled jobs → workflow executor, workflow steps,
       // inter-assistant callees). Two sub-cases, both fail-closed (the
       // tool NEVER executes here — that's the Posture A invariant,
-      // docs/plans/write-gating-decision-brief.md §4):
+      // docs/architecture/engine/tool-executor.md §4):
       //
       //   (a) The dispatcher wired `createToolInvocationApproval`
       //       (WU-6.3 port). Park the call: persist a

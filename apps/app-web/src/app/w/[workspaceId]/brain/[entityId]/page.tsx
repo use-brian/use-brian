@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/app/(app)/brain/[entityId]/page.tsx` as part
  * of the brain surface migration
- * (docs/plans/doc-web-app-consolidation.md §5a). Single-entity detail
+ * (docs/architecture/features/doc.md §5a). Single-entity detail
  * view: header, overview attributes, memories / knowledge / files /
  * edges / recent episodes, and an inline pending-changes banner.
  *

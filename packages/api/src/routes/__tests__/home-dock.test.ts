@@ -20,10 +20,13 @@ const SIGNALS: HomeSignals = {
   brainReviewCount: 2,
   approvalsCount: 0,
   autopilotCount: 0,
+  connectorAttentionCount: 0,
+  workflowAttentionCount: 0,
   upcomingWorkflows: [{ id: 'wf1', name: 'Weekly digest', nextRunAt: '2026-07-08T09:00:00.000Z' }],
   recentDrafts: [{ id: 'd1', name: 'Untitled', updatedAt: '2026-07-07T08:00:00.000Z' }],
   brainEntryCount: 42,
   brainGrowth7d: 5,
+  brainSparkline: [0, 0, 1, 0, 2, 0, 0, 1, 0, 0, 1, 0, 0, 0],
   onboarding: { hasConnector: true },
 }
 
@@ -87,7 +90,12 @@ describe('[COMP:api/home-dock-routes] GET /api/home-dock', () => {
     // Signals pass through to the resolved dock unchanged.
     expect(dock.pickUp).toEqual(SIGNALS.recentDrafts)
     expect(dock.comingUp).toEqual(SIGNALS.upcomingWorkflows)
-    expect(dock.brain).toEqual({ entryCount: 42, growth7d: 5, hasConnector: true })
+    expect(dock.brain).toEqual({
+      entryCount: 42,
+      growth7d: 5,
+      sparkline: SIGNALS.brainSparkline,
+      hasConnector: true,
+    })
   })
 
   it('500 when signal assembly throws', async () => {

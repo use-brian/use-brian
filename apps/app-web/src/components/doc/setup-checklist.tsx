@@ -2,7 +2,7 @@
 
 /**
  * Cold-start setup checklist — the home half of the lifecycle-aware Studio
- * prominence (docs/plans/doc-web-app-consolidation.md §4). The companion to
+ * prominence (docs/architecture/features/doc.md §4). The companion to
  * the sidebar's Studio "Set up" nudge: where the nudge lives in the persistent
  * chrome, this renders ON the doc `/p` home landing (above the chatter) and
  * walks a new workspace through the first three setup moves, each a deep link

@@ -17,7 +17,7 @@
  * [COMP:home/merge]
  */
 
-import type { HomeDockLayout, HomeSignals, NeedCardKind } from './types.js'
+import { URGENT_NEED_KINDS, type HomeDockLayout, type HomeSignals, type NeedCardKind } from './types.js'
 
 export type ResolvedNeed = {
   kind: NeedCardKind
@@ -38,12 +38,20 @@ export type ResolvedDock = {
   pickUp: { id: string; name: string; updatedAt: string }[]
   /** "Coming up" — upcoming scheduled workflow runs. */
   comingUp: { id: string; name: string; nextRunAt: string }[]
-  /** "Your brain" — growth stat + connector nudge state. */
-  brain: { entryCount: number; growth7d: number; hasConnector: boolean }
+  /** "Your brain" — growth stat + sparkline + connector nudge state. */
+  brain: {
+    entryCount: number
+    growth7d: number
+    sparkline: number[]
+    hasConnector: boolean
+  }
 }
 
-/** Deterministic ordering when no assistant artifact exists. */
+/** Deterministic ordering when no assistant artifact exists. Attention-class
+ *  kinds (broken connector, failed runs) lead: they block everything else. */
 const DEFAULT_NEEDS: ReadonlyArray<{ kind: NeedCardKind; caption?: string }> = [
+  { kind: 'connector_attention' },
+  { kind: 'workflow_attention' },
   { kind: 'brain_review' },
   { kind: 'approvals' },
   { kind: 'autopilot' },
@@ -57,6 +65,10 @@ function countFor(kind: NeedCardKind, signals: HomeSignals): number {
       return signals.approvalsCount
     case 'autopilot':
       return signals.autopilotCount
+    case 'connector_attention':
+      return signals.connectorAttentionCount
+    case 'workflow_attention':
+      return signals.workflowAttentionCount
   }
 }
 
@@ -81,6 +93,16 @@ export function mergeHomeDock(
     })
   }
 
+  // Urgent kinds the artifact did not mention still surface while live — an
+  // artifact generated before a connector broke (or before the kind existed)
+  // may lag in order/caption, never in hiding the breakage.
+  for (const kind of URGENT_NEED_KINDS) {
+    if (seen.has(kind)) continue
+    const count = countFor(kind, signals)
+    if (count <= 0) continue
+    needsYou.push({ kind, count, caption: null })
+  }
+
   return {
     source: layout ? 'assistant' : 'default',
     generatedAt: layout?.generatedAt ?? null,
@@ -91,6 +113,7 @@ export function mergeHomeDock(
     brain: {
       entryCount: signals.brainEntryCount,
       growth7d: signals.brainGrowth7d,
+      sparkline: signals.brainSparkline,
       hasConnector: signals.onboarding.hasConnector,
     },
   }

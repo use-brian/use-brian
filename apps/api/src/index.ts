@@ -10,7 +10,7 @@
  * still dreams (consolidation runs on the local timer); billing, connectors,
  * feed-distribution, and the messaging channels are simply absent.
  *
- * See docs/plans/oss-local-brain-wedge.md §12.7 (one-command parity boot).
+ * See the open-core split (repo CLAUDE.md; plan in git history) §12.7 (one-command parity boot).
  */
 
 import dotenv from 'dotenv'

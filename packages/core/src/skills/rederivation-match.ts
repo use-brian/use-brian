@@ -1,7 +1,7 @@
 import { normalizeName, jaroWinkler } from '../entities/resolver.js'
 
 /**
- * Re-derivation matching (`docs/plans/skills-as-procedural-brain-primitive.md`
+ * Re-derivation matching (`docs/architecture/engine/skill-system.md`
  * §5.2 + §10.4 — "the weakest spot in the trust math").
  *
  * Decides whether a newly-induced skill is a RE-DERIVATION of an existing one

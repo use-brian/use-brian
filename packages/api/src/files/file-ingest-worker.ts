@@ -15,7 +15,7 @@
 // injected so the loop unit-tests without a DB, GCS, or model. Store-only cases
 // (audio/video owned by recordings; PDF/image with no `distill` port; empty
 // text) short-circuit to markDone without chunking or decomposition — see
-// docs/plans/large-content-artifacts.md §"Explicitly NOT in v1".
+// docs/architecture/brain/file-artifacts.md §"Explicitly NOT in v1".
 
 import type { FilesContext, FilesReadBytesResult, FilesResult } from '@sidanclaw/core'
 import { parseFileContent } from '@sidanclaw/core'

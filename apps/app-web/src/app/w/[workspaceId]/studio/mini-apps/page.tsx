@@ -4,7 +4,7 @@
  * Studio → Mini-apps store (app-web).
  *
  * Ported from `apps/web/src/app/(app)/studio/mini-apps/page.tsx` as part of
- * the studio surface migration (docs/plans/doc-web-app-consolidation.md
+ * the studio surface migration (docs/architecture/features/doc.md
  * §9 #5). Card grid of installable surfaces:
  *
  *   distribution (Feed)   → the in-app Feed surface `/w/<wid>/feed`

@@ -3,7 +3,7 @@
 // [COMP:app-web/settings-usage-section] — see docs/architecture/platform/cost-and-pricing.md
 // Ported from apps/web/src/app/(app)/settings/usage/page.tsx (UsagePage →
 // UsageSection) as part of the settings consolidation
-// (docs/plans/doc-web-app-consolidation.md §5a). Scoped to the active
+// (docs/architecture/features/doc.md §5a). Scoped to the active
 // workspace via the app-web `useWorkspaceContext()` (single-workspace per
 // route), mirroring the BillingSection — apps/web reads `useWorkspaces()`
 // because it is multi-workspace.

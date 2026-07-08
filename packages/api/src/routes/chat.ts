@@ -172,7 +172,7 @@ type WebChatOptions = {
    * set, the `ingestPage` chat tool is injected on doc turns so the assistant
    * can ingest a page on request. Absent (no Pipeline B) → the tool isn't
    * injected. Built at boot; RLS-scoped to the caller. See
-   * docs/plans/canvas-brain-distillation.md.
+   * docs/architecture/brain/ingest-pipeline.md.
    */
   ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
   /**

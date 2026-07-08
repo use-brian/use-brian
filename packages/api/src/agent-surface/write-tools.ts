@@ -1,6 +1,6 @@
 /**
  * Agent-surface control-plane WRITE tools — the Tier-2 BUILD-NEW set
- * (docs/plans/agent-facing-capability-surface.md §4 / Phase 4):
+ * (docs/architecture/integrations/agent-capability-surface.md §4 / Phase 4):
  *
  *   proposeSkill                — stages a `staged_skill_creation` approval;
  *                                 rides the skills governance loop (§6.2),
@@ -67,7 +67,7 @@ export type AgentWriteToolDeps = {
    * Resolve the human approver for a staged row created from this context —
    * the credential's creator when known, else the workspace owner (the
    * `ToolContext.userId` on every agent surface). See approver precedent in
-   * docs/plans/agent-facing-capability-surface.md §11.3.
+   * docs/architecture/integrations/agent-capability-surface.md §11.3.
    */
   resolveApprover: (ctx: ToolContext) => Promise<string>
 }

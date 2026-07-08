@@ -26,7 +26,7 @@ const SYSTEM_PROMPT = `You curate the "Suggested for you" home dock for a worksp
 You are given today's live signals. Call setHomeDock EXACTLY ONCE, then stop.
 
 - note: one short, warm, specific sentence (≤280 chars) that helps the user know what to do next, grounded in the signals (e.g. an upcoming workflow, a draft worth finishing, a fast-growing brain). Omit (null) if nothing is worth saying — do not invent news, and never write a bare greeting.
-- needsYou: order the action cards ('brain_review', 'approvals', 'autopilot') by what matters most right now. Omit a kind whose count is already 0. Counts are filled in live, so never state a number yourself.
+- needsYou: order the action cards ('brain_review', 'approvals', 'autopilot', 'connector_attention', 'workflow_attention') by what matters most right now. A broken connector or failed workflow runs usually belong first — they silently block everything downstream. Omit a kind whose count is already 0. The two attention kinds surface automatically while live even if you omit them; list one only to reposition or caption it. Counts are filled in live, so never state a number yourself.
 
 Be terse. Do not narrate. Do not call any other tool.`
 
@@ -36,6 +36,8 @@ function buildUserMessage(signals: HomeSignals): string {
     `- brain entries awaiting review: ${signals.brainReviewCount}`,
     `- approvals waiting: ${signals.approvalsCount}`,
     `- autopilot goals waiting on a confirm or unblock: ${signals.autopilotCount}`,
+    `- connectors whose credentials stopped working (ingestion paused until reconnect): ${signals.connectorAttentionCount}`,
+    `- workflow runs failed in the last 48 hours: ${signals.workflowAttentionCount}`,
     `- brain size: ${signals.brainEntryCount} entries (+${signals.brainGrowth7d} in the last 7 days)`,
     `- connector connected: ${signals.onboarding.hasConnector ? 'yes' : 'no'}`,
     `- upcoming workflows: ${

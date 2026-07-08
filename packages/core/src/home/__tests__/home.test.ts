@@ -8,10 +8,13 @@ function signals(over: Partial<HomeSignals> = {}): HomeSignals {
     brainReviewCount: 5,
     approvalsCount: 2,
     autopilotCount: 0,
+    connectorAttentionCount: 0,
+    workflowAttentionCount: 0,
     upcomingWorkflows: [{ id: 'w1', name: 'Investor digest', nextRunAt: '2026-06-10T17:00:00Z' }],
     recentDrafts: [{ id: 'd1', name: 'Q2 memo', updatedAt: '2026-06-10T08:00:00Z' }],
     brainEntryCount: 142,
     brainGrowth7d: 18,
+    brainSparkline: [0, 1, 0, 2, 3, 1, 0, 4, 2, 1, 0, 2, 1, 1],
     onboarding: { hasConnector: false },
     ...over,
   }
@@ -40,7 +43,12 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     expect(dock.note).toBeNull()
     expect(dock.pickUp).toHaveLength(1)
     expect(dock.comingUp).toHaveLength(1)
-    expect(dock.brain).toEqual({ entryCount: 142, growth7d: 18, hasConnector: false })
+    expect(dock.brain).toEqual({
+      entryCount: 142,
+      growth7d: 18,
+      sparkline: [0, 1, 0, 2, 3, 1, 0, 4, 2, 1, 0, 2, 1, 1],
+      hasConnector: false,
+    })
   })
 
   it('honours assistant order + caption + note, but counts stay live', () => {
@@ -80,6 +88,58 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     const dock = mergeHomeDock(null, signals({ autopilotCount: 3 }))
     expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals', 'autopilot'])
     expect(dock.needsYou[2].count).toBe(3)
+  })
+
+  it('leads the default order with live attention kinds (broken connector, failed runs)', () => {
+    const dock = mergeHomeDock(
+      null,
+      signals({ connectorAttentionCount: 1, workflowAttentionCount: 2 }),
+    )
+    expect(dock.needsYou.map((n) => n.kind)).toEqual([
+      'connector_attention',
+      'workflow_attention',
+      'brain_review',
+      'approvals',
+    ])
+  })
+
+  it('appends a live attention kind the artifact omitted (a stale artifact cannot hide breakage)', () => {
+    const layout: HomeDockLayout = {
+      version: 1,
+      note: null,
+      needsYou: [{ kind: 'brain_review' }, { kind: 'approvals' }],
+      generatedAt: '2026-06-10T09:00:00Z',
+      generatedByAssistantId: 'a1',
+    }
+    const dock = mergeHomeDock(layout, signals({ connectorAttentionCount: 1 }))
+    expect(dock.needsYou.map((n) => n.kind)).toEqual([
+      'brain_review',
+      'approvals',
+      'connector_attention',
+    ])
+    expect(dock.needsYou[2].count).toBe(1)
+  })
+
+  it('lets the artifact reposition + caption an attention kind without duplicating it', () => {
+    const layout: HomeDockLayout = {
+      version: 1,
+      note: null,
+      needsYou: [
+        { kind: 'workflow_attention', caption: 'The digest run broke overnight' },
+        { kind: 'approvals' },
+      ],
+      generatedAt: '2026-06-10T09:00:00Z',
+      generatedByAssistantId: 'a1',
+    }
+    const dock = mergeHomeDock(layout, signals({ workflowAttentionCount: 3 }))
+    expect(dock.needsYou.map((n) => n.kind)).toEqual(['workflow_attention', 'approvals'])
+    expect(dock.needsYou[0].caption).toBe('The digest run broke overnight')
+    expect(dock.needsYou[0].count).toBe(3)
+  })
+
+  it('drops a dead attention kind like any other card', () => {
+    const dock = mergeHomeDock(null, signals())
+    expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals'])
   })
 
   it('de-dups a kind the artifact listed twice', () => {

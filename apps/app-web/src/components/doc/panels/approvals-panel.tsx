@@ -9,7 +9,7 @@
  * docs/architecture/features/doc.md → "Top bar" (panel tabs).
  *
  * Originally ported from `apps/web/src/app/(app)/approvals/page.tsx`
- * (docs/plans/doc-web-app-consolidation.md §5a).
+ * (docs/architecture/features/doc.md §5a).
  *
  * One cross-cutting surface over `pending_approvals` (all kinds).
  * `workflow_step`, `tool_invocation`, and `staged_write` resolve in place —

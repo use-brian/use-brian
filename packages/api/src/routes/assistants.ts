@@ -451,7 +451,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   // who flipped what. The `configure` capability is the exception: it arms
   // control-plane writes on the agent surfaces (brain MCP / assistant MCP),
   // so toggling it requires workspace owner/admin
-  // (docs/plans/agent-facing-capability-surface.md §5 — off by default,
+  // (docs/architecture/integrations/agent-capability-surface.md §5 — off by default,
   // never self-grantable; this route is the ONLY user-facing grant path).
   // See docs/plans/company-brain.md §17 and
   // docs/architecture/features/tasks.md / crm.md "Primitive access control".

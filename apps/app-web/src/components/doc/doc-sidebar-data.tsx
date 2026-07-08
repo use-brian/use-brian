@@ -6,7 +6,7 @@
  * (Brain / Studio / Workflow / Approvals / Knowledge-base / the doc page
  * tree), not just `/p`.
  *
- * THE HOIST (docs/plans/doc-web-app-consolidation.md §4 chrome). Before this
+ * THE HOIST (docs/architecture/features/doc.md §4 chrome). Before this
  * provider, the sidebar lists (`saved` / `drafts` / `recents` / `draftPruneByid`
  * / inbox state) and the page-mutation handlers (save / unsave / delete /
  * rename / duplicate / reparent / add-child / new-draft / set-icon) all lived

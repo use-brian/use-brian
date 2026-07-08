@@ -211,7 +211,7 @@ export type CreateStagedSkillCreationParams = {
  * call from an agent surface (brain MCP / assistant MCP / public-api chat)
  * lands here instead of executing; a human approves in the web Approvals
  * inbox and only then does the tool run. See
- * docs/plans/agent-facing-capability-surface.md §6.1 and
+ * docs/architecture/integrations/agent-capability-surface.md §6.1 and
  * `packages/api/src/agent-surface/banding.ts`.
  */
 export type CreateStagedWriteParams = {

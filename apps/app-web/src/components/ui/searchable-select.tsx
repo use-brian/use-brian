@@ -4,7 +4,7 @@
  * Searchable single-select combobox (app-web).
  *
  * Ported from `apps/web/src/components/ui/searchable-select.tsx` as part of
- * the app consolidation (docs/plans/doc-web-app-consolidation.md §5a
+ * the app consolidation (docs/architecture/features/doc.md §5a
  * "Foundation" / Phase 0 — the shared UI primitives surfaces depend on).
  * Identical API and `@base-ui/react/combobox` base; the theme tokens
  * (`border`, `muted`, `popover`, `accent`, `ring`) resolve against

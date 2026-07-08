@@ -291,7 +291,7 @@ export function chatTierBudget(args: {
 
 /**
  * Max execution-plan continuation nudges per attempt, tier-scaled (locked
- * decision D in docs/plans/execution-plan-completeness.md). Lives beside
+ * decision D, docs/architecture/context-engine/execution-plan.md). Lives beside
  * `chatTierBudget` so the completeness gate's persistence scales with the
  * same tier knob as the turn/tool budget. Weaker tiers get a tighter cap.
  */

@@ -80,7 +80,7 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
   },
   // recording transcript segments — the packed segment text is the embed unit.
   // The store stamps embedding=NULL on insert; the worker drains these rows
-  // exactly like kb_chunks. See docs/plans/recording-to-brain.md.
+  // exactly like kb_chunks. See docs/architecture/media/transcription.md.
   transcript_segment: {
     table: 'transcript_segments',
     textExpr: 'segment_text',

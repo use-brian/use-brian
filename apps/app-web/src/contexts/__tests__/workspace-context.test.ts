@@ -15,7 +15,7 @@ import {
  * `setActive` navigation) needs a React renderer and is covered by surface
  * QA; here we test the framework-free list cache + the route-id mirror.
  *
- * Spec: docs/plans/doc-web-app-consolidation.md §5a.
+ * Spec: docs/architecture/features/doc.md §5a.
  */
 describe("[COMP:app-web/workspaces-adapter] useWorkspaces adapter cache", () => {
   beforeEach(() => {

@@ -7,7 +7,7 @@
  *   │  hoisted up to the workspace layout   │  Empty selection state OR loaded   │
  *   └───────────────────────────────────────┴────────────────────────────────────┘
  *
- * THE HOIST (docs/plans/doc-web-app-consolidation.md §4). The sidebar +
+ * THE HOIST (docs/architecture/features/doc.md §4). The sidebar +
  * inbox flyout used to live HERE, which made them doc-only chrome. They are
  * now hoisted into `WorkspaceChrome` (mounted by `/w/[workspaceId]/layout.tsx`),
  * so the sidebar is PERSISTENT across every surface. The sidebar data + the
@@ -29,8 +29,8 @@
  * tab. (Writing the legacy `/doc?viewId=` URL would hit the proxy's 301 →
  * `/p/<id>` and bounce through a full reload — the "draft won't open" bug.)
  *
- * Spec: docs/plans/a2ui-notion-feel.md § Phase 1 → Full-screen UI;
- *       docs/plans/doc-web-app-consolidation.md §4.
+ * Spec: docs/architecture/features/views.md § Phase 1 → Full-screen UI;
+ *       docs/architecture/features/doc.md §4.
  *
  * [COMP:app-web/views-shell]
  */

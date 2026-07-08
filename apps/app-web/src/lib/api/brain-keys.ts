@@ -2,7 +2,7 @@
  * Brain key API client (app-web).
  *
  * Ported verbatim from `apps/web/src/lib/api/brain-keys.ts` as part of the
- * brain surface migration (docs/plans/doc-web-app-consolidation.md
+ * brain surface migration (docs/architecture/features/doc.md
  * §5a). Wraps the workspace-scoped
  * `/api/workspaces/:workspaceId/brain-keys` CRUD that backs the brain MCP
  * server's credentials. Used by the brain empty-state "Connect via MCP"

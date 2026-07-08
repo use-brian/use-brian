@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/app/(app)/knowledge-base/gaps/page.tsx` as the
  * first surface migration of the app consolidation
- * (docs/plans/doc-web-app-consolidation.md §5a — the pattern-proving
+ * (docs/architecture/features/doc.md §5a — the pattern-proving
  * vertical slice: route under `/w/[id]` + `useWorkspaces()` adapter + SDK +
  * en/ja/zh i18n + component-map row).
  *

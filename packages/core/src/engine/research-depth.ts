@@ -68,16 +68,42 @@ const TIERS: Record<ResearchDepthTier, ResearchBudget> = {
 export const RESEARCH_DEPTH_TIERS = Object.keys(TIERS) as ResearchDepthTier[]
 
 /**
+ * Default wall-clock abort (ms) for an `assistant_call` step with no `depth`.
+ * Raised 30s → 90s (2026-07-08): a single step routinely gathers context,
+ * drafts, AND writes a workspace file, and the old 30s abort clipped that
+ * legitimate work mid-turn — which pushed authors to *degrade* the workflow
+ * (drop the file write) just to fit the cap rather than give the step room.
+ * Overridable via the `ASSISTANT_CALL_TIMEOUT_MS` env var, clamped to
+ * [FLOOR.timeoutMs, CEILING.timeoutMs]. An explicit `step.depth.timeoutMs` or
+ * a `deep` tier still wins field-by-field over this default.
+ */
+export const DEFAULT_ASSISTANT_CALL_TIMEOUT_MS = 90_000
+
+/**
+ * Resolve the default step wall-clock from a raw env string. Pure (takes the
+ * value, not `process.env`) so it's testable without env mutation. An unset,
+ * blank, or non-numeric value falls back to {@link DEFAULT_ASSISTANT_CALL_TIMEOUT_MS};
+ * a numeric value is clamped to the same [FLOOR, CEILING] as every other budget.
+ */
+export function parseAssistantCallTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_ASSISTANT_CALL_TIMEOUT_MS
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed)) return DEFAULT_ASSISTANT_CALL_TIMEOUT_MS
+  return clamp(parsed, RESEARCH_BUDGET_FLOOR.timeoutMs, RESEARCH_BUDGET_CEILING.timeoutMs)
+}
+
+/**
  * Default budget for a workflow `assistant_call` step — and therefore for a
  * scheduled job, which post the scheduling⇄workflow cutover *is* a one-step
- * `assistant_call` workflow. Tighter than `standard`: historically these
- * steps ran `maxTurns: 5` with a 30s abort. A step with no `depth` keeps that
- * behaviour exactly; `depth` is purely opt-in.
+ * `assistant_call` workflow. Tighter than `standard` on turns / tool calls
+ * (`maxTurns: 5`), but its wall-clock is the env-configurable default above
+ * (90s out of the box). A step with no `depth` keeps this exactly; `depth` is
+ * purely opt-in.
  */
 export const ASSISTANT_CALL_DEFAULT_BUDGET: ResearchBudget = {
   maxTurns: 5,
   maxToolCalls: 10,
-  timeoutMs: 30_000,
+  timeoutMs: parseAssistantCallTimeoutMs(process.env.ASSISTANT_CALL_TIMEOUT_MS),
 }
 
 /** Boundary schema — reused by the workflow step schema and the cron tools. */

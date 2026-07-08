@@ -15,7 +15,7 @@
  * its typed inputs. Uses the existing `channel_window` source kind — a
  * windowed slice of a channel is exactly what a WhatsApp group ingest is.
  *
- * Spec: docs/plans/whatsapp-bring-your-own-number.md §Defect 1;
+ * Spec: docs/architecture/channels/whatsapp.md §Defect 1;
  * data-model.md §ChannelWindowContentRef.
  *
  * [COMP:brain/source-adapters/whatsapp]

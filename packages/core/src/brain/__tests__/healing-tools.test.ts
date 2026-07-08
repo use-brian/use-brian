@@ -1,6 +1,6 @@
 /**
  * [COMP:brain/healing-tools] tests — the Posture A write-gate wiring
- * (docs/plans/write-gating-decision-brief.md §3).
+ * (docs/architecture/engine/tool-executor.md §3).
  *
  *  • Tier D — `dedupeEntities` is gated everywhere (`requiresConfirmation`)
  *    and its `describeConfirmation` previews the lexical merge clusters

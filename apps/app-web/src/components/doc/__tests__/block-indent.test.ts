@@ -7,7 +7,7 @@
  * mount, no jsdom. The keymap wiring (Tab swallows focus, lists keep
  * `sinkListItem`, the caret guard) is covered by the jsdom integration test
  * in `block-indent.keymap.test.ts`. Finding IDs (B1/E3/S1…) refer to
- * `docs/plans/doc-editor-notion-parity-audit.md` §3.
+ * `docs/architecture/features/doc.md` §3.
  */
 
 import { describe, expect, it } from "vitest";

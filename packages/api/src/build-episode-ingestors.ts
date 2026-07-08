@@ -17,7 +17,7 @@
  * `apps/api/src/index.ts` passes this as `ports.buildEpisodeIngestors`. The
  * hosted platform supplies its own factory over the same `EpisodeIngestorDeps`,
  * so boot is unchanged. See oss-local-brain-wedge.md §12.4 and
- * docs/plans/canvas-brain-distillation.md.
+ * docs/architecture/brain/ingest-pipeline.md.
  */
 
 import {

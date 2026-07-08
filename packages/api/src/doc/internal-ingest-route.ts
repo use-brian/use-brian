@@ -30,7 +30,7 @@
  * All three are REQUIRED so a burst of debounced saves collapses to at most one
  * ingest. The runner runs in the background; the endpoint acks immediately.
  *
- * Spec: docs/plans/canvas-brain-distillation.md (the auto-on-save deviation).
+ * Spec: docs/architecture/brain/ingest-pipeline.md (the auto-on-save deviation).
  *
  * [COMP:api/internal-ingest-route]
  */

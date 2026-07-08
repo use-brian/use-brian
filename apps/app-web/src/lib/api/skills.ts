@@ -20,7 +20,7 @@
  *   PUT    /api/skills/:id/access                — set enablement rows
  *   DELETE /api/skills/:id                       — delete a skill
  *
- * Spec: docs/plans/skills-as-procedural-brain-primitive.md §5, §7.1 and
+ * Spec: docs/architecture/engine/skill-system.md §5, §7.1 and
  * docs/plans/brain-skill-management-ux.md §4.
  */
 

@@ -44,7 +44,7 @@ export const EMBEDDED_PRIMITIVES = [
   // Long-recording transcript segments (recording-to-brain). Carries a real
   // VECTOR(768) column; the worker drains it like kb_chunks via the
   // PRIMITIVE_CONFIGS entry in embedding-store.ts. See
-  // docs/plans/recording-to-brain.md.
+  // docs/architecture/media/transcription.md.
   'transcript_segment',
   // Workspace-file text segments (large-content-artifacts). The chunked body
   // of a large document/paste — heading-path-prefixed embed text via the

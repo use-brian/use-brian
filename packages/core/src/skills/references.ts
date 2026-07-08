@@ -1,7 +1,7 @@
 /**
  * Skill reference parsing — extracts EXPLICIT entity references from skill
  * content for the `references_entity` derived edge
- * (`docs/plans/skills-as-procedural-brain-primitive.md` §6).
+ * (`docs/architecture/engine/skill-system.md` §6).
  *
  * **Zero inference.** We only match literal `kind:uuid` tokens the author or the
  * Brain skill editor put in the content — never LLM-guessed relatedness. Both

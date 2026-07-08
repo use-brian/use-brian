@@ -544,7 +544,7 @@ export const WorkflowTriggerSchema = z.discriminatedUnion('kind', [
      * `assistant_call` step's `deliver`. Multi-step workflows set per-step
      * `deliver` directly; a `trigger.delivery` on a multi-step workflow is an
      * authoring warning. `web` is never a delivery target.
-     * See docs/plans/scheduling-authoring-unification.md §3.
+     * See docs/architecture/features/workflow.md §3.
      */
     delivery: z.object({ channel: z.enum(['telegram', 'slack', 'whatsapp']) }).optional(),
     /**

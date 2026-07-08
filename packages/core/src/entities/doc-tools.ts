@@ -479,7 +479,7 @@ export function createRemovePropertyTool(
     isReadOnly: false,
     isConcurrencySafe: false,
     timeoutMs: 15_000,
-    // Tier-C write-gate (Posture A, docs/plans/write-gating-decision-brief.md
+    // Tier-C write-gate (Posture A, docs/architecture/engine/tool-executor.md
     // §3): removing a property affects EVERY row of the type. Recoverable
     // (cell values stay in JSONB), so no interactive prompt — but a
     // cron/workflow loop rewriting a whole type's schema with no human

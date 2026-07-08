@@ -5,7 +5,7 @@
  *
  * Ported verbatim from `apps/web/src/components/ui/user-avatar.tsx`
  * ([COMP:app-web/user-avatar]) as part of the settings consolidation
- * (docs/plans/doc-web-app-consolidation.md §5a — Settings). Depends only
+ * (docs/architecture/features/doc.md §5a — Settings). Depends only
  * on `getInitials` from `@/lib/user` and `cn` from `@/lib/utils`, both of
  * which already exist in app-web — no new npm dependency.
  *

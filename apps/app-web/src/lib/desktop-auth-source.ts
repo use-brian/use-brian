@@ -14,7 +14,7 @@
  * keeps the cookie path. The shared orchestration (expiry check, 401→retry)
  * lives in `auth-fetch.ts` and is identical for both sources.
  *
- * Spec: docs/plans/doc-web-app-consolidation.md §12 (auth token-source seam).
+ * Spec: docs/architecture/features/doc.md §12 (auth token-source seam).
  * [COMP:app-web/desktop-auth-source]
  */
 

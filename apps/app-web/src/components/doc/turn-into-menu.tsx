@@ -86,7 +86,7 @@ export type TurnIntoItem = {
  * media / database, no divider, since "turn a paragraph into a divider" is
  * nonsensical). Order mirrors the slash menu's Basic group, including
  * Heading 4 and Code (both first-class slash-menu kinds — see CHROME-2/3 in
- * `docs/plans/doc-notion-parity-audit-2.md`).
+ * the round-2 parity audit (git history)).
  */
 export const TURN_INTO_ITEMS: readonly TurnIntoItem[] = [
   { id: "paragraph", labelKey: "paragraph", icon: Type },

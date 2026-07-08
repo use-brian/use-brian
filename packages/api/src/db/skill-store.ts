@@ -422,7 +422,7 @@ async function resolvePrimaryWorkspace(userId: string): Promise<string> {
  * The skill-edge recomputer (`skill-edge-service.ts`) is its sole production
  * implementation: every skill body change re-derives `references_entity` /
  * `requires_connector` edges and refreshes inherited sensitivity
- * (`docs/plans/skills-as-procedural-brain-primitive.md` §5.1, §6).
+ * (`docs/architecture/engine/skill-system.md` §5.1, §6).
  */
 export type WorkspaceSkillStoreHooks = {
   onWritten?: (skill: WorkspaceSkill) => void

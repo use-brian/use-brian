@@ -4,7 +4,7 @@
  *
  * Exercises `applyStagedSkillCreation` through the route handler's
  * `POST /:id/approve` path with mocked stores. Verifies the two re-derivation
- * branches (`docs/plans/skills-as-procedural-brain-primitive.md` §5.2, §6):
+ * branches (`docs/architecture/engine/skill-system.md` §5.2, §6):
  *   * matched existing skill → recordRederivation + learned_from edge, NO create;
  *   * no match → create with inductionSource='self' + learned_from edge.
  */

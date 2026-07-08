@@ -37,7 +37,7 @@ export type BrainEpisodeInput = {
    * generic text ingest). Doc-page distillation passes `'doc_page'` so the
    * derived facts carry doc-page provenance. The closed Pipeline B impl stamps
    * this onto the Episode and Pipeline B inherits the general trust model like
-   * any source. See docs/plans/canvas-brain-distillation.md §"New vs. reused".
+   * any source. See docs/architecture/brain/ingest-pipeline.md §"New vs. reused".
    */
   sourceKind?: SourceKind
   /**

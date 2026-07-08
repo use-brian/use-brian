@@ -46,6 +46,13 @@ export type ToolUsed = {
   /** For spawnWorker tools: the workerId that was spawned (for nesting). */
   spawnedWorkerId?: string
   workerDescription?: string
+  /**
+   * Client-measured wall-clock for the call (`tool_start` → `tool_result`).
+   * Live turns only — history restores have no timings.
+   */
+  durationMs?: number
+  /** Short error excerpt when the call failed (status `retried`). */
+  errorMessage?: string
 }
 
 export type ReplyTo = {
@@ -83,6 +90,12 @@ export type Message = {
   fileAttachments?: ChatFileAttachment[]
   citations?: CitationSource[]
   toolsUsed?: ToolUsed[]
+  /**
+   * Total wall-clock of the turn that produced this assistant message —
+   * drives the "Worked for 42s · 6 steps" activity receipt. Live turns
+   * only; absent on history restores.
+   */
+  activityDurationMs?: number
   /** Q5 (§16) — A2UI view payloads emitted via renderView tool calls in this message. */
   views?: ViewPayloadAttachment[]
   replyTo?: ReplyTo

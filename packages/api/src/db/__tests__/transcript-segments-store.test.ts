@@ -5,7 +5,7 @@ import { segmentTranscript, type Utterance } from '../transcript-segments-store.
  * Pure unit tests for the transcript segmenter (recording-to-brain Phase 3).
  * No DB. Component tag: [COMP:brain/transcript-segments-store].
  *
- * Spec: docs/plans/recording-to-brain.md §"Segment granularity + timestamp model".
+ * Spec: docs/architecture/media/transcription.md §"Segment granularity + timestamp model".
  */
 describe('[COMP:brain/transcript-segments-store] segmentTranscript', () => {
   it('packs consecutive same-speaker utterances into one segment', () => {

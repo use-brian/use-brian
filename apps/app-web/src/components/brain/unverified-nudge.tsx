@@ -16,7 +16,7 @@
  *
  * Spec: docs/architecture/brain/corrections.md.
  *
- * Ported verbatim from apps/web (docs/plans/doc-web-app-consolidation.md
+ * Ported verbatim from apps/web (docs/architecture/features/doc.md
  * §5a — brain surface migration). Dependencies (brain-inbox SDK,
  * brain-events, InspectionDrawer) all resolve in app-web unchanged.
  *

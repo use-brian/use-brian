@@ -44,7 +44,7 @@ export type BrainKeyRow = {
    * Per-key clearance override (migration 262). NULL = the workspace primary
    * assistant's clearance governs; a tier = `min(primary, max_clearance)`.
    * Pre-262 keys are backfilled to 'internal' (no silent widening — see
-   * docs/plans/agent-facing-capability-surface.md §12.1).
+   * docs/architecture/integrations/agent-capability-surface.md §12.1).
    */
   maxClearance: Sensitivity | null
   createdBy: string | null

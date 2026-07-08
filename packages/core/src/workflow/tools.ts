@@ -147,7 +147,7 @@ export type WorkflowToolDeps = {
    * ergonomics (topic capture, confirmation ping, target label) onto the
    * workflow path. All optional: absent → a `schedule` trigger is rejected with
    * a clear message and the tools behave exactly as before.
-   * See docs/plans/scheduling-authoring-unification.md.
+   * See docs/architecture/features/workflow.md.
    */
   jobStore?: JobStore
   resolvePrimary?: (workspaceId: string) => Promise<string | null>
@@ -1004,7 +1004,7 @@ type ScheduleApplyResult = {
  *     helper (the team-automation path).
  * The reminder rows reuse the exact delivery-resolution module createScheduledJob
  * uses, so the deprecated alias's behavior is preserved byte-for-byte.
- * See docs/plans/scheduling-authoring-unification.md §3, §5.
+ * See docs/architecture/features/workflow.md §3, §5.
  */
 async function applyScheduleTrigger(
   deps: WorkflowToolDeps,

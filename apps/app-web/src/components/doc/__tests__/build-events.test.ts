@@ -13,6 +13,8 @@ import {
   appendStep,
   EMPTY_LOG,
   lastNonEmptyLine,
+  removeToolSteps,
+  updateStepText,
   windowEvents,
   type EventLog,
 } from "../../../lib/build-events";
@@ -126,5 +128,44 @@ describe("[COMP:app-web/build-events] windowEvents", () => {
   it("returns empty for a non-positive window or empty log", () => {
     expect(windowEvents(events, 0)).toEqual([]);
     expect(windowEvents([], 4)).toEqual([]);
+  });
+});
+
+describe("[COMP:app-web/build-events] step metadata + retraction", () => {
+  it("carries toolId/url metadata on step events", () => {
+    const log = appendStep(EMPTY_LOG, "Reading example.com", minter(), {
+      toolId: "t1",
+      url: "https://example.com",
+    });
+    expect(log.events[0]).toMatchObject({
+      kind: "step",
+      toolId: "t1",
+      url: "https://example.com",
+    });
+  });
+
+  it("updateStepText rewrites the tool's latest step row in place", () => {
+    const mint = minter();
+    let log = appendStep(EMPTY_LOG, "Running webSearch", mint, { toolId: "t1" });
+    log = updateStepText(log, "t1", 'Searching "middle mile"');
+    expect(log.events).toHaveLength(1);
+    expect(log.events[0]!.text).toBe('Searching "middle mile"');
+  });
+
+  it("updateStepText is a no-op for an unknown tool or unchanged text", () => {
+    const mint = minter();
+    const log = appendStep(EMPTY_LOG, "Running webSearch", mint, { toolId: "t1" });
+    expect(updateStepText(log, "t2", "other")).toBe(log);
+    expect(updateStepText(log, "t1", "Running webSearch")).toBe(log);
+  });
+
+  it("removeToolSteps retracts every row for a dropped tool, keeping reasoning", () => {
+    const mint = minter();
+    let log = appendReasoning(EMPTY_LOG, "planning", mint);
+    log = appendStep(log, "Asking a question", mint, { toolId: "t1" });
+    log = appendStep(log, "Follow-up line", mint, { toolId: "t1" });
+    log = removeToolSteps(log, "t1");
+    expect(log.events).toHaveLength(1);
+    expect(log.events[0]!.kind).toBe("reasoning");
   });
 });

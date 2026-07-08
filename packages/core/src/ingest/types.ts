@@ -188,7 +188,7 @@ export type PlatformEngagementDigestContentRef = {
  * or the live `documents.seq`). It is recorded for audit / staleness-by-the-
  * user's-workflow, not consulted by Pipeline B itself.
  *
- * See docs/plans/canvas-brain-distillation.md §"The ingestion pipeline" step 2.
+ * See docs/architecture/brain/ingest-pipeline.md §"The ingestion pipeline" step 2.
  */
 export type DocPageContentRef = {
   source_kind: 'doc_page'

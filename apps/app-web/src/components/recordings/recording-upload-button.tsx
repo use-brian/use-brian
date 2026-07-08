@@ -13,7 +13,7 @@
  * placeholder prompts an explicit choice (a blueprint, or the "ingest only"
  * item). Whatever is selected is submitted verbatim: a blueprint id authors a
  * brief page; "ingest only" omits the slug (Pipeline B only). See
- * docs/plans/workspace-default-recording-blueprint.md §D3 and
+ * docs/architecture/brain/structural-synthesis.md §D3 and
  * structural-synthesis.md -> "One SearchableSelect picker appears in three places".
  */
 

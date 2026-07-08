@@ -41,7 +41,7 @@ export type BlueprintCaptureKind = (typeof BLUEPRINT_CAPTURE_KINDS)[number]
  * Typed field kinds a blueprint contract can demand (contract v2). `markdown`
  * is the v1 prose/list/table section; the rest make the record a real handoff
  * contract (workflows read values, not prose). See structural-synthesis.md ->
- * "The blueprint object" and docs/plans/blueprint-output-contract.md §3.
+ * "The blueprint object" and docs/architecture/brain/structural-synthesis.md §3.
  */
 export const EXTRACTION_FIELD_TYPES = [
   'markdown',

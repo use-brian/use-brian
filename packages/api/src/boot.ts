@@ -13,7 +13,7 @@
  * `BootContext`. A standalone open entry (`sidanclaw/apps/api`,
  * `@sidanclaw/api-open`) calls it with no ports → all safe defaults.
  *
- * See docs/plans/oss-local-brain-wedge.md §10 (ports & adapters DI), §12.5
+ * See the open-core split (repo CLAUDE.md; plan in git history) §10 (ports & adapters DI), §12.5
  * (the open/closed manifest), and /tmp/squash/apps-split-plan.md for the full
  * inventory of open vs closed mounts.
  *
@@ -1444,7 +1444,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // only when Pipeline B is present (`brainEpisodeIngestor`). Shared by the
   // manual route, the `ingestPage` chat tool, and the auto-on-save internal
   // endpoint. See packages/api/src/doc/ingest-page-runner.ts +
-  // docs/plans/canvas-brain-distillation.md.
+  // docs/architecture/brain/ingest-pipeline.md.
   const docPageSourceStore = createDbDocPageSourceStore()
   const ingestPageRunner = brainEpisodeIngestor
     ? (args: { userId: string; pageId: string; skipIfHashUnchanged?: string | null }) =>

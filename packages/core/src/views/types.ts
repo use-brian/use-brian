@@ -339,7 +339,7 @@ export type SavedView = {
    * Per-page "Sync to brain" opt-in (migration 001_doc_brain_sync). When true,
    * an authored-content change on save/settle auto-ingests the page into the
    * brain via Pipeline B. Default false. See
-   * docs/plans/canvas-brain-distillation.md.
+   * docs/architecture/brain/ingest-pipeline.md.
    */
   brainSyncEnabled: boolean
   /**
@@ -417,7 +417,7 @@ export type SavedViewUpdateFields = {
    * Per-page "Sync to brain" toggle (migration 001_doc_brain_sync). When true,
    * an authored-content change on save/settle auto-ingests the page into the
    * brain. Omit to leave unchanged. See
-   * docs/plans/canvas-brain-distillation.md (the on-request `ingestPage`
+   * docs/architecture/brain/ingest-pipeline.md (the on-request `ingestPage`
    * becomes ALSO auto via this toggle).
    */
   brainSyncEnabled?: boolean

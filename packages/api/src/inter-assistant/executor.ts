@@ -1052,7 +1052,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // Research-depth budget — a step's `depth` (or a scheduled job's, via its
     // one-step workflow) raises the turn / tool-call / wall-clock caps above
     // the modest default. Absent → ASSISTANT_CALL_DEFAULT_BUDGET (5 turns,
-    // 30s) — unchanged from before depth config existed.
+    // 90s default wall-clock, `ASSISTANT_CALL_TIMEOUT_MS`-configurable).
     const budget = resolveResearchBudget(params.depth, ASSISTANT_CALL_DEFAULT_BUDGET)
     // Raw live-stream accumulation — kept ONLY as the wall-clock-timeout
     // partialOutput (operator-facing, never delivered). The returned consult

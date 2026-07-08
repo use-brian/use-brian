@@ -51,7 +51,7 @@ export type BrainAuth = {
    * `min(primary.clearance, maxClearance)`. API keys carry the row's
    * `max_clearance` (migration 262); OAuth tokens stay pinned at the
    * historical 'internal' ceiling until oauth_authorizations grows its own
-   * override. See docs/plans/agent-facing-capability-surface.md §12.1.
+   * override. See docs/architecture/integrations/agent-capability-surface.md §12.1.
    */
   maxClearance: Sensitivity | null
   /** Which path resolved this principal. Useful for analytics + audit. */

@@ -5,7 +5,7 @@
  *
  * Ported from `apps/web/src/components/brain/empty-state.tsx` as part of
  * the brain surface migration
- * (docs/plans/doc-web-app-consolidation.md §5a). Exports:
+ * (docs/architecture/features/doc.md §5a). Exports:
  *   - `<EmptyState />` — "Nothing matches" filter-mismatch message.
  *   - `<PristineBrainNudge />` — the pristine-brain hero. Its two CTA
  *     tiles seed the shared assistant chat dock via `requestBrainChatSeed()`

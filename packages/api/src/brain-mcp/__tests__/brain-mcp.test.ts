@@ -709,7 +709,7 @@ describe('[COMP:api/brain-mcp] primary-assistant authority (agent-facing capabil
   // The brain MCP acts AS the workspace primary assistant: clearance,
   // compartments, kind, and capability grants all derive from the primary
   // row, capped by the key's max_clearance. See
-  // docs/plans/agent-facing-capability-surface.md §12.1.
+  // docs/architecture/integrations/agent-capability-surface.md §12.1.
 
   it('effectiveBrainClearance: NULL cap = primary governs; a cap takes the min', () => {
     expect(effectiveBrainClearance('confidential', null)).toBe('confidential')

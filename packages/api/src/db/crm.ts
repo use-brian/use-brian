@@ -16,7 +16,7 @@ import { createEntity, getEntityById, getEntityByIdSystem, updateEntity } from '
 
 /**
  * CRM SQL layer — post CRM→entity unification
- * (docs/plans/crm-entity-unification.md).
+ * (docs/architecture/features/crm.md).
  *
  * A contact / company / deal IS an `entities` row: `kind` ∈
  * {person, company, deal}, name → `display_name`, email/domain →

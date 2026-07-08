@@ -2,7 +2,7 @@
  * SDK for the Studio → Channels surface (app-web).
  *
  * Ported from `apps/web/src/lib/api/channels.ts` as part of the app
- * consolidation (docs/plans/doc-web-app-consolidation.md §9 #5, CHUNK 4).
+ * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
  * Identical wire contract — workspace-owned channels (the workspace-channels
  * model): list a workspace's channels, edit clearance / capabilities / status,
  * and wire per-surface assistant routing. Backed by the

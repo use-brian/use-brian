@@ -7,7 +7,7 @@
  * here — not under the closed `billing/` folder — so the OPEN consumers
  * (`routes/public-api.ts`, `inter-assistant/executor.ts`) can import it without
  * a leak. The closed `billing/resolve-billing.ts` re-exports it for the closed
- * channel routes. See docs/plans/oss-local-brain-wedge.md §12.5.
+ * channel routes. See the open-core split (repo CLAUDE.md; plan in git history) §12.5.
  *
  * Single determining rule:
  *

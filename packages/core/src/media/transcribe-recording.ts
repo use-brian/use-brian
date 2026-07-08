@@ -23,7 +23,7 @@
  * seam-dedup logic and unit-test without a network. The network calls take an
  * injectable `fetchFn`.
  *
- * Spec: docs/plans/recording-to-brain.md §Architecture(b).
+ * Spec: docs/architecture/media/transcription.md §Architecture(b).
  */
 
 import type { TokenUsage } from '../providers/types.js'
