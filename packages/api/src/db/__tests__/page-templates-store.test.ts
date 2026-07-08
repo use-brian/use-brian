@@ -126,6 +126,44 @@ describe('[COMP:api/page-templates-store] page-templates store', () => {
     expect(params[4]).toBeNull() // icon
   })
 
+  it('update writes only the present keys and always bumps updated_at', async () => {
+    const blocks = [{ kind: 'heading', id: 'b1', level: 2, text: 'Overview' }]
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [summaryRow({ blocks })], rowCount: 1 } as never)
+    const spec = {
+      fields: [
+        { key: 'overview', heading: 'Overview', instruction: 'Summarize', type: 'markdown', required: false },
+      ],
+      capture: [],
+    }
+    const updated = await store.update(USER_ID, TEMPLATE_ID, {
+      name: 'Renamed',
+      extraction: spec as never,
+      blocks: blocks as never,
+    })
+    const [user, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(user).toBe(USER_ID)
+    expect(sql).toContain('UPDATE workspace_page_templates')
+    expect(sql).toContain('updated_at = NOW()')
+    // Absent keys never appear in the SET clause — a name+extraction patch
+    // must not touch description / icon / category. (RETURNING still selects
+    // every column, so assert on the assignment shape, not the bare names.)
+    expect(sql).not.toMatch(/description = \$/)
+    expect(sql).not.toMatch(/icon = \$/)
+    expect(sql).not.toMatch(/category = \$/)
+    expect(params).toEqual([TEMPLATE_ID, 'Renamed', JSON.stringify(blocks), JSON.stringify(spec)])
+    expect(updated?.id).toBe(TEMPLATE_ID)
+  })
+
+  it('update clears extraction with an explicit null and returns null when missing', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [summaryRow({ blocks: [] })], rowCount: 1 } as never)
+    await store.update(USER_ID, TEMPLATE_ID, { extraction: null })
+    const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(params).toEqual([TEMPLATE_ID, null])
+
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    expect(await store.update(USER_ID, TEMPLATE_ID, { name: 'X' })).toBeNull()
+  })
+
   it('remove returns true only when a row was deleted', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ id: TEMPLATE_ID }], rowCount: 1 } as never)
     expect(await store.remove(USER_ID, TEMPLATE_ID)).toBe(true)

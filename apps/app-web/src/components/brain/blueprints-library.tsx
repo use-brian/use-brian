@@ -7,10 +7,12 @@
  * so this reuses the `SkillsLibrary` pattern: a QUIET LIST of full-width
  * borderless rows (`border-b`, `hover:bg-muted/40`, no card borders, no primary
  * blue). Each row carries a blueprint glyph, the name + description, a quiet
- * section-count meta, and a "Blueprint" badge; a trailing Delete asks through
- * `confirmDialog` (NEVER `window.confirm`). A "+ New blueprint" affordance seeds
- * a blank blueprint doc (a heading + an empty extraction slot) and opens it in
- * the editor.
+ * section-count meta, and a "Blueprint" badge; clicking the row body opens the
+ * blueprint DETAIL EDITOR (`/brain/blueprints/[templateId]`,
+ * `[COMP:web/blueprint-detail]`) where the contract is viewed + edited; a
+ * trailing Delete asks through `confirmDialog` (NEVER `window.confirm`). A
+ * "+ New blueprint" affordance seeds a blank blueprint doc (a heading + an
+ * empty extraction slot) and opens it in the editor.
  *
  * A BLUEPRINT is a workspace page template carrying an `extraction` spec; the
  * list API returns every template, so the filter (`filterBlueprints`) keeps only
@@ -35,16 +37,14 @@ import {
   filterBlueprints,
 } from "@/lib/blueprints";
 import {
-  estimateBlueprintGenerate,
-  generateBlueprintFromBrain,
   listBlueprintRecords,
   openBlueprintRecordPage,
   type BlueprintRecordSummary,
 } from "@/lib/api/views";
 import { docPagePath } from "@/lib/doc-page-url";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
-import { promptDialog } from "@/components/ui/prompt-dialog";
 import { Button } from "@/components/ui/button";
+import { useGenerateFromBrain } from "@/components/brain/use-generate-from-brain";
 
 type Props = {
   workspaceId: string;
@@ -67,60 +67,12 @@ export function BlueprintsLibrary({
 }: Props) {
   const t = useT();
   const copy = t.brainPage.blueprints;
-  const router = useRouter();
 
   // Generate-from-brain: estimate the credit cost, confirm with the subject,
-  // fill the blueprint, then open the produced page. Credit-metered on the
-  // server (POST .../generate charges a surcharge on success). See
-  // docs/architecture/brain/structural-synthesis.md -> "Generate is user-surfaced".
-  async function handleGenerate(blueprint: CustomPageTemplateSummary) {
-    let credits: number;
-    try {
-      const est = await estimateBlueprintGenerate(workspaceId, blueprint.id);
-      credits = est.surchargeCredits;
-    } catch {
-      await confirmDialog({
-        title: copy.generateErrorTitle,
-        description: copy.generateEstimateError,
-        confirmLabel: copy.generateErrorOk,
-      });
-      return;
-    }
-    const subject = await promptDialog({
-      title: copy.generateTitle,
-      // Cost + what the run produces (preflight-confirmation invariant: the
-      // confirm states both the price and the output shape — record + page).
-      description: `${
-        credits === 1 ? copy.generateCostOne : format(copy.generateCostMany, { count: credits })
-      } ${copy.generateRendersPage}`,
-      placeholder: copy.generateSubjectPlaceholder,
-      confirmLabel: copy.generateConfirm,
-      cancelLabel: copy.generateCancel,
-    });
-    if (!subject) return;
-    try {
-      const result = await generateBlueprintFromBrain(workspaceId, blueprint.id, {
-        subject,
-        requestId: crypto.randomUUID(),
-      });
-      if (result.pageId) {
-        router.push(docPagePath(workspaceId, result.pageId));
-      } else {
-        await confirmDialog({
-          title: copy.generateErrorTitle,
-          description: copy.generateNoPage,
-          confirmLabel: copy.generateErrorOk,
-        });
-      }
-    } catch (err) {
-      const outOfCredits = String(err).includes("HTTP 402");
-      await confirmDialog({
-        title: copy.generateErrorTitle,
-        description: outOfCredits ? copy.generateCreditLimit : copy.generateFailed,
-        confirmLabel: copy.generateErrorOk,
-      });
-    }
-  }
+  // fill the blueprint, then open the produced page. Shared with the detail
+  // editor (`useGenerateFromBrain`) so the preflight-confirmation flow never
+  // drifts between the two surfaces.
+  const handleGenerate = useGenerateFromBrain(workspaceId);
 
   // Blueprint subset (templates with an extraction spec), name-sorted, then the
   // shared search needle over name + description.
@@ -256,7 +208,7 @@ function BlueprintRow({
 
   return (
     <li className="border-b border-border">
-    <div className="group flex items-center">
+    <div className="group flex items-center hover:bg-muted/40">
       {/* Records expander — quiet chevron, same hover language as the actions. */}
       <div className="shrink-0 pl-2">
         <button
@@ -273,7 +225,15 @@ function BlueprintRow({
           )}
         </button>
       </div>
-      <div className="flex-1 min-w-0 flex items-center gap-3 px-2 py-3">
+      {/* Row body — opens the blueprint detail editor (view + edit the
+          contract); the expander and hover actions keep their own targets. */}
+      <button
+        type="button"
+        aria-label={format(copy.openAria, { name: blueprint.name })}
+        onClick={() =>
+          router.push(`/w/${workspaceId}/brain/blueprints/${blueprint.id}`)
+        }
+        className="flex-1 min-w-0 flex items-center gap-3 px-2 py-3 text-left cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50">
         {/* Blueprint glyph — the template's own emoji if set, else a stack icon. */}
         {blueprint.icon ? (
           <span aria-hidden className="shrink-0 text-base leading-none">
@@ -306,7 +266,7 @@ function BlueprintRow({
         <span className="hidden md:inline-block shrink-0 px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide font-medium border border-border bg-muted/40 text-muted-foreground">
           {copy.badge}
         </span>
-      </div>
+      </button>
 
       {/* Generate from brain — fill this blueprint from memory into a new page. */}
       <div className="shrink-0 pl-3">

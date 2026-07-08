@@ -210,7 +210,7 @@ describe('[COMP:api/views-routes] auth', () => {
 
 describe('[COMP:api/views-routes] custom page templates', () => {
   function fakePageTemplateStore() {
-    return { list: vi.fn(), getById: vi.fn(), create: vi.fn(), remove: vi.fn() }
+    return { list: vi.fn(), getById: vi.fn(), create: vi.fn(), update: vi.fn(), remove: vi.fn() }
   }
   const TEMPLATE_ID = '00000000-0000-0000-0000-0000000000aa'
   const VALID_BODY = {
@@ -263,6 +263,60 @@ describe('[COMP:api/views-routes] custom page templates', () => {
       .send({ ...VALID_BODY, category: 'nonsense' })
     expect(res.status).toBe(400)
     expect(store.create).not.toHaveBeenCalled()
+  })
+
+  it('PATCH updates only the sent keys and returns the updated template', async () => {
+    const store = fakePageTemplateStore()
+    store.getById.mockResolvedValue({ id: TEMPLATE_ID, workspaceId: WORKSPACE_ID })
+    store.update.mockResolvedValue({ id: TEMPLATE_ID, name: 'Renamed' })
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const res = await request(app)
+      .patch(`/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`)
+      .send({ name: 'Renamed' })
+    expect(res.status).toBe(200)
+    expect(res.body.template.name).toBe('Renamed')
+    expect(store.update).toHaveBeenCalledWith(USER_ID, TEMPLATE_ID, { name: 'Renamed' })
+  })
+
+  it('PATCH with extraction but no blocks regenerates the authoring skeleton', async () => {
+    const store = fakePageTemplateStore()
+    store.getById.mockResolvedValue({ id: TEMPLATE_ID, workspaceId: WORKSPACE_ID })
+    store.update.mockResolvedValue({ id: TEMPLATE_ID })
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const extraction = {
+      fields: [
+        { key: 'summary', heading: 'Summary', instruction: 'Sum it up', type: 'markdown' },
+      ],
+      capture: [],
+    }
+    const res = await request(app)
+      .patch(`/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`)
+      .send({ extraction })
+    expect(res.status).toBe(200)
+    const patch = store.update.mock.calls[0][2]
+    // The derived skeleton pairs each field's heading with its extraction slot
+    // so the WYSIWYG round-trip (blocksToExtractionSpec) still yields the spec.
+    expect(patch.blocks.map((b: { kind: string }) => b.kind)).toEqual(['heading', 'extraction_slot'])
+    expect(patch.blocks[0].text).toBe('Summary')
+    expect(patch.blocks[1].fieldKey).toBe('summary')
+  })
+
+  it('PATCH is 404 for a template outside the route workspace and 400 for an empty patch', async () => {
+    const store = fakePageTemplateStore()
+    store.getById.mockResolvedValue({ id: TEMPLATE_ID, workspaceId: 'other-workspace' })
+    const { app } = makeApp({ userId: USER_ID, pageTemplateStore: store })
+    const cross = await request(app)
+      .patch(`/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`)
+      .send({ name: 'Renamed' })
+    expect(cross.status).toBe(404)
+    expect(store.update).not.toHaveBeenCalled()
+
+    store.getById.mockResolvedValue({ id: TEMPLATE_ID, workspaceId: WORKSPACE_ID })
+    const empty = await request(app)
+      .patch(`/api/workspaces/${WORKSPACE_ID}/page-templates/${TEMPLATE_ID}`)
+      .send({})
+    expect(empty.status).toBe(400)
+    expect(store.update).not.toHaveBeenCalled()
   })
 
   it('DELETE returns 404 when the template is missing', async () => {

@@ -78,6 +78,7 @@ export {
   type BlueprintCaptureKind,
   PAGE_TEMPLATE_CATEGORIES,
   EXTRACTION_FIELD_TYPES,
+  BLUEPRINT_CAPTURE_KINDS,
   pageTemplateCategorySchema,
   customTemplateCreateInputSchema,
   extractionSpecSchema,

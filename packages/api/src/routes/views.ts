@@ -72,6 +72,8 @@ import {
   savedViewUpdateInputSchema,
   viewEntitySchema,
   customTemplateCreateInputSchema,
+  customTemplateUpdateInputSchema,
+  extractionSpecToBlocks,
 } from '@sidanclaw/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
@@ -356,6 +358,30 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!parsed.success) return badRequest(res, `Invalid template: ${parsed.error.message}`)
     const template = await opts.pageTemplateStore.create(userId, { workspaceId, ...parsed.data })
     res.status(201).json({ template })
+  })
+
+  // PATCH /workspaces/:workspaceId/page-templates/:id — partial update (the
+  // blueprint detail editor + the WYSIWYG re-save path). An `extraction` patch
+  // with no `blocks` regenerates the authoring skeleton so the doc round-trip
+  // (blocksToExtractionSpec) stays consistent. See structural-synthesis.md ->
+  // "The blueprint detail editor".
+  router.patch('/workspaces/:workspaceId/page-templates/:id', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageTemplateStore) return res.status(503).json({ error: 'Custom templates not configured' })
+    const role = await opts.workspaceStore.getRole(userId, req.params.workspaceId)
+    if (!role) return notMember(res)
+    const existing = await opts.pageTemplateStore.getById(userId, req.params.id)
+    if (!existing || existing.workspaceId !== req.params.workspaceId) return notFound(res, 'Template not found')
+    const parsed = customTemplateUpdateInputSchema.safeParse(req.body)
+    if (!parsed.success) return badRequest(res, `Invalid template patch: ${parsed.error.message}`)
+    const patch = { ...parsed.data }
+    if (patch.extraction && patch.blocks === undefined) {
+      patch.blocks = extractionSpecToBlocks(patch.extraction)
+    }
+    const template = await opts.pageTemplateStore.update(userId, req.params.id, patch)
+    if (!template) return notFound(res, 'Template not found')
+    res.json({ template })
   })
 
   // DELETE /workspaces/:workspaceId/page-templates/:id

@@ -227,6 +227,30 @@ export const customTemplateCreateInputSchema = z.object({
 export type CustomTemplateCreateInput = z.infer<typeof customTemplateCreateInputSchema>
 
 /**
+ * Route-boundary input for updating a custom template — every field optional,
+ * at least one present. Serves the blueprint detail editor (name / description
+ * / icon / extraction patches) and the WYSIWYG re-save path (blocks +
+ * extraction together). When a patch carries `extraction` but no `blocks`, the
+ * route regenerates the authoring skeleton via `extractionSpecToBlocks` so the
+ * doc round-trip stays consistent. See structural-synthesis.md ->
+ * "The blueprint detail editor".
+ */
+export const customTemplateUpdateInputSchema = z
+  .object({
+    name: z.string().min(1).max(256).optional(),
+    description: z.string().max(2000).nullish(),
+    icon: z.string().max(16).nullish(),
+    category: pageTemplateCategorySchema.optional(),
+    blocks: z.array(blockSchema).min(1).max(1000).optional(),
+    extraction: extractionSpecSchema.nullish(),
+  })
+  .refine((patch) => Object.values(patch).some((v) => v !== undefined), {
+    message: 'empty patch',
+  })
+
+export type CustomTemplateUpdateInput = z.infer<typeof customTemplateUpdateInputSchema>
+
+/**
  * Return a structurally-identical block list with every block id (and any
  * nested `children` ids on callout / toggle containers) replaced by a fresh id
  * from `genId`. Instantiating a stored-blocks template into a live page must

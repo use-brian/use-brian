@@ -36,6 +36,17 @@ export type CreatePageTemplateInput = {
   extraction?: ExtractionSpec | null
 }
 
+/** Partial update — only present keys are written. `undefined` = leave as-is;
+ *  `null` clears the nullable columns (description / icon / extraction). */
+export type UpdatePageTemplateInput = {
+  name?: string
+  description?: string | null
+  icon?: string | null
+  category?: PageTemplateCategory
+  blocks?: Block[]
+  extraction?: ExtractionSpec | null
+}
+
 export type PageTemplateStore = {
   /** Workspace's custom templates, newest first, without the heavy `blocks`. */
   list(userId: string, workspaceId: string): Promise<CustomPageTemplateSummary[]>
@@ -43,6 +54,8 @@ export type PageTemplateStore = {
   getById(userId: string, id: string): Promise<CustomPageTemplate | null>
   /** Persist a new custom template; returns the full row. */
   create(userId: string, input: CreatePageTemplateInput): Promise<CustomPageTemplate>
+  /** Patch a template in place; returns the updated row, null = not found / no access. */
+  update(userId: string, id: string, patch: UpdatePageTemplateInput): Promise<CustomPageTemplate | null>
   /** Hard delete; true when a row was removed (RLS-scoped). */
   remove(userId: string, id: string): Promise<boolean>
 }
@@ -130,6 +143,32 @@ export function createDbPageTemplateStore(): PageTemplateStore {
         ],
       )
       return rowToFull(result.rows[0])
+    },
+
+    async update(userId, id, patch) {
+      const sets: string[] = []
+      const params: unknown[] = [id]
+      const push = (column: string, value: unknown) => {
+        params.push(value)
+        sets.push(`${column} = $${params.length}`)
+      }
+      if (patch.name !== undefined) push('name', patch.name)
+      if (patch.description !== undefined) push('description', patch.description)
+      if (patch.icon !== undefined) push('icon', patch.icon)
+      if (patch.category !== undefined) push('category', patch.category)
+      if (patch.blocks !== undefined) push('blocks', JSON.stringify(patch.blocks))
+      if (patch.extraction !== undefined)
+        push('extraction', patch.extraction ? JSON.stringify(patch.extraction) : null)
+      if (sets.length === 0) return this.getById(userId, id)
+      const result = await queryWithRLS<FullRow>(
+        userId,
+        `UPDATE workspace_page_templates
+         SET ${sets.join(', ')}, updated_at = NOW()
+         WHERE id = $1
+         RETURNING ${FULL_SELECT}`,
+        params,
+      )
+      return result.rows[0] ? rowToFull(result.rows[0]) : null
     },
 
     async remove(userId, id) {

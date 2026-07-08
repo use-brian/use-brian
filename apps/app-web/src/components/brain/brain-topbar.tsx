@@ -52,8 +52,9 @@ type Props = {
   tail?: React.ReactNode;
   /** Which section a `tail` route belongs to — the skill editor uses
    *  "skills" (the default, preserving its breadcrumb), the entry reader
-   *  uses "entries". Ignored when `tail` is absent. */
-  tailSection?: "entries" | "skills";
+   *  uses "entries", the blueprint detail editor uses "blueprints".
+   *  Ignored when `tail` is absent. */
+  tailSection?: "entries" | "skills" | "blueprints";
   /** Cluster after the breadcrumb (entries view tabs, the reviews pager). */
   center?: React.ReactNode;
   /** Right-aligned cluster (counts, quiet actions, the editor's Save). */
@@ -77,7 +78,7 @@ export function BrainTopbar({
   // Breadcrumb segments navigate by section — and, from the editor
   // sub-route, walk back to the Brain root first so the page can react.
   const brainRoot = workspaceId ? `/w/${workspaceId}/brain` : null;
-  const goSection = (section: "entries" | "skills") => {
+  const goSection = (section: "entries" | "skills" | "blueprints") => {
     brain.setSection(section);
     if (brainRoot && pathname !== brainRoot) router.push(brainRoot);
   };

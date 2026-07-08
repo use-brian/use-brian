@@ -25,6 +25,7 @@ import type {
   CustomPageTemplate,
   CustomPageTemplateSummary,
   CustomTemplateCreateInput,
+  ExtractionSpec,
 } from "@sidanclaw/doc-model";
 import {
   Briefcase,
@@ -587,6 +588,35 @@ export async function createCustomPageTemplate(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   });
+  const body = await json<{ template: CustomPageTemplate }>(res);
+  return body.template;
+}
+
+/** Partial patch. An `extraction`-only patch regenerates the authoring
+ *  skeleton server-side (structural-synthesis.md -> "The blueprint detail
+ *  editor"); send `blocks` too only on a WYSIWYG re-save. */
+export type CustomTemplateUpdateInput = {
+  name?: string;
+  description?: string | null;
+  icon?: string | null;
+  category?: CustomPageTemplate["category"];
+  blocks?: Block[];
+  extraction?: ExtractionSpec | null;
+};
+
+export async function updateCustomPageTemplate(
+  workspaceId: string,
+  id: string,
+  patch: CustomTemplateUpdateInput,
+): Promise<CustomPageTemplate> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${workspaceId}/page-templates/${id}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
   const body = await json<{ template: CustomPageTemplate }>(res);
   return body.template;
 }

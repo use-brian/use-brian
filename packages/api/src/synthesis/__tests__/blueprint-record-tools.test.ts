@@ -59,6 +59,7 @@ function build() {
     list: vi.fn().mockResolvedValue([TEMPLATE, SKELETON]),
     getById: vi.fn(),
     create: vi.fn().mockResolvedValue({ ...TEMPLATE, id: 'bp-new', name: 'Weekly Report' }),
+    update: vi.fn(),
     remove: vi.fn(),
   }
   const blueprintRecordStore = {
