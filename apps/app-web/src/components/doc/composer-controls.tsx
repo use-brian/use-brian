@@ -37,14 +37,14 @@ import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
 import { webAppUrl } from "@/lib/primary-auth";
 
 /** Remaining free-research quota the server reports on a research turn. */
-export type ResearchQuota = { used: number; quota: number; isPaid: boolean };
+type ResearchQuota = { used: number; quota: number; isPaid: boolean };
 
 /**
  * A normalized `research_quota` / `research_quota_exhausted` SSE event — the
  * shape {@link useComposerControls}'s `applyResearchQuotaEvent` folds into its
  * quota + exhausted state, shared by every composer that can arm research mode.
  */
-export type ResearchQuotaEvent = {
+type ResearchQuotaEvent = {
   type: "research_quota" | "research_quota_exhausted";
   used?: number;
   quota?: number;

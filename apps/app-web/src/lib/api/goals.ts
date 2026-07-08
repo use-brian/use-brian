@@ -24,7 +24,7 @@ export type GoalStatus =
   | "done"
   | "abandoned";
 
-export type GoalHostType = "task" | "page" | "entity" | "workflow";
+type GoalHostType = "task" | "page" | "entity" | "workflow";
 
 export type GoalRow = {
   id: string;
@@ -66,7 +66,7 @@ export type DoneWhenNode =
   | { any: DoneWhenNode[] }
   | { not: DoneWhenNode };
 
-export type GoalBudget = {
+type GoalBudget = {
   maxIterations?: number;
   /** The load-bearing dollar cap (gated on COGS metering). */
   maxSpend?: number;
@@ -74,13 +74,13 @@ export type GoalBudget = {
   deadline?: string | null;
 };
 
-export type GoalPolicy = {
+type GoalPolicy = {
   blastRadius?: "internal" | "external";
   approval?: "auto" | "ask";
   escalateTo?: string | null;
 };
 
-export type GoalMeans = {
+type GoalMeans = {
   workflowId?: string | null;
   blueprintIds?: string[];
   skillIds?: string[];
@@ -88,7 +88,7 @@ export type GoalMeans = {
 
 /** Agentic-termination verified-done marker (§12): present only once an
  *  adversarial verifier passed a completion claim. */
-export type GoalCompletionClaim = { because: string; verifiedAt: string };
+type GoalCompletionClaim = { because: string; verifiedAt: string };
 
 /** The board row plus the full acceptance contract + completion claim. */
 export type GoalDetail = GoalRow & {

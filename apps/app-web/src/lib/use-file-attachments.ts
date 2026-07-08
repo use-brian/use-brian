@@ -30,7 +30,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type AttachmentStatus = "uploading" | "done" | "error";
+type AttachmentStatus = "uploading" | "done" | "error";
 
 export type Attachment = {
   /** Stable client id — the chip key + reconciliation handle. */

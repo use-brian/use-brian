@@ -66,7 +66,7 @@ export type DiscordAllowedMentions = {
   parse: Array<'users' | 'roles' | 'everyone'>
 }
 
-export type DiscordMessageReference = {
+type DiscordMessageReference = {
   message_id: string
   channel_id?: string
   fail_if_not_exists?: boolean

@@ -23,7 +23,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 export type ModelTier = "standard" | "pro" | "max";
 
 /** Persisted so the choice sticks across reloads + surfaces. */
-export const MODEL_STORAGE_KEY = "doc-chat-model";
+const MODEL_STORAGE_KEY = "doc-chat-model";
 
 function readCachedTier(): ModelTier | null {
   if (typeof window === "undefined") return null;

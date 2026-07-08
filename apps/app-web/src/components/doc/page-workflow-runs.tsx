@@ -29,6 +29,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useT, useLocale, format } from "@/lib/i18n/client";
+import {
+  WORKFLOW_REFRESH_EVENT,
+  type WorkflowRefreshDetail,
+} from "@/lib/workflow-events";
 import { cn } from "@/lib/utils";
 import {
   listPageWorkflowRuns,
@@ -81,6 +85,20 @@ export function PageWorkflowRuns({
     }, 5000);
     return () => window.clearInterval(tid);
   }, [runs, load]);
+
+  // Server leg (realtime-sync): a `workflow_run` signal re-fetches even when
+  // no run is in flight — the in-flight poll alone can never DISCOVER a new
+  // run started by a schedule / webhook / assistant after mount.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<WorkflowRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      if (detail?.primitive === "workflow") return;
+      void load();
+    };
+    window.addEventListener(WORKFLOW_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(WORKFLOW_REFRESH_EVENT, handler);
+  }, [workspaceId, load]);
 
   if (runs.length === 0) return null;
 

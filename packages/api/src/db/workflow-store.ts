@@ -38,6 +38,7 @@ import type {
   WorkflowTriggerKind,
 } from '@sidanclaw/core'
 import { query, queryWithRLS } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 // ── workflows ───────────────────────────────────────────────────────────
 
@@ -191,7 +192,9 @@ export function createDbWorkflowStore(): WorkflowStore {
           researchMode ?? null,
         ],
       )
-      return rowToWorkflow(result.rows[0])
+      const record = rowToWorkflow(result.rows[0])
+      notifyWorkspaceChange(record.workspaceId, 'workflow', 'create', record.id)
+      return record
     },
     async getById(userId, id) {
       const result = await queryWithRLS<WorkflowRow>(
@@ -266,7 +269,10 @@ export function createDbWorkflowStore(): WorkflowStore {
         `UPDATE workflows SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${WORKFLOW_SELECT}`,
         values,
       )
-      return result.rows[0] ? rowToWorkflow(result.rows[0]) : null
+      if (!result.rows[0]) return null
+      const record = rowToWorkflow(result.rows[0])
+      notifyWorkspaceChange(record.workspaceId, 'workflow', 'update', record.id)
+      return record
     },
     async updateAutoName(userId, id, name) {
       // Auto-titler write — mirrors `sessions.updateSessionTitle`. Only
@@ -275,21 +281,24 @@ export function createDbWorkflowStore(): WorkflowStore {
       // only update because the WHERE filter still touches `name` via the
       // SET; the global `trigger_set_updated_at` is on UPDATE — we let it
       // run and accept the bump, since the row is mutating).
-      const result = await queryWithRLS(
+      const result = await queryWithRLS<{ workspaceId: string }>(
         userId,
         `UPDATE workflows
             SET name = $2
-          WHERE id = $1 AND name_manually_set = false`,
+          WHERE id = $1 AND name_manually_set = false
+          RETURNING workspace_id AS "workspaceId"`,
         [id, name],
       )
+      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', id)
       return (result.rowCount ?? 0) > 0
     },
     async delete(userId, id) {
-      const result = await queryWithRLS(
+      const result = await queryWithRLS<{ workspaceId: string }>(
         userId,
-        `DELETE FROM workflows WHERE id = $1`,
+        `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
         [id],
       )
+      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', id)
       return result.rowCount !== null && result.rowCount > 0
     },
     async findByWebhookSlugSystem(slug) {
@@ -463,7 +472,9 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
           triggerPageId,
         ],
       )
-      return rowToRun(result.rows[0])
+      const run = rowToRun(result.rows[0])
+      notifyWorkspaceChange(workspaceId, 'workflow_run', 'create', run.id)
+      return run
     },
     async getRunById(userId, id) {
       const result = await queryWithRLS<RunRow>(
@@ -507,15 +518,22 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
         `UPDATE workflow_runs SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${RUN_SELECT}`,
         values,
       )
-      return result.rows[0] ? rowToRun(result.rows[0]) : null
+      if (!result.rows[0]) return null
+      const run = rowToRun(result.rows[0])
+      // Run lifecycle transitions (status / step advance / outcome) are the
+      // live-activity signal; the coalescer absorbs many-step bursts.
+      notifyWorkspaceChange(run.workspaceId, 'workflow_run', 'update', run.id)
+      return run
     },
     async createStepRun({ runId, stepId, stepType, input }) {
-      const result = await query<StepRunRow>(
+      const result = await query<StepRunRow & { workspaceId: string | null }>(
         `INSERT INTO workflow_step_runs (run_id, step_id, step_type, status, input)
          VALUES ($1, $2, $3, 'running', $4)
-         RETURNING ${STEP_RUN_SELECT}`,
+         RETURNING ${STEP_RUN_SELECT},
+           (SELECT workspace_id FROM workflow_runs WHERE id = run_id) AS "workspaceId"`,
         [runId, stepId, stepType, JSON.stringify(input ?? {})],
       )
+      notifyWorkspaceChange(result.rows[0]?.workspaceId, 'workflow_run', 'update', runId)
       return rowToStepRun(result.rows[0])
     },
     async updateStepRun(id, fields) {
@@ -537,11 +555,15 @@ export function createDbWorkflowRunStore(): WorkflowRunStore {
       }
 
       values.push(id)
-      const result = await query<StepRunRow>(
-        `UPDATE workflow_step_runs SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${STEP_RUN_SELECT}`,
+      const result = await query<StepRunRow & { workspaceId: string | null }>(
+        `UPDATE workflow_step_runs SET ${sets.join(', ')} WHERE id = $${idx}
+         RETURNING ${STEP_RUN_SELECT},
+           (SELECT workspace_id FROM workflow_runs WHERE id = run_id) AS "workspaceId"`,
         values,
       )
-      return result.rows[0] ? rowToStepRun(result.rows[0]) : null
+      if (!result.rows[0]) return null
+      notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow_run', 'update', result.rows[0].runId)
+      return rowToStepRun(result.rows[0])
     },
     async listStepRuns(userId, runId) {
       const result = await queryWithRLS<StepRunRow>(
@@ -1287,11 +1309,13 @@ export async function pauseWorkflowSystem(
   workflowId: string,
   reason: string,
 ): Promise<void> {
-  await query(
+  const result = await query<{ workspaceId: string }>(
     `UPDATE workflows SET enabled = false, paused_reason = $2, updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING workspace_id AS "workspaceId"`,
     [workflowId, reason],
   )
+  if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', workflowId)
 }
 
 // ── workflow lifecycle sweep (mig 308) ──────────────────────────────────
@@ -1373,15 +1397,17 @@ export async function applyLifecycleTransitionSystem(
   state: WorkflowLifecycleState,
   reason: string | null,
 ): Promise<void> {
-  await query(
+  const result = await query<{ workspaceId: string }>(
     `UPDATE workflows
         SET lifecycle_state = $2,
             lifecycle_reason = $3,
             lifecycle_transitioned_at = now(),
             enabled = CASE WHEN $2 = 'archived' THEN false ELSE enabled END
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING workspace_id AS "workspaceId"`,
     [workflowId, state, reason],
   )
+  if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', workflowId)
 }
 
 /**
@@ -1416,6 +1442,10 @@ export async function markWorkflowsDigestedSystem(
  * caller emits the audit event carrying a summary snapshot first.
  */
 export async function deleteWorkflowSystem(workflowId: string): Promise<boolean> {
-  const result = await query(`DELETE FROM workflows WHERE id = $1`, [workflowId])
+  const result = await query<{ workspaceId: string }>(
+    `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
+    [workflowId],
+  )
+  if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', workflowId)
   return result.rowCount !== null && result.rowCount > 0
 }

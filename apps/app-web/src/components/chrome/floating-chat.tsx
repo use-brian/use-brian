@@ -40,9 +40,8 @@
  *
  * Tool-confirmation flow: server emits `tool_confirmation_required` with
  * `{toolCallId, toolName, displayName, input, description, displayLines}`.
- * We render an inline approval card (`<ToolConfirmationCard>` from
- * `@sidanclaw/chat-ui`). Approve/Deny POSTs `/api/chat/confirm` and the
- * server resumes the stream.
+ * We render an inline approval card. Approve/Deny POSTs
+ * `/api/chat/confirm` and the server resumes the stream.
  *
  * askQuestion suspend-resume: when the assistant asks a clarifying
  * question the engine suspends the session (persists a `kind='question'`
@@ -183,7 +182,7 @@ export type ChatSurface =
  * page-editing nudges are gated off). See
  * `docs/architecture/features/doc.md` → "One dock, every surface".
  */
-export type ChatOrigin = "doc" | ChatSurface;
+type ChatOrigin = "doc" | ChatSurface;
 
 /** Persisted across sessions so the model choice sticks. */
 const MODEL_STORAGE_KEY = "doc-chat-model";

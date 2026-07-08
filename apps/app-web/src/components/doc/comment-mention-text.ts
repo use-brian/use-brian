@@ -11,7 +11,7 @@
 export type InsertedMention = { id: string; name: string };
 
 /** Escape a display name for use inside a RegExp. */
-export function escapeRegExp(s: string): string {
+function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 

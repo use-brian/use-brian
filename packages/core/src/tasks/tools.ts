@@ -39,7 +39,7 @@ export type TaskToolEvent =
   | { type: 'task_listed'; resultCount: number }
 
 /** Subset of ToolContext the analytics callback can use without pulling the full type in. */
-export type TaskToolEventContext = {
+type TaskToolEventContext = {
   userId: string
   assistantId: string
   sessionId: string

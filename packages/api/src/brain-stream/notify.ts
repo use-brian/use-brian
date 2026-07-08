@@ -7,7 +7,7 @@
  * already succeeded — a missed NOTIFY just means the open brain page
  * doesn't redraw until the next event or refocus.
  *
- * Spec: docs/architecture/brain/realtime-stream.md.
+ * Spec: docs/architecture/platform/realtime-sync.md.
  *
  * [COMP:api/brain-stream-fanout]
  */
@@ -21,8 +21,50 @@ import {
   type BrainPrimitive,
 } from './sse-fanout.js'
 
-export async function notifyBrainChange(payload: BrainChangePayload): Promise<void> {
-  if (!payload.workspaceId) return
+/**
+ * Per-(workspaceId, primitive) burst coalescer. The first emit for a key
+ * passes through immediately (leading edge — the common single-write case
+ * pays zero latency); further emits inside the window collapse into ONE
+ * trailing emit carrying the LAST payload. Payloads are refetch signals, not
+ * data, so collapsing loses nothing — the refetch reads current truth. This
+ * is the burst guard that lets bounded-but-chatty writers (a 20-step
+ * workflow run, an approvals batch) share the channel safely.
+ */
+const COALESCE_WINDOW_MS = 2_000
+
+type CoalesceSlot = {
+  timer: NodeJS.Timeout
+  /** Set when at least one emit arrived during the window. */
+  pending: BrainChangePayload | null
+}
+
+const coalesceSlots = new Map<string, CoalesceSlot>()
+
+function emitCoalesced(payload: BrainChangePayload): void {
+  const key = `${payload.workspaceId}:${payload.primitive}`
+  const slot = coalesceSlots.get(key)
+  if (slot) {
+    slot.pending = payload
+    return
+  }
+  const timer = setTimeout(() => {
+    const s = coalesceSlots.get(key)
+    coalesceSlots.delete(key)
+    if (s?.pending) void sendNotify(s.pending)
+  }, COALESCE_WINDOW_MS)
+  // Don't hold the process open for a trailing window.
+  timer.unref?.()
+  coalesceSlots.set(key, { timer, pending: null })
+  void sendNotify(payload)
+}
+
+/** Test helper — flush and clear all coalescer slots. */
+export function _resetCoalescerForTests(): void {
+  for (const slot of coalesceSlots.values()) clearTimeout(slot.timer)
+  coalesceSlots.clear()
+}
+
+async function sendNotify(payload: BrainChangePayload): Promise<void> {
   // Single-process (OSS local boot): the PGLite socket server does not propagate
   // LISTEN/NOTIFY, so dispatch straight into the same-process subscribers. The
   // writer and the SSE subscribers share one api process locally.
@@ -37,6 +79,29 @@ export async function notifyBrainChange(payload: BrainChangePayload): Promise<vo
   }
 }
 
+export async function notifyBrainChange(payload: BrainChangePayload): Promise<void> {
+  if (!payload.workspaceId) return
+  emitCoalesced(payload)
+}
+
+/**
+ * Store-seam emitter for the workspace-scoped primitives (workflow,
+ * workflow_run, approval, skill, scheduled_job — see the WorkspacePrimitive
+ * union). Same fire-and-forget semantics as the brain-write emitters: never
+ * awaited by callers, failures swallowed, bursts coalesced. Kept as a named
+ * export so store code reads as intent ("workspace change") rather than
+ * brain-specific plumbing.
+ */
+export function notifyWorkspaceChange(
+  workspaceId: string | null | undefined,
+  primitive: BrainChangePayload['primitive'],
+  action: BrainChangeAction,
+  rowId?: string,
+): void {
+  if (!workspaceId) return
+  void notifyBrainChange({ workspaceId, primitive, action, rowId })
+}
+
 /**
  * Single source of truth for "this tool changes a brain row → emit this
  * signal". The set deliberately covers every chat-side brain-write tool. The
@@ -46,7 +111,7 @@ export async function notifyBrainChange(payload: BrainChangePayload): Promise<vo
  * reuse these same signals (see programmatic-access.md). Any tool absent from
  * the map is a no-op when looked up.
  *
- * Spec: docs/architecture/brain/realtime-stream.md.
+ * Spec: docs/architecture/platform/realtime-sync.md.
  */
 export const BRAIN_WRITE_TOOL_SIGNALS: Record<string, { primitive: BrainPrimitive; action: BrainChangeAction }> = {
   // Memory
@@ -68,6 +133,11 @@ export const BRAIN_WRITE_TOOL_SIGNALS: Record<string, { primitive: BrainPrimitiv
   // Entities + self profile (chat-only — not bridged via MCP v1)
   updateSelfProfile: { primitive: 'entity', action: 'update' },
   createEntity: { primitive: 'entity', action: 'create' },
+  // Workflow-run brain-write tools (core/src/workflows/tools.ts) — resolved
+  // from the per-run registry; they fire on the callee lane, which emits via
+  // this same map (realtime-sync-audit §9.8).
+  createEdge: { primitive: 'edge', action: 'create' },
+  supersedeMemory: { primitive: 'memory', action: 'update' },
   // Files — all the writes bridge to MCP. saveFileToBrain promotes a cached
   // upload by id; saveFileBytes persists base64 bytes the caller supplies.
   fileWrite: { primitive: 'file', action: 'update' },

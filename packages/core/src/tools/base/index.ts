@@ -5,15 +5,10 @@ import { xSearchTool } from './x-search.js'
 import { askQuestionTool } from './ask-question.js'
 import { createTaskTool, updateTaskTool, _getSessionTasksSize } from './tasks.js'
 import { getTimeTool } from './get-time.js'
-export { createReportBugTool } from './report-bug.js'
-export type { BugReportStore } from './report-bug.js'
-export { createConfirmRecordingProcessingTool } from './confirm-recording-processing.js'
-export type { ConfirmRecordingProcessingDeps } from './confirm-recording-processing.js'
 
 export {
   urlReaderTool,
   webSearchTool,
-  xSearchTool,
   askQuestionTool,
   createTaskTool,
   updateTaskTool,

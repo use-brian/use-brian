@@ -15,21 +15,9 @@ import {
 
 const ALL_BOUNDARIES = ['connector', 'tool', 'inbox', 'extraction', 'self_heal'] as const
 
-function normalizeGithubUrl(owner: string, repo: string): string {
-  return `https://github.com/${owner}/${repo.replace(/\.git$/, '')}`
-}
-
-function normalizeGitlabUrl(owner: string, repo: string): string {
-  return `https://gitlab.com/${owner}/${repo.replace(/\.git$/, '')}`
-}
-
-function normalizeBitbucketUrl(owner: string, repo: string): string {
-  return `https://bitbucket.org/${owner}/${repo}`
-}
-
 // ── Positive rules ───────────────────────────────────────────────────
 
-export const repositoryGithubUrl: ClassifierRule<EntityKind> = {
+const repositoryGithubUrl: ClassifierRule<EntityKind> = {
   id: 'repository-github-url',
   produces: 'repository',
   tier: 'deterministic',
@@ -60,7 +48,7 @@ export const repositoryGithubUrl: ClassifierRule<EntityKind> = {
   },
 }
 
-export const repositoryGitlabUrl: ClassifierRule<EntityKind> = {
+const repositoryGitlabUrl: ClassifierRule<EntityKind> = {
   id: 'repository-gitlab-url',
   produces: 'repository',
   tier: 'deterministic',
@@ -91,7 +79,7 @@ export const repositoryGitlabUrl: ClassifierRule<EntityKind> = {
   },
 }
 
-export const repositoryBitbucketUrl: ClassifierRule<EntityKind> = {
+const repositoryBitbucketUrl: ClassifierRule<EntityKind> = {
   id: 'repository-bitbucket-url',
   produces: 'repository',
   tier: 'deterministic',
@@ -125,7 +113,7 @@ export const repositoryBitbucketUrl: ClassifierRule<EntityKind> = {
 const OWNER_SLASH_NAME_RE = /^[a-z0-9][a-z0-9-_]*\/[a-z0-9][a-z0-9-_.]*$/i
 const CODE_CONTEXT_RE = /\b(commit|branch|repo|repository|clone|pull request|pr|issue|merge|fork)\b/i
 
-export const repositoryOwnerSlashName: ClassifierRule<EntityKind> = {
+const repositoryOwnerSlashName: ClassifierRule<EntityKind> = {
   id: 'repository-owner-slash-name-shorthand',
   produces: 'repository',
   tier: 'probabilistic',  // ambiguous shorthand — needs code-context guard
@@ -160,5 +148,3 @@ export const repositoryRules = [
   repositoryBitbucketUrl,
   repositoryOwnerSlashName,
 ] as const
-
-export { normalizeGithubUrl, normalizeGitlabUrl, normalizeBitbucketUrl }

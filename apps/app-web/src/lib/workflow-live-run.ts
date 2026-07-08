@@ -31,6 +31,10 @@ import {
   type WorkflowRunDetail,
   type WorkflowRunSummary,
 } from "@/lib/api/workflow";
+import {
+  WORKFLOW_REFRESH_EVENT,
+  type WorkflowRefreshDetail,
+} from "@/lib/workflow-events";
 
 export const ACTIVE_POLL_MS = 2500;
 export const IDLE_POLL_MS = 15000;
@@ -224,6 +228,22 @@ export function useWorkflowLiveRun(
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [workflowId, limit, epoch]);
+
+  // Server leg (realtime-sync): a `workflow_run` change signal from the
+  // shell's workspace stream forces an immediate tick, so a run started by
+  // a schedule / webhook / assistant appears without waiting for the idle
+  // poll. The poll loop stays as the degraded-SSE fallback (decision
+  // recorded in docs/plans/realtime-sync-audit.md §10 row 4). Purely
+  // definitional 'workflow' signals don't tick — they can't change runs.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<WorkflowRefreshDetail>).detail;
+      if (detail?.primitive === "workflow") return;
+      setEpoch((n) => n + 1);
+    };
+    window.addEventListener(WORKFLOW_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(WORKFLOW_REFRESH_EVENT, handler);
+  }, []);
 
   const liveRun = useMemo(() => pickLiveRun(runs ?? []), [runs]);
   const liveView = useMemo(() => {

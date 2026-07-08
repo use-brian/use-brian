@@ -62,7 +62,7 @@ import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { SetupChecklist } from "./setup-checklist";
 
-export type BuildOptions = {
+type BuildOptions = {
   model: ModelTier;
   researchMode: boolean;
   /** Ready (`done`) attachment ids to feed the build turn, in chip order. */

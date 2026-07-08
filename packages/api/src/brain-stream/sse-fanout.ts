@@ -12,7 +12,7 @@
  * Reconnect is exponential-backoff (1s → 30s cap). On reconnect we re-issue
  * LISTEN so we resume receiving events.
  *
- * Spec: docs/architecture/brain/realtime-stream.md.
+ * Spec: docs/architecture/platform/realtime-sync.md.
  *
  * [COMP:api/brain-stream-fanout]
  */
@@ -49,6 +49,15 @@ export function dispatchBrainChangeLocal(payload: BrainChangePayload): void {
   }
 }
 
+/**
+ * The workspace-change vocabulary. Brain rows were the original scope; the
+ * 2026-07 realtime-sync generalization (docs/plans/realtime-sync-audit.md)
+ * added the orchestration/governance primitives — workflow, workflow_run,
+ * approval, skill, scheduled_job — which emit from their db stores (bounded
+ * write rates), unlike brain primitives which emit at user-facing write
+ * surfaces only (hot ingest loops share their stores). Unknown primitives
+ * must be ignored by clients, so widening here is additive.
+ */
 export type BrainPrimitive =
   | 'memory'
   | 'task'
@@ -59,6 +68,14 @@ export type BrainPrimitive =
   | 'entity'
   | 'edge'
   | 'kb_chunk'
+  | 'workflow'
+  | 'workflow_run'
+  | 'approval'
+  | 'skill'
+  | 'scheduled_job'
+
+/** Alias reflecting the widened, workspace-wide scope. */
+export type WorkspacePrimitive = BrainPrimitive
 
 export type BrainChangeAction = 'create' | 'update' | 'delete'
 

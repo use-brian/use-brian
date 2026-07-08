@@ -27,18 +27,18 @@ import type { WhatsappGroupWindow } from './types.js'
 
 // ── Param schemas (used at the agent tool layer for validation) ──────
 
-export const groupMatchParamsSchema = z.object({
+const groupMatchParamsSchema = z.object({
   values: z.array(z.string().min(1)).min(1),
 })
 export type GroupMatchParams = z.infer<typeof groupMatchParamsSchema>
 
-export const senderMatchParamsSchema = z.object({
+const senderMatchParamsSchema = z.object({
   values: z.array(z.string().min(1)).min(1),
 })
 export type SenderMatchParams = z.infer<typeof senderMatchParamsSchema>
 
 /** `is_dm` takes no parameters. */
-export const isDmParamsSchema = z.object({}).strict()
+const isDmParamsSchema = z.object({}).strict()
 export type IsDmParams = z.infer<typeof isDmParamsSchema>
 
 // ── Filter implementations ───────────────────────────────────────────

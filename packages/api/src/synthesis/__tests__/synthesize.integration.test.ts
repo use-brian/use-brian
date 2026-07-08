@@ -35,9 +35,10 @@ import { createCrmTools, createTaskTools, createDocTools } from '@sidanclaw/core
  * synthesize.ts header + recording-synthesizer.ts) so synthesis-captured rows
  * surface in Brain Reviews (`?includeExtracted=true`). The synthesizers build the
  * CRM/task tools with `{ writeSource: 'extracted' }`, which threads through
- * `CrmStore.createCompany` into the fresh-insert `INSERT INTO entities` /
- * `INSERT INTO companies` (packages/api/src/db/crm.ts). This test mirrors that
- * wiring and asserts the DB-observable `source='extracted'`.
+ * `CrmStore.createCompany` into the fresh-insert `INSERT INTO entities`
+ * (kind='company') — post CRM→entity unification (mig 296) a company IS an
+ * entities row, there is no separate `companies` table (packages/api/src/db/crm.ts).
+ * This test mirrors that wiring and asserts the DB-observable `source='extracted'`.
  */
 
 let pool: pg.Pool | undefined
@@ -47,11 +48,12 @@ async function canConnect(): Promise<boolean> {
   try {
     const client = await p.connect()
     try {
-      // Every table the engine + its assertions touch must exist.
+      // Every table the engine + its assertions touch must exist. Post
+      // CRM→entity unification (mig 296) a company IS an `entities` row
+      // (kind='company'); there is no separate `companies` table to probe.
       await client.query('SELECT id FROM transcript_segments LIMIT 1')
       await client.query('SELECT id, anchor_key FROM saved_views LIMIT 1')
       await client.query('SELECT id, source FROM entities LIMIT 1')
-      await client.query('SELECT id FROM companies LIMIT 1')
       await client.query('SELECT id FROM episodes LIMIT 1')
     } finally {
       client.release()
@@ -262,7 +264,7 @@ describeIf('[COMP:api/synthesize] structural-synthesis engine (integration)', ()
 
   afterEach(async () => {
     // Tear down by cascading workspace + user deletes (FK ON DELETE CASCADE
-    // sweeps episodes / transcript_segments / entities / companies / saved_views).
+    // sweeps episodes / transcript_segments / entities / saved_views).
     const client = await pool!.connect()
     try {
       for (const ws of createdWorkspaces) {
@@ -412,21 +414,6 @@ describeIf('[COMP:api/synthesize] structural-synthesis engine (integration)', ()
     }
   }
 
-  async function readCompanyRow(name: string): Promise<{ id: string; source: string } | null> {
-    const client = await pool!.connect()
-    try {
-      const r = await client.query<{ id: string; source: string }>(
-        `SELECT id, source FROM companies
-          WHERE workspace_id = $1 AND lower(name) = lower($2) AND valid_to IS NULL
-          ORDER BY created_at DESC LIMIT 1`,
-        [workspaceId, name],
-      )
-      return r.rows[0] ?? null
-    } finally {
-      client.release()
-    }
-  }
-
   /** Read the brief page's blocks so we can prove patchPage actually authored it. */
   async function readPageBlockText(pageId: string): Promise<string> {
     const client = await pool!.connect()
@@ -502,11 +489,10 @@ describeIf('[COMP:api/synthesize] structural-synthesis engine (integration)', ()
     expect(pageJson).toContain('Acme renewal')
 
     // ── (2) the company "Acme" was written by the real save* path ──
-    const companyRow = await readCompanyRow('Acme')
-    expect(companyRow).not.toBeNull()
-    // The brain-inbox `company` branch filters on `companies.source`; it must be
-    // 'extracted' for the row to surface under `?includeExtracted=true`.
-    expect(companyRow!.source).toBe('extracted')
+    // Post CRM→entity unification (mig 296) a company IS an `entities` row
+    // (kind='company'); there is no separate `companies` table. The entity
+    // read proves existence + source='extracted' — the same facts the old
+    // `companies`-table read asserted, plus kind + display_name.
     const entity = await readCompanyEntity('Acme')
     expect(entity).not.toBeNull()
     expect(entity!.kind).toBe('company')

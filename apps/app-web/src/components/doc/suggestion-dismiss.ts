@@ -35,7 +35,7 @@
  *   - `delegate`    — normal case: forward the key to the popup's own
  *                     `onKeyDown` (↑/↓/Enter navigation + selection).
  */
-export type SuggestionKeyAction = "dismiss" | "passthrough" | "delegate";
+type SuggestionKeyAction = "dismiss" | "passthrough" | "delegate";
 
 export type SuggestionDismissController = {
   /** Call from `onStart` (fresh trigger) and `onExit` (token gone). */

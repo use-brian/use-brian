@@ -11,6 +11,7 @@ const handlers: MenuTemplateHandlers = {
   onSignIn: () => {},
   onSignOut: () => {},
   onUpdate: () => {},
+  onSwitchTarget: () => {},
 };
 
 /** Default options; spread + override per test. */
@@ -130,5 +131,50 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
       handlers,
     );
     expect(allItems(busy).find((i) => i.label === "Downloading Update… 42%")?.enabled).toBe(false);
+  });
+});
+
+describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.3)", () => {
+  const CLOUD = { kind: "cloud" as const, label: "sidanclaw Cloud" };
+  const LOCAL = { kind: "local" as const, label: "Local Brain (localhost:3003)" };
+
+  it("omits every target item when no target is passed (pre-dual-target menu)", () => {
+    for (const isMac of [true, false]) {
+      const items = allItems(buildMenuTemplate(opts({ isMac }), handlers));
+      expect(items.find((i) => i.label?.startsWith("Target:"))).toBeUndefined();
+      expect(items.find((i) => i.label === "Sign In")).toBeDefined();
+    }
+  });
+
+  it("cloud target: shows the disabled indicator, the switch-to-local item, and keeps Sign In/Out", () => {
+    for (const isMac of [true, false]) {
+      const items = allItems(buildMenuTemplate(opts({ isMac, target: CLOUD }), handlers));
+      const indicator = items.find((i) => i.label === "Target: sidanclaw Cloud");
+      expect(indicator?.enabled).toBe(false);
+      expect(items.find((i) => i.label === "Switch to Local Brain…")).toBeDefined();
+      expect(items.find((i) => i.label === "Sign In")).toBeDefined();
+      expect(items.find((i) => i.label === "Sign Out")).toBeDefined();
+    }
+  });
+
+  it("local target: hides Sign In/Out (no login exists) and offers the switch back to cloud", () => {
+    for (const isMac of [true, false]) {
+      const items = allItems(buildMenuTemplate(opts({ isMac, target: LOCAL }), handlers));
+      expect(items.find((i) => i.label === "Sign In")).toBeUndefined();
+      expect(items.find((i) => i.label === "Sign Out")).toBeUndefined();
+      const indicator = items.find((i) => i.label === "Target: Local Brain (localhost:3003)");
+      expect(indicator?.enabled).toBe(false);
+      expect(items.find((i) => i.label === "Switch to sidanclaw Cloud")).toBeDefined();
+    }
+  });
+
+  it("clicking the switch item invokes onSwitchTarget", () => {
+    const onSwitchTarget = vi.fn();
+    const items = allItems(
+      buildMenuTemplate(opts({ target: CLOUD }), { ...handlers, onSwitchTarget }),
+    );
+    const item = items.find((i) => i.label === "Switch to Local Brain…");
+    (item?.click as () => void)();
+    expect(onSwitchTarget).toHaveBeenCalledTimes(1);
   });
 });

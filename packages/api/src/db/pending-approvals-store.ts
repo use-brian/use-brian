@@ -11,6 +11,7 @@
  */
 
 import { query, queryWithRLS } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 export type PendingApprovalStatus =
   | 'pending'
@@ -529,7 +530,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.expiresAt ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async createStagedSkillUpdate(params) {
@@ -562,7 +565,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.originatingAssistantId ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async createStagedSkillCreation(params) {
@@ -591,7 +596,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.originatingAssistantId ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async createStagedWrite(params) {
@@ -620,7 +627,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.originatingAssistantId ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async listSkillApprovals(userId, workspaceId) {
@@ -702,7 +711,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.expiresAt ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async createQuestion(params) {
@@ -736,7 +747,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
           params.expiresAt ?? null,
         ],
       )
-      return rowToApproval(result.rows[0] as Record<string, unknown>)
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
     },
 
     async recordAnswer(id, answerText, responderUserId) {
@@ -808,7 +821,10 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
          RETURNING ${COLS}`,
         [id, decision, responderUserId, rejectReason ?? null],
       )
-      return result.rows[0] ? rowToApproval(result.rows[0] as Record<string, unknown>) : null
+      if (!result.rows[0]) return null
+      const responded = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(responded.workspaceId, 'approval', 'update', responded.id)
+      return responded
     },
 
     async expireDue() {
@@ -818,7 +834,10 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
          WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at <= now()
          RETURNING ${COLS}`,
       )
-      return result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+      const expired = result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+      // One signal per touched row; the coalescer folds same-workspace bursts.
+      for (const row of expired) notifyWorkspaceChange(row.workspaceId, 'approval', 'update', row.id)
+      return expired
     },
 
     async expireDueQuestions() {
@@ -831,7 +850,9 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
            AND expires_at <= now()
          RETURNING ${COLS}`,
       )
-      return result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+      const expired = result.rows.map((r) => rowToApproval(r as Record<string, unknown>))
+      for (const row of expired) notifyWorkspaceChange(row.workspaceId, 'approval', 'update', row.id)
+      return expired
     },
 
     // ── Wave 3 admin methods (ADM-A) ────────────────────────────────────

@@ -6,9 +6,10 @@ import type { RetrievalActor, RetrievalStore } from '@sidanclaw/core'
  * Integration tests for createDbAggregateStore (company-brain WU-5.4).
  *
  * Requires the local `sidanclaw` PostgreSQL database with migrations
- * 113 (tasks), 114 (CRM), 125 (entities), and 128 (universal columns)
- * applied. Skips silently when the DB isn't reachable — matches the
- * pattern in entities-store.integration.test.ts.
+ * through 296 (tasks table + CRM→entity unification) applied: the `deals`
+ * primitive reads `entities` rows (kind='deal'), tasks its own table.
+ * Skips silently when the DB isn't reachable — matches the pattern in
+ * entities-store.integration.test.ts.
  *
  * Spec: docs/architecture/brain/retrieval-layer.md §"aggregate semantics".
  */
@@ -20,10 +21,12 @@ async function canConnect(): Promise<boolean> {
   try {
     const client = await p.connect()
     try {
-      // Probe a column that only exists after mig 128 (universal columns
-      // batch). If it's missing, the test environment is pre-WS-2 and
-      // the aggregate store can't be exercised meaningfully.
-      await client.query('SELECT valid_from FROM deals LIMIT 1')
+      // Probe the bi-temporal `valid_from` column on the tables the
+      // aggregate store reads. Post CRM→entity unification (mig 296) the
+      // `deals` primitive is an `entities` row (kind='deal'); a missing
+      // column means the environment predates the universal-columns /
+      // unification migrations and the store can't be exercised meaningfully.
+      await client.query('SELECT valid_from FROM entities LIMIT 1')
       await client.query('SELECT valid_from FROM tasks LIMIT 1')
     } finally {
       client.release()
@@ -70,27 +73,42 @@ async function addMember(client: pg.PoolClient, workspaceId: string, userId: str
   )
 }
 
+/**
+ * Insert a deal as an `entities` row (kind='deal'). Post CRM→entity
+ * unification (mig 296) the old `deals` table is gone; the aggregate
+ * store's `deals` primitive reads `attributes->>'stage'` and
+ * `(attributes->>'amount')::numeric` off `entities` (see the ALLOWLIST in
+ * aggregate-store.ts). The row is owned by `createdByUserId` (set as both
+ * `created_by_user_id` and `user_id`) so the store's visibility-double
+ * access predicate admits it — `entities` requires a non-null owner
+ * (`user_id IS NOT NULL OR assistant_id IS NOT NULL`) and a non-null
+ * `created_by_user_id`, unlike the old shared-null-owner `deals` row.
+ */
 async function insertDeal(
   client: pg.PoolClient,
   workspaceId: string,
+  createdByUserId: string,
   stage: string,
   amount: number | null,
   overrides: {
     validFrom?: string
     validTo?: string
     retractedAt?: string
-    userId?: string | null
   } = {},
 ): Promise<string> {
   const r = await client.query(
-    `INSERT INTO deals (workspace_id, stage, amount, user_id, valid_from, valid_to, retracted_at)
-     VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()), $6, $7)
+    `INSERT INTO entities
+       (workspace_id, kind, display_name, source, created_by_user_id, user_id,
+        attributes, valid_from, valid_to, retracted_at)
+     VALUES ($1, 'deal', 'Deal', 'user', $2, $2,
+        jsonb_build_object('stage', $3::text, 'amount', $4::numeric),
+        COALESCE($5::timestamptz, now()), $6, $7)
      RETURNING id`,
     [
       workspaceId,
+      createdByUserId,
       stage,
       amount,
-      overrides.userId === undefined ? null : overrides.userId,
       overrides.validFrom ?? null,
       overrides.validTo ?? null,
       overrides.retractedAt ?? null,
@@ -146,9 +164,9 @@ describeIf('[COMP:retrieval/aggregate] aggregate store (integration)', () => {
     it('count over deals grouped by stage', async () => {
       const client = await pool!.connect()
       try {
-        await insertDeal(client, workspaceId, 'lead', 100)
-        await insertDeal(client, workspaceId, 'lead', 200)
-        await insertDeal(client, workspaceId, 'won', 1000)
+        await insertDeal(client, workspaceId, userId, 'lead', 100)
+        await insertDeal(client, workspaceId, userId, 'lead', 200)
+        await insertDeal(client, workspaceId, userId, 'won', 1000)
       } finally {
         client.release()
       }
@@ -173,9 +191,9 @@ describeIf('[COMP:retrieval/aggregate] aggregate store (integration)', () => {
     it('sum over deals.amount grouped by stage', async () => {
       const client = await pool!.connect()
       try {
-        await insertDeal(client, workspaceId, 'lead', 100)
-        await insertDeal(client, workspaceId, 'lead', 250)
-        await insertDeal(client, workspaceId, 'won', 1000)
+        await insertDeal(client, workspaceId, userId, 'lead', 100)
+        await insertDeal(client, workspaceId, userId, 'lead', 250)
+        await insertDeal(client, workspaceId, userId, 'won', 1000)
       } finally {
         client.release()
       }
@@ -222,12 +240,12 @@ describeIf('[COMP:retrieval/aggregate] aggregate store (integration)', () => {
       const client = await pool!.connect()
       try {
         // Historical row: valid between 2h ago and 1h ago.
-        await insertDeal(client, workspaceId, 'lead', 100, {
+        await insertDeal(client, workspaceId, userId, 'lead', 100, {
           validFrom: twoHoursAgo,
           validTo: oneHourAgo,
         })
         // Current row: valid from now onward.
-        await insertDeal(client, workspaceId, 'lead', 200)
+        await insertDeal(client, workspaceId, userId, 'lead', 200)
       } finally {
         client.release()
       }
@@ -253,10 +271,10 @@ describeIf('[COMP:retrieval/aggregate] aggregate store (integration)', () => {
     it('retracted rows are excluded', async () => {
       const client = await pool!.connect()
       try {
-        await insertDeal(client, workspaceId, 'lead', 100, {
+        await insertDeal(client, workspaceId, userId, 'lead', 100, {
           retractedAt: new Date().toISOString(),
         })
-        await insertDeal(client, workspaceId, 'lead', 200)
+        await insertDeal(client, workspaceId, userId, 'lead', 200)
       } finally {
         client.release()
       }
@@ -272,14 +290,14 @@ describeIf('[COMP:retrieval/aggregate] aggregate store (integration)', () => {
     it('rows in another workspace are excluded', async () => {
       const client = await pool!.connect()
       try {
-        await insertDeal(client, workspaceId, 'lead', 100)
+        await insertDeal(client, workspaceId, userId, 'lead', 100)
 
         // Foreign workspace + member so RLS would let the other user
         // read it, but the aggregate filter pins to actor.workspaceId.
         const otherUser = await makeUser(client)
         const otherWs = await makeWorkspace(client, otherUser)
         await addMember(client, otherWs, otherUser)
-        await insertDeal(client, otherWs, 'lead', 9999)
+        await insertDeal(client, otherWs, otherUser, 'lead', 9999)
       } finally {
         client.release()
       }

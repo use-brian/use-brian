@@ -84,21 +84,11 @@ export function normalizeDomain(s: string): string {
 
 // ── URL helpers ──────────────────────────────────────────────────────
 
-const URL_RE = /^https?:\/\//i
-
-export function isUrl(s: string | null | undefined): s is string {
-  return typeof s === 'string' && URL_RE.test(s)
-}
-
 // GitHub repo URL — captures owner + repo. Excludes sub-paths
 // (`/pull/`, `/issues/`, etc.) by anchoring on optional trailing slash
 // followed by end. Accepts `.git` suffix for clone URLs.
 export const GITHUB_REPO_RE =
   /^(?:https?:\/\/)?(?:www\.)?github\.com\/(?<owner>[a-z0-9][a-z0-9-]*)\/(?<repo>[a-z0-9][a-z0-9-_.]*?)(?:\.git)?\/?$/i
-
-// GitHub account URL — single path segment. Could be user or org.
-export const GITHUB_ACCOUNT_RE =
-  /^(?:https?:\/\/)?(?:www\.)?github\.com\/(?<owner>[a-z0-9][a-z0-9-]*)\/?$/i
 
 export const GITLAB_REPO_RE =
   /^(?:https?:\/\/)?(?:www\.)?gitlab\.com\/(?<owner>[a-z0-9][a-z0-9-_.]*?)\/(?<repo>[a-z0-9][a-z0-9-_.]*?)(?:\.git)?\/?$/i

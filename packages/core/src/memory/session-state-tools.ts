@@ -6,7 +6,7 @@ import type { SessionStateStore } from './session-state-types.js'
  * Analytics callback for the two session-state write tools.
  * Caller wires these into the analytics logger in the chat route.
  */
-export type SessionStateToolEvent =
+type SessionStateToolEvent =
   | { type: 'session_state_upsert'; source: 'tool'; key: string; wasInsert: boolean }
   | { type: 'session_state_resolve'; source: 'tool'; key: string; hit: boolean }
 

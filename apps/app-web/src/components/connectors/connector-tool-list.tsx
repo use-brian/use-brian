@@ -23,7 +23,7 @@ import { GDRIVE_GROUPS, gdriveToolGroup, type GdriveGroupId } from "./gdrive-gro
 import { useT } from "@/lib/i18n/client";
 
 export type ToolPolicy = "allow" | "ask" | "block";
-export type ToolClassification = "read" | "write" | "destructive" | "unknown";
+type ToolClassification = "read" | "write" | "destructive" | "unknown";
 
 export type ConnectorToolListItem = {
   name: string;

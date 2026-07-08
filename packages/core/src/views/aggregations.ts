@@ -22,9 +22,9 @@
  */
 
 import { z } from 'zod'
-import type { CrmStore, DealListRow } from '../crm/types.js'
+import type { CrmStore } from '../crm/types.js'
 import type { AccessContext } from '../security/access-context.js'
-import type { TaskListRow, TaskStore } from '../tasks/types.js'
+import type { TaskStore } from '../tasks/types.js'
 
 // ── Public types ──────────────────────────────────────────────────────
 
@@ -346,18 +346,3 @@ export const aggregateBindingSchema: z.ZodType<AggregateBinding> = z.object({
   bucket: z.enum(['day', 'week', 'month']).optional(),
   filters: z.record(z.unknown()).optional(),
 }) as z.ZodType<AggregateBinding>
-
-// ── Test-facing helpers ───────────────────────────────────────────────
-//
-// Internal entity-row narrow types exported for test fixtures, so tests
-// don't need to type-cast `as EntityRow` themselves.
-
-export type TaskRowForAggregation = Pick<
-  TaskListRow,
-  'id' | 'status' | 'assigneeId' | 'due' | 'updatedAt'
->
-
-export type DealRowForAggregation = Pick<
-  DealListRow,
-  'id' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
->

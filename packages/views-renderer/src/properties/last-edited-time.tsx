@@ -87,5 +87,3 @@ export const LastEditedTimeProperty: PropertyModule = {
   Icon,
   sortFn,
 }
-
-export const __test = { asTime }

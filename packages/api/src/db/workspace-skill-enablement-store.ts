@@ -18,6 +18,24 @@
  */
 
 import { query, queryWithRLS } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
+
+/**
+ * Enablement rows key by (skill, assistant); the workspace for the realtime
+ * `skill` signal resolves through the skill row. Fire-and-forget.
+ */
+function notifySkillEnablementChange(workspaceSkillId: string): void {
+  // Async IIFE so a synchronous throw from `query` (or a non-promise return
+  // under a test mock) degrades into the same swallowed rejection — the
+  // signal is telemetry, the write path must never feel it.
+  void (async () => {
+    const r = await query<{ workspaceId: string | null }>(
+      `SELECT workspace_id AS "workspaceId" FROM workspace_skills WHERE id = $1`,
+      [workspaceSkillId],
+    )
+    notifyWorkspaceChange(r.rows[0]?.workspaceId, 'skill', 'update', workspaceSkillId)
+  })().catch(() => {})
+}
 
 export type WorkspaceSkillEnablement = {
   workspaceSkillId: string
@@ -164,6 +182,7 @@ export function createDbWorkspaceSkillEnablementStore(): WorkspaceSkillEnablemen
          RETURNING ${COLS_PUBLIC}`,
         [workspaceSkillId, assistantId, actingUserId],
       )
+      notifySkillEnablementChange(workspaceSkillId)
       return r.rows[0]
     },
 
@@ -174,6 +193,7 @@ export function createDbWorkspaceSkillEnablementStore(): WorkspaceSkillEnablemen
          WHERE workspace_skill_id = $1 AND assistant_id = $2`,
         [workspaceSkillId, assistantId],
       )
+      if ((r.rowCount ?? 0) > 0) notifySkillEnablementChange(workspaceSkillId)
       return (r.rowCount ?? 0) > 0
     },
 

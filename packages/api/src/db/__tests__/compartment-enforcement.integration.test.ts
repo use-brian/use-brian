@@ -42,7 +42,9 @@ async function canConnect(): Promise<boolean> {
     const client = await p.connect()
     try {
       await client.query('SELECT compartments FROM memories LIMIT 1')
-      await client.query('SELECT compartments FROM deals LIMIT 1')
+      // Post mig 296 a deal IS an `entities` row (kind='deal') — the CRM
+      // `deals` table is gone; probe the table the ported deal leg writes.
+      await client.query('SELECT compartments FROM entities LIMIT 1')
       await client.query('SELECT compartments FROM kb_chunks LIMIT 1')
       await client.query('SELECT compartments, default_compartments FROM assistants LIMIT 1')
       await client.query('SELECT compartments FROM workspace_members LIMIT 1')
@@ -149,12 +151,16 @@ async function seedDeal(
   compartments: string[],
   sensitivity: Sensitivity = 'internal',
 ): Promise<string> {
+  // Post mig 296 a deal IS an `entities` row (kind='deal'); crm.getDealById
+  // reads it back through the same buildAccessPredicate compartment clause.
+  // Kept workspace-shared (user_id set, assistant_id NULL) so the compartment
+  // array stays the only gate.
   const r = await client.query<{ id: string }>(
-    `INSERT INTO deals (
-       workspace_id, stage, external_ref, sensitivity,
-       user_id, assistant_id, source, created_by_user_id, compartments
+    `INSERT INTO entities (
+       kind, display_name, sensitivity, workspace_id, user_id, assistant_id,
+       created_by_user_id, source, compartments
      ) VALUES (
-       $1, 'lead', '{}'::jsonb, $3, $2, NULL, 'user', $2, $4
+       'deal', 'compcanaryword deal', $3, $1, $2, NULL, $2, 'user', $4
      ) RETURNING id`,
     [ws, userId, sensitivity, compartments],
   )

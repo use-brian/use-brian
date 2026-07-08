@@ -28,12 +28,12 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type EntityKind = "tasks" | "deals" | "contacts" | "companies";
 
-export type PatchEntitySuccess = {
+type PatchEntitySuccess = {
   ok: true;
   row: Record<string, unknown>;
 };
 
-export type PatchEntityFailure = {
+type PatchEntityFailure = {
   ok: false;
   error: string;
 };
@@ -68,7 +68,7 @@ export async function patchEntity(opts: {
   }
 }
 
-export type CreateEntitySuccess = {
+type CreateEntitySuccess = {
   ok: true;
   row: Record<string, unknown>;
 };
@@ -110,7 +110,7 @@ export async function createEntity(opts: {
   }
 }
 
-export type DeleteEntitySuccess = { ok: true };
+type DeleteEntitySuccess = { ok: true };
 export type DeleteEntityResult = DeleteEntitySuccess | PatchEntityFailure;
 
 /**

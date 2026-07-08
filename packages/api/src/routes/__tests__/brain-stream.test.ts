@@ -14,7 +14,7 @@
  * `verifyAccessToken` + `subscribeToBrainChanges` are module-mocked;
  * `workspaceStore` is injected.
  *
- * Spec: docs/architecture/brain/realtime-stream.md.
+ * Spec: docs/architecture/platform/realtime-sync.md.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import express from 'express'

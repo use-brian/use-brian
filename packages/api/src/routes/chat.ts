@@ -3511,7 +3511,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                     // Realtime brain stream — fire-and-forget NOTIFY so other
                     // surfaces (a /brain tab, Claude Code, another device)
                     // see the change without polling. No-ops on read tools.
-                    // Spec: docs/architecture/brain/realtime-stream.md.
+                    // Spec: docs/architecture/platform/realtime-sync.md.
                     notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
                     const toolMeta = event.metaByToolUseId?.[block.toolUseId]
                     const extraMeta: Record<string, string | number | boolean> = { in_worker: true }

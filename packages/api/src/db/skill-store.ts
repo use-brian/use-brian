@@ -26,6 +26,7 @@
  */
 
 import { query, queryWithRLS } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import type { SkillContent, SkillMeta } from '@sidanclaw/core'
 import { SKILL_ACTIVATION_THRESHOLD, SKILL_REDERIVATION_INCREMENT } from '@sidanclaw/core'
 
@@ -518,6 +519,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       )
       const skill = rowToWorkspaceSkill(result.rows[0])
       fireOnWritten(skill)
+      notifyWorkspaceChange(skill.workspaceId, 'skill', 'create', skill.rowId)
       return skill
     },
 
@@ -589,16 +591,18 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
       if (!result.rows[0]) return null
       const skill = rowToWorkspaceSkill(result.rows[0])
       fireOnWritten(skill)
+      notifyWorkspaceChange(skill.workspaceId, 'skill', 'update', skill.rowId)
       return skill
     },
 
     async setBlueprint(userId, workspaceId, skillId, blueprintId) {
-      await queryWithRLS(
+      const result = await queryWithRLS(
         userId,
         `UPDATE workspace_skills SET blueprint_id = $1, updated_at = now()
           WHERE id = $2 AND workspace_id = $3`,
         [blueprintId, skillId, workspaceId],
       )
+      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },
 
     async delete(userId, workspaceId, skillId) {
@@ -609,6 +613,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE id = $1 AND workspace_id = $2 AND valid_to IS NULL`,
         [skillId, workspaceId],
       )
+      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'delete', skillId)
       return (result.rowCount ?? 0) > 0
     },
 
@@ -651,6 +656,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE id = $1 AND workspace_id = $2`,
         [skillId, workspaceId],
       )
+      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
       return (result.rowCount ?? 0) > 0
     },
 
@@ -662,6 +668,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE id = $1 AND workspace_id = $2`,
         [skillId, workspaceId],
       )
+      if ((result.rowCount ?? 0) > 0) notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
       return (result.rowCount ?? 0) > 0
     },
 
@@ -726,6 +733,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE id = $1 AND workspace_id = $2`,
         [skillId, workspaceId],
       )
+      notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },
 
     // ── V2 — pin / unpin (S13) ───────────────────────────────────────
@@ -746,17 +754,20 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE id = $2 AND workspace_id = $3`,
         [pinned, skillId, workspaceId],
       )
+      notifyWorkspaceChange(workspaceId, 'skill', 'update', skillId)
     },
 
     // ── V2 — lifecycle (S12) ─────────────────────────────────────────
 
     async setState(skillId, state) {
-      await query(
+      const result = await query<{ workspaceId: string }>(
         `UPDATE workspace_skills
          SET state = $1, state_transitioned_at = now(), updated_at = now()
-         WHERE id = $2`,
+         WHERE id = $2
+         RETURNING workspace_id AS "workspaceId"`,
         [state, skillId],
       )
+      if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'skill', 'update', skillId)
     },
 
     async recordInvocation(skillId) {

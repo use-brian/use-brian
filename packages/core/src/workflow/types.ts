@@ -23,7 +23,7 @@ import type { ResearchDepthConfig } from '../engine/research-depth.js'
  */
 export type AssistantTargetRef = string | 'primary'
 
-export type WorkflowStepCommon = {
+type WorkflowStepCommon = {
   /** Stable identifier within the definition. */
   id: string
   /** Optional human-readable label for audit + getWorkflowRun output. */
@@ -75,7 +75,7 @@ export type WorkflowStepCommon = {
  * See docs/plans/workflow-page-anchor.md and
  * docs/architecture/features/workflow.md → "assistant_call page anchor".
  */
-export type PageAnchor =
+type PageAnchor =
   | { id: string }
   | { create: true; title?: string; nestUnder?: string; reuse?: 'per-run' | 'per-workflow' }
   | { fromStep: string }

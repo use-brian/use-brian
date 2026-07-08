@@ -19,7 +19,7 @@ import type { useT } from "@/lib/i18n/client";
 
 export type FeedSectionKey =
   keyof ReturnType<typeof useT>["feedPage"]["sections"];
-export type FeedGroupKey = keyof ReturnType<typeof useT>["feedPage"]["groups"];
+type FeedGroupKey = keyof ReturnType<typeof useT>["feedPage"]["groups"];
 
 /** The distribution platforms the feed engine supports. Mirrors the backend's
  *  `distribution_profiles.platform` enum — the URL segment is the platform id. */
@@ -35,7 +35,7 @@ export function isFeedPlatform(
   return !!value && FEED_PLATFORM_SET.has(value);
 }
 
-export type FeedSection = {
+type FeedSection = {
   key: FeedSectionKey;
   /** Route segment. Team rows: under `/feed/`; the home row is the bare
    *  `/feed` index (empty segment). Platform rows: under `/feed/[platform]/`. */

@@ -175,4 +175,4 @@ function parseVerdicts(
 }
 
 // Export internals for testing
-export { extractRecalledMemories, extractResponseText, buildJudgmentPrompt, parseVerdicts }
+export { extractRecalledMemories, extractResponseText, parseVerdicts }

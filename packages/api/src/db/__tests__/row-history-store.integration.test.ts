@@ -21,9 +21,6 @@ async function canConnect(): Promise<boolean> {
       await client.query('SELECT valid_to, superseded_by FROM tasks LIMIT 1')
       await client.query('SELECT valid_to, superseded_by FROM workspace_files LIMIT 1')
       await client.query('SELECT valid_to, superseded_by FROM entities LIMIT 1')
-      await client.query('SELECT valid_to, superseded_by FROM companies LIMIT 1')
-      await client.query('SELECT valid_to, superseded_by FROM contacts LIMIT 1')
-      await client.query('SELECT valid_to, superseded_by FROM deals LIMIT 1')
     } finally {
       client.release()
     }
@@ -324,8 +321,9 @@ describeIf('[COMP:corrections/row-history] unified getRowHistory dispatch', () =
   })
 
   it('entities: forged supersession chain walks correctly', async () => {
-    // WU-1.5 (Q24): direct createEntity for the CRM-specialized kinds
-    // is blocked — use a non-CRM kind. The row-history walker is
+    // A non-CRM kind keeps this leg distinct from the CRM-primitive
+    // tests above. (The old Q24 guard blocking direct CRM-kind
+    // createEntity went with mig 296.) The row-history walker is
     // kind-agnostic, so 'project' exercises the supersession chain
     // identically.
     const e1 = await entities.createEntity({
@@ -363,48 +361,66 @@ describeIf('[COMP:corrections/row-history] unified getRowHistory dispatch', () =
     expect(result!.data.current_id).toBe(e2.id)
   })
 
-  it('companies: supersession on update walks the chain', async () => {
+  // Post CRM→entity unification (mig 296) a company / contact / deal IS an
+  // `entities` row; the `companies` / `contacts` / `deals` primitives dispatch
+  // to the same entity history walker (fetchEntityVersions), so their chain +
+  // display are entity-shaped ({ kind, displayName, canonicalId }) — there is
+  // no `name` / `stage` display leg any more. CRM writes update IN PLACE
+  // (updateEntity, no supersession — crm-entity-unification.md D5), so a
+  // multi-version chain exists only when the underlying entity is superseded;
+  // these forge that edge to exercise the walker through the CRM primitive,
+  // exactly like the `entities` test above.
+
+  it('companies: the companies primitive walks the entity supersession chain', async () => {
     const c1 = await crm.createCompany(userId, { workspaceId, name: 'CoA' })
-    const c2 = await crm.updateCompany(userId, c1.id, { name: 'CoB' })
-    expect(c2).not.toBeNull()
+    const c2 = await crm.createCompany(userId, { workspaceId, name: 'CoB' })
+    await pool!.query(
+      `UPDATE entities SET valid_to = now(), superseded_by = $2 WHERE id = $1`,
+      [c1.id, c2.id],
+    )
 
     const factory = store.createDbRowHistoryStore()
     const result = await factory.getRowHistory(actor, { primitive: 'companies', row_id: c1.id })
     expect(result).not.toBeNull()
     const chain = result!.data.chain
-    expect(chain.map((r) => r.id)).toEqual([c1.id, c2!.id])
+    expect(chain.map((r) => r.id)).toEqual([c1.id, c2.id])
     expect(chain[0].status).toBe('superseded')
     expect(chain[1].status).toBe('active')
-    expect(chain[0].display).toMatchObject({ name: 'CoA' })
-    expect(chain[1].display).toMatchObject({ name: 'CoB' })
-    expect(result!.data.current_id).toBe(c2!.id)
+    expect(chain[0].display).toMatchObject({ kind: 'company', displayName: 'CoA' })
+    expect(chain[1].display).toMatchObject({ kind: 'company', displayName: 'CoB' })
+    expect(result!.data.current_id).toBe(c2.id)
   })
 
-  it('contacts: history walker hits the contacts table', async () => {
+  it('contacts: the contacts primitive walks the entity chain (kind=person)', async () => {
     const c1 = await crm.createContact(userId, { workspaceId, name: 'PersonA' })
-    const c2 = await crm.updateContact(userId, c1.id, { name: 'PersonB' })
+    const c2 = await crm.createContact(userId, { workspaceId, name: 'PersonB' })
+    await pool!.query(
+      `UPDATE entities SET valid_to = now(), superseded_by = $2 WHERE id = $1`,
+      [c1.id, c2.id],
+    )
 
     const factory = store.createDbRowHistoryStore()
     const result = await factory.getRowHistory(actor, { primitive: 'contacts', row_id: c1.id })
     expect(result!.data.chain).toHaveLength(2)
-    expect(result!.data.chain[0].display).toMatchObject({ name: 'PersonA' })
-    expect(result!.data.chain[1].display).toMatchObject({ name: 'PersonB' })
-    expect(result!.data.current_id).toBe(c2!.id)
+    expect(result!.data.chain[0].display).toMatchObject({ kind: 'person', displayName: 'PersonA' })
+    expect(result!.data.chain[1].display).toMatchObject({ kind: 'person', displayName: 'PersonB' })
+    expect(result!.data.current_id).toBe(c2.id)
   })
 
-  it('deals: stage transition supersedes', async () => {
-    const company = await crm.createCompany(userId, { workspaceId, name: 'Co' })
-    const d1 = await crm.createDeal(userId, {
-      workspaceId, companyId: company.id, stage: 'qualified',
-    })
-    const d2 = await crm.setDealStage(userId, d1.id, 'proposal')
-    expect(d2).not.toBeNull()
+  it('deals: the deals primitive walks the entity chain (kind=deal)', async () => {
+    const d1 = await crm.createDeal(userId, { workspaceId, stage: 'qualified' })
+    const d2 = await crm.createDeal(userId, { workspaceId, stage: 'proposal' })
+    await pool!.query(
+      `UPDATE entities SET valid_to = now(), superseded_by = $2 WHERE id = $1`,
+      [d1.id, d2.id],
+    )
 
     const factory = store.createDbRowHistoryStore()
     const result = await factory.getRowHistory(actor, { primitive: 'deals', row_id: d1.id })
-    expect(result!.data.chain.map((r) => r.id)).toEqual([d1.id, d2!.id])
-    expect(result!.data.chain[0].display).toMatchObject({ stage: 'qualified' })
-    expect(result!.data.chain[1].display).toMatchObject({ stage: 'proposal' })
-    expect(result!.data.current_id).toBe(d2!.id)
+    expect(result!.data.chain.map((r) => r.id)).toEqual([d1.id, d2.id])
+    expect(result!.data.chain[0].status).toBe('superseded')
+    expect(result!.data.chain[1].status).toBe('active')
+    expect(result!.data.chain.every((r) => r.display.kind === 'deal')).toBe(true)
+    expect(result!.data.current_id).toBe(d2.id)
   })
 })

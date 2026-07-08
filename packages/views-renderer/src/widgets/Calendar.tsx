@@ -86,33 +86,28 @@ const MAX_CHIPS_PER_DAY = 3
 
 // ── Pure date helpers (exported for tests) ────────────────────────────
 
-/** Construct a date at local midnight from year/month/day. */
-export function dateAt(year: number, month: number, day: number): Date {
-  return new Date(year, month, day)
-}
-
 /** Local-midnight clone of `d` (drops time-of-day for day-level math). */
 export function startOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
 }
 
 /** Local-midnight Date for the first of the cursor's month. */
-export function startOfMonth(cursor: Date): Date {
+function startOfMonth(cursor: Date): Date {
   return new Date(cursor.getFullYear(), cursor.getMonth(), 1)
 }
 
 /** Number of days in the cursor's month. */
-export function daysInMonth(cursor: Date): number {
+function daysInMonth(cursor: Date): number {
   return new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
 }
 
 /** Returns 0–6 where 0=Mon, 6=Sun. */
-export function mondayIndex(d: Date): number {
+function mondayIndex(d: Date): number {
   return (d.getDay() + 6) % 7
 }
 
 /** Pure helper: add `n` days (positive or negative) to `d`. */
-export function addDays(d: Date, n: number): Date {
+function addDays(d: Date, n: number): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)
 }
 
@@ -157,7 +152,7 @@ export function toIsoDate(d: Date): string {
 }
 
 /** True when `a` and `b` share year+month+day (in local time). */
-export function sameDay(a: Date, b: Date): boolean {
+function sameDay(a: Date, b: Date): boolean {
   return (
     a.getFullYear() === b.getFullYear()
     && a.getMonth() === b.getMonth()

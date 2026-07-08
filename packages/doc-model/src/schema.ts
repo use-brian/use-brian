@@ -114,7 +114,7 @@ export const Toggle = Node.create({
  * byte-for-byte identical on both Yjs ends; only the browser's input rule
  * differs.
  */
-export const DocBlockquote = Blockquote.extend({
+const DocBlockquote = Blockquote.extend({
   addInputRules() {
     return [wrappingInputRule({ find: BLOCKQUOTE_INPUT_REGEX, type: this.type })]
   },
@@ -133,7 +133,7 @@ export const DocBlockquote = Blockquote.extend({
  * layers a `ReactNodeViewRenderer` + the `@` Suggestion plugin on top via
  * `.extend()` (rendering + behavior only; the schema stays identical).
  */
-export const PersonMention = Node.create({
+const PersonMention = Node.create({
   name: 'personMention',
   group: 'inline',
   inline: true,
@@ -187,7 +187,7 @@ export const PersonMention = Node.create({
  * pill — keyboard-focusable + Cmd-clickable in the viewer. Shared for the
  * same Yjs-round-trip reason as `personMention`.
  */
-export const PageMention = Node.create({
+const PageMention = Node.create({
   name: 'pageMention',
   group: 'inline',
   inline: true,
@@ -281,8 +281,8 @@ export const Embed = Node.create({
  * ignores plugins, so they run only inside the browser Editor — no
  * schema-parity risk and no `withViewPlugins` gate needed.
  */
-export const DocTableCell = TableCell.extend({ content: 'paragraph+' })
-export const DocTableHeader = TableHeader.extend({ content: 'paragraph+' })
+const DocTableCell = TableCell.extend({ content: 'paragraph+' })
+const DocTableHeader = TableHeader.extend({ content: 'paragraph+' })
 
 /**
  * Comment mark — anchors a Notion-style comment thread to a precise text
@@ -303,7 +303,7 @@ export const DocTableHeader = TableHeader.extend({ content: 'paragraph+' })
  * (`anchor_block_id`) and never mutate the Yjs doc. The ONLY writer is the
  * floating-toolbar "Comment" action in `apps/app-web`.
  */
-export const Comment = Mark.create({
+const Comment = Mark.create({
   name: 'comment',
   inclusive: false,
   excludes: '',

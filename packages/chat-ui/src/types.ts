@@ -66,7 +66,7 @@ export type ReplyTo = {
  * @sidanclaw/views-renderer (where the typed schema lives) — the
  * apps/web consumer validates at the renderer boundary on mount.
  */
-export type ViewPayloadAttachment = {
+type ViewPayloadAttachment = {
   toolUseId: string
   payload: unknown
   entity?: string

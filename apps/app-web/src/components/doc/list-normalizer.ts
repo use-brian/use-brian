@@ -71,7 +71,7 @@ export function firstAdjacentListJoinPos(doc: PMNode): number {
   return walk(doc, -1);
 }
 
-export const listNormalizerKey = new PluginKey("docListNormalizer");
+const listNormalizerKey = new PluginKey("docListNormalizer");
 
 export const ListNormalizer = Extension.create({
   name: "listNormalizer",

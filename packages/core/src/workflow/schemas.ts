@@ -504,7 +504,7 @@ const EVENT_SOURCE_TYPE_VALUES = new Set(
  * docs/architecture/features/workflow.md → "Event trigger" (flattened-source
  * tolerance).
  */
-export function normalizeEventSubscriptionShape(value: unknown): unknown {
+function normalizeEventSubscriptionShape(value: unknown): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return value
   const obj = value as Record<string, unknown>
   if ('source' in obj) return value

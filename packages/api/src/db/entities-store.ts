@@ -37,15 +37,11 @@ import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js
  * stays stubbed — deferred to WU-3.7 even though the table exists
  * (mig 132). Sensitivity-clearance projection is WS-4 (WU-4.2).
  *
- * WU-1.5 (Q24 enforcement): `createEntity` rejects direct inserts for
- * `kind='person'|'company'|'deal'`. Those kinds are CRM-specialized
- * (data-model.md §"CRM as specialization of entities") and must be
- * created through `saveContact` / `saveCompany` / `saveDeal` in
- * `crm.ts`, which wrap the `entities` + specialization-table inserts
- * in one transaction. The CRM wrappers reach the `entities` table via
- * a raw `INSERT` on their own pooled connection, not through this
- * helper — so the guard here closes the public-store entrypoint
- * without breaking the CRM write path.
+ * WU-1.5 (Q24 enforcement) is retired: pre-unification, `createEntity`
+ * rejected direct inserts for `kind='person'|'company'|'deal'` to force
+ * them through the CRM specialization tables. Mig 296 dropped those
+ * tables — every kind now inserts directly here, and the CRM tools in
+ * `crm.ts` are thin projections over this store.
  */
 
 // (Removed) `CRM_SPECIALIZED_KINDS` guard. Post CRM→entity unification
@@ -243,16 +239,12 @@ function normalizeAliasArray(input: readonly string[]): string[] {
  * themselves. Creates it lazily on first call and stamps
  * `users.entity_id` for follow-up calls to short-circuit.
  *
- * Why this bypasses the Q24 CRM-specialization guard:
- *
- *   The Q24 guard in `createEntity` blocks raw inserts for
- *   `kind='person'` because every person *contact* needs a matching
- *   `contacts` specialization row. The self-entity is the deliberate
- *   exception — it represents the user, not a CRM contact, and has
- *   `attributes.self=true` as the discriminator. We raw-insert
- *   directly into `entities` here under the same DB pool the CRM
- *   wrappers use; the Q24 guard's job is to keep regular contact
- *   creation flowing through the CRM tools, which still happens.
+ * The self-entity is an ordinary `kind='person'` entities row with
+ * `attributes.self=true` as the discriminator — it represents the user,
+ * not a CRM contact. (Historical note: pre-unification a Q24 guard in
+ * `createEntity` blocked raw `kind='person'` inserts to force contacts
+ * through the CRM specialization tables; mig 296 dropped those tables
+ * and the guard with them, so this insert no longer bypasses anything.)
  *
  * Workspace scoping: the self entity is created in the *passed*
  * workspace. A user with two workspaces ends up with one self entity
@@ -288,9 +280,8 @@ export async function getOrCreateSelfEntity(params: {
     // — fall through and create a new one for this workspace.
   }
 
-  // Materialise. Raw INSERT bypasses the Q24 guard intentionally per
-  // the docstring above. attributes.self=true is the discriminator
-  // for follow-up tools that need to distinguish self entities from
+  // Materialise. attributes.self=true is the discriminator for
+  // follow-up tools that need to distinguish self entities from
   // regular contacts.
   const created = await query<EntityRow>(
     `INSERT INTO entities (
@@ -1482,28 +1473,24 @@ async function getEntityRollup(
 // The brain-inbox detail panel exposes "change type" to users who notice
 // the extractor mis-classified an entity (the canonical case: a company
 // extracted as `kind='product'` because the chat phrased it like one).
-// Two distinct paths:
+// Two distinct paths, both entities-only since the CRM unification
+// (mig 296 dropped the contacts/companies/deals companion tables):
 //
 //   1. NON-CRM kind change — direct UPDATE on entities.kind. Allowed
 //      between any pair of non-CRM kinds (product, project, topic,
-//      event, tenant.* namespaces). Cheap, no companion row needed.
+//      event, tenant.* namespaces). Cheap.
 //
 //   2. CRM PROMOTION — entity goes to kind='person'|'company'|'deal'.
-//      These kinds are CRM-specialized (see CRM_SPECIALIZED_KINDS top
-//      of file): they require a companion row in `contacts` /
-//      `companies` / `deals`. Without the companion row, every CRM
-//      read (`listCompanies` etc, plus the brain-inbox listing branches
-//      that filter `kind NOT IN ('person','company','deal')`)
-//      misclassifies the row. So we wrap the entity UPDATE + the
-//      specialization INSERT in one transaction — same shape as the
-//      `saveCompany`/`saveContact`/`saveDeal` create paths in crm.ts,
-//      except for an existing entity rather than a fresh one.
+//      Typed CRM fields (email/phone/domain/stage/amount/closeDate)
+//      merge into `attributes`, and `canonical_id` picks up the natural
+//      key (email for person, domain for company). One UPDATE inside a
+//      row-locked transaction so a concurrent promote/supersede can't
+//      race.
 //
-// Demote-from-CRM (e.g. company → product, which would orphan the
-// `companies` row) is intentionally NOT supported here. Users who want
-// to drop the CRM specialization should retract the CRM row through
-// the corrections surface; reclassifying the entity afterwards then
-// goes through path 1.
+// Demote-from-CRM (e.g. company → product) is intentionally NOT
+// supported here. Users who want to drop the CRM specialization retract
+// through the corrections surface; reclassifying the entity afterwards
+// then goes through path 1.
 
 export type ReclassifyEntityKindParams = {
   /** Target kind. Must NOT be a CRM-specialized kind. */
@@ -1511,8 +1498,9 @@ export type ReclassifyEntityKindParams = {
 }
 
 /**
- * Path 1 — direct kind change between non-CRM kinds. Rejects CRM
- * targets so callers can't sneak past the companion-row invariant.
+ * Path 1 — direct kind change between non-CRM kinds. CRM targets are
+ * rejected upstream (route validation) and must go through
+ * `promoteEntityToCrm` instead, so typed attributes + canonical_id land.
  * Returns `null` when the entity doesn't exist / isn't live / belongs
  * to a workspace the actor can't see.
  */
@@ -1554,21 +1542,19 @@ export type PromoteEntityToCrmParams = {
 }
 
 /**
- * Path 2 — atomic CRM promotion. Inserts the `contacts` / `companies`
- * / `deals` companion row referencing the existing entity, then flips
- * `entities.kind`. Both writes happen in one transaction with the
- * authorship context set on the connection so `created_by_user_id`
- * fills in (mig 128) and RLS still applies.
+ * Path 2 — atomic CRM promotion. Flips `entities.kind` and merges the
+ * typed CRM fields into `attributes` (plus `canonical_id` from the
+ * natural key) in one row-locked transaction, with the actor scope SET
+ * LOCAL on the connection so RLS still applies.
  *
  * Rejects:
- *   - missing / non-live entity
- *   - cross-workspace mismatch (entity outside the actor's workspace)
- *   - entity that's ALREADY CRM-specialized (the companion row would
- *     duplicate)
+ *   - missing / non-live entity (also covers cross-workspace: an entity
+ *     outside the actor's RLS visibility reads as not found)
  *   - deals without a stage value
  *
- * Returns the updated entity (kind = target). The companion row's id
- * is also returned for the route to surface.
+ * Returns the updated entity (kind = target). `specializationId` is the
+ * entity's own id — kept for route-shape compatibility with the
+ * pre-unification API, where it was the companion row's id.
  */
 export async function promoteEntityToCrm(
   actorUserId: string,

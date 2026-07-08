@@ -31,7 +31,7 @@ import { Plugin, PluginKey } from "@tiptap/pm/state";
 import type { FileRef } from "@/lib/api/views";
 import { queueMediaUpload } from "./doc-media-uploads";
 
-export const mediaPasteKey = new PluginKey("docMediaPaste");
+const mediaPasteKey = new PluginKey("docMediaPaste");
 
 export type DocMediaPasteOptions = {
   /** Active workspace; scopes the durable upload + read. Undefined → no-op. */

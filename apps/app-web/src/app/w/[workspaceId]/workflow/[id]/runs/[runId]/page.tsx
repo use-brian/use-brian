@@ -33,6 +33,10 @@ import {
   type WorkflowRunDetail,
   type WorkflowStepRunDetail,
 } from "@/lib/api/workflow";
+import {
+  WORKFLOW_REFRESH_EVENT,
+  type WorkflowRefreshDetail,
+} from "@/lib/workflow-events";
 import { cn } from "@/lib/utils";
 
 export default function WorkflowRunDetailPage({
@@ -81,6 +85,19 @@ export default function WorkflowRunDetailPage({
     }, 5000);
     return () => window.clearInterval(tid);
   }, [run, load]);
+
+  // Server leg (realtime-sync): step/status transitions arrive as
+  // `workflow_run` signals — refetch immediately instead of waiting for the
+  // next 5s tick. The in-flight poll stays as the degraded-SSE fallback.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<WorkflowRefreshDetail>).detail;
+      if (detail?.primitive === "workflow") return;
+      void load();
+    };
+    window.addEventListener(WORKFLOW_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(WORKFLOW_REFRESH_EVENT, handler);
+  }, [load]);
 
   if (run === undefined || workflow === undefined) {
     return (

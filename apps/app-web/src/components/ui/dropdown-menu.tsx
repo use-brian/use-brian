@@ -32,7 +32,6 @@ import { cn } from "@/lib/utils";
 
 const DropdownMenu = MenuPrimitive.Root;
 const DropdownMenuTrigger = MenuPrimitive.Trigger;
-const DropdownMenuGroup = MenuPrimitive.Group;
 
 function DropdownMenuContent({
   className,
@@ -112,25 +111,10 @@ function DropdownMenuSeparator({
   );
 }
 
-function DropdownMenuLabel({
-  className,
-  ...props
-}: MenuPrimitive.GroupLabel.Props) {
-  return (
-    <MenuPrimitive.GroupLabel
-      data-slot="dropdown-menu-label"
-      className={cn("px-2.5 py-1 text-xs text-muted-foreground", className)}
-      {...props}
-    />
-  );
-}
-
 export {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
-  DropdownMenuLabel,
-  DropdownMenuGroup,
 };

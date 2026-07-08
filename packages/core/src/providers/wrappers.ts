@@ -321,7 +321,7 @@ export function detectBlockRestart(buffer: string): { looping: boolean; cleanEnd
 
 // ── Text loop prevention wrapper ───────────────────────────────
 
-export type RepetitionDetected = {
+type RepetitionDetected = {
   type: 'degenerate' | 'ngram' | 'restart'
   cleanText: string
   /** Last usage seen before the stream was aborted. */

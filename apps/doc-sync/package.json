@@ -16,9 +16,7 @@
     "@sidanclaw/api": "workspace:*",
     "@sidanclaw/doc-model": "workspace:*",
     "@sidanclaw/core": "workspace:*",
-    "@sidanclaw/shared": "workspace:*",
     "dotenv": "^16",
-    "express": "^5",
     "ws": "^8.21.0",
     "yjs": "13.6.31"
   },

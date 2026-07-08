@@ -53,7 +53,7 @@ const YEAR_SEC = 365 * DAY_SEC
  * the user's locale; the unit cascade matches Notion/Linear's display
  * (seconds → minutes → hours → days → weeks → months → years).
  */
-export function formatRelative(iso: string, now: Date): string {
+function formatRelative(iso: string, now: Date): string {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return iso
   const diffSec = Math.round((t - now.getTime()) / 1000)
@@ -73,7 +73,7 @@ export function formatRelative(iso: string, now: Date): string {
  * `format: 'absolute'` display and for the hover tooltip on relative
  * cells (so the user can disambiguate "3 days ago" without thinking).
  */
-export function formatAbsolute(iso: string): string {
+function formatAbsolute(iso: string): string {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return iso
   return new Intl.DateTimeFormat(undefined, {
@@ -85,7 +85,7 @@ export function formatAbsolute(iso: string): string {
  * Absolute date + time, used for `format: 'datetime'` cells where the
  * extra precision matters (audit-style displays).
  */
-export function formatDatetime(iso: string): string {
+function formatDatetime(iso: string): string {
   const t = Date.parse(iso)
   if (!Number.isFinite(t)) return iso
   return new Intl.DateTimeFormat(undefined, {

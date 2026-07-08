@@ -41,7 +41,7 @@ export type ScheduleConfig =
  * One event source an `event`-trigger workflow listens on. Mirrors
  * `EventSourceRef` in `packages/core/src/workflow/types.ts`.
  */
-export type EventSourceRef =
+type EventSourceRef =
   | {
       type: "connector";
       connectorInstanceId: string;
@@ -243,7 +243,7 @@ export type WorkflowDefinition = {
 // ── Records ───────────────────────────────────────────────────────────────
 
 /** Mig 308 — the retirement ladder. Archived rows are hidden by default. */
-export type WorkflowLifecycleState = "active" | "stale" | "archived";
+type WorkflowLifecycleState = "active" | "stale" | "archived";
 
 export type WorkflowSummary = {
   id: string;
@@ -352,7 +352,7 @@ export type WorkflowRunDetail = WorkflowRunSummary & {
 
 // ── Legacy shapes kept for the existing detail page renderer ─────────────
 
-export type WorkflowStepView = {
+type WorkflowStepView = {
   id: string;
   name: string;
   status: "idle" | "running" | "awaiting_approval" | "completed" | "failed";
@@ -360,14 +360,14 @@ export type WorkflowStepView = {
   description?: string | null;
 };
 
-export type WorkflowDetail = {
+type WorkflowDetail = {
   id: string;
   name: string;
   description?: string | null;
   steps: WorkflowStepView[];
 };
 
-export type ApprovalOutcome = "approved" | "rejected";
+type ApprovalOutcome = "approved" | "rejected";
 
 // ── Read operations ──────────────────────────────────────────────────────
 
@@ -393,22 +393,6 @@ export async function restoreWorkflow(workflowId: string): Promise<boolean> {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ lifecycleState: "active" }),
-    },
-  );
-  return res.ok;
-}
-
-/** Mig 308 — toggle the lifecycle-sweep veto flag. */
-export async function setWorkflowPinned(
-  workflowId: string,
-  pinned: boolean,
-): Promise<boolean> {
-  const res = await authFetch(
-    `${API_URL}/api/workflows/${encodeURIComponent(workflowId)}`,
-    {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pinned }),
     },
   );
   return res.ok;

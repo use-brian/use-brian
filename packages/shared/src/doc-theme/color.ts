@@ -34,7 +34,7 @@ export function rgbToHex({ r, g, b }: Rgb): string {
   return `#${to2(r)}${to2(g)}${to2(b)}`.toUpperCase()
 }
 
-export function rgbToHsl({ r, g, b }: Rgb): Hsl {
+function rgbToHsl({ r, g, b }: Rgb): Hsl {
   const rn = r / 255
   const gn = g / 255
   const bn = b / 255
@@ -54,7 +54,7 @@ export function rgbToHsl({ r, g, b }: Rgb): Hsl {
   return { h, s: s * 100, l: l * 100 }
 }
 
-export function hslToRgb({ h, s, l }: Hsl): Rgb {
+function hslToRgb({ h, s, l }: Hsl): Rgb {
   const sn = clamp(s, 0, 100) / 100
   const ln = clamp(l, 0, 100) / 100
   const c = (1 - Math.abs(2 * ln - 1)) * sn

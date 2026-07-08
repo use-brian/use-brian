@@ -441,7 +441,7 @@ export async function fetchFeedSessionIdByChannel(
 // `draft-session-detail.tsx` — streams don't belong in the RPC SDK.
 
 /** Mirrors `ReplyTarget` in `packages/api/src/db/draft-session-store.ts`. */
-export type FeedReplyTargetSummary = {
+type FeedReplyTargetSummary = {
   authorHandle: string;
   text: string;
   permalink: string | null;

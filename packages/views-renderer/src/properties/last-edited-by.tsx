@@ -78,5 +78,3 @@ export const LastEditedByProperty: PropertyModule = {
   Icon,
   sortFn,
 }
-
-export const __test = { asPerson }

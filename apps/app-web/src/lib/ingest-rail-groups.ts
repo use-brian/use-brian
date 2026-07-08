@@ -40,7 +40,7 @@ export type RailWhatsappState = {
   enabledGroups: number;
 };
 
-export type IngestRailRow<S, A> =
+type IngestRailRow<S, A> =
   | { kind: "source"; key: string; source: S }
   | { kind: "whatsapp"; key: "whatsapp" }
   | { kind: "available"; key: string; provider: A };

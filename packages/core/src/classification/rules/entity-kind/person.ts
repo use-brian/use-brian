@@ -26,7 +26,7 @@ const ALL_BOUNDARIES = ['connector', 'tool', 'inbox', 'extraction', 'self_heal']
 
 // ── Positive rules ───────────────────────────────────────────────────
 
-export const personEmailPersonalDomain: ClassifierRule<EntityKind> = {
+const personEmailPersonalDomain: ClassifierRule<EntityKind> = {
   id: 'person-email-personal-domain',
   produces: 'person',
   tier: 'deterministic',  // PR 5 — flipped from probabilistic; an email with
@@ -56,7 +56,7 @@ export const personEmailPersonalDomain: ClassifierRule<EntityKind> = {
   },
 }
 
-export const personEmailCorporateDomain: ClassifierRule<EntityKind> = {
+const personEmailCorporateDomain: ClassifierRule<EntityKind> = {
   id: 'person-email-corporate-domain',
   produces: 'person',
   tier: 'probabilistic',
@@ -105,7 +105,7 @@ export const personEmailCorporateDomain: ClassifierRule<EntityKind> = {
   },
 }
 
-export const personLinkedinProfile: ClassifierRule<EntityKind> = {
+const personLinkedinProfile: ClassifierRule<EntityKind> = {
   id: 'person-linkedin-profile-url',
   produces: 'person',
   tier: 'probabilistic',
@@ -127,7 +127,7 @@ export const personLinkedinProfile: ClassifierRule<EntityKind> = {
   },
 }
 
-export const personHonorific: ClassifierRule<EntityKind> = {
+const personHonorific: ClassifierRule<EntityKind> = {
   id: 'person-honorific-title',
   produces: 'person',
   tier: 'probabilistic',
@@ -147,7 +147,7 @@ export const personHonorific: ClassifierRule<EntityKind> = {
   },
 }
 
-export const personTwoNameWords: ClassifierRule<EntityKind> = {
+const personTwoNameWords: ClassifierRule<EntityKind> = {
   id: 'person-two-name-words',
   produces: 'person',
   tier: 'probabilistic',
@@ -172,7 +172,7 @@ export const personTwoNameWords: ClassifierRule<EntityKind> = {
 
 // ── Negative rules ───────────────────────────────────────────────────
 
-export const notPersonSystemMailbox: ClassifierNegativeRule<EntityKind> = {
+const notPersonSystemMailbox: ClassifierNegativeRule<EntityKind> = {
   id: 'not-person-system-mailbox',
   blocks: ['person'],
   tier: 'deterministic',

@@ -26,7 +26,7 @@ export type DataBlockRender =
   | { mode: "unavailable"; reason: "no-cache" | "expired" };
 
 /** Metadata about a cached payload (the payload itself lives in IndexedDB). */
-export interface DataBlockCacheMeta {
+interface DataBlockCacheMeta {
   /** Unix ms the payload was last successfully resolved + cached. */
   cachedAt: number;
 }

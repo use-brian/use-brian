@@ -207,25 +207,25 @@ export type CodeBlock = {
   code: string;
 };
 
-export type QuoteBlock = {
+type QuoteBlock = {
   kind: "quote";
   id: string;
   richText?: RichTextContent;
 };
 
-export type BulletedListItemBlock = {
+type BulletedListItemBlock = {
   kind: "bulleted_list_item";
   id: string;
   richText?: RichTextContent;
 };
 
-export type NumberedListItemBlock = {
+type NumberedListItemBlock = {
   kind: "numbered_list_item";
   id: string;
   richText?: RichTextContent;
 };
 
-export type TodoBlock = {
+type TodoBlock = {
   kind: "to_do";
   id: string;
   checked: boolean;
@@ -246,7 +246,7 @@ export type ToggleBlock = {
  * rectangular. Mirrors the canonical core block kind in
  * `packages/core/src/views/blocks.ts` — keep the two in sync.
  */
-export type TableBlock = {
+type TableBlock = {
   kind: "table";
   id: string;
   rows: RichTextContent[][];
@@ -268,7 +268,7 @@ export type FileBlock = {
   ref: FileRef | null;
 };
 
-export type BookmarkMeta = {
+type BookmarkMeta = {
   title?: string;
   description?: string;
   image?: string;
@@ -276,7 +276,7 @@ export type BookmarkMeta = {
   favicon?: string;
 };
 
-export type BookmarkBlock = {
+type BookmarkBlock = {
   kind: "bookmark";
   id: string;
   url: string;
@@ -299,7 +299,7 @@ export type VideoBlock = {
  * Inline audio player from a URL. Same `url: ""` empty-state convention as
  * `VideoBlock`. Mirrors the canonical core block kind.
  */
-export type AudioBlock = {
+type AudioBlock = {
   kind: "audio";
   id: string;
   url: string;
@@ -555,11 +555,6 @@ export async function getView(viewId: string): Promise<ViewMetadata> {
   return json<ViewMetadata>(res);
 }
 
-export async function getViewPayload(viewId: string): Promise<ViewPayload> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/payload`);
-  return json<ViewPayload>(res);
-}
-
 // ── Custom page templates (migration 281) ─────────────────────────────
 //
 // Workspace-shared, user-authored templates. Distinct from the built-in
@@ -696,31 +691,6 @@ export type PageGrant = {
   createdAt: string;
 };
 
-export type ShareResult = { grant: PageGrant; token: string; sharePath: string };
-
-/**
- * Mint an anonymous "anyone with the link" grant. Returns `{ notPublic }`
- * when the page isn't public yet (the caller then confirms declassify and
- * retries with `declassify: true`).
- */
-export async function sharePage(
-  viewId: string,
-  opts?: {
-    role?: "view" | "comment" | "edit";
-    indexable?: boolean;
-    label?: string | null;
-    declassify?: boolean;
-  },
-): Promise<ShareResult | { notPublic: true }> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/share`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(opts ?? {}),
-  });
-  if (res.status === 409) return { notPublic: true };
-  return json<ShareResult>(res);
-}
-
 export async function listGrants(viewId: string): Promise<PageGrant[]> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/grants`);
   const body = await json<{ grants: PageGrant[] }>(res);
@@ -799,25 +769,6 @@ export async function listWorkspaceGroups(viewId: string): Promise<WorkspaceGrou
   const res = await authFetch(`${API_URL}/api/views/${viewId}/groups`);
   const body = await json<{ groups: WorkspaceGroup[] }>(res);
   return body.groups;
-}
-
-export async function createWorkspaceGroup(viewId: string, name: string): Promise<WorkspaceGroup> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/groups`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  const body = await json<{ group: WorkspaceGroup }>(res);
-  return body.group;
-}
-
-export async function addGroupMember(viewId: string, groupId: string, userId: string): Promise<void> {
-  const res = await authFetch(`${API_URL}/api/views/${viewId}/groups/${groupId}/members`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ userId }),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
 // ── Write ─────────────────────────────────────────────────────────────
@@ -1205,10 +1156,6 @@ export function derivePageIcon(params: {
       return params.viewType === "board" ? LayoutGrid : FileText;
   }
 }
-
-/** Re-export the table glyph so callers needing a generic data-view
- * icon don't reach into lucide directly. */
-export const DataViewIcon: LucideIcon = Table2;
 
 /**
  * Compute the auto-prune horizon as a human-friendly "N days" diff.

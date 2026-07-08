@@ -7,7 +7,7 @@
 // falls through to normal confirmation. Outside an active run, this module
 // is a no-op (returns `{ kind: 'no_grant' }`).
 
-export type PermissionGrantKind = 'allow' | 'ask' | 'block'
+type PermissionGrantKind = 'allow' | 'ask' | 'block'
 
 export type WorkflowPermissionGrant = {
   action_kind: string
@@ -16,7 +16,7 @@ export type WorkflowPermissionGrant = {
   granted_by?: string
 }
 
-export type PermissionGrantDecision =
+type PermissionGrantDecision =
   | { kind: 'allow'; workflowRunId: string; grant: WorkflowPermissionGrant }
   | { kind: 'ask'; workflowRunId: string; grant: WorkflowPermissionGrant }
   | { kind: 'block'; workflowRunId: string; grant: WorkflowPermissionGrant }

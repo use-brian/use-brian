@@ -11,7 +11,7 @@
 
 export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 4;
-export const ZOOM_STEP = 0.25;
+const ZOOM_STEP = 0.25;
 /** The "fit" / reset scale — the visual at its inline size. */
 export const FIT_ZOOM = 1;
 

@@ -20,7 +20,7 @@
  * The route does NOT replay — payloads are signals, not data, and the
  * web client re-fetches via the existing list / rollup endpoints.
  *
- * Spec: docs/architecture/brain/realtime-stream.md.
+ * Spec: docs/architecture/platform/realtime-sync.md.
  *
  * [COMP:api/brain-stream-sse]
  */

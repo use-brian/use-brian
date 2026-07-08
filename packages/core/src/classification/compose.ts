@@ -70,17 +70,6 @@ export type ComposeExecutorDeps = {
   crm: CrmStore
 }
 
-import type { CircuitBreaker } from './circuit-breaker.js'
-
-/**
- * Optional circuit-breaker integration. When provided, deterministic-tier
- * overrides consult the breaker before applying. Probabilistic writes
- * don't trip the breaker (they're suggestions, not overrides).
- */
-export type ComposeExecutorDepsWithBreaker = ComposeExecutorDeps & {
-  circuitBreaker?: CircuitBreaker
-}
-
 // ── Factory ──────────────────────────────────────────────────────────
 
 const CRM_KINDS = new Set(['person', 'company', 'deal'])

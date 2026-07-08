@@ -72,7 +72,7 @@ export type ConsolidationEvent =
  * instead of a special memory `type`. See `migration 162` header and
  * `docs/architecture/context-engine/memory-consolidation.md`.
  */
-export const REM_OUTPUT_TAG = 'consolidation:rem'
+const REM_OUTPUT_TAG = 'consolidation:rem'
 
 /** True when the memory is REM's own output — used to keep REM patterns
  *  out of REM's own input set and to gate their looser-Jaccard / shorter
@@ -895,7 +895,7 @@ export async function runDeepConsolidation(
 // consolidation" (correction-history learning).
 
 /** Provenance tag stamped on memories the reflection phase writes. */
-export const REFLECTION_OUTPUT_TAG = 'consolidation:correction-pattern'
+const REFLECTION_OUTPUT_TAG = 'consolidation:correction-pattern'
 
 /** Per-tick correction-event cap. Keeps the LLM prompt bounded and
  *  the cost predictable. Above this, the oldest events are dropped

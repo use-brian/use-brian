@@ -47,6 +47,7 @@ import type {
   GDriveFilesStore,
 } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
+import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt } from './route-helpers.js'
 import { getConnectorUserId, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -637,6 +638,17 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         })) {
           if (event.type === 'text_delta') {
             responseText += event.text
+          } else if (event.type === 'tool_result') {
+            // Realtime parity with the web chat lane (realtime-sync): a
+            // brain write from a public-API turn repaints open brain pages.
+            for (const block of event.results) {
+              if (block.type !== 'tool_result') continue
+              notifyBrainWriteIfMatch(
+                assistant.workspaceId,
+                block.name,
+                block.isError ?? false,
+              )
+            }
           } else if (event.type === 'turn_complete') {
             totalUsage = event.totalUsage ?? null
             responseModel = event.response.model

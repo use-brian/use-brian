@@ -18,7 +18,7 @@ import {
   type Sensitivity,
 } from './types.js'
 
-export type { Finding, Severity } from './types.js'
+export type { Finding } from './types.js'
 
 const SECRET_PATTERNS: { name: string; re: RegExp }[] = [
   { name: 'private-key-block', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },

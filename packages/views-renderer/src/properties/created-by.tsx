@@ -91,5 +91,3 @@ export const CreatedByProperty: PropertyModule = {
   Icon,
   sortFn,
 }
-
-export const __test = { asPerson }

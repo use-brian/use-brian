@@ -33,6 +33,10 @@ import {
   type WorkflowSummary,
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
+import {
+  WORKFLOW_REFRESH_EVENT,
+  type WorkflowRefreshDetail,
+} from "@/lib/workflow-events";
 import { CreateWorkflowModal } from "@/components/workflow/create-workflow-modal";
 import { cn } from "@/lib/utils";
 
@@ -64,6 +68,20 @@ export default function WorkflowPage() {
       cancelled = true;
     };
   }, [activeId]);
+
+  // Silent re-fetch on the workflow event bus — same-tab mutations AND the
+  // shell's server leg (assistant chat, workers, another tab). No "…"
+  // flash: the current grid stays put until the fresh list swaps in.
+  useEffect(() => {
+    if (!activeId) return;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<WorkflowRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== activeId) return;
+      void reload();
+    };
+    window.addEventListener(WORKFLOW_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(WORKFLOW_REFRESH_EVENT, handler);
+  }, [activeId, reload]);
 
   const live = (workflows ?? []).filter((w) => w.lifecycleState !== "archived");
   const archived = (workflows ?? []).filter((w) => w.lifecycleState === "archived");

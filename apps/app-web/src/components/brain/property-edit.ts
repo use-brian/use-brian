@@ -23,7 +23,7 @@ import type { AdjustMemoryChanges, BrainPrimitive } from "@/lib/api/brain-inbox"
 
 /** Body fields that should never reach the user — provenance plumbing,
  *  not entry content. */
-export const HIDDEN_BODY_KEYS = new Set([
+const HIDDEN_BODY_KEYS = new Set([
   "source_episode_id",
   "source_session_id",
   "assistant_id",

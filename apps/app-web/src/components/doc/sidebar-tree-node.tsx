@@ -54,7 +54,7 @@ import {
 
 /** Encodes a drop target as `nodeId::intent`. */
 export type DropIntent = "onto" | "after";
-export function dropId(nodeId: string, intent: DropIntent): string {
+function dropId(nodeId: string, intent: DropIntent): string {
   return `${nodeId}::${intent}`;
 }
 export function parseDropId(

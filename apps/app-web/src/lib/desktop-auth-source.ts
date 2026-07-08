@@ -19,7 +19,7 @@
  */
 
 /** Tokens handed back by the desktop refresh exchange / stored by the shell. */
-export interface DesktopTokens {
+interface DesktopTokens {
   accessToken: string;
   refreshToken: string;
   user?: { id: string; name: string; email: string; plan?: string };
@@ -30,7 +30,7 @@ export interface DesktopTokens {
  * present in every mode (thin shell + bundled); the token methods are added only
  * by the bundled app.
  */
-export interface DesktopBridge {
+interface DesktopBridge {
   signIn: () => void;
   /**
    * Ask the shell to clear its own session (cookies in the thin shell, the

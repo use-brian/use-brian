@@ -97,7 +97,7 @@ import {
   requestBrainRefresh,
   type BrainRefreshDetail,
 } from "@/lib/brain-events";
-import { useBrainStream } from "@/lib/brain-stream";
+import { SKILL_REFRESH_EVENT } from "@/lib/workspace-events";
 import {
   fetchReviewItems,
   filterReviewItems,
@@ -235,12 +235,21 @@ function BrainPageInner() {
       setRefreshTick((n) => n + 1);
     };
     window.addEventListener(BRAIN_REFRESH_EVENT, handler);
-    return () => window.removeEventListener(BRAIN_REFRESH_EVENT, handler);
+    // Skill changes (assistant-staged creation approved, review-worker state
+    // flips, another tab's edit) ride the same tick — the skills fetch below
+    // already keys on it. Skill events are rare enough that re-running the
+    // sibling brain fetches alongside is acceptable.
+    window.addEventListener(SKILL_REFRESH_EVENT, handler);
+    return () => {
+      window.removeEventListener(BRAIN_REFRESH_EVENT, handler);
+      window.removeEventListener(SKILL_REFRESH_EVENT, handler);
+    };
   }, [activeId]);
 
-  // Realtime brain stream — listens for cross-process writes (Claude Code via
-  // MCP, chat from another tab/device) and dispatches `BRAIN_REFRESH_EVENT`.
-  useBrainStream(activeId);
+  // Cross-process writes (MCP, chat from another tab/device, workers) arrive
+  // as BRAIN_REFRESH_EVENT / SKILL_REFRESH_EVENT via the shell-level
+  // workspace stream — the chrome mounts `useWorkspaceEvents`, so this page
+  // only listens (handler above).
 
   useEffect(() => {
     if (!activeId) return;

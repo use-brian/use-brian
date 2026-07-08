@@ -936,10 +936,3 @@ export async function getChildPageLabelsSystem(
   }
   return map
 }
-
-/**
- * Convenience factory used by the admin/system path. Same shape as the
- * default store; reads/writes still go through `queryWithRLS` because RLS
- * has a system_bypass policy that defaults open.
- */
-export const createSavedViewStore = createDbSavedViewStore

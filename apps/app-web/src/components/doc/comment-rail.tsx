@@ -57,7 +57,7 @@ import { quoteForRow } from "./comment-quote";
 /** Minimum card width (the rail-room gate is checked against this). */
 export const RAIL_WIDTH = 300;
 /** Cards grow up to this when the gutter allows ("use more space"). */
-export const RAIL_MAX_WIDTH = 480;
+const RAIL_MAX_WIDTH = 480;
 /** Gap between the page column's right edge and the rail card. */
 export const RAIL_GAP = 32;
 /** Vertical inset keeping an expanded card clear of the viewport bottom — and

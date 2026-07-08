@@ -64,7 +64,7 @@ export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]
  * from EMBEDDED_PRIMITIVES (not a second hardcoded list) so a newly-embedded
  * primitive flows through automatically; non-drainable kinds are excluded here.
  */
-export const DRAINABLE_PRIMITIVES: readonly EmbeddingPrimitive[] =
+const DRAINABLE_PRIMITIVES: readonly EmbeddingPrimitive[] =
   EMBEDDED_PRIMITIVES.filter((p) => p !== 'episodes')
 
 const DEFAULT_PRIMITIVES: readonly EmbeddingPrimitive[] = DRAINABLE_PRIMITIVES

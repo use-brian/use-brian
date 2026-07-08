@@ -8,7 +8,7 @@
  * Spec: docs/architecture/integrations/xai.md.
  */
 
-export const XAI_RESPONSES_ENDPOINT = 'https://api.x.ai/v1/responses'
+const XAI_RESPONSES_ENDPOINT = 'https://api.x.ai/v1/responses'
 
 /**
  * Model for `xSearch` tool — reasoning on. Same per-token price as the
@@ -22,9 +22,6 @@ export const XAI_X_SEARCH_MODEL = 'grok-4-1-fast'
  * task is "quote the post verbatim"; reasoning tokens would be wasted.
  */
 export const XAI_X_URL_QUOTE_MODEL = 'grok-4-1-fast-non-reasoning'
-
-/** @deprecated prefer the path-specific constants above. */
-export const XAI_DEFAULT_X_SEARCH_MODEL = XAI_X_URL_QUOTE_MODEL
 
 // ── Request ──────────────────────────────────────────────────────
 

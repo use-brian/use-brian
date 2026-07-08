@@ -12,9 +12,9 @@
  * OSS launcher (`scripts/launch.mjs`) sets `NEXT_PUBLIC_SIDANCLAW_EDITION=oss`
  * to switch app-web into single-player mode.
  */
-export type SidanclawEdition = "oss" | "hosted";
+type SidanclawEdition = "oss" | "hosted";
 
-export function sidanclawEdition(): SidanclawEdition {
+function sidanclawEdition(): SidanclawEdition {
   return process.env.NEXT_PUBLIC_SIDANCLAW_EDITION === "oss" ? "oss" : "hosted";
 }
 

@@ -58,7 +58,7 @@ export type CrmToolEvent =
   | { type: 'deal_listed'; resultCount: number }
 
 /** Subset of ToolContext the analytics callback can use without pulling the full type in. */
-export type CrmToolEventContext = {
+type CrmToolEventContext = {
   userId: string
   assistantId: string
   sessionId: string

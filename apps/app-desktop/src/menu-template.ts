@@ -34,6 +34,13 @@ export interface MenuTemplateOptions {
    * (the platform convention); Windows/Linux: in the File menu before Exit.
    */
   readonly update: { readonly label: string; readonly enabled: boolean } | null;
+  /**
+   * The active target (docs/plans/consumer-local-experience.md §2.1/§2.3):
+   * renders a disabled `Target: <label>` indicator plus the switch item, and
+   * hides Sign In/Out for a local target (a local brain has no login).
+   * Omit/null to keep the pre-dual-target menu.
+   */
+  readonly target?: { readonly kind: "cloud" | "local"; readonly label: string } | null;
 }
 
 export interface MenuTemplateHandlers {
@@ -45,6 +52,8 @@ export interface MenuTemplateHandlers {
   onSignOut: () => void;
   /** Perform the current update action (check for updates / restart to install). */
   onUpdate: () => void;
+  /** Switch the shell's target (cloud ↔ local brain); persists + relaunches. */
+  onSwitchTarget: () => void;
 }
 
 /** Build the platform-appropriate menu template (pure). */
@@ -83,10 +92,28 @@ export function buildMenuTemplate(
       accelerator: "CommandOrControl+Shift+Space",
       click: () => handlers.onQuickCapture(),
     },
-    { type: "separator" },
-    { label: "Sign In", click: () => handlers.onSignIn() },
-    { label: "Sign Out", click: () => handlers.onSignOut() },
   ];
+  // A local target has no login (the shell mints the local-owner session), so
+  // Sign In/Out only render for the cloud target.
+  if (opts.target?.kind !== "local") {
+    appActions.push(
+      { type: "separator" },
+      { label: "Sign In", click: () => handlers.onSignIn() },
+      { label: "Sign Out", click: () => handlers.onSignOut() },
+    );
+  }
+  // The active-target indicator + switch (§2.1 toggle, §2.3 visible indicator).
+  if (opts.target) {
+    appActions.push(
+      { type: "separator" },
+      { label: `Target: ${opts.target.label}`, enabled: false },
+      {
+        label:
+          opts.target.kind === "cloud" ? "Switch to Local Brain…" : "Switch to sidanclaw Cloud",
+        click: () => handlers.onSwitchTarget(),
+      },
+    );
+  }
 
   // The single auto-update item (state-derived label; absent when disabled).
   const updateItems: MenuItemConstructorOptions[] = opts.update

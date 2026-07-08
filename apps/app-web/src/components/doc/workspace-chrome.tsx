@@ -43,6 +43,7 @@ import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
+import { useWorkspaceEvents } from "@/lib/workspace-events";
 import { cn } from "@/lib/utils";
 import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
@@ -91,6 +92,11 @@ export function WorkspaceChrome({
   // (chrome is on every surface) so the global offline flag + write-queue flush
   // run app-wide, not just on the doc page. No-op on web/thin shell.
   useOfflineSync();
+  // The ONE workspace realtime EventSource per tab (realtime-sync). Routes
+  // server change signals to per-domain CustomEvents; surfaces refetch via
+  // their existing listeners. Mounted on the chrome so every surface —
+  // workflow, approvals, brain, skills — stays live without its own stream.
+  useWorkspaceEvents(workspaceId);
   const activeSurface = surfaceFromPathname(pathname);
   // Views that embed their OWN chat (the skill editor / the skill creator's
   // doc stage) take a suppression hold — two docks never coexist on a surface.

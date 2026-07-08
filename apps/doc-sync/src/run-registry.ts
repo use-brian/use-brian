@@ -27,7 +27,7 @@ import {
 } from '@sidanclaw/doc-model'
 
 /** Broadcast the current run state for a page (or `null` to clear → idle). */
-export type RunPublisher = (pageId: string, state: AssistantRunState | null) => void
+type RunPublisher = (pageId: string, state: AssistantRunState | null) => void
 
 export type RunRegistryOptions = {
   publish: RunPublisher
@@ -37,13 +37,13 @@ export type RunRegistryOptions = {
   ttlMs?: number
 }
 
-export type RunStartInput = {
+type RunStartInput = {
   pageId: string
   actor: AssistantRunState['actor']
   channel: AssistantRunChannel
 }
 
-export type RunProgressInput = {
+type RunProgressInput = {
   pageId: string
   step?: AssistantRunStep
   toolName?: string

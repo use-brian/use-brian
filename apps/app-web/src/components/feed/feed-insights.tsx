@@ -690,7 +690,7 @@ function PostMasonry({
 
 // ── Top-performer highlighting ──────────────────────────────────
 
-export type AccentMetric = "views" | "likes" | "replies" | "reposts" | "quotes";
+type AccentMetric = "views" | "likes" | "replies" | "reposts" | "quotes";
 
 /** Per-post → its dominant accent metric (the one where its lead over
  *  the median is largest). Posts not in the map are not standouts. */

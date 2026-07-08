@@ -7,9 +7,12 @@
  * (docs/plans/feed-web-consolidation.md §4). Two extras over bare EventSource:
  *   1. `lastEventId` tracking so a reconnect resumes from the last processed
  *      row instead of replaying the whole initial window.
- *   2. Absolute URL building against `NEXT_PUBLIC_API_URL` — never
- *      `window.location.origin` — so the desktop bundle's `file://` origin
- *      can't produce an unfetchable URL.
+ *   2. Absolute URL building against `NEXT_PUBLIC_API_URL` when set (prod,
+ *      desktop — so the desktop bundle's `file://` origin can't produce an
+ *      unfetchable URL). `window.location.origin` is passed ONLY as the
+ *      `new URL` base for next-dev, where the env is deliberately blanked
+ *      to "" so the stream rides the /api rewrite; an absolute API_URL
+ *      ignores the base.
  *
  * [COMP:app-web/feed-sse]
  */
@@ -50,8 +53,12 @@ export function openFeedStream(opts: {
 
   function connect() {
     if (closed) return;
+    // Base is only consulted when API_URL is dev's blanked "" (next.config
+    // inlines "" so fetches ride the /api rewrite); an absolute API_URL
+    // (prod, desktop bundle) ignores it, so file:// can't leak in.
     const url = new URL(
       `${API_URL}/api/distribution/t/${opts.workspaceId}/events`,
+      window.location.origin,
     );
     if (lastEventId) url.searchParams.set("lastEventId", lastEventId);
     // EventSource can't set headers — pass the access_token as a query

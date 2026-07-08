@@ -60,6 +60,7 @@ import {
   getSessionMessages,
 } from '../db/sessions.js'
 import { MODEL_MAP } from '../model-resolution.js'
+import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
@@ -1311,6 +1312,15 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // tool name + success + a short error excerpt, never input/output.
           for (const block of event.results) {
             if (block.type !== 'tool_result') continue
+            // Realtime parity with the chat lane: a brain write on the
+            // callee path (workflow step, A2A consult, scheduled turn) must
+            // repaint an open brain page the same way an interactive write
+            // does. Same fire-and-forget map lookup chat.ts uses.
+            notifyBrainWriteIfMatch(
+              calleeAssistant.workspaceId,
+              block.name,
+              block.isError ?? false,
+            )
             const toolMeta = event.metaByToolUseId?.[block.toolUseId]
             const extraMeta: Record<string, ReturnType<typeof sanitize> | number | boolean> = {}
             if (toolMeta) {

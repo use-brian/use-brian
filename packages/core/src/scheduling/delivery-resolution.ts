@@ -24,7 +24,7 @@ import type { DeliverToChannel } from '../workflow/executor.js'
  * resolves to it is either rejected at creation or, when it maintains a doc
  * page, run silently with no channel push.
  */
-export const DELIVER_CHANNELS = ['web', 'telegram', 'slack', 'whatsapp'] as const
+const DELIVER_CHANNELS = ['web', 'telegram', 'slack', 'whatsapp'] as const
 export type DeliverChannel = (typeof DELIVER_CHANNELS)[number]
 
 export function coerceDeliverChannel(channelType: string): DeliverChannel {
@@ -34,7 +34,7 @@ export function coerceDeliverChannel(channelType: string): DeliverChannel {
 }
 
 /** Channels a confirmation ping can be posted to (web is the UI itself). */
-export const MESSAGING_CHANNELS = new Set(['telegram', 'slack', 'whatsapp'])
+const MESSAGING_CHANNELS = new Set(['telegram', 'slack', 'whatsapp'])
 
 /** Messaging channel types the model may name as a delivery target. */
 export type MessagingChannel = 'telegram' | 'slack' | 'whatsapp'

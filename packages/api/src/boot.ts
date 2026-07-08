@@ -2674,6 +2674,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     runDeps: workflowExecutorDeps,
   }))
 
+  // Workspace realtime SSE — PUBLIC mount + own `?access_token=` auth
+  // (browser EventSource cannot send an Authorization header). Same rule as
+  // the webhook receiver above: it MUST register before the bare
+  // `app.use('/api', requireAuth(...))` guards below, or the first guard
+  // 401s every stream connect with "Missing or invalid Authorization
+  // header". That exact shadowing silently killed the stream when this
+  // mount sat below the guards (caught by the realtime-sync-audit probe,
+  // 2026-07-08 — EventSource swallows the 401 and just retries, so nothing
+  // ever surfaced). See docs/architecture/platform/realtime-sync.md.
+  app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
+  startBrainStreamFanout()
+
+  // Public assistant directory — world-readable by design (its module header:
+  // "no auth required"). Same shadowing victim as the stream above: it sat
+  // below the bare guards and 401'd for everyone (route-mount-order rule 2).
+  app.use('/api/discover', discoverRoutes())
+
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
@@ -2773,8 +2790,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
 
-  app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
-  startBrainStreamFanout()
+  // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
+  // requireAuth guards — see the block next to workflowWebhookRoutes.)
   app.use('/api/brain', requireAuth(env.JWT_SECRET), brainRoutes({ entitiesStore, entityLinksStore, retrievalStore, knowledgeStore, workspaceSkillStore, connectorInstanceStore }))
   // Brain inbox (verification surface). Open + hosted share this one mount: the
   // route's deps are all open (brain-inbox-store / entities-store / crm / sessions /
@@ -2803,7 +2820,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/handles', requireAuth(env.JWT_SECRET), handleRoutes())
   app.use('/api/connections', requireAuth(env.JWT_SECRET), connectionRoutes({ connectionStore }))
-  app.use('/api/discover', discoverRoutes())
+  // (/api/discover moved to the early-public block above the bare guards.)
   app.use('/api/assistants/:assistantId/modes', requireAuth(env.JWT_SECRET), createModesRouter({ modesStore: assistantModesStore }))
   app.use('/api/pending-messages', requireAuth(env.JWT_SECRET), pendingMessageRoutes({ pendingMessageStore, integrationStore: integrationStore ?? undefined, defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN, waConnectorUrl: env.WA_CONNECTOR_URL, waConnectorSecret: env.WA_CONNECTOR_SECRET }))
   app.use('/api/snapshots', requireAuth(env.JWT_SECRET), snapshotRoutes({ snapshotStore, generateSnapshot: snapshotGenerator }))

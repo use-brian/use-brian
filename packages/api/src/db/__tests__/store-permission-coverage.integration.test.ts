@@ -49,9 +49,6 @@ async function canConnect(): Promise<boolean> {
       )
       await client.query('SELECT sensitivity FROM tasks LIMIT 1')
       await client.query('SELECT sensitivity FROM workspace_files LIMIT 1')
-      await client.query('SELECT sensitivity FROM companies LIMIT 1')
-      await client.query('SELECT sensitivity FROM contacts LIMIT 1')
-      await client.query('SELECT sensitivity FROM deals LIMIT 1')
       await client.query('SELECT sensitivity FROM entities LIMIT 1')
       await client.query('SELECT sensitivity FROM entity_links LIMIT 1')
       await client.query('SELECT sensitivity FROM episodes LIMIT 1')
@@ -199,6 +196,13 @@ async function seedWorkspaceFile(
   return r.rows[0].id
 }
 
+// Post mig 296 a company / contact / deal IS an `entities` row
+// (kind='company' | 'person' | 'deal'); the CRM specialization tables are
+// gone. `crm.getCompanyById` / `getContactById` / `getDealById` read those
+// entities back through the SAME `buildAccessPredicate` universal projection,
+// so seeding entities-kind rows here exercises the CRM store's own read path
+// (kind filter + projection), distinct from the plain `entities` leg below.
+
 async function seedCompany(
   client: pg.PoolClient,
   ws: string,
@@ -207,12 +211,11 @@ async function seedCompany(
   sensitivity: Sensitivity,
 ): Promise<string> {
   const r = await client.query<{ id: string }>(
-    `INSERT INTO companies (
-       workspace_id, name, tags, external_ref, sensitivity,
-       user_id, assistant_id, source, created_by_user_id
+    `INSERT INTO entities (
+       kind, display_name, sensitivity, workspace_id, user_id, assistant_id,
+       created_by_user_id, source
      ) VALUES (
-       $1, 'permcanaryword company ' || $4, ARRAY['perm-test'], '{}'::jsonb, $4,
-       $2, $3, 'user', $2
+       'company', 'permcanaryword company ' || $4, $4, $1, $2, $3, $2, 'user'
      ) RETURNING id`,
     [ws, userId, assistantId, sensitivity],
   )
@@ -227,12 +230,11 @@ async function seedContact(
   sensitivity: Sensitivity,
 ): Promise<string> {
   const r = await client.query<{ id: string }>(
-    `INSERT INTO contacts (
-       workspace_id, name, tags, external_ref, sensitivity,
-       user_id, assistant_id, source, created_by_user_id
+    `INSERT INTO entities (
+       kind, display_name, sensitivity, workspace_id, user_id, assistant_id,
+       created_by_user_id, source
      ) VALUES (
-       $1, 'permcanaryword contact ' || $4, ARRAY['perm-test'], '{}'::jsonb, $4,
-       $2, $3, 'user', $2
+       'person', 'permcanaryword contact ' || $4, $4, $1, $2, $3, $2, 'user'
      ) RETURNING id`,
     [ws, userId, assistantId, sensitivity],
   )
@@ -247,11 +249,11 @@ async function seedDeal(
   sensitivity: Sensitivity,
 ): Promise<string> {
   const r = await client.query<{ id: string }>(
-    `INSERT INTO deals (
-       workspace_id, stage, external_ref, sensitivity,
-       user_id, assistant_id, source, created_by_user_id
+    `INSERT INTO entities (
+       kind, display_name, sensitivity, workspace_id, user_id, assistant_id,
+       created_by_user_id, source
      ) VALUES (
-       $1, 'lead', '{}'::jsonb, $4, $2, $3, 'user', $2
+       'deal', 'permcanaryword deal ' || $4, $4, $1, $2, $3, $2, 'user'
      ) RETURNING id`,
     [ws, userId, assistantId, sensitivity],
   )
@@ -265,8 +267,8 @@ async function seedEntity(
   assistantId: string,
   sensitivity: Sensitivity,
 ): Promise<string> {
-  // `kind='project'` — the CRM-specialization kinds (person/company/
-  // deal) are write-blocked by the Q24 guard; project is unguarded.
+  // `kind='project'` keeps this generic-entities leg distinct from the
+  // CRM-kind legs above. (The old Q24 write guard went with mig 296.)
   const r = await client.query<{ id: string }>(
     `INSERT INTO entities (
        kind, display_name, sensitivity, workspace_id, user_id, assistant_id,

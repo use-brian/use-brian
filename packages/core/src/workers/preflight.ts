@@ -21,7 +21,7 @@ import { classifySplit } from './splitter.js'
  * caller can attribute it as `overhead:splitter`. Absent when the message
  * was too short to trigger classification.
  */
-export type PreflightClassifierUsage = {
+type PreflightClassifierUsage = {
   usage: TokenUsage | null
   model: string | null
 }

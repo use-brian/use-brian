@@ -37,7 +37,7 @@
  */
 
 /** Stable kind tags used in the `[redacted:<kind>]` replacement marker. */
-export type CredentialKind = 'private_key' | 'api_token' | 'jwt'
+type CredentialKind = 'private_key' | 'api_token' | 'jwt'
 
 type ScrubPattern = {
   kind: CredentialKind

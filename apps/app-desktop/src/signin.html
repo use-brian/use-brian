@@ -4,7 +4,17 @@
     <meta charset="utf-8" />
     <!-- Self-contained landing: inline styles/script only, plus the brand mark
          as a data: URI (no remote/file loads). `img-src data:` is the only
-         addition to the strict baseline. -->
+         addition to the strict baseline.
+
+         Views (docs/plans/consumer-local-experience.md §2.2):
+           #signin  (default)           Sign in to Cloud, or "Run locally"
+           #signing                     the system browser is completing PKCE
+           #local   ?mode=local-choose  the menu/tray switch: confirm or edit
+                                        the address, Connect probes + switches
+                    ?mode=local-setup   probe failed: custom URL entry
+                    ?mode=local-down    the active local target is unreachable
+                                        (&reason=auth: the session mint bounced)
+         main.ts picks the view via loadFile query params. -->
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:"
@@ -30,7 +40,7 @@
         -webkit-user-select: none;
         user-select: none;
         /* Frameless (hiddenInset) window: the whole landing is a drag handle so
-           the user can move the window; the button opts out below. */
+           the user can move the window; controls opt out below. */
         -webkit-app-region: drag;
         overflow: hidden;
       }
@@ -72,7 +82,8 @@
       .card {
         position: relative;
         text-align: center;
-        max-width: 320px;
+        max-width: 340px;
+        width: 340px;
         padding: 32px;
       }
       .mark {
@@ -132,14 +143,108 @@
         transform: translateY(0) scale(0.985);
         filter: brightness(0.98);
       }
-      #signing {
-        display: none;
+      button:disabled {
+        cursor: default;
+        filter: saturate(0.4) brightness(0.95);
+        transform: none;
       }
-      body.signing #signin {
-        display: none;
+      /* Quietest action: a text link in button's clothing (keeps :disabled).
+         Neutralizes every base-button treatment. */
+      button.linklike,
+      button.linklike:hover,
+      button.linklike:active {
+        background: none;
+        border: 0;
+        box-shadow: none;
+        transform: none;
+        filter: none;
+        padding: 4px 6px;
       }
-      body.signing #signing {
+      button.linklike {
+        color: inherit;
+        opacity: 0.55;
+        font-size: 12.5px;
+        font-weight: 500;
+        text-decoration: underline;
+        text-underline-offset: 3px;
+        text-decoration-color: rgba(52, 211, 255, 0.65);
+      }
+      button.linklike:hover {
+        opacity: 0.85;
+      }
+      button.linklike:disabled {
+        opacity: 0.45;
+        text-decoration: none;
+      }
+      /* Quiet secondary action: a ghost button next to the glowing CTA. */
+      button.secondary {
+        color: inherit;
+        background: rgba(55, 53, 47, 0.05);
+        border: 1px solid rgba(55, 53, 47, 0.16);
+        box-shadow: none;
+      }
+      button.secondary:hover {
+        filter: none;
+        transform: none;
+        box-shadow: none;
+        background: rgba(55, 53, 47, 0.09);
+      }
+      @media (prefers-color-scheme: dark) {
+        button.secondary {
+          background: rgba(255, 255, 255, 0.06);
+          border-color: rgba(255, 255, 255, 0.14);
+        }
+        button.secondary:hover {
+          background: rgba(255, 255, 255, 0.1);
+        }
+      }
+      input[type="text"] {
+        font: inherit;
+        font-size: 14px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(55, 53, 47, 0.16);
+        background: #ffffff;
+        color: inherit;
+        outline: none;
+        -webkit-app-region: no-drag;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      input[type="text"]:focus {
+        border-color: #34d3ff;
+        box-shadow: 0 0 0 3px rgba(52, 211, 255, 0.22);
+      }
+      @media (prefers-color-scheme: dark) {
+        input[type="text"] {
+          background: #131a2e;
+          border-color: rgba(255, 255, 255, 0.14);
+        }
+      }
+      .stack button {
         display: block;
+        width: 100%;
+        margin: 10px 0 0;
+      }
+      .field {
+        margin: 14px 0 0;
+      }
+      .status {
+        min-height: 18px;
+        font-size: 12.5px;
+        opacity: 0.75;
+        margin: 10px 0 0;
+      }
+      .sub {
+        font-size: 12.5px;
+        opacity: 0.55;
+        margin: 18px 0 0;
+      }
+      #signing,
+      #local {
+        display: none;
       }
     </style>
   </head>
@@ -148,27 +253,220 @@
       <img
         class="mark"
         alt="Sidanclaw"
-        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAJoElEQVR4nO3dsYoiaRhAUV3EQIwKH8B0w8XI9w+MZMJJfQAxkkld6BfYXqbH6vrvOUmFfvV/0F7Kgl5vd9NrBQCk/DX3AADA+wkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIGgz9wDwGfvD0UGxCM/7be4R4FMEAIvxuFxXo5rOp4+rexxjj7AEfgIAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAELTe7qbX3EPAf9kfjg6JRXjeb3OPAJ8iAAbgyxF4J5Ezhs3cA/A1HpfrsEc5nU8fV/e4bPY41h5ZPu8AAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAhab3fTa+4h+D37w9ERAm/zvN+c9gCGDwBfjgD8X89A5GxWAY/LdTWq6Xz6uLrHZbPHMdjjWHscnXcAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAghL/DZC23T9/v+Vzfv34+ZbPqbJH+FqeAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABA0GbuAeBP+/Xjp0MegD3C1/IEAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAEDQerubXquB7Q/HuUcAYGGe99tqdJ4AAEDQZhXwuFxXo5rOp4+re1w2exyDPY61x9F5AgAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgaL3dTa/VwPaH49wjALAwz/ttNbrhA6BA5ADvVPhyLNjMPQBf43G5DnuU0/n0cXWPy2aPY+2R5fMOAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAICg9XY3veYegt+zPxwdIfA2z/vNaQ9AALAIhcgp/FG1R/g+NnMPAJ/1uFyHPazpfFpV2CN8D94BAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABAkAAAgSAAAQJAAAIAgAQAAQQIAAIIEAAAECQAACBIAABC0mXsA+KzpfHJYA7BH+B7W2930mnsIAOC9/AQAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAFj1/AuUCJSpn1bklAAAAABJRU5ErkJggg=="
+        src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAYAAAD0eNT6AAAJoElEQVR4nO3dsYoiaRhAUV3EQIwKH8B0w8XI9w+MZMJJfQAxkkld6BfYXqbH6vrvOUmFfvV/0F7Kgl5vd9NrBQCk/DX3AADA+wkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIGgz9wDwGfvD0UGxCM/7be4R4FMEAIvxuFxXo5rOp4+rexxjj7AEfgIAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAELTe7qbX3EPAf9kfjg6JRXjeb3OPAJ8iAAbgyxF4J5Ezhs3cA/A1HpfrsEc5nU8fV/e4bPY41h5ZPu8AAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAhab3fTa+4h+D37w9ERAm/zvN+c9gCGDwBfjgD8X89A5GxWAY/LdTWq6Xz6uLrHZbPHMdjjWHscnXcAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAghL/DZC23T9/v+Vzfv34+ZbPqbJH+FqeAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABAkAAAgCABAABBAgAAggQAAAQJAAAIEgAAECQAACBIAABA0GbuAeBP+/Xjp0MegD3C1/IEAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAEDQerubXquB7Q/HuUcAYGGe99tqdJ4AAEDQZhXwuFxXo5rOp4+rexwjexxrj6PzDgAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAAgSAAAQJAAAIEgAAECQAACAIAEAAEECAACCBAAABAkAAFj1/AuUCJSpn1bklAAAAABJRU5ErkJggg=="
       />
       <h1>sidanclaw</h1>
+
       <div id="signin">
         <p>You're signed out. Sign in to open your workspace.</p>
         <button id="signin-btn" type="button">Sign In</button>
+        <div class="sub">
+          <button id="run-local-btn" type="button" class="linklike">
+            Running sidanclaw yourself? Run locally
+          </button>
+        </div>
       </div>
+
       <div id="signing">
         <p>Opening your browser to sign in. Come back here once you're done.</p>
-        <button id="retry-btn" type="button">Open browser again</button>
+        <button id="retry-signin-btn" type="button">Open browser again</button>
+      </div>
+
+      <div id="local">
+        <p id="local-msg"></p>
+        <div class="stack">
+          <button id="local-retry-btn" type="button">Retry now</button>
+        </div>
+        <div class="field">
+          <input
+            id="local-input"
+            type="text"
+            placeholder="http://localhost:3003"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </div>
+        <div class="stack">
+          <button id="local-connect-btn" type="button">Connect</button>
+          <button id="local-secondary-btn" type="button" class="secondary"></button>
+        </div>
+        <p id="local-status" class="status"></p>
       </div>
     </div>
+
     <script>
-      function go() {
-        document.body.classList.add("signing");
-        if (window.sidanclawDesktop && window.sidanclawDesktop.signIn) {
-          window.sidanclawDesktop.signIn();
-        }
+      var desktop = window.sidanclawDesktop || {};
+      var DEFAULT_LOCAL_URL = "http://localhost:3003";
+      var qs = new URLSearchParams(location.search);
+
+      function el(id) {
+        return document.getElementById(id);
       }
-      document.getElementById("signin-btn").addEventListener("click", go);
-      document.getElementById("retry-btn").addEventListener("click", go);
+      function show(name) {
+        ["signin", "signing", "local"].forEach(function (v) {
+          el(v).style.display = v === name ? "block" : "none";
+        });
+      }
+
+      // ── Cloud sign-in (system-browser PKCE) ──────────────────
+      function startSignIn() {
+        show("signing");
+        if (desktop.signIn) desktop.signIn();
+      }
+      el("signin-btn").addEventListener("click", startSignIn);
+      el("retry-signin-btn").addEventListener("click", startSignIn);
+
+      // ── Local target (§2.2) ──────────────────────────────────
+      // variant "choose": the menu/tray switch — confirm or edit the address.
+      // variant "setup":  probing found no brain; enter an address.
+      // variant "down":   the ACTIVE local target is unreachable (or, with
+      //                   reason=auth, refused the local-owner session mint).
+      var localVariant = "setup";
+      var cameFromSignin = false;
+
+      function setLocalStatus(text) {
+        el("local-status").textContent = text;
+      }
+
+      function configureLocal(variant, url, reason) {
+        localVariant = variant;
+        var msg;
+        if (variant === "down") {
+          msg =
+            reason === "auth"
+              ? "Your local brain at " +
+                url +
+                " is reachable but didn't accept the session. Make sure it runs the open-source edition in local mode."
+              : "Can't reach your local brain at " +
+                url +
+                ". sidanclaw reconnects automatically when it's back.";
+        } else if (variant === "choose") {
+          msg =
+            "Connect to a local or self-hosted brain. Use the default address or enter your own, then Connect.";
+        } else {
+          msg =
+            "No local brain answered at " +
+            url +
+            ". Start it first, or enter its address.";
+        }
+        el("local-msg").textContent = msg;
+        el("local-input").value = url === DEFAULT_LOCAL_URL ? "" : url;
+        el("local-retry-btn").style.display = variant === "down" ? "" : "none";
+        el("local-secondary-btn").textContent =
+          variant === "down" ? "Switch to sidanclaw Cloud" : "Back";
+        setLocalStatus("");
+        show("local");
+      }
+
+      function setLocalBusy(busy) {
+        el("local-connect-btn").disabled = busy;
+        el("local-retry-btn").disabled = busy;
+        el("local-secondary-btn").disabled = busy;
+      }
+
+      function localFailureMessage(res, url) {
+        if (res && res.error === "invalid-url") {
+          return "That doesn't look like a URL. Include http:// or https://.";
+        }
+        if (res && res.error === "env-override") {
+          return "The SIDANCLAW_APP_URL dev override is active, so targets are ignored. Unset it and reopen sidanclaw to switch.";
+        }
+        return "No brain answered at " + url + ". Is it running?";
+      }
+
+      function connectLocal() {
+        var url = el("local-input").value.trim() || DEFAULT_LOCAL_URL;
+        if (!desktop.runLocal) return;
+        setLocalBusy(true);
+        setLocalStatus("Checking " + url + " ...");
+        desktop.runLocal(url)
+          .then(function (res) {
+            if (res && res.ok) {
+              // The shell persists the target and relaunches; leave busy.
+              setLocalStatus("Connected. Restarting sidanclaw...");
+              return;
+            }
+            setLocalBusy(false);
+            setLocalStatus(localFailureMessage(res, url));
+          })
+          .catch(function () {
+            // The invoke itself failed (e.g. a stale shell process without the
+            // handler). Never leave the button stuck.
+            setLocalBusy(false);
+            setLocalStatus(
+              "Something went wrong talking to the app shell. Quit and reopen sidanclaw, then try again.",
+            );
+          });
+      }
+      el("local-connect-btn").addEventListener("click", connectLocal);
+
+      var RUN_LOCAL_LABEL = "Running sidanclaw yourself? Run locally";
+      el("run-local-btn").addEventListener("click", function () {
+        var btn = el("run-local-btn");
+        if (!desktop.runLocal) return;
+        btn.disabled = true;
+        btn.textContent = "Looking for a local brain...";
+        desktop.runLocal(null)
+          .then(function (res) {
+            if (res && res.ok) {
+              btn.textContent = "Connected. Restarting...";
+              return;
+            }
+            btn.disabled = false;
+            btn.textContent = RUN_LOCAL_LABEL;
+            cameFromSignin = true;
+            configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
+            if (res && res.error === "env-override") {
+              setLocalStatus(localFailureMessage(res, ""));
+            }
+          })
+          .catch(function () {
+            // The invoke itself failed (e.g. a stale shell process without the
+            // handler). Reset and say so instead of sticking on "Looking...".
+            btn.disabled = false;
+            btn.textContent = RUN_LOCAL_LABEL;
+            cameFromSignin = true;
+            configureLocal("setup", DEFAULT_LOCAL_URL);
+            setLocalStatus(
+              "Something went wrong talking to the app shell. Quit and reopen sidanclaw, then try again.",
+            );
+          });
+      });
+
+      el("local-retry-btn").addEventListener("click", function () {
+        setLocalBusy(true);
+        setLocalStatus("Reconnecting...");
+        if (desktop.retry) desktop.retry();
+      });
+
+      el("local-secondary-btn").addEventListener("click", function () {
+        if (localVariant === "down") {
+          if (desktop.useCloud) desktop.useCloud();
+          return;
+        }
+        // "Back": to the sign-in view when we came from it, else to the app
+        // (a signed-in cloud user who tried a menu switch that found no brain).
+        if (cameFromSignin) show("signin");
+        else if (desktop.retry) desktop.retry();
+        else show("signin");
+      });
+
+      // ── Initial view (main.ts passes loadFile query params) ──
+      var mode = qs.get("mode");
+      if (mode === "local-down") {
+        configureLocal(
+          "down",
+          qs.get("target") || DEFAULT_LOCAL_URL,
+          qs.get("reason") || "unreachable",
+        );
+      } else if (mode === "local-setup" || mode === "local-choose") {
+        configureLocal(
+          mode === "local-choose" ? "choose" : "setup",
+          qs.get("url") || DEFAULT_LOCAL_URL,
+        );
+      } else {
+        show("signin");
+      }
     </script>
   </body>
 </html>

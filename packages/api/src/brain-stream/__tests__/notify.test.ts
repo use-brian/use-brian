@@ -20,6 +20,7 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import {
+  _resetCoalescerForTests,
   BRAIN_WRITE_TOOL_SIGNALS,
   notifyBrainChange,
   notifyBrainInboxChange,
@@ -28,6 +29,9 @@ import {
 
 beforeEach(() => {
   calls.length = 0
+  // Each test asserts the leading-edge emit; clear any coalescer window a
+  // previous test opened for the same (workspaceId, primitive) key.
+  _resetCoalescerForTests()
 })
 
 afterEach(() => {

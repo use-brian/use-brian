@@ -43,7 +43,7 @@ export type SessionResumeHandler = (job: ScheduledJob) => Promise<void>
  * `scheduled_job.auto_disabled` analytics event and (optionally) surface
  * the dead job to its owner. Absent = disable silently (still logged).
  */
-export type JobAutoDisabledHandler = (
+type JobAutoDisabledHandler = (
   job: ScheduledJob,
   failureCount: number,
 ) => Promise<void> | void

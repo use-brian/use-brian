@@ -26,7 +26,7 @@ const ALL_BOUNDARIES = ['connector', 'tool', 'inbox', 'extraction', 'self_heal']
 
 // ── Positive rules ───────────────────────────────────────────────────
 
-export const companyBareDomain: ClassifierRule<EntityKind> = {
+const companyBareDomain: ClassifierRule<EntityKind> = {
   id: 'company-bare-domain',
   produces: 'company',
   tier: 'deterministic',  // PR 5 — flipped after measuring against the
@@ -54,7 +54,7 @@ export const companyBareDomain: ClassifierRule<EntityKind> = {
   },
 }
 
-export const companyLegalSuffix: ClassifierRule<EntityKind> = {
+const companyLegalSuffix: ClassifierRule<EntityKind> = {
   id: 'company-legal-suffix',
   produces: 'company',
   tier: 'probabilistic',
@@ -74,7 +74,7 @@ export const companyLegalSuffix: ClassifierRule<EntityKind> = {
   },
 }
 
-export const companyLinkedinUrl: ClassifierRule<EntityKind> = {
+const companyLinkedinUrl: ClassifierRule<EntityKind> = {
   id: 'company-linkedin-url',
   produces: 'company',
   tier: 'probabilistic',
@@ -96,7 +96,7 @@ export const companyLinkedinUrl: ClassifierRule<EntityKind> = {
   },
 }
 
-export const companyCrunchbaseUrl: ClassifierRule<EntityKind> = {
+const companyCrunchbaseUrl: ClassifierRule<EntityKind> = {
   id: 'company-crunchbase-url',
   produces: 'company',
   tier: 'probabilistic',
@@ -118,7 +118,7 @@ export const companyCrunchbaseUrl: ClassifierRule<EntityKind> = {
   },
 }
 
-export const companyTicker: ClassifierRule<EntityKind> = {
+const companyTicker: ClassifierRule<EntityKind> = {
   id: 'company-ticker-shape',
   produces: 'company',
   tier: 'probabilistic',
@@ -153,7 +153,7 @@ export const companyTicker: ClassifierRule<EntityKind> = {
 
 // ── Negative rules ───────────────────────────────────────────────────
 
-export const notCompanyPersonalDomain: ClassifierNegativeRule<EntityKind> = {
+const notCompanyPersonalDomain: ClassifierNegativeRule<EntityKind> = {
   id: 'not-company-personal-domain',
   blocks: ['company'],
   tier: 'deterministic',

@@ -15,7 +15,7 @@ import { collectStream } from '../providers/accumulator.js'
  * memory rows with `type` retired post-Phase-4 (the categorical
  * signal rides on tags now).
  */
-export type ExtractedFact = {
+type ExtractedFact = {
   /** Memory type. `identity` is deprecated. */
   type: 'identity' | 'preference' | 'context'
   /** Optional tags. `self-profile` marks identity-flavored preferences. */

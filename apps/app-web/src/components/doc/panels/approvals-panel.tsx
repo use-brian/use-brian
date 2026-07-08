@@ -51,7 +51,11 @@ import {
   type SkillApprovalDetail,
 } from "@/lib/api/approvals";
 import { listAssistants } from "@/lib/api/studio";
-import { requestApprovalsRefresh } from "@/lib/approvals-events";
+import {
+  APPROVALS_REFRESH_EVENT,
+  requestApprovalsRefresh,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
 import {
   collapseContext,
   diffLines,
@@ -99,6 +103,40 @@ export function ApprovalsPanel() {
   // Pinned once at mount — the age filter buckets relative to "now", and
   // a stable reference keeps `filtered` from churning every render.
   const [now] = useState(() => Date.now());
+
+  // Bumped by the approvals event bus (same-tab respond actions AND the
+  // shell's server leg: an assistant staging an approval, an executor
+  // pause, another tab responding). Drives the SILENT refetch below —
+  // never the full reset the workspace-switch effect performs.
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  useEffect(() => {
+    if (!activeId) return;
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== activeId) return;
+      setRefreshTick((n) => n + 1);
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handler);
+  }, [activeId]);
+
+  useEffect(() => {
+    if (!activeId || refreshTick === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const list = await listApprovals(activeId);
+      if (cancelled) return;
+      setRows(list);
+      if (list.some((r) => isSkillApprovalKind(r.kind))) {
+        const details = await listSkillApprovalDetails(activeId);
+        if (!cancelled) setSkillDetails(details);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, refreshTick]);
 
   useEffect(() => {
     if (!activeId) return;

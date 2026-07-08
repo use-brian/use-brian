@@ -133,7 +133,60 @@ export function isLoginNavigation(targetUrl: string): boolean {
   return url.pathname === "/login" || url.pathname.startsWith("/login/");
 }
 
-export type LoadFailureAction = "ignore" | "show-window" | "offline-retry" | "signin";
+export type LoginNavAction = "pkce" | "local-session" | "none";
+
+/**
+ * Per-target routing of an intercepted login navigation (§2.3 of
+ * docs/plans/consumer-local-experience.md). `isLoginNavigation` decides
+ * WHETHER a navigation is a sign-in attempt; this decides WHAT the shell does
+ * about it for the active target:
+ *
+ *  - cloud (`auth: "pkce"`) → `"pkce"`: the system-browser PKCE flow, exactly
+ *    as before.
+ *  - local (`auth: "local-session"`) → `"local-session"` for the app origin's
+ *    own `/login` (the shell mints the oss local-owner session by loading the
+ *    app-web trigger route in-window — a local brain has no login); any OTHER
+ *    login URL (an OAuth provider host, another origin's `/login`) → `"none"`,
+ *    falling through to `classifyNavigation` → the system browser. A local
+ *    target must never start a PKCE exchange, and one-origin-per-window means
+ *    an off-origin login page is just an external link to it.
+ *
+ *  - not a login navigation at all → `"none"`.
+ */
+export function decideLoginAction(
+  targetUrl: string,
+  opts: { auth: "pkce" | "local-session"; appOrigin: string },
+): LoginNavAction {
+  if (!isLoginNavigation(targetUrl)) return "none";
+  if (opts.auth !== "local-session") return "pkce";
+  try {
+    if (new URL(targetUrl).origin === opts.appOrigin) return "local-session";
+  } catch {
+    /* unparseable — not ours to handle */
+  }
+  return "none";
+}
+
+/**
+ * Cooldown between local-owner session mints. If the mint "succeeds" but the
+ * brain bounces straight back to `/login` (an edition/gate mismatch — e.g. a
+ * self-hosted HOSTED-edition brain, where the trigger route 404s), re-minting
+ * on every bounce would loop forever. Within the cooldown the shell shows the
+ * brain-problem landing instead of re-attempting.
+ */
+export const LOCAL_MINT_COOLDOWN_MS = 10_000;
+
+/** True when enough time has passed since the last mint attempt to try again. */
+export function shouldAttemptLocalMint(lastAttemptAtMs: number | null, nowMs: number): boolean {
+  return lastAttemptAtMs === null || nowMs - lastAttemptAtMs >= LOCAL_MINT_COOLDOWN_MS;
+}
+
+export type LoadFailureAction =
+  | "ignore"
+  | "show-window"
+  | "offline-retry"
+  | "signin"
+  | "local-unreachable";
 
 /**
  * Decide what a main-frame load failure (`did-fail-load`) should do. A signed-in
@@ -147,6 +200,10 @@ export type LoadFailureAction = "ignore" | "show-window" | "offline-retry" | "si
  *    redirect cancels, see `handleNavigation`) → `ignore`.
  *  - the failed URL is our own `file:` landing (a packaging bug, not a network
  *    failure) → `show-window` rather than reload it in a loop.
+ *  - a LOCAL target (`target: "local"`) → `local-unreachable`, session or not:
+ *    the dominant failure is the brain not running, and its landing carries
+ *    every recovery (retry / custom URL / switch to cloud). §2.2 of
+ *    docs/plans/consumer-local-experience.md.
  *  - a session exists (a refresh token in the jar) → `offline-retry`.
  *  - otherwise (no session) → `signin`.
  *
@@ -158,8 +215,10 @@ export function decideLoadFailureAction(opts: {
   isMainFrame: boolean;
   failedUrl: string;
   hasSession: boolean;
+  target?: "cloud" | "local";
 }): LoadFailureAction {
   if (!opts.isMainFrame || opts.errorCode === -3) return "ignore";
   if (opts.failedUrl.startsWith("file:")) return "show-window";
+  if (opts.target === "local") return "local-unreachable";
   return opts.hasSession ? "offline-retry" : "signin";
 }

@@ -22,7 +22,7 @@ import {
 
 const ALL_BOUNDARIES = ['connector', 'tool', 'inbox', 'extraction', 'self_heal'] as const
 
-export const notProjectGithubUrl: ClassifierNegativeRule<EntityKind> = {
+const notProjectGithubUrl: ClassifierNegativeRule<EntityKind> = {
   id: 'not-project-github-url',
   blocks: ['project'],
   tier: 'deterministic',
@@ -33,7 +33,7 @@ export const notProjectGithubUrl: ClassifierNegativeRule<EntityKind> = {
   reason: 'GitHub repository URL — should be classified as repository',
 }
 
-export const notProjectGitlabUrl: ClassifierNegativeRule<EntityKind> = {
+const notProjectGitlabUrl: ClassifierNegativeRule<EntityKind> = {
   id: 'not-project-gitlab-url',
   blocks: ['project'],
   tier: 'deterministic',
@@ -44,7 +44,7 @@ export const notProjectGitlabUrl: ClassifierNegativeRule<EntityKind> = {
   reason: 'GitLab repository URL — should be classified as repository',
 }
 
-export const notProjectBitbucketUrl: ClassifierNegativeRule<EntityKind> = {
+const notProjectBitbucketUrl: ClassifierNegativeRule<EntityKind> = {
   id: 'not-project-bitbucket-url',
   blocks: ['project'],
   tier: 'deterministic',
@@ -55,7 +55,7 @@ export const notProjectBitbucketUrl: ClassifierNegativeRule<EntityKind> = {
   reason: 'Bitbucket repository URL — should be classified as repository',
 }
 
-export const notProjectBareDomain: ClassifierNegativeRule<EntityKind> = {
+const notProjectBareDomain: ClassifierNegativeRule<EntityKind> = {
   id: 'not-project-bare-domain',
   blocks: ['project'],
   tier: 'deterministic',
@@ -66,7 +66,7 @@ export const notProjectBareDomain: ClassifierNegativeRule<EntityKind> = {
   reason: 'bare domain — likely a company, not a project',
 }
 
-export const notProjectEmail: ClassifierNegativeRule<EntityKind> = {
+const notProjectEmail: ClassifierNegativeRule<EntityKind> = {
   id: 'not-project-email',
   blocks: ['project'],
   tier: 'deterministic',

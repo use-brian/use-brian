@@ -1,5 +1,6 @@
 import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@sidanclaw/core'
 import { query } from './client.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
 /**
  * Guard against Invalid Date reaching Postgres. pg serialises an Invalid
@@ -56,6 +57,24 @@ const JOB_SELECT = `
   workflow_step_run_id as "workflowStepRunId",
   view_id as "viewId"
 `
+
+/**
+ * scheduled_jobs has no workspace_id column — resolve it through the owning
+ * assistant for the realtime `scheduled_job` signal. Fire-and-forget like
+ * every other emitter: a resolution failure must never affect the write.
+ */
+function notifyJobChange(jobId: string, assistantId: string, action: 'create' | 'update' | 'delete'): void {
+  // Async IIFE so a synchronous throw from `query` (or a non-promise return
+  // under a test mock) degrades into the same swallowed rejection — the
+  // signal is telemetry, the write path must never feel it.
+  void (async () => {
+    const r = await query<{ workspaceId: string | null }>(
+      `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+      [assistantId],
+    )
+    notifyWorkspaceChange(r.rows[0]?.workspaceId, 'scheduled_job', action, jobId)
+  })().catch(() => {})
+}
 
 function rowToJob(row: JobRow): ScheduledJob {
   return {
@@ -119,7 +138,9 @@ export function createDbJobStore(): JobStore {
         })
       }
 
-      return rowToJob(result.rows[0])
+      const job = rowToJob(result.rows[0])
+      notifyJobChange(job.id, job.assistantId, 'create')
+      return job
     },
 
     async update(id, updates) {
@@ -145,11 +166,18 @@ export function createDbJobStore(): JobStore {
         `UPDATE scheduled_jobs SET ${sets.join(', ')} WHERE id = $${idx} RETURNING ${JOB_SELECT}`,
         values,
       )
-      return result.rows[0] ? rowToJob(result.rows[0]) : null
+      if (!result.rows[0]) return null
+      const job = rowToJob(result.rows[0])
+      notifyJobChange(job.id, job.assistantId, 'update')
+      return job
     },
 
     async delete(id) {
-      const result = await query(`DELETE FROM scheduled_jobs WHERE id = $1`, [id])
+      const result = await query<{ assistantId: string }>(
+        `DELETE FROM scheduled_jobs WHERE id = $1 RETURNING assistant_id AS "assistantId"`,
+        [id],
+      )
+      if (result.rows[0]) notifyJobChange(id, result.rows[0].assistantId, 'delete')
       return (result.rowCount ?? 0) > 0
     },
 
@@ -267,8 +295,9 @@ export function createDbJobStore(): JobStore {
         channel_type: string
         workflow_id: string | null
         state_json: { activeNag?: unknown } | null
+        assistant_id: string
       }>(
-        `SELECT schedule, nag_interval_mins, channel_type, workflow_id, state_json
+        `SELECT schedule, nag_interval_mins, channel_type, workflow_id, state_json, assistant_id
            FROM scheduled_jobs WHERE id = $1`,
         [id],
       )
@@ -288,15 +317,23 @@ export function createDbJobStore(): JobStore {
         // mirrors `deleteScheduledJob` at
         // packages/core/src/scheduling/tools.ts:406-410.
         if (row.workflow_id && row.channel_type !== 'workflow') {
-          await query(`DELETE FROM workflows WHERE id = $1`, [row.workflow_id]).catch(
-            (err) => {
+          await query<{ workspaceId: string }>(
+            `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
+            [row.workflow_id],
+          )
+            .then((r) => {
+              // The implicit one-step reminder workflow is list-visible;
+              // its reap must repaint the workflow surfaces too.
+              if (r.rows[0]) notifyWorkspaceChange(r.rows[0].workspaceId, 'workflow', 'delete', row.workflow_id!)
+            })
+            .catch((err) => {
               console.error(
                 `[job-store] failed to cascade-delete workflow ${row.workflow_id} for job ${id}:`,
                 err,
               )
-            },
-          )
+            })
         }
+        notifyJobChange(id, row.assistant_id, 'delete')
         return
       }
 
@@ -308,6 +345,7 @@ export function createDbJobStore(): JobStore {
           `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', updated_at = now() WHERE id = $1`,
           [id],
         )
+        notifyJobChange(id, row.assistant_id, 'update')
         return
       }
 
@@ -315,13 +353,16 @@ export function createDbJobStore(): JobStore {
         `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'completed', next_run_at = $2, updated_at = now() WHERE id = $1`,
         [id, safeNextRunAt(id, nextRunAt)],
       )
+      notifyJobChange(id, row.assistant_id, 'update')
     },
 
     async markFailed(id, nextRunAt) {
-      await query(
-        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'failed', next_run_at = $2, updated_at = now() WHERE id = $1`,
+      const result = await query<{ assistantId: string }>(
+        `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'failed', next_run_at = $2, updated_at = now() WHERE id = $1
+         RETURNING assistant_id AS "assistantId"`,
         [id, safeNextRunAt(id, nextRunAt)],
       )
+      if (result.rows[0]) notifyJobChange(id, result.rows[0].assistantId, 'update')
     },
 
     async purgeDisabledOlderThan(cutoff) {

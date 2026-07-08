@@ -101,20 +101,20 @@ export type WorkflowRunColumnId = (typeof WORKFLOW_RUN_COLUMN_IDS)[number]
 // through it before render. Built-in and user-defined (custom) tables share
 // the exact same mechanism.
 
-export type ViewSort = {
+type ViewSort = {
   field: string
   direction: 'asc' | 'desc'
 }
 
 /** One persisted filter chip. `op` matches the doc FilterBar operator ids
  *  (`contains` / `is` / `gt` / `before` / …); `value` is the comparand. */
-export type ViewColumnFilter = {
+type ViewColumnFilter = {
   propertyName: string
   op: string
   value?: string | number | boolean | string[] | null
 }
 
-export type ViewDisplay = {
+type ViewDisplay = {
   /** Per-column pixel widths, keyed by column `field`. */
   columnWidths?: Record<string, number>
   /** Column `field` order (a permutation/subset of the binding's columns). */
@@ -232,7 +232,7 @@ export type WorkflowRunsTableBinding = {
  * the injected `docEntityStore`. Reuses the same `display` view-state as the
  * built-in tables.
  */
-export type CustomEntityTableBinding = {
+type CustomEntityTableBinding = {
   entity: 'custom'
   /** `entity_types.id` of the user-defined type this table renders. */
   entityTypeId: string

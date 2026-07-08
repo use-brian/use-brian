@@ -17,7 +17,7 @@ export function Skeleton({
  * voice, etc). Mirrors the real card geometry so the page doesn't
  * shift on first paint.
  */
-export function CardSkeleton({
+function CardSkeleton({
   lines = 2,
   className,
 }: {

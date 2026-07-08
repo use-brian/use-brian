@@ -59,10 +59,15 @@ describe('[COMP:db/job-store-claim] markCompleted reap + nag preservation (2026-
 
     const store = createDbJobStore()
     await store.markCompleted('job_1', new Date(0))
+    // Let the fire-and-forget realtime signal's workspace lookup settle.
+    await new Promise((r) => setImmediate(r))
 
-    expect(mockQuery).toHaveBeenCalledTimes(2)
+    // Row read + scheduled_jobs DELETE + the realtime signal's assistants
+    // workspace lookup (realtime-sync) — but NEVER the workflow cascade.
+    expect(mockQuery).toHaveBeenCalledTimes(3)
     const sqls = mockQuery.mock.calls.map((c) => c[0] as string)
     expect(sqls[1]).toContain('DELETE FROM scheduled_jobs')
+    expect(sqls[2]).toContain('FROM assistants')
     expect(sqls.some((s) => s.includes('DELETE FROM workflows'))).toBe(false)
   })
 

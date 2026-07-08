@@ -52,7 +52,7 @@ export function crossesBlocks(doc: PMNode, a: number, h: number): boolean {
 }
 
 const DRAG_THRESHOLD = 6; // px before a press counts as a drag (vs a click)
-export const blockAreaSelectKey = new PluginKey("blockAreaSelect");
+const blockAreaSelectKey = new PluginKey("blockAreaSelect");
 
 /** Decide whether a past-threshold drag is an AREA select (engage + marquee) vs a
  *  native in-block text selection. Pure/testable. The ONLY case left to the

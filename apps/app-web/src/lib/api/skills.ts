@@ -35,7 +35,7 @@ export type SkillInductionSource = "self" | "ingested" | "authored";
 
 export type SkillSensitivity = "public" | "internal" | "confidential";
 
-export type SkillLifecycleState = "active" | "stale" | "archived";
+type SkillLifecycleState = "active" | "stale" | "archived";
 
 /**
  * Governance-aware projection of a `workspace_skills` row, as returned by
