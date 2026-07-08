@@ -38,28 +38,10 @@ importers:
       '@sidanclaw/api':
         specifier: workspace:*
         version: link:../../packages/api
-      '@sidanclaw/channels':
-        specifier: workspace:*
-        version: link:../../packages/channels
-      '@sidanclaw/core':
-        specifier: workspace:*
-        version: link:../../packages/core
-      '@sidanclaw/doc-model':
-        specifier: workspace:*
-        version: link:../../packages/doc-model
-      '@sidanclaw/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       dotenv:
         specifier: ^16
         version: 16.6.1
-      express:
-        specifier: ^5
-        version: 5.2.1
     devDependencies:
-      '@types/express':
-        specifier: ^5
-        version: 5.0.6
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
