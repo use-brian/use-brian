@@ -29,6 +29,7 @@ import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
+import { mcpResultToToolResult } from './tool-result.js'
 import { jsonSchemaFromZod } from '../engine/query-loop.js'
 import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
@@ -660,7 +661,8 @@ async function dispatchRemote(params: {
       }
     }
 
-    return { data: result }
+    // Lift any inline image content onto ToolResult.images so the model sees it.
+    return mcpResultToToolResult(result)
   } catch (err) {
     return {
       data: `MCP tool ${tool} failed: ${err instanceof Error ? err.message : String(err)}`,

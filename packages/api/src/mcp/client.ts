@@ -54,8 +54,20 @@ export async function discoverMcpServer(
 }
 
 /**
+ * A remote MCP tool result that carried inline image content (e.g. sampled
+ * video frames). Returned by `callRemoteMcpTool` instead of a bare string so
+ * the images can be lifted onto `ToolResult.images` and shown to the model.
+ * See `@sidanclaw/core` `mcpResultToToolResult`.
+ */
+export type McpImageToolResult = {
+  text: string
+  images: Array<{ mimeType: string; data: string }>
+}
+
+/**
  * Call a tool on a remote MCP server. Opens a fresh connection, calls the tool,
- * and closes. Returns the text content from the result.
+ * and closes. Returns the joined text content, or — when the tool returned
+ * inline image content — an `McpImageToolResult` carrying the text plus images.
  */
 export async function callRemoteMcpTool(
   serverUrl: string,
@@ -82,12 +94,27 @@ export async function callRemoteMcpTool(
       throw new Error(errorText)
     }
 
-    // Extract text content from the result
-    const texts = (result.content as Array<{ type: string; text?: string }>)
-      ?.filter((c) => c.type === 'text')
-      .map((c) => c.text)
+    // Split the result into text + inline images. Text-only results return the
+    // joined string (unchanged behavior). When the tool returned image content
+    // (e.g. sampled video frames), return a structured payload so the images can
+    // reach the model — core's `mcpResultToToolResult` lifts them onto
+    // `ToolResult.images`, which the engine renders as inline image blocks.
+    const content = (result.content ?? []) as Array<{
+      type: string
+      text?: string
+      data?: string
+      mimeType?: string
+    }>
+    const texts = content.filter((c) => c.type === 'text').map((c) => c.text ?? '')
+    const images = content
+      .filter((c) => c.type === 'image' && typeof c.data === 'string')
+      .map((c) => ({ mimeType: c.mimeType ?? 'image/jpeg', data: c.data as string }))
 
-    return texts?.length ? texts.join('\n') : result.content
+    if (images.length > 0) {
+      const out: McpImageToolResult = { text: texts.join('\n'), images }
+      return out
+    }
+    return texts.length ? texts.join('\n') : result.content
   } finally {
     await client.close().catch(() => {})
   }

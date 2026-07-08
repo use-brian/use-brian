@@ -848,3 +848,66 @@ describe('[COMP:engine/tool-executor-approval-refactor] autonomous approvals-row
     expect(port).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('[COMP:engine/tool-executor] image tool results', () => {
+  it('emits ToolResult.images as image blocks right after the tool_result', async () => {
+    const framesTool = buildTool({
+      name: 'getFrames',
+      description: 'returns frames',
+      inputSchema: z.record(z.unknown()),
+      isConcurrencySafe: true,
+      isReadOnly: true,
+      async execute() {
+        return {
+          data: '[returned 2 image(s)]',
+          images: [
+            { mimeType: 'image/jpeg', data: 'AAA' },
+            { mimeType: 'image/png', data: 'BBB' },
+          ],
+        }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map<string, Tool>([['getFrames', framesTool]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'getFrames', {})
+    const results = await drainResults(executor)
+
+    // tool_result first, then one image block per returned frame, in order.
+    expect(results).toHaveLength(3)
+    expect(results[0]).toMatchObject({ type: 'tool_result', toolUseId: 'call_1' })
+    expect(results[1]).toEqual({ type: 'image', mimeType: 'image/jpeg', data: 'AAA' })
+    expect(results[2]).toEqual({ type: 'image', mimeType: 'image/png', data: 'BBB' })
+  })
+
+  it('drops images with empty data', async () => {
+    const tool = buildTool({
+      name: 'mixed',
+      description: 'mixed images',
+      inputSchema: z.record(z.unknown()),
+      isConcurrencySafe: true,
+      isReadOnly: true,
+      async execute() {
+        return {
+          data: 'ok',
+          images: [
+            { mimeType: 'image/jpeg', data: 'GOOD' },
+            { mimeType: 'image/png', data: '' }, // empty data -> dropped
+          ],
+        }
+      },
+    })
+    const executor = createToolExecutor({
+      tools: new Map<string, Tool>([['mixed', tool]]),
+      context: ctx,
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'mixed', {})
+    const results = await drainResults(executor)
+
+    expect(results).toHaveLength(2)
+    expect(results[1]).toEqual({ type: 'image', mimeType: 'image/jpeg', data: 'GOOD' })
+  })
+})

@@ -8,6 +8,7 @@
 import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
+import { mcpResultToToolResult } from './tool-result.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
 /** Sanitize a string for use in LLM tool names (Gemini restriction). */
@@ -82,7 +83,8 @@ export function wrapMcpTools(params: {
             allowed: true,
           }).catch((err) => console.debug('MCP usage tracking failed:', err))
 
-          return { data: result }
+          // Lift any inline image content onto ToolResult.images so the model sees it.
+          return mcpResultToToolResult(result)
         } catch (err) {
           return {
             data: `MCP tool ${mcpTool.name} failed: ${err instanceof Error ? err.message : String(err)}`,

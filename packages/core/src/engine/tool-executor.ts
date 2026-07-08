@@ -45,6 +45,12 @@ type TrackedTool = {
   isConcurrencySafe: boolean
   promise?: Promise<void>
   result?: ContentBlock
+  /**
+   * Inline images the tool produced (ToolResult.images) as `image` content
+   * blocks, emitted right after `result` so they join the tool-results user
+   * turn and a multimodal provider can see them.
+   */
+  resultImages?: ContentBlock[]
   /** Internal-only meta from the tool's ToolResult.meta. Surfaced via getCompletedResults. */
   meta?: ToolResultMeta
   error?: string
@@ -622,6 +628,15 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       content = capToolResultTokens(content)
 
       t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: result.isError }
+      // Inline images (e.g. an MCP tool returning sampled frames) become `image`
+      // content blocks emitted right after the tool_result, so a multimodal
+      // provider sees them. Capped + validated; a text-only provider drops them.
+      if (Array.isArray(result.images) && result.images.length > 0) {
+        t.resultImages = result.images
+          .filter((im) => im && typeof im.data === 'string' && im.data.length > 0)
+          .slice(0, 8)
+          .map((im) => ({ type: 'image', mimeType: im.mimeType || 'image/jpeg', data: im.data }))
+      }
       t.meta = result.meta
       t.status = 'completed'
       // Feed the consecutive-failure breaker with this real outcome (a tool may
@@ -696,6 +711,9 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         ) break // preserve order
         if (t.result) {
           blocks.push(t.result)
+          // Emit tool-produced images right after their tool_result so they land
+          // in the same tool-results user turn the model reads next.
+          if (t.resultImages?.length) blocks.push(...t.resultImages)
           if (t.meta) metaByToolUseId[t.id] = t.meta
         }
         t.status = 'yielded'

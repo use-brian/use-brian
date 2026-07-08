@@ -89,16 +89,41 @@ describe('[COMP:api/mcp-client] discoverMcpServer', () => {
 })
 
 describe('[COMP:api/mcp-client] callRemoteMcpTool', () => {
-  it('extracts and joins the text content of a successful call', async () => {
+  it('extracts and joins the text content of a text-only call', async () => {
     fakeClient.callTool.mockResolvedValueOnce({
       content: [
         { type: 'text', text: 'line 1' },
         { type: 'text', text: 'line 2' },
-        { type: 'image', data: '...' },
       ],
     })
     const out = await callRemoteMcpTool('https://mcp.example/sse', 'search', { q: 'x' })
     expect(out).toBe('line 1\nline 2')
+  })
+
+  it('returns structured { text, images } when the result carries image content', async () => {
+    fakeClient.callTool.mockResolvedValueOnce({
+      content: [
+        { type: 'text', text: 'here are the frames' },
+        { type: 'image', mimeType: 'image/jpeg', data: 'b64a' },
+        { type: 'image', data: 'b64b' }, // mimeType defaulted
+      ],
+    })
+    const out = await callRemoteMcpTool('https://mcp.example/sse', 'get_frames', {})
+    expect(out).toEqual({
+      text: 'here are the frames',
+      images: [
+        { mimeType: 'image/jpeg', data: 'b64a' },
+        { mimeType: 'image/jpeg', data: 'b64b' },
+      ],
+    })
+  })
+
+  it('returns image-only results as { text:"", images }', async () => {
+    fakeClient.callTool.mockResolvedValueOnce({
+      content: [{ type: 'image', mimeType: 'image/png', data: 'b64' }],
+    })
+    const out = await callRemoteMcpTool('https://mcp.example/sse', 'render', {})
+    expect(out).toEqual({ text: '', images: [{ mimeType: 'image/png', data: 'b64' }] })
   })
 
   it('throws with the error text when the result is flagged isError', async () => {
@@ -109,8 +134,8 @@ describe('[COMP:api/mcp-client] callRemoteMcpTool', () => {
     await expect(callRemoteMcpTool('https://mcp.example/sse', 'search', {})).rejects.toThrow('rate limited')
   })
 
-  it('returns the raw content when the result has no text parts', async () => {
-    const content = [{ type: 'image', data: 'b64' }]
+  it('returns the raw content when the result has neither text nor image parts', async () => {
+    const content = [{ type: 'resource', resource: { uri: 'x://y' } }]
     fakeClient.callTool.mockResolvedValueOnce({ content })
     const out = await callRemoteMcpTool('https://mcp.example/sse', 'render', {})
     expect(out).toBe(content)

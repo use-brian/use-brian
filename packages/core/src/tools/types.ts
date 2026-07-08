@@ -252,10 +252,21 @@ export type ToolContext = {
  */
 export type ToolResultMeta = Record<string, string | number | boolean>
 
+/** Inline base64 image a tool produces for the model to SEE (not just read as text). */
+export type ToolResultImage = { mimeType: string; data: string }
+
 export type ToolResult<T = unknown> = {
   data: T
   isError?: boolean
   meta?: ToolResultMeta
+  /**
+   * Optional inline images the tool produced for the model to look at. The
+   * engine emits these as `image` content blocks appended to the tool-results
+   * user turn, so a multimodal provider (Gemini → inlineData) sees them; a
+   * text-only provider drops them. The primary producer is an MCP tool whose
+   * CallToolResult carries `type:'image'` content (see mcp/client.ts).
+   */
+  images?: ToolResultImage[]
 }
 
 // ── Tool definition ────────────────────────────────────────────
