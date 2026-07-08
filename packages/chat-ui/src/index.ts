@@ -36,9 +36,4 @@ export {
 export { normalizeBullets } from './normalize-markdown.js'
 export { ChatMarkdown, type ChatMarkdownProps } from './markdown.js'
 
-export { MessageList, type MessageListProps } from './MessageList.js'
 export { ChatComposer, type ChatComposerProps } from './ChatComposer.js'
-export {
-  ToolConfirmationCard,
-  type ToolConfirmationCardProps,
-} from './ToolConfirmationCard.js'
