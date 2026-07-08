@@ -5,19 +5,45 @@
  * right now" strip on the workflow detail page. Renders while the tracked
  * run is non-terminal: a spinner (or pause glyph), which step of how many is
  * executing, a ticking elapsed clock, a per-step progress bar, and a link to
- * the run-detail drill-down. Data comes from `useWorkflowLiveRun`'s
- * `LiveRunView`; this component is pure presentation plus a 1 s clock tick.
+ * the run-detail drill-down.
+ *
+ * When the run is paused on an approval (`awaiting_input`), the banner is
+ * also the resolution surface: it fetches the pending `workflow_step`
+ * approval for this run, renders Approve / Reject in place, and a
+ * collapsible request review that reuses the approvals queue's per-tool
+ * preview (`ToolPreview` — an email send shows as an email) with the raw
+ * frozen input as the fallback. Resolution goes through `respondByKind`
+ * (the unified respond route resumes the run); `onApprovalResolved` lets
+ * the page force a live-poll tick so the board unfreezes immediately.
+ *
+ * Data comes from `useWorkflowLiveRun`'s `LiveRunView`; beyond the approval
+ * fetch this component is presentation plus a 1 s clock tick.
  *
  * Spec: docs/architecture/features/workflow.md → "Live run activity".
  * [COMP:app-web/workflow]
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useT } from "@/lib/i18n/client";
 import { format as fmt } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { WorkflowDefinition, WorkflowStep } from "@/lib/api/workflow";
+import {
+  listApprovals,
+  respondByKind,
+  type PendingApprovalRow,
+} from "@/lib/api/approvals";
+import {
+  APPROVALS_REFRESH_EVENT,
+  requestApprovalsRefresh,
+  type ApprovalsRefreshDetail,
+} from "@/lib/approvals-events";
+import {
+  extractAttachmentLines,
+  parseToolPreview,
+} from "@/lib/approval-previews";
+import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
 import {
   elapsedLabel,
   isActivelyExecuting,
@@ -32,6 +58,9 @@ type Props = {
   view: LiveRunView;
   definition: WorkflowDefinition;
   assistants: StudioAssistantSummary[];
+  /** Called after an in-banner approve/reject lands, so the page can force
+   *  an immediate live-poll tick instead of waiting for the idle cadence. */
+  onApprovalResolved?: () => void;
 };
 
 export function LiveRunBanner({
@@ -40,6 +69,7 @@ export function LiveRunBanner({
   view,
   definition,
   assistants,
+  onApprovalResolved,
 }: Props) {
   const t = useT();
   const b = t.workflowPage.builder;
@@ -58,6 +88,7 @@ export function LiveRunBanner({
   );
   const currentStep = currentIdx >= 0 ? steps[currentIdx] : null;
   const active = isActivelyExecuting(view.status);
+  const awaitingApproval = view.status === "awaiting_input";
 
   const statusText = active
     ? b.liveRunning
@@ -117,6 +148,138 @@ export function LiveRunBanner({
           ))}
         </div>
       )}
+
+      {awaitingApproval && (
+        <RunApprovalActions
+          workspaceId={workspaceId}
+          runId={view.runId}
+          onResolved={onApprovalResolved}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * In-banner resolution for the approval a paused run is waiting on. Finds
+ * the pending row whose `workflowRunId` matches the live run; renders
+ * Approve / Reject plus a collapsible request review (per-tool preview with
+ * the raw input fallback). Missing row (already resolved elsewhere, or the
+ * queue fetch failed) renders nothing — the "View run" link still covers it.
+ */
+function RunApprovalActions({
+  workspaceId,
+  runId,
+  onResolved,
+}: {
+  workspaceId: string;
+  runId: string;
+  onResolved?: () => void;
+}) {
+  const t = useT();
+  const b = t.workflowPage.builder;
+  const [approval, setApproval] = useState<PendingApprovalRow | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // Another tab / the queue panel resolving the same row also clears it here.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<ApprovalsRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      setRefreshTick((n) => n + 1);
+    };
+    window.addEventListener(APPROVALS_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(APPROVALS_REFRESH_EVENT, handler);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const rows = await listApprovals(workspaceId);
+      if (cancelled) return;
+      setApproval(rows.find((r) => r.workflowRunId === runId) ?? null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, runId, refreshTick]);
+
+  const respond = useCallback(
+    async (decision: "approved" | "rejected") => {
+      if (!approval) return;
+      setBusy(true);
+      setError(null);
+      const result = await respondByKind(approval, decision);
+      setBusy(false);
+      if (!result.ok) {
+        setError(
+          "error" in result ? result.error : t.approvalsPage.respondError,
+        );
+        return;
+      }
+      setApproval(null);
+      requestApprovalsRefresh(workspaceId);
+      onResolved?.();
+    },
+    [approval, workspaceId, onResolved, t],
+  );
+
+  if (!approval) return null;
+
+  const preview = parseToolPreview(approval.toolName, approval.arguments);
+  const description = approval.approvalPayload.description?.trim();
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-amber-500/30 pt-2.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-xs text-foreground/80 min-w-0 truncate">
+          {description || approval.toolName}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="text-xs font-medium text-primary hover:underline"
+        >
+          {open ? b.liveHideRequest : b.liveReviewRequest}
+        </button>
+        <span className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void respond("approved")}
+            className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 disabled:opacity-50"
+          >
+            {t.approvalsPage.approveAction}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void respond("rejected")}
+            className="text-xs px-3 py-1.5 rounded-md border border-border bg-background font-medium hover:bg-muted disabled:opacity-50"
+          >
+            {t.approvalsPage.rejectAction}
+          </button>
+        </span>
+      </div>
+      {error && (
+        <span className="text-xs text-red-600 dark:text-red-400">{error}</span>
+      )}
+      {open &&
+        (preview ? (
+          <ToolPreview
+            preview={preview}
+            attachmentLines={extractAttachmentLines(
+              approval.approvalPayload.displayLines,
+            )}
+          />
+        ) : (
+          <pre className="w-full text-[11px] font-mono bg-background/60 border border-border rounded px-2 py-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-all max-w-2xl">
+            {JSON.stringify(approval.arguments, null, 2)}
+          </pre>
+        ))}
     </div>
   );
 }

@@ -4,12 +4,16 @@
  * Workflow detail page — `/w/[workspaceId]/workflow/[id]` (app-web).
  *
  * Ported from `apps/web/src/app/(app)/workflow/[id]/page.tsx` (app
- * consolidation §5a). Board-centric view: the centerpiece is the
- * WorkflowBoard, an n8n-style illustration of the trigger + step chain.
- * Clicking a board node opens that step's editor (entering edit mode and
- * scrolling to it); the "Edit" button reveals the full editor panel (trigger
- * config + step editors + add-step). "Run now" kicks off a manual run via
- * POST /api/workflows/:id/run, and recent runs are listed below.
+ * consolidation §5a). Board-centric, single-mode surface: there is no
+ * edit/view split. The centerpiece is the WorkflowBoard, an n8n-style
+ * illustration of the trigger + step chain; clicking a board node opens
+ * that node's editor below and scrolls to it. The name + description are
+ * view-styled text that edit in place (`InlineEditableText` — pencil
+ * affordance, borderless field on click). "Save changes" is always in the
+ * header and stays disabled until the draft actually differs from the
+ * saved workflow (there is no Cancel — the draft is the page). "Run now"
+ * kicks off a manual run via POST /api/workflows/:id/run, and recent runs
+ * stay visible below in a compact list even while editing.
  *
  * app-web is single-workspace-per-route — assistants + destinations scope
  * to the route workspace (`activeId` from the `useWorkspaces()` adapter,
@@ -22,7 +26,8 @@
  * [COMP:app-web/workflow]
  */
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Pencil } from "lucide-react";
 import { BackButton } from "@/components/ui/back-button";
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
@@ -59,6 +64,10 @@ import { TriggerEditor } from "@/components/workflow/trigger-editor";
 import { TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
 import { RunHistory } from "@/components/workflow/run-history";
 import { LiveRunBanner } from "@/components/workflow/live-run-banner";
+import {
+  fieldUnderlineCls,
+  quietFieldCls,
+} from "@/components/brain/skill-document";
 import { cn } from "@/lib/utils";
 
 export default function WorkflowDetailPage({
@@ -80,7 +89,6 @@ export default function WorkflowDetailPage({
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
-  const [editing, setEditing] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
@@ -214,7 +222,7 @@ export default function WorkflowDetailPage({
   // When a board node selects a target, scroll its editor into view once
   // the editor panel has mounted.
   useEffect(() => {
-    if (!editing || !selectedKey) return;
+    if (!selectedKey) return;
     const domId =
       selectedKey === "trigger" ? "wf-trigger-editor" : `wf-step-${selectedKey}`;
     const tid = window.setTimeout(() => {
@@ -223,9 +231,24 @@ export default function WorkflowDetailPage({
         ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }, 60);
     return () => window.clearTimeout(tid);
-  }, [editing, selectedKey]);
+  }, [selectedKey]);
 
   const refresh = useCallback(() => setRefetchTick((n) => n + 1), []);
+
+  // Single-mode dirty check — the header Save button is the only commit
+  // path, enabled exactly when the draft's editable fields differ from the
+  // saved workflow. Server-side toggles (enable / pin / restore / webhook
+  // rotate) write through immediately and merge into the draft, so they
+  // never trip this.
+  const dirty = useMemo(() => {
+    if (!workflow || !draft) return false;
+    return (
+      draft.name !== workflow.name ||
+      (draft.description ?? "") !== (workflow.description ?? "") ||
+      JSON.stringify(draft.definition) !== JSON.stringify(workflow.definition) ||
+      JSON.stringify(draft.trigger) !== JSON.stringify(workflow.trigger)
+    );
+  }, [draft, workflow]);
 
   if (workflow === undefined) {
     return (
@@ -311,14 +334,26 @@ export default function WorkflowDetailPage({
     setSelectedKey(nextId);
   };
 
-  // ── Board node selection → enter edit mode + scroll to the editor ────
-  const selectStep = (stepId: string) => {
-    setEditing(true);
-    setSelectedKey(stepId);
-  };
-  const selectTrigger = () => {
-    setEditing(true);
-    setSelectedKey("trigger");
+  // ── Board node selection → open that node's editor below the board ───
+  const selectStep = (stepId: string) => setSelectedKey(stepId);
+  const selectTrigger = () => setSelectedKey("trigger");
+
+  // Server-side writes that bypass the draft (rotate / enable / pin /
+  // restore) adopt the fresh server row but graft the draft's editable
+  // fields back on, so an in-progress edit is never silently discarded.
+  const adoptServerRow = (next: WorkflowFull) => {
+    setWorkflow(next);
+    setDraft((d) =>
+      d
+        ? {
+            ...next,
+            name: d.name,
+            description: d.description,
+            definition: d.definition,
+            trigger: d.trigger,
+          }
+        : next,
+    );
   };
 
   // ── Persistence ──────────────────────────────────────────────────────
@@ -333,8 +368,7 @@ export default function WorkflowDetailPage({
       setError(result.error || t.workflowPage.builder.saveFail);
       return;
     }
-    setWorkflow(result.workflow);
-    setDraft(result.workflow);
+    adoptServerRow(result.workflow);
   };
 
   const onSave = async () => {
@@ -371,11 +405,7 @@ export default function WorkflowDetailPage({
       const first = next[0];
       if (first) {
         const target = locateIssueTarget(first, draft.definition.steps);
-        if (target === "trigger") {
-          setEditing(true);
-          setSelectedKey("trigger");
-        } else if (typeof target === "string") {
-          setEditing(true);
+        if (target === "trigger" || typeof target === "string") {
           setSelectedKey(target);
         }
         // Header errors (name/description) don't change focus — they're
@@ -385,18 +415,8 @@ export default function WorkflowDetailPage({
     }
     setWorkflow(result.workflow);
     setDraft(result.workflow);
-    setEditing(false);
-    setSelectedKey(null);
     requestWorkflowRefresh(result.workflow.workspaceId);
     refresh();
-  };
-
-  const onCancelEdit = () => {
-    setDraft(workflow);
-    setEditing(false);
-    setSelectedKey(null);
-    setError(null);
-    setIssues([]);
   };
 
   const onDelete = async () => {
@@ -445,8 +465,7 @@ export default function WorkflowDetailPage({
       setError(result.error || t.workflowPage.builder.saveFail);
       return;
     }
-    setWorkflow(result.workflow);
-    setDraft(result.workflow);
+    adoptServerRow(result.workflow);
     requestWorkflowRefresh(result.workflow.workspaceId);
   };
 
@@ -460,8 +479,7 @@ export default function WorkflowDetailPage({
       setError(result.error || t.workflowPage.builder.saveFail);
       return;
     }
-    setWorkflow(result.workflow);
-    setDraft(result.workflow);
+    adoptServerRow(result.workflow);
   };
 
   const onRestoreLifecycle = async () => {
@@ -473,16 +491,8 @@ export default function WorkflowDetailPage({
       setError(result.error || t.workflowPage.builder.saveFail);
       return;
     }
-    setWorkflow(result.workflow);
-    setDraft(result.workflow);
+    adoptServerRow(result.workflow);
     requestWorkflowRefresh(result.workflow.workspaceId);
-  };
-
-  // The "Edit" button has no node context — focus the start step so the
-  // panel opens on something.
-  const enterEditFromButton = () => {
-    setEditing(true);
-    setSelectedKey(draft.definition.startStepId);
   };
 
   // Resolve the single step the editor panel should render. `selectedKey`
@@ -522,92 +532,67 @@ export default function WorkflowDetailPage({
       <header className="flex flex-col gap-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
-            {editing ? (
-              <>
-                <input
-                  type="text"
-                  value={draft.name}
-                  onChange={(e) => updateDraft({ name: e.target.value })}
-                  maxLength={120}
-                  // Plain label field — keep browser autofill and password
-                  // managers (1Password / LastPass / Dashlane) off it.
-                  autoComplete="off"
-                  data-1p-ignore="true"
-                  data-lpignore="true"
-                  data-form-type="other"
-                  className={cn(
-                    "w-full text-xl font-semibold bg-background border rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-ring",
-                    nameIssues.length > 0
-                      ? "border-red-500 focus:ring-red-500/40"
-                      : "border-border",
-                  )}
-                />
-                {nameIssues.length > 0 && (
-                  <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                    {nameIssues.map((i) => i.message).join("; ")}
-                  </p>
-                )}
-              </>
-            ) : (
-              <>
-                <h1 className="text-xl font-semibold flex items-center gap-2">
-                  {workflow.name}
-                  <EnabledBadge enabled={workflow.enabled} t={t} />
-                  {workflow.lifecycleState === "stale" && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 uppercase tracking-wide">
-                      {t.workflowPage.lifecycle.staleBadge}
-                    </span>
-                  )}
-                  {workflow.lifecycleState === "archived" && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase tracking-wide">
-                      {t.workflowPage.lifecycle.archivedBadge}
-                    </span>
-                  )}
-                  {workflow.pinned && (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide">
-                      {t.workflowPage.lifecycle.pinnedBadge}
-                    </span>
-                  )}
-                </h1>
-                {!workflow.enabled && workflow.pausedReason ? (
-                  <p className="mt-1 text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
-                    <span className="font-medium">
-                      {t.workflowPage.builder.stormPausedTitle}
-                    </span>{" "}
-                    {workflow.pausedReason}
-                  </p>
-                ) : null}
-                {workflow.lifecycleState !== "active" && workflow.lifecycleReason ? (
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {workflow.lifecycleReason}
-                  </p>
-                ) : null}
-              </>
+            <div className="flex items-center gap-2 min-w-0">
+              <InlineEditableText
+                value={draft.name}
+                onChange={(v) => updateDraft({ name: v })}
+                editLabel={t.workflowPage.builder.editNameAction}
+                placeholder={t.workflowPage.builder.namePlaceholder}
+                maxLength={120}
+                hasIssues={nameIssues.length > 0}
+                textClassName="text-xl font-semibold"
+              />
+              <EnabledBadge enabled={workflow.enabled} t={t} />
+              {workflow.lifecycleState === "stale" && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-700 dark:text-amber-400 uppercase tracking-wide">
+                  {t.workflowPage.lifecycle.staleBadge}
+                </span>
+              )}
+              {workflow.lifecycleState === "archived" && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground uppercase tracking-wide">
+                  {t.workflowPage.lifecycle.archivedBadge}
+                </span>
+              )}
+              {workflow.pinned && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary uppercase tracking-wide">
+                  {t.workflowPage.lifecycle.pinnedBadge}
+                </span>
+              )}
+            </div>
+            {nameIssues.length > 0 && (
+              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {nameIssues.map((i) => i.message).join("; ")}
+              </p>
             )}
-            {editing ? (
-              <>
-                <textarea
-                  value={draft.description ?? ""}
-                  onChange={(e) => updateDraft({ description: e.target.value || null })}
-                  placeholder={t.workflowPage.builder.descriptionPlaceholder}
-                  rows={2}
-                  maxLength={2000}
-                  className={cn(
-                    "mt-2 w-full text-sm bg-background border rounded-md px-2 py-1 outline-none focus:ring-2 focus:ring-ring resize-y",
-                    descriptionIssues.length > 0
-                      ? "border-red-500 focus:ring-red-500/40"
-                      : "border-border",
-                  )}
-                />
-                {descriptionIssues.length > 0 && (
-                  <p className="mt-1 text-xs text-red-600 dark:text-red-400">
-                    {descriptionIssues.map((i) => i.message).join("; ")}
-                  </p>
-                )}
-              </>
-            ) : workflow.description ? (
-              <p className="text-sm text-muted-foreground">{workflow.description}</p>
+            {!workflow.enabled && workflow.pausedReason ? (
+              <p className="mt-1 text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
+                <span className="font-medium">
+                  {t.workflowPage.builder.stormPausedTitle}
+                </span>{" "}
+                {workflow.pausedReason}
+              </p>
             ) : null}
+            {workflow.lifecycleState !== "active" && workflow.lifecycleReason ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {workflow.lifecycleReason}
+              </p>
+            ) : null}
+            <InlineEditableText
+              value={draft.description ?? ""}
+              onChange={(v) => updateDraft({ description: v || null })}
+              editLabel={t.workflowPage.builder.editDescriptionAction}
+              placeholder={t.workflowPage.builder.descriptionPlaceholder}
+              maxLength={2000}
+              multiline
+              hasIssues={descriptionIssues.length > 0}
+              textClassName="text-sm text-muted-foreground"
+              className="mt-1"
+            />
+            {descriptionIssues.length > 0 && (
+              <p className="mt-1 text-xs text-red-600 dark:text-red-400">
+                {descriptionIssues.map((i) => i.message).join("; ")}
+              </p>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             {workflow.lifecycleState === "archived" && (
@@ -660,37 +645,22 @@ export default function WorkflowDetailPage({
             >
               {running ? t.workflowPage.builder.running : t.workflowPage.builder.runNowBtn}
             </button>
-            {editing ? (
-              <>
-                <button
-                  type="button"
-                  onClick={onCancelEdit}
-                  disabled={saving}
-                  className="px-3 py-1.5 rounded-md border border-border text-sm hover:bg-muted disabled:opacity-50"
-                >
-                  {t.workflowPage.builder.cancel}
-                </button>
-                <button
-                  type="button"
-                  onClick={onSave}
-                  disabled={saving}
-                  className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
-                >
-                  {saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={enterEditFromButton}
-                className="px-3 py-1.5 rounded-md border border-border text-sm hover:bg-muted"
-              >
-                {t.workflowPage.builder.editModeOn}
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={saving || !dirty}
+              className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+            >
+              {saving ? t.workflowPage.builder.saving : t.workflowPage.builder.saveChanges}
+            </button>
           </div>
         </div>
 
+        {dirty && !saving && (
+          <div className="text-xs text-amber-600 dark:text-amber-400">
+            {t.workflowPage.builder.unsavedChanges}
+          </div>
+        )}
         {runMessage && !liveView && (
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
@@ -699,7 +669,8 @@ export default function WorkflowDetailPage({
 
       {/* Live activity — visible whenever a run is in flight (Run now,
           schedule, webhook or event), so the user sees which step the
-          assistant is working on instead of a silent board. */}
+          assistant is working on instead of a silent board. A run paused on
+          an approval resolves right here (Approve / Reject in the banner). */}
       {liveView && (
         <LiveRunBanner
           workspaceId={workspaceId}
@@ -707,6 +678,7 @@ export default function WorkflowDetailPage({
           view={liveView}
           definition={workflow.definition}
           assistants={assistants}
+          onApprovalResolved={pollNow}
         />
       )}
 
@@ -717,7 +689,7 @@ export default function WorkflowDetailPage({
         trigger={draft.trigger}
         assistants={assistants}
         pages={pages}
-        selectedKey={editing ? selectedKey : null}
+        selectedKey={selectedKey}
         live={liveView}
         onSelectStep={selectStep}
         onSelectTrigger={selectTrigger}
@@ -731,20 +703,22 @@ export default function WorkflowDetailPage({
         <TriggerJobsList trigger={workflow.trigger} jobs={workflow.triggerJobs} />
       )}
 
-      {/* Editor panel — revealed in edit mode. Shows only the editor for
-          the node focused on the board (the trigger or a single step). */}
-      {editing && (
-        <div className="flex flex-col gap-3">
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={addStep}
-              className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
-            >
-              {t.workflowPage.builder.addStepBtn}
-            </button>
-          </div>
+      {/* Editor panel — always live (no edit mode). Shows only the editor
+          for the node focused on the board (the trigger or a single step);
+          nothing selected keeps the page at board + runs. */}
+      <div className="flex flex-col gap-3">
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={addStep}
+            className="text-xs px-2 py-1 rounded border border-border hover:bg-muted"
+          >
+            {t.workflowPage.builder.addStepBtn}
+          </button>
+        </div>
 
+        {selectedKey && (
+          <>
           {selectedKey === "trigger" && (
             <div
               id="wf-trigger-editor"
@@ -813,18 +787,16 @@ export default function WorkflowDetailPage({
               />
             </div>
           )}
-        </div>
-      )}
+          </>
+        )}
+      </div>
 
-      {/* Recent runs — read-only history, hidden while editing so the edit
-          surface stays focused on the step being configured. */}
-      {!editing && (
-        <RunHistory
-          workspaceId={workspaceId}
-          workflowId={workflow.id}
-          runs={runs}
-        />
-      )}
+      {/* Recent runs — always visible (compact), even mid-edit. */}
+      <RunHistory
+        workspaceId={workspaceId}
+        workflowId={workflow.id}
+        runs={runs}
+      />
 
       {/* Footer actions */}
       <div className="flex items-center justify-between pt-2 border-t border-border">
@@ -849,6 +821,136 @@ export default function WorkflowDetailPage({
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * View-styled text that edits in place. Reads as ordinary page copy (the
+ * h1 / description look) with a pencil affordance revealed on hover/focus;
+ * clicking swaps in a borderless field with identical typography (the
+ * skill-document quiet-field treatment), autofocused, closed on blur /
+ * Enter / Escape. The value binds straight to the page draft — persistence
+ * stays with the header Save button, so "closing" the field never loses or
+ * commits anything by itself.
+ */
+function InlineEditableText({
+  value,
+  onChange,
+  editLabel,
+  placeholder,
+  maxLength,
+  multiline = false,
+  hasIssues = false,
+  textClassName,
+  className,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  editLabel: string;
+  placeholder: string;
+  maxLength: number;
+  multiline?: boolean;
+  hasIssues?: boolean;
+  textClassName: string;
+  className?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const fieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (editing) fieldRef.current?.focus();
+  }, [editing]);
+
+  // A validation issue forces the field open — the fix happens here.
+  const open = editing || hasIssues;
+
+  const fieldCls = cn(
+    quietFieldCls,
+    "w-full bg-transparent p-0 placeholder:text-muted-foreground/60",
+    textClassName,
+  );
+  const closeOnKey = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape" || (e.key === "Enter" && !multiline)) {
+      e.preventDefault();
+      setEditing(false);
+    }
+  };
+
+  if (open) {
+    return (
+      <div
+        className={cn(
+          "flex-1 min-w-0",
+          fieldUnderlineCls,
+          hasIssues && "after:scale-x-100 after:from-red-500 after:via-red-500/40",
+          className,
+        )}
+      >
+        {multiline ? (
+          <textarea
+            ref={(el) => {
+              fieldRef.current = el;
+            }}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onBlur={() => setEditing(false)}
+            onKeyDown={closeOnKey}
+            placeholder={placeholder}
+            rows={Math.max(2, value.split("\n").length)}
+            maxLength={maxLength}
+            className={cn(fieldCls, "resize-none")}
+          />
+        ) : (
+          <input
+            ref={(el) => {
+              fieldRef.current = el;
+            }}
+            type="text"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onBlur={() => setEditing(false)}
+            onKeyDown={closeOnKey}
+            placeholder={placeholder}
+            maxLength={maxLength}
+            // Plain label field — keep browser autofill and password
+            // managers (1Password / LastPass / Dashlane) off it.
+            autoComplete="off"
+            data-1p-ignore="true"
+            data-lpignore="true"
+            data-form-type="other"
+            className={fieldCls}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      aria-label={editLabel}
+      title={editLabel}
+      className={cn(
+        "group flex gap-1.5 min-w-0 max-w-full text-left rounded-sm",
+        multiline ? "items-start" : "items-center",
+        className,
+      )}
+    >
+      <span
+        className={cn(
+          multiline ? "whitespace-pre-wrap break-words" : "truncate",
+          textClassName,
+          !value && "italic text-muted-foreground/60",
+        )}
+      >
+        {value || placeholder}
+      </span>
+      <Pencil
+        className="size-3.5 shrink-0 text-muted-foreground/70 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 transition-opacity"
+        aria-hidden
+      />
+    </button>
   );
 }
 

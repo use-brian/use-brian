@@ -3,6 +3,9 @@
 /**
  * Recent runs of a workflow (app-web) — compact table with clickable
  * rows that drill into the run-detail page for a step-by-step trail.
+ * Deliberately dense (small rows, capped height with internal scroll):
+ * since the detail page went single-mode the history is ALWAYS on screen,
+ * sharing it with the board and an open step editor.
  *
  * Ported from `apps/web/src/components/workflow/run-history.tsx` (app
  * consolidation §5a). app-web is workspace-scoped at `/w/[workspaceId]/…`,
@@ -30,33 +33,33 @@ export function RunHistory({ workspaceId, workflowId, runs }: Props) {
   const t = useT();
   return (
     <section className="border border-border rounded-md bg-card overflow-hidden">
-      <div className="px-4 py-2 border-b border-border text-xs font-medium uppercase tracking-wide text-muted-foreground">
+      <div className="px-3 py-1.5 border-b border-border text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
         {t.workflowPage.builder.runsHeading}
       </div>
       {runs === null ? (
-        <div className="px-4 py-3 text-sm text-muted-foreground">…</div>
+        <div className="px-3 py-2 text-xs text-muted-foreground">…</div>
       ) : runs.length === 0 ? (
-        <div className="px-4 py-3 text-sm text-muted-foreground">
+        <div className="px-3 py-2 text-xs text-muted-foreground">
           {t.workflowPage.builder.noRunsYet}
         </div>
       ) : (
-        <ul className="divide-y divide-border">
+        <ul className="divide-y divide-border max-h-64 overflow-y-auto">
           {runs.map((r) => (
             <li key={r.id}>
               <Link
                 href={`/w/${workspaceId}/workflow/${workflowId}/runs/${r.id}`}
-                className="px-4 py-2.5 flex items-center gap-3 text-sm hover:bg-muted/40 transition-colors"
+                className="px-3 py-1.5 flex items-center gap-2.5 text-xs hover:bg-muted/40 transition-colors"
                 aria-label={t.workflowPage.builder.runsOpenRun}
               >
                 <StatusPill status={r.status} t={t} />
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs text-muted-foreground">
+                  <span className="text-xs text-muted-foreground">
                     {formatStarted(r.startedAt)} ·{" "}
                     {isTerminalRunStatus(r.status)
                       ? durationLabel(r.startedAt, r.finishedAt)
                       : // In-flight: elapsed so far, refreshed by the live poll.
                         elapsedLabel(r.startedAt, new Date())}
-                  </div>
+                  </span>
                   {r.error && (
                     <div className="text-xs text-red-600 dark:text-red-400 truncate">
                       {String(
