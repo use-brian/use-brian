@@ -27,7 +27,10 @@ COPY packages/api/src ./packages/api/src
 COPY packages/doc-model/src ./packages/doc-model/src
 COPY apps/doc-sync/src ./apps/doc-sync/src
 
-RUN pnpm turbo run build --filter=@sidanclaw/doc-sync
+# pnpm topological build, not turbo: emulated (`--platform linux/amd64` on
+# arm64 / QEMU) turbo aborts on EINTR creating its `.turbo` log dir. `<pkg>...`
+# = package + dependency closure, built deps-first (same as turbo's `^build`).
+RUN pnpm --filter "@sidanclaw/doc-sync..." run build
 
 # ── Stage 3: Production image ─────────────────────────────────
 FROM node:22-slim AS runner
