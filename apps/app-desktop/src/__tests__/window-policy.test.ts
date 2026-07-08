@@ -6,6 +6,9 @@ import {
   isLoginNavigation,
   parseRefreshBounce,
   decideLoadFailureAction,
+  decideLoginAction,
+  shouldAttemptLocalMint,
+  LOCAL_MINT_COOLDOWN_MS,
 } from "../window-policy.js";
 
 const CANVAS_ORIGIN = "https://app.sidan.ai";
@@ -169,5 +172,112 @@ describe("[COMP:app-desktop/window-policy] decideLoadFailureAction", () => {
         hasSession: false,
       }),
     ).toBe("show-window");
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)", () => {
+  const LOCAL_ORIGIN = "http://localhost:3003";
+  const cloud = { auth: "pkce" as const, appOrigin: CANVAS_ORIGIN };
+  const local = { auth: "local-session" as const, appOrigin: LOCAL_ORIGIN };
+
+  it("cloud target: every login navigation starts the PKCE flow (today's behavior)", () => {
+    expect(decideLoginAction("https://app.sidan.ai/login", cloud)).toBe("pkce");
+    expect(decideLoginAction("https://sidan.ai/login?next=/w/x", cloud)).toBe("pkce");
+    expect(decideLoginAction("https://accounts.google.com/o/oauth2/v2/auth?x=1", cloud)).toBe(
+      "pkce",
+    );
+  });
+
+  it("local target: the app origin's own /login mints the local-owner session", () => {
+    expect(decideLoginAction("http://localhost:3003/login", local)).toBe("local-session");
+    expect(decideLoginAction("http://localhost:3003/login?next=/w/x", local)).toBe(
+      "local-session",
+    );
+  });
+
+  it("local target: NEVER starts PKCE — off-origin logins and OAuth hops fall through", () => {
+    expect(decideLoginAction("https://sidan.ai/login", local)).toBe("none");
+    expect(decideLoginAction("https://accounts.google.com/o/oauth2/v2/auth?x=1", local)).toBe(
+      "none",
+    );
+  });
+
+  it("a connector OAuth hop is not a login for either target", () => {
+    expect(decideLoginAction(connectorOAuthUrl(), cloud)).toBe("none");
+    expect(decideLoginAction(connectorOAuthUrl(LOCAL_ORIGIN), local)).toBe("none");
+  });
+
+  it("a non-login navigation is none for either target", () => {
+    expect(decideLoginAction("https://app.sidan.ai/w/x/p/y", cloud)).toBe("none");
+    expect(decideLoginAction("http://localhost:3003/w/x", local)).toBe("none");
+    expect(decideLoginAction("not a url", local)).toBe("none");
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] shouldAttemptLocalMint", () => {
+  it("always allows the first attempt, blocks within the cooldown, re-allows after it", () => {
+    expect(shouldAttemptLocalMint(null, 1_000)).toBe(true);
+    expect(shouldAttemptLocalMint(1_000, 1_000 + LOCAL_MINT_COOLDOWN_MS - 1)).toBe(false);
+    expect(shouldAttemptLocalMint(1_000, 1_000 + LOCAL_MINT_COOLDOWN_MS)).toBe(true);
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] decideLoadFailureAction (local target, §2.2)", () => {
+  const LOCAL = "http://localhost:3003/w/x";
+
+  it("routes any main-frame failure on a local target to the brain-unreachable landing", () => {
+    for (const hasSession of [true, false]) {
+      expect(
+        decideLoadFailureAction({
+          errorCode: -102, // ERR_CONNECTION_REFUSED — the brain isn't running
+          isMainFrame: true,
+          failedUrl: LOCAL,
+          hasSession,
+          target: "local",
+        }),
+      ).toBe("local-unreachable");
+    }
+  });
+
+  it("keeps the ignore + file: precedence rules under a local target", () => {
+    expect(
+      decideLoadFailureAction({
+        errorCode: -3,
+        isMainFrame: true,
+        failedUrl: LOCAL,
+        hasSession: true,
+        target: "local",
+      }),
+    ).toBe("ignore");
+    expect(
+      decideLoadFailureAction({
+        errorCode: -102,
+        isMainFrame: false,
+        failedUrl: LOCAL,
+        hasSession: true,
+        target: "local",
+      }),
+    ).toBe("ignore");
+    expect(
+      decideLoadFailureAction({
+        errorCode: -6,
+        isMainFrame: true,
+        failedUrl: "file:///app/dist/signin.html",
+        hasSession: false,
+        target: "local",
+      }),
+    ).toBe("show-window");
+  });
+
+  it("an explicit cloud target keeps the session-driven behavior", () => {
+    expect(
+      decideLoadFailureAction({
+        errorCode: -106,
+        isMainFrame: true,
+        failedUrl: "https://app.sidan.ai/w/x",
+        hasSession: true,
+        target: "cloud",
+      }),
+    ).toBe("offline-retry");
   });
 });

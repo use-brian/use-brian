@@ -24,10 +24,14 @@ export interface MenuHandlers {
   onSignOut: () => void;
   /** Perform the current update action (check for updates / restart to install). */
   onUpdate: () => void;
+  /** Switch the shell's target (cloud ↔ local brain); persists + relaunches. */
+  onSwitchTarget: () => void;
   /** Whether DevTools / reload affordances should be shown (dev only). */
   isDev: boolean;
   /** The auto-update item state, or null to omit it (auto-update disabled). */
   update: { readonly label: string; readonly enabled: boolean } | null;
+  /** The active target for the indicator + switch items (see menu-template.ts). */
+  target: { readonly kind: "cloud" | "local"; readonly label: string } | null;
 }
 
 export function buildAppMenu(handlers: MenuHandlers): Menu {
@@ -37,6 +41,7 @@ export function buildAppMenu(handlers: MenuHandlers): Menu {
       isDev: handlers.isDev,
       appName: app.name,
       update: handlers.update,
+      target: handlers.target,
     },
     handlers,
   );

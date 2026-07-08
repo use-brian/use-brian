@@ -38,6 +38,15 @@ const bridge = {
   // mode (like signIn/out); bundled mode stays single-account (switch errors).
   addAccount: () => ipcRenderer.send("sidanclaw:add-account"),
   switchAccount: (id) => ipcRenderer.invoke("sidanclaw:switch-account", id),
+  // Dual target (docs/plans/consumer-local-experience.md §2.2). `runLocal`
+  // probes a local/self-hosted brain's paired API (`null` = the launcher
+  // default address) and resolves `{ ok }` / `{ ok:false, error, url }`; on
+  // success the shell persists the target and RELAUNCHES. `useCloud` persists
+  // the cloud target and relaunches. Present in every mode; the landing that
+  // calls them is shell-owned.
+  runLocal: (url) =>
+    ipcRenderer.invoke("sidanclaw:run-local", typeof url === "string" ? url : null),
+  useCloud: () => ipcRenderer.send("sidanclaw:use-cloud"),
 };
 
 if (process.argv.includes("--sidanclaw-bundled")) {

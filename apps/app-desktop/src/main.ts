@@ -44,6 +44,17 @@ import electronUpdater from "electron-updater";
 
 import { resolveConfig } from "./config.js";
 import {
+  DEFAULT_LOCAL_APP_URL,
+  TARGET_FILE_NAME,
+  healthUrl,
+  localMintUrl,
+  localTarget,
+  parsePersistedTarget,
+  serializePersistedTarget,
+  targetWindowTitle,
+  type TargetKind,
+} from "./target-store.js";
+import {
   INITIAL_UPDATE_STATE,
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_INITIAL_CHECK_DELAY_MS,
@@ -56,9 +67,10 @@ import {
 } from "./auto-update.js";
 import {
   classifyNavigation,
-  isLoginNavigation,
+  decideLoginAction,
   parseRefreshBounce,
   decideLoadFailureAction,
+  shouldAttemptLocalMint,
 } from "./window-policy.js";
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl } from "./quick-capture.js";
@@ -108,7 +120,27 @@ import {
 const { autoUpdater } = electronUpdater;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const cfg = resolveConfig();
+
+/**
+ * The persisted target record (§2.1 of docs/plans/consumer-local-experience.md;
+ * see target-store.ts): read synchronously BEFORE the config resolves so the
+ * whole process — window, policy closures, keep-alive, menus — is born on one
+ * target. Switching targets rewrites the file and relaunches; nothing
+ * re-resolves in place.
+ */
+function targetFile(): string {
+  return join(app.getPath("userData"), TARGET_FILE_NAME);
+}
+
+function readPersistedTargetRaw(): string | null {
+  try {
+    return readFileSync(targetFile(), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+const cfg = resolveConfig(process.env, readPersistedTargetRaw());
 const isDev = !app.isPackaged;
 
 const PRELOAD_PATH = join(__dirname, "preload.cjs");
@@ -227,10 +259,23 @@ function createWindow(): BrowserWindow {
     if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(INTERACTIVE_NO_DRAG_CSS);
   });
 
+  // §2.3 visible target indicator: a local target suffixes every page title so
+  // the two brains can never be mistaken for each other. Cloud keeps titles
+  // untouched (no handler installed).
+  if (cfg.target === "local") {
+    win.webContents.on("page-title-updated", (event, title) => {
+      event.preventDefault();
+      win.setTitle(targetWindowTitle(title, { kind: cfg.target, label: cfg.targetLabel }));
+    });
+  }
+
   // Outbound links and untrusted origins open in the system browser; sign-in
-  // navigations show the in-app landing; the app frame stays pinned to canvas.
+  // navigations route per target (PKCE for cloud, the local-owner session mint
+  // for a local brain); the app frame stays pinned to the app origin.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (isLoginNavigation(url)) promptSignIn();
+    const login = decideLoginAction(url, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin });
+    if (login === "pkce") promptSignIn();
+    else if (login === "local-session") void mintLocalSession();
     else void shell.openExternal(url);
     return { action: "deny" };
   });
@@ -246,7 +291,9 @@ function createWindow(): BrowserWindow {
   win.webContents.on("did-fail-load", (_e, errorCode, _desc, failedUrl, isMainFrame) => {
     void (async () => {
       const hasSession = !!(await readJarCookie("refresh_token"));
-      switch (decideLoadFailureAction({ errorCode, isMainFrame, failedUrl, hasSession })) {
+      switch (
+        decideLoadFailureAction({ errorCode, isMainFrame, failedUrl, hasSession, target: cfg.target })
+      ) {
         case "ignore":
           return;
         case "show-window":
@@ -254,6 +301,9 @@ function createWindow(): BrowserWindow {
           return;
         case "offline-retry":
           showOffline(win);
+          return;
+        case "local-unreachable":
+          showLocalDown(win);
           return;
         case "signin":
           promptSignIn();
@@ -270,12 +320,15 @@ function createWindow(): BrowserWindow {
 }
 
 function handleNavigation(event: Event, url: string): void {
-  // A login page or OAuth hop must never load in-window — cancel it and show
-  // the in-app sign-in landing (the user starts the system-browser PKCE flow
-  // from there) instead of leaving a blank window.
-  if (isLoginNavigation(url)) {
+  // A login page or OAuth hop must never load in-window — cancel it and route
+  // per target (§2.3): the cloud target shows the sign-in landing (the user
+  // starts the system-browser PKCE flow from there); a local target mints the
+  // local-owner session via the app-web trigger route instead.
+  const login = decideLoginAction(url, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin });
+  if (login !== "none") {
     event.preventDefault();
-    promptSignIn();
+    if (login === "pkce") promptSignIn();
+    else void mintLocalSession();
     return;
   }
   // A sub-app refresh bounce (the proxy's redirect on a stale access token, or
@@ -296,7 +349,7 @@ function handleNavigation(event: Event, url: string): void {
 
 /** Show the built-in sign-in landing (never a blank window). */
 function promptSignIn(): void {
-  stopOfflineRetry(); // leaving the offline state for a real sign-out
+  stopRetryWatchers(); // leaving the offline/brain-down state for a real sign-out
   const win = ensureWindow();
   void win.webContents.loadFile(SIGNIN_PAGE).then(() => focusWindow(win));
 }
@@ -311,11 +364,18 @@ function promptSignIn(): void {
 
 const OFFLINE_RETRY_INTERVAL_MS = 5 * 1000;
 let offlineRetryTimer: ReturnType<typeof setInterval> | null = null;
+/** The local-brain reconnect watcher (§2.2) — mutually exclusive with the offline one. */
+let localRetryTimer: ReturnType<typeof setInterval> | null = null;
 
-function stopOfflineRetry(): void {
+/** Stop both reconnect watchers (offline + local-brain). */
+function stopRetryWatchers(): void {
   if (offlineRetryTimer) {
     clearInterval(offlineRetryTimer);
     offlineRetryTimer = null;
+  }
+  if (localRetryTimer) {
+    clearInterval(localRetryTimer);
+    localRetryTimer = null;
   }
 }
 
@@ -327,7 +387,7 @@ function stopOfflineRetry(): void {
  * re-shows the offline landing.
  */
 async function retryLoad(win: BrowserWindow): Promise<void> {
-  stopOfflineRetry();
+  stopRetryWatchers();
   await loadApp(win);
 }
 
@@ -337,10 +397,118 @@ async function retryLoad(win: BrowserWindow): Promise<void> {
  */
 function showOffline(win: BrowserWindow): void {
   void win.webContents.loadFile(OFFLINE_PAGE).then(() => focusWindow(win));
-  stopOfflineRetry();
+  stopRetryWatchers();
   offlineRetryTimer = setInterval(() => {
     if (net.isOnline()) void retryLoad(win);
   }, OFFLINE_RETRY_INTERVAL_MS);
+}
+
+// ── Local target (§2.2/§2.3, docs/plans/consumer-local-experience.md) ─
+//
+// The machinery for fronting a local / self-hosted brain: the paired-API
+// health probe, the local-owner session mint (a local brain has no login),
+// the brain-not-reachable landing + auto-reconnect, and the persist+relaunch
+// target switch. Every decision is pure (target-store.ts / window-policy.ts);
+// only the IO lives here.
+
+/** Probe the paired API's `/health` — cheap, short-timeout, never throws (§2.2). */
+async function probeLocalBrain(apiUrl: string): Promise<boolean> {
+  try {
+    const res = await net.fetch(healthUrl(apiUrl), {
+      signal: AbortSignal.timeout(3500),
+      cache: "no-store",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Persist the target record and relaunch — the §2.1 switch. The config is a
+ * process-lifetime constant (keep-alive timers, menu labels, and the policy
+ * closures all hang off it), so a switch never re-resolves in place.
+ */
+function persistTargetAndRelaunch(kind: TargetKind, appUrl?: string): void {
+  try {
+    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl));
+  } catch (err) {
+    dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
+    return;
+  }
+  app.relaunch();
+  app.exit(0);
+}
+
+/** The last local address ever used (remembered across a switch to cloud). */
+function rememberedLocalAppUrl(): string {
+  return parsePersistedTarget(readPersistedTargetRaw())?.appUrl ?? DEFAULT_LOCAL_APP_URL;
+}
+
+let lastLocalMintAt: number | null = null;
+
+/**
+ * Mint the oss local-owner session by loading the app-web trigger route
+ * in-window (same-origin: it sets the cookie trio into this jar and 302s into
+ * the app — the shell's jar is separate from the system browser's, so the
+ * launcher's session can never be reused). Cooldown-guarded: a brain that
+ * keeps bouncing back to /login (an edition/gate mismatch) would loop, so
+ * within the cooldown the brain-problem landing shows instead.
+ */
+async function mintLocalSession(): Promise<void> {
+  const win = ensureWindow();
+  const now = Date.now();
+  if (!shouldAttemptLocalMint(lastLocalMintAt, now)) {
+    showLocalDown(win, "auth");
+    return;
+  }
+  lastLocalMintAt = now;
+  try {
+    await win.webContents.loadURL(localMintUrl(cfg.appUrl));
+  } catch (err) {
+    console.warn("Local session mint failed:", err); // did-fail-load shows the landing
+  }
+}
+
+/**
+ * Show the brain-not-reachable landing (§2.2) and start the reconnect
+ * watcher. Unlike the cloud offline watcher, `net.isOnline()` says nothing
+ * about a localhost brain — so this one re-probes the paired API and reloads
+ * the app the moment `/health` answers.
+ */
+function showLocalDown(win: BrowserWindow, reason: "unreachable" | "auth" = "unreachable"): void {
+  void win.webContents
+    .loadFile(SIGNIN_PAGE, { query: { mode: "local-down", target: cfg.appUrl, reason } })
+    .then(() => focusWindow(win));
+  stopRetryWatchers();
+  localRetryTimer = setInterval(() => {
+    void (async () => {
+      if (await probeLocalBrain(cfg.apiUrl)) await retryLoad(win);
+    })();
+  }, OFFLINE_RETRY_INTERVAL_MS);
+}
+
+/**
+ * The menu/tray "Switch to ..." action. Cloud → local re-probes the
+ * remembered address first: reachable → persist + relaunch; not → the
+ * landing's custom-URL view, never a silent failure. Local → cloud always
+ * switches (the local address stays remembered for the way back).
+ */
+async function switchTargetFromMenu(): Promise<void> {
+  if (cfg.target === "local") {
+    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl());
+    return;
+  }
+  const url = rememberedLocalAppUrl();
+  const target = localTarget(url);
+  if (target && (await probeLocalBrain(target.apiUrl))) {
+    persistTargetAndRelaunch("local", target.appUrl);
+    return;
+  }
+  const win = ensureWindow();
+  void win.webContents
+    .loadFile(SIGNIN_PAGE, { query: { mode: "local-setup", url } })
+    .then(() => focusWindow(win));
 }
 
 /** Return the live window, recreating it if it was closed (tray app model). */
@@ -887,7 +1055,14 @@ async function resumeAfterRefresh(nextUrl: string): Promise<void> {
     showOffline(ensureWindow());
     return;
   }
-  promptSignIn(); // "signed-out" — the refresh token is dead
+  // "signed-out" — the refresh token is dead. A local target re-mints instead
+  // of prompting: reloading the app bounces to /login, which decideLoginAction
+  // turns into a fresh local-owner session (a local brain has no sign-in).
+  if (cfg.targetAuth === "local-session") {
+    void loadApp(ensureWindow());
+    return;
+  }
+  promptSignIn();
 }
 
 /** Keep the thin shell's session alive across access-token expiries. */
@@ -901,8 +1076,11 @@ function startSessionKeepalive(): void {
       const outcome = await refreshSessionInPlace();
       if (outcome === "signed-out" && mainWindow && !mainWindow.isDestroyed()) {
         // Quietly swap to the landing — a background tick must not steal focus
-        // (and must not conjure a window when the app is tray-resident).
-        void mainWindow.webContents.loadFile(SIGNIN_PAGE);
+        // (and must not conjure a window when the app is tray-resident). A
+        // local target reloads the app instead: its /login bounce re-mints the
+        // local-owner session (see mintLocalSession).
+        if (cfg.targetAuth === "local-session") void loadApp(mainWindow);
+        else void mainWindow.webContents.loadFile(SIGNIN_PAGE);
       }
     } catch (err) {
       console.warn("Session keep-alive tick failed:", err);
@@ -1069,8 +1247,10 @@ function refreshAppMenu(): void {
       onSignIn: startSignIn,
       onSignOut: () => void signOut(),
       onUpdate: handleUpdateMenuClick,
+      onSwitchTarget: () => void switchTargetFromMenu(),
       isDev,
       update: updateMenuItem(),
+      target: { kind: cfg.target, label: cfg.targetLabel },
     }),
   );
 }
@@ -1085,10 +1265,24 @@ function buildTrayMenu(): Menu {
   const template: MenuItemConstructorOptions[] = [
     { label: "Open sidanclaw", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
-    { type: "separator" },
-    { label: "Sign In", click: () => startSignIn() },
-    { label: "Sign Out", click: () => void signOut() },
   ];
+  // A local target has no login — the tray mirrors the app menu (§2.3).
+  if (cfg.target !== "local") {
+    template.push(
+      { type: "separator" },
+      { label: "Sign In", click: () => startSignIn() },
+      { label: "Sign Out", click: () => void signOut() },
+    );
+  }
+  // The active-target indicator + switch (§2.1 toggle, §2.3 visible indicator).
+  template.push(
+    { type: "separator" },
+    { label: `Target: ${cfg.targetLabel}`, enabled: false },
+    {
+      label: cfg.target === "cloud" ? "Switch to Local Brain…" : "Switch to sidanclaw Cloud",
+      click: () => void switchTargetFromMenu(),
+    },
+  );
   if (update) {
     template.push(
       { type: "separator" },
@@ -1122,7 +1316,7 @@ function createTray(): Tray {
   }
 
   const t = new Tray(icon);
-  t.setToolTip(app.name);
+  t.setToolTip(cfg.target === "local" ? `${app.name} · ${cfg.targetLabel}` : app.name);
   t.setContextMenu(buildTrayMenu());
   t.on("click", () => focusWindow(ensureWindow()));
   return t;
@@ -1174,6 +1368,25 @@ if (!gotLock) {
     typeof accountId === "string"
       ? switchAccount(accountId)
       : Promise.resolve({ ok: false, error: "switch" }),
+  );
+
+  // Dual target (§2.2). `run-local` probes the paired API of the requested
+  // (or default) local address; on success it replies, then persists the
+  // target and relaunches on the next tick so the landing can paint its
+  // "Restarting..." state before the process dies. `use-cloud` switches back,
+  // keeping the local address remembered for the return trip.
+  ipcMain.handle("sidanclaw:run-local", async (_event, rawUrl: unknown) => {
+    const input = typeof rawUrl === "string" && rawUrl.trim() ? rawUrl : DEFAULT_LOCAL_APP_URL;
+    const target = localTarget(input);
+    if (!target) return { ok: false, error: "invalid-url", url: input };
+    if (!(await probeLocalBrain(target.apiUrl))) {
+      return { ok: false, error: "unreachable", url: target.appUrl };
+    }
+    setImmediate(() => persistTargetAndRelaunch("local", target.appUrl));
+    return { ok: true, url: target.appUrl };
+  });
+  ipcMain.on("sidanclaw:use-cloud", () =>
+    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl()),
   );
 
   // Bundled-mode token bridge: the preload reads/writes the Bearer token here.

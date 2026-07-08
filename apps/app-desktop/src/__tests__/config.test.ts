@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { resolveConfig, PROTOCOL_SCHEME } from "../config.js";
+import { serializePersistedTarget } from "../target-store.js";
 
 describe("[COMP:app-desktop/config] resolveConfig", () => {
   it("defaults to the production app + API URLs with no env override", () => {
@@ -93,5 +94,64 @@ describe("[COMP:app-desktop/config] resolveConfig", () => {
   it("returns a frozen config", () => {
     const cfg = resolveConfig({});
     expect(Object.isFrozen(cfg)).toBe(true);
+  });
+});
+
+describe("[COMP:app-desktop/config] resolveConfig target resolution (§2.1)", () => {
+  it("defaults to the cloud target with no persisted record (today's behavior, byte for byte)", () => {
+    const cfg = resolveConfig({});
+    expect(cfg.target).toBe("cloud");
+    expect(cfg.targetAuth).toBe("pkce");
+    expect(cfg.targetLabel).toBe("sidanclaw Cloud");
+    expect(cfg.appUrl).toBe("https://app.sidan.ai");
+    expect(cfg.apiUrl).toBe("https://api.sidan.ai");
+  });
+
+  it("resolves a persisted local record to its address, paired API, and local-session auth", () => {
+    const cfg = resolveConfig({}, serializePersistedTarget("local", "http://localhost:3003"));
+    expect(cfg.target).toBe("local");
+    expect(cfg.targetAuth).toBe("local-session");
+    expect(cfg.targetLabel).toBe("Local Brain (localhost:3003)");
+    expect(cfg.appUrl).toBe("http://localhost:3003");
+    expect(cfg.apiUrl).toBe("http://localhost:4000");
+  });
+
+  it("pairs a self-hosted address with its own backend, never the cloud API", () => {
+    const cfg = resolveConfig({}, serializePersistedTarget("local", "https://brain.example.com"));
+    expect(cfg.appUrl).toBe("https://brain.example.com");
+    expect(cfg.apiUrl).toBe("https://brain.example.com:4000");
+  });
+
+  it("keeps a persisted cloud record on cloud (the remembered local address is inert)", () => {
+    const cfg = resolveConfig({}, serializePersistedTarget("cloud", "http://myserver:3003"));
+    expect(cfg.target).toBe("cloud");
+    expect(cfg.appUrl).toBe("https://app.sidan.ai");
+  });
+
+  it("falls back to cloud on a corrupt record", () => {
+    const cfg = resolveConfig({}, "{not json");
+    expect(cfg.target).toBe("cloud");
+    expect(cfg.appUrl).toBe("https://app.sidan.ai");
+  });
+
+  it("lets the env override win the whole target (dev semantics, PKCE auth)", () => {
+    const cfg = resolveConfig(
+      { SIDANCLAW_APP_URL: "http://localhost:3003" },
+      serializePersistedTarget("local", "http://myserver:3003"),
+    );
+    expect(cfg.appUrl).toBe("http://localhost:3003");
+    expect(cfg.apiUrl).toBe("http://localhost:4000");
+    expect(cfg.target).toBe("cloud");
+    expect(cfg.targetAuth).toBe("pkce");
+  });
+
+  it("lets an explicit SIDANCLAW_API_URL override a persisted local pairing", () => {
+    const cfg = resolveConfig(
+      { SIDANCLAW_API_URL: "http://localhost:5000" },
+      serializePersistedTarget("local", "http://localhost:3003"),
+    );
+    expect(cfg.appUrl).toBe("http://localhost:3003");
+    expect(cfg.apiUrl).toBe("http://localhost:5000");
+    expect(cfg.targetAuth).toBe("local-session");
   });
 });
