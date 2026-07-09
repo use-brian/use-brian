@@ -21,13 +21,24 @@ import {
   MAX_ATTACHMENTS_PER_TURN,
   MAX_EXTERNAL_DOCUMENT_BYTES,
 } from './attachments.js'
-import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from './tool-helpers.js'
+import {
+  ctxFor,
+  errorMessage,
+  idOrPathShape,
+  policyBlockGate,
+  policyConfirmation,
+  workspaceGate,
+  type ResolveFileToolPolicy,
+} from './tool-helpers.js'
 
 function formatMb(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
 }
 
-export function createSendFileTool(api: FilesApi): Tool {
+export function createSendFileTool(
+  api: FilesApi,
+  opts?: { resolvePolicy?: ResolveFileToolPolicy },
+): Tool {
   return buildTool({
     name: 'sendFile',
     requiresCapability: 'files',
@@ -35,6 +46,7 @@ export function createSendFileTool(api: FilesApi): Tool {
     // Reads the brain, writes nothing — the side effect (delivery) is owned
     // by the channel route after the turn.
     isReadOnly: true,
+    resolveConfirmation: policyConfirmation(opts?.resolvePolicy, 'sendFile'),
     description:
       'Attach an existing workspace file to your reply as a real document (a downloadable file in the chat), preserving the original bytes. ' +
       'Use when the user asks you to send / share / give them a file from the brain. To send freshly written content, first save it with fileWrite, then call sendFile with the saved path. ' +
@@ -53,6 +65,8 @@ export function createSendFileTool(api: FilesApi): Tool {
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await policyBlockGate(opts?.resolvePolicy, 'sendFile', context)
+      if (policyGate) return policyGate
 
       // ── Gate 1: delivery surface ──
       const collector = context.outboundAttachments

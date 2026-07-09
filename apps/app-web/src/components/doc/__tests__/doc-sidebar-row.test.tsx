@@ -136,3 +136,51 @@ describe("[COMP:app-web/doc-sidebar] Draft prune caption", () => {
     expect(html).not.toContain(en.docPage.sidebarDraftSave);
   });
 });
+
+describe("[COMP:app-web/doc-sidebar] Temporary-page icon ghost", () => {
+  it("ghosts the leading icon on an unsaved draft", () => {
+    // The always-on counterpart to the hover-revealed prune caption: an
+    // auto-pruning draft's icon carries `doc-icon-temporary` so it reads as
+    // temporary at a glance. Gated on `state`, not the prune ETA, so it shows
+    // even when the list row has no `autoPruneAt` yet.
+    const html = render(
+      <DocSidebarRow
+        row={draftRow()}
+        active={false}
+        onSelect={noop}
+        onSave={noop}
+        onDelete={noop}
+      />,
+    );
+    expect(html).toContain("doc-icon-temporary");
+  });
+
+  it("does not ghost a saved row", () => {
+    const html = render(
+      <DocSidebarRow
+        row={draftRow({ state: "saved" })}
+        active={false}
+        onSelect={noop}
+        onSave={noop}
+        onDelete={noop}
+      />,
+    );
+    expect(html).not.toContain("doc-icon-temporary");
+  });
+
+  it("does not ghost a draft kept by a saved ancestor", () => {
+    // Kept by ancestry → the prune worker spares it, so it is not temporary.
+    const html = render(
+      <DocSidebarRow
+        row={draftRow()}
+        active={false}
+        autoPruneAt={in28Days}
+        inSavedSubtree
+        onSelect={noop}
+        onSave={noop}
+        onDelete={noop}
+      />,
+    );
+    expect(html).not.toContain("doc-icon-temporary");
+  });
+});

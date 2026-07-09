@@ -25,14 +25,18 @@
  */
 
 import { useState } from "react";
+import Link from "next/link";
 import Markdown from "react-markdown";
 import {
   BookText,
+  Bot,
   Box,
   ChevronDown,
+  ExternalLink,
   File as FileIcon,
   ListChecks,
   MessageSquare,
+  Sparkles,
   StickyNote,
   type LucideIcon,
 } from "lucide-react";
@@ -43,6 +47,10 @@ import {
   type BrainInboxRowDetail,
   type BrainPrimitive as InboxPrimitive,
 } from "@/lib/api/brain-inbox";
+import {
+  getWorkspaceSkill,
+  type WorkspaceSkillSummary,
+} from "@/lib/api/skills";
 
 type EdgeEndpoint = { kind: string; id: string; label: string | null };
 
@@ -72,6 +80,8 @@ const KIND_ICON: Record<string, LucideIcon> = {
   episode: MessageSquare,
   event: MessageSquare,
   kb_chunk: BookText,
+  skill: Sparkles,
+  assistant: Bot,
 };
 
 /** Humanise a snake/underscore data token for display ("documented_by" →
@@ -128,7 +138,10 @@ export function RelationshipReview({
       <h3 className="text-xs uppercase tracking-wide text-muted-foreground">
         {rel.heading}
       </h3>
-      <div className="flex flex-col">
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {rel.explainer}
+      </p>
+      <div className="mt-1 flex flex-col">
         <EndpointCard
           workspaceId={workspaceId}
           endpoint={source}
@@ -169,6 +182,12 @@ function EndpointCard({
   const primitive = endpointPrimitive(endpoint.kind);
   const kinds = rel.kinds as Record<string, string>;
   const kindLabel = kinds[endpoint.kind] ?? humanise(endpoint.kind);
+  // A skill endpoint isn't a brain-inbox primitive (skills live in
+  // `workspace_skills`, not the review union), so `endpointPrimitive` returns
+  // null — but it IS previewable: the expander fetches the skill and shows its
+  // description + a link into the full skill editor, so a "skill → learned_from
+  // → assistant" review says which skill it is, not just "Skill".
+  const isSkill = endpoint.kind === "skill";
   // The label columns are NOT NULL, so a RESOLVABLE endpoint kind with no
   // resolved label means its row was hard-deleted — this edge is dangling.
   // Flag it up front (no fetch needed) so a stale relationship is obvious and
@@ -176,18 +195,25 @@ function EndpointCard({
   // have a null label only because we don't resolve them, so never "missing".)
   const missing = primitive !== null && endpoint.label === null;
   const name = endpoint.label ?? kindLabel;
-  const canExpand = primitive !== null && endpoint.id.length > 0 && !missing;
+  const canExpand =
+    (primitive !== null || isSkill) && endpoint.id.length > 0 && !missing;
 
   const [open, setOpen] = useState(false);
   // undefined = not fetched yet, null = fetch failed / gone.
   const [detail, setDetail] = useState<BrainInboxRowDetail | null | undefined>(
     undefined,
   );
+  const [skill, setSkill] = useState<
+    WorkspaceSkillSummary | null | undefined
+  >(undefined);
 
   function toggle() {
     const next = !open;
     setOpen(next);
-    if (next && detail === undefined && primitive) {
+    if (!next) return;
+    if (isSkill && skill === undefined) {
+      void getWorkspaceSkill(workspaceId, endpoint.id).then((s) => setSkill(s));
+    } else if (detail === undefined && primitive) {
       void fetchBrainRow(workspaceId, primitive, endpoint.id).then((d) =>
         setDetail(d),
       );
@@ -253,13 +279,93 @@ function EndpointCard({
       </button>
       {open && canExpand && (
         <div className="border-t border-border px-3 py-2.5">
-          <EndpointDetail
-            detail={detail}
-            missing={rel.endpointMissing}
-            unavailable={rel.detailsUnavailable}
-          />
+          {isSkill ? (
+            <SkillEndpointDetail
+              workspaceId={workspaceId}
+              skillRowId={endpoint.id}
+              skill={skill}
+              missing={rel.endpointMissing}
+              unavailable={rel.detailsUnavailable}
+            />
+          ) : (
+            <EndpointDetail
+              detail={detail}
+              missing={rel.endpointMissing}
+              unavailable={rel.detailsUnavailable}
+            />
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Expanded detail for a `skill` endpoint — the skill's description +
+ *  when-to-use routing copy + Suggested/Active status, and the UX path to
+ *  preview the exact skill: a link into the full skill editor
+ *  (`/w/:ws/brain/skills/:rowId`). This is what makes a "learned_from" review
+ *  reviewable — the user can see and open the skill they're confirming. */
+function SkillEndpointDetail({
+  workspaceId,
+  skillRowId,
+  skill,
+  missing,
+  unavailable,
+}: {
+  workspaceId: string;
+  skillRowId: string;
+  skill: WorkspaceSkillSummary | null | undefined;
+  missing: string;
+  unavailable: string;
+}) {
+  const t = useT();
+  const rel = t.brainPage.reviewPanel.relationship;
+  const href = `/w/${workspaceId}/brain/skills/${skillRowId}`;
+
+  if (skill === undefined) {
+    return <p className="text-xs text-muted-foreground">…</p>;
+  }
+  if (skill === null) {
+    // Resolved a name at list time but the skill is gone now (deleted between).
+    return <p className="text-xs italic text-muted-foreground">{missing}</p>;
+  }
+
+  const description = skill.description.trim();
+  const whenToUse = skill.whenToUse?.trim() ?? "";
+  const statusLabel = skill.activatedAt ? rel.skillActive : rel.skillSuggested;
+
+  return (
+    <div className="flex flex-col gap-2 text-xs">
+      <span
+        className={cn(
+          "self-start rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide",
+          skill.activatedAt
+            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+            : "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+        )}
+      >
+        {statusLabel}
+      </span>
+      {description.length > 0 ? (
+        <p className="leading-relaxed text-foreground">{description}</p>
+      ) : (
+        <p className="text-muted-foreground">{unavailable}</p>
+      )}
+      {whenToUse.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+            {rel.skillWhenToUse}
+          </span>
+          <p className="leading-relaxed text-muted-foreground">{whenToUse}</p>
+        </div>
+      )}
+      <Link
+        href={href}
+        className="inline-flex items-center gap-1 self-start font-medium text-foreground underline-offset-2 hover:underline"
+      >
+        {rel.openSkill}
+        <ExternalLink className="size-3" aria-hidden />
+      </Link>
     </div>
   );
 }

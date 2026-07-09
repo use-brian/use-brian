@@ -3,15 +3,17 @@ import request from 'supertest'
 import { goalsRoutes, type GoalsRouteOptions } from '../goals.js'
 import { createTestApp } from './helpers.js'
 
-// The confirm/work routes use the db helpers directly (not the goalStore port).
+// The confirm/work/abandon routes use the db helpers directly (not the goalStore port).
 vi.mock('../../db/goals.js', () => ({
   getGoalById: vi.fn(),
   getGoalByIdSystem: vi.fn(),
   updateGoalSystem: vi.fn(),
+  setGoalStatusSystem: vi.fn(),
 }))
-import { getGoalById, updateGoalSystem } from '../../db/goals.js'
+import { getGoalById, updateGoalSystem, setGoalStatusSystem } from '../../db/goals.js'
 const mockGetGoalById = vi.mocked(getGoalById)
 const mockUpdateGoalSystem = vi.mocked(updateGoalSystem)
+const mockSetGoalStatusSystem = vi.mocked(setGoalStatusSystem)
 
 beforeEach(() => vi.clearAllMocks())
 
@@ -200,6 +202,48 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm — clarity gate (�
     expect(res.status).toBe(404)
     expect(assessClarity).not.toHaveBeenCalled()
     expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/goals-route] POST /api/goals/:id/abandon — discard', () => {
+  it('401 when unauthenticated (never reads or writes the goal)', async () => {
+    const { app } = makeApp({ role: 'member' })
+    const res = await request(app).post('/api/goals/g1/abandon').send({})
+    expect(res.status).toBe(401)
+    expect(mockGetGoalById).not.toHaveBeenCalled()
+    expect(mockSetGoalStatusSystem).not.toHaveBeenCalled()
+  })
+
+  it('404 when the goal is absent / the caller is not a member (RLS-scoped)', async () => {
+    mockGetGoalById.mockResolvedValue(null as never)
+    const { app } = makeApp({ userId: 'stranger', role: null })
+    const res = await request(app).post('/api/goals/g1/abandon').send({})
+    expect(res.status).toBe(404)
+    expect(mockGetGoalById).toHaveBeenCalledWith('stranger', 'g1')
+    expect(mockSetGoalStatusSystem).not.toHaveBeenCalled()
+  })
+
+  it('discards a draft: sets status=abandoned and returns the projected goal', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    mockSetGoalStatusSystem.mockResolvedValue({ ...DRAFT_GOAL, status: 'abandoned' } as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+
+    const res = await request(app).post('/api/goals/g1/abandon').send({})
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.goal.status).toBe('abandoned')
+    expect(mockSetGoalStatusSystem).toHaveBeenCalledWith('g1', 'abandoned')
+  })
+
+  it('409 refuses to discard a completed goal (never writes)', async () => {
+    mockGetGoalById.mockResolvedValue({ ...DRAFT_GOAL, status: 'done', confirmedAt: NOW } as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+
+    const res = await request(app).post('/api/goals/g1/abandon').send({})
+
+    expect(res.status).toBe(409)
+    expect(mockSetGoalStatusSystem).not.toHaveBeenCalled()
   })
 })
 

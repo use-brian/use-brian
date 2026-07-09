@@ -1500,14 +1500,18 @@ function DeliverField({
                   setStickyCustom(true);
                   onChange({
                     ...step,
-                    deliver: { channelType, channelId: "" },
+                    // Spread keeps a chat-authored `thread` (reply-in-thread)
+                    // intact across a same-platform destination edit — the
+                    // type-change path above deliberately resets it (a thread
+                    // parent can't live on another platform).
+                    deliver: { ...step.deliver, channelType, channelId: "" },
                   });
                   return;
                 }
                 setStickyCustom(false);
                 onChange({
                   ...step,
-                  deliver: { channelType, channelId: v },
+                  deliver: { ...step.deliver, channelType, channelId: v },
                 });
               }}
               items={items}
@@ -1544,7 +1548,8 @@ function DeliverField({
                 onChange={(e) =>
                   onChange({
                     ...step,
-                    deliver: { channelType, channelId: e.target.value },
+                    // Same thread-preserving spread as the picker above.
+                    deliver: { ...step.deliver, channelType, channelId: e.target.value },
                   })
                 }
                 disabled={disabled}

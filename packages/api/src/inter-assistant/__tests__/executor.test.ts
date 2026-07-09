@@ -456,6 +456,25 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     )
   })
 
+  // ── Record-creation restraint (Pattern 2 of the duplicate-task incident) ──
+  // A recurring summary/overview workflow step kept opening a task that merely
+  // restated its own instruction each fire, accumulating near-identical tasks.
+  // The workflow-lane system prompt now steers the callee off that behavior.
+  it('injects the record-creation restraint block on the workflow lane', async () => {
+    yieldsText()
+    await executorWithTools(new Map())({ ...baseParams, callerChannelType: 'workflow' })
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).toContain("## Produce this step's output, do not restate it as a record")
+    expect(systemPrompt).toContain('near-duplicate every fire')
+  })
+
+  it('omits the record-creation restraint block on ordinary A2A consults', async () => {
+    yieldsText()
+    await executorWithTools(new Map())(baseParams)
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).not.toContain("## Produce this step's output, do not restate it as a record")
+  })
+
   it('fails fast with tools_unavailable when the pinned allow-list survives as nothing (run 0477b50d)', async () => {
     // The incident's second run: `tools: ["gmailSendMessage"]` on an
     // assistant_call step → ask-drop left a zero-tool surface → the model

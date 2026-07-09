@@ -158,7 +158,10 @@ import {
   extractToolUses,
   fetchLatestSession,
   fetchSessionMessages,
+  parseMessageAttachments,
+  type MessageAttachmentRef,
 } from "@/lib/api/sessions";
+import { MessageAttachments } from "@/components/doc/message-attachment-card";
 import {
   fetchPendingQuestion,
   submitAnswer,
@@ -167,10 +170,19 @@ import {
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import { useT, format } from "@/lib/i18n/client";
+import {
+  collapseResolvedConfirmations,
+  type ResolvedConfirmationCounts,
+} from "@/lib/confirmation-collapse";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import type { AssistantRunState } from "@sidanclaw/doc-model";
 import { cn } from "@/lib/utils";
-import { imageFilesFromClipboard, useFileAttachments } from "@/lib/use-file-attachments";
+import {
+  imageFilesFromClipboard,
+  readyAttachments,
+  useFileAttachments,
+} from "@/lib/use-file-attachments";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -278,7 +290,18 @@ type ViewAttachment = {
 };
 
 /** Extends chat-ui's Message with the per-message view list. */
-type MessageWithViews = Message & { views?: ViewAttachment[] };
+type MessageWithViews = Message & {
+  views?: ViewAttachment[];
+  /**
+   * The user's OWN uploaded attachments (pasted screenshots, picked/dropped
+   * files), shown as thumbnail/file cards on their message bubble. On the live
+   * send path these carry object-URL previews handed off from the composer
+   * tray; on session restore they carry base64 thumbnails parsed from the
+   * persisted `<attached_file>` blocks. Distinct from `fileAttachments`, which
+   * are the assistant's outbound `sendFile` download cards.
+   */
+  userAttachments?: MessageAttachmentRef[];
+};
 
 /**
  * `ToolUsed` extended with optional per-op build-log lines for `patchPage`.
@@ -417,6 +440,7 @@ export function FloatingChat({
   const offline = useIsOffline();
   const tRun = useT().docPage.assistantRun;
   const tAttach = useT().attachments;
+  const tRec = useT().recordings;
   const router = useRouter();
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
@@ -479,7 +503,27 @@ export function FloatingChat({
   // (its creature icon) instead of a generic chat glyph. Only the floating
   // launcher renders the FAB, so the fetch is skipped in side-panel mode.
   const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
-  const att = useFileAttachments(() => sessionIdRef.current ?? undefined);
+  // Attached video is too large for the cache upload (Cloud Run's 32 MiB edge
+  // cap / the 20 MB multer limit) and the model can't consume it inline, so
+  // hand it to the recordings pipeline instead: direct-to-GCS upload → server
+  // cost estimate → transcribe + file to the brain. Brain-only ingest (no
+  // blueprint) here — `run` shows its own cost confirm, which is all the
+  // preflight invariant needs when there's no synthesized page.
+  // See docs/architecture/media/transcription.md.
+  const activeAssistantId = selectedAssistantId || assistantId;
+  const rec = useRecordingUpload(workspaceId, activeAssistantId);
+  const att = useFileAttachments(() => sessionIdRef.current ?? undefined, {
+    // Only offer routing when we have a workspace + assistant to bind the
+    // recording to; otherwise video falls to the guard (unsupported-here) chip.
+    onRouteMedia:
+      workspaceId && activeAssistantId
+        ? (videos) => {
+            void (async () => {
+              for (const file of videos) await rec.run(file);
+            })();
+          }
+        : undefined,
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   // Resolve the assistant's avatar identity for the floating launcher FAB.
@@ -800,6 +844,23 @@ export function FloatingChat({
   // Per-turn buffers — keyed by toolUseId / URL so re-emits replace prior entry.
   const turnViewsRef = useRef<ViewAttachment[]>([]);
   const turnTextRef = useRef("");
+  // A multi-step turn streams text in segments separated by tool activity:
+  // any prose the model emits alongside/around an intermediate tool step is
+  // step narration, NOT the answer — the answer is the LAST text segment
+  // (the tool-free synthesis turn). Without segmenting, a stray token the
+  // model glues onto a tool-call turn (observed: Gemini echoing a `"20"`
+  // text part next to an `inspectMyActivity(limit:20)` call) gets concatenated
+  // in front of the real answer, e.g. "20I have diagnosed…".
+  //
+  // `tool_start` arms this flag (once per segment) and clears the live stream
+  // buffer immediately, so the stale segment stops showing in the reply
+  // preview while the tool runs. The next `text_delta` then discards the prior
+  // segment from the finalized-message buffer (`turnTextRef`) before appending.
+  // The finalized-buffer discard is deliberately LAZY (arm-then-discard-on-
+  // next-text) rather than eager: a turn that answers and THEN calls a
+  // bookkeeping tool (text, then `saveMemory`, then end-of-turn) has no later
+  // text to trigger the discard, so `turnTextRef` keeps that answer.
+  const pendingAnswerResetRef = useRef(false);
   const turnCitationsRef = useRef<CitationSource[]>([]);
   // Outbound file attachments (`sendFile`) — set by the `attachments` SSE
   // event, merged into the finalized assistant message at stream end.
@@ -1093,6 +1154,7 @@ export function FloatingChat({
   const resetTurnBuffers = useCallback(() => {
     turnViewsRef.current = [];
     turnTextRef.current = "";
+    pendingAnswerResetRef.current = false;
     turnCitationsRef.current = [];
     turnFileAttachmentsRef.current = [];
     turnToolsRef.current = [];
@@ -1165,14 +1227,29 @@ export function FloatingChat({
       const anchorBlockId = override?.docAnchorBlockId;
 
       const localUserId = `local-${Date.now()}`;
-      session.appendMessage({
+      // Snapshot the ready chips (this render) so the sent bubble shows the
+      // user's own images/files immediately — otherwise they upload + ride the
+      // turn as `fileIds` but leave no visible record. Reuse each chip's preview
+      // object URL as the thumbnail; `att.detach()` (below) clears the tray
+      // WITHOUT revoking these, transferring URL ownership to the message.
+      const userAttachments: MessageAttachmentRef[] = readyAttachments(
+        att.attachments,
+      ).map((a) => ({
+        id: a.fileId!,
+        name: a.fileName,
+        mime: a.mimeType,
+        ...(a.previewUrl ? { dataUrl: a.previewUrl } : {}),
+      }));
+      const userMessage: MessageWithViews = {
         id: localUserId,
         role: "user",
         text: trimmed,
         timestamp: new Date(),
-      });
+        ...(userAttachments.length > 0 ? { userAttachments } : {}),
+      };
+      session.appendMessage(userMessage);
       setInput("");
-      att.clear();
+      att.detach();
       setError(null);
       setNotice(null);
       setResumePolling(false);
@@ -1254,6 +1331,16 @@ export function FloatingChat({
             case "text_delta": {
               const delta = typeof payload.text === "string" ? payload.text : "";
               if (delta) {
+                // A new answer segment is starting after intermediate tool
+                // activity — the prior segment was step narration, not the
+                // answer. Discard it from the finalized-message buffer so only
+                // the last segment survives. (`tool_start` already cleared the
+                // live stream buffer when it armed this flag.) See
+                // `pendingAnswerResetRef` above.
+                if (pendingAnswerResetRef.current) {
+                  pendingAnswerResetRef.current = false;
+                  turnTextRef.current = "";
+                }
                 turnTextRef.current += delta;
                 session.dispatch({ type: "stream/append", text: delta });
               }
@@ -1303,6 +1390,18 @@ export function FloatingChat({
               // Dedup — re-emits keep the existing row (status may already
               // be `done` from a retry replay).
               if (turnToolsRef.current.some((t) => t.id === id)) break;
+              // A tool step is beginning: any answer prose accumulated so far
+              // was step narration, not the final answer. Arm the segment
+              // reset so the NEXT `text_delta` discards it from the finalized
+              // buffer (lazy — an answer-then-tool turn with no trailing text
+              // keeps its answer), and clear the live stream buffer now so the
+              // stale segment doesn't linger in the reply preview while the
+              // tool runs. Guarded to fire once per segment (no redundant
+              // dispatches across a multi-tool step). See `pendingAnswerResetRef`.
+              if (!pendingAnswerResetRef.current) {
+                pendingAnswerResetRef.current = true;
+                session.dispatch({ type: "stream/reset" });
+              }
               toolStartTimesRef.current.set(id, performance.now());
               const workerId =
                 typeof payload.workerId === "string"
@@ -2155,6 +2254,10 @@ export function FloatingChat({
       p.status === "denied" ||
       p.status === "failed",
   );
+  // Cap the resolved-receipt block at two rows (summary + newest) so a
+  // long approve-one-at-a-time run can't bury the next pending card.
+  const collapsedConfirmations =
+    collapseResolvedConfirmations(resolvedConfirmations);
 
   // Idle copy — the doc dock nudges toward the page ("Ask for a view…");
   // a surface dock stays neutral ("Ask anything…"), with the view-context
@@ -2442,6 +2545,30 @@ export function FloatingChat({
             </div>
           ) : null}
 
+          {/* Resolved confirmation rows (approved/denied/failed) render ABOVE
+              the pending cards — they happened earlier, and the actionable
+              Approve/Deny card must sit nearest the auto-scrolled bottom. A
+              long one-action-at-a-time run collapses everything but the
+              newest receipt into one counts row (confirmation-collapse.ts),
+              so the resolved block never buries the next pending card. */}
+          {collapsedConfirmations.counts ? (
+            <CollapsedConfirmationsRow
+              counts={collapsedConfirmations.counts}
+              doneTemplate={t.confirmationCollapsedDone}
+              deniedTemplate={t.confirmationCollapsedDenied}
+              failedTemplate={t.confirmationCollapsedFailed}
+            />
+          ) : null}
+          {collapsedConfirmations.tail.map((conf) => (
+            <ResolvedConfirmationRow
+              key={conf.toolCallId}
+              confirmation={conf}
+              doneTemplate={t.confirmationDone}
+              failedTemplate={t.confirmationFailed}
+              deniedTemplate={t.confirmationDenied}
+            />
+          ))}
+
           {/* Pending confirmation cards — always visible regardless of stream state */}
           {visiblePending.map((conf) => (
             <PendingConfirmationBubble
@@ -2452,17 +2579,6 @@ export function FloatingChat({
               approvingLabel={t.confirmationApproving}
               onApprove={(id) => void handleConfirmation(id, "approve")}
               onDeny={(id) => void handleConfirmation(id, "deny")}
-            />
-          ))}
-
-          {/* Resolved confirmation rows (approved/denied/failed) */}
-          {resolvedConfirmations.map((conf) => (
-            <ResolvedConfirmationRow
-              key={conf.toolCallId}
-              confirmation={conf}
-              doneTemplate={t.confirmationDone}
-              failedTemplate={t.confirmationFailed}
-              deniedTemplate={t.confirmationDenied}
             />
           ))}
 
@@ -2556,7 +2672,25 @@ export function FloatingChat({
             }
             sendLabel={t.send}
             slotAttachments={
-              <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+              <>
+                <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+                {rec.status !== "idle" ? (
+                  <p
+                    className={
+                      rec.status === "error"
+                        ? "px-1 py-0.5 text-xs text-destructive"
+                        : "px-1 py-0.5 text-xs text-muted-foreground"
+                    }
+                    role="status"
+                  >
+                    {rec.status === "uploading"
+                      ? tRec.uploading
+                      : rec.status === "processing"
+                        ? tRec.processing
+                        : rec.message}
+                  </p>
+                ) : null}
+              </>
             }
             slotPreInput={
               <>
@@ -2734,10 +2868,10 @@ function coercePayload(data: unknown): Record<string, unknown> {
 function mapSessionRows(
   rows: Awaited<ReturnType<typeof fetchSessionMessages>>,
   narration: NarrationDict,
-): Message[] {
+): MessageWithViews[] {
   return rows
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => {
+    .map((m): MessageWithViews => {
       const toolsUsed =
         m.role === "assistant"
           ? extractToolUses(m.content).map((use): ToolUsed => {
@@ -2755,6 +2889,12 @@ function mapSessionRows(
               };
             })
           : [];
+      // User rows: split the persisted body into clean text + structured
+      // attachment refs (base64 image thumbnails), so a restored message shows
+      // the same thumbnail cards as the live send — not the "📎 filename"
+      // placeholder `extractMessageText` leaves behind.
+      const parsedUser =
+        m.role === "user" ? parseMessageAttachments(m.content) : null;
       return {
         id: m.id,
         role: m.role as "user" | "assistant",
@@ -2763,15 +2903,23 @@ function mapSessionRows(
         text:
           m.role === "assistant"
             ? stripFollowUps(extractMessageText(m.content))
-            : extractMessageText(m.content),
+            : (parsedUser?.text ?? extractMessageText(m.content)),
         timestamp: new Date(m.timestamp),
         ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
         ...(m.attachments && m.attachments.length > 0
           ? { fileAttachments: m.attachments }
           : {}),
+        ...(parsedUser && parsedUser.attachments.length > 0
+          ? { userAttachments: parsedUser.attachments }
+          : {}),
       };
     })
-    .filter((m) => m.text.trim().length > 0 || m.fileAttachments?.length);
+    .filter(
+      (m) =>
+        m.text.trim().length > 0 ||
+        m.fileAttachments?.length ||
+        m.userAttachments?.length,
+    );
 }
 
 /**
@@ -3021,9 +3169,18 @@ function MessageBubble({
             small accents (sparkle/spinner); a full-blue bubble was the loudest,
             least-cohesive element on the dark theme and white-on-blue missed
             WCAG AA (≈3.9:1). `--secondary` reads ~9:1 in both modes. */}
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] text-secondary-foreground shadow-sm break-words whitespace-pre-wrap">
-          {message.text}
-        </div>
+        {message.text ? (
+          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-3.5 py-2 text-[14px] leading-[1.5] text-secondary-foreground shadow-sm break-words whitespace-pre-wrap">
+            {message.text}
+          </div>
+        ) : null}
+        {/* The user's own uploaded attachments (pasted images / picked files) —
+            image thumbnails or file cards, right-aligned under the bubble. */}
+        {message.userAttachments?.length ? (
+          <div className="w-full max-w-[280px]">
+            <MessageAttachments attachments={message.userAttachments} />
+          </div>
+        ) : null}
         {message.text ? (
           <div className="flex items-center gap-1 -mr-1 pt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
             <IconActionButton
@@ -3310,6 +3467,43 @@ function PendingConfirmationBubble({
             {denyLabel}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** One compact counts-by-status row summarizing the resolved confirmations
+ *  that collapsed out of the transcript ("7 completed · 1 denied") — the
+ *  policy lives in `confirmation-collapse.ts`. Non-interactive: the full
+ *  history is in the turn's persisted messages. */
+function CollapsedConfirmationsRow({
+  counts,
+  doneTemplate,
+  deniedTemplate,
+  failedTemplate,
+}: {
+  counts: ResolvedConfirmationCounts;
+  doneTemplate: string;
+  deniedTemplate: string;
+  failedTemplate: string;
+}) {
+  const parts: string[] = [];
+  if (counts.approved > 0) {
+    parts.push(format(doneTemplate, { count: counts.approved }));
+  }
+  if (counts.denied > 0) {
+    parts.push(format(deniedTemplate, { count: counts.denied }));
+  }
+  if (counts.failed > 0) {
+    parts.push(format(failedTemplate, { count: counts.failed }));
+  }
+  return (
+    <div className="flex gap-2.5">
+      <div className="opacity-60 mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border">
+        <Sparkles className="size-3.5" aria-hidden />
+      </div>
+      <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+        {parts.join(" · ")}
       </div>
     </div>
   );

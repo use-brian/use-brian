@@ -58,6 +58,34 @@ describe("[COMP:app-web/connector-oauth-state] Connector OAuth state CSRF", () =
       expect(parsed.workspaceId).toBe(WS);
       expect(parsed.nonce).toBe(NONCE);
     });
+
+    it("round-trips the reconnect (`:re:<instanceId>`) intent for a workspace-owned OAuth connector", () => {
+      const INST = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      const state = buildConnectorState({ connector: "gmail", workspaceId: WS, instanceId: INST, nonce: NONCE });
+      expect(state).toBe(`gmail:re:${INST}:${WS}:${NONCE}`);
+      const parsed = parseConnectorState(state);
+      expect(parsed.connector).toBe("gmail");
+      expect(parsed.instanceId).toBe(INST);
+      expect(parsed.createNew).toBe(false);
+      expect(parsed.workspaceId).toBe(WS);
+      expect(parsed.nonce).toBe(NONCE);
+    });
+
+    it("reconnect wins over add-another (mutually exclusive intents)", () => {
+      const INST = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+      const state = buildConnectorState({ connector: "notion", workspaceId: WS, createNew: true, instanceId: INST, nonce: NONCE });
+      expect(state).toBe(`notion:re:${INST}:${WS}:${NONCE}`);
+      const parsed = parseConnectorState(state);
+      expect(parsed.instanceId).toBe(INST);
+      expect(parsed.createNew).toBe(false);
+    });
+
+    it("drops a malformed (non-UUID) reconnect id but keeps the tail aligned", () => {
+      const parsed = parseConnectorState(`gmail:re:not-a-uuid:${WS}:${NONCE}`);
+      expect(parsed.instanceId).toBeUndefined();
+      expect(parsed.workspaceId).toBe(WS);
+      expect(parsed.nonce).toBe(NONCE);
+    });
   });
 
   describe("legacy / malformed state (no nonce) parses but carries no nonce", () => {

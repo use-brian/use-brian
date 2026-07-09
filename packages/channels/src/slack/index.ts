@@ -2,6 +2,14 @@ export { createSlackAdapter } from './adapter.js'
 export type { SlackAdapterOptions, SlackAdapterConfig, SlackOutboundAudit } from './adapter.js'
 export { createSlackApi } from './api.js'
 export type { SlackApi } from './api.js'
+export {
+  resolveMentionsInText,
+  resolveMentionsCached,
+  buildMentionIndex,
+  hasMentionCandidates,
+  clearMentionDirectoryCache,
+} from './mentions.js'
+export type { SlackMember } from './mentions.js'
 export { verifySlackSignature } from './verify.js'
 export { validateSlackCredentials } from './validate.js'
 export type { SlackCredentialInfo } from './validate.js'

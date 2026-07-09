@@ -25,6 +25,7 @@ export type ChatAction =
   | { type: 'message/replace'; messageId: string; message: Message }
   | { type: 'stream/start' }
   | { type: 'stream/append'; text: string }
+  | { type: 'stream/reset' }
   | { type: 'stream/finalize'; finalMessage: Message }
   | { type: 'stream/abort' }
   | { type: 'reply/set'; replyTo: ReplyTo | null }
@@ -65,6 +66,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case 'stream/append':
       return { ...state, streamingText: state.streamingText + action.text }
+
+    // Clear the live stream buffer WITHOUT ending the stream — used to drop an
+    // intermediate text segment (step narration the model emitted alongside a
+    // tool call) so it never becomes part of the final answer. Unlike
+    // `stream/start` this leaves `isStreaming` untouched. See the chat consumer's
+    // `pendingAnswerResetRef` (segment-aware answer accumulation).
+    case 'stream/reset':
+      return { ...state, streamingText: '' }
 
     case 'stream/finalize':
       return {

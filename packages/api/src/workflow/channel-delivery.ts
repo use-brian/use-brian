@@ -49,7 +49,7 @@ export type WorkflowChannelDeliveryOptions = {
 export function createWorkflowChannelDelivery(
   options: WorkflowChannelDeliveryOptions,
 ): DeliverToChannel {
-  return async ({ assistantId, userId, channelType, channelId, text }): Promise<DeliveryOutcome> => {
+  return async ({ assistantId, userId, channelType, channelId, text, threadRef }): Promise<DeliveryOutcome> => {
     // Strip any model scaffolding / meta-commentary before it is persisted to
     // the delivery session OR pushed to the channel — a cron-framed turn can
     // echo a "Message body:" planning preamble and a duplicated body (see
@@ -90,11 +90,15 @@ export function createWorkflowChannelDelivery(
         if (integ) token = (integ.credentials as { bot_token: string }).bot_token
       }
       if (!token) return { status: 'skipped', channelType, reason: 'no_integration' }
-      await createTelegramAdapter({ token }).sendMessage(channelId, {
-        text: deliverable,
-        format: 'markdown',
-      })
-      return { status: 'delivered', channelType, channelId }
+      // `threadRef` (an earlier delivery's message id) posts this one as a
+      // reply; the returned message id lets a later `deliver.thread` step
+      // reply under THIS message. See workflow.md → deliver `thread`.
+      const tgMessageId = await createTelegramAdapter({ token }).sendMessage(
+        channelId,
+        { text: deliverable, format: 'markdown' },
+        threadRef ? { threadTs: threadRef } : undefined,
+      )
+      return { status: 'delivered', channelType, channelId, messageId: tgMessageId || undefined }
     }
 
     if (channelType === 'slack') {
@@ -104,11 +108,17 @@ export function createWorkflowChannelDelivery(
         'slack',
       )
       if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
-      await createSlackAdapter({
+      // `threadRef` (an earlier delivery's Slack ts) posts into that thread;
+      // the returned ts anchors later `deliver.thread` steps.
+      const slackTs = await createSlackAdapter({
         botToken: (integ.credentials as { bot_token: string }).bot_token,
         botUserId: integ.botUserId ?? undefined,
-      }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
-      return { status: 'delivered', channelType, channelId }
+      }).sendMessage(
+        channelId,
+        { text: deliverable, format: 'markdown' },
+        threadRef ? { threadTs: threadRef } : undefined,
+      )
+      return { status: 'delivered', channelType, channelId, messageId: slackTs || undefined }
     }
 
     if (channelType === 'whatsapp') {

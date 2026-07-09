@@ -33,6 +33,9 @@ export type WorkspaceAuditEventType =
   | 'member.invite_revoked'
   | 'connector.connected'
   | 'connector.disconnected'
+  // Workspace-owned connectors (workspace-owned-connector-transfer.md §2A/§2C)
+  | 'connector.transferred'
+  | 'connector.policy_changed'
   | 'plan.changed'
   // Phase A — workflow primitive (Q4 §12)
   | 'workflow.created'

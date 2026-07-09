@@ -29,11 +29,12 @@
  * UI can render the relationship as a labelled source → edge → target diagram
  * rather than the raw "memory → documented_by → file" + bare endpoint UUIDs.
  *
- * DANGLING edges (an endpoint hard-deleted out from under the edge) carry
- * nothing to review, so the `entity_link` list + count branches EXCLUDE them
- * (`danglingEntityLinkSql`) and `pruneDanglingEntityLinks` soft-deletes them
- * lazily from the list route — auto-pruning the dead relationships instead of
- * asking the user to confirm an edge that points at nothing.
+ * DANGLING edges (an endpoint deleted out from under the edge — hard-deleted,
+ * soft-deleted via `valid_to`, or retracted) carry nothing to review, so the
+ * `entity_link` list + count branches EXCLUDE them (`danglingEntityLinkSql`)
+ * and `pruneDanglingEntityLinks` soft-deletes them lazily from the list route
+ * — auto-pruning the dead relationships instead of asking the user to confirm
+ * an edge that points at nothing.
  *
  * ── COMP ──
  * Component-map tag: `brain/inbox-store`.
@@ -89,32 +90,46 @@ const PRIMITIVE_TABLES: readonly BrainInboxPrimitive[] = [
  *  frontend falls back to the humanised kind. `kindCol` / `idCol` are the
  *  qualified columns of the aliased `entity_links el` row (e.g.
  *  `el.target_kind`). Correlated subqueries — the inbox is small
- *  (`source='model'`, capped limit), so the per-row lookups are cheap. */
+ *  (`source='model'`, capped limit), so the per-row lookups are cheap.
+ *
+ *  `skill` + `assistant` are the `learned_from` induction-provenance
+ *  endpoints (skill → learned_from → assistant): without them a review of
+ *  that edge read "Skill → Learned from → Assistant" — the bare kind names,
+ *  telling the reviewer nothing about WHICH skill or assistant they were
+ *  confirming. Resolving `workspace_skills.name` / `assistants.name` here
+ *  makes the source card name the actual skill and the target the actual
+ *  assistant (the frontend then offers a preview link for the skill). */
 function edgeEndpointLabelSql(kindCol: string, idCol: string): string {
   return `(CASE ${kindCol}
              WHEN 'file' THEN (SELECT name FROM workspace_files WHERE id = ${idCol})
              WHEN 'entity' THEN (SELECT display_name FROM entities WHERE id = ${idCol})
              WHEN 'memory' THEN (SELECT summary FROM memories WHERE id = ${idCol})
              WHEN 'task' THEN (SELECT title FROM tasks WHERE id = ${idCol})
+             WHEN 'skill' THEN (SELECT name FROM workspace_skills WHERE id = ${idCol})
+             WHEN 'assistant' THEN (SELECT name FROM assistants WHERE id = ${idCol})
              ELSE NULL END)`
 }
 
 /** SQL boolean: is `entity_link` row `${alias}` DANGLING — i.e. does either
- *  endpoint point at a row that no longer exists? Only RESOLVABLE kinds
- *  (memory / file / task / entity) can be checked; for non-resolvable kinds
- *  (episode / kb_chunk / event) we can't tell, so they're treated as present
- *  (never dangling) — conservative, we only prune when we're SURE the endpoint
- *  is gone. A hard-deleted endpoint leaves the edge pointing at nothing, so
- *  there's nothing left to review; the inbox excludes these and
- *  `pruneDanglingEntityLinks` soft-deletes them. (A SOFT-deleted endpoint row
- *  still exists, so `EXISTS` is true and the edge is NOT dangling.) */
+ *  endpoint point at a row that is no longer LIVE? An endpoint counts as
+ *  present only when its row exists AND is active (`valid_to IS NULL AND
+ *  retracted_at IS NULL`) — soft delete is the platform's DEFAULT delete
+ *  (corrections.md D.4, including the review UI's own delete button), so a
+ *  soft-deleted or retracted endpoint must orphan the edge exactly like a
+ *  hard delete. Only RESOLVABLE kinds (memory / file / task / entity) can be
+ *  checked; for non-resolvable kinds (episode / kb_chunk / event) we can't
+ *  tell, so they're treated as present (never dangling) — conservative, we
+ *  only prune when we're SURE the endpoint is gone. A dangling edge carries
+ *  nothing to review; the inbox excludes these and
+ *  `pruneDanglingEntityLinks` soft-deletes them. */
 function danglingEntityLinkSql(alias: string): string {
+  const live = 'sub.valid_to IS NULL AND sub.retracted_at IS NULL'
   const missing = (kindCol: string, idCol: string) =>
     `(CASE ${kindCol}
-        WHEN 'memory' THEN NOT EXISTS (SELECT 1 FROM memories sub WHERE sub.id = ${idCol})
-        WHEN 'file' THEN NOT EXISTS (SELECT 1 FROM workspace_files sub WHERE sub.id = ${idCol})
-        WHEN 'task' THEN NOT EXISTS (SELECT 1 FROM tasks sub WHERE sub.id = ${idCol})
-        WHEN 'entity' THEN NOT EXISTS (SELECT 1 FROM entities sub WHERE sub.id = ${idCol})
+        WHEN 'memory' THEN NOT EXISTS (SELECT 1 FROM memories sub WHERE sub.id = ${idCol} AND ${live})
+        WHEN 'file' THEN NOT EXISTS (SELECT 1 FROM workspace_files sub WHERE sub.id = ${idCol} AND ${live})
+        WHEN 'task' THEN NOT EXISTS (SELECT 1 FROM tasks sub WHERE sub.id = ${idCol} AND ${live})
+        WHEN 'entity' THEN NOT EXISTS (SELECT 1 FROM entities sub WHERE sub.id = ${idCol} AND ${live})
         ELSE FALSE END)`
   return `(${missing(`${alias}.source_kind`, `${alias}.source_id`)}
         OR ${missing(`${alias}.target_kind`, `${alias}.target_id`)})`
@@ -123,8 +138,9 @@ function danglingEntityLinkSql(alias: string): string {
 /**
  * Auto-prune the review queue's dead relationships: soft-delete (`valid_to =
  * now()`) every unverified, model-saved `entity_link` whose source or target
- * endpoint has been hard-deleted. A dangling edge points at nothing, so there
- * is literally nothing for the user to confirm — leaving it in the inbox is
+ * endpoint has been deleted (hard-deleted, soft-deleted, or retracted). A
+ * dangling edge points at nothing, so there is literally nothing for the
+ * user to confirm — leaving it in the inbox is
  * noise (and the count badge over-states the real backlog). Idempotent: once
  * an edge is pruned it has `valid_to`, so re-runs touch 0 rows. Scoped to
  * `source = 'model'` (what the review surface shows) so it never sweeps the

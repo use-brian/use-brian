@@ -38,7 +38,7 @@ export async function GET(request: Request) {
   const stateRaw = url.searchParams.get("state") ?? ""; // "fathom[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { connector: intent, createNew, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector: intent, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
   const validIntent = intent === "fathom";
 
   if (error || !code || !validIntent) {
@@ -136,8 +136,11 @@ export async function GET(request: Request) {
             expiresAt,
           },
           email: connectedEmail,
-          createNew,
-          label: createNew ? connectedEmail : undefined,
+          // Reconnect a workspace-owned instance re-points the existing row;
+          // otherwise connect / add-another. Mutually exclusive.
+          ...(instanceId
+            ? { instanceId }
+            : { createNew, label: createNew ? connectedEmail : undefined }),
         }),
       },
     );

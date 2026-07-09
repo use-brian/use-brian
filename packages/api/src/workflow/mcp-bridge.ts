@@ -30,6 +30,7 @@ export type WorkflowToolRegistryDeps = {
   assistantConnectorStore?: AssistantConnectorStore
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace-files byte layer — `gmailSendMessage` attachments on workflow
@@ -94,6 +95,7 @@ export async function buildWorkflowToolRegistry(
     gdriveFilesStore: deps.gdriveFilesStore,
     connectorGrantStore: deps.connectorGrantStore,
     connectorInstanceStore: deps.connectorInstanceStore,
+    workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
     // KB write tools are chat-only (D2): workflow runs have no live

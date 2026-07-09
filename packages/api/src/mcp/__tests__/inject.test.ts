@@ -929,6 +929,58 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
   })
 })
 
+describe('[COMP:api/workspace-tool-policy-store] team-owned connector shared policy', () => {
+  function teamGithub() {
+    return {
+      id: 'ci-ws', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+      provider: 'github', label: 'Team GitHub', connectedEmail: null, url: null,
+      custom: false, config: {}, sensitivity: 'internal', connected: true,
+      ingestionEnabled: false, credentialsType: 'oauth', healthStatus: 'ok',
+      lastError: null, lastCheckedAt: null, createdBy: null,
+      createdAt: new Date('2026-01-01T00:00:00Z'), updatedAt: new Date('2026-01-01T00:00:00Z'),
+    }
+  }
+  function stores() {
+    return {
+      connectorStore: { list: vi.fn().mockResolvedValue([]), getCredentials: vi.fn().mockResolvedValue(null) },
+      connectorInstanceStore: {
+        listByWorkspaceSystem: vi.fn().mockResolvedValue([teamGithub()]),
+        getCredentialsSystem: vi.fn().mockResolvedValue({ client_id: 'github_pat', client_secret: 'pat-ws' }),
+        getAuthCredentialsSystem: vi.fn().mockResolvedValue(null),
+        markHealth: vi.fn(),
+      },
+    }
+  }
+
+  it('resolves a team-owned tool policy from workspace_tool_policy, not the per-user store', async () => {
+    const tools = new Map()
+    const { connectorStore, connectorInstanceStore } = stores()
+    // The per-user store would ALLOW (stub returns undefined → default), but the
+    // workspace policy BLOCKS this tool — the shared policy must win.
+    const workspaceToolPolicyStore = {
+      getPolicy: vi.fn().mockImplementation(async (_ws: string, _server: string, tool: string) =>
+        tool === 'githubSearchRepositories'
+          ? { id: 'p1', workspaceId: 'ws-1', serverName: 'github', toolName: tool, policy: 'block', classification: 'read', updatedBy: 'u-x', updatedAt: new Date() }
+          : null,
+      ),
+      setPolicy: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    }
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      workspaceToolPolicyStore: workspaceToolPolicyStore as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+    // The workspace store was consulted, and its `block` excluded the tool.
+    expect(workspaceToolPolicyStore.getPolicy).toHaveBeenCalledWith('ws-1', 'github', 'githubSearchRepositories')
+    expect([...tools.keys()]).not.toContain('githubSearchRepositories')
+  })
+})
+
 describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
   it('reports the discovery-cache size as a non-negative number', () => {
     const size = _getMcpDiscoveryCacheSize()

@@ -35,6 +35,9 @@ export const CONNECTOR_OAUTH_STATE_TTL_SECONDS = 60 * 15;
 /** A URL-safe nonce is base64url; this bounds length + alphabet at the boundary. */
 const NONCE_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
+/** A UUID bounds the reconnect-target segment at the parse boundary. */
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
 export type ConnectorOauthState = {
   /** Provider slug — `gcal` | `gmail` | `gdrive` | `notion` | `fathom`. */
   connector: string;
@@ -42,52 +45,70 @@ export type ConnectorOauthState = {
   workspaceId: string | undefined;
   /** "Add another account" intent — mint a fresh instance, don't overwrite. */
   createNew: boolean;
+  /**
+   * Reconnect target — re-point an EXISTING instance's credential instead of
+   * minting one. Set when reconnecting a workspace-owned OAuth connector (a
+   * cleared teammate re-auths with their own account). Mutually exclusive with
+   * `createNew`. Undefined for the connect / add-another flows.
+   */
+  instanceId: string | undefined;
   /** The CSRF nonce; matched against the companion cookie in the callback. */
   nonce: string | undefined;
 };
 
 /**
- * Build the `state` string for the provider authorize URL:
- *   `<connector>[:add]:<workspaceId>:<nonce>`
- *
- * The nonce is appended as the LAST colon-segment (workspace ids are UUIDs and
- * the nonce is base64url — neither contains a colon), so the legacy 3-part
- * parse is a strict prefix of the 4-part parse.
+ * Build the `state` string for the provider authorize URL. Three shapes,
+ * disambiguated by the second segment (workspace ids, instance ids, and the
+ * base64url nonce never contain a colon, so the split stays unambiguous):
+ *   connect      `<connector>:<workspaceId>:<nonce>`
+ *   add another  `<connector>:add:<workspaceId>:<nonce>`
+ *   reconnect    `<connector>:re:<instanceId>:<workspaceId>:<nonce>`
  */
 export function buildConnectorState(input: {
   connector: string;
   workspaceId: string;
   createNew?: boolean;
+  instanceId?: string;
   nonce: string;
 }): string {
+  // Reconnect wins over add-another — they are mutually exclusive intents.
+  if (input.instanceId) {
+    return `${input.connector}:re:${input.instanceId}:${input.workspaceId}:${input.nonce}`;
+  }
   const add = input.createNew ? ":add" : "";
   return `${input.connector}${add}:${input.workspaceId}:${input.nonce}`;
 }
 
 /**
- * Parse a connector `state`. Accepts both the new 4-part form (with a trailing
- * nonce) and the legacy 3-part form (no nonce) so a callback can tell "old
- * unsigned state" (→ reject as un-verifiable) from a malformed value.
- *
- * `<connector>[:add]:<workspaceId>[:<nonce>]`
+ * Parse a connector `state`. Accepts the connect / add-another / reconnect
+ * shapes above plus the legacy no-nonce form (→ rejected downstream as
+ * un-verifiable). A malformed reconnect instance id is dropped (treated as a
+ * plain connect) rather than trusted.
  */
 export function parseConnectorState(raw: string): ConnectorOauthState {
   const parts = raw.split(":");
-  // [connector, (add)?, workspaceId, (nonce)?] — walk from the front for the
-  // connector + optional `add`, then the tail is workspaceId (+ optional nonce).
   if (parts.length === 0 || !parts[0]) {
-    return { connector: "", workspaceId: undefined, createNew: false, nonce: undefined };
+    return { connector: "", workspaceId: undefined, createNew: false, instanceId: undefined, nonce: undefined };
   }
   const connector = parts[0];
   let idx = 1;
-  const createNew = parts[idx] === "add";
-  if (createNew) idx += 1;
+  let createNew = false;
+  let instanceId: string | undefined;
+  if (parts[idx] === "add") {
+    createNew = true;
+    idx += 1;
+  } else if (parts[idx] === "re") {
+    idx += 1;
+    const raw = parts[idx];
+    instanceId = raw && UUID_RE.test(raw) ? raw : undefined;
+    idx += 1;
+  }
 
   const workspaceId = parts[idx] || undefined;
   const nonceRaw = parts[idx + 1];
   const nonce = nonceRaw && NONCE_RE.test(nonceRaw) ? nonceRaw : undefined;
 
-  return { connector, workspaceId, createNew, nonce };
+  return { connector, workspaceId, createNew, instanceId, nonce };
 }
 
 /**

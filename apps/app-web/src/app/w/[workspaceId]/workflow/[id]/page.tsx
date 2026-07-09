@@ -94,6 +94,9 @@ export default function WorkflowDetailPage({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issues, setIssues] = useState<WorkflowIssue[]>([]);
+  // Non-blocking authoring advisories returned on a successful save (e.g. a
+  // research-mode step that will likely fail on snippet/marketplace discovery).
+  const [warnings, setWarnings] = useState<WorkflowIssue[]>([]);
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [refetchTick, setRefetchTick] = useState(0);
 
@@ -375,6 +378,7 @@ export default function WorkflowDetailPage({
     if (!draft) return;
     setError(null);
     setIssues([]);
+    setWarnings([]);
     setRunMessage(null);
     setSaving(true);
     // An "Edit a page" anchor left unpicked is transient UI state, not
@@ -415,6 +419,7 @@ export default function WorkflowDetailPage({
     }
     setWorkflow(result.workflow);
     setDraft(result.workflow);
+    setWarnings(result.warnings ?? []);
     requestWorkflowRefresh(result.workflow.workspaceId);
     refresh();
   };
@@ -665,6 +670,16 @@ export default function WorkflowDetailPage({
           <div className="text-xs text-green-700 dark:text-green-400">{runMessage}</div>
         )}
         {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}
+        {warnings.length > 0 && (
+          <div className="text-xs rounded-md border border-amber-300/60 bg-amber-500/10 text-amber-700 dark:text-amber-400 px-2 py-1.5">
+            <p className="font-medium">{t.workflowPage.builder.advisoryTitle}</p>
+            <ul className="mt-1 list-disc pl-4 space-y-0.5">
+              {warnings.map((w, i) => (
+                <li key={i}>{w.message}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </header>
 
       {/* Live activity — visible whenever a run is in flight (Run now,

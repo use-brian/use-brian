@@ -204,6 +204,19 @@ export async function findOrCreateUser(params: {
       [workspaceId, user.id],
     )
 
+    // The default (General) teamspace, owner joined — same seeding as
+    // workspaceStore.create() (migration 313; teamspaces.md).
+    await client.query(
+      `WITH ts AS (
+         INSERT INTO teamspaces (workspace_id, name, sensitivity, is_default, created_by)
+         VALUES ($1, 'General', 'internal', true, $2)
+         RETURNING id
+       )
+       INSERT INTO teamspace_members (teamspace_id, user_id)
+       SELECT id, $2 FROM ts`,
+      [workspaceId, user.id],
+    )
+
     // The primary assistant is workspace-bound. owner_user_id stays set so
     // the legacy assistant_members fan-out still resolves; the workspace
     // is the canonical owner for new code paths.

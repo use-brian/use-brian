@@ -18,21 +18,28 @@
  *    drops to a highlighted icon, so a label can never collide with a second
  *    pill and truncate. Studio shows a dismissable cold-start "Set up" nudge
  *    while the workspace has no connected connector.
- *  - Favorites — the Saved pages rendered as a nested tree
- *    (`buildTree`) via recursive `<SidebarTreeNode>`. Drag a row ONTO
- *    another to nest it; drop in the gap BETWEEN rows to reorder. Per-row
- *    hover shows `…` (menu) then `+` (add child); the page icon swaps to
- *    a disclosure chevron on hover / when expanded.
- *  - Drafts — flat list (keeps the existing prune-caption behavior via
- *    `<DocSidebarRow>`).
+ *  - Teamspace sections (docs/architecture/features/teamspaces.md) — one
+ *    collapsible section per teamspace the viewer belongs to (icon +
+ *    name), each rendering ITS OWN nested tree (`buildTree` over that
+ *    teamspace's saved + draft rows via `groupRowsByTeamspace`; draft
+ *    rows keep their save/prune affordances). Section hover reveals `⋯`
+ *    (Add members / Settings / Leave / Delete, gated by `canManage` /
+ *    `isDefault`) and `+` (new page in that teamspace). Drag a row ONTO
+ *    another to nest it; drop in the gap BETWEEN rows to reorder; drop
+ *    on a SECTION HEADER to file the page at that section's root.
+ *  - A subtle "New teamspace" affordance under the teamspace block.
+ *  - Private — the caller's `teamspaceId === null` pages, same tree
+ *    treatment, `+` only (creates with `teamspaceId: null`).
  *
  * The tree DnD lives in a `<DndContext>` *scoped to this sidebar* —
  * deliberately separate from the page-renderer's block-reorder context
  * (root CLAUDE.md / task brief). Search is a lightweight substring
- * filter over loaded rows, not a Cmd-K palette.
+ * filter over loaded rows, not a Cmd-K palette (its flat hit list is
+ * NOT sectioned by teamspace).
  *
- * Expand/collapse state persists in `localStorage` keyed per workspace
- * (`doc:sidebar:collapsed:<workspaceId>`).
+ * Row expand/collapse state persists in `localStorage` keyed per
+ * workspace (`doc:sidebar:collapsed:<workspaceId>`); section collapse
+ * state likewise (`doc:sidebar:sections:<workspaceId>`).
  *
  * The parent (the `DocSidebarDataProvider` via `WorkspaceChrome`) owns all
  * data + mutations; this component renders + raises intent callbacks.
@@ -48,11 +55,13 @@ import {
   type DragEndEvent,
   type DragStartEvent,
   PointerSensor,
+  useDroppable,
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
 import {
   Brain,
+  ChevronRight,
   GitBranch,
   Home,
   Inbox,
@@ -63,9 +72,9 @@ import {
   Search,
   SlidersHorizontal,
   Trash2,
+  Users,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -90,7 +99,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
-import { buildTree, savedAncestorIds, type TreeNode } from "@/lib/sidebar-tree";
+import type { Teamspace } from "@/lib/api/teamspaces";
+import {
+  buildTree,
+  groupRowsByTeamspace,
+  savedAncestorIds,
+  type TreeNode,
+} from "@/lib/sidebar-tree";
+import { parseSectionDropId, sectionDropId } from "@/lib/sidebar-sections";
 import { surfaceShortcutLabel } from "@/lib/surface-shortcuts";
 import { fetchInboxBadgeCount } from "@/lib/api/inbox";
 import { INBOX_CHANGED_EVENT } from "@/lib/inbox-events";
@@ -99,7 +115,7 @@ import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { DocSidebarRow } from "./doc-sidebar-row";
 import { HomeDock } from "./home-dock";
 import { SidebarTreeNode, parseDropId } from "./sidebar-tree-node";
-import { EmptyDraftsSidebar, EmptySearchResults } from "./empty-states";
+import { EmptySearchResults } from "./empty-states";
 import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
@@ -110,26 +126,52 @@ export type SidebarMove = {
   nestParentId: string | null;
   /** Target sibling index among the new parent's children. */
   position: number;
+  /**
+   * Target teamspace for a ROOT drop (`nestParentId: null`): a teamspace id
+   * files the page into that section, `null` files it Private, omitted keeps
+   * the current teamspace. Ignored when `nestParentId` is a page — the child
+   * adopts the parent's teamspace server-side.
+   */
+  teamspaceId?: string | null;
 };
+
+/** Section-collapse localStorage key (per workspace) — the section analog of
+ *  `collapseKey` below. Values: section key → collapsed (default expanded). */
+function sectionsKey(workspaceId: string): string {
+  return `doc:sidebar:sections:${workspaceId}`;
+}
 
 type Props = {
   workspaceId: string;
   saved: ViewListRow[];
   drafts: ViewListRow[];
+  /** Teamspaces the viewer belongs to (General first) — one section each. */
+  teamspaces: Teamspace[];
   /** Map of viewId → autoPruneAt for draft rows (the list endpoint omits it). */
   draftPruneByid: Record<string, string | null>;
   activeId: string | null;
   busyNewDraft: boolean;
   onSelect: (id: string) => void;
-  onNewDraft: () => void;
+  /** Create a page: a teamspace id files it there, `null` = Private,
+   *  omitted = the server default (General). */
+  onNewDraft: (teamspaceId?: string | null) => void;
   onAddChild: (parentId: string) => void;
   onSave: (id: string) => void;
   onUnsave: (id: string) => void;
   onRename: (id: string) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
-  /** Drop ONTO a row (reparent under it) or BETWEEN rows (reorder). */
+  /** Drop ONTO a row (reparent under it), BETWEEN rows (reorder), or on a
+   *  SECTION HEADER (file at that teamspace's root — `move.teamspaceId`). */
   onMove: (move: SidebarMove) => void;
+  /** Open the "New teamspace" dialog (owned by the chrome). */
+  onNewTeamspace: () => void;
+  /** Open the teamspace settings modal on the given tab (owned by the chrome). */
+  onTeamspaceSettings: (teamspaceId: string, tab: "general" | "members") => void;
+  /** Leave a non-default teamspace (confirm + mutate in the provider). */
+  onLeaveTeamspace: (teamspaceId: string) => void;
+  /** Delete a non-default teamspace (confirm + mutate in the provider). */
+  onDeleteTeamspace: (teamspaceId: string) => void;
   /** Whether the Inbox flyout panel is open (drives the nav row's active
    *  state). The panel itself is owned + rendered by the chrome. */
   inboxOpen: boolean;
@@ -278,25 +320,73 @@ export function DocSidebar(props: Props) {
     [workspaceId],
   );
 
+  // ── Persisted teamspace collapse state (per workspace) ──────────────
+  // Keys: teamspace ids. `true` = collapsed; teamspaces default to EXPANDED
+  // (a fresh workspace should show its page trees, not a wall of closed
+  // headers). Private is not collapsible, so it has no key here.
+  const [sectionCollapsed, setSectionCollapsed] = useState<
+    Record<string, boolean>
+  >({});
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(sectionsKey(workspaceId));
+      setSectionCollapsed(
+        raw ? (JSON.parse(raw) as Record<string, boolean>) : {},
+      );
+    } catch {
+      setSectionCollapsed({});
+    }
+  }, [workspaceId]);
+  const toggleSection = useCallback(
+    (key: string) => {
+      setSectionCollapsed((prev) => {
+        const next = { ...prev, [key]: !(prev[key] ?? false) };
+        try {
+          window.localStorage.setItem(
+            sectionsKey(workspaceId),
+            JSON.stringify(next),
+          );
+        } catch {
+          // Non-fatal — section state is a convenience, not load-bearing.
+        }
+        return next;
+      });
+    },
+    [workspaceId],
+  );
+
   // ── Derived sections ─────────────────────────────────────────────────
-  // ONE directory tree over the full page set (saved ∪ drafts), so a sub-page
-  // nests under its parent regardless of which list each lands in — a freshly
-  // created sub-page is a *draft*, and folding only `saved` would strand it
-  // flat at the root of the Drafts section instead of under its parent (and
-  // leave the parent with no disclosure chevron). We then split the roots by
-  // state: saved roots head the Favorites tree, draft roots head Drafts. A
-  // child never appears at root — it renders nested under whichever ancestor
-  // it belongs to, in that ancestor's section.
+  // Group the full page set (saved ∪ drafts, so a freshly created sub-page
+  // draft nests under its saved parent instead of stranding flat) by
+  // teamspace, then fold ONE directory tree per section. A child renders
+  // nested under whichever ancestor it belongs to, never at a section root —
+  // unless its denormalized `teamspaceId` drifted from its parent's, in which
+  // case `buildTree`'s orphan promotion roots it in its OWN section (visible
+  // beats vanished).
   const allRows = useMemo(() => [...saved, ...drafts], [saved, drafts]);
-  const directoryTree = useMemo(() => buildTree(allRows), [allRows]);
-  const favoriteRoots = useMemo(
-    () => directoryTree.filter((n) => n.row.state === "saved"),
-    [directoryTree],
+  const rowsByTeamspace = useMemo(
+    () => groupRowsByTeamspace(allRows),
+    [allRows],
   );
-  const draftRoots = useMemo(
-    () => directoryTree.filter((n) => n.row.state === "draft"),
-    [directoryTree],
-  );
+  const sectionTrees = useMemo(() => {
+    const trees = new Map<string, TreeNode[]>();
+    for (const ts of props.teamspaces) {
+      trees.set(ts.id, buildTree(rowsByTeamspace.get(ts.id) ?? []));
+    }
+    return trees;
+  }, [props.teamspaces, rowsByTeamspace]);
+  // Private = the caller's unfiled pages, PLUS any row referencing a
+  // teamspace missing from the list (a mid-reload or drifted row) — the
+  // crash-safe fallback so no visible row is ever dropped from the sidebar.
+  const privateTree = useMemo(() => {
+    const known = new Set(props.teamspaces.map((ts) => ts.id));
+    const rows = [...(rowsByTeamspace.get(null) ?? [])];
+    for (const [key, groupRows] of rowsByTeamspace) {
+      if (key !== null && !known.has(key)) rows.push(...groupRows);
+    }
+    return buildTree(rows);
+  }, [props.teamspaces, rowsByTeamspace]);
   // Pages filed inside a saved (Favorites) subtree are *kept by ancestry* —
   // the parent's save covers them, so they show no per-page "Save page" CTA
   // and the prune worker spares them (same rule, server-side). Derived once
@@ -329,12 +419,32 @@ export function DocSidebar(props: Props) {
     const { active, over } = event;
     if (!over) return;
     const draggedId = String(active.id);
+
+    // Section-header drop — file the dragged page (and, server-side, its
+    // whole subtree) at that teamspace's root, appended after its roots.
+    const section = parseSectionDropId(String(over.id));
+    if (section) {
+      const sectionRoots = allRows.filter(
+        (r) =>
+          r.nestParentId === null &&
+          (r.teamspaceId ?? null) === section.teamspaceId,
+      );
+      props.onMove({
+        viewId: draggedId,
+        nestParentId: null,
+        position: sectionRoots.length,
+        teamspaceId: section.teamspaceId,
+      });
+      return;
+    }
+
     const target = parseDropId(String(over.id));
     if (!target) return;
     if (target.nodeId === draggedId) return; // dropped on self
 
     if (target.intent === "onto") {
-      // Reparent under the target; append to the end of its children.
+      // Reparent under the target; append to the end of its children. The
+      // child adopts the target's teamspace server-side — no teamspaceId here.
       const siblings = allRows.filter((r) => r.nestParentId === target.nodeId);
       props.onMove({
         viewId: draggedId,
@@ -344,12 +454,21 @@ export function DocSidebar(props: Props) {
       return;
     }
 
-    // intent === "after": reorder as a sibling directly after target.
+    // intent === "after": reorder as a sibling directly after target. Root
+    // siblings are scoped to the target's SECTION (root positions order
+    // within a teamspace group), and the move carries that teamspace so a
+    // cross-section gap drop files the page where it visually landed.
     const targetRow = allRows.find((r) => r.id === target.nodeId);
     if (!targetRow) return;
     const parentId = targetRow.nestParentId;
+    const targetTeamspaceId = targetRow.teamspaceId ?? null;
     const siblings = allRows
-      .filter((r) => r.nestParentId === parentId)
+      .filter((r) =>
+        parentId === null
+          ? r.nestParentId === null &&
+            (r.teamspaceId ?? null) === targetTeamspaceId
+          : r.nestParentId === parentId,
+      )
       .sort((a, b) => a.position - b.position);
     const targetIdx = siblings.findIndex((r) => r.id === target.nodeId);
     // Insert after the target. The server re-packs positions, so a
@@ -358,12 +477,13 @@ export function DocSidebar(props: Props) {
       viewId: draggedId,
       nestParentId: parentId,
       position: targetIdx + 1,
+      ...(parentId === null ? { teamspaceId: targetTeamspaceId } : {}),
     });
   }
 
-  // One recursive tree row, shared by the Favorites + Drafts sections so they
-  // render identically (chevron toggle, nesting, DnD); the node itself shows
-  // the Save action + prune caption only on `state: 'draft'` rows.
+  // One recursive tree row, shared by every section so they render
+  // identically (chevron toggle, nesting, DnD); the node itself shows the
+  // Save action + prune caption only on `state: 'draft'` rows.
   const renderRoot = (node: TreeNode) => (
     <SidebarTreeNode
       key={node.row.id}
@@ -380,16 +500,34 @@ export function DocSidebar(props: Props) {
       onDelete={props.onDelete}
       draftPruneByid={props.draftPruneByid}
       keptByAncestry={keptByAncestry}
-      onMoveToRoot={(id) =>
+      onMoveToRoot={(id) => {
+        // "Move to root" stays WITHIN the row's own section — appended after
+        // that teamspace group's current roots.
+        const moved = allRows.find((r) => r.id === id);
+        const tsKey = moved?.teamspaceId ?? null;
         props.onMove({
           viewId: id,
           nestParentId: null,
-          position: allRows.filter((r) => r.nestParentId === null).length,
-        })
-      }
+          position: allRows.filter(
+            (r) => r.nestParentId === null && (r.teamspaceId ?? null) === tsKey,
+          ).length,
+          teamspaceId: tsKey,
+        });
+      }}
       draggingId={draggingId}
     />
   );
+
+  // A section's body — the tree, or a muted empty caption when expanded with
+  // nothing inside (mirrors the per-row "No pages inside" treatment).
+  const renderSectionBody = (nodes: TreeNode[]) =>
+    nodes.length === 0 ? (
+      <div className="select-none py-1 pl-7 pr-1 text-[13px] text-sidebar-foreground/40">
+        {t.sidebarNoPagesInside}
+      </div>
+    ) : (
+      <ul className="space-y-0.5">{nodes.map(renderRoot)}</ul>
+    );
 
   return (
     <aside className="flex h-full w-64 shrink-0 flex-col border-r border-sidebar-border doc-sidebar-surface text-sidebar-foreground">
@@ -627,50 +765,63 @@ export function DocSidebar(props: Props) {
           </>
         )}
 
-        {/* Favorites + Drafts — both nested trees over the one directory, so a
-            sub-page stays nested under its parent (never flattened to root) and
-            any page with children gets a disclosure chevron. A single
-            `<DndContext>` spans both so a row can be dragged between them. */}
+        {/* Teamspace sections + Private — one nested tree per section (saved
+            and draft rows together; drafts keep their prune captions). A
+            single `<DndContext>` spans every section so a row can be dragged
+            between them, and each section HEADER is a drop zone that files
+            the page at that section's root. */}
         {!q && (
           <DndContext
             sensors={sensors}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
           >
-            {/* Home Dock — single "Suggested for you" entry, pinned above
-                Favorites, badged with the live needs-you total off the shared
+            {/* Home Dock — single "Suggested for you" entry, pinned above the
+                sections, badged with the live needs-you total off the shared
                 dock. The suggestions render in the content pane
                 (SuggestedView). Spec: docs/architecture/features/home-dock.md. */}
             <HomeDock workspaceId={workspaceId} />
 
-            {favoriteRoots.length > 0 && (
-              <>
-                <SectionLabel>{t.sidebarFavorites}</SectionLabel>
-                <ul className="space-y-0.5">{favoriteRoots.map(renderRoot)}</ul>
-              </>
-            )}
+            {/* "Teamspaces" group label — wraps every teamspace row, with a
+                hover `⋯` housing "New teamspace" (no collapse-all: the group
+                itself never folds, only individual teamspaces do). */}
+            <TeamspacesGroupHeader
+              onNewTeamspace={props.onNewTeamspace}
+              disabled={offline}
+              offlineTitle={offline ? t.offlineUnavailable : undefined}
+            />
 
-            <div className="mt-4 mb-1 flex items-center justify-between px-1">
-              <SectionLabel className="mt-0 px-0">
-                {t.sidebarDrafts}
-              </SectionLabel>
-              <Button
-                size="xs"
-                variant="ghost"
-                onClick={props.onNewDraft}
-                disabled={props.busyNewDraft || offline}
-                title={offline ? t.offlineUnavailable : undefined}
-                aria-label={t.sidebarNewDraftAria}
-                className="h-6 px-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+            {props.teamspaces.map((ts) => (
+              <TeamspaceRow
+                key={ts.id}
+                teamspace={ts}
+                collapsed={sectionCollapsed[ts.id] ?? false}
+                onToggle={() => toggleSection(ts.id)}
+                onNewPage={() => props.onNewDraft(ts.id)}
+                newPageDisabled={props.busyNewDraft || offline}
+                newPageTitle={offline ? t.offlineUnavailable : undefined}
+                dragging={draggingId !== null}
+                onOpenSettings={(tab) => props.onTeamspaceSettings(ts.id, tab)}
+                onLeave={() => props.onLeaveTeamspace(ts.id)}
+                onDelete={() => props.onDeleteTeamspace(ts.id)}
               >
-                + {t.sidebarNewDraft}
-              </Button>
-            </div>
-            {draftRoots.length === 0 ? (
-              <EmptyDraftsSidebar />
-            ) : (
-              <ul className="space-y-0.5">{draftRoots.map(renderRoot)}</ul>
-            )}
+                {renderSectionBody(sectionTrees.get(ts.id) ?? [])}
+              </TeamspaceRow>
+            ))}
+
+            {/* Private — the caller's unfiled pages (`teamspaceId: null`), a
+                plain group label + `+` (create private) + drop zone (drag a
+                page here to make it private). No manage menu. */}
+            <PrivateGroupSection
+              onNewPage={() => props.onNewDraft(null)}
+              newPageDisabled={props.busyNewDraft || offline}
+              newPageTitle={offline ? t.offlineUnavailable : undefined}
+              dragging={draggingId !== null}
+            >
+              {privateTree.length > 0 && (
+                <ul className="space-y-0.5">{privateTree.map(renderRoot)}</ul>
+              )}
+            </PrivateGroupSection>
           </DndContext>
         )}
           </>
@@ -877,6 +1028,316 @@ function PalettePicker() {
       </Select>
       <CreateThemeDialog open={createOpen} onOpenChange={setCreateOpen} />
     </>
+  );
+}
+
+/**
+ * The "Teamspaces" group label — a single uppercase heading above every
+ * teamspace row (Notion's group header). It deliberately does NOT collapse
+ * the whole group (only individual teamspaces fold); its one action is a
+ * hover-revealed `⋯` housing "New teamspace", so the create affordance lives
+ * in the menu rather than an always-on button.
+ *
+ * [COMP:app-web/teamspace-sections]
+ */
+function TeamspacesGroupHeader({
+  onNewTeamspace,
+  disabled,
+  offlineTitle,
+}: {
+  onNewTeamspace: () => void;
+  disabled: boolean;
+  offlineTitle?: string;
+}) {
+  const t = useT().docPage;
+  return (
+    <div className="group/tsgroup mt-4 mb-1 flex items-center px-1">
+      <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
+        {t.sidebarTeamspacesGroup}
+      </span>
+      <div className="flex items-center opacity-0 pointer-events-none transition-opacity group-hover/tsgroup:opacity-100 group-hover/tsgroup:pointer-events-auto has-[[aria-expanded=true]]:opacity-100 has-[[aria-expanded=true]]:pointer-events-auto">
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                aria-label={t.sidebarTeamspacesMenuAria}
+                className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <MoreHorizontal className="size-3.5" />
+              </button>
+            }
+          />
+          <DropdownMenuContent>
+            <DropdownMenuItem
+              disabled={disabled}
+              onClick={onNewTeamspace}
+              {...(offlineTitle ? { title: offlineTitle } : {})}
+            >
+              {t.sidebarNewTeamspace}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One teamspace, rendered in the **page-row** treatment (icon + normal-case
+ * title, not the uppercase section-label look) so it reads like the pages
+ * beneath it. Differences from a page row: clicking the row toggles
+ * collapse/expand instead of navigating (a teamspace has no page view), and
+ * the whole row is a DROP ZONE (`sectionDropId`) that files a dropped page at
+ * this teamspace's root. Hover reveals the teamspace `⋯` (Add members /
+ * Settings / Leave / Delete via `TeamspaceSectionMenu`) then `+` (new page
+ * here), out of flow like a page row's actions. Its child page tree renders
+ * indented beneath so the nesting reads.
+ *
+ * [COMP:app-web/teamspace-sections]
+ */
+function TeamspaceRow({
+  teamspace,
+  collapsed,
+  onToggle,
+  onNewPage,
+  newPageDisabled,
+  newPageTitle,
+  dragging,
+  onOpenSettings,
+  onLeave,
+  onDelete,
+  children,
+}: {
+  teamspace: Teamspace;
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewPage: () => void;
+  newPageDisabled: boolean;
+  newPageTitle?: string;
+  /** True while any sidebar row is being dragged (hides hover actions). */
+  dragging: boolean;
+  onOpenSettings: (tab: "general" | "members") => void;
+  onLeave: () => void;
+  onDelete: () => void;
+  children: React.ReactNode;
+}) {
+  const t = useT().docPage;
+  const drop = useDroppable({ id: sectionDropId(teamspace.id) });
+  const title = teamspace.name?.trim() ? teamspace.name : t.breadcrumbUntitled;
+  return (
+    <>
+      <div
+        ref={drop.setNodeRef}
+        className={[
+          "group/row relative flex items-center gap-0.5 rounded-md pr-1 text-sm",
+          "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+          drop.isOver ? "ring-1 ring-primary" : "",
+        ].join(" ")}
+      >
+        {/* Leading icon↔chevron toggle, exactly like a page row — the
+            teamspace icon (emoji or a default) at rest, swapping to a
+            disclosure chevron on hover (rotated when expanded). Clicking it
+            (or the title) folds the teamspace. */}
+        <div className="flex h-7 shrink-0 items-center self-stretch pl-1">
+          <button
+            type="button"
+            aria-label={collapsed ? t.sidebarExpandAria : t.sidebarCollapseAria}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggle();
+            }}
+            className="relative flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <span className="flex items-center justify-center opacity-100 transition-opacity group-hover/row:opacity-0">
+              {teamspace.icon ? (
+                <span className="text-[15px] leading-none">{teamspace.icon}</span>
+              ) : (
+                <Users className="size-4 text-sidebar-foreground/55" />
+              )}
+            </span>
+            <ChevronRight
+              aria-hidden
+              className={[
+                "absolute inset-0 m-auto size-3.5 opacity-0 transition-[transform,opacity] group-hover/row:opacity-100",
+                collapsed ? "" : "rotate-90",
+              ].join(" ")}
+            />
+          </button>
+        </div>
+
+        {/* Title — toggles collapse (a teamspace has no page view to open).
+            State is conveyed by the leading toggle's aria-label (mirroring
+            the page rows), so no aria-expanded here — that attribute is
+            reserved for the `⋯` trigger, which the hover-keep-open selector
+            below keys off. Pads right on hover to clear the out-of-flow
+            actions. */}
+        <button
+          type="button"
+          onClick={onToggle}
+          title={title}
+          className="flex min-w-0 flex-1 items-center py-1 pr-0 text-left group-hover/row:pr-14 group-focus-within/row:pr-14"
+        >
+          <span className="min-w-0 flex-1 truncate font-medium">{title}</span>
+        </button>
+
+        {/* Hover actions — teamspace `⋯` then `+` (new page here). Also
+            revealed while the `⋯` menu is open (`has-[aria-expanded]`, which
+            in this row can only be the dropdown trigger). */}
+        {!dragging && (
+          <div className="absolute inset-y-0 right-1 z-10 flex items-center gap-0.5 opacity-0 pointer-events-none transition-opacity group-hover/row:opacity-100 group-hover/row:pointer-events-auto group-focus-within/row:opacity-100 group-focus-within/row:pointer-events-auto has-[[aria-expanded=true]]:opacity-100 has-[[aria-expanded=true]]:pointer-events-auto">
+            <TeamspaceSectionMenu
+              teamspace={teamspace}
+              onOpenSettings={onOpenSettings}
+              onLeave={onLeave}
+              onDelete={onDelete}
+            />
+            <button
+              type="button"
+              aria-label={t.sidebarSectionNewPageAria}
+              disabled={newPageDisabled}
+              title={newPageTitle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onNewPage();
+              }}
+              className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            >
+              <Plus className="size-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+      {/* Child pages, indented so the nesting under the teamspace reads. */}
+      {!collapsed && <div className="pl-3">{children}</div>}
+    </>
+  );
+}
+
+/**
+ * The "Private" group — the caller's unfiled (`teamspaceId: null`) pages. A
+ * plain uppercase group label (not a page row: Private is not a teamspace and
+ * has nothing to manage), carrying a hover `+` to create a private page and a
+ * drop zone so dragging a page here privatises it. The page tree renders
+ * directly beneath; the whole group is hidden when the caller has no private
+ * pages. Always visible (Notion's model): it is both the create affordance
+ * for a private page (`+`) and the drop target that privatises a dragged page,
+ * so it can't be hidden when empty or there'd be no way to reach it.
+ */
+function PrivateGroupSection({
+  onNewPage,
+  newPageDisabled,
+  newPageTitle,
+  dragging,
+  children,
+}: {
+  onNewPage: () => void;
+  newPageDisabled: boolean;
+  newPageTitle?: string;
+  dragging: boolean;
+  children: React.ReactNode;
+}) {
+  const t = useT().docPage;
+  const drop = useDroppable({ id: sectionDropId(null) });
+  return (
+    <section className="mt-4">
+      <div
+        ref={drop.setNodeRef}
+        className={[
+          "group/priv mb-1 flex items-center rounded px-1",
+          drop.isOver ? "ring-1 ring-primary" : "",
+        ].join(" ")}
+      >
+        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
+          {t.sidebarPrivate}
+        </span>
+        {!dragging && (
+          <div className="flex items-center opacity-0 pointer-events-none transition-opacity group-hover/priv:opacity-100 group-hover/priv:pointer-events-auto">
+            <button
+              type="button"
+              aria-label={t.sidebarSectionNewPageAria}
+              disabled={newPageDisabled}
+              title={newPageTitle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onNewPage();
+              }}
+              className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+            >
+              <Plus className="size-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/**
+ * The section-header `⋯` menu for a teamspace. Management entries (Add
+ * members / Teamspace settings / Delete) show only with `canManage` — the
+ * single management gate off the list response. Leave shows for ANY member
+ * on a non-default teamspace; Delete additionally needs `canManage`. The
+ * General (default) teamspace can be neither left nor deleted, so a plain
+ * General member gets no menu at all (returns null → `+` only).
+ */
+function TeamspaceSectionMenu({
+  teamspace,
+  onOpenSettings,
+  onLeave,
+  onDelete,
+}: {
+  teamspace: Teamspace;
+  onOpenSettings: (tab: "general" | "members") => void;
+  onLeave: () => void;
+  onDelete: () => void;
+}) {
+  const t = useT().docPage;
+  const canManage = teamspace.canManage;
+  const canLeave = !teamspace.isDefault;
+  const canDelete = canManage && !teamspace.isDefault;
+  if (!canManage && !canLeave) return null;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            aria-label={t.teamspaceMenuAria}
+            onClick={(e) => e.stopPropagation()}
+            className="flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <MoreHorizontal className="size-3.5" />
+          </button>
+        }
+      />
+      <DropdownMenuContent>
+        {canManage && (
+          <>
+            <DropdownMenuItem onClick={() => onOpenSettings("members")}>
+              {t.teamspaceMenuAddMembers}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onOpenSettings("general")}>
+              {t.teamspaceMenuSettings}
+            </DropdownMenuItem>
+          </>
+        )}
+        {canLeave && (
+          <DropdownMenuItem onClick={onLeave}>
+            {t.teamspaceMenuLeave}
+          </DropdownMenuItem>
+        )}
+        {canDelete && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem variant="destructive" onClick={onDelete}>
+              {t.teamspaceMenuDelete}
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

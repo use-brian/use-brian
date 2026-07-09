@@ -88,3 +88,18 @@ describe("[COMP:app-web/sidebar-tree-node] kept-by-ancestry suppression", () => 
     expect(html).not.toContain(en.docPage.sidebarDraftSave);
   });
 });
+
+describe("[COMP:app-web/sidebar-tree-node] Temporary-page icon ghost", () => {
+  it("ghosts the icon on an auto-pruning draft", () => {
+    const node = draftNode("child");
+    const html = render(node, new Set());
+    expect(html).toContain("doc-icon-temporary");
+  });
+
+  it("does not ghost a draft kept by a saved ancestor", () => {
+    // Kept by ancestry → spared by the prune worker, so it is not temporary.
+    const node = draftNode("child");
+    const html = render(node, new Set(["child"]));
+    expect(html).not.toContain("doc-icon-temporary");
+  });
+});

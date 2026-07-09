@@ -134,11 +134,15 @@ export type AssistantCallStep = WorkflowStepCommon & {
   /**
    * Optional delivery target. When set, the step's text response is pushed
    * to this user channel after the consult completes (best-effort).
+   * `thread.fromStep` posts it as a thread reply under the message an
+   * earlier deliver-step pushed this run (Slack thread / Telegram reply;
+   * those two platforms only, same channel on both steps — schema-enforced).
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
   deliver?: {
     channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'
     channelId: string
+    thread?: { fromStep: string }
   }
   /**
    * Session continuity. `persistent` reuses one durable callee session

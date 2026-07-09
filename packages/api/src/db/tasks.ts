@@ -79,6 +79,56 @@ function toListRow(row: CompactRow): TaskListRow {
 }
 
 /**
+ * Idempotency window for task creation. A retry or double-fire of the same
+ * logical create (an SSE/client retry of `POST /api/tasks`, a re-invoked
+ * board-materialization, a model re-emitting the same `saveTask`) lands a
+ * character-identical row seconds apart with no dedupe. 120s comfortably
+ * covers those (observed exact-duplicate spans were 1-6s) while staying far
+ * under the smallest *legitimate* recurring gap seen in prod (~27 min — a
+ * recurring workflow re-running), so a daily/weekly task is never collapsed.
+ * See docs/architecture/features/tasks.md → "Create idempotency".
+ */
+const TASK_DEDUP_WINDOW_SECONDS = 120
+
+/**
+ * The blank-row placeholder title (`POST /api/tasks` default, `views.ts`
+ * `DEFAULT_TASK_TITLE`). Adding several empty rows to a board in quick
+ * succession is intentional, so placeholder titles are exempt from the
+ * create-idempotency guard — only meaningful titles dedupe.
+ */
+const PLACEHOLDER_TASK_TITLE = 'Untitled task'
+
+/**
+ * Return a live task in `workspaceId` that a create with these exact
+ * (title, status, parentId) coordinates would duplicate if it landed within
+ * `TASK_DEDUP_WINDOW_SECONDS`. Runs under the caller's RLS so only same-
+ * workspace rows are visible. `valid_to IS NULL` (live version) +
+ * `retracted_at IS NULL` exclude superseded / retracted rows. Placeholder
+ * titles never match. Returns null when there is no recent duplicate.
+ */
+export async function findRecentDuplicateTask(
+  userId: string,
+  coords: { workspaceId: string; title: string; status: TaskRecordStatus; parentId: string | null },
+): Promise<TaskRecord | null> {
+  if (coords.title === PLACEHOLDER_TASK_TITLE) return null
+  const result = await queryWithRLS<TaskRow>(
+    userId,
+    `SELECT ${FULL_SELECT} FROM tasks
+      WHERE workspace_id = $1
+        AND title = $2
+        AND status = $3
+        AND parent_id IS NOT DISTINCT FROM $4
+        AND valid_to IS NULL
+        AND retracted_at IS NULL
+        AND created_at > now() - ($5 || ' seconds')::interval
+      ORDER BY created_at DESC
+      LIMIT 1`,
+    [coords.workspaceId, coords.title, coords.status, coords.parentId, String(TASK_DEDUP_WINDOW_SECONDS)],
+  )
+  return result.rows[0] ? toRecord(result.rows[0]) : null
+}
+
+/**
  * Create a task.
  *
  * WU-1.7 edge hook: when `params.linkedEntityIds` is non-empty AND an

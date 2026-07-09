@@ -311,6 +311,40 @@ async function dependencyIssues(
   return issues
 }
 
+/**
+ * Non-blocking authoring advisories for a workflow definition. Unlike
+ * `dependencyIssues` (which hard-rejects the save with a 400), these are
+ * heads-up warnings returned in the POST/PATCH success body so the builder can
+ * surface them without blocking the save.
+ *
+ * The only advisory today: an `assistant_call` step with `researchMode: true`.
+ * Research mode routes the step through the deep coordinator fan-out, whose
+ * protocol REQUIRES urlReader-backed evidence and DISCARDS webSearch-only
+ * findings (see `docs/architecture/engine/coordinator-pattern.md`). For
+ * snippet-based / marketplace discovery — listing items off a JS-heavy
+ * storefront that cannot be opened page-by-page with urlReader — the fan-out
+ * gathers nothing usable, the coordinator synthesises empty, and the step fails
+ * `empty_response`. This turned a working Standard/Pro discovery workflow into a
+ * hard FAILED the moment research mode was flipped on (prod incident
+ * 2026-07-08, run 12abd640: HKTV Mall merchant discovery). The advisory tells
+ * the author to keep such steps on the Standard/Pro tier.
+ * See `docs/architecture/features/workflow.md` → "Authoring advisories".
+ */
+function stepAdvisories(
+  definition: WorkflowDefinition,
+): Array<{ path: Array<string | number>; message: string }> {
+  const advisories: Array<{ path: Array<string | number>; message: string }> = []
+  for (const [i, step] of definition.steps.entries()) {
+    if (step.type === 'assistant_call' && step.researchMode === true) {
+      advisories.push({
+        path: ['definition', 'steps', i],
+        message: `Step "${step.id}" has research mode on. The deep research protocol requires urlReader-backed evidence and discards webSearch-only findings, so for snippet-based or marketplace discovery (e.g. listing shops from a storefront that cannot be opened page by page with urlReader) it often gathers nothing and fails the run with an empty response. If the sources cannot be read individually with urlReader, use the Standard or Pro model tier for this step instead of research mode.`,
+      })
+    }
+  }
+  return advisories
+}
+
 /** Generate a URL-safe slug + 32-byte hex secret for webhook triggers. */
 function mintWebhookCredentials(): { slug: string; secret: string } {
   return {
@@ -524,7 +558,11 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       name: record.name,
     })
 
-    res.status(201).json(serializeWorkflow(record))
+    const createWarnings = stepAdvisories(definitionParsed.data)
+    res.status(201).json({
+      ...serializeWorkflow(record),
+      ...(createWarnings.length > 0 ? { warnings: createWarnings } : {}),
+    })
   })
 
   // ── PATCH /workflows/:id ───────────────────────────────────────────────
@@ -634,7 +672,11 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
       name: updated.name,
     })
 
-    res.json(serializeWorkflow(updated))
+    const updateWarnings = stepAdvisories(updated.definition)
+    res.json({
+      ...serializeWorkflow(updated),
+      ...(updateWarnings.length > 0 ? { warnings: updateWarnings } : {}),
+    })
   })
 
   // ── DELETE /workflows/:id ──────────────────────────────────────────────

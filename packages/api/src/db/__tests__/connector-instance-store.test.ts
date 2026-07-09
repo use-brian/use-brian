@@ -251,6 +251,64 @@ describe('[COMP:api/connector-instance-store] createConnectorInstanceStore', () 
     })
   })
 
+  describe('transferToWorkspace', () => {
+    it('converts scope=user → workspace, nulls user_id + ingest, and deletes grants', async () => {
+      const store = createConnectorInstanceStore(key)
+      // 1st call: the UPDATE returning the transferred row.
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [fakeRow({ scope: 'workspace', userId: null, workspaceId: 'ws_9', sensitivity: 'confidential' })],
+        rowCount: 1,
+      } as never)
+      // 2nd call: the grant cleanup DELETE.
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 2 } as never)
+
+      const result = await store.transferToWorkspace('u_1', 'ci_1', 'ws_9', 'confidential')
+
+      expect(result?.scope).toBe('workspace')
+      expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
+
+      const [updUser, updSql, updParams] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+      expect(updUser).toBe('u_1')
+      expect(updSql).toContain("SET scope = 'workspace'")
+      expect(updSql).toContain('user_id = NULL')
+      expect(updSql).toContain('ingest_workspace_id = NULL')
+      // Explicit ownership guard mirrors the RLS USING clause.
+      expect(updSql).toContain("WHERE id = $1 AND scope = 'user' AND user_id = $4")
+      expect(updParams).toEqual(['ci_1', 'ws_9', 'confidential', 'u_1'])
+
+      const [, delSql, delParams] = mockQueryWithRLS.mock.calls[1] as [string, string, unknown[]]
+      expect(delSql).toContain('DELETE FROM connector_grant WHERE connector_instance_id = $1')
+      expect(delParams).toEqual(['ci_1'])
+    })
+
+    it('returns null and skips grant cleanup when the caller does not own the row', async () => {
+      const store = createConnectorInstanceStore(key)
+      // UPDATE matches 0 rows (non-owner / non-member / already workspace-scoped).
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      const result = await store.transferToWorkspace('intruder', 'ci_1', 'ws_9')
+
+      expect(result).toBeNull()
+      // No second call — grants are only cleaned after a successful transfer.
+      expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+    })
+
+    it('keeps the existing sensitivity (COALESCE) when none is passed', async () => {
+      const store = createConnectorInstanceStore(key)
+      mockQueryWithRLS.mockResolvedValueOnce({
+        rows: [fakeRow({ scope: 'workspace', userId: null, workspaceId: 'ws_9' })],
+        rowCount: 1,
+      } as never)
+      mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+      await store.transferToWorkspace('u_1', 'ci_1', 'ws_9')
+
+      const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+      expect(sql).toContain('sensitivity = COALESCE($3::text, sensitivity)')
+      expect(params[2]).toBeNull()
+    })
+  })
+
   describe('update', () => {
     it('builds a dynamic SET list from provided keys', async () => {
       const store = createConnectorInstanceStore(key)

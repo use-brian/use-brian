@@ -1,6 +1,7 @@
 import type { ChannelAdapter, IncomingMessage, OutgoingMessage } from '../types.js'
 import { chunkText } from '../chunking.js'
 import { createSlackApi, type SlackApi, type SlackOutboundAudit } from './api.js'
+import { resolveMentionsCached } from './mentions.js'
 
 const SLACK_MAX_MESSAGE_LENGTH = 3000 // Slack's limit is 4000 but leave room for formatting
 
@@ -232,7 +233,12 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
       // Never send empty messages — Slack renders them as blank bubbles.
       // Documents still deliver when present (a docs-only send is legal).
       if (!response.text.trim() && !response.documents?.length) return ''
-      const text = response.format === 'markdown' ? markdownToMrkdwn(response.text) : response.text
+      const raw = response.format === 'markdown' ? markdownToMrkdwn(response.text) : response.text
+      // Rewrite name-shaped mentions (`<@handle>`, `@handle`, `@Real Name`)
+      // to real `<@U…>` ids against the workspace directory — Slack only
+      // notifies on real ids. Best-effort + TTL-cached; a directory failure
+      // still strips literal `<@name>` noise. See slack/mentions.ts.
+      const text = await resolveMentionsCached(raw, options.botToken, async () => (await api.usersList()).members)
       const chunks = chunkText(text, SLACK_MAX_MESSAGE_LENGTH)
       let lastTs = ''
 
@@ -272,7 +278,8 @@ export function createSlackAdapter(options: SlackAdapterOptions): ChannelAdapter
     },
 
     async editMessage(channelId: string, messageId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<void> {
-      const raw = response.format === 'markdown' ? markdownToMrkdwn(response.text) : response.text
+      const converted = response.format === 'markdown' ? markdownToMrkdwn(response.text) : response.text
+      const raw = await resolveMentionsCached(converted, options.botToken, async () => (await api.usersList()).members)
       const text = raw.slice(0, SLACK_MAX_MESSAGE_LENGTH)
       try {
         await api.updateMessage(channelId, messageId, text)

@@ -40,6 +40,50 @@ export function reviewItemKey(
   return `${item.primitive}:${item.id}`;
 }
 
+/** Inverse of `reviewItemKey` — split on the FIRST `:` (ids are UUIDs and
+ *  never contain one; primitives never do either). Malformed keys ⇒ null. */
+export function parseReviewKey(
+  key: string,
+): { primitive: InboxPrimitive; id: string } | null {
+  const i = key.indexOf(":");
+  if (i <= 0 || i === key.length - 1) return null;
+  return {
+    primitive: key.slice(0, i) as InboxPrimitive,
+    id: key.slice(i + 1),
+  };
+}
+
+/** Run a bulk verify/delete over selected review keys — sequential (each
+ *  action hits its own per-row endpoint; there is no server batch), mirroring
+ *  the approvals panel's `runBatch`: succeeded keys drop out, FAILED keys are
+ *  returned so the caller keeps them selected for a retry. A malformed key
+ *  counts as failed. */
+export async function runReviewBatch(
+  keys: string[],
+  act: (
+    primitive: InboxPrimitive,
+    id: string,
+  ) => Promise<{ ok: boolean }>,
+): Promise<{ succeeded: string[]; failed: string[] }> {
+  const succeeded: string[] = [];
+  const failed: string[] = [];
+  for (const key of keys) {
+    const parsed = parseReviewKey(key);
+    if (!parsed) {
+      failed.push(key);
+      continue;
+    }
+    try {
+      const result = await act(parsed.primitive, parsed.id);
+      if (result.ok) succeeded.push(key);
+      else failed.push(key);
+    } catch {
+      failed.push(key);
+    }
+  }
+  return { succeeded, failed };
+}
+
 /** Project raw inbox rows into review items, preserving endpoint order. */
 export function toReviewItems(rows: BrainInboxRow[]): PendingReviewItem[] {
   return rows.map((row) => ({

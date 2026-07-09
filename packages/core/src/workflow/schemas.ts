@@ -148,12 +148,22 @@ const assistantCallStepSchema = z.object({
    * to this user channel after the consult completes — best-effort, a push
    * failure never fails the step. This is what lets a one-step workflow
    * stand in for a scheduled job.
+   *
+   * `thread.fromStep` makes the push a THREAD REPLY under the message an
+   * earlier deliver-step posted this run (Slack thread / Telegram reply):
+   * the executor records each delivered message's platform id under the
+   * reserved run var `__deliveryMsg_<stepId>` and passes it as the reply
+   * anchor. Both steps must deliver to the same channel; if the referenced
+   * step delivered nothing this run (branch routed around it, push failed),
+   * the message falls back to a top-level post and the step's `__delivery`
+   * outcome records `thread: 'parent_missing'`.
    * See docs/architecture/engine/scheduled-jobs.md → "Channel delivery".
    */
   deliver: z
     .object({
       channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp']),
       channelId: z.string().min(1).max(256),
+      thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
     })
     .optional(),
   /**
@@ -388,6 +398,55 @@ export const WorkflowDefinitionSchema = z
           code: z.ZodIssueCode.custom,
           message: `step "${step.id}".page.fromStep references "${ref}", which is not an assistant_call step with page.create — only pages created by an earlier step this run can be anchored via fromStep.`,
           path: ['steps', i, 'page', 'fromStep'],
+        })
+      }
+    }
+
+    // `deliver.thread.fromStep` must reference a DIFFERENT assistant_call step
+    // that delivers to the SAME channel — the thread parent is the message
+    // that step posted this run. Also platform-gated: only Slack (thread_ts)
+    // and Telegram (reply) support threaded replies. Mirrors the page.fromStep
+    // checks — catches the dangling reference at authoring time instead of a
+    // silent top-level fallback on every run.
+    const deliverSteps = new Map(
+      def.steps
+        .filter((s) => s.type === 'assistant_call' && s.deliver !== undefined)
+        .map((s) => [s.id, (s as { deliver: { channelType: string; channelId: string } }).deliver]),
+    )
+    for (const [i, step] of def.steps.entries()) {
+      if (step.type !== 'assistant_call' || !step.deliver?.thread) continue
+      const ref = step.deliver.thread.fromStep
+      if (step.deliver.channelType !== 'slack' && step.deliver.channelType !== 'telegram') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.thread is only supported for slack (thread reply) and telegram (reply) deliveries — ${step.deliver.channelType} has no threaded replies.`,
+          path: ['steps', i, 'deliver', 'thread'],
+        })
+        continue
+      }
+      if (ref === step.id) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.thread.fromStep must not reference itself.`,
+          path: ['steps', i, 'deliver', 'thread', 'fromStep'],
+        })
+        continue
+      }
+      const parent = deliverSteps.get(ref)
+      if (!parent) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.thread.fromStep references "${ref}", which is not an assistant_call step with a \`deliver\` target — the thread parent must be a message an earlier deliver-step posts this run.`,
+          path: ['steps', i, 'deliver', 'thread', 'fromStep'],
+        })
+      } else if (
+        parent.channelType !== step.deliver.channelType ||
+        parent.channelId !== step.deliver.channelId
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `step "${step.id}".deliver.thread.fromStep references "${ref}", which delivers to a different channel (${parent.channelType} "${parent.channelId}" vs ${step.deliver.channelType} "${step.deliver.channelId}") — a thread reply must target the same channel as its parent message.`,
+          path: ['steps', i, 'deliver', 'thread', 'fromStep'],
         })
       }
     }

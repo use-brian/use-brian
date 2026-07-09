@@ -73,6 +73,25 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(notifications[0].workerId).toBe('worker_1')
   })
 
+  it('surfaces an empty-output worker as failed, not a "No results found" completion (incident 2026-07-08 run 12abd640)', async () => {
+    // A worker that produced ZERO synthesis text must NOT masquerade as a
+    // completed "No results found." finding — that made an internal empty turn
+    // indistinguishable from a genuine negative result, so the coordinator read
+    // it as "nothing exists" and the parent consult failed `empty_response`.
+    const manager = createWorkerManager({
+      provider: makeFakeProvider(''),
+      model: 'gemini-flash',
+      tools: new Map(),
+    })
+    manager.spawn('Find 5 new HKTV Mall merchants', ctx)
+    await manager.waitForNext()
+    const [n] = manager.drainNotifications()
+    expect(n.status).toBe('failed')
+    expect(n.result).not.toContain('No results found')
+    expect(n.result).toContain('EMPTY')
+    expect(n.result).toContain('worker_empty_output')
+  })
+
   it('scopes notification delivery by spawning session — never delivers to another session (incident 2026-06-02)', async () => {
     // The manager is a process-wide singleton shared across every user/channel.
     // A worker spawned by session A must NOT surface in session B's turn — that
@@ -414,7 +433,7 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     expect(seenModels[4]).toBe('gemini-flash')
   })
 
-  it('returns a completed (not crashed) result when the provider errors inside the stream', async () => {
+  it('returns a graceful failed (not crashed) result when the provider errors inside the stream', async () => {
     const manager = createWorkerManager({
       provider: makeThrowingProvider(),
       model: 'gemini-flash',
@@ -424,9 +443,12 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     await manager.waitForNext()
     const notifications = manager.drainNotifications()
     expect(notifications).toHaveLength(1)
-    expect(notifications[0].status).toBe('completed')
-    expect(notifications[0].result).toContain('No results found')
-    expect(manager.getStatus(workerId)).toBe('completed')
+    // A provider error that produced no text is an empty output, not a
+    // trustworthy "nothing found" completion — surfaced as `failed` (but the
+    // worker still returns gracefully rather than throwing / crashing).
+    expect(notifications[0].status).toBe('failed')
+    expect(notifications[0].result).not.toContain('No results found')
+    expect(manager.getStatus(workerId)).toBe('failed')
   })
 
   it('formatNotification truncates long worker results to cap coordinator-session bloat', () => {

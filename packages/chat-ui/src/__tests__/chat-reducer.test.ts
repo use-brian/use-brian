@@ -81,6 +81,24 @@ describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
     expect(fuller.streamingText).toBe('Hello')
   })
 
+  it('resets the live buffer without ending the stream (drops an intermediate text segment)', () => {
+    // A stray token the model emits alongside an intermediate tool step (e.g.
+    // Gemini gluing a "20" text part onto an `inspectMyActivity(limit:20)`
+    // call) must not survive into the final answer. `stream/reset` clears the
+    // buffer while keeping isStreaming true, so the next segment starts clean.
+    const leaked = chatReducer(
+      { ...initialChatState, isStreaming: true, streamingText: '20' },
+      { type: 'stream/reset' },
+    )
+    expect(leaked.streamingText).toBe('')
+    expect(leaked.isStreaming).toBe(true)
+    const answer = chatReducer(leaked, {
+      type: 'stream/append',
+      text: 'I have diagnosed the two causes',
+    })
+    expect(answer.streamingText).toBe('I have diagnosed the two causes')
+  })
+
   it('finalizes a stream by appending the final assistant message', () => {
     const streaming = chatReducer(
       { ...initialChatState, isStreaming: true, streamingText: 'partial' },

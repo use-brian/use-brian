@@ -521,7 +521,7 @@ export type CreateWorkflowInput = {
 };
 
 export type CreateWorkflowResult =
-  | { ok: true; workflow: WorkflowFull }
+  | { ok: true; workflow: WorkflowFull; warnings?: WorkflowIssue[] }
   | { ok: false; error: string; issues?: WorkflowIssue[] };
 
 export async function createWorkflow(
@@ -543,7 +543,10 @@ export async function createWorkflow(
       issues: body.issues,
     };
   }
-  return { ok: true, workflow: (await res.json()) as WorkflowFull };
+  const created = (await res.json()) as WorkflowFull & {
+    warnings?: WorkflowIssue[];
+  };
+  return { ok: true, workflow: created, warnings: created.warnings };
 }
 
 export type UpdateWorkflowInput = {
@@ -563,7 +566,7 @@ export type UpdateWorkflowInput = {
 };
 
 export type UpdateWorkflowResult =
-  | { ok: true; workflow: WorkflowFull }
+  | { ok: true; workflow: WorkflowFull; warnings?: WorkflowIssue[] }
   | { ok: false; error: string; issues?: WorkflowIssue[] };
 
 export async function updateWorkflow(
@@ -589,7 +592,10 @@ export async function updateWorkflow(
       issues: body.issues,
     };
   }
-  return { ok: true, workflow: (await res.json()) as WorkflowFull };
+  const updated = (await res.json()) as WorkflowFull & {
+    warnings?: WorkflowIssue[];
+  };
+  return { ok: true, workflow: updated, warnings: updated.warnings };
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<boolean> {

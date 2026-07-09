@@ -44,6 +44,7 @@ const BRIDGE_READ_NAMES = [
   'getWorkflowRun',
   'proposeWorkflow', // read-only draft helper
   'listSlackChannels', // read-only: real Slack channel ids for a delivery target
+  'listSlackMembers', // read-only: real Slack member ids for <@…> mentions
   // WS-5 retrieval reads (getEntity/search already live on the brain MCP)
   'aggregate',
   'recentEpisodes',

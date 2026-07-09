@@ -4,8 +4,10 @@ import {
   filterReviewItems,
   inboxPrimitivesForSelection,
   nextReviewKey,
+  parseReviewKey,
   resolveReviewIndex,
   reviewItemKey,
+  runReviewBatch,
   toReviewItems,
   type PendingReviewItem,
 } from "../review-queue";
@@ -240,6 +242,67 @@ describe("[COMP:app-web/brain-review-panel] review queue helpers", () => {
     it("tolerates an unknown acted key by selecting the first item", () => {
       expect(nextReviewKey(items, "deal:gone")).toBe("memory:a");
       expect(nextReviewKey([], "deal:gone")).toBeNull();
+    });
+  });
+});
+
+describe("[COMP:app-web/brain-review-panel] bulk selection batch", () => {
+  describe("parseReviewKey", () => {
+    it("round-trips reviewItemKey", () => {
+      expect(parseReviewKey("entity_link:abc-123")).toEqual({
+        primitive: "entity_link",
+        id: "abc-123",
+      });
+      expect(parseReviewKey("memory:m-1")).toEqual({
+        primitive: "memory",
+        id: "m-1",
+      });
+    });
+
+    it("rejects malformed keys", () => {
+      expect(parseReviewKey("no-colon")).toBeNull();
+      expect(parseReviewKey(":id-only")).toBeNull();
+      expect(parseReviewKey("memory:")).toBeNull();
+    });
+  });
+
+  describe("runReviewBatch", () => {
+    it("runs the action per key and partitions succeeded/failed", async () => {
+      const acted: Array<[string, string]> = [];
+      const { succeeded, failed } = await runReviewBatch(
+        ["memory:a", "task:b", "contact:c"],
+        async (primitive, id) => {
+          acted.push([primitive, id]);
+          return { ok: id !== "b" };
+        },
+      );
+      expect(acted).toEqual([
+        ["memory", "a"],
+        ["task", "b"],
+        ["contact", "c"],
+      ]);
+      expect(succeeded).toEqual(["memory:a", "contact:c"]);
+      expect(failed).toEqual(["task:b"]);
+    });
+
+    it("counts a thrown action and a malformed key as failed", async () => {
+      const { succeeded, failed } = await runReviewBatch(
+        ["memory:a", "garbage", "task:b"],
+        async (_primitive, id) => {
+          if (id === "a") throw new Error("boom");
+          return { ok: true };
+        },
+      );
+      expect(succeeded).toEqual(["task:b"]);
+      expect(failed).toEqual(["memory:a", "garbage"]);
+    });
+
+    it("handles an empty selection", async () => {
+      const { succeeded, failed } = await runReviewBatch([], async () => ({
+        ok: true,
+      }));
+      expect(succeeded).toEqual([]);
+      expect(failed).toEqual([]);
     });
   });
 });

@@ -137,7 +137,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.
-  // Runtime injection happens at boot in apps/api/src/index.ts using the
+  // Runtime injection happens at boot in packages/api/src/boot.ts using the
   // Tasks/CRM pattern (`requiresCapability: 'files'` + `filterToolsByCapabilities`),
   // NOT through `mcp/inject.ts createFilesTools`. Drift hazard: keep tool
   // names here in sync with the tool factories in
@@ -148,7 +148,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'fileRead',    description: 'Read a workspace file',                                         classification: 'read',        defaultPolicy: 'allow' },
     { name: 'fileSearch',  description: 'Search workspace files by title, summary, tag, or filename',    classification: 'read',        defaultPolicy: 'allow' },
     { name: 'fileSetMeta', description: 'Update title, summary, tags, or sensitivity on a file',         classification: 'write',       defaultPolicy: 'ask' },
-    { name: 'saveFileToBrain', description: 'Save an uploaded attachment to the workspace as a file, preserving the original', classification: 'write', defaultPolicy: 'ask' },
+    // saveFileToBrain defaults to allow (not ask): the user explicitly asked
+    // to save the attachment, and comment-thread chats surface no
+    // confirmation card — an ask default would silently stall those saves.
+    // Mirrors requiresConfirmation:false in core/src/workspace-files/tools.ts.
+    { name: 'saveFileToBrain', description: 'Save an uploaded attachment to the workspace as a file, preserving the original', classification: 'write', defaultPolicy: 'allow' },
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
@@ -193,7 +197,7 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
 /**
  * Built-in connector tools that are NOT injected through
  * `packages/api/src/mcp/inject.ts`. Instead they are wired at boot in
- * `apps/api/src/index.ts` using the Tasks/CRM capability-gated pattern
+ * `packages/api/src/boot.ts` (`bootOpenApi`) using the Tasks/CRM capability-gated pattern
  * (`requiresCapability: 'files'` + `filterToolsByCapabilities`).
  *
  * The Drift Sweep admin surface

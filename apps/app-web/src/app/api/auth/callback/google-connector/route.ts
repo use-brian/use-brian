@@ -36,7 +36,7 @@ export async function GET(request: Request) {
   const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
 
-  const { connector, createNew, workspaceId, nonce } = parseConnectorState(stateRaw);
+  const { connector, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
 
   if (error || !code || !connector) {
     return NextResponse.redirect(
@@ -114,10 +114,11 @@ export async function GET(request: Request) {
       return NextResponse.redirect(new URL("/login", request.url));
     }
 
-    // `createNew` ("Add another" intent) makes the backend mint a FRESH
-    // connector_instance instead of updating the first — the connected
-    // email doubles as the new instance's nickname so two accounts are
-    // tellable apart on the rail.
+    // `instanceId` (reconnect) re-points an EXISTING instance's credential —
+    // used when a cleared teammate re-auths a workspace-owned OAuth connector
+    // onto their own account. `createNew` ("Add another") mints a FRESH
+    // instance (the connected email doubles as its nickname). The two are
+    // mutually exclusive; reconnect wins.
     const storeRes = await fetch(`${API_URL}/api/connectors/${connector}/store-credentials`, {
       method: "POST",
       headers: {
@@ -127,7 +128,11 @@ export async function GET(request: Request) {
       body: JSON.stringify({
         refreshToken: tokens.refresh_token,
         email: connectedEmail,
-        ...(createNew ? { createNew: true, label: connectedEmail } : {}),
+        ...(instanceId
+          ? { instanceId }
+          : createNew
+            ? { createNew: true, label: connectedEmail }
+            : {}),
       }),
     });
 

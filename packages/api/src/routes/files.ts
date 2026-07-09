@@ -1,5 +1,5 @@
-import { Router } from 'express'
-import multer from 'multer'
+import { Router, type Request, type Response, type NextFunction } from 'express'
+import multer, { MulterError } from 'multer'
 import { z } from 'zod'
 import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
@@ -479,6 +479,34 @@ export function fileRoutes(
       console.error('File preview error:', err)
       res.status(500).json({ error: 'Failed to load file' })
     }
+  })
+
+  // Map multer limit rejections to a clear 413 instead of the generic 500 a
+  // thrown MulterError would otherwise surface. The web client guards before
+  // POST (`use-file-attachments.ts` → `partitionUpload`), so this is
+  // defense-in-depth for direct API callers and any file between the 20 MB
+  // multer cap and Cloud Run's 32 MiB edge cap. See
+  // docs/architecture/features/files.md → "Upload limits".
+  router.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (err instanceof MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        res.status(413).json({
+          error: 'file_too_large',
+          detail: `Each file must be ${MAX_FILE_SIZE / (1024 * 1024)} MB or smaller.`,
+        })
+        return
+      }
+      if (err.code === 'LIMIT_FILE_COUNT') {
+        res.status(413).json({
+          error: 'too_many_files',
+          detail: `Attach at most ${MAX_FILES_PER_REQUEST} files per upload.`,
+        })
+        return
+      }
+      res.status(400).json({ error: 'upload_rejected', detail: err.message })
+      return
+    }
+    next(err)
   })
 
   return router

@@ -140,6 +140,37 @@ describe('[COMP:api/workflows-route] GET / POST /workflows', () => {
     expect(res.status).toBe(201)
     expect(emitAudit).toHaveBeenCalledWith(expect.objectContaining({ type: 'workflow.created' }))
   })
+
+  it('POST /workflows returns a non-blocking research-mode advisory in warnings[] (incident 2026-07-08 run 12abd640)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    mockDefParse.mockReturnValueOnce({
+      success: true,
+      data: { steps: [{ id: 'find_merchants', type: 'assistant_call', researchMode: true }] },
+    })
+    workflowStore.create.mockResolvedValueOnce(wf())
+    const res = await request(app('u-1'))
+      .post('/api/workflows')
+      .send({ workspaceId: WS, name: 'Discovery', definition: { steps: [] } })
+    // Save still succeeds — the advisory is non-blocking, unlike a hard `issues` reject.
+    expect(res.status).toBe(201)
+    expect(res.body.warnings).toHaveLength(1)
+    expect(res.body.warnings[0].message).toMatch(/research mode/i)
+    expect(res.body.warnings[0].path).toEqual(['definition', 'steps', 0])
+  })
+
+  it('POST /workflows omits warnings[] when no step is in research mode', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    mockDefParse.mockReturnValueOnce({
+      success: true,
+      data: { steps: [{ id: 's1', type: 'assistant_call', researchMode: false }] },
+    })
+    workflowStore.create.mockResolvedValueOnce(wf())
+    const res = await request(app('u-1'))
+      .post('/api/workflows')
+      .send({ workspaceId: WS, name: 'Plain', definition: { steps: [] } })
+    expect(res.status).toBe(201)
+    expect(res.body.warnings).toBeUndefined()
+  })
 })
 
 describe('[COMP:api/workflows-route] delete / run', () => {

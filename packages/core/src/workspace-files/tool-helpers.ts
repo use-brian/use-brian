@@ -9,6 +9,56 @@ import type { FilesContext, FilesError } from './api.js'
 
 export const idOrPathShape = z.string().min(1).max(1024)
 
+// ── Tool-policy gate ───────────────────────────────────────────
+//
+// The Studio ▸ Connectors and Assistant ▸ Tools surfaces write per-tool
+// allow/ask/block policy for the `files` built-in (serverName='files' in
+// `mcp_tool_settings`), but the files tools are constructed once at boot —
+// they can't read the store directly (core is store-agnostic). Boot wires
+// this hook to the same L1 (app-level) + L2 (per-assistant) strictest-wins
+// resolution the UI displays; when it's absent (open default, tests) the
+// tools' static `requiresConfirmation` flags stand and nothing blocks.
+// See docs/architecture/features/files.md → "Connector-style governance".
+
+export type FileToolPolicy = 'allow' | 'ask' | 'block'
+
+export type ResolveFileToolPolicy = (
+  toolName: string,
+  context: { userId: string; assistantId: string },
+) => Promise<FileToolPolicy>
+
+/** Per-tool `resolveConfirmation` hook — dynamic policy overrides the
+ *  static flag only when the boot wired a resolver. */
+export function policyConfirmation(
+  resolvePolicy: ResolveFileToolPolicy | undefined,
+  toolName: string,
+): ((context: { userId: string; assistantId: string }) => Promise<boolean>) | undefined {
+  if (!resolvePolicy) return undefined
+  return async (context) => (await resolvePolicy(toolName, context)) === 'ask'
+}
+
+/** Execute-time block gate — mirrors the MCP connector wrapper: a blocked
+ *  tool returns an isError result instead of running. Fail-open on a
+ *  resolver error (policy lookup outage must not take down file tools). */
+export async function policyBlockGate(
+  resolvePolicy: ResolveFileToolPolicy | undefined,
+  toolName: string,
+  context: { userId: string; assistantId: string },
+): Promise<{ data: string; isError: true } | null> {
+  if (!resolvePolicy) return null
+  try {
+    if ((await resolvePolicy(toolName, context)) === 'block') {
+      return {
+        data: `ERROR: "${toolName}" is blocked by tool policy for this assistant. A workspace member can change it under Studio > Connectors > Workspace Files.`,
+        isError: true,
+      }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
 export function workspaceGate(workspaceId: string | null | undefined): { data: string; isError: true } | null {
   if (!workspaceId) {
     return {

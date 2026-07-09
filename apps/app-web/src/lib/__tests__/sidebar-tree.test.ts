@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBreadcrumb,
   buildTree,
+  groupRowsByTeamspace,
   savedAncestorIds,
   type TreeNode,
 } from "../sidebar-tree";
@@ -29,6 +30,7 @@ function row(
     name?: string;
     updatedAt?: string;
     state?: "draft" | "saved";
+    teamspaceId?: string | null;
   } = {},
 ): ViewListRow {
   return {
@@ -44,6 +46,7 @@ function row(
     nestParentId: opts.nestParentId ?? null,
     position: opts.position ?? 0,
     icon: null,
+    teamspaceId: opts.teamspaceId ?? null,
   };
 }
 
@@ -154,6 +157,57 @@ describe("[COMP:app-web/sidebar-tree] buildTree", () => {
 
   it("handles an empty list", () => {
     expect(buildTree([])).toEqual([]);
+  });
+});
+
+describe("[COMP:app-web/sidebar-tree] groupRowsByTeamspace", () => {
+  it("groups rows by teamspaceId with null as the private group", () => {
+    const groups = groupRowsByTeamspace([
+      row("a", { teamspaceId: "ts1" }),
+      row("b", { teamspaceId: null }),
+      row("c", { teamspaceId: "ts1" }),
+      row("d", { teamspaceId: "ts2" }),
+    ]);
+    expect(groups.get("ts1")?.map((r) => r.id)).toEqual(["a", "c"]);
+    expect(groups.get("ts2")?.map((r) => r.id)).toEqual(["d"]);
+    expect(groups.get(null)?.map((r) => r.id)).toEqual(["b"]);
+    expect(groups.size).toBe(3);
+  });
+
+  it("preserves input order within each group", () => {
+    const groups = groupRowsByTeamspace([
+      row("z", { teamspaceId: "ts1", position: 9 }),
+      row("a", { teamspaceId: "ts1", position: 0 }),
+    ]);
+    // No sorting here — buildTree owns ordering per section.
+    expect(groups.get("ts1")?.map((r) => r.id)).toEqual(["z", "a"]);
+  });
+
+  it("coalesces a missing teamspaceId field to the null group", () => {
+    // An older server may omit the field entirely — must not crash, and the
+    // row must land in Private rather than vanish.
+    const legacy: Omit<ViewListRow, "teamspaceId"> &
+      Partial<Pick<ViewListRow, "teamspaceId">> = { ...row("legacy") };
+    delete legacy.teamspaceId;
+    const groups = groupRowsByTeamspace([legacy as ViewListRow]);
+    expect(groups.get(null)?.map((r) => r.id)).toEqual(["legacy"]);
+  });
+
+  it("handles an empty list", () => {
+    expect(groupRowsByTeamspace([]).size).toBe(0);
+  });
+
+  it("feeds buildTree per group so cross-section children become section roots", () => {
+    // A child whose denormalized teamspaceId drifted from its parent's group
+    // is an orphan within its own group's tree — promoted to that section's
+    // root, never dropped.
+    const groups = groupRowsByTeamspace([
+      row("parent", { teamspaceId: "ts1" }),
+      row("drifted", { nestParentId: "parent", teamspaceId: "ts2" }),
+    ]);
+    const ts2Tree = buildTree(groups.get("ts2") ?? []);
+    expect(ts2Tree.map((n) => n.row.id)).toEqual(["drifted"]);
+    expect(ts2Tree[0].depth).toBe(0);
   });
 });
 

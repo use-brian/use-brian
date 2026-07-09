@@ -226,6 +226,50 @@ export function createSlackApi(options: SlackApiOptions) {
       return { channels }
     },
 
+    /**
+     * List the workspace's human members (id + handle + display/real name),
+     * paginating through `users.list`. Deleted users, bots, and Slackbot are
+     * excluded. Backs outbound mention resolution (`mentions.ts`) and the
+     * workflow-authoring `listSlackMembers` tool — Slack only notifies via
+     * `<@MEMBER_ID>` syntax, so the model needs real ids, not guesses.
+     * Requires `users:read` (already in the BYO app manifest — the identity
+     * path calls `users.info` with the same scope). Paging is bounded
+     * (10 pages) so a huge workspace can't spin the caller.
+     */
+    usersList: async (
+      opts?: { limit?: number },
+    ): Promise<{
+      members: Array<{ id: string; handle: string; displayName: string; realName: string }>
+    }> => {
+      const pageLimit = Math.min(Math.max(opts?.limit ?? 200, 1), 1000)
+      const members: Array<{ id: string; handle: string; displayName: string; realName: string }> = []
+      let cursor: string | undefined
+      for (let page = 0; page < 10; page++) {
+        const res = await call<{
+          members?: Array<{
+            id: string
+            name?: string
+            deleted?: boolean
+            is_bot?: boolean
+            profile?: { display_name?: string; real_name?: string }
+          }>
+          response_metadata?: { next_cursor?: string }
+        }>('users.list', { limit: pageLimit, cursor })
+        for (const m of res.members ?? []) {
+          if (m.deleted || m.is_bot || m.id === 'USLACKBOT') continue
+          members.push({
+            id: m.id,
+            handle: m.name ?? '',
+            displayName: m.profile?.display_name ?? '',
+            realName: m.profile?.real_name ?? '',
+          })
+        }
+        cursor = res.response_metadata?.next_cursor || undefined
+        if (!cursor) break
+      }
+      return { members }
+    },
+
     /** Fetch recent messages from a channel. Requires channels:history scope. */
     conversationsHistory: (channel: string, opts?: { limit?: number; latest?: string }) =>
       call<{ messages: Array<{ type: string; user?: string; bot_id?: string; text?: string; ts: string; subtype?: string }> }>(

@@ -67,7 +67,7 @@ import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { cn } from "@/lib/utils";
-import { OFFICIAL_OAUTH_SCOPES, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
+import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS } from "@sidanclaw/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
@@ -185,6 +185,9 @@ type ToolPermission = {
   classification: "read" | "write" | "destructive" | "unknown";
   policy: "allow" | "ask" | "block";
 };
+
+/** Connector visibility clearance tier — mirrors the server's SensitivityTier. */
+type SensitivityTier = "public" | "internal" | "confidential";
 
 function getTransportLabel(url?: string): string {
   if (!url) return "";
@@ -669,6 +672,30 @@ function ConnectorsList() {
   // Connector config state (e.g. gcal sendUpdates)
   const [configMap, setConfigMap] = useState<Record<string, Record<string, unknown>>>({});
 
+  // ── Workspace-owned connector management ──────────────────────
+  // [COMP:web/workspace-connector-manage] — full management surface for
+  // scope='workspace' (source==='team_native') connectors: sensitivity (fetched
+  // separately, the connectors list omits it), the shared per-tool policy, and
+  // the inline Edit / Reconnect forms. Any team_native row the list surfaces is
+  // already within the member's clearance (listUsableWorkspaceConnectors applies
+  // the same gate as the route's requireConnectorClearance), so presence ==
+  // "cleared to manage" and no extra clearance signal is needed here.
+  // instanceId -> current sensitivity, for the Edit form.
+  const [wsOwnedSensitivity, setWsOwnedSensitivity] = useState<Record<string, SensitivityTier>>({});
+  // instanceId -> shared per-tool policy (toolName -> allow/ask/block).
+  const [wsToolPolicies, setWsToolPolicies] = useState<Record<string, { policies: Record<string, ToolPolicy>; loading: boolean }>>({});
+  // The workspace-owned instance whose Edit / Reconnect form is open.
+  const [wsEditingId, setWsEditingId] = useState<string | null>(null);
+  const [wsEditLabel, setWsEditLabel] = useState("");
+  const [wsEditSensitivity, setWsEditSensitivity] = useState<SensitivityTier>("internal");
+  const [wsReconnectId, setWsReconnectId] = useState<string | null>(null);
+  const [wsReconnectSecret, setWsReconnectSecret] = useState("");
+  // Inline error under the workspace-owned management panel.
+  const [wsManageError, setWsManageError] = useState<string | null>(null);
+  // Transfer (personal -> workspace) — the instance being transferred / its error.
+  const [transferringId, setTransferringId] = useState<string | null>(null);
+  const [transferError, setTransferError] = useState<string | null>(null);
+
   // Drive-picker error (e.g. not-configured / token failure). Rendered as a
   // transient banner in any panel that wraps a DrivePicker trigger.
   const [gdriveError, setGdriveError] = useState<string | null>(null);
@@ -770,6 +797,48 @@ function ConnectorsList() {
   useEffect(() => {
     fetchGrants();
   }, [fetchGrants]);
+
+  // Workspace-owned connectors: the connectors list omits `sensitivity`, so
+  // fetch the workspace instance list (`teamNative`) and index sensitivity by
+  // instance id to prefill the Edit form. Any member may read it (the route is
+  // role-gated, not admin-gated).
+  const fetchWorkspaceOwnedMeta = useCallback(() => {
+    if (!workspaceId) return;
+    authFetch(`${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { teamNative?: Array<{ id: string; sensitivity?: SensitivityTier }> } | null) => {
+        if (!data?.teamNative) return;
+        const map: Record<string, SensitivityTier> = {};
+        for (const inst of data.teamNative) if (inst.sensitivity) map[inst.id] = inst.sensitivity;
+        setWsOwnedSensitivity(map);
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
+  useEffect(() => {
+    fetchWorkspaceOwnedMeta();
+  }, [fetchWorkspaceOwnedMeta]);
+
+  // The shared per-tool allow/ask/block for a workspace-owned connector, from
+  // GET .../connectors/:instanceId/tool-policies. Absent tools default to 'ask'
+  // when rendered against the tool catalog.
+  const loadWsToolPolicies = useCallback(async (instanceId: string) => {
+    if (!workspaceId) return;
+    setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: prev[instanceId]?.policies ?? {}, loading: true } }));
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${instanceId}/tool-policies`,
+      );
+      const map: Record<string, ToolPolicy> = {};
+      if (res.ok) {
+        const data = (await res.json()) as { policies?: Array<{ toolName: string; policy: ToolPolicy }> };
+        for (const p of data.policies ?? []) map[p.toolName] = p.policy;
+      }
+      setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: map, loading: false } }));
+    } catch {
+      setWsToolPolicies((prev) => ({ ...prev, [instanceId]: { policies: prev[instanceId]?.policies ?? {}, loading: false } }));
+    }
+  }, [workspaceId]);
 
   // ── Auto-trigger from `?connect=<id>` ───────────────────────────
   //
@@ -886,7 +955,7 @@ function ConnectorsList() {
   // `opts.addAnother` connects a NEW account for a provider that already has
   // one (OAuth state carries an `:add` suffix so the callback creates a fresh
   // instance instead of overwriting the first).
-  async function handleConnect(c: Connector, opts?: { addAnother?: boolean }) {
+  async function handleConnect(c: Connector, opts?: { addAnother?: boolean; instanceId?: string }) {
     const id = c.id;
     const rid = rowId(c);
     setConnecting(rid);
@@ -919,7 +988,7 @@ function ConnectorsList() {
         redirect_uri: redirectUri,
         response_type: "code",
         owner: "user",
-        state: buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, nonce }),
+        state: buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
       window.location.href = `https://api.notion.com/v1/oauth/authorize?${sp}`;
       return;
@@ -934,7 +1003,7 @@ function ConnectorsList() {
         redirect_uri: redirectUri,
         response_type: "code",
         scope: "public_api",
-        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, nonce }),
+        state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
       return;
@@ -955,7 +1024,7 @@ function ConnectorsList() {
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, nonce }),
+        state: buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;
@@ -1291,14 +1360,14 @@ function ConnectorsList() {
     fetchConnectors();
   }
 
-  // Remove a WORKSPACE-native connector (scope='workspace') from the read-only
-  // panel. Unlike a personal connector, this one is owned by the workspace, so
-  // any member can delete it (backend RLS `ci_workspace_member`) — but it is a
-  // shared resource whose removal stops the tools + any ingestion it feeds for
-  // the whole workspace, so confirm first. Reuses `handleRemove` (DELETE
-  // /instances/:id + refetch). This is the affordance the read-only panel was
-  // missing, which left a dead workspace connector unremovable by anyone.
+  // Remove a WORKSPACE-OWNED connector (scope='workspace', source==='team_native')
+  // via the clearance-gated workspace route (DELETE .../connectors/:instanceId).
+  // Any member cleared for the connector may delete it — but it is a shared
+  // resource whose removal stops its tools + any ingestion it feeds for the
+  // whole workspace, so confirm first. [COMP:web/workspace-connector-manage]
   async function handleRemoveWorkspaceConnector(c: Connector) {
+    const iid = c.connectorInstanceId;
+    if (!iid || !workspaceId) return;
     const ok = await confirmDialog({
       title: tc.workspaceNativeRemoveTitle,
       description: tc.workspaceNativeRemoveDesc,
@@ -1306,7 +1375,154 @@ function ConnectorsList() {
       variant: "destructive",
     });
     if (!ok) return;
-    await handleRemove(c);
+    setWsManageError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${iid}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error();
+      setConnectors((prev) => prev.filter((x) => !isSameRow(x, c)));
+      setSelected(null);
+      fetchConnectors();
+    } catch {
+      setWsManageError(tc.wsManageError);
+    }
+  }
+
+  // ── Workspace-owned connector management handlers ─────────────
+  // [COMP:web/workspace-connector-manage]
+
+  // Transfer a PERSONAL connector to the active workspace (ownership change,
+  // parallel to "Share with workspace"). One-way; the credential rides along.
+  // OAuth connectors surface the caveat that the connector stays signed in as
+  // the transferring member until a teammate reconnects it.
+  async function handleTransfer(c: Connector) {
+    const iid = c.connectorInstanceId;
+    if (!iid || !active) return;
+    const base = tc.transferConfirmDesc.replace("{name}", active.name);
+    const description = c.oauthRequired ? `${base} ${tc.transferConfirmOauthCaveat}` : base;
+    const ok = await confirmDialog({
+      title: tc.transferConfirmTitle,
+      description,
+      confirmLabel: tc.transferConfirmBtn,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setTransferringId(iid);
+    setTransferError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connector-instances/${iid}/transfer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId: active.id }),
+      });
+      if (!res.ok) throw new Error();
+      // Ownership changed: the row leaves Personal and reappears as a managed
+      // workspace connector. Keep it selected and refetch both lists + the
+      // sensitivity map + its shared tool policy so the new panel renders. (The
+      // selection key is unchanged, so the seed effect won't reload these.)
+      setSelected(iid);
+      fetchConnectors();
+      fetchGrants();
+      fetchWorkspaceOwnedMeta();
+      loadWsToolPolicies(iid);
+    } catch {
+      setTransferError(iid);
+    } finally {
+      setTransferringId(null);
+    }
+  }
+
+  // Reconnect a PAT-style workspace-owned connector by rotating its secret via
+  // the clearance-gated credentials route. OAuth connectors don't take a pasted
+  // secret, so this form is hidden for them (see the panel).
+  async function handleWsReconnect(c: Connector) {
+    const iid = c.connectorInstanceId;
+    if (!iid || !workspaceId || !wsReconnectSecret.trim()) return;
+    setConnecting(rowId(c));
+    setWsManageError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${iid}/credentials`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ clientSecret: wsReconnectSecret.trim() }),
+        },
+      );
+      if (!res.ok) throw new Error();
+      setWsReconnectId(null);
+      setWsReconnectSecret("");
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+      fetchConnectors();
+    } catch {
+      setWsManageError(tc.wsReconnectError);
+    } finally {
+      setConnecting(null);
+    }
+  }
+
+  // OAuth-family workspace-owned connectors reconnect by re-running the
+  // provider OAuth flow with the target instance id threaded through `state`,
+  // so the callback re-points THIS workspace instance instead of minting a
+  // personal one. A cleared teammate re-auths onto their own account; the
+  // backend clearance check + RLS gate the re-point. See
+  // docs/plans/workspace-owned-connector-transfer.md §2B.
+  function handleWsOauthReconnect(c: Connector) {
+    if (!c.connectorInstanceId) return;
+    void handleConnect(c, { instanceId: c.connectorInstanceId });
+  }
+
+  // Edit a workspace-owned connector's label + sensitivity (PATCH). The route
+  // caps sensitivity at the member's own read ceiling; we reflect the response.
+  async function handleWsSaveDetails(c: Connector) {
+    const iid = c.connectorInstanceId;
+    if (!iid || !workspaceId) return;
+    setWsManageError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${iid}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label: wsEditLabel.trim() || undefined, sensitivity: wsEditSensitivity }),
+        },
+      );
+      if (!res.ok) throw new Error();
+      const data = (await res.json().catch(() => ({}))) as {
+        instance?: { label?: string | null; sensitivity?: SensitivityTier };
+      };
+      const nextLabel = data.instance?.label ?? undefined;
+      const nextSensitivity = data.instance?.sensitivity ?? wsEditSensitivity;
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, label: nextLabel ?? x.label } : x)));
+      setWsOwnedSensitivity((prev) => ({ ...prev, [iid]: nextSensitivity }));
+      setWsEditingId(null);
+    } catch {
+      setWsManageError(tc.wsManageError);
+    }
+  }
+
+  // Set the shared workspace policy for one tool (PUT). Optimistic; reverts by
+  // reloading on failure. Writes the WORKSPACE policy, not the per-user one.
+  async function handleWsToolPolicy(instanceId: string, toolName: string, policy: ToolPolicy, classification?: string) {
+    setWsToolPolicies((prev) => {
+      const entry = prev[instanceId] ?? { policies: {}, loading: false };
+      return { ...prev, [instanceId]: { ...entry, policies: { ...entry.policies, [toolName]: policy } } };
+    });
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${instanceId}/tools/${encodeURIComponent(toolName)}/policy`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(classification ? { policy, classification } : { policy }),
+        },
+      );
+      if (!res.ok) throw new Error();
+    } catch {
+      loadWsToolPolicies(instanceId);
+    }
   }
 
   // Returns true on success so callers (e.g. the post-connect nudge) can
@@ -1398,6 +1614,15 @@ function ConnectorsList() {
     seededSelRef.current = selKey;
     setExpandTab("tools");
     setRenamingId(null);
+    // Workspace-owned connector — reset its inline forms and load the shared
+    // per-tool policy for the newly selected instance.
+    setWsEditingId(null);
+    setWsReconnectId(null);
+    setWsReconnectSecret("");
+    setWsManageError(null);
+    if (sel.readonly && sel.source === "team_native" && sel.connectorInstanceId) {
+      loadWsToolPolicies(sel.connectorInstanceId);
+    }
     if ((sel.connected || isBuiltinPrimitive(sel)) && !toolsMap[sel.id]) loadTools(sel.id);
     if (sel.custom) {
       setEditName(sel.name); setEditUrl(sel.url ?? "");
@@ -1581,8 +1806,215 @@ function ConnectorsList() {
             </div>
           ) : (() => {
             const rid = rowId(sel);
-            // Read-only workspace-shared connector — a teammate's or a legacy
-            // team-native instance the member can use but not manage. A
+            // Workspace-OWNED connector (scope='workspace', source==='team_native')
+            // — full management for any member cleared for it: Reconnect (PAT
+            // rotation), Edit label/sensitivity, Delete, and a shared per-tool
+            // allow/ask/block the team assistant enforces. Replaces the former
+            // read-only panel. [COMP:web/workspace-connector-manage]
+            if (sel.readonly && sel.source === "team_native" && sel.connectorInstanceId) {
+              const iid = sel.connectorInstanceId;
+              // OAuth connectors sign in through the provider, so a pasted
+              // secret can't reconnect them (they need an OAuth round-trip); the
+              // credentials-rotation form is shown only for PAT-style connectors.
+              const isOauth = !!sel.oauthRequired;
+              const sensitivity = wsOwnedSensitivity[iid] ?? "internal";
+              const polEntry = wsToolPolicies[iid];
+              const policyMap = polEntry?.policies ?? {};
+              // Tool catalog: the built-in registry (names + descriptions +
+              // classification), plus any governed tool not in the registry (a
+              // custom MCP's tools only surface once they carry a policy).
+              const catalog = OFFICIAL_CONNECTOR_TOOLS[sel.id] ?? [];
+              const extraTools = Object.keys(policyMap)
+                .filter((name) => !catalog.some((tool) => tool.name === name))
+                .map((name) => ({ name, description: "", classification: "unknown" as const }));
+              const toolItems = [
+                ...catalog.map((tool) => ({ name: tool.name, description: tool.description, classification: tool.classification })),
+                ...extraTools,
+              ].map((tool) => ({ ...tool, currentPolicy: (policyMap[tool.name] ?? "ask") as ToolPolicy }));
+              return (
+                <div key={rid} className="space-y-4">
+                  {/* Header — identity + status. */}
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+                      <ConnectorIcon connectorId={sel.id} iconUrl={sel.icon_url} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                        {sel.label ?? sel.name}
+                      </h2>
+                      <p className="text-[12px] text-muted-foreground">
+                        {tc.workspaceSharedTeamNative}
+                      </p>
+                    </div>
+                    {sel.connected && (
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                        {tc.connected}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+                    {tc.workspaceOwnedNote}
+                  </div>
+
+                  {wsManageError && (
+                    <div className="text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
+                      {wsManageError}
+                    </div>
+                  )}
+
+                  {/* Actions — Reconnect (PAT), Edit details, Remove. */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!isOauth && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setWsReconnectId(wsReconnectId === iid ? null : iid);
+                          setWsReconnectSecret("");
+                          setWsManageError(null);
+                        }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors"
+                      >
+                        {tc.reconnectBtn}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setWsEditingId(wsEditingId === iid ? null : iid);
+                        setWsEditLabel(sel.label ?? "");
+                        setWsEditSensitivity(sensitivity);
+                        setWsManageError(null);
+                      }}
+                      className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:text-foreground hover:border-primary/30 transition-colors"
+                    >
+                      {tc.editDetailsBtn}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveWorkspaceConnector(sel)}
+                      className="text-xs font-medium text-destructive/60 hover:text-destructive transition-colors px-2 py-1"
+                    >
+                      {tc.removeBtn}
+                    </button>
+                  </div>
+
+                  {isOauth && (
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-muted-foreground">{tc.wsReconnectOauthNote}</p>
+                      <button
+                        onClick={() => handleWsOauthReconnect(sel)}
+                        disabled={connecting === rid}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-foreground hover:bg-muted transition-colors disabled:opacity-50"
+                      >
+                        {connecting === rid ? tc.connectingBtn : tc.reconnectBtn}
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Reconnect form — rotate the PAT / secret for the whole team. */}
+                  {wsReconnectId === iid && !isOauth && (
+                    <div className="space-y-2">
+                      <p className="text-xs text-muted-foreground">{tc.wsReconnectDesc}</p>
+                      <input
+                        type="password"
+                        placeholder={tc.wsReconnectSecretPlaceholder}
+                        value={wsReconnectSecret}
+                        onChange={(e) => setWsReconnectSecret(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") handleWsReconnect(sel); }}
+                        className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        autoFocus
+                      />
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { setWsReconnectId(null); setWsReconnectSecret(""); }}
+                          className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                        >
+                          {tc.cancel}
+                        </button>
+                        <button
+                          onClick={() => handleWsReconnect(sel)}
+                          disabled={!wsReconnectSecret.trim() || connecting === rid}
+                          className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                        >
+                          {connecting === rid ? tc.savingBtn : tc.saveBtn}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Edit details — label + sensitivity (PATCH). */}
+                  {wsEditingId === iid && (
+                    <div className="space-y-3 rounded-lg border border-border px-4 py-3">
+                      <div className="text-[13px] font-medium">{tc.editDetailsTitle}</div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-medium text-muted-foreground">{tc.editLabelLabel}</label>
+                        <input
+                          type="text"
+                          placeholder={tc.nicknamePlaceholder}
+                          value={wsEditLabel}
+                          onChange={(e) => setWsEditLabel(e.target.value)}
+                          className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-medium text-muted-foreground">{tc.editSensitivityLabel}</label>
+                        <Select value={wsEditSensitivity} onValueChange={(v) => { if (v) setWsEditSensitivity(v as SensitivityTier); }}>
+                          <SelectTrigger size="sm" className="text-sm">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="public">{tc.sensitivityPublic}</SelectItem>
+                            <SelectItem value="internal">{tc.sensitivityInternal}</SelectItem>
+                            <SelectItem value="confidential">{tc.sensitivityConfidential}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-[11px] text-muted-foreground">{tc.sensitivityHint}</p>
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => setWsEditingId(null)}
+                          className="text-xs font-medium border border-border px-4 py-1.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                        >
+                          {tc.cancel}
+                        </button>
+                        <button
+                          onClick={() => handleWsSaveDetails(sel)}
+                          className="text-xs font-medium bg-primary text-primary-foreground px-4 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
+                        >
+                          {tc.saveBtn}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Shared per-tool allow/ask/block — the WORKSPACE policy the
+                      team assistant enforces (not the per-user one). */}
+                  <div className="space-y-2">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {tc.wsToolPolicyTitle}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">{tc.wsToolPolicyDesc}</p>
+                    <ConnectorToolList
+                      connectorId={sel.id}
+                      loading={polEntry?.loading}
+                      tools={toolItems}
+                      onPolicyChange={(toolName, policy) =>
+                        handleWsToolPolicy(
+                          iid,
+                          toolName,
+                          policy,
+                          catalog.find((tool) => tool.name === toolName)?.classification,
+                        )
+                      }
+                    />
+                  </div>
+                </div>
+              );
+            }
+
+            // Read-only workspace-shared connector — a teammate's granted
+            // personal instance the member can use but not manage. A
             // self-contained panel: identity + attribution + status, no
             // connect / rename / remove / share affordances and no credentials.
             if (sel.readonly) {
@@ -1597,11 +2029,9 @@ function ConnectorsList() {
                         {sel.label ?? sel.name}
                       </h2>
                       <p className="text-[12px] text-muted-foreground">
-                        {sel.source === "granted"
-                          ? sel.sharedBy
-                            ? tc.workspaceSharedByMember.replace("{name}", sel.sharedBy)
-                            : tc.workspaceSharedByTeammate
-                          : tc.workspaceSharedTeamNative}
+                        {sel.sharedBy
+                          ? tc.workspaceSharedByMember.replace("{name}", sel.sharedBy)
+                          : tc.workspaceSharedByTeammate}
                       </p>
                     </div>
                     {sel.connected && (
@@ -1611,23 +2041,8 @@ function ConnectorsList() {
                     )}
                   </div>
                   <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
-                    {sel.source === "team_native"
-                      ? tc.workspaceNativeNote
-                      : tc.workspaceSharedReadonlyNote}
+                    {tc.workspaceSharedReadonlyNote}
                   </div>
-                  {/* A workspace-native connector is owned by the workspace, so
-                      a member can remove it (a teammate-granted personal one
-                      cannot be removed here — only its owner can). This is the
-                      management affordance the read-only panel used to omit,
-                      which stranded dead workspace connectors as unremovable. */}
-                  {sel.source === "team_native" && sel.connectorInstanceId && (
-                    <button
-                      onClick={() => handleRemoveWorkspaceConnector(sel)}
-                      className="text-xs font-medium text-destructive/60 hover:text-destructive transition-colors px-2 py-1"
-                    >
-                      {tc.removeBtn}
-                    </button>
-                  )}
                 </div>
               );
             }
@@ -2094,6 +2509,32 @@ function ConnectorsList() {
                         )
                       )}
                     </div>
+
+                    {/* Transfer to workspace — hand ownership to the team
+                        (scope='user' -> 'workspace'). Parallel to Share, but a
+                        one-way ownership change; the credential rides along.
+                        [COMP:web/workspace-connector-manage] */}
+                    {instanceId && active && (
+                      <div className="mt-3 border-t border-border pt-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[13px] font-medium">{tc.transferTitle}</div>
+                            <p className="mt-0.5 text-[12px] text-muted-foreground">{tc.transferDesc}</p>
+                            {transferError === instanceId && (
+                              <div className="mt-0.5 text-[11px] text-destructive">{tc.transferErrorMsg}</div>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleTransfer(sel)}
+                            disabled={transferringId === instanceId}
+                            className="shrink-0 rounded-lg border border-border px-3 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground disabled:opacity-50"
+                          >
+                            {transferringId === instanceId ? tc.transferringBtn : tc.transferBtn}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 

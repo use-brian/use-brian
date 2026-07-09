@@ -219,6 +219,8 @@ type WebChatOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption (team-admin-configured tools). */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  /** Shared workspace tool policy (migration 312) — governs team-owned connector tool allow/ask/block. */
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   workerManager?: import('@sidanclaw/core').WorkerManager
   /**
    * Phase 3 of askQuestion suspend-resume — persisted worker_runs store.

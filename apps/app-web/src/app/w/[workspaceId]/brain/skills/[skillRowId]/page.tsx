@@ -161,6 +161,10 @@ function SkillEditor({
 
   const status = skillStatus(skill);
   const suggested = status === "suggested";
+  // Un-certified = no verifier stamped. A self-learned skill is born Active but
+  // un-certified (medium confidence); the Confirm affordance stays available until a
+  // human certifies it to 100%. Only an explicit human action clears this.
+  const unverified = !skill.verifiedAt;
 
   // The document drafts. Hoisted here (not in a child section) so the sticky
   // header's Save button and the unsaved dot read the same diff.
@@ -233,15 +237,26 @@ function SkillEditor({
                 {copy.unsaved}
               </span>
             )}
-            {/* D2 — while Suggested, a save also activates; the label says so
-                and the tooltip carries the full consequence. */}
+            {/* D2 — a human edit of name/body certifies the skill to 100%. While
+                Suggested it also activates; while Active-but-uncertified it lifts
+                confidence to certified. The label + tooltip carry the consequence. */}
             <Button
               size="sm"
               disabled={busy || !dirty}
               onClick={() => void save()}
-              title={suggested ? copy.saveActivateHint : undefined}
+              title={
+                unverified
+                  ? suggested
+                    ? copy.saveActivateHint
+                    : copy.saveConfirmHint
+                  : undefined
+              }
             >
-              {suggested ? copy.saveActivate : copy.save}
+              {unverified
+                ? suggested
+                  ? copy.saveActivate
+                  : copy.saveConfirm
+                : copy.save}
             </Button>
           </>
         }
@@ -274,10 +289,11 @@ function SkillEditor({
             which sees the skill the user is viewing (viewingSkillRowId on
             /api/chat) — the embedded rail chat is creator-only now. ──────── */}
         <aside className="mt-10 flex flex-col gap-4 text-sm lg:mt-0">
-          {suggested && (
-            <SuggestedCard
+          {unverified && (
+            <ConfirmCard
               workspaceId={workspaceId}
               skill={skill}
+              status={status}
               onConfirmed={onSaved}
             />
           )}
@@ -461,6 +477,13 @@ function AboutGroup({
           </div>
         )}
       </dl>
+      {/* Make the graded meter legible where it matters: an un-certified skill
+          climbs with use but only a human confirmation reaches 100%. */}
+      {!skill.verifiedAt && (
+        <p className="pt-2 text-[10px] leading-snug text-muted-foreground/70">
+          {copy.confidenceHint}
+        </p>
+      )}
     </RailCard>
   );
 }
@@ -637,22 +660,26 @@ function AccessGroup({
   );
 }
 
-// ── Suggested-state card — the constructive decision leads the rail ────
+// ── Confirm card — the certification decision leads the rail ──────────
 
-/** Amber soft card shown only while the skill is Suggested: a one-line
- *  state explainer + the confirm-without-editing action. Active/Stale
- *  skills render nothing here. */
-function SuggestedCard({
+/** Amber soft card shown while the skill is not yet certified (no verifier
+ *  stamped). Copy adapts to status: a Suggested skill's Confirm also activates
+ *  it; an Active-but-uncertified self-learned skill's Confirm lifts confidence
+ *  to 100%. Both call `confirmSkill`. Certified skills render nothing here. */
+function ConfirmCard({
   workspaceId,
   skill,
+  status,
   onConfirmed,
 }: {
   workspaceId: string;
   skill: WorkspaceSkillSummary;
+  status: ReturnType<typeof skillStatus>;
   onConfirmed: () => void;
 }) {
   const t = useT();
   const copy = t.brainPage.skillEditor;
+  const suggested = status === "suggested";
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -673,17 +700,17 @@ function SuggestedCard({
   return (
     <section className="flex flex-col gap-2.5 rounded-lg bg-amber-500/10 p-3">
       <p className="text-[11px] leading-snug text-amber-700 dark:text-amber-400">
-        {copy.suggestedNote}
+        {suggested ? copy.suggestedNote : copy.confirmActiveNote}
       </p>
       {/* Solid (user-locked): the rail's one constructive action carries real
-          weight. Emerald = the Active state it produces; not primary blue. */}
+          weight. Emerald = the certified state it produces; not primary blue. */}
       <Button
         size="sm"
         disabled={busy}
         onClick={() => void handleConfirm()}
         className="w-full bg-emerald-600 text-white shadow-sm hover:bg-emerald-700 active:bg-emerald-700/90 dark:bg-emerald-600 dark:hover:bg-emerald-500"
       >
-        {copy.confirmWithoutEditing}
+        {suggested ? copy.confirmWithoutEditing : copy.confirmActiveButton}
       </Button>
       {error && (
         <p className="text-xs text-red-500" role="alert">

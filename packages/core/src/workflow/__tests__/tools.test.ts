@@ -277,6 +277,10 @@ function makeAllTools(opts?: {
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
   >
+  listSlackMembers?: (args: { assistantId: string }) => Promise<
+    | { ok: true; members: Array<{ id: string; handle: string; displayName: string; realName: string }> }
+    | { ok: false; reason: string }
+  >
   listAuthorableSkills?: (userId: string, workspaceId: string) => Promise<Array<{ slug: string; name: string }>>
 }) {
   const events: WorkflowToolEvent[] = []
@@ -303,6 +307,7 @@ function makeAllTools(opts?: {
     validateDeliveryTarget: opts?.validateDeliveryTarget,
     preflightConnectorTool: opts?.preflightConnectorTool,
     listSlackChannels: opts?.listSlackChannels,
+    listSlackMembers: opts?.listSlackMembers,
     listAuthorableSkills: opts?.listAuthorableSkills,
   })
   return { tools, stores, events, jobStore }
@@ -594,6 +599,81 @@ describe('[COMP:workflow/tools] Slack native delivery target', () => {
     const { tools } = makeAllTools()
     const r = await tools.listSlackChannels.execute({}, makeContext())
     expect(r.isError).toBe(true)
+  })
+
+  it('listSlackMembers returns the member directory (ids for <@…> mentions)', async () => {
+    const { tools } = makeAllTools({
+      listSlackMembers: async () => ({
+        ok: true,
+        members: [
+          { id: 'U02AWCJACK', handle: 'awcjack', displayName: 'awcjack', realName: 'Jack Wong' },
+        ],
+      }),
+    })
+    const r = await tools.listSlackMembers.execute({}, makeContext())
+    expect(r.isError).toBeFalsy()
+    expect(r.data).toEqual({
+      members: [{ id: 'U02AWCJACK', handle: 'awcjack', displayName: 'awcjack', realName: 'Jack Wong' }],
+    })
+  })
+
+  it('listSlackMembers reports when discovery is unwired', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.listSlackMembers.execute({}, makeContext())
+    expect(r.isError).toBe(true)
+  })
+
+  // The mis-tagged standup incident: a Slack-delivering step that asks to tag
+  // people with no real member id in the prompt makes the callee improvise
+  // (`<@handle>`, plain `@name`) — nobody gets notified. Authoring must warn.
+  it('proposeWorkflow warns when a Slack deliver step asks to mention people without member ids', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Daily standup',
+        definition: {
+          startStepId: 's1',
+          steps: [
+            {
+              id: 's1',
+              type: 'assistant_call',
+              target: { assistantId: 'primary' },
+              prompt: 'Post the standup and tag @hinson.wong and @awcjack for their updates.',
+              deliver: { channelType: 'slack', channelId: 'C123' },
+            },
+          ],
+        },
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('listSlackMembers') && w.includes('<@MEMBER_ID>'))).toBe(true)
+  })
+
+  it('proposeWorkflow stays quiet when the prompt already carries real member ids', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Daily standup',
+        definition: {
+          startStepId: 's1',
+          steps: [
+            {
+              id: 's1',
+              type: 'assistant_call',
+              target: { assistantId: 'primary' },
+              prompt: 'Post the standup and tag <@U02AWCJACK> for the update.',
+              deliver: { channelType: 'slack', channelId: 'C123' },
+            },
+          ],
+        },
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('listSlackMembers'))).toBe(false)
   })
 })
 

@@ -215,6 +215,73 @@ describeIf('[COMP:api/tasks-store] tasks store + RLS (integration)', () => {
     })
   })
 
+  // Create idempotency — a retry / double-fire of the same logical create
+  // returns the existing task instead of a duplicate. Root cause of the prod
+  // "duplicated tasks" incident (identical rows seconds apart, no dedupe).
+  // See docs/architecture/features/tasks.md → "Create idempotency".
+  describe('create idempotency', () => {
+    let userId: string
+    let workspaceId: string
+
+    beforeEach(async () => {
+      const client = await pool!.connect()
+      try {
+        userId = await makeUser(client)
+        workspaceId = await makeWorkspace(client, userId)
+        await addMember(client, workspaceId, userId)
+      } finally {
+        client.release()
+      }
+    })
+
+    it('a second identical create within the window returns the same task (no duplicate row)', async () => {
+      const first = await store.create({ userId, workspaceId, title: 'Clarify CLA requirements' })
+      const second = await store.create({ userId, workspaceId, title: 'Clarify CLA requirements' })
+      expect(second.id).toBe(first.id)
+
+      const c = await pool!.connect()
+      try {
+        const r = await c.query<{ n: string }>(
+          `SELECT count(*) AS n FROM tasks WHERE workspace_id = $1 AND title = $2 AND valid_to IS NULL`,
+          [workspaceId, 'Clarify CLA requirements'],
+        )
+        expect(Number(r.rows[0].n)).toBe(1)
+      } finally {
+        c.release()
+      }
+    })
+
+    it('deduped create does not fire onTaskCreate a second time (no duplicate draft goal)', async () => {
+      const mod = await import('../tasks-store.js')
+      const created: string[] = []
+      const spyStore = mod.createDbTaskStore({ onTaskCreate: (t) => created.push(t.id) })
+      const first = await spyStore.create({ userId, workspaceId, title: 'Add setup to task sidanclaw' })
+      const second = await spyStore.create({ userId, workspaceId, title: 'Add setup to task sidanclaw' })
+      expect(second.id).toBe(first.id)
+      expect(created).toEqual([first.id]) // fired exactly once
+    })
+
+    it('placeholder blank-row title is exempt — two "Untitled task" rows are allowed', async () => {
+      const a = await store.create({ userId, workspaceId, title: 'Untitled task' })
+      const b = await store.create({ userId, workspaceId, title: 'Untitled task' })
+      expect(b.id).not.toBe(a.id)
+    })
+
+    it('a different status is not treated as a duplicate', async () => {
+      const todo = await store.create({ userId, workspaceId, title: 'Same title', status: 'todo' })
+      const inprog = await store.create({ userId, workspaceId, title: 'Same title', status: 'in_progress' })
+      expect(inprog.id).not.toBe(todo.id)
+    })
+
+    it('same title under different parents are distinct (parent is part of the key)', async () => {
+      const p1 = await store.create({ userId, workspaceId, title: 'Parent 1' })
+      const p2 = await store.create({ userId, workspaceId, title: 'Parent 2' })
+      const c1 = await store.create({ userId, workspaceId, title: 'Sub', parentId: p1.id })
+      const c2 = await store.create({ userId, workspaceId, title: 'Sub', parentId: p2.id })
+      expect(c2.id).not.toBe(c1.id)
+    })
+  })
+
   describe('RLS isolation', () => {
     // RLS isolation cannot be exercised when the test connects as a Postgres
     // SUPERUSER (the typical local-dev role). Superusers bypass RLS even with

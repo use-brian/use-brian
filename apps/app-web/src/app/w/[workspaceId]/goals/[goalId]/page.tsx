@@ -25,39 +25,10 @@ import { use, useEffect, useState } from "react";
 import { BackButton } from "@/components/ui/back-button";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import { getGoalDetail, type DoneWhenNode, type GoalDetail } from "@/lib/api/goals";
+import { getGoalDetail, type GoalDetail } from "@/lib/api/goals";
 import { cn } from "@/lib/utils";
 import { STATUS_BADGE } from "@/components/doc/panels/goal-status-badge";
-
-type AcceptanceLabels = {
-  subtasks: string;
-  query: string;
-  tool: string;
-  verify: string;
-  all: string;
-  any: string;
-  not: string;
-};
-
-/** Human summary of the `done_when` acceptance tree. Prefers the author's own
- *  description on a query / tool leaf (e.g. "task complete"), falling back to a
- *  generic i18n label; combinators recurse. Never evaluates — the engine does
- *  that elsewhere (see packages/core/src/goals/done-when.ts). */
-function summariseDoneWhen(node: DoneWhenNode, L: AcceptanceLabels): string {
-  if ("all" in node) {
-    return format(L.all, { items: node.all.map((n) => summariseDoneWhen(n, L)).join(", ") });
-  }
-  if ("any" in node) {
-    return format(L.any, { items: node.any.map((n) => summariseDoneWhen(n, L)).join(", ") });
-  }
-  if ("not" in node) {
-    return format(L.not, { item: summariseDoneWhen(node.not, L) });
-  }
-  if (node.kind === "subtasks") return L.subtasks;
-  if (node.kind === "query") return node.query.description?.trim() || L.query;
-  if (node.kind === "tool") return node.tool.description?.trim() || node.tool.tool || L.tool;
-  return L.verify; // node.kind === "verify"
-}
+import { summariseDoneWhen } from "@/components/doc/panels/goal-done-when";
 
 export default function GoalDetailPage({
   params,

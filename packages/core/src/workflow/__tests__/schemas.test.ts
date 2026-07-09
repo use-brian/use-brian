@@ -364,6 +364,104 @@ describe('[COMP:workflow/schemas] WorkflowDefinitionSchema', () => {
       expect(r.error.issues.some((i) => i.message.includes('itself'))).toBe(true)
     }
   })
+
+  // ── deliver.thread (reply-in-thread delivery) ────────────────────────────
+
+  function deliverStep(
+    id: string,
+    deliver?: { channelType: string; channelId: string; thread?: { fromStep: string } },
+  ) {
+    return {
+      id,
+      type: 'assistant_call',
+      target: { assistantId: 'primary' },
+      prompt: `step ${id}`,
+      ...(deliver ? { deliver } : {}),
+    }
+  }
+
+  it('accepts deliver.thread.fromStep referencing an earlier deliver-step on the same channel', () => {
+    const def = {
+      startStepId: 'parent',
+      steps: [
+        deliverStep('parent', { channelType: 'slack', channelId: 'C123' }),
+        deliverStep('reply', { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'parent' } }),
+      ],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('accepts a telegram deliver.thread (reply chain)', () => {
+    const def = {
+      startStepId: 'parent',
+      steps: [
+        deliverStep('parent', { channelType: 'telegram', channelId: '42' }),
+        deliverStep('reply', { channelType: 'telegram', channelId: '42', thread: { fromStep: 'parent' } }),
+      ],
+    }
+    expect(WorkflowDefinitionSchema.safeParse(def).success).toBe(true)
+  })
+
+  it('rejects deliver.thread on a whatsapp delivery (no threaded replies)', () => {
+    const def = {
+      startStepId: 'parent',
+      steps: [
+        deliverStep('parent', { channelType: 'whatsapp', channelId: 'jid@s.whatsapp.net' }),
+        deliverStep('reply', {
+          channelType: 'whatsapp',
+          channelId: 'jid@s.whatsapp.net',
+          thread: { fromStep: 'parent' },
+        }),
+      ],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('only supported for slack'))).toBe(true)
+    }
+  })
+
+  it('rejects deliver.thread.fromStep referencing a step without a deliver target', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [
+        deliverStep('a'),
+        deliverStep('b', { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'a' } }),
+      ],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('deliver'))).toBe(true)
+    }
+  })
+
+  it('rejects deliver.thread.fromStep referencing a different channel', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [
+        deliverStep('a', { channelType: 'slack', channelId: 'C999' }),
+        deliverStep('b', { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'a' } }),
+      ],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('different channel'))).toBe(true)
+    }
+  })
+
+  it('rejects deliver.thread.fromStep referencing itself', () => {
+    const def = {
+      startStepId: 'a',
+      steps: [deliverStep('a', { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'a' } })],
+    }
+    const r = WorkflowDefinitionSchema.safeParse(def)
+    expect(r.success).toBe(false)
+    if (!r.success) {
+      expect(r.error.issues.some((i) => i.message.includes('itself'))).toBe(true)
+    }
+  })
 })
 
 describe('[COMP:workflow/schemas] WorkflowTriggerSchema', () => {

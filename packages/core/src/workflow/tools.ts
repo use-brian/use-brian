@@ -210,6 +210,19 @@ export type WorkflowToolDeps = {
     | { ok: true; channels: Array<{ id: string; name: string; isMember: boolean }> }
     | { ok: false; reason: string }
   >
+  /**
+   * Authoring-time Slack member discovery — backs the `listSlackMembers`
+   * tool so the model can embed real `<@U…>` mention ids in step prompts /
+   * message text. Slack only notifies on real member ids; without a
+   * directory the model improvises broken forms (`<@handle>`, plain
+   * `@name`) that render as text and ping nobody (the mis-tagged standup
+   * incident). Enumerates via Slack `users.list` (BYO token, `users:read`).
+   * Absent (tests, minimal boots) → the tool reports discovery unavailable.
+   */
+  listSlackMembers?: (args: { assistantId: string }) => Promise<
+    | { ok: true; members: Array<{ id: string; handle: string; displayName: string; realName: string }> }
+    | { ok: false; reason: string }
+  >
 }
 
 const idShape = z.string().uuid()
@@ -354,6 +367,22 @@ function warningsFor(
         `Step "${step.id}" binds blueprint "${step.blueprintId}" but its \`tools\` allow-list omits \`saveBlueprintRecord\`. The allow-list is applied after the record tools are injected, so the callee cannot save the blueprint record and the binding silently produces no typed output. Add "saveBlueprintRecord" to the list or drop the allow-list.`,
       )
     }
+    // Slack mentions without member ids — the mis-tagged standup incident.
+    // Slack only notifies via `<@MEMBER_ID>`; a prompt that asks the callee
+    // to tag/mention people without providing real ids makes the model
+    // improvise (`<@handle>`, plain `@name`) and nobody gets pinged. The
+    // send-time resolver rewrites what it can, but ids in the prompt are the
+    // reliable path — steer the author to `listSlackMembers`.
+    if (
+      step.type === 'assistant_call' &&
+      step.deliver?.channelType === 'slack' &&
+      (SLACK_MENTION_ASK.test(step.prompt) || PLAIN_AT_NAME.test(step.prompt)) &&
+      !SLACK_MENTION_ID.test(step.prompt)
+    ) {
+      warnings.push(
+        `Step "${step.id}" delivers to Slack and asks to mention people, but the prompt contains no real member id. Slack only notifies via \`<@MEMBER_ID>\` syntax — call \`listSlackMembers\`, then embed the exact ids in the step prompt (e.g. \`<@U0123ABCD>\`); plain \`@name\` renders as text and pings nobody.`,
+      )
+    }
     // Doc-work-without-anchor — the incident class behind "the workflow runs
     // but never updates the doc". Doc tools (`patchPage`, `createSubPage`, …)
     // are injected ONLY on a page-anchored step. A prompt that tells the
@@ -374,6 +403,15 @@ function warningsFor(
   }
   return warnings
 }
+
+/** "Tag/mention someone" intent in a Slack-delivering step's prompt. */
+const SLACK_MENTION_ASK = /\b(mention|tag(?:ging)?|ping|notify)\b/i
+
+/** A plain `@name` token (whitespace-preceded, so emails don't match). */
+const PLAIN_AT_NAME = /(^|\s)@[A-Za-z0-9][A-Za-z0-9._-]*/
+
+/** A real Slack member-id mention already present in the prompt. */
+const SLACK_MENTION_ID = /<@[UW][A-Z0-9]{2,}>/
 
 /** Doc-authoring tool names — naming one in a prompt with no `page` anchor is the no-op signal. */
 const DOC_AUTHORING_SIGNAL =
@@ -1136,6 +1174,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
   listWorkflows: Tool
   getWorkflowRun: Tool
   listSlackChannels: Tool
+  listSlackMembers: Tool
 } {
   const phaseBActive = deps.executorDeps.pauseRunForWait !== undefined
 
@@ -1152,7 +1191,9 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
       `Variants: \`page: {"id": "<page uuid>"}\` edits an existing page; \`page: {"create": true, "title": "...", "nestUnder": "<page uuid>"}\` creates a saved page each run and anchors the step to it (title may use {{vars}}/{{input}}); \`page: {"fromStep": "<stepId>"}\` edits the page an earlier create-step made this run. ` +
       `The callee then runs with the doc tools (getCurrentPage / patchPage / renderPage) against that page.` +
       `\n\nSkills: when a step should follow a saved brain skill, ATTACH it on the step — NEVER just name the skill in the prompt (a workflow callee has no skill surface unless the step attaches one, so a prose-only reference silently does nothing on every run). \`enforcedSkills: ["<slug>"]\` force-loads the skill's instructions every run (the usual choice for workflows); \`skills: ["<slug>"]\` offers it via useSkill and the callee chooses. Use exact skill slugs; an attached slug that matches no workspace skill or built-in id is rejected. ` +
-      `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.`,
+      `For structured output, an assistant_call research step may also set \`blueprintId: "<workspace skill slug | page-template id>"\` together with a \`page\` anchor to fill that blueprint instead of free-form authoring — blueprints themselves are created in the web app (Brain → Blueprints) or minted from a skill's extraction spec; they cannot be created from chat, so never claim otherwise.` +
+      `\n\nChannel delivery: a step's \`deliver: { channelType, channelId }\` pushes that step's output to a messaging channel (Slack channelId from listSlackChannels). To post a THREAD — one parent message with replies under it — use one deliver-step per message and give each follow-up step \`deliver: { ..., thread: { fromStep: "<parent step id>" } }\`: it replies under the message that earlier step posted this run (same channel required; slack + telegram only). Do NOT concatenate multiple messages into one step's output and expect threading. ` +
+      `To MENTION people in a Slack delivery, first call \`listSlackMembers\` and embed the literal \`<@MEMBER_ID>\` ids in the step prompt — plain @name renders as text and notifies nobody.`,
     inputSchema: z.object({
       name: z
         .string()
@@ -1857,6 +1898,34 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     },
   })
 
+  const listSlackMembers = buildTool({
+    name: 'listSlackMembers',
+    description:
+      "List the Slack workspace's members this workspace's bot can see: each member's id (a Slack `U…` id), handle, display name, and real name. " +
+      'Call this whenever a Slack message should MENTION (tag / notify) specific people — a workflow step prompt, a reminder, or a direct send. ' +
+      'Slack only notifies via the literal mention syntax `<@MEMBER_ID>` (e.g. `<@U0123ABCD>`): embed the exact id from here in the message text or step prompt. ' +
+      'Plain `@name` renders as text and notifies nobody, and `<@handle>` (a handle inside the id syntax) renders as broken literal text — never use either.',
+    inputSchema: z.object({
+      assistantId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe('The delivering assistant (the workflow step target). Defaults to the current assistant.'),
+    }),
+    isReadOnly: true,
+    isConcurrencySafe: true,
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      if (!deps.listSlackMembers) {
+        return { data: 'Slack member discovery is not available in this context.', isError: true }
+      }
+      const res = await deps.listSlackMembers({ assistantId: input.assistantId ?? context.assistantId })
+      if (!res.ok) return { data: res.reason, isError: true }
+      return { data: { members: res.members } }
+    },
+  })
+
   return {
     proposeWorkflow,
     createWorkflow,
@@ -1866,6 +1935,7 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
     listWorkflows,
     getWorkflowRun,
     listSlackChannels,
+    listSlackMembers,
   }
 }
 

@@ -553,6 +553,22 @@ export function createWorkerManager(options: WorkerOptions) {
         // payload so the coordinator sees a "failed" worker and spawns a
         // follow-up, rather than synthesising "no info" from snippet noise.
         const protocolViolation = isResearch && webSearchCalls > 0 && urlReaderCalls === 0
+        // An empty final response is NOT a "nothing exists" finding: the worker
+        // ran its turns but produced ZERO synthesis text (an empty model turn,
+        // or the loop ended on a tool call before a final text turn). Papering
+        // over it with a bland "No results found." made an internal empty-output
+        // indistinguishable from a genuine negative result — the coordinator
+        // then synthesised "no info" and the parent consult failed
+        // `empty_response` (prod incident 2026-07-08, run 12abd640: a
+        // research-fan-out HKTV Mall merchant discovery where every worker
+        // returned empty text was read as "no prospects exist" — the prospects
+        // existed and were being searched). Surface it as `failed` with an
+        // explicit empty-output payload so the coordinator respawns / pivots
+        // instead of trusting the absence. Applies in both modes — a worker that
+        // genuinely found nothing SAYS so in text; a truly empty string is a
+        // broken turn. See
+        // docs/architecture/engine/coordinator-pattern.md → "Empty-output workers".
+        const emptyOutput = !protocolViolation && responseText.trim().length === 0
         const finalResult = protocolViolation
           ? `<worker-findings>
 <self-critique>
@@ -571,21 +587,44 @@ INVALID — urlReader was required by protocol but not called. Search snippets a
 - enforcement: worker_skipped_urlreader (${webSearchCalls} webSearch / 0 urlReader)
 </failed-sources>
 </worker-findings>`
-          : (responseText || 'No results found.')
+          : emptyOutput
+            ? `<worker-findings>
+<self-critique>
+NO OUTPUT — this worker completed its turns but produced ZERO synthesis text (${webSearchCalls} webSearch / ${urlReaderCalls} urlReader call(s), 0 chars written). This is NOT a "nothing found" result — absence of output is not evidence of absence. The gap is UNANSWERED.
+</self-critique>
+
+<findings>
+EMPTY — the worker ran but returned no findings. Do not treat this as a negative result; respawn this gap or pivot to a different angle.
+</findings>
+
+<gaps-remaining>
+- Original gap UNANSWERED (worker produced no synthesis text). Respawn a follow-up worker.
+</gaps-remaining>
+
+<failed-sources>
+- enforcement: worker_empty_output (${webSearchCalls} webSearch / ${urlReaderCalls} urlReader / 0 chars)
+</failed-sources>
+</worker-findings>`
+            : responseText
 
         if (protocolViolation) {
           console.warn(
             `[worker] Research-mode worker ${workerId} exited with ${webSearchCalls} webSearch / 0 urlReader — overwriting result with protocol-violation payload.`,
+          )
+        } else if (emptyOutput) {
+          console.warn(
+            `[worker] Worker ${workerId} produced ZERO output (${webSearchCalls} webSearch / ${urlReaderCalls} urlReader) — surfacing as failed empty-output rather than a "no results" completion.`,
           )
         }
 
         const result: WorkerResult = {
           workerId,
           description,
-          // Protocol violations are surfaced as `failed` (not `completed`) so
-          // the coordinator's notification XML shows status=failed — clean
-          // signal that this worker did NOT actually do research.
-          status: protocolViolation ? 'failed' : 'completed',
+          // Protocol violations AND empty-output workers are surfaced as
+          // `failed` (not `completed`) so the coordinator's notification XML
+          // shows status=failed — a clean signal this worker did NOT deliver
+          // usable research (vs. a trustworthy "nothing found" completion).
+          status: protocolViolation || emptyOutput ? 'failed' : 'completed',
           result: finalResult,
           ownerSessionId,
         }

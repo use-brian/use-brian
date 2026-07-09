@@ -20,12 +20,24 @@ import {
   getPullRequest,
   createIssue,
   listIssues,
+  listOrgRepos,
+  listAffiliatedRepos,
 } from '../client.js'
 
 const mockFetch = vi.fn()
 
 function ok(data: unknown) {
   return { ok: true, status: 200, json: async () => data, text: async () => '' }
+}
+/** OK response carrying a `Link` header (for pagination tests). */
+function okLinked(data: unknown, link: string | null) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => data,
+    text: async () => '',
+    headers: { get: (h: string) => (h.toLowerCase() === 'link' ? link : null) },
+  }
 }
 function fail(status: number, body = 'error body') {
   return { ok: false, status, json: async () => ({}), text: async () => body }
@@ -172,5 +184,46 @@ describe('[COMP:api/github-client] response shaping', () => {
   it('getBranchHead extracts the ref object sha', async () => {
     mockFetch.mockResolvedValueOnce(ok({ object: { sha: 'abc123' } }))
     expect(await getBranchHead('pat', 'o', 'r', 'main')).toBe('abc123')
+  })
+})
+
+describe('[COMP:api/github-client] paginated repo listing', () => {
+  it('listOrgRepos hits /orgs/{org}/repos and follows every Link rel="next" page', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        okLinked(
+          [{ full_name: 'acme/a' }, { full_name: 'acme/b' }],
+          '<https://api.github.com/orgs/acme/repos?per_page=100&page=2>; rel="next"',
+        ),
+      )
+      .mockResolvedValueOnce(okLinked([{ full_name: 'acme/c' }], null))
+
+    const repos = await listOrgRepos('pat', 'acme')
+
+    expect(repos.map((r) => r.full_name)).toEqual(['acme/a', 'acme/b', 'acme/c'])
+    // First page is the org endpoint; second page is the Link URL, origin-stripped.
+    expect(mockFetch.mock.calls[0][0]).toBe(
+      'https://api.github.com/orgs/acme/repos?sort=pushed&direction=desc&per_page=100',
+    )
+    expect(mockFetch.mock.calls[1][0]).toBe(
+      'https://api.github.com/orgs/acme/repos?per_page=100&page=2',
+    )
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('listOrgRepos stops when there is no next page (single page)', async () => {
+    mockFetch.mockResolvedValueOnce(okLinked([{ full_name: 'acme/only' }], null))
+    const repos = await listOrgRepos('pat', 'acme')
+    expect(repos.map((r) => r.full_name)).toEqual(['acme/only'])
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('listAffiliatedRepos requests owner + organization_member affiliation', async () => {
+    mockFetch.mockResolvedValueOnce(okLinked([{ full_name: 'me/x' }], null))
+    await listAffiliatedRepos('pat')
+    const url = mockFetch.mock.calls[0][0] as string
+    expect(url).toContain('/user/repos?')
+    expect(url).toContain('affiliation=owner,organization_member')
+    expect(url).toContain('per_page=100')
   })
 })

@@ -1997,3 +1997,98 @@ describe('[COMP:workflow/executor] cross-run state ({{lastRun}}) + anchor reuse'
     expect(summary?.length).toBe(2000)
   })
 })
+
+describe('[COMP:workflow/executor] deliver.thread — reply-in-thread delivery', () => {
+  function threadDefinition(): WorkflowDefinition {
+    return {
+      startStepId: 'parent',
+      steps: [
+        {
+          id: 'parent',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'post the summary',
+          deliver: { channelType: 'slack', channelId: 'C123' },
+        },
+        {
+          id: 'reply',
+          type: 'assistant_call',
+          target: { assistantId: 'primary' },
+          prompt: 'post the per-person update',
+          deliver: { channelType: 'slack', channelId: 'C123', thread: { fromStep: 'parent' } },
+        },
+      ],
+    }
+  }
+
+  it('passes the parent delivery message id as threadRef and records __deliveryMsg_<stepId>', async () => {
+    const stores = makeFakeStores()
+    const delivered: Array<{ channelId: string; threadRef?: string }> = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'update text' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (p) => {
+        delivered.push({ channelId: p.channelId, threadRef: p.threadRef })
+        return {
+          status: 'delivered' as const,
+          channelType: p.channelType,
+          channelId: p.channelId,
+          // The Slack ts of the message this call posted.
+          messageId: delivered.length === 1 ? '1751970000.111111' : '1751970001.222222',
+        }
+      },
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, threadDefinition())
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('completed')
+
+    // Parent posted top-level; the reply threaded under the parent's ts.
+    expect(delivered).toEqual([
+      { channelId: 'C123', threadRef: undefined },
+      { channelId: 'C123', threadRef: '1751970000.111111' },
+    ])
+    // The parent's message id is recorded under the reserved run var.
+    expect(stores.runs.get(run.id)?.vars?.['__deliveryMsg_parent']).toBe('1751970000.111111')
+    // The reply's __delivery outcome shows the thread was applied.
+    const replyRun = stores.stepRuns.find((s) => s.runId === run.id && s.stepId === 'reply')
+    expect(
+      (replyRun?.output as { __delivery?: { thread?: string; messageId?: string } } | undefined)
+        ?.__delivery,
+    ).toMatchObject({ status: 'delivered', thread: 'applied', messageId: '1751970001.222222' })
+  })
+
+  it('falls back to a top-level post with thread=parent_missing when the parent delivered nothing', async () => {
+    const stores = makeFakeStores()
+    const delivered: Array<{ threadRef?: string }> = []
+    const deps: ExecutorDeps = {
+      workflowStore: stores.workflowStore,
+      runStore: stores.runStore,
+      consultTransport: makeConsultTransport({ responseText: 'update text' }),
+      resolvePrimary: async () => PRIMARY_ASSISTANT_ID,
+      buildToolRegistry: async () => new Map(),
+      deliverToChannel: async (p) => {
+        delivered.push({ threadRef: p.threadRef })
+        // Parent push fails → no message id is ever recorded for it.
+        if (delivered.length === 1) {
+          return { status: 'failed' as const, channelType: p.channelType, error: 'slack down' }
+        }
+        return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
+      },
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, threadDefinition())
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('completed')
+
+    // The reply still went out — top-level, with the fallback recorded.
+    expect(delivered[1]?.threadRef).toBeUndefined()
+    const replyRun = stores.stepRuns.find((s) => s.runId === run.id && s.stepId === 'reply')
+    expect(
+      (replyRun?.output as { __delivery?: { thread?: string } } | undefined)?.__delivery,
+    ).toMatchObject({ status: 'delivered', thread: 'parent_missing' })
+  })
+})

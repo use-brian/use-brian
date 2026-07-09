@@ -24,6 +24,7 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
+import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
@@ -126,7 +127,7 @@ export function _getMcpDiscoveryCacheSize(): number {
  * on the Drift Sweep admin page.
  *
  * NOT included: workspace `files` tools (boot-wired in
- * `apps/api/src/index.ts`; see `BOOT_INJECTED_BUILTIN_TOOLS` in
+ * `packages/api/src/boot.ts`; see `BOOT_INJECTED_BUILTIN_TOOLS` in
  * `packages/shared/src/builtin-connectors.ts`).
  */
 export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string[]> = {
@@ -255,6 +256,14 @@ export async function injectMcpTools(params: {
    */
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  /**
+   * Shared workspace tool policy (migration 312). When present, a team-owned
+   * (`scope='workspace'`) connector's tools resolve allow/ask/block from here
+   * instead of the acting user's `mcp_tool_settings`, so any sufficiently-
+   * cleared member governs the shared assistant. Personal / granted connectors
+   * keep the per-user path. See docs/plans/workspace-owned-connector-transfer.md §2C.
+   */
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   assistantTeamId?: string | null
   /**
    * Connector-action audit deps. When provided, the Gmail
@@ -339,7 +348,7 @@ export async function injectMcpTools(params: {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
     userTimezone, knowledgeStore, knowledgeRepoWriter, allowKnowledgeWrites = false,
     gdriveFilesStore,
-    connectorGrantStore, connectorInstanceStore, assistantTeamId,
+    connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
     introspectionTools,
@@ -758,6 +767,15 @@ export async function injectMcpTools(params: {
       const overlaidByTeam = new Set<string>()
       const googleOverrides: Partial<Record<string, () => Promise<string | null>>> = {}
 
+      // Team-owned connectors are governed by the SHARED workspace policy, not
+      // any single user's mcp_tool_settings. Swap the settings store for a
+      // workspace-keyed adapter so allow/ask/block resolves from
+      // workspace_tool_policy. Falls back to the per-user store when the shared
+      // policy store isn't wired (legacy call sites / tests).
+      const teamPolicyStore = workspaceToolPolicyStore
+        ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
+        : settingsStore
+
       // Synthesize a "connectors" array that looks like the legacy per-user
       // one, so the per-provider injectors' enable checks and discovery
       // logic don't need to change. `credsOverride` / `credsOverridePerConnector`
@@ -784,8 +802,8 @@ export async function injectMcpTools(params: {
           await injectGitHubTools(
             syntheticConnectors,
             connectorStore,
-            settingsStore,
-            userId,              // policy lookup still uses the acting user
+            teamPolicyStore,     // team-owned: policy from workspace_tool_policy
+            userId,              // userId still binds credentials + assistant enable-state
             assistantId,
             assistantConnectorStore,
             tools,
@@ -802,7 +820,7 @@ export async function injectMcpTools(params: {
           await injectNotionTools(
             syntheticConnectors,
             connectorStore,
-            settingsStore,
+            teamPolicyStore,     // team-owned: policy from workspace_tool_policy
             userId,
             assistantId,
             assistantConnectorStore,
@@ -844,7 +862,7 @@ export async function injectMcpTools(params: {
         await injectGoogleTools(
           syntheticConnectors,
           connectorStore,
-          settingsStore,
+          teamPolicyStore,       // team-owned: policy from workspace_tool_policy
           userId,
           assistantId,
           assistantConnectorStore,

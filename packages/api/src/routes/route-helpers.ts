@@ -229,6 +229,8 @@ export type ChannelMcpStores = {
   gdriveFilesStore?: GDriveFilesStore
   connectorGrantStore?: ConnectorGrantStore
   connectorInstanceStore?: ConnectorInstanceStore
+  /** Shared workspace tool policy (migration 312) — governs team-owned connector tools. */
+  workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   /**
    * Per-assistant connector grants store (#4 in
    * `docs/architecture/integrations/connector-actions.md`). Forwarded
@@ -342,6 +344,7 @@ export async function applyMcpInjection(
       gdriveFilesStore: stores.gdriveFilesStore,
       connectorGrantStore: stores.connectorGrantStore,
       connectorInstanceStore: stores.connectorInstanceStore,
+      workspaceToolPolicyStore: stores.workspaceToolPolicyStore,
       assistantTeamId: params.assistant.workspaceId ?? null,
       connectorActionAudit: params.connectorActionAudit,
       assistantConnectorGrantsStore: stores.assistantConnectorGrantsStore,

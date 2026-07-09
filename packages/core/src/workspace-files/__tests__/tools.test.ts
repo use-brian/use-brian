@@ -643,3 +643,85 @@ describe('[COMP:files/tools] saveFileBytes', () => {
     expect(api.files.size).toBe(0)
   })
 })
+
+// ── Tool-policy gate (resolvePolicy hook) ────────────────────
+//
+// The boot wires `resolvePolicy` to the same L1/L2 mcp_tool_settings
+// resolution the Studio / Assistant tool-policy UIs write. These tests
+// pin the contract: allow ⇒ no confirmation, ask ⇒ confirmation,
+// block ⇒ the tool refuses at execute time; absent hook ⇒ the static
+// requiresConfirmation flags stand (open default / legacy behavior).
+
+describe('[COMP:files/tools] tool-policy gate', () => {
+  it('leaves static confirmation flags in charge when no resolver is wired', () => {
+    const api = buildFakeApi()
+    const tools = createFileTools(api)
+    expect(tools.fileWrite.resolveConfirmation).toBeUndefined()
+    expect(tools.fileDelete.resolveConfirmation).toBeUndefined()
+    expect(tools.fileWrite.requiresConfirmation).toBe(true)
+    expect(tools.fileRead.requiresConfirmation).toBeFalsy()
+  })
+
+  it('policy allow suppresses the confirmation (the fileDelete=Allow case)', async () => {
+    const api = buildFakeApi()
+    const { fileWrite, fileDelete } = createFileTools(api, {
+      resolvePolicy: async () => 'allow',
+    })
+    expect(await fileDelete.resolveConfirmation!(ctx)).toBe(false)
+    // And execution proceeds normally.
+    await fileWrite.execute({ path: '/tmp.md', content: 'x' }, ctx)
+    const result = await fileDelete.execute({ file: '/tmp.md' }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(api.files.size).toBe(0)
+  })
+
+  it('policy ask requires the confirmation', async () => {
+    const api = buildFakeApi()
+    const { fileRead } = createFileTools(api, {
+      resolvePolicy: async () => 'ask',
+    })
+    expect(await fileRead.resolveConfirmation!(ctx)).toBe(true)
+  })
+
+  it('policy block refuses at execute time without touching the api', async () => {
+    const api = buildFakeApi()
+    const perTool: Record<string, 'allow' | 'ask' | 'block'> = {
+      fileWrite: 'allow',
+      fileDelete: 'block',
+      fileRead: 'block',
+    }
+    const { fileWrite, fileDelete, fileRead } = createFileTools(api, {
+      resolvePolicy: async (toolName) => perTool[toolName] ?? 'allow',
+    })
+    await fileWrite.execute({ path: '/keep.md', content: 'x' }, ctx)
+
+    const del = await fileDelete.execute({ file: '/keep.md' }, ctx)
+    expect(del.isError).toBe(true)
+    expect(String(del.data)).toContain('blocked by tool policy')
+    expect(api.files.size).toBe(1) // nothing deleted
+
+    const read = await fileRead.execute({ file: '/keep.md' }, ctx)
+    expect(read.isError).toBe(true)
+    expect(String(read.data)).toContain('blocked by tool policy')
+  })
+
+  it('sendFile honors the policy hook through its own factory', async () => {
+    const api = buildFakeApi()
+    const { sendFile } = createFileTools(api, {
+      resolvePolicy: async () => 'block',
+    })
+    const result = await sendFile.execute({ file: '/any.md' }, ctx)
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('blocked by tool policy')
+  })
+
+  it('fails open when the resolver throws (policy outage must not break file tools)', async () => {
+    const api = buildFakeApi()
+    const { fileWrite } = createFileTools(api, {
+      resolvePolicy: async () => { throw new Error('store down') },
+    })
+    const result = await fileWrite.execute({ path: '/ok.md', content: 'x' }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(api.files.size).toBe(1)
+  })
+})

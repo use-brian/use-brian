@@ -138,10 +138,26 @@ export type ListSlackChannels = (args: {
   | { ok: false; reason: string }
 >
 
+/**
+ * Enumerate the Slack workspace's human members (id + handle + names) so the
+ * authoring model can embed real `<@U…>` mention ids in step prompts — Slack
+ * only notifies on real member ids, and without a directory the model
+ * improvises broken forms (`<@handle>`, plain `@name`). The membership half
+ * of the mention-configuration fix; `ok:false` when Slack is not connected
+ * or the enumeration fails (e.g. `missing_scope`).
+ */
+export type ListSlackMembers = (args: {
+  assistantId: string
+}) => Promise<
+  | { ok: true; members: Array<{ id: string; handle: string; displayName: string; realName: string }> }
+  | { ok: false; reason: string }
+>
+
 export function createWorkflowDependencyPreflight(options: WorkflowDependencyPreflightOptions): {
   validateDeliveryTarget: ValidateDeliveryTarget
   preflightConnectorTool: PreflightConnectorTool
   listSlackChannels: ListSlackChannels
+  listSlackMembers: ListSlackMembers
 } {
   const validateDeliveryTarget: ValidateDeliveryTarget = async ({ assistantId, channelType, channelId }) => {
     if (channelType === 'slack') {
@@ -266,5 +282,26 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     }
   }
 
-  return { validateDeliveryTarget, preflightConnectorTool, listSlackChannels }
+  const listSlackMembers: ListSlackMembers = async ({ assistantId }) => {
+    if (!options.integrationStore) {
+      return { ok: false, reason: 'Slack member listing is unavailable in this context' }
+    }
+    const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'slack')
+    const botToken = integ && (integ.credentials as { bot_token?: string }).bot_token
+    if (!botToken) return { ok: false, reason: 'Slack is not connected for this assistant' }
+    try {
+      const { members } = await createSlackApi({ botToken }).usersList()
+      return {
+        ok: true,
+        members: members
+          .slice()
+          .sort((a, b) => (a.handle || a.realName).localeCompare(b.handle || b.realName)),
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { ok: false, reason: msg.replace(/^Slack API users\.list:\s*/, 'Slack: ') }
+    }
+  }
+
+  return { validateDeliveryTarget, preflightConnectorTool, listSlackChannels, listSlackMembers }
 }

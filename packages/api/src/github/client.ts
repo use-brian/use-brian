@@ -33,7 +33,7 @@ export type GitHubRepo = {
   id: number
   full_name: string
   name: string
-  owner: { login: string }
+  owner: { login: string; type?: string }
   description: string | null
   html_url: string
   private: boolean
@@ -499,6 +499,72 @@ export async function listOwnerRepos(
     `/user/repos?sort=pushed&direction=desc&per_page=${perPage}`,
   )
   return (await res.json()) as GitHubRepo[]
+}
+
+const REPO_PAGE_SIZE = 100
+/** Defensive page ceiling so a pathological org can never loop forever. */
+const REPO_MAX_PAGES = 20
+
+/** Parse the `rel="next"` URL out of a GitHub `Link` response header. */
+function nextPageUrl(linkHeader: string | null): string | null {
+  if (!linkHeader) return null
+  for (const part of linkHeader.split(',')) {
+    const match = part.match(/<([^>]+)>\s*;\s*rel="next"/)
+    if (match) return match[1] ?? null
+  }
+  return null
+}
+
+/**
+ * Fetch every page of a GitHub list endpoint, following the `Link:
+ * rel="next"` header. `firstPath` is an API path relative to the API root
+ * (e.g. `/orgs/acme/repos?per_page=100`); the Link header's next URL is
+ * absolute, so its origin is stripped back to a path for the next `ghFetch`.
+ * Bounded by `REPO_MAX_PAGES` (logged if the ceiling is hit).
+ */
+async function ghFetchAllPages<T>(pat: string, firstPath: string): Promise<T[]> {
+  const items: T[] = []
+  let path: string | null = firstPath
+  for (let page = 0; page < REPO_MAX_PAGES && path; page++) {
+    const res = await ghFetch(pat, path)
+    const batch = (await res.json()) as T[]
+    if (!Array.isArray(batch)) break
+    items.push(...batch)
+    const next = nextPageUrl(res.headers?.get?.('link') ?? null)
+    path = next ? next.replace(GITHUB_API, '') : null
+    if (page === REPO_MAX_PAGES - 1 && path) {
+      console.warn(
+        `[github-client] pagination ceiling (${REPO_MAX_PAGES} pages) hit for ${firstPath}`,
+      )
+    }
+  }
+  return items
+}
+
+/**
+ * Every repository under an organization, most-recently-pushed first,
+ * across all pages. Used to expand a user's "whole org" ingest selection
+ * into the concrete repo set at poll time (auto-following repos added to
+ * the org after the selection was made).
+ */
+export async function listOrgRepos(pat: string, org: string): Promise<GitHubRepo[]> {
+  return ghFetchAllPages<GitHubRepo>(
+    pat,
+    `/orgs/${encodeURIComponent(org)}/repos?sort=pushed&direction=desc&per_page=${REPO_PAGE_SIZE}`,
+  )
+}
+
+/**
+ * Every repository the PAT can see across BOTH personal ownership and org
+ * membership, most-recently-pushed first, all pages. Unlike `listOwnerRepos`
+ * (single page, no affiliation), this surfaces org-owned repos reliably — it
+ * backs the ingest repo picker's list and the org set derived from it.
+ */
+export async function listAffiliatedRepos(pat: string): Promise<GitHubRepo[]> {
+  return ghFetchAllPages<GitHubRepo>(
+    pat,
+    `/user/repos?sort=pushed&direction=desc&affiliation=owner,organization_member&per_page=${REPO_PAGE_SIZE}`,
+  )
 }
 
 /**

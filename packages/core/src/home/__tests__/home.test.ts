@@ -120,6 +120,26 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     expect(dock.needsYou[2].count).toBe(1)
   })
 
+  it('appends live approvals + autopilot the artifact omitted (a stale layout cannot hide a pending-you action)', () => {
+    // The real incident: a month-old layout listing only brain_review hid a
+    // freshly-drafted goal awaiting confirmation (autopilot) — and would hide a
+    // new approval too. Both are blocking user actions; the merge must surface
+    // them without waiting for the next curation turn.
+    const layout: HomeDockLayout = {
+      version: 1,
+      note: null,
+      needsYou: [{ kind: 'brain_review' }],
+      generatedAt: '2026-06-10T09:00:00Z',
+      generatedByAssistantId: 'a1',
+    }
+    const dock = mergeHomeDock(layout, signals({ autopilotCount: 1 }))
+    const kinds = dock.needsYou.map((n) => n.kind)
+    expect(kinds[0]).toBe('brain_review') // the artifact's one choice still leads
+    expect(kinds).toContain('approvals') // live (2), surfaced despite being omitted
+    expect(kinds).toContain('autopilot') // live (1), surfaced despite being omitted
+    expect(dock.needsYou.find((n) => n.kind === 'autopilot')?.count).toBe(1)
+  })
+
   it('lets the artifact reposition + caption an attention kind without duplicating it', () => {
     const layout: HomeDockLayout = {
       version: 1,

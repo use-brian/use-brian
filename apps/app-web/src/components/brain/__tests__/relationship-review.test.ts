@@ -17,4 +17,14 @@ describe("[COMP:app-web/relationship-review] endpointPrimitive", () => {
     expect(endpointPrimitive("kb_chunk")).toBeNull();
     expect(endpointPrimitive("")).toBeNull();
   });
+
+  it("returns null for skill / assistant — not brain-inbox primitives", () => {
+    // A skill endpoint (the `learned_from` source) lives in `workspace_skills`,
+    // not the review union, so it has no `fetchBrainRow` primitive. The card
+    // still expands: `EndpointCard` routes a skill through `getWorkspaceSkill`
+    // (its own `isSkill` branch), not `endpointPrimitive`. Assistant endpoints
+    // resolve a name server-side but have no in-Brain preview surface.
+    expect(endpointPrimitive("skill")).toBeNull();
+    expect(endpointPrimitive("assistant")).toBeNull();
+  });
 });

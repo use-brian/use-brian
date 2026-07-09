@@ -87,13 +87,19 @@ export function buildWorkspaceCuratorScope(
       async createUmbrella(workspaceId, draft) {
         // System-level auto-generated insert (author_id NULL — no acting
         // user). Mirrors the column list of `WorkspaceSkillStore.create`.
+        // `induction_source = 'self'`: a curator umbrella is a consolidation of the
+        // team's OWN auto-learned skills — self-induced, not authored by a human.
+        // Confidence + activated_at are left to their column defaults (0.0, NULL) so
+        // the umbrella is born SUGGESTED: unlike the approval-admitted `self` path,
+        // no human gated this consolidation, so it waits for review before running.
         const r = await query<{ id: string }>(
           `INSERT INTO workspace_skills (
              slug, name, description, when_to_use, content, category,
              requires_connectors, source, author_id, workspace_id,
-             write_origin, originating_assistant_id, auto_generated_at
+             write_origin, originating_assistant_id, auto_generated_at,
+             induction_source
            )
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'auto-generated',NULL,$8,'background_review',$9,now())
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'auto-generated',NULL,$8,'background_review',$9,now(),'self')
            RETURNING id`,
           [
             draft.slug,

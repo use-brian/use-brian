@@ -39,6 +39,10 @@ Assemble the `definition` (`startStepId` + `steps[]`) and the `trigger` (a **sib
 
 **Delivery channel must be reachable from where you author.** Setting `delivery.channel: "slack"` (or a per-step Slack `deliver`) captures the channel from the session you're in — so a Slack target authored from a web or Telegram chat has no real Slack channel to capture and fails `channel_not_found`. Author the workflow from inside the Slack channel you want the result posted to, or pick a channel the connected bot is a member of. Delivery targets are validated at create time; an unreachable one is a hard error.
 
+**Threaded delivery = one deliver-step per message.** To post a parent message with follow-up replies under it (a Slack thread / Telegram reply chain), give EACH message its own `assistant_call` step with its own `deliver`, and set every follow-up's `deliver.thread: { fromStep: "<parent step id>" }` — it replies under whatever the parent step posted this run. Same channel on both steps; slack + telegram only. Concatenating all messages into one step's output posts one big top-level message, never a thread.
+
+**Slack mentions need real member ids.** Slack only notifies via the literal syntax `<@MEMBER_ID>` (e.g. `<@U0123ABCD>`). When a Slack-delivered step should tag people, call `listSlackMembers` during authoring and embed the exact ids in the step prompt so the callee copies them into the message. Plain `@name` renders as inert text; `<@handle>` renders as broken literal text — never rely on either (the send path rewrites what it can match, but ids in the prompt are the reliable path).
+
 ## Limits — don't promise what the primitives lack
 
 - **No web delivery** (the web app is pull-only) — use a messaging channel or a doc page; otherwise the output only lives in run history.

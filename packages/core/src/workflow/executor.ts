@@ -118,7 +118,26 @@ export type EmitAuditEvent = (event: WorkflowAuditEvent) => Promise<void> | void
  * surface as a typed non-`delivered` status rather than looking like success.
  */
 export type DeliveryOutcome =
-  | { status: 'delivered'; channelType: string; channelId: string }
+  | {
+      status: 'delivered'
+      channelType: string
+      channelId: string
+      /**
+       * Platform message id of the pushed message (Slack ts / Telegram
+       * message id), when the adapter reports one. The executor records it
+       * under the reserved run var `__deliveryMsg_<stepId>` so a later
+       * step's `deliver.thread.fromStep` can reply under this message.
+       */
+      messageId?: string
+      /**
+       * Thread-reply resolution for a `deliver.thread` step: `applied` — the
+       * parent message id resolved and the push was a thread reply;
+       * `parent_missing` — the referenced step delivered nothing this run
+       * (branch routed around it / push failed), so the message fell back to
+       * a top-level post. Absent on non-thread deliveries.
+       */
+      thread?: 'applied' | 'parent_missing'
+    }
   | {
       status: 'skipped'
       channelType: string
@@ -149,6 +168,13 @@ export type DeliverToChannel = (params: {
   channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'
   channelId: string
   text: string
+  /**
+   * Platform message id to reply under (Slack thread_ts / Telegram
+   * reply_to_message_id) — resolved by the executor from an earlier
+   * deliver-step's recorded message id when the step sets
+   * `deliver.thread.fromStep`. Absent = top-level post.
+   */
+  threadRef?: string
 }) => Promise<DeliveryOutcome>
 
 export type WorkflowAuditEvent =
@@ -913,6 +939,21 @@ async function dispatchAssistantCall(
         // The API-side deliverToChannel impl sanitizes again (idempotent
         // defense-in-depth across the multiple DeliverToChannel impls).
         const deliveredText = sanitizeDeliveryText(text)
+        // Thread-reply anchor: an earlier deliver-step's platform message id,
+        // recorded under the reserved `__deliveryMsg_<stepId>` var when it
+        // delivered. Missing (branch routed around it, push failed) → fall
+        // back to a top-level post, recorded as `thread: 'parent_missing'`.
+        let threadRef: string | undefined
+        let threadNote: 'applied' | 'parent_missing' | undefined
+        if (step.deliver.thread) {
+          const parentMsg = ctx.scope.vars[`__deliveryMsg_${step.deliver.thread.fromStep}`]
+          if (typeof parentMsg === 'string' && parentMsg) {
+            threadRef = parentMsg
+            threadNote = 'applied'
+          } else {
+            threadNote = 'parent_missing'
+          }
+        }
         if (!ctx.deps.deliverToChannel) {
           delivery = { status: 'skipped', channelType, reason: 'not_wired' }
         } else if (!deliveredText.trim()) {
@@ -926,7 +967,16 @@ async function dispatchAssistantCall(
               channelType,
               channelId: step.deliver.channelId,
               text: deliveredText,
+              threadRef,
             })
+            if (delivery.status === 'delivered') {
+              if (threadNote) delivery = { ...delivery, thread: threadNote }
+              // Record the pushed message's platform id so a later step's
+              // `deliver.thread.fromStep` can reply under it this run.
+              if (delivery.messageId) {
+                varsPatch = { ...varsPatch, [`__deliveryMsg_${step.id}`]: delivery.messageId }
+              }
+            }
           } catch (err) {
             delivery = {
               status: 'failed',

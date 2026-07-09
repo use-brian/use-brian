@@ -16,7 +16,13 @@ import {
 // grant the resolver should find. `access: null` → not a member (empty first
 // read); `grantRole: null` → no grant (empty second read → the `edit` baseline).
 function makeQuery(opts: {
-  access: { workspaceId: string; pageClearance: string | null; memberClearance: string | null } | null
+  access: {
+    workspaceId: string
+    pageClearance: string | null
+    memberClearance: string | null
+    /** Migration 313 — the page's teamspace tier; null/omitted = a private page / no container. */
+    teamspaceSensitivity?: string | null
+  } | null
   grantRole?: GrantRole | null
 }): RlsQuery {
   return (async (_userId: string, sql: string) => {
@@ -92,6 +98,54 @@ describe('[COMP:doc-sync/clearance-gate] assertPageAccess', () => {
     const access = await assertPageAccess({ userId: 'u', pageId: 'p', query })
     expect(access.role).toBe('full')
     expect(isReadOnlyRole(access.role)).toBe(false)
+  })
+
+  it('denies a member whose clearance is below the TEAMSPACE sensitivity (migration 313)', async () => {
+    // The demotion edge: filed into the container while cleared, tier raised
+    // (or clearance dropped) later — the page-open gate is the backstop.
+    const query = makeQuery({
+      access: {
+        workspaceId: 'w',
+        pageClearance: 'public',
+        memberClearance: 'internal',
+        teamspaceSensitivity: 'confidential',
+      },
+    })
+    await expect(
+      assertPageAccess({ userId: 'u', pageId: 'p', query }),
+    ).rejects.toMatchObject({ reason: 'insufficient_teamspace_clearance' })
+  })
+
+  it('a null teamspace sensitivity (private page) adds no container gate', async () => {
+    const query = makeQuery({
+      access: {
+        workspaceId: 'w',
+        pageClearance: 'internal',
+        memberClearance: 'internal',
+        teamspaceSensitivity: null,
+      },
+      grantRole: null,
+    })
+    await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({
+      workspaceId: 'w',
+      role: 'edit',
+    })
+  })
+
+  it('a member clearing both the page and the teamspace tier joins normally', async () => {
+    const query = makeQuery({
+      access: {
+        workspaceId: 'w',
+        pageClearance: 'internal',
+        memberClearance: 'confidential',
+        teamspaceSensitivity: 'confidential',
+      },
+      grantRole: null,
+    })
+    await expect(assertPageAccess({ userId: 'u', pageId: 'p', query })).resolves.toMatchObject({
+      workspaceId: 'w',
+      role: 'edit',
+    })
   })
 
   it('the clearance gate runs BEFORE the role read — a below-clearance member never reaches the grant', async () => {

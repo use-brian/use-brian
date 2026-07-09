@@ -13,6 +13,9 @@ import {
   applyUploadResult,
   imageFilesFromClipboard,
   markStagedError,
+  partitionUpload,
+  previewUrlsToRevokeOnDetach,
+  readyAttachments,
   readyFileIds,
   type Attachment,
 } from "../use-file-attachments";
@@ -82,6 +85,41 @@ describe("[COMP:app-web/file-attachments] upload reconciliation", () => {
     ];
     expect(readyFileIds(list)).toEqual(["file_a", "file_d"]);
   });
+
+  it("readyAttachments keeps only done+fileId chips (the ones handed to the message)", () => {
+    const list: Attachment[] = [
+      { ...staged("a"), status: "done", fileId: "file_a" },
+      { ...staged("b"), status: "done" }, // done but no fileId — not ready
+      { ...staged("c"), status: "uploading" },
+    ];
+    expect(readyAttachments(list).map((a) => a.localId)).toEqual(["a"]);
+  });
+});
+
+describe("[COMP:app-web/file-attachments] detach preview-URL retention", () => {
+  function withPreview(a: Attachment, url: string): Attachment {
+    return { ...a, previewUrl: url };
+  }
+
+  it("revokes ONLY the dropped chips' URLs, keeping the handed-off (ready) ones alive", () => {
+    // The just-sent message adopts the ready image's object URL for its
+    // thumbnail — detach must NOT revoke it, or the thumbnail breaks on
+    // re-render. The dropped uploading/errored chips' URLs are freed.
+    const list: Attachment[] = [
+      withPreview({ ...staged("ready"), status: "done", fileId: "f1" }, "blob:ready"),
+      withPreview({ ...staged("err"), status: "error", error: "x" }, "blob:err"),
+      withPreview({ ...staged("up"), status: "uploading" }, "blob:up"),
+    ];
+    expect(previewUrlsToRevokeOnDetach(list)).toEqual(["blob:err", "blob:up"]);
+  });
+
+  it("ignores chips with no previewUrl (non-image files)", () => {
+    const list: Attachment[] = [
+      { ...staged("pdf"), status: "done", fileId: "f1" }, // no previewUrl
+      withPreview({ ...staged("txt"), status: "error", error: "x" }, "blob:txt"),
+    ];
+    expect(previewUrlsToRevokeOnDetach(list)).toEqual(["blob:txt"]);
+  });
 });
 
 function fakeFile(type: string, name = "file"): File {
@@ -136,5 +174,62 @@ describe("[COMP:app-web/file-attachments] paste image extraction", () => {
   it("returns [] when there is no clipboard data", () => {
     expect(imageFilesFromClipboard(null)).toEqual([]);
     expect(imageFilesFromClipboard(undefined)).toEqual([]);
+  });
+});
+
+function sizedFile(type: string, size: number, name = "file"): File {
+  return { type, name, size } as unknown as File;
+}
+
+describe("[COMP:app-web/file-attachments] upload partition guard", () => {
+  const MAX = 20 * 1024 * 1024;
+
+  it("routes video to media when the host can route", () => {
+    const mp4 = sizedFile("video/mp4", 93 * 1024 * 1024, "call.mp4");
+    const r = partitionUpload([mp4], { maxBytes: MAX, canRouteMedia: true });
+    expect(r.media).toEqual([mp4]);
+    expect(r.attach).toEqual([]);
+    expect(r.rejected).toEqual([]);
+  });
+
+  it("rejects video as unsupported when the host cannot route", () => {
+    const mp4 = sizedFile("video/mp4", 5 * 1024 * 1024, "clip.mp4");
+    const r = partitionUpload([mp4], { maxBytes: MAX, canRouteMedia: false });
+    expect(r.media).toEqual([]);
+    expect(r.attach).toEqual([]);
+    expect(r.rejected).toEqual([{ file: mp4, reason: "video_unsupported" }]);
+  });
+
+  it("rejects an oversized non-video as too_large", () => {
+    const pdf = sizedFile("application/pdf", MAX + 1, "big.pdf");
+    const r = partitionUpload([pdf], { maxBytes: MAX, canRouteMedia: true });
+    expect(r.rejected).toEqual([{ file: pdf, reason: "too_large" }]);
+    expect(r.attach).toEqual([]);
+  });
+
+  it("keeps a normal file on the attach path", () => {
+    const png = sizedFile("image/png", 1024, "shot.png");
+    const r = partitionUpload([png], { maxBytes: MAX, canRouteMedia: false });
+    expect(r.attach).toEqual([png]);
+    expect(r.media).toEqual([]);
+    expect(r.rejected).toEqual([]);
+  });
+
+  it("allows a file exactly at the limit, rejects one byte over", () => {
+    const at = sizedFile("application/pdf", MAX, "at.pdf");
+    const over = sizedFile("application/pdf", MAX + 1, "over.pdf");
+    const r = partitionUpload([at, over], { maxBytes: MAX, canRouteMedia: true });
+    expect(r.attach).toEqual([at]);
+    expect(r.rejected).toEqual([{ file: over, reason: "too_large" }]);
+  });
+
+  it("splits a mixed batch into all three lanes", () => {
+    const mp4 = sizedFile("video/mp4", 40 * 1024 * 1024, "v.mp4");
+    const big = sizedFile("application/pdf", MAX + 10, "big.pdf");
+    const ok = sizedFile("text/plain", 200, "note.txt");
+    const r = partitionUpload([mp4, big, ok], { maxBytes: MAX, canRouteMedia: true });
+    expect(r.media).toEqual([mp4]);
+    expect(r.rejected).toEqual([{ file: big, reason: "too_large" }]);
+    expect(r.attach).toEqual([ok]);
   });
 });

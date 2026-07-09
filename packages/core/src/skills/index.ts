@@ -32,8 +32,14 @@ export { parseSkillReferences } from './references.js'
 export type { SkillReferences, SkillReferenceKind } from './references.js'
 export {
   shouldActivateSkill,
+  bornConfidence,
+  bornActivated,
+  bornVerified,
+  nextUsageConfidence,
   SKILL_ACTIVATION_THRESHOLD,
-  SKILL_REDERIVATION_INCREMENT,
+  SKILL_SELF_BORN_CONFIDENCE,
+  SKILL_USAGE_CONFIDENCE_INCREMENT,
+  SKILL_USAGE_CONFIDENCE_CAP,
 } from './governance.js'
 export type { SkillActivationInputs, SkillInductionSource } from './governance.js'
 export {

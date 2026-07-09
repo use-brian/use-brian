@@ -25,6 +25,7 @@
 import type { PoolClient } from 'pg'
 import { minSensitivity } from '@sidanclaw/core'
 import type { Sensitivity } from '@sidanclaw/core'
+import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './teamspace-store.js'
 import { query, queryWithRLS, getPool } from './client.js'
 import type { ConnectorGrantStore } from './connector-grant-store.js'
 import type { ChannelRouteStore } from './channel-route-store.js'
@@ -960,6 +961,21 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
           [workspace.id, userId],
         )
 
+        // Every workspace gets its default (General) teamspace in the same
+        // transaction, with the owner joined — the doc sidebar's day-one
+        // section and the landing place for programmatic page creation
+        // (migration 313; docs/architecture/features/teamspaces.md).
+        await client.query(
+          `WITH ts AS (
+             INSERT INTO teamspaces (workspace_id, name, sensitivity, is_default, created_by)
+             VALUES ($1, 'General', 'internal', true, $2)
+             RETURNING id
+           )
+           INSERT INTO teamspace_members (teamspace_id, user_id)
+           SELECT id, $2 FROM ts`,
+          [workspace.id, userId],
+        )
+
         // Every workspace gets a `kind='primary'` assistant in the same
         // transaction. It anchors the workspace home (the composer hero,
         // the workspace-scoped chat fallback) and is required for the
@@ -1145,6 +1161,16 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         [memberUserId, workspaceId],
       )
 
+      // Auto-join the workspace's default (General) teamspace — the hard
+      // page-access boundary would otherwise leave a fresh member with an
+      // empty doc sidebar (migration 313). Non-fatal: a missing join heals
+      // on the next teamspace list.
+      try {
+        await joinDefaultTeamspacesSystem(workspaceId, memberUserId)
+      } catch (err) {
+        console.error('[workspace-store] default-teamspace join on member add failed:', err)
+      }
+
       return member
     },
 
@@ -1181,6 +1207,14 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         } catch (err) {
           console.error('[workspace-store] channel_routes cleanup on member removal failed:', err)
         }
+      }
+
+      // A leaving member holds no teamspace memberships either — the rows
+      // have no workspace-member FK, so the cleanup is explicit (mig 313).
+      try {
+        await leaveWorkspaceTeamspacesSystem(workspaceId, memberUserId)
+      } catch (err) {
+        console.error('[workspace-store] teamspace cleanup on member removal failed:', err)
       }
 
       const result = await query(
