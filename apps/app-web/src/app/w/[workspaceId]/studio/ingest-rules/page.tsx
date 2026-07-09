@@ -80,7 +80,13 @@ type AvailableProvider = {
   nature: IngestNature;
 };
 
-type RepoOption = { fullName: string; private: boolean };
+type RepoOption = {
+  fullName: string;
+  private: boolean;
+  ownerLogin?: string | null;
+  ownerType?: string | null;
+};
+type OrgOption = { login: string; repoCount: number };
 
 type ReposCopy = ReturnType<typeof useT>["studioPage"]["ingestRules"]["repos"];
 
@@ -98,6 +104,8 @@ function GithubRepoPicker({
   copy: ReposCopy;
 }) {
   const [available, setAvailable] = useState<RepoOption[] | null>(null);
+  const [orgs, setOrgs] = useState<OrgOption[]>([]);
+  const [checkedOrgs, setCheckedOrgs] = useState<Set<string>>(new Set());
   const [loadError, setLoadError] = useState(false);
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -108,15 +116,26 @@ function GithubRepoPicker({
   useEffect(() => {
     let cancelled = false;
     setAvailable(null);
+    setOrgs([]);
+    setCheckedOrgs(new Set());
     setLoadError(false);
     setQuery("");
     authFetch(`${API_URL}/api/ingest/sources/${instanceId}/github/repos`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error())))
-      .then((data: { available: RepoOption[]; selected: string[] }) => {
-        if (cancelled) return;
-        setAvailable(data.available);
-        setChecked(new Set(data.selected));
-      })
+      .then(
+        (data: {
+          available: RepoOption[];
+          selected: string[];
+          orgs?: OrgOption[];
+          selectedOrgs?: string[];
+        }) => {
+          if (cancelled) return;
+          setAvailable(data.available);
+          setChecked(new Set(data.selected));
+          setOrgs(data.orgs ?? []);
+          setCheckedOrgs(new Set(data.selectedOrgs ?? []));
+        },
+      )
       .catch(() => {
         if (!cancelled) setLoadError(true);
       });
@@ -137,6 +156,16 @@ function GithubRepoPicker({
       const next = new Set(prev);
       if (next.has(fullName)) next.delete(fullName);
       else next.add(fullName);
+      return next;
+    });
+    setSaved(false);
+  }
+
+  function toggleOrg(login: string) {
+    setCheckedOrgs((prev) => {
+      const next = new Set(prev);
+      if (next.has(login)) next.delete(login);
+      else next.add(login);
       return next;
     });
     setSaved(false);
@@ -170,7 +199,7 @@ function GithubRepoPicker({
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repos: [...checked] }),
+          body: JSON.stringify({ repos: [...checked], orgs: [...checkedOrgs] }),
         },
       );
       if (!res.ok) throw new Error();
@@ -202,6 +231,36 @@ function GithubRepoPicker({
         available &&
         filtered && (
           <>
+            {orgs.length > 0 && (
+              <div className="mb-3">
+                <div className="text-[12px] font-medium mb-1.5">
+                  {copy.orgsTitle}
+                </div>
+                <ul className="flex flex-col gap-0.5">
+                  {orgs.map((org) => (
+                    <li key={org.login}>
+                      <label className="flex items-center gap-2 text-xs cursor-pointer py-0.5">
+                        <input
+                          type="checkbox"
+                          checked={checkedOrgs.has(org.login)}
+                          onChange={() => toggleOrg(org.login)}
+                          className="accent-primary"
+                        />
+                        <span className="font-medium truncate">
+                          {format(copy.orgAllRepos, { org: org.login })}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground shrink-0">
+                          {format(copy.orgRepoCount, { n: org.repoCount })}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <p className="text-[11px] text-muted-foreground mt-1.5">
+                  {copy.orgNote}
+                </p>
+              </div>
+            )}
             <div className="flex items-center gap-2 mb-2">
               <input
                 type="search"
@@ -226,26 +285,40 @@ function GithubRepoPicker({
               </div>
             ) : (
               <ul className="flex flex-col gap-0.5 max-h-64 overflow-y-auto">
-                {filtered.map((repo) => (
-                  <li key={repo.fullName}>
-                    <label className="flex items-center gap-2 text-xs cursor-pointer py-0.5">
-                      <input
-                        type="checkbox"
-                        checked={checked.has(repo.fullName)}
-                        onChange={() => toggle(repo.fullName)}
-                        className="accent-primary"
-                      />
-                      <span className="font-medium truncate">
-                        {repo.fullName}
-                      </span>
-                      {repo.private && (
-                        <span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted px-1 py-0.5 rounded shrink-0">
-                          {copy.privateBadge}
+                {filtered.map((repo) => {
+                  // A repo whose owning org is selected is already covered —
+                  // show it checked+disabled rather than as a separate pick.
+                  const covered =
+                    !!repo.ownerLogin && checkedOrgs.has(repo.ownerLogin);
+                  return (
+                    <li key={repo.fullName}>
+                      <label
+                        className={`flex items-center gap-2 text-xs py-0.5 ${covered ? "opacity-50 cursor-default" : "cursor-pointer"}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={covered || checked.has(repo.fullName)}
+                          disabled={covered}
+                          onChange={() => toggle(repo.fullName)}
+                          className="accent-primary"
+                        />
+                        <span className="font-medium truncate">
+                          {repo.fullName}
                         </span>
-                      )}
-                    </label>
-                  </li>
-                ))}
+                        {repo.private && (
+                          <span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted px-1 py-0.5 rounded shrink-0">
+                            {copy.privateBadge}
+                          </span>
+                        )}
+                        {covered && (
+                          <span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted px-1 py-0.5 rounded shrink-0">
+                            {copy.orgCoveredBadge}
+                          </span>
+                        )}
+                      </label>
+                    </li>
+                  );
+                })}
               </ul>
             )}
             <p className="text-[11px] text-muted-foreground mt-2">
