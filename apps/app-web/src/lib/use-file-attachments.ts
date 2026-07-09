@@ -41,7 +41,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
  * (direct-to-GCS + transcription) instead. See docs/architecture/features/files.md
  * -> "Client-side upload guard" and docs/architecture/media/transcription.md.
  */
-export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 type AttachmentStatus = "uploading" | "done" | "error";
 
@@ -159,7 +159,7 @@ export function previewUrlsToRevokeOnDetach(
 }
 
 /** Why a file was kept out of the `/api/files/upload` POST. */
-export type RejectReason = "too_large" | "video_unsupported";
+type RejectReason = "too_large" | "video_unsupported";
 
 export type PartitionedUpload = {
   /** Files that go through the normal cache upload. */
