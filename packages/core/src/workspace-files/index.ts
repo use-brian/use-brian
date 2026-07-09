@@ -36,6 +36,8 @@ export {
 
 export { createSendFileTool } from './send-file.js'
 
+export type { FileToolPolicy, ResolveFileToolPolicy } from './tool-helpers.js'
+
 export {
   AttachmentCollector,
   MAX_ATTACHMENTS_PER_TURN,

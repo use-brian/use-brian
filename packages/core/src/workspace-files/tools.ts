@@ -23,7 +23,15 @@ import {
 import type { CachedFile } from '../files/types.js'
 import type { AccessContext } from '../security/access-context.js'
 import { createSendFileTool } from './send-file.js'
-import { ctxFor, errorMessage, idOrPathShape, workspaceGate } from './tool-helpers.js'
+import {
+  ctxFor,
+  errorMessage,
+  idOrPathShape,
+  policyBlockGate,
+  policyConfirmation,
+  workspaceGate,
+  type ResolveFileToolPolicy,
+} from './tool-helpers.js'
 
 /**
  * Nine chat tools for the workspace filesystem primitive
@@ -83,6 +91,16 @@ export type FileToolOptions = {
    * another workspace/user's cached upload by id (audit #3).
    */
   readCachedFile?: (id: string, ctx: AccessContext) => Promise<CachedFile | null>
+  /**
+   * Effective allow/ask/block policy for a files tool, resolved per call
+   * from the same store the Studio/Assistant tool-policy UIs write
+   * (`mcp_tool_settings`, serverName='files': L1 app-level + L2
+   * per-assistant, strictest wins). Wired at boot; absent (open default,
+   * tests) the tools' static `requiresConfirmation` flags stand and no
+   * tool is blocked. See docs/architecture/features/files.md →
+   * "Connector-style governance".
+   */
+  resolvePolicy?: ResolveFileToolPolicy
 }
 
 const SENSITIVITY_VALUES = [...FILE_SENSITIVITIES] as [FileSensitivity, ...FileSensitivity[]]
@@ -199,10 +217,19 @@ export function createFileTools(
   saveFileBytes: Tool
   sendFile: Tool
 } {
+  // Per-tool policy plumbing — no-ops when boot didn't wire a resolver.
+  const confirm = (toolName: string) =>
+    policyConfirmation(opts?.resolvePolicy, toolName)
+  const blockedGate = (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ) => policyBlockGate(opts?.resolvePolicy, toolName, context)
+
   const fileWrite = buildTool({
     name: 'fileWrite',
     requiresCapability: 'files',
     requiresConfirmation: true,
+    resolveConfirmation: confirm('fileWrite'),
     description:
       'Create or overwrite a workspace file. Files are workspace-shared — every workspace member can read them. Use for shared artifacts (drafts, notes, reports), not personal scratch (use saveMemory). ' +
 'Use this to author NEW text content (you provide the body). To save an UPLOADED file the user attached (an image, PDF, document), use saveFileToBrain instead — it preserves the original bytes; fileWrite would only store text. ' +
@@ -222,6 +249,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileWrite', context)
+      if (policyGate) return policyGate
 
       const result = await api.write(ctxFor(context), {
         path: input.path,
@@ -260,6 +289,7 @@ export function createFileTools(
     name: 'fileAppend',
     requiresCapability: 'files',
     requiresConfirmation: true,
+    resolveConfirmation: confirm('fileAppend'),
     description:
       'Append content to an existing workspace file. Useful for journal-style logs and incremental writes. The append is read-modify-write; concurrent appends are best-effort. Returns the file with its new size.',
     inputSchema: z.object({
@@ -269,6 +299,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileAppend', context)
+      if (policyGate) return policyGate
 
       const result = await api.append(ctxFor(context), input.file, input.content)
       if (!result.ok) {
@@ -288,6 +320,7 @@ export function createFileTools(
     requiresCapability: 'files',
     isConcurrencySafe: true,
     isReadOnly: true,
+    resolveConfirmation: confirm('fileRead'),
     description:
       'Read a workspace file by id or path. Returns full content plus metadata. Use this when the # Workspace Files L1 block hint is insufficient — the block only shows path/title/summary/mime, not content.',
     inputSchema: z.object({
@@ -296,6 +329,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileRead', context)
+      if (policyGate) return policyGate
 
       const result = await api.read(ctxFor(context), input.file)
       if (!result.ok) {
@@ -315,6 +350,7 @@ export function createFileTools(
     requiresCapability: 'files',
     isConcurrencySafe: true,
     isReadOnly: true,
+    resolveConfirmation: confirm('fileSearch'),
     description:
       'Search workspace files by title / summary / tags / name. Returns a compact projection (id, path, name, title, summary, mime, size_bytes, tags, sensitivity, updated_at). For full content use fileRead. ' +
       'Optional: `tag` filters to files with that exact tag; `parent_path` scopes to a folder. Default limit 25 (max 100).',
@@ -327,6 +363,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileSearch', context)
+      if (policyGate) return policyGate
 
       const rows = await api.search(ctxFor(context), {
         query: input.query,
@@ -346,6 +384,7 @@ export function createFileTools(
     name: 'fileSetMeta',
     requiresCapability: 'files',
     requiresConfirmation: true,
+    resolveConfirmation: confirm('fileSetMeta'),
     description:
       'Update metadata on an existing file: title, summary, tags, related_ids, sensitivity. Path / name / content are not editable here — to rename, fileDelete + fileWrite at the new path. Use this opportunistically when you read or write a file and learn enough to label it well. ' +
       'For the draft lifecycle: to lock in a draft, remove the `draft` tag and optionally add `final` (or `final:<commit_sha>`) — tag-only edits stay in-place. Substantive content edits route through the draft-approval flow, not this tool.',
@@ -362,6 +401,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileSetMeta', context)
+      if (policyGate) return policyGate
 
       const patch: WorkspaceFileMetaPatch = {}
       const fields: string[] = []
@@ -434,14 +475,17 @@ export function createFileTools(
     name: 'fileDelete',
     requiresCapability: 'files',
     requiresConfirmation: true,
+    resolveConfirmation: confirm('fileDelete'),
     description:
-      'Permanently delete a workspace file. Both the metadata row and the stored file are removed. Workspace members can recover within a 30-day soft-delete window through support, but there is no in-product undo. Default policy is `block` — a workspace owner must opt in to allow this from chat.',
+      'Permanently delete a workspace file. Both the metadata row and the stored file are removed. Workspace members can recover within a 30-day soft-delete window through support, but there is no in-product undo. Asks for confirmation by default; the workspace or assistant tool policy can allow or block it.',
     inputSchema: z.object({
       file: idOrPathShape.describe('UUID or absolute workspace path of the file.'),
     }),
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('fileDelete', context)
+      if (policyGate) return policyGate
 
       const result = await api.delete(ctxFor(context), input.file)
       if (!result.ok) {
@@ -466,11 +510,14 @@ export function createFileTools(
   const saveFileToBrain = buildTool({
     name: 'saveFileToBrain',
     requiresCapability: 'files',
-    // No confirmation: the user explicitly asked to save the attachment, it's
-    // reversible (fileDelete), and it mirrors saveMemory's friction-free UX.
-    // Comment-thread chats also don't surface a confirmation card, so a
-    // required confirmation would silently stall the save.
+    // No confirmation by default: the user explicitly asked to save the
+    // attachment, it's reversible (fileDelete), and it mirrors saveMemory's
+    // friction-free UX. Comment-thread chats also don't surface a
+    // confirmation card, so a required confirmation would silently stall the
+    // save. (The registry defaultPolicy is 'allow' to match; a user can
+    // still set ask/block per tool via the policy UIs.)
     requiresConfirmation: false,
+    resolveConfirmation: confirm('saveFileToBrain'),
     description:
       'Save an UPLOADED FILE (a chat or comment attachment) to the workspace brain as a real file, preserving the original — the actual image / PDF / document, not a text summary. ' +
       'Use this — NOT saveMemory — whenever the user asks to save / keep / store / remember an attached file. saveMemory only records a text note and loses the file. ' +
@@ -492,6 +539,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('saveFileToBrain', context)
+      if (policyGate) return policyGate
       if (!opts?.readCachedFile) {
         return {
           data: 'This assistant cannot save uploaded files to the brain (the upload cache is not wired here). Tell the user the file can\'t be saved.',
@@ -557,6 +606,7 @@ export function createFileTools(
     name: 'saveFileBytes',
     requiresCapability: 'files',
     requiresConfirmation: true,
+    resolveConfirmation: confirm('saveFileBytes'),
     description:
       'Save a file to the workspace brain from raw bytes you provide as base64 (an image, PDF, or document), preserving the EXACT original bytes. ' +
       'Use this when you hold a file\'s bytes directly. To author NEW text content use fileWrite (UTF-8); to save a file the user UPLOADED in chat use saveFileToBrain (it references the upload by id and needs no bytes). ' +
@@ -576,6 +626,8 @@ export function createFileTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+      const policyGate = await blockedGate('saveFileBytes', context)
+      if (policyGate) return policyGate
 
       if (input.base64.length > MAX_SAVE_FILE_BYTES_BASE64) {
         return {
@@ -629,7 +681,7 @@ export function createFileTools(
   // sendFile — outbound document delivery. Built in `send-file.ts`
   // ([COMP:files/send-file]); included here so boot wiring registers all
   // file tools through one constructor.
-  const sendFile = createSendFileTool(api)
+  const sendFile = createSendFileTool(api, { resolvePolicy: opts?.resolvePolicy })
 
   return { fileWrite, fileAppend, fileRead, fileSearch, fileSetMeta, fileDelete, saveFileToBrain, saveFileBytes, sendFile }
 }

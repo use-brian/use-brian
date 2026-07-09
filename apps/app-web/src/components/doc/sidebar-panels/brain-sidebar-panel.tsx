@@ -52,8 +52,9 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Check, ListFilter, Plus } from "lucide-react";
-import { useT } from "@/lib/i18n/client";
+import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Popover,
   PopoverContent,
@@ -68,19 +69,25 @@ import {
   type BrainFacets,
   type BrainPrimitive,
 } from "@/lib/api/brain";
-import { brainInboxCount } from "@/lib/api/brain-inbox";
+import {
+  brainInboxCount,
+  deleteBrainRow,
+  verifyBrainRow,
+} from "@/lib/api/brain-inbox";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   listWorkspaceSkills,
   type SkillInductionSource,
   type SkillSensitivity,
   type WorkspaceSkillSummary,
 } from "@/lib/api/skills";
-import { BRAIN_REFRESH_EVENT } from "@/lib/brain-events";
+import { BRAIN_REFRESH_EVENT, requestBrainRefresh } from "@/lib/brain-events";
 import {
   fetchReviewItems,
   filterReviewItems,
   REVIEW_FILTERS,
   reviewItemKey,
+  runReviewBatch,
   type PendingReviewItem,
 } from "@/lib/review-queue";
 import {
@@ -149,6 +156,12 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const [reviewItems, setReviewItems] = useState<PendingReviewItem[] | null>(
     null,
   );
+  // Multi-select over the Reviews master list — a Set of review keys, the
+  // same pattern as the approvals panel's SelectionToolbar. Bulk verify /
+  // delete loop the per-row endpoints; FAILED keys stay selected for retry.
+  const [reviewSelected, setReviewSelected] = useState<Set<string>>(new Set());
+  const [reviewBatchBusy, setReviewBatchBusy] = useState(false);
+  const [reviewBatchError, setReviewBatchError] = useState<string | null>(null);
   const [viewpointAssistantId, setViewpointAssistantId] = useState<string | null>(
     () => getActiveAssistantId(),
   );
@@ -247,6 +260,84 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
   });
 
   const visibleReviews = filterReviewItems(reviewItems ?? [], brain.search);
+
+  // Prune the selection whenever the queue refreshes — acted-on rows (here or
+  // anywhere else: the detail panel, another tab) must not linger as selected
+  // ghosts. Runs off reviewItems, not visibleReviews, so a search narrowing
+  // doesn't silently drop selections.
+  useEffect(() => {
+    if (reviewItems === null) return;
+    const live = new Set(reviewItems.map(reviewItemKey));
+    setReviewSelected((prev) => {
+      const next = new Set([...prev].filter((k) => live.has(k)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [reviewItems]);
+
+  const visibleReviewKeys = visibleReviews.map(reviewItemKey);
+  const selectedVisibleCount = visibleReviewKeys.filter((k) =>
+    reviewSelected.has(k),
+  ).length;
+  const allVisibleSelected =
+    visibleReviewKeys.length > 0 &&
+    selectedVisibleCount === visibleReviewKeys.length;
+
+  const toggleReviewSelect = (key: string) => {
+    setReviewSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleReviewSelectAll = () => {
+    setReviewSelected((prev) => {
+      if (allVisibleSelected) {
+        const next = new Set(prev);
+        for (const k of visibleReviewKeys) next.delete(k);
+        return next;
+      }
+      return new Set([...prev, ...visibleReviewKeys]);
+    });
+  };
+
+  // Bulk verify ("Looks correct") / delete over the selected keys. Sequential
+  // per-row calls (no server batch); succeeded keys drop out on the refresh,
+  // failed keys stay selected with a retry-able error line — the approvals
+  // panel's partial-failure contract.
+  const runReviewBulk = async (decision: "verify" | "delete") => {
+    const keys = visibleReviewKeys.filter((k) => reviewSelected.has(k));
+    if (keys.length === 0 || !workspaceId) return;
+    if (decision === "delete") {
+      const ok = await confirmDialog({
+        description: format(t.brainPage.reviewPanel.batch.deleteConfirmBody, {
+          count: keys.length,
+        }),
+        confirmLabel: t.memoriesReview.deleteConfirmAction,
+        cancelLabel: t.memoriesReview.cancel,
+        variant: "destructive",
+      });
+      if (!ok) return;
+    }
+    setReviewBatchBusy(true);
+    setReviewBatchError(null);
+    const { failed } = await runReviewBatch(keys, (primitive, id) =>
+      decision === "verify"
+        ? verifyBrainRow(workspaceId, primitive, id)
+        : deleteBrainRow(workspaceId, primitive, id),
+    );
+    setReviewBatchBusy(false);
+    setReviewSelected(new Set(failed));
+    if (failed.length > 0) {
+      setReviewBatchError(
+        format(t.brainPage.reviewPanel.batch.partialError, {
+          count: failed.length,
+        }),
+      );
+    }
+    requestBrainRefresh(workspaceId);
+  };
 
   return (
     <div className="flex flex-col gap-3 px-1 pt-1">
@@ -451,13 +542,81 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
             ]}
           />
 
-          {/* The master list — clicking selects the item the page's
-              ReviewPanel shows. */}
+          {/* Multi-select toolbar — select-all + bulk "Looks correct" /
+              delete over the checked rows (approvals SelectionToolbar
+              pattern; failed rows stay selected for retry). Only mounts
+              ONCE a selection exists: at rest the row checkboxes are
+              hover-revealed (the Notion/Gmail "click to enter multi-select"
+              feel), so the idle list is just dot + name with no chrome. */}
+          {selectedVisibleCount > 0 && (
+            <div className="flex flex-col gap-1 px-1">
+              <div className="flex items-center gap-2 text-[12px] text-sidebar-foreground/70">
+                <div className="flex items-center gap-1.5 select-none">
+                  <Checkbox
+                    checked={allVisibleSelected}
+                    indeterminate={
+                      selectedVisibleCount > 0 && !allVisibleSelected
+                    }
+                    onCheckedChange={toggleReviewSelectAll}
+                    disabled={reviewBatchBusy}
+                    aria-label={t.brainPage.reviewPanel.batch.selectAll}
+                  />
+                  <button
+                    type="button"
+                    onClick={toggleReviewSelectAll}
+                    disabled={reviewBatchBusy}
+                    className="cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    {format(t.brainPage.reviewPanel.batch.selected, {
+                      count: selectedVisibleCount,
+                    })}
+                  </button>
+                </div>
+                {selectedVisibleCount > 0 && (
+                  <div className="ml-auto flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={reviewBatchBusy}
+                      onClick={() => void runReviewBulk("verify")}
+                      className="rounded px-1.5 py-0.5 font-medium text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-400 disabled:opacity-50"
+                    >
+                      {t.brainPage.reviewPanel.batch.confirmSelected}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={reviewBatchBusy}
+                      onClick={() => void runReviewBulk("delete")}
+                      className="rounded px-1.5 py-0.5 font-medium text-red-600 hover:bg-red-500/10 dark:text-red-400 disabled:opacity-50"
+                    >
+                      {t.brainPage.reviewPanel.batch.deleteSelected}
+                    </button>
+                  </div>
+                )}
+              </div>
+              {reviewBatchError && (
+                <p className="text-[11px] text-red-500" role="alert">
+                  {reviewBatchError}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* The master list — clicking a row selects the item the page's
+              ReviewPanel shows; the checkbox joins/leaves the bulk
+              selection without changing the shown item. The checkbox
+              OVERLAYS the amber status dot in the same leading slot and is
+              hidden at rest, so an idle row reads exactly like the
+              checkbox-less Skills quick-list above (no bolted-on column).
+              It fades in on row hover / keyboard focus — that first click is
+              how you enter multi-select — and once ANY row is selected
+              (`selectedVisibleCount > 0`, selection mode) every row shows
+              its box so you can see and extend the selection. */}
           <ul className="flex flex-col gap-0.5">
             {visibleReviews.map((item) => {
               const key = reviewItemKey(item);
+              const selectionMode = selectedVisibleCount > 0;
               return (
-                <li key={key}>
+                <li key={key} className="group/rev relative flex items-center">
                   <button
                     type="button"
                     onClick={() => {
@@ -468,12 +627,30 @@ export function BrainSidebarPanel({ workspaceId }: { workspaceId: string }) {
                   >
                     <span
                       aria-hidden
-                      className="inline-block h-2 w-2 shrink-0 rounded-full bg-amber-500"
+                      className={cn(
+                        "inline-block h-2 w-2 shrink-0 rounded-full bg-amber-500 transition-opacity",
+                        // The checkbox takes the dot's place once it shows.
+                        selectionMode
+                          ? "opacity-0"
+                          : "opacity-100 group-hover/rev:opacity-0",
+                      )}
                     />
                     <span className="min-w-0 flex-1 truncate">
                       {item.row.name}
                     </span>
                   </button>
+                  <Checkbox
+                    checked={reviewSelected.has(key)}
+                    onCheckedChange={() => toggleReviewSelect(key)}
+                    disabled={reviewBatchBusy}
+                    aria-label={item.row.name}
+                    className={cn(
+                      "absolute left-[5px] top-1/2 size-3.5 -translate-y-1/2",
+                      selectionMode
+                        ? "opacity-100"
+                        : "opacity-0 pointer-events-none group-hover/rev:opacity-100 group-hover/rev:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto",
+                    )}
+                  />
                 </li>
               );
             })}

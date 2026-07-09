@@ -170,6 +170,9 @@ export const ja: Dictionary = {
     confirmationDone: "完了しました。{label} を実行しました。",
     confirmationFailed: "失敗しました。{label} を完了できませんでした。",
     confirmationDenied: "拒否しました。{label} は実行されませんでした。",
+    confirmationCollapsedDone: "{count}件完了",
+    confirmationCollapsedDenied: "{count}件拒否",
+    confirmationCollapsedFailed: "{count}件失敗",
     citationLabel: "ソース",
     citationDismiss: "閉じる",
     fileAttachments: {
@@ -401,6 +404,72 @@ export const ja: Dictionary = {
     sidebarRowRename: "名前を変更",
     sidebarRowDuplicate: "複製",
     sidebarRowMoveToRoot: "ルートへ移動",
+    // チームスペース - サイドバーのセクション + 設定モーダル
+    // (docs/architecture/features/teamspaces.md)
+    sidebarPrivate: "プライベート",
+    sidebarTeamspacesGroup: "チームスペース",
+    sidebarTeamspacesMenuAria: "チームスペースのオプション",
+    sidebarNewTeamspace: "新しいチームスペース",
+    sidebarSectionNewPageAria: "このセクションにページを作成",
+    teamspaceMenuAria: "チームスペースのオプション",
+    teamspaceMenuAddMembers: "メンバーを追加",
+    teamspaceMenuSettings: "チームスペース設定",
+    teamspaceMenuLeave: "チームスペースから退出",
+    teamspaceMenuDelete: "チームスペースを削除",
+    teamspaceLeaveConfirmTitle: "チームスペースから退出",
+    teamspaceLeaveConfirm:
+      "{name} から退出しますか？そのページにはアクセスできなくなります。",
+    teamspaceLeaveAction: "退出",
+    teamspaceLeaveFailed: "チームスペースから退出できませんでした: {message}",
+    teamspaceDeleteConfirmTitle: "チームスペースを削除",
+    teamspaceDeleteConfirm:
+      "{name} を削除しますか？ページは General チームスペースへ移動され、削除はされません。",
+    teamspaceDeleteAction: "削除",
+    teamspaceDeleteFailed: "チームスペースを削除できませんでした: {message}",
+    teamspaceCreateTitle: "新しいチームスペース",
+    teamspaceCreateHint:
+      "チームの一部でページを共有するための場所です。作成後にメンバーを追加できます。",
+    teamspaceNameLabel: "名前",
+    teamspaceNamePlaceholder: "例: エンジニアリング",
+    teamspaceCreateAction: "チームスペースを作成",
+    teamspaceCreating: "作成中…",
+    teamspaceCreateFailed: "チームスペースを作成できませんでした: {message}",
+    teamspaceIconLabel: "アイコン",
+    teamspaceDescriptionLabel: "説明",
+    teamspaceDescriptionPlaceholder: "このチームスペースの用途",
+    teamspaceSensitivityLabel: "機密度",
+    teamspaceSensitivityPublic: "公開",
+    teamspaceSensitivityInternal: "社内",
+    teamspaceSensitivityConfidential: "機密",
+    teamspaceSettingsTitle: "チームスペース設定",
+    teamspaceModalCloseAria: "チームスペース設定を閉じる",
+    teamspaceTabGeneral: "一般",
+    teamspaceTabMembers: "メンバー",
+    teamspaceSaveAction: "変更を保存",
+    teamspaceSaving: "保存中…",
+    teamspaceSavedNotice: "変更を保存しました。",
+    teamspaceUpdateFailed: "チームスペースを更新できませんでした: {message}",
+    teamspaceDeleteDangerHint:
+      "このチームスペースを削除すると、すべてのページは General へ移動します。",
+    teamspaceMembersCount: "メンバー {count} 名",
+    teamspaceMembersLoading: "メンバーを読み込み中…",
+    teamspaceMembersLoadFailed: "メンバーを読み込めませんでした。",
+    teamspaceMemberSearchPlaceholder: "メンバーを検索…",
+    teamspaceMemberYou: "（自分）",
+    teamspaceMemberRemove: "削除",
+    teamspaceMemberRemoveConfirm:
+      "{name} さんをこのチームスペースから削除しますか？そのページにはアクセスできなくなります。",
+    teamspaceMemberAdd: "追加",
+    teamspaceAddMembersHeading: "メンバーを追加",
+    teamspaceAddMembersEmpty: "ワークスペースの全員がすでにメンバーです。",
+    teamspaceErrorInsufficientClearance:
+      "このチームスペースを管理する権限がありません。",
+    teamspaceErrorSensitivityExceedsClearance:
+      "自分のクリアランスを超える機密度は設定できません。",
+    teamspaceErrorMemberBelowSensitivity:
+      "その機密度を下回るクリアランスのメンバーがいます。先にそのメンバーを外してください。",
+    teamspaceErrorTargetClearanceBelow:
+      "そのメンバーのクリアランスはこのチームスペースの機密度を下回っているため、追加できません。",
     // Surface-aware sidebar bodies — below the nav the body swaps per surface
     // (page tree on Home; these head the Brain / Studio / Workflow panels).
     sidebarBrainHeader: "ブレイン",
@@ -1786,6 +1855,13 @@ export const ja: Dictionary = {
     countBadge: "{count}",
     filterStatusLabel: "ステータス",
     statusAll: "進行中すべて",
+    draftBadge: "下書き",
+    sections: {
+      needsConfirmation: "確認が必要",
+      active: "アクティブ",
+    },
+    selectPrompt:
+      "ゴールを選ぶと、完了の条件を確認し、実行前に編集・確定・破棄できます。",
     status: {
       active: "アクティブ",
       running: "実行中",
@@ -1814,6 +1890,18 @@ export const ja: Dictionary = {
       confirmError: "ゴールを確定できませんでした。",
       workError: "ゴールへの着手を開始できませんでした。",
       clarifyLabel: "このゴールを確定するために、もう少し詳細を加えてください:",
+      confirmArm: "確定して開始準備",
+      editHint: "完了の意味が明確になるよう成果を編集してから確定してください。",
+      discard: "破棄",
+      discarding: "破棄中…",
+      discardError: "ゴールを破棄できませんでした。",
+      discarded: "破棄済み",
+    },
+    discardDialog: {
+      title: "このゴールを破棄しますか？",
+      body: "アクティブ一覧から外れます。後で「破棄済み」ステータスフィルターから見つけられます。",
+      confirm: "破棄",
+      cancel: "残す",
     },
     detail: {
       back: "すべてのゴール",
@@ -1827,6 +1915,9 @@ export const ja: Dictionary = {
       notConfirmed: "下書き、未確定",
       blockerHeading: "ブロッカー",
       acceptanceHeading: "完了条件",
+      workedByHeading: "実行者",
+      workedBySet: "アシスタントのワークフロー",
+      workedByNone: "未開始",
       budgetHeading: "予算",
       budgetMaxSpend: "上限 ${amount}",
       budgetMaxIterations: "最大 {count} 回の反復",
@@ -2539,6 +2630,9 @@ export const ja: Dictionary = {
       saveActivate: "保存して有効化",
       saveActivateHint:
         "編集を保存すると、このスキルは承認され有効になります。",
+      saveConfirm: "保存して承認",
+      saveConfirmHint:
+        "編集を保存すると、このスキルは確認済みとなり、信頼度が100%になります。",
       aboutHeading: "概要",
       usageLabel: "利用状況",
       usageSummary: "実行 {runs} · 成功 {ok} · 修正 {corrected}",
@@ -2559,6 +2653,11 @@ export const ja: Dictionary = {
       suggestedNote:
         "このスキルは提案段階で、まだ広くは提供されていません。承認するとそのまま有効になり、確認済みとして記録されます。",
       confirmWithoutEditing: "編集せずに承認",
+      confirmActiveNote:
+        "このスキルは有効ですが、まだ確認済みではありません。承認すると信頼度100%の完全に信頼された状態になります。",
+      confirmActiveButton: "承認して完全に信頼する",
+      confidenceHint:
+        "うまく使われるたびに最大90%まで上がります。100%になるのはあなたの承認だけです。",
       notFoundTitle: "スキルが見つかりません",
       notFoundBody: "削除されたか、別のワークスペースのものかもしれません。",
     },
@@ -2603,14 +2702,30 @@ export const ja: Dictionary = {
       prevAria: "前の項目",
       nextAria: "次の項目",
       moreOptions: "その他のオプション",
+      batch: {
+        selectAll: "すべて選択",
+        selected: "{count}件選択中",
+        confirmSelected: "正しい",
+        deleteSelected: "削除",
+        deleteConfirmBody:
+          "選択した{count}件のエントリを削除しますか？削除後は検索・回答に使われなくなります。",
+        partialError:
+          "{count}件を更新できませんでした。選択されたままなので再試行できます。",
+      },
       allClearTitle: "すべて確認済み",
       allClearBody: "確認待ちの項目はありません。",
       relationship: {
         heading: "関連付け",
+        explainer:
+          "確認すると、この関連付けはブレインに保持され、アシスタントが参照する内容に影響します。いずれかの側を展開すると、参照先を確認できます。",
         source: "ソース",
         target: "ターゲット",
         endpointMissing: "存在しません",
         detailsUnavailable: "追加の詳細はありません。",
+        openSkill: "スキルを開く",
+        skillWhenToUse: "使用する場面",
+        skillActive: "有効",
+        skillSuggested: "提案中",
         kinds: {
           memory: "メモリ",
           file: "ファイル",
@@ -2618,6 +2733,8 @@ export const ja: Dictionary = {
           task: "タスク",
           episode: "エピソード",
           knowledge: "ナレッジ",
+          skill: "スキル",
+          assistant: "アシスタント",
         },
       },
     },
@@ -4329,6 +4446,8 @@ export const ja: Dictionary = {
       disconnectedByMember: "メンバーが切断中",
       scopeTeamNative: "チーム",
       scopeTeamGrant: "共有",
+      scopeBuiltin: "ビルトイン",
+      alwaysOn: "常に有効",
       connectMorePrefix: "新しいサービスやカスタム MCP サーバーは",
       settingsLink: "設定",
       skillsDescPrefix: "スキルはアシスタントに専用ワークフローを教えます。このアシスタントが使えるものを切り替えてください。スター付きが上位に表示されます。スターの管理は",

@@ -51,6 +51,11 @@ import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
 import { DocSidebar } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
 import { useSidebarData } from "./doc-sidebar-data";
+import {
+  TeamspaceCreateDialog,
+  TeamspaceSettingsModal,
+  type TeamspaceSettingsTab,
+} from "./teamspace-settings-modal";
 import { FloatingChat } from "@/components/chrome/floating-chat";
 import { MobileChatDrawer } from "./mobile-chat-drawer";
 
@@ -109,6 +114,7 @@ export function WorkspaceChrome({
   const {
     saved,
     drafts,
+    teamspaces,
     draftPruneByid,
     busyNewDraft,
     inboxOpen,
@@ -118,6 +124,7 @@ export function WorkspaceChrome({
     setSidebarOpen,
     studioSetupIncomplete,
     feedProfiles,
+    reloadSidebar,
     handleNewDraft,
     handleAddChild,
     handleSave,
@@ -126,7 +133,23 @@ export function WorkspaceChrome({
     handleDuplicate,
     handleDelete,
     handleMove,
+    handleLeaveTeamspace,
+    handleDeleteTeamspace,
   } = useSidebarData();
+
+  // ── Teamspace dialogs (settings modal + create) ───────────────────────
+  // Owned here, beside the sidebar mount: the sidebar raises intent
+  // callbacks (its section `⋯` menu / the "New teamspace" affordance) and
+  // stays a pure renderer. The modal resolves its teamspace FROM THE LIVE
+  // LIST by id so a reload (rename, member change) refreshes it in place.
+  const [teamspaceModal, setTeamspaceModal] = useState<{
+    id: string;
+    tab: TeamspaceSettingsTab;
+  } | null>(null);
+  const [createTeamspaceOpen, setCreateTeamspaceOpen] = useState(false);
+  const modalTeamspace = teamspaceModal
+    ? teamspaces.find((ts) => ts.id === teamspaceModal.id) ?? null
+    : null;
 
   // The active page id is the canonical `/p/<pageId>` path segment — used only
   // to highlight the matching sidebar row. Pathname-derived (NOT the centre
@@ -325,6 +348,7 @@ export function WorkspaceChrome({
           workspaceId={workspaceId}
           saved={saved}
           drafts={drafts}
+          teamspaces={teamspaces}
           draftPruneByid={draftPruneByid}
           activeId={activeId}
           busyNewDraft={busyNewDraft}
@@ -342,6 +366,10 @@ export function WorkspaceChrome({
           onDuplicate={handleDuplicate}
           onDelete={handleDelete}
           onMove={handleMove}
+          onNewTeamspace={() => setCreateTeamspaceOpen(true)}
+          onTeamspaceSettings={(id, tab) => setTeamspaceModal({ id, tab })}
+          onLeaveTeamspace={handleLeaveTeamspace}
+          onDeleteTeamspace={handleDeleteTeamspace}
           inboxOpen={inboxOpen}
           onToggleInbox={() => {
             setInboxOpen(!inboxOpen);
@@ -413,6 +441,26 @@ export function WorkspaceChrome({
           (skill editor / creator doc stage) the dock HIDES via `display:none`
           but stays MOUNTED, so an in-flight stream is not aborted. Renders
           only once the primary assistant resolves. */}
+      {/* Teamspace dialogs — portaled; state above, intents from the sidebar. */}
+      <TeamspaceCreateDialog
+        workspaceId={workspaceId}
+        open={createTeamspaceOpen}
+        onOpenChange={setCreateTeamspaceOpen}
+        onCreated={() => reloadSidebar()}
+      />
+      {modalTeamspace && (
+        <TeamspaceSettingsModal
+          workspaceId={workspaceId}
+          teamspace={modalTeamspace}
+          initialTab={teamspaceModal?.tab ?? "general"}
+          open
+          onOpenChange={(next) => {
+            if (!next) setTeamspaceModal(null);
+          }}
+          onChanged={reloadSidebar}
+        />
+      )}
+
       {chatAssistantId && (
         <div className={cn(dockSuppressed && "hidden")} aria-hidden={dockSuppressed}>
           <div className="hidden lg:block">

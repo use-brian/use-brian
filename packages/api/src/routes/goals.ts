@@ -12,6 +12,8 @@
  *   POST /:id/confirm     — arm a DRAFT goal (autopilot); optional `outcome` edit
  *   POST /:id/work        — spin up the acting loop: set the means (a chosen
  *                           workflow, or the default completion workflow) + kick off
+ *   POST /:id/abandon     — discard a goal (drafts / active goals the user no
+ *                           longer wants); reversible — sets status='abandoned'
  *
  * [COMP:api/goals-route]
  */
@@ -26,7 +28,7 @@ import {
   type GoalStatus,
   type GoalStore,
 } from '@sidanclaw/core'
-import { getGoalById, updateGoalSystem } from '../db/goals.js'
+import { getGoalById, setGoalStatusSystem, updateGoalSystem } from '../db/goals.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
 export type GoalsRouteOptions = {
@@ -198,6 +200,31 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
     }
     await opts.kickoffGoal(updated.id)
     res.json({ ok: true, goal: projectGoal(updated) })
+  })
+
+  // POST /:id/abandon — discard a goal the user no longer wants (a draft they
+  // won't confirm, or an active goal to stand down). Reversible: sets
+  // status='abandoned' so the record survives and stays retrievable via the
+  // status filter (never a hard delete). A completed goal is refused (409) —
+  // discarding it would misrepresent a verified success. `setGoalStatusSystem`
+  // is a system write; the RLS membership check above is the authz gate.
+  router.post('/:id/abandon', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const existing = await getGoalById(userId, req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (existing.status === 'done') {
+      res.status(409).json({ error: 'A completed goal cannot be discarded' })
+      return
+    }
+    const goal = await setGoalStatusSystem(req.params.id, 'abandoned')
+    res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 
   return router

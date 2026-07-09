@@ -93,9 +93,11 @@ export function mergeHomeDock(
     })
   }
 
-  // Urgent kinds the artifact did not mention still surface while live — an
-  // artifact generated before a connector broke (or before the kind existed)
-  // may lag in order/caption, never in hiding the breakage.
+  // Always-surface kinds the artifact did not mention still appear while live —
+  // attention kinds (silent breakage) AND pending-you actions (a new approval, a
+  // goal draft awaiting confirm). A stale artifact (e.g. a month-old layout
+  // listing only brain_review) may lag their order/caption, never hide them: a
+  // blocking item you must act on cannot wait for the next curation turn.
   for (const kind of URGENT_NEED_KINDS) {
     if (seen.has(kind)) continue
     const count = countFor(kind, signals)

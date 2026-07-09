@@ -133,6 +133,38 @@ export function buildTree(rows: ViewListRow[]): TreeNode[] {
 }
 
 /**
+ * Group a flat row list by its `teamspaceId` — the first fold of the
+ * teamspace-sectioned sidebar (docs/architecture/features/teamspaces.md):
+ * one group per teamspace, plus the `null` group (pages private to the
+ * caller). The sidebar then runs `buildTree` over each group
+ * independently, so a child whose denormalized `teamspaceId` drifted
+ * from its parent's surfaces as a root of ITS OWN section (buildTree's
+ * orphan promotion) rather than vanishing — the same "never drop a row"
+ * contract as the rest of this module.
+ *
+ * A missing field (an older server that doesn't return `teamspaceId`
+ * yet) coalesces to `null`, degrading every page into the Private
+ * section instead of crashing. Input order is preserved within groups;
+ * group iteration order is first-appearance (callers order sections by
+ * the teamspace list, not by this map).
+ */
+export function groupRowsByTeamspace(
+  rows: ViewListRow[],
+): Map<string | null, ViewListRow[]> {
+  const groups = new Map<string | null, ViewListRow[]>();
+  for (const row of rows) {
+    const key = row.teamspaceId ?? null;
+    const group = groups.get(key);
+    if (group) {
+      group.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+  return groups;
+}
+
+/**
  * Ids of pages that live **inside a saved (Favorites) subtree** — some
  * ancestor up the `nest_parent_id` chain has `state === 'saved'`. Such a
  * page is *kept by ancestry*: being filed under a saved page **is** its

@@ -39,6 +39,7 @@ function row(over: Partial<ViewListRow> & Pick<ViewListRow, "id" | "name">): Vie
     nestParentId: null,
     position: 0,
     icon: null,
+    teamspaceId: null,
     nameOrigin: "user",
     ...over,
   };

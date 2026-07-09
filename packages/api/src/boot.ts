@@ -75,6 +75,7 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  type FileToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
   createEntityKindClassifier,
@@ -93,6 +94,8 @@ import {
   type EngineHooks,
   createIntrospectionTools,
 } from '@sidanclaw/core'
+
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
 
 // ── OPEN package imports (@sidanclaw/api) ──────────────────────────
 import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
@@ -245,6 +248,8 @@ import { createWorkflowChannelDelivery } from './workflow/channel-delivery.js'
 import { createWorkflowDependencyPreflight } from './workflow/dependency-preflight.js'
 import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
+import { teamspacesRoutes } from './routes/teamspaces.js'
+import { createTeamspaceStore } from './db/teamspace-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
@@ -2198,9 +2203,46 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
+    // Effective allow/ask/block for a files tool — the same L1 (app-level
+    // sentinel) + L2 (per-assistant) strictest-wins resolution the Studio /
+    // Assistant tool-policy UIs display and write (`mcp_tool_settings`,
+    // serverName='files'). Without this hook those toggles were stored but
+    // never read at execution (static requiresConfirmation flags only).
+    // See docs/architecture/features/files.md → "Connector-style governance".
+    // The one connector id this resolver serves — NOT an "all built-ins"
+    // list (see the builtin-id-sets invariant); the policy rows are keyed
+    // by this serverName in mcp_tool_settings.
+    const FILES_CONNECTOR_ID = 'files'
+    const filesToolDefaults = new Map(
+      (OFFICIAL_CONNECTOR_TOOLS[FILES_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+    )
+    const POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+    const strictestFilePolicy = (a: FileToolPolicy, b: FileToolPolicy): FileToolPolicy =>
+      (POLICY_STRICTNESS[a] ?? 0) >= (POLICY_STRICTNESS[b] ?? 0) ? a : b
+    const resolveFilesToolPolicy = async (
+      toolName: string,
+      context: { userId: string; assistantId: string },
+    ): Promise<FileToolPolicy> => {
+      const fallback = (filesToolDefaults.get(toolName) ?? 'ask') as FileToolPolicy
+      const [l1, l2] = await Promise.all([
+        mcpSettingsStore.getPolicy({
+          assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+          serverName: FILES_CONNECTOR_ID, toolName,
+        }),
+        mcpSettingsStore.getPolicy({
+          assistantId: context.assistantId, userId: context.userId,
+          serverName: FILES_CONNECTOR_ID, toolName,
+        }),
+      ])
+      return strictestFilePolicy(
+        (l1?.policy as FileToolPolicy) ?? fallback,
+        (l2?.policy as FileToolPolicy) ?? fallback,
+      )
+    }
     const fileTools = createFileTools(filesApi, {
       entityLinks: entityLinksStore,
       readCachedFile: (id, ctx) => fileStore.get(id, ctx),
+      resolvePolicy: resolveFilesToolPolicy,
       onEvent: (evt, ctx) => {
         const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
         if (evt.type === 'file_created') {
@@ -2777,6 +2819,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ingestPage: ingestPageRunner
       ? ({ userId, pageId }) => ingestPageRunner({ userId, pageId })
       : undefined,
+  }))
+
+  // Teamspaces (migration 313) — Notion-style page containers above the doc
+  // page tree. Visibility rides RLS; sensitivity gates live in the routes.
+  // See docs/architecture/features/teamspaces.md.
+  app.use('/api', requireAuth(env.JWT_SECRET), teamspacesRoutes({
+    teamspaceStore: createTeamspaceStore(),
   }))
 
   // Internal auto-on-save ingest endpoint — doc-sync POSTs here on a debounced

@@ -23,7 +23,7 @@ import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
 import type { McpSettingsStore, JobStore, CapabilityStore } from '@sidanclaw/core'
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
+import { APP_LEVEL_ASSISTANT_ID, BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
 import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@sidanclaw/core'
 import type { SkillContent } from '@sidanclaw/core'
 import type { SkillStore } from '../db/skill-store.js'
@@ -642,7 +642,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         enabled: boolean
         icon_url?: string
         category?: 'official' | 'community'
-        scope: 'personal' | 'team-native' | 'team-grant'
+        scope: 'personal' | 'team-native' | 'team-grant' | 'builtin'
         grantedByUserId?: string
       }
       const byKey = new Map<string, Entry>()
@@ -702,6 +702,34 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
           icon_url: entry?.icon_url,
           category: entry?.category ?? (c.custom ? undefined : 'community' as const),
           scope: 'personal',
+        })
+      }
+
+      // Built-in workspace primitives (Workspace Files) have NO row in any
+      // of the three sources above — they are boot-injected capability
+      // primitives, not connector instances — so without this pass they can
+      // never appear here and their per-assistant (L2) tool policy is
+      // unreachable, contradicting the Studio Connectors page's
+      // "Configure per-assistant tool permissions in the Assistant
+      // Connectors tab" pointer. Synthesize an always-on entry per registry
+      // built-in (derived — never hardcode the id list; see
+      // BUILTIN_PRIMITIVE_CONNECTOR_IDS). The /tools + /tools/policy
+      // sub-routes below already handle OFFICIAL_CONNECTOR_TOOLS ids.
+      for (const id of BUILTIN_PRIMITIVE_CONNECTOR_IDS) {
+        if (byKey.has(id)) continue
+        if ((OFFICIAL_CONNECTOR_TOOLS[id]?.length ?? 0) === 0) continue // no governable tools
+        const official = OFFICIAL_CONNECTORS.find((e) => e.id === id)
+        if (!official?.enabled) continue
+        const entry = registry.find((e) => e.id === id)
+        byKey.set(id, {
+          id,
+          name: official.name,
+          custom: false,
+          connected: true, // always-on: no external account, no instance row
+          enabled: settingsMap.get(id) ?? true,
+          icon_url: entry?.icon_url,
+          category: 'official',
+          scope: 'builtin',
         })
       }
 
@@ -770,10 +798,6 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
 
     const { assistantId, connectorId } = req.params as { assistantId: string; connectorId: string }
 
-    {
-      const { appendFile } = await import('node:fs/promises')
-      await appendFile('/tmp/sidanclaw-debug.log', `[assistants/tools] assistantId=${assistantId} connectorId=${connectorId} isOfficial=${!!OFFICIAL_CONNECTOR_TOOLS[connectorId]} officialCount=${OFFICIAL_CONNECTOR_TOOLS[connectorId]?.length ?? 0} keys=${Object.keys(OFFICIAL_CONNECTOR_TOOLS).join(',')}\n`).catch(() => {})
-    }
     try {
       if (OFFICIAL_CONNECTOR_TOOLS[connectorId]) {
         const tools = await Promise.all(

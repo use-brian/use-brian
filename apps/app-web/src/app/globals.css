@@ -1433,6 +1433,18 @@
   .animate-pop-in  { animation: fb-pop-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both; }
   .animate-pulse-soft { animation: fb-pulse-soft 1.6s ease-in-out infinite; }
   .animate-draft-hint { animation: fb-draft-hint 2.4s ease-in-out infinite; }
+  /* Temporary-page icon — an unsaved, auto-pruning draft's page icon ghosts so
+     it reads as provisional at a glance (no hover needed), distinct from the
+     `draft-hint` "about to name itself" breathe: this one never returns to full
+     opacity, so it reads as faded/ephemeral rather than pulsing for attention.
+     The static dimming IS the signal; the slow, shallow breath keeps it from
+     looking merely disabled. Reduced-motion drops the breath and keeps the
+     dimming (see the reduced-motion block below). */
+  @keyframes fb-temp-ghost {
+    0%, 100% { opacity: 0.72; }
+    50% { opacity: 0.4; }
+  }
+  .doc-icon-temporary { opacity: 0.55; animation: fb-temp-ghost 3.2s ease-in-out infinite; }
 
   /* Stagger helper — mount lists with .animate-stagger > * and the
      children inherit a small per-index delay. */
@@ -1792,6 +1804,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
   .animate-pop-in,
   .animate-pulse-soft,
   .animate-draft-hint,
+  .doc-icon-temporary,
   .animate-stagger > *,
   .doc-ai-feed-line,
   .claw-pace,

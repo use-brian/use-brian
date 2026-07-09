@@ -133,6 +133,11 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
       ? daysUntilPrune(draftPruneByid[row.id] ?? null)
       : null;
   const revealPrune = isActive || rowHovered;
+  // An unsaved draft not kept by a saved ancestor will be auto-pruned — ghost
+  // its leading icon so it reads as temporary at a glance (the always-on
+  // counterpart to the hover-revealed "Nd until auto-delete" caption). Gated on
+  // `state`, not `pruneDays`, so it shows even before the prune ETA is fetched.
+  const isTemporary = row.state === "draft" && !keptByParent;
   const Icon = derivePageIcon({
     entity: row.entity,
     viewType: row.viewType,
@@ -203,7 +208,10 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
             className="relative flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
           >
             {/* Page icon — visible by default, faded out once the chevron
-                takes over (on hover, or while expanded). */}
+                takes over (on hover, or while expanded). The temporary "ghost"
+                lives on an inner wrapper so its opacity multiplies with this
+                span's hover fade instead of overriding it (the icon still
+                disappears cleanly when the chevron swaps in). */}
             <span
               className={[
                 "flex items-center justify-center transition-opacity",
@@ -212,11 +220,18 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
                   : "opacity-100 group-hover/row:opacity-0",
               ].join(" ")}
             >
-              {row.icon ? (
-                <span className="text-[15px] leading-none">{row.icon}</span>
-              ) : (
-                <Icon className="size-4 text-sidebar-foreground/55" />
-              )}
+              <span
+                className={[
+                  "flex items-center justify-center",
+                  isTemporary ? "doc-icon-temporary" : "",
+                ].join(" ")}
+              >
+                {row.icon ? (
+                  <span className="text-[15px] leading-none">{row.icon}</span>
+                ) : (
+                  <Icon className="size-4 text-sidebar-foreground/55" />
+                )}
+              </span>
             </span>
             {/* Disclosure chevron — fades in on hover, stays while expanded. */}
             <ChevronRight

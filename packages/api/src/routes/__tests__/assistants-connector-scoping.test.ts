@@ -78,9 +78,45 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(mockIsPersonal).toHaveBeenCalledWith('ws-shared')
     // The fix: personal connectors are never even loaded for a shared workspace.
     expect(connectorStore.list).not.toHaveBeenCalled()
-    const ids = (res.body.connectors as Array<{ id: string; scope: string }>).map((c) => c.id)
-    expect(ids).toEqual(['github'])
-    expect(res.body.connectors[0].scope).toBe('team-native')
+    const connectors = res.body.connectors as Array<{ id: string; scope: string }>
+    // Non-builtin rows: only the team-native one. Built-in primitives
+    // (files) are synthesized in every response — asserted separately below.
+    expect(connectors.filter((c) => c.scope !== 'builtin').map((c) => c.id)).toEqual(['github'])
+    expect(connectors[0].scope).toBe('team-native')
+  })
+
+  it('synthesizes an always-on built-in row (Workspace Files) with no backing connector row', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    mockIsPersonal.mockResolvedValueOnce(false)
+    // No instances, no grants, no personal connectors — the built-in must
+    // still appear (it has no row in ANY source; the route synthesizes it).
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const files = (
+      res.body.connectors as Array<{ id: string; scope: string; connected: boolean; enabled: boolean; custom: boolean }>
+    ).find((c) => c.id === 'files')
+    expect(files).toBeDefined()
+    expect(files?.scope).toBe('builtin')
+    expect(files?.connected).toBe(true)
+    expect(files?.enabled).toBe(true)
+    expect(files?.custom).toBe(false)
+  })
+
+  it('applies a stored per-assistant enabled=false to the synthesized built-in row', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    mockIsPersonal.mockResolvedValueOnce(false)
+    assistantConnectorStore.listForAssistant.mockResolvedValueOnce([
+      { connectorId: 'files', enabled: false },
+    ])
+
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const files = (res.body.connectors as Array<{ id: string; enabled: boolean }>).find(
+      (c) => c.id === 'files',
+    )
+    expect(files?.enabled).toBe(false)
   })
 
   it('loads the owner\'s personal connectors for a SOLO personal workspace', async () => {

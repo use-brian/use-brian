@@ -953,6 +953,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
         : ''
 
+    // Record-creation restraint for workflow-origin callees. A recurring
+    // summary / overview step ("provide an overview of tasks due", "summarize
+    // the team's GitHub work") is read-only in intent, but the callee still
+    // holds write tools (`saveTask`) and treats the instruction as an action
+    // item — opening a task that merely restates its own prompt on EVERY fire,
+    // so near-identical tasks accumulate day after day (the prod duplicate-task
+    // clutter). This is the task analog of the `priorRunMemoryBlock` above.
+    // Conditioned on "unless the instruction explicitly asks" so action steps
+    // (a step whose job IS to create a task) are unaffected, and it never
+    // contradicts `directExecutionBlock` (which forbids REFUSING an asked-for
+    // action). See docs/architecture/features/workflow.md → "assistant_call
+    // record-creation restraint".
+    const recordCreationGuardBlock =
+      params.callerChannelType === 'workflow'
+        ? `\n\n## Produce this step's output, do not restate it as a record\nDo NOT create, update, or retract tasks, memories, contacts, deals, or other workspace records unless THIS step's instruction explicitly asks you to create or change one. When the instruction is to summarize, review, list, report on, or give an overview of existing items, the message you write IS the complete deliverable: do not also open a task that merely echoes the instruction. A recurring run that creates such a task mints a near-duplicate every fire.`
+        : ''
+
     // Direct-execution framing for confirmation-stripped consults. The
     // confirmation strip above sets `requiresConfirmation = false` on every
     // tool, but base prompts + tool descriptions still describe an
@@ -997,7 +1014,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //

@@ -350,16 +350,86 @@ describe('[COMP:api/skill-store] WorkspaceSkillStore — S15 absorption', () => 
 describe('[COMP:api/skill-store] WorkspaceSkillStore — CL-8 counters', () => {
   const ws = createDbWorkspaceSkillStore()
 
-  it('incrementSucceeded bumps the column', async () => {
+  it('incrementSucceeded bumps the column AND nudges confidence, capped, un-verified only', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
     await ws.incrementSucceeded('sk-1')
-    expect(mockQuery.mock.calls[0][0]).toContain('succeeded = succeeded + 1')
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('succeeded = succeeded + 1')
+    expect(sql).toContain('verified_at IS NULL') // certified skills are never nudged
+    expect(sql).toContain('LEAST(confidence + $2, $3)') // slight bump, capped
+    expect(mockQuery.mock.calls[0][1]).toEqual(['sk-1', 0.05, 0.9])
   })
 
   it('incrementUserCorrectedAfter bumps the column', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
     await ws.incrementUserCorrectedAfter('sk-1')
     expect(mockQuery.mock.calls[0][0]).toContain('user_corrected_after = user_corrected_after + 1')
+  })
+})
+
+// ── Graded-confidence governance ───────────────────────────────────
+
+describe('[COMP:api/skill-store] WorkspaceSkillStore — graded confidence', () => {
+  const ws = createDbWorkspaceSkillStore()
+  // Param positions in the create() INSERT (0-based): induction_source[13],
+  // confidence[14], activated_at[15], verified_by_user_id[16].
+
+  it('a self-induced skill is born Active at medium confidence, un-certified', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [skillRow()], rowCount: 1 } as never)
+    await ws.create('u-1', 'ws-1', {
+      slug: 's', name: 'S', description: 'd', content: 'c', inductionSource: 'self',
+    })
+    const params = mockRls.mock.calls[0][2]
+    const sql = mockRls.mock.calls[0][1] as string
+    expect(params?.[13]).toBe('self')
+    expect(params?.[14]).toBe(0.5) // medium — not 100%
+    expect(params?.[15]).toBeInstanceOf(Date) // born active
+    expect(params?.[16]).toBeNull() // verifier not stamped
+    expect(sql).toContain('NULL,$18,$19') // verified_at literal NULL
+  })
+
+  it('an authored skill is born certified — 1.0, active, verifier stamped', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [skillRow()], rowCount: 1 } as never)
+    await ws.create('u-1', 'ws-1', { slug: 's', name: 'S', description: 'd', content: 'c' })
+    const params = mockRls.mock.calls[0][2]
+    const sql = mockRls.mock.calls[0][1] as string
+    expect(params?.[13]).toBe('authored') // default provenance
+    expect(params?.[14]).toBe(1.0)
+    expect(params?.[15]).toBeInstanceOf(Date)
+    expect(params?.[16]).toBe('u-1') // verifier = author
+    expect(sql).toContain('now(),$18,$19') // verified_at = now()
+  })
+
+  it('an ingested skill is born Suggested — 0.0, activated_at NULL (poisoning hard-bar)', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [skillRow()], rowCount: 1 } as never)
+    await ws.create('u-1', 'ws-1', {
+      slug: 's', name: 'S', description: 'd', content: 'c', inductionSource: 'ingested',
+    })
+    const params = mockRls.mock.calls[0][2]
+    expect(params?.[13]).toBe('ingested')
+    expect(params?.[14]).toBe(0.0)
+    expect(params?.[15]).toBeNull() // not active
+    expect(params?.[16]).toBeNull() // not verified
+  })
+
+  it('recordRederivation nudges confidence (capped) and NO LONGER auto-activates', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    await ws.recordRederivation('sk-1')
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('rederivation_count = rederivation_count + 1')
+    expect(sql).toContain('LEAST(confidence + $2, $3)')
+    expect(sql).not.toContain('activated_at') // usage/re-derivation never activate
+    expect(mockQuery.mock.calls[0][1]).toEqual(['sk-1', 0.05, 0.9])
+  })
+
+  it('confirmSkill is the only path to certified: verifier + threshold + activate', async () => {
+    mockRls.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    await ws.confirmSkill('u-1', 'ws-1', 'sk-1')
+    const sql = mockRls.mock.calls[0][1] as string
+    expect(sql).toContain('verified_by_user_id = $1')
+    expect(sql).toContain('GREATEST(confidence, $2)')
+    expect(sql).toContain('activated_at = COALESCE(activated_at, now())')
+    expect(mockRls.mock.calls[0][2]).toEqual(['u-1', 1.0, 'sk-1', 'ws-1'])
   })
 })
 

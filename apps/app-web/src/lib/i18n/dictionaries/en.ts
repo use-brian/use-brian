@@ -208,6 +208,10 @@ export const en = {
     confirmationDone: "Done. {label} completed.",
     confirmationFailed: "Failed. {label} did not complete.",
     confirmationDenied: "Denied. {label} was not executed.",
+    // Counts row summarizing older resolved confirmations once they collapse.
+    confirmationCollapsedDone: "{count} completed",
+    confirmationCollapsedDenied: "{count} denied",
+    confirmationCollapsedFailed: "{count} failed",
     // Citations bar at the bottom of an assistant message.
     citationLabel: "Sources",
     citationDismiss: "Dismiss",
@@ -465,6 +469,72 @@ export const en = {
     sidebarRowRename: "Rename",
     sidebarRowDuplicate: "Duplicate",
     sidebarRowMoveToRoot: "Move to root",
+    // Teamspaces - sidebar sections + settings modal
+    // (docs/architecture/features/teamspaces.md)
+    sidebarPrivate: "Private",
+    sidebarTeamspacesGroup: "Teamspaces",
+    sidebarTeamspacesMenuAria: "Teamspaces options",
+    sidebarNewTeamspace: "New teamspace",
+    sidebarSectionNewPageAria: "Create a page in this section",
+    teamspaceMenuAria: "Teamspace options",
+    teamspaceMenuAddMembers: "Add members",
+    teamspaceMenuSettings: "Teamspace settings",
+    teamspaceMenuLeave: "Leave teamspace",
+    teamspaceMenuDelete: "Delete teamspace",
+    teamspaceLeaveConfirmTitle: "Leave teamspace",
+    teamspaceLeaveConfirm: "Leave {name}? You will lose access to its pages.",
+    teamspaceLeaveAction: "Leave",
+    teamspaceLeaveFailed: "Could not leave teamspace: {message}",
+    teamspaceDeleteConfirmTitle: "Delete teamspace",
+    teamspaceDeleteConfirm:
+      "Delete {name}? Its pages will move to the General teamspace. No page is deleted.",
+    teamspaceDeleteAction: "Delete",
+    teamspaceDeleteFailed: "Could not delete teamspace: {message}",
+    teamspaceCreateTitle: "New teamspace",
+    teamspaceCreateHint:
+      "A shared home for part of your team's pages. You can add members after creating it.",
+    teamspaceNameLabel: "Name",
+    teamspaceNamePlaceholder: "e.g. Engineering",
+    teamspaceCreateAction: "Create teamspace",
+    teamspaceCreating: "Creating…",
+    teamspaceCreateFailed: "Could not create teamspace: {message}",
+    teamspaceIconLabel: "Icon",
+    teamspaceDescriptionLabel: "Description",
+    teamspaceDescriptionPlaceholder: "What does this teamspace hold?",
+    teamspaceSensitivityLabel: "Sensitivity",
+    teamspaceSensitivityPublic: "Public",
+    teamspaceSensitivityInternal: "Internal",
+    teamspaceSensitivityConfidential: "Confidential",
+    teamspaceSettingsTitle: "Teamspace settings",
+    teamspaceModalCloseAria: "Close teamspace settings",
+    teamspaceTabGeneral: "General",
+    teamspaceTabMembers: "Members",
+    teamspaceSaveAction: "Save changes",
+    teamspaceSaving: "Saving…",
+    teamspaceSavedNotice: "Changes saved.",
+    teamspaceUpdateFailed: "Could not update teamspace: {message}",
+    teamspaceDeleteDangerHint:
+      "Deleting this teamspace moves all of its pages to General.",
+    teamspaceMembersCount: "{count} members",
+    teamspaceMembersLoading: "Loading members…",
+    teamspaceMembersLoadFailed: "Couldn't load members.",
+    teamspaceMemberSearchPlaceholder: "Search members…",
+    teamspaceMemberYou: "(you)",
+    teamspaceMemberRemove: "Remove",
+    teamspaceMemberRemoveConfirm:
+      "Remove {name} from this teamspace? They will lose access to its pages.",
+    teamspaceMemberAdd: "Add",
+    teamspaceAddMembersHeading: "Add members",
+    teamspaceAddMembersEmpty:
+      "Everyone in this workspace is already a member.",
+    teamspaceErrorInsufficientClearance:
+      "You don't have clearance to manage this teamspace.",
+    teamspaceErrorSensitivityExceedsClearance:
+      "You can't set the sensitivity above your own clearance.",
+    teamspaceErrorMemberBelowSensitivity:
+      "A current member's clearance is below that tier. Remove them from the teamspace first, then raise it.",
+    teamspaceErrorTargetClearanceBelow:
+      "That person's clearance is below this teamspace's sensitivity, so they can't be added.",
     // Surface-aware sidebar bodies — below the nav the body swaps per surface
     // (page tree on Home; these head the Brain / Studio / Workflow panels).
     sidebarBrainHeader: "Brain",
@@ -1974,6 +2044,15 @@ export const en = {
     countBadge: "{count}",
     filterStatusLabel: "Status",
     statusAll: "All active",
+    // Draft (unconfirmed) vs the confirmed working set: the list split + row badge.
+    draftBadge: "Draft",
+    sections: {
+      needsConfirmation: "Needs your confirmation",
+      active: "Active",
+    },
+    // Empty right pane, before a goal is picked.
+    selectPrompt:
+      "Select a goal to see what done means, edit it, and confirm or discard it before it runs.",
     status: {
       active: "Active",
       running: "Running",
@@ -2004,6 +2083,20 @@ export const en = {
       workError: "Could not start working the goal.",
       // Heading shown above the model's clarifying question (the §12 gate).
       clarifyLabel: "Add a little more detail to confirm this goal:",
+      // Detail-pane pre-run affordances.
+      confirmArm: "Confirm & arm",
+      editHint: "Edit the outcome until it is clear what done means, then confirm.",
+      discard: "Discard",
+      discarding: "Discarding…",
+      discardError: "Could not discard the goal.",
+      discarded: "Discarded",
+    },
+    // Confirmation modal for Discard (confirmDialog).
+    discardDialog: {
+      title: "Discard this goal?",
+      body: "It moves out of your active list. You can still find it later under the Discarded status filter.",
+      confirm: "Discard",
+      cancel: "Keep",
     },
     // Goal-detail drill-down.
     detail: {
@@ -2018,6 +2111,9 @@ export const en = {
       notConfirmed: "Draft, not confirmed yet",
       blockerHeading: "Blocker",
       acceptanceHeading: "Done when",
+      workedByHeading: "Worked by",
+      workedBySet: "An assistant workflow",
+      workedByNone: "Not started yet",
       budgetHeading: "Budget",
       budgetMaxSpend: "Spend cap ${amount}",
       budgetMaxIterations: "Up to {count} iterations",
@@ -2735,6 +2831,9 @@ export const en = {
       saveActivate: "Save & activate",
       saveActivateHint:
         "Saving your edit confirms this skill and makes it active.",
+      saveConfirm: "Save & confirm",
+      saveConfirmHint:
+        "Saving your edit certifies this skill and sets its confidence to 100%.",
       aboutHeading: "About",
       usageLabel: "Usage",
       usageSummary: "{runs} runs · {ok} ok · {corrected} corrected",
@@ -2755,6 +2854,11 @@ export const en = {
       suggestedNote:
         "This skill is suggested and not yet offered broadly. Confirming activates it as-is and marks it verified.",
       confirmWithoutEditing: "Confirm without editing",
+      confirmActiveNote:
+        "This skill is active but not yet certified. Confirming marks it fully trusted at 100%.",
+      confirmActiveButton: "Confirm - mark fully trusted",
+      confidenceHint:
+        "Grows with successful use, up to 90%. Only your confirmation reaches 100%.",
       notFoundTitle: "Skill not found",
       notFoundBody: "It may have been deleted, or it belongs to another workspace.",
     },
@@ -2799,14 +2903,30 @@ export const en = {
       prevAria: "Previous item",
       nextAria: "Next item",
       moreOptions: "More options",
+      batch: {
+        selectAll: "Select all",
+        selected: "{count} selected",
+        confirmSelected: "Looks correct",
+        deleteSelected: "Delete",
+        deleteConfirmBody:
+          "Delete {count} selected entries? They will no longer shape retrieval.",
+        partialError:
+          "{count} items could not be updated. They stay selected so you can retry.",
+      },
       allClearTitle: "All clear",
       allClearBody: "Nothing is waiting for your review.",
       relationship: {
         heading: "Relationship",
+        explainer:
+          "Confirming keeps this connection in your brain, where it shapes what your assistant retrieves. Expand either side to see what it points to.",
         source: "Source",
         target: "Target",
         endpointMissing: "No longer exists",
         detailsUnavailable: "No additional details.",
+        openSkill: "Open skill",
+        skillWhenToUse: "When to use",
+        skillActive: "Active",
+        skillSuggested: "Suggested",
         kinds: {
           memory: "Memory",
           file: "File",
@@ -2814,6 +2934,8 @@ export const en = {
           task: "Task",
           episode: "Episode",
           knowledge: "Knowledge",
+          skill: "Skill",
+          assistant: "Assistant",
         },
       },
     },
@@ -4531,6 +4653,8 @@ export const en = {
       disconnectedByMember: "Disconnected by member",
       scopeTeamNative: "Workspace",
       scopeTeamGrant: "Shared",
+      scopeBuiltin: "Built-in",
+      alwaysOn: "Always on",
       connectMorePrefix: "Connect new services or add custom MCP servers in",
       settingsLink: "Settings",
       skillsDescPrefix: "Skills teach your assistant specialized workflows. Toggle which ones this assistant can use. Starred skills sort first. Manage stars in",

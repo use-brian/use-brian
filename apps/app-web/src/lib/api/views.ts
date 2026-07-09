@@ -406,6 +406,13 @@ export type ViewListRow = {
    * `setViewIcon`.
    */
   icon: string | null;
+  /**
+   * The teamspace this page is filed in (migration 313), or `null` for a
+   * page private to its creator. Denormalized onto every row; the sidebar
+   * groups its sections from this (`groupRowsByTeamspace`). See
+   * docs/architecture/features/teamspaces.md.
+   */
+  teamspaceId: string | null;
 };
 
 /**
@@ -471,6 +478,11 @@ export type ViewMetadata = {
    * `setViewIcon`.
    */
   icon: string | null;
+  /**
+   * The teamspace this page is filed in (migration 313), or `null` for a
+   * page private to its creator. See `ViewListRow.teamspaceId`.
+   */
+  teamspaceId: string | null;
   /**
    * Notion-style page-width mode (migration 220). `false` (default) —
    * the page body renders as a constrained, centered reading column;
@@ -974,6 +986,14 @@ export async function createDraft(params: {
    */
   nestParentId?: string | null;
   /**
+   * The teamspace to create in (migration 313). A teamspace id files the
+   * page in that section; explicit `null` creates it PRIVATE to the
+   * caller; omitted (`undefined`) lets the server default apply (the
+   * General teamspace). Meaningless alongside `nestParentId` — a child
+   * adopts its parent's teamspace server-side.
+   */
+  teamspaceId?: string | null;
+  /**
    * Optional block seed (migration 281) — "Start from a template" creates the
    * draft pre-filled with a template's blocks. Omit for an empty page.
    */
@@ -988,6 +1008,11 @@ export async function createDraft(params: {
         ...(params.name ? { name: params.name } : {}),
         ...(params.binding ? { binding: params.binding } : {}),
         ...(params.nestParentId ? { nestParentId: params.nestParentId } : {}),
+        // `null` is a meaningful value (private) — spread on `!== undefined`,
+        // not truthiness, so it reaches the wire.
+        ...(params.teamspaceId !== undefined
+          ? { teamspaceId: params.teamspaceId }
+          : {}),
         ...(params.blocks ? { blocks: params.blocks } : {}),
       }),
     },
@@ -1023,12 +1048,24 @@ export async function commitPageCreatedEvent(
  * positions, so callers should refetch the sidebar list afterwards
  * rather than trusting a local position guess.
  *
+ * `teamspaceId` (migration 313) is meaningful when `nestParentId` is
+ * null — a root drop into a sidebar section: a teamspace id files the
+ * page (and its whole subtree, server-side) into that teamspace, `null`
+ * files it Private. Omitted = keep the current teamspace. When
+ * `nestParentId` is a page, the child adopts the parent's teamspace
+ * server-side regardless.
+ *
  * Maps to `PATCH /api/views/:id/reparent` with body
- * `{ nestParentId, position }` → returns the updated `ViewMetadata`.
+ * `{ nestParentId, position, teamspaceId? }` → returns the updated
+ * `ViewMetadata`.
  */
 export async function reparentView(
   viewId: string,
-  body: { nestParentId: string | null; position: number },
+  body: {
+    nestParentId: string | null;
+    position: number;
+    teamspaceId?: string | null;
+  },
 ): Promise<ViewMetadata> {
   const res = await authFetch(`${API_URL}/api/views/${viewId}/reparent`, {
     method: "PATCH",

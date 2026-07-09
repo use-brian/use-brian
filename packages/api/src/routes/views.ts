@@ -268,6 +268,10 @@ function viewMetadata(view: SavedView) {
     state: view.state,
     nestParentId: view.nestParentId ?? null,
     position: view.position ?? 0,
+    // Teamspace placement (migration 313). Null = private to the creator.
+    // The sidebar groups sections by this; drag-to-section writes it via
+    // /views/:id/reparent.
+    teamspaceId: view.teamspaceId ?? null,
     // Notion-style per-page width mode (migration 220). The doc client
     // reads this to pick the body wrapper width (full vs constrained column).
     fullWidth: view.fullWidth ?? false,
@@ -537,6 +541,11 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
         state: r.state,
         nestParentId: r.nestParentId ?? null,
         position: r.position ?? 0,
+        // Teamspace placement (migration 313). The sidebar groups its
+        // sections from this — omit it and every page collapses into the
+        // Private group (all teamspaces render empty), and a drag into a
+        // teamspace never sticks across the reload.
+        teamspaceId: r.teamspaceId ?? null,
         updatedAt: r.updatedAt.toISOString(),
       })),
     })
@@ -1125,6 +1134,12 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   const reparentBodySchema = z.object({
     nestParentId: z.string().uuid().nullable(),
     position: z.number().int().min(0),
+    // Teamspace destination for a root drop (migration 313). Omitted = keep
+    // the page's current teamspace (plain reorder / legacy promote-to-root);
+    // a teamspace id files it at that section's root; null moves it to the
+    // caller's Private section. Ignored when nestParentId is a page — the
+    // child always adopts the parent's teamspace.
+    teamspaceId: z.string().uuid().nullable().optional(),
   })
   router.patch('/views/:id/reparent', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -1146,11 +1161,13 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       req.params.id,
       parsed.data.nestParentId,
       parsed.data.position,
+      undefined,
+      parsed.data.teamspaceId,
     )
     if (!moved) {
       return badRequest(
         res,
-        'Cannot reparent: the target parent is missing, not accessible, or would create a cycle (a page cannot be nested under itself or one of its descendants).',
+        'Cannot reparent: the target parent is missing or not accessible, the destination teamspace is not yours to file into, or the move would create a cycle (a page cannot be nested under itself or one of its descendants).',
       )
     }
 
@@ -1178,6 +1195,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       binding?: unknown
       nestParentId?: unknown
       blocks?: unknown
+      teamspaceId?: unknown
     }
 
     // Optional block seed (migration 281) — "Start from a template" creates the
@@ -1211,6 +1229,20 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       nestParentId = parsedParent.data
     }
 
+    // Teamspace placement (migration 313) — tri-state: omitted → inherit the
+    // parent's teamspace / default to General; a teamspace id → that section
+    // (the sidebar section "+"); null → private to the creator (the Private
+    // section's create). The RLS WITH CHECK refuses a teamspace the caller
+    // isn't a member of.
+    let teamspaceId: string | null | undefined
+    if (body.teamspaceId !== undefined) {
+      const parsedTeamspace = z.string().uuid().nullable().safeParse(body.teamspaceId)
+      if (!parsedTeamspace.success) {
+        return badRequest(res, 'teamspaceId must be a UUID or null')
+      }
+      teamspaceId = parsedTeamspace.data
+    }
+
     // A user-supplied name is a deliberate title (e.g. Duplicate copies the
     // source name) → frozen against auto-title. A bare "+ New draft" lands on
     // the placeholder default and is auto-title-eligible (migration 218),
@@ -1230,6 +1262,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       binding,
       page: seededPage ?? emptyPage,
       nestParentId,
+      teamspaceId,
       // Interactive create (the doc-editor blank / from-template flows): defer
       // the `created` page-event-trigger instead of firing it on this empty,
       // just-minted draft. The client commits it once the user engages

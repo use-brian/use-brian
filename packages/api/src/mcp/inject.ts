@@ -127,7 +127,7 @@ export function _getMcpDiscoveryCacheSize(): number {
  * on the Drift Sweep admin page.
  *
  * NOT included: workspace `files` tools (boot-wired in
- * `apps/api/src/index.ts`; see `BOOT_INJECTED_BUILTIN_TOOLS` in
+ * `packages/api/src/boot.ts`; see `BOOT_INJECTED_BUILTIN_TOOLS` in
  * `packages/shared/src/builtin-connectors.ts`).
  */
 export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string[]> = {

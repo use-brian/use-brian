@@ -118,12 +118,16 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain("'draft'")
     expect(params[0]).toBe(WORKSPACE_ID)
-    // Trailing params (mig 279 + 283): auto_prune_at ($12), anchor_key ($13,
-    // null on this non-workflow path), created_event_pending ($14, false on
-    // this direct store call — only the interactive /views/draft route defers).
-    expect(params[params.length - 1]).toBe(false)
-    expect(params[params.length - 2]).toBeNull()
-    const when = params[params.length - 3] as Date
+    // Trailing params (mig 279 + 283 + 313): auto_prune_at ($12), anchor_key
+    // ($13, null on this non-workflow path), created_event_pending ($14, false
+    // on this direct store call — only the interactive /views/draft route
+    // defers), then the teamspace tri-state pair — explicit flag ($15, false =
+    // let the SQL CASE inherit/default) + teamspace id ($16, null).
+    expect(params[params.length - 1]).toBeNull()
+    expect(params[params.length - 2]).toBe(false)
+    expect(params[params.length - 3]).toBe(false)
+    expect(params[params.length - 4]).toBeNull()
+    const when = params[params.length - 5] as Date
     expect(when.getTime() - now.getTime()).toBe(30 * 24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -160,8 +164,9 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
       autoPruneDays: 1,
     })
     const [, , params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
-    // Trailing params: auto_prune_at ($12), anchor_key ($13), created_event_pending ($14).
-    const when = params[params.length - 3] as Date
+    // Trailing params: auto_prune_at ($12), anchor_key ($13),
+    // created_event_pending ($14), teamspace flag ($15) + id ($16).
+    const when = params[params.length - 5] as Date
     expect(when.getTime() - now.getTime()).toBe(24 * 60 * 60 * 1000)
     vi.useRealTimers()
   })
@@ -186,8 +191,36 @@ describe('[COMP:api/saved-views-store] createDraft', () => {
     })
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain('anchor_key')
-    // anchor_key is $13 — now second-to-last, ahead of created_event_pending ($14).
-    expect(params[params.length - 2]).toBe('wf-1:s1')
+    // anchor_key is $13 — ahead of created_event_pending ($14) and the
+    // teamspace pair ($15/$16).
+    expect(params[params.length - 4]).toBe('wf-1:s1')
+  })
+
+  it('threads an explicit teamspace placement to the trailing param pair (mig 313)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({
+      rows: [{
+        id: VIEW_ID, workspaceId: WORKSPACE_ID, createdBy: USER_ID, name: 'Note',
+        description: null, entity: 'tasks', viewType: 'table',
+        binding: { entity: 'tasks', viewType: 'table' }, page: { blocks: [] },
+        state: 'draft', autoPruneAt: new Date('2026-06-25T00:00:00Z'),
+        createdAt: new Date(), updatedAt: new Date(),
+      }],
+      rowCount: 1,
+    } as never)
+    await store.createDraft({
+      userId: USER_ID, workspaceId: WORKSPACE_ID, name: 'Note',
+      entity: 'tasks', viewType: 'table',
+      binding: { entity: 'tasks', viewType: 'table' },
+      page: { blocks: [] },
+      // Explicit private placement (the Private section's create) — the flag
+      // must flip true so the SQL CASE takes the explicit NULL rather than
+      // falling through to the General default.
+      teamspaceId: null,
+    })
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
+    expect(sql).toContain('teamspace_id')
+    expect(params[params.length - 2]).toBe(true)
+    expect(params[params.length - 1]).toBeNull()
   })
 
   it('findIdByAnchorKey resolves a page id by (workspace, anchor_key), RLS-scoped (mig 279)', async () => {
@@ -488,10 +521,11 @@ describe('[COMP:api/saved-views-store] page-lifecycle emit (writtenBy → isSyst
     await s.createDraft({ ...draftArgs, deferCreatedEvent: true })
     // No `created` fires at creation — the client commits it later.
     expect(onPageLifecycle).not.toHaveBeenCalled()
-    // The defer flag rides the trailing INSERT param ($14 = true).
+    // The defer flag rides the $14 INSERT param (ahead of the mig-313
+    // teamspace pair $15/$16).
     const [, sql, params] = mockQueryWithRLS.mock.calls[0] as [string, string, unknown[]]
     expect(sql).toContain('created_event_pending')
-    expect(params[params.length - 1]).toBe(true)
+    expect(params[params.length - 3]).toBe(true)
   })
 
   it('commitCreatedEvent emits `created` once when it wins the flip', async () => {

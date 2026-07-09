@@ -68,13 +68,20 @@ export const NEED_CARD_KINDS = [
 ] as const
 export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
 
-/** Attention-class kinds the merge ALWAYS surfaces while their signal is live,
- *  even when the artifact omits them — a stale artifact may reorder or caption
- *  a broken connector / failed run, but never hide it. The assistant's "include
- *  only the kinds worth surfacing" latitude applies to the other kinds. */
+/** Kinds the merge ALWAYS surfaces while their signal is live, even when the
+ *  artifact omits them. Two classes belong here: attention kinds
+ *  (`connector_attention` / `workflow_attention` — silent breakage) and
+ *  pending-you actions (`approvals` / `autopilot` — a new approval to action, or
+ *  a goal draft awaiting your confirm). A stale artifact may reorder or caption
+ *  any of these, but never hide it: a blocking item you must act on cannot wait
+ *  on the next curation turn. Only `brain_review` (not a blocking action) stays
+ *  fully curation-gated — the assistant's "include only the kinds worth
+ *  surfacing" latitude applies to it alone. */
 export const URGENT_NEED_KINDS: ReadonlySet<NeedCardKind> = new Set([
   'connector_attention',
   'workflow_attention',
+  'approvals',
+  'autopilot',
 ])
 
 export const homeDockLayoutSchema = z.object({

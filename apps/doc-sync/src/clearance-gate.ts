@@ -46,9 +46,11 @@ export type PageAccess = { workspaceId: string; clearance: Sensitivity; role: Gr
 export const PAGE_ACCESS_SQL = `
   SELECT sv.workspace_id AS "workspaceId",
          sv.clearance    AS "pageClearance",
-         wm.clearance    AS "memberClearance"
+         wm.clearance    AS "memberClearance",
+         ts.sensitivity  AS "teamspaceSensitivity"
   FROM saved_views sv
   JOIN workspace_members wm ON wm.workspace_id = sv.workspace_id
+  LEFT JOIN teamspaces ts ON ts.id = sv.teamspace_id
   WHERE sv.id = $1 AND wm.user_id = $2
   LIMIT 1
 `
@@ -98,15 +100,28 @@ export async function assertPageAccess(params: {
     workspaceId: string
     pageClearance: Sensitivity | null
     memberClearance: Sensitivity | null
+    teamspaceSensitivity: Sensitivity | null
   }>(params.userId, PAGE_ACCESS_SQL, [params.pageId, params.userId])
 
   const row = rows[0]
+  // The RLS-scoped read already carries the teamspace HARD boundary
+  // (migration 313): a page in a teamspace the viewer doesn't belong to —
+  // or another creator's private page — returns no row, same as a
+  // non-member. Membership in the workspace alone no longer implies the
+  // row is visible.
   if (!row) throw new PageAccessDenied('not_a_workspace_member')
 
   const pageClearance: Sensitivity = row.pageClearance ?? 'internal'
   const memberClearance: Sensitivity = row.memberClearance ?? 'internal'
   if (!canRead(memberClearance, pageClearance)) {
     throw new PageAccessDenied('insufficient_clearance')
+  }
+  // The teamspace's sensitivity tier layers on top of the per-page
+  // clearance (teamspaces.md): a member filed into a container whose tier
+  // later rose above their clearance (demotion edge) never joins the doc.
+  // NULL = a private page (creator-only via RLS) — no container tier.
+  if (row.teamspaceSensitivity && !canRead(memberClearance, row.teamspaceSensitivity)) {
+    throw new PageAccessDenied('insufficient_teamspace_clearance')
   }
 
   const role = await resolveEffectiveRole(params)

@@ -452,6 +452,33 @@ describe('[COMP:api/views-routes] saved-views CRUD', () => {
     expect(res.body.savedViews[0].nameOrigin).toBe('user')
   })
 
+  it('GET list carries teamspaceId so the sidebar can group pages by section (mig 313)', async () => {
+    // Regression: the hand-built list projection once dropped teamspaceId, so
+    // every page collapsed into the Private group (all teamspaces rendered
+    // empty) and a drag into a teamspace never stuck across the reload.
+    const { app, stores } = makeApp({ userId: USER_ID })
+    stores.savedViewStore.list.mockResolvedValueOnce([
+      {
+        id: 'sv-filed', workspaceId: WORKSPACE_ID, name: 'Filed', nameOrigin: 'user',
+        description: null, icon: null, entity: 'tasks', viewType: 'table', state: 'saved',
+        nestParentId: null, position: 0, teamspaceId: 'ts-general',
+        updatedAt: new Date('2026-07-09T10:00:00Z'),
+      },
+      {
+        id: 'sv-private', workspaceId: WORKSPACE_ID, name: 'Private one', nameOrigin: 'user',
+        description: null, icon: null, entity: 'tasks', viewType: 'table', state: 'saved',
+        nestParentId: null, position: 1, teamspaceId: null,
+        updatedAt: new Date('2026-07-09T10:00:00Z'),
+      },
+    ])
+    const res = await request(app).get(`/api/workspaces/${WORKSPACE_ID}/saved-views`)
+    expect(res.status).toBe(200)
+    expect(res.body.savedViews[0].teamspaceId).toBe('ts-general')
+    // A private page carries an explicit null (not absent) so the client's
+    // `teamspaceId ?? null` grouping is unambiguous.
+    expect(res.body.savedViews[1].teamspaceId).toBeNull()
+  })
+
   it('GET list returns icon: null when the page has no icon', async () => {
     const { app, stores } = makeApp({ userId: USER_ID })
     stores.savedViewStore.list.mockResolvedValueOnce([
@@ -1335,11 +1362,15 @@ describe('[COMP:api/views-routes] reparent (page tree)', () => {
       .patch('/api/views/sv-page-1/reparent')
       .send({ nestParentId: PARENT_ID, position: 2 })
     expect(res.status).toBe(200)
+    // Trailing args: writtenBy (undefined = 'user' default) + the mig-313
+    // teamspace destination (undefined = adopt the parent's teamspace).
     expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(
       USER_ID,
       'sv-page-1',
       PARENT_ID,
       2,
+      undefined,
+      undefined,
     )
     expect(res.body.nestParentId).toBe(PARENT_ID)
     expect(res.body.position).toBe(2)
@@ -1354,7 +1385,7 @@ describe('[COMP:api/views-routes] reparent (page tree)', () => {
       .patch('/api/views/sv-page-1/reparent')
       .send({ nestParentId: null, position: 0 })
     expect(res.status).toBe(200)
-    expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(USER_ID, 'sv-page-1', null, 0)
+    expect(stores.savedViewStore.reparent).toHaveBeenCalledWith(USER_ID, 'sv-page-1', null, 0, undefined, undefined)
     expect(res.body.nestParentId).toBeNull()
   })
 })

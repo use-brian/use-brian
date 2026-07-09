@@ -99,6 +99,11 @@ export function DocSidebarRow({
   // caption itself sits inside this container's hover region, so dropping the
   // pointer onto the "Save page" button keeps it open.
   const revealPrune = active || hovered;
+  // An unsaved draft that isn't kept by a saved ancestor will be auto-pruned —
+  // ghost its leading icon so it reads as temporary at a glance (the always-on
+  // counterpart to the hover-revealed "Nd until auto-delete" caption). Gated on
+  // `state`, not `pruneDays`, so it shows even before the prune ETA is fetched.
+  const isTemporary = row.state === "draft" && !inSavedSubtree;
 
   return (
     <div
@@ -114,7 +119,11 @@ export function DocSidebarRow({
         {/* Static leading glyph — the page emoji, else the type-derived
             fallback. No picker here (icons are set from the page header);
             `relative z-10` keeps it above the title's full-row hit overlay. */}
-        <span className="relative z-10 flex size-5 shrink-0 items-center justify-center">
+        <span
+          className={`relative z-10 flex size-5 shrink-0 items-center justify-center${
+            isTemporary ? " doc-icon-temporary" : ""
+          }`}
+        >
           {row.icon ? (
             <span className="text-[15px] leading-none">{row.icon}</span>
           ) : (

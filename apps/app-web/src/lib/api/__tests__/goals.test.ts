@@ -8,7 +8,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
-import { listGoals, confirmGoal, getGoalDetail, type GoalRow, type GoalDetail } from "../goals";
+import {
+  listGoals,
+  confirmGoal,
+  abandonGoal,
+  getGoalDetail,
+  type GoalRow,
+  type GoalDetail,
+} from "../goals";
 
 const mockAuthFetch = vi.mocked(authFetch);
 
@@ -97,6 +104,25 @@ describe("[COMP:app-web/goals-board] confirmGoal clarity gate (§12)", () => {
   it("maps a non-OK HTTP response to an error result", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ error: "nope" }, 500));
     const r = await confirmGoal("g1");
+    expect(r.ok).toBe(false);
+    expect(r.error).toBeTruthy();
+  });
+});
+
+describe("[COMP:app-web/goals-board] abandonGoal", () => {
+  it("POSTs to /:id/abandon and returns the discarded goal", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ ok: true, goal: { ...SAMPLE, status: "abandoned" } }));
+    const r = await abandonGoal("g1");
+    expect(r.ok).toBe(true);
+    expect(r.goal?.status).toBe("abandoned");
+    const [url, init] = mockAuthFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/api/goals/g1/abandon");
+    expect(init.method).toBe("POST");
+  });
+
+  it("maps a non-OK HTTP response (e.g. 409 on a completed goal) to an error result", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ error: "A completed goal cannot be discarded" }, 409));
+    const r = await abandonGoal("g1");
     expect(r.ok).toBe(false);
     expect(r.error).toBeTruthy();
   });

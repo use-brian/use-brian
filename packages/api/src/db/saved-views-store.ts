@@ -51,6 +51,7 @@ const FULL_SELECT = `
   state,
   nest_parent_id AS "nestParentId",
   position,
+  teamspace_id   AS "teamspaceId",
   full_width     AS "fullWidth",
   clearance,
   origin_prompt  AS "originPrompt",
@@ -75,6 +76,7 @@ const LIST_SELECT = `
   state,
   nest_parent_id AS "nestParentId",
   position,
+  teamspace_id   AS "teamspaceId",
   updated_at     AS "updatedAt"
 `
 
@@ -93,6 +95,7 @@ type FullRow = {
   state: ViewState
   nestParentId: string | null
   position: number
+  teamspaceId: string | null
   fullWidth: boolean
   clearance: 'public' | 'internal' | 'confidential'
   originPrompt: string | null
@@ -117,6 +120,7 @@ type ListRow = {
   state: ViewState
   nestParentId: string | null
   position: number
+  teamspaceId: string | null
   updatedAt: Date
 }
 
@@ -136,6 +140,7 @@ function rowToFull(row: FullRow): SavedView {
     state: row.state,
     nestParentId: row.nestParentId,
     position: row.position,
+    teamspaceId: row.teamspaceId,
     fullWidth: row.fullWidth,
     clearance: row.clearance,
     originPrompt: row.originPrompt,
@@ -162,6 +167,7 @@ function rowToList(row: ListRow): SavedViewListRow {
     state: row.state,
     nestParentId: row.nestParentId,
     position: row.position,
+    teamspaceId: row.teamspaceId,
     updatedAt: row.updatedAt,
   }
 }
@@ -261,9 +267,12 @@ export function createDbSavedViewStore(
         userId,
         // `name_origin = 'user'` — the /views/new form always carries a
         // user-chosen name, so it's never auto-title-eligible.
+        // `teamspace_id` defaults to the workspace's General teamspace
+        // (migration 313) so a programmatic root create stays team-visible.
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, entity, view_type, binding, page, state, auto_prune_at)
-         VALUES ($1, $2, $3, 'user', $4, $5, $6, $7, $8, 'saved', NULL)
+           (workspace_id, created_by, name, name_origin, description, entity, view_type, binding, page, state, auto_prune_at, teamspace_id)
+         VALUES ($1, $2, $3, 'user', $4, $5, $6, $7, $8, 'saved', NULL,
+           (SELECT t.id FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true))
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -471,7 +480,7 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId }) {
       const days = autoPruneDays ?? DEFAULT_DRAFT_TTL_DAYS
       const autoPruneAt = addDays(new Date(), days)
       // Snapshot the genesis prompt (migration 231). Trim + cap so a pasted
@@ -504,12 +513,25 @@ export function createDbSavedViewStore(
         // interactive drafts (migration 283): true → the `created` emit below
         // is skipped and the client fires it later via `commitCreatedEvent`.
         // Programmatic creates pass false (default) and emit immediately.
+        // `teamspace_id` (migration 313) is tri-state via $15/$16: an explicit
+        // placement ($15 true — a teamspace id, or NULL for a private page)
+        // wins; else a nested draft inherits its parent's teamspace; else the
+        // workspace's default (General) teamspace, so every AI / workflow /
+        // programmatic root create stays team-visible. The subqueries run
+        // under RLS: an invisible parent or missing default resolves NULL →
+        // a private page, never an insert into a teamspace the caller can't
+        // see (the policy WITH CHECK backstops that anyway).
         `INSERT INTO saved_views
-           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending)
+           (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id)
          VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, 'draft', $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
-           $11, $12, $13, $14)
+           $11, $12, $13, $14,
+           CASE
+             WHEN $15::boolean THEN $16::uuid
+             WHEN $9::uuid IS NOT NULL THEN (SELECT p.teamspace_id FROM saved_views p WHERE p.id = $9)
+             ELSE (SELECT t.id FROM teamspaces t WHERE t.workspace_id = $1 AND t.is_default = true)
+           END)
          RETURNING ${FULL_SELECT}`,
         [
           workspaceId,
@@ -526,6 +548,8 @@ export function createDbSavedViewStore(
           autoPruneAt,
           anchorKey ?? null,
           deferCreatedEvent === true,
+          teamspaceId !== undefined,
+          teamspaceId ?? null,
         ],
       )
       const view = rowToFull(result.rows[0])
@@ -615,7 +639,7 @@ export function createDbSavedViewStore(
 
     // ── Doc page-tree (migration 210) ──────────────────────────────
 
-    async reparent(userId, id, newNestParentId, position, writtenBy) {
+    async reparent(userId, id, newNestParentId, position, writtenBy, teamspaceId) {
       // 1. Cycle guard. Walk up the ancestor chain from the destination
       //    parent (RLS-scoped reads) and refuse the move if it would form
       //    a loop. Done before opening the write transaction so a rejected
@@ -668,8 +692,11 @@ export function createDbSavedViewStore(
         // capture its workspace so the sibling-set operations stay scoped
         // to one workspace (critical for the root list — `nest_parent_id
         // IS NULL` would otherwise span every workspace the user can see).
-        const found = await client.query<{ workspaceId: string; name: string }>(
-          `SELECT workspace_id AS "workspaceId", name FROM saved_views WHERE id = $1 FOR UPDATE`,
+        // `teamspace_id` rides along for the destination-teamspace resolve
+        // below (migration 313).
+        const found = await client.query<{ workspaceId: string; name: string; teamspaceId: string | null }>(
+          `SELECT workspace_id AS "workspaceId", name, teamspace_id AS "teamspaceId"
+             FROM saved_views WHERE id = $1 FOR UPDATE`,
           [id],
         )
         if (found.rows.length === 0) {
@@ -678,44 +705,95 @@ export function createDbSavedViewStore(
         }
         const workspaceId = found.rows[0].workspaceId
         const movedName = found.rows[0].name
+        const currentTeamspaceId = found.rows[0].teamspaceId
+
+        // Resolve the destination teamspace (migration 313):
+        //  - under a page parent → the child always adopts the parent's
+        //    teamspace (the container is a property of the subtree root);
+        //  - to a root slot → the caller's explicit section (a teamspace id
+        //    or null = Private), else keep the current one (plain reorder /
+        //    legacy promote-to-root).
+        let destTeamspaceId: string | null
+        if (newNestParentId !== null) {
+          const parentRow = await client.query<{ teamspaceId: string | null }>(
+            `SELECT teamspace_id AS "teamspaceId" FROM saved_views WHERE id = $1`,
+            [newNestParentId],
+          )
+          if (parentRow.rows.length === 0) {
+            // Parent invisible under RLS / gone — mirrors the cycle-guard's
+            // inaccessible-parent rejection.
+            await client.query('ROLLBACK')
+            return false
+          }
+          destTeamspaceId = parentRow.rows[0].teamspaceId
+        } else {
+          destTeamspaceId = teamspaceId === undefined ? currentTeamspaceId : teamspaceId
+        }
 
         // Open a gap at the requested slot among the destination siblings,
         // then place the moved row there. `nest_parent_id IS NOT DISTINCT
         // FROM $1` matches the root list (NULL) and any concrete parent;
-        // `workspace_id = $4` keeps the root list per-workspace.
+        // `workspace_id = $4` keeps the root list per-workspace, and the
+        // root list is additionally scoped to the destination teamspace
+        // section ($5/$6) so sections keep independent orderings — a
+        // non-root sibling set is teamspace-uniform already, so the extra
+        // predicate is a no-op there.
         await client.query(
           `UPDATE saved_views
               SET position = position + 1
             WHERE nest_parent_id IS NOT DISTINCT FROM $1
               AND id <> $2
               AND position >= $3
-              AND workspace_id = $4`,
-          [newNestParentId, id, position, workspaceId],
+              AND workspace_id = $4
+              AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $5::uuid)`,
+          [newNestParentId, id, position, workspaceId, destTeamspaceId],
         )
         await client.query(
           `UPDATE saved_views
-              SET nest_parent_id = $1, position = $2
+              SET nest_parent_id = $1, position = $2, teamspace_id = $4
             WHERE id = $3`,
-          [newNestParentId, position, id],
+          [newNestParentId, position, id, destTeamspaceId],
         )
+
+        // Cascade the teamspace across the moved page's whole descendant
+        // subtree so the denormalized `teamspace_id` stays true (migration
+        // 313) — a move files the subtree, not just the root. RLS-scoped:
+        // the caller can see the subtree (it shared the moved row's old
+        // teamspace), and the policy's WITH CHECK refuses a destination the
+        // caller isn't a member of.
+        if (destTeamspaceId !== currentTeamspaceId) {
+          await client.query(
+            `WITH RECURSIVE subtree AS (
+               SELECT id FROM saved_views WHERE id = $1
+               UNION ALL
+               SELECT sv.id FROM saved_views sv JOIN subtree s ON sv.nest_parent_id = s.id
+             )
+             UPDATE saved_views
+                SET teamspace_id = $2
+              WHERE id IN (SELECT id FROM subtree)`,
+            [id, destTeamspaceId],
+          )
+        }
 
         // Renumber the destination sibling set to contiguous 0..n-1,
         // preserving the ordering the gap-open produced. Ties (e.g. equal
         // raw positions) break on id for determinism. Scoped to the
-        // workspace so the root list doesn't bleed across workspaces.
+        // workspace (and, for the root list, the destination teamspace
+        // section) so positions don't bleed across workspaces or sections.
         await client.query(
           `WITH ordered AS (
              SELECT id, ROW_NUMBER() OVER (ORDER BY position ASC, id ASC) - 1 AS rn
                FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $1
                 AND workspace_id = $2
+                AND ($1::uuid IS NOT NULL OR teamspace_id IS NOT DISTINCT FROM $3::uuid)
            )
            UPDATE saved_views sv
               SET position = ordered.rn
              FROM ordered
             WHERE sv.id = ordered.id
               AND sv.position <> ordered.rn`,
-          [newNestParentId, workspaceId],
+          [newNestParentId, workspaceId, destTeamspaceId],
         )
 
         await client.query('COMMIT')
@@ -733,6 +811,11 @@ export function createDbSavedViewStore(
         return true
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {})
+        // A row-level-security WITH CHECK violation (42501) means the caller
+        // tried to file the page (or its subtree) somewhere they may not —
+        // a teamspace they aren't a member of, or privatizing a teammate's
+        // page. That's a clean authorization reject, not a server fault.
+        if ((err as { code?: string }).code === '42501') return false
         throw err
       } finally {
         await rollbackAndRelease(client)

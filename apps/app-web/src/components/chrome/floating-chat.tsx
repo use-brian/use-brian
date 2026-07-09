@@ -170,6 +170,10 @@ import {
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import { useT, format } from "@/lib/i18n/client";
+import {
+  collapseResolvedConfirmations,
+  type ResolvedConfirmationCounts,
+} from "@/lib/confirmation-collapse";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import type { AssistantRunState } from "@sidanclaw/doc-model";
 import { cn } from "@/lib/utils";
@@ -2250,6 +2254,10 @@ export function FloatingChat({
       p.status === "denied" ||
       p.status === "failed",
   );
+  // Cap the resolved-receipt block at two rows (summary + newest) so a
+  // long approve-one-at-a-time run can't bury the next pending card.
+  const collapsedConfirmations =
+    collapseResolvedConfirmations(resolvedConfirmations);
 
   // Idle copy — the doc dock nudges toward the page ("Ask for a view…");
   // a surface dock stays neutral ("Ask anything…"), with the view-context
@@ -2537,6 +2545,30 @@ export function FloatingChat({
             </div>
           ) : null}
 
+          {/* Resolved confirmation rows (approved/denied/failed) render ABOVE
+              the pending cards — they happened earlier, and the actionable
+              Approve/Deny card must sit nearest the auto-scrolled bottom. A
+              long one-action-at-a-time run collapses everything but the
+              newest receipt into one counts row (confirmation-collapse.ts),
+              so the resolved block never buries the next pending card. */}
+          {collapsedConfirmations.counts ? (
+            <CollapsedConfirmationsRow
+              counts={collapsedConfirmations.counts}
+              doneTemplate={t.confirmationCollapsedDone}
+              deniedTemplate={t.confirmationCollapsedDenied}
+              failedTemplate={t.confirmationCollapsedFailed}
+            />
+          ) : null}
+          {collapsedConfirmations.tail.map((conf) => (
+            <ResolvedConfirmationRow
+              key={conf.toolCallId}
+              confirmation={conf}
+              doneTemplate={t.confirmationDone}
+              failedTemplate={t.confirmationFailed}
+              deniedTemplate={t.confirmationDenied}
+            />
+          ))}
+
           {/* Pending confirmation cards — always visible regardless of stream state */}
           {visiblePending.map((conf) => (
             <PendingConfirmationBubble
@@ -2547,17 +2579,6 @@ export function FloatingChat({
               approvingLabel={t.confirmationApproving}
               onApprove={(id) => void handleConfirmation(id, "approve")}
               onDeny={(id) => void handleConfirmation(id, "deny")}
-            />
-          ))}
-
-          {/* Resolved confirmation rows (approved/denied/failed) */}
-          {resolvedConfirmations.map((conf) => (
-            <ResolvedConfirmationRow
-              key={conf.toolCallId}
-              confirmation={conf}
-              doneTemplate={t.confirmationDone}
-              failedTemplate={t.confirmationFailed}
-              deniedTemplate={t.confirmationDenied}
             />
           ))}
 
@@ -3446,6 +3467,43 @@ function PendingConfirmationBubble({
             {denyLabel}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** One compact counts-by-status row summarizing the resolved confirmations
+ *  that collapsed out of the transcript ("7 completed · 1 denied") — the
+ *  policy lives in `confirmation-collapse.ts`. Non-interactive: the full
+ *  history is in the turn's persisted messages. */
+function CollapsedConfirmationsRow({
+  counts,
+  doneTemplate,
+  deniedTemplate,
+  failedTemplate,
+}: {
+  counts: ResolvedConfirmationCounts;
+  doneTemplate: string;
+  deniedTemplate: string;
+  failedTemplate: string;
+}) {
+  const parts: string[] = [];
+  if (counts.approved > 0) {
+    parts.push(format(doneTemplate, { count: counts.approved }));
+  }
+  if (counts.denied > 0) {
+    parts.push(format(deniedTemplate, { count: counts.denied }));
+  }
+  if (counts.failed > 0) {
+    parts.push(format(failedTemplate, { count: counts.failed }));
+  }
+  return (
+    <div className="flex gap-2.5">
+      <div className="opacity-60 mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border">
+        <Sparkles className="size-3.5" aria-hidden />
+      </div>
+      <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">
+        {parts.join(" · ")}
       </div>
     </div>
   );

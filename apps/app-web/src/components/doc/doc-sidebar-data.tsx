@@ -69,6 +69,13 @@ import {
   type ViewListRow,
   type ViewMetadata,
 } from "@/lib/api/views";
+import {
+  deleteTeamspace,
+  listTeamspaces,
+  removeTeamspaceMember,
+  type Teamspace,
+} from "@/lib/api/teamspaces";
+import { getUserInfo } from "@/lib/user";
 import { hasAnyConnectedConnector } from "@/lib/api/studio";
 import { fetchFeedTeamProfiles, type FeedProfile } from "@/lib/api/feed";
 import { isHostedEdition } from "@/lib/edition";
@@ -117,6 +124,14 @@ type SidebarData = {
   workspaceId: string;
   saved: ViewListRow[];
   drafts: ViewListRow[];
+  /**
+   * Teamspaces the caller belongs to (General first, server-ordered) — the
+   * sidebar renders one collapsible section per entry plus a Private section
+   * (docs/architecture/features/teamspaces.md). Fetched with the page lists
+   * and refreshed by the same `reloadSidebar` tick, so sections and rows
+   * never disagree for more than one reload.
+   */
+  teamspaces: Teamspace[];
   draftPruneByid: Record<string, string | null>;
   /** The most-recently-opened saved cards (recents, falling back to freshest). */
   landingCards: ViewListRow[];
@@ -180,7 +195,11 @@ type SidebarData = {
   // Mutation handlers (raised by the sidebar + page header). Each commits to
   // the API, refreshes the lists, and — when a page is open — keeps the centre
   // pane in sync through the active-page bridge.
-  handleNewDraft: () => Promise<void>;
+  /**
+   * Create a draft. `teamspaceId` files it in that section, explicit `null`
+   * creates it Private, omitted lets the server default apply (General).
+   */
+  handleNewDraft: (teamspaceId?: string | null) => Promise<void>;
   handleAddChild: (parentId: string) => Promise<void>;
   handleSave: (id: string) => Promise<void>;
   handleUnsave: (id: string) => Promise<void>;
@@ -190,6 +209,12 @@ type SidebarData = {
   handleDelete: (id: string) => Promise<void>;
   handleMove: (move: SidebarMove) => Promise<void>;
   handleSetIcon: (id: string, icon: string | null) => Promise<void>;
+  /** Leave a (non-default) teamspace — confirm, then remove the caller's
+   *  own member row. Any member may leave regardless of `canManage`. */
+  handleLeaveTeamspace: (teamspaceId: string) => Promise<void>;
+  /** Delete a (non-default) teamspace — confirm, then delete. The server
+   *  moves its pages to General; pages are never destroyed. */
+  handleDeleteTeamspace: (teamspaceId: string) => Promise<void>;
 };
 
 const SidebarDataContext = createContext<SidebarData | null>(null);
@@ -215,6 +240,7 @@ export function DocSidebarDataProvider({
 
   const [saved, setSaved] = useState<ViewListRow[]>([]);
   const [drafts, setDrafts] = useState<ViewListRow[]>([]);
+  const [teamspaces, setTeamspaces] = useState<Teamspace[]>([]);
   const [draftPruneByid, setDraftPruneByid] = useState<
     Record<string, string | null>
   >({});
@@ -350,28 +376,39 @@ export function DocSidebarDataProvider({
     const bundled = isDesktopAuth();
     const savedKey = `sidebar:saved:${workspaceId}`;
     const draftKey = `sidebar:drafts:${workspaceId}`;
+    const teamspacesKey = `sidebar:teamspaces:${workspaceId}`;
     if (bundled) {
       void Promise.all([
         idbGet<ViewListRow[]>(savedKey),
         idbGet<ViewListRow[]>(draftKey),
-      ]).then(([cs, cd]) => {
+        idbGet<Teamspace[]>(teamspacesKey),
+      ]).then(([cs, cd, cts]) => {
         if (cancelled) return;
         if (cs) setSaved(cs);
         if (cd) setDrafts(cd);
+        if (cts) setTeamspaces(cts);
       });
     }
 
+    // The teamspace list rides the same fetch as the page lists so the
+    // sidebar's sections and their rows always land together (a row whose
+    // teamspace section hasn't arrived would misfile into Private). A failed
+    // teamspace fetch (an older backend without the route) degrades to zero
+    // sections rather than blanking the whole sidebar.
     Promise.all([
       listViews({ workspaceId, state: "saved" }),
       listViews({ workspaceId, state: "draft" }),
+      listTeamspaces(workspaceId).catch(() => [] as Teamspace[]),
     ])
-      .then(([s, d]) => {
+      .then(([s, d, ts]) => {
         if (cancelled) return;
         setSaved(s);
         setDrafts(d);
+        setTeamspaces(ts);
         if (bundled) {
           void idbSet(savedKey, s);
           void idbSet(draftKey, d);
+          void idbSet(teamspacesKey, ts);
         }
       })
       .catch((err: unknown) => {
@@ -433,23 +470,32 @@ export function DocSidebarDataProvider({
   }, [pushRecent]);
 
   // ── Mutation handlers ─────────────────────────────────────────────────
-  const handleNewDraft = useCallback(async () => {
-    if (!getOnline()) return; // not supported offline — the create button is disabled too
-    setBusyNewDraft(true);
-    setTopError(null);
-    try {
-      const created = await createDraft({ workspaceId });
-      reloadSidebar();
-      recordPrune(created.id, created.autoPruneAt);
-      bridgeRef.current?.latchNewDraft(created.id);
-      navigate(created.id);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setTopError(format(t.createDraftFailed, { message }));
-    } finally {
-      setBusyNewDraft(false);
-    }
-  }, [workspaceId, reloadSidebar, recordPrune, navigate, t]);
+  const handleNewDraft = useCallback(
+    async (teamspaceId?: string | null) => {
+      if (!getOnline()) return; // not supported offline — the create button is disabled too
+      setBusyNewDraft(true);
+      setTopError(null);
+      try {
+        // `null` = private, a section's id = that teamspace, omitted =
+        // server default (General). Spread on `!== undefined` so an explicit
+        // null survives to the wire.
+        const created = await createDraft({
+          workspaceId,
+          ...(teamspaceId !== undefined ? { teamspaceId } : {}),
+        });
+        reloadSidebar();
+        recordPrune(created.id, created.autoPruneAt);
+        bridgeRef.current?.latchNewDraft(created.id);
+        navigate(created.id);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setTopError(format(t.createDraftFailed, { message }));
+      } finally {
+        setBusyNewDraft(false);
+      }
+    },
+    [workspaceId, reloadSidebar, recordPrune, navigate, t],
+  );
 
   const handleAddChild = useCallback(
     async (parentId: string) => {
@@ -565,6 +611,9 @@ export function DocSidebarDataProvider({
           workspaceId,
           name: source.name,
           nestParentId: source.nestParentId,
+          // A duplicate lands in the SAME section as its source (a root
+          // duplicate would otherwise fall to the server default, General).
+          teamspaceId: source.teamspaceId,
         });
         reloadSidebar();
         recordPrune(created.id, created.autoPruneAt);
@@ -614,6 +663,12 @@ export function DocSidebarDataProvider({
         const updated = await reparentView(move.viewId, {
           nestParentId: move.nestParentId,
           position: move.position,
+          // A root drop into a sidebar section carries the target teamspace
+          // (`null` = Private); omitted = keep the current one. Spread on
+          // `!== undefined` so an explicit null reaches the wire.
+          ...(move.teamspaceId !== undefined
+            ? { teamspaceId: move.teamspaceId }
+            : {}),
         });
         patchActiveView(move.viewId, () => updated);
         reloadSidebar();
@@ -644,6 +699,62 @@ export function DocSidebarDataProvider({
       }
     },
     [patchActiveView, reloadSidebar, t],
+  );
+
+  // ── Teamspace section handlers (leave / delete) ───────────────────────
+  // Rename / icon / description / sensitivity / members live in the
+  // teamspace settings modal, which calls the SDK directly and then
+  // `reloadSidebar()`; these two are here because the sidebar's section
+  // menu raises them directly (confirm + mutate + reload, no modal).
+  const handleLeaveTeamspace = useCallback(
+    async (teamspaceId: string) => {
+      if (!getOnline()) return; // not supported offline
+      const teamspace = teamspaces.find((ts) => ts.id === teamspaceId);
+      const me = getUserInfo();
+      if (!teamspace || !me?.id) return;
+      const ok = await confirmDialog({
+        title: t.teamspaceLeaveConfirmTitle,
+        description: format(t.teamspaceLeaveConfirm, { name: teamspace.name }),
+        confirmLabel: t.teamspaceLeaveAction,
+        cancelLabel: t.cancel,
+        variant: "destructive",
+      });
+      if (!ok) return;
+      try {
+        // Self-removal = leave (allowed for any member on a non-default
+        // teamspace, regardless of canManage).
+        await removeTeamspaceMember(teamspaceId, me.id);
+        reloadSidebar();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setTopError(format(t.teamspaceLeaveFailed, { message }));
+      }
+    },
+    [teamspaces, reloadSidebar, t],
+  );
+
+  const handleDeleteTeamspace = useCallback(
+    async (teamspaceId: string) => {
+      if (!getOnline()) return; // not supported offline
+      const teamspace = teamspaces.find((ts) => ts.id === teamspaceId);
+      if (!teamspace) return;
+      const ok = await confirmDialog({
+        title: t.teamspaceDeleteConfirmTitle,
+        description: format(t.teamspaceDeleteConfirm, { name: teamspace.name }),
+        confirmLabel: t.teamspaceDeleteAction,
+        cancelLabel: t.cancel,
+        variant: "destructive",
+      });
+      if (!ok) return;
+      try {
+        await deleteTeamspace(teamspaceId);
+        reloadSidebar();
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setTopError(format(t.teamspaceDeleteFailed, { message }));
+      }
+    },
+    [teamspaces, reloadSidebar, t],
   );
 
   // ── Derived: recents → home landing cards ─────────────────────────────
@@ -677,6 +788,7 @@ export function DocSidebarDataProvider({
       workspaceId,
       saved,
       drafts,
+      teamspaces,
       draftPruneByid,
       landingCards,
       busyNewDraft,
@@ -708,11 +820,14 @@ export function DocSidebarDataProvider({
       handleDelete,
       handleMove,
       handleSetIcon,
+      handleLeaveTeamspace,
+      handleDeleteTeamspace,
     }),
     [
       workspaceId,
       saved,
       drafts,
+      teamspaces,
       draftPruneByid,
       landingCards,
       busyNewDraft,
@@ -739,6 +854,8 @@ export function DocSidebarDataProvider({
       handleDelete,
       handleMove,
       handleSetIcon,
+      handleLeaveTeamspace,
+      handleDeleteTeamspace,
     ],
   );
 

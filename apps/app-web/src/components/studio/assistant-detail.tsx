@@ -1315,9 +1315,12 @@ type UserConnector = {
   icon_url?: string;
   category?: "official" | "community";
   // Source of the connector: a personal one the team-owner has connected,
-  // a team-native one (the team owns the credential), or a grant from a
-  // team member who exposed their personal connector to the team.
-  scope?: "personal" | "team-native" | "team-grant";
+  // a team-native one (the team owns the credential), a grant from a
+  // team member who exposed their personal connector to the team, or a
+  // built-in workspace primitive (Workspace Files) — always-on, no
+  // credential, synthesized by the route so its per-assistant tool
+  // policy is governable here.
+  scope?: "personal" | "team-native" | "team-grant" | "builtin";
 };
 
 type ToolPerm = {
@@ -1635,6 +1638,9 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                       {c.scope === "team-grant" && (
                         <span className="text-[10px] uppercase tracking-wider font-medium bg-amber-500/15 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded">{t.assistant.toolsTab.scopeTeamGrant}</span>
                       )}
+                      {c.scope === "builtin" && (
+                        <span className="text-[10px] uppercase tracking-wider font-medium bg-muted text-muted-foreground px-1.5 py-0.5 rounded">{t.assistant.toolsTab.scopeBuiltin}</span>
+                      )}
                     </div>
                     {c.custom && c.url && (
                       <div className="text-[11px] text-muted-foreground truncate">{c.url}</div>
@@ -1664,6 +1670,14 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                           <path d="M3 5l4 4 4-4" />
                         </svg>
                       )}
+                      {c.scope === "builtin" ? (
+                        // Built-in primitives are always available — there is no
+                        // per-assistant off switch to honor, so a toggle here
+                        // would be cosmetic. Per-tool policy below is the control.
+                        <span className="text-[11px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full">
+                          {t.assistant.toolsTab.alwaysOn}
+                        </span>
+                      ) : (
                       <button
                         type="button" role="switch" aria-checked={c.enabled}
                         disabled={toggling === c.id}
@@ -1672,6 +1686,7 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                       >
                         <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-background shadow-sm transition-transform duration-200 ${c.enabled ? "translate-x-4" : "translate-x-0"}`} />
                       </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1695,8 +1710,13 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                         handlePolicyChange(c.id, toolsMap[c.id]?.serverName ?? c.id, toolName, policy)
                       }
                     />
-                    {/* Per-tool capability grants (#4 in connector-actions.md). Empty grants = no writes allowed. */}
-                    <ConnectorActionGrants assistantId={assistantId} connectorId={c.id} />
+                    {/* Per-tool capability grants (#4 in connector-actions.md). Empty
+                        grants = no writes allowed. Not applicable to built-in
+                        primitives — their writes are governed by the per-tool
+                        policy above, not the connector-action grant table. */}
+                    {c.scope !== "builtin" && (
+                      <ConnectorActionGrants assistantId={assistantId} connectorId={c.id} />
+                    )}
                   </div>
                 </div>
               </div>

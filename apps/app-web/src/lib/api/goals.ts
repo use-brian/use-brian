@@ -142,7 +142,11 @@ type GoalActionResult = {
   question?: string;
 };
 
-async function goalAction(goalId: string, action: "confirm" | "work", body: unknown): Promise<GoalActionResult> {
+async function goalAction(
+  goalId: string,
+  action: "confirm" | "work" | "abandon",
+  body: unknown,
+): Promise<GoalActionResult> {
   const res = await authFetch(`${API_URL}/api/goals/${encodeURIComponent(goalId)}/${action}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -172,4 +176,11 @@ export function confirmGoal(goalId: string, outcome?: string): Promise<GoalActio
 /** Spin up the assistant to work the task to done (sets the means + kicks off the loop). */
 export function workGoal(goalId: string, workflowId?: string): Promise<GoalActionResult> {
   return goalAction(goalId, "work", { workflowId });
+}
+
+/** Discard a goal (a draft the user won't confirm, or an active goal to stand
+ *  down). Reversible server-side: sets status='abandoned' — the record survives
+ *  and is retrievable via the status filter. Refused (409) for a completed goal. */
+export function abandonGoal(goalId: string): Promise<GoalActionResult> {
+  return goalAction(goalId, "abandon", {});
 }

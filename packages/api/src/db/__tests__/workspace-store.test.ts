@@ -32,6 +32,7 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
           .mockResolvedValueOnce(undefined) // BEGIN
           .mockResolvedValueOnce({ rows: [{ id: 't_1', name: 'Eng', purpose: 'Backend platform team', ownerUserId: 'u_1', createdAt: new Date(), updatedAt: new Date() }] }) // INSERT workspaces
           .mockResolvedValueOnce(undefined) // INSERT workspace_members
+          .mockResolvedValueOnce(undefined) // INSERT teamspaces (General) + member (mig 313)
           .mockResolvedValueOnce({ rows: [{ id: 'a_primary' }] }) // INSERT assistants (primary)
           .mockResolvedValueOnce(undefined) // INSERT assistant_capabilities
           .mockResolvedValueOnce(undefined), // COMMIT
@@ -43,9 +44,9 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
 
       expect(team.name).toBe('Eng')
       expect(team.purpose).toBe('Backend platform team')
-      expect(mockClient.query).toHaveBeenCalledTimes(6)
+      expect(mockClient.query).toHaveBeenCalledTimes(7)
       expect(mockClient.query.mock.calls[0][0]).toBe('BEGIN')
-      expect(mockClient.query.mock.calls[5][0]).toBe('COMMIT')
+      expect(mockClient.query.mock.calls[6][0]).toBe('COMMIT')
 
       // Workspace INSERT carries the purpose
       const wsInsert = mockClient.query.mock.calls[1]
@@ -61,17 +62,23 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(memberInsertSql).toContain('clearance')
       expect(memberInsertSql).toContain("'confidential'")
 
+      // Default (General) teamspace seeded in the same transaction (mig 313)
+      const teamspaceInsertSql = mockClient.query.mock.calls[3][0] as string
+      expect(teamspaceInsertSql).toContain('INSERT INTO teamspaces')
+      expect(teamspaceInsertSql).toContain("'General'")
+      expect(teamspaceInsertSql).toContain('INSERT INTO teamspace_members')
+
       // Primary assistant — kind='primary', owner_user_id NULL, named "<workspace> Primary Assistant"
-      const assistantInsertSql = mockClient.query.mock.calls[3][0] as string
-      const assistantInsertArgs = mockClient.query.mock.calls[3][1] as unknown[]
+      const assistantInsertSql = mockClient.query.mock.calls[4][0] as string
+      const assistantInsertArgs = mockClient.query.mock.calls[4][1] as unknown[]
       expect(assistantInsertSql).toContain('INSERT INTO assistants')
       expect(assistantInsertSql).toContain("'primary'")
       expect(assistantInsertSql).toContain('NULL')
       expect(assistantInsertArgs).toEqual(['Eng Primary Assistant', 't_1'])
 
       // §17 Tasks/CRM default-on capability grants
-      const capsInsertSql = mockClient.query.mock.calls[4][0] as string
-      const capsInsertArgs = mockClient.query.mock.calls[4][1] as unknown[]
+      const capsInsertSql = mockClient.query.mock.calls[5][0] as string
+      const capsInsertArgs = mockClient.query.mock.calls[5][1] as unknown[]
       expect(capsInsertSql).toContain('INSERT INTO assistant_capabilities')
       expect(capsInsertSql).toContain("'tasks'")
       expect(capsInsertSql).toContain("'crm'")
@@ -313,23 +320,32 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
   })
 
   describe('addMember', () => {
-    it('adds member to team and all team assistants', async () => {
+    it('adds member to team and all team assistants (and the General teamspace)', async () => {
       mockQuery
         .mockResolvedValueOnce({
           rows: [{ id: 'tm_1', workspaceId: 't_1', userId: 'u_2', role: 'member', joinedAt: new Date() }],
           rowCount: 1,
         } as never)
         .mockResolvedValueOnce({ rowCount: 0 } as never) // assistant_members insert
+        // Default-teamspace auto-join (mig 313): ensureDefault's SELECT finds
+        // the existing General row, then the member-join INSERT.
+        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never)
+        .mockResolvedValueOnce({ rowCount: 1 } as never)
 
       const member = await store.addMember('u_1', 't_1', 'u_2')
       expect(member.userId).toBe('u_2')
       expect(member.role).toBe('member')
 
       // Verify assistant_members sync
-      expect(mockQuery).toHaveBeenCalledTimes(2)
+      expect(mockQuery).toHaveBeenCalledTimes(4)
       const assistantSql = mockQuery.mock.calls[1][0] as string
       expect(assistantSql).toContain('INSERT INTO assistant_members')
       expect(assistantSql).toContain('ON CONFLICT')
+
+      // Verify the teamspace auto-join landed on the default teamspace
+      const teamspaceJoinSql = mockQuery.mock.calls[3][0] as string
+      expect(teamspaceJoinSql).toContain('INSERT INTO teamspace_members')
+      expect(teamspaceJoinSql).toContain('is_default = true')
     })
 
     it("stamps a plain member's clearance to 'internal' (role default)", async () => {
@@ -339,6 +355,8 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
           rowCount: 1,
         } as never)
         .mockResolvedValueOnce({ rowCount: 0 } as never)
+        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never) // teamspace default lookup (mig 313)
+        .mockResolvedValueOnce({ rowCount: 1 } as never) // teamspace member join
 
       await store.addMember('u_1', 't_1', 'u_2')
 
@@ -357,6 +375,8 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
           rowCount: 1,
         } as never)
         .mockResolvedValueOnce({ rowCount: 0 } as never)
+        .mockResolvedValueOnce({ rows: [{ id: 'ts_general' }], rowCount: 1 } as never) // teamspace default lookup (mig 313)
+        .mockResolvedValueOnce({ rowCount: 1 } as never) // teamspace member join
 
       await store.addMember('u_1', 't_1', 'u_3', 'admin')
 
@@ -395,19 +415,23 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
   })
 
   describe('removeMember', () => {
-    it('removes member from team and team assistants', async () => {
+    it('removes member from team, team assistants, and their teamspaces', async () => {
       mockQuery
         .mockResolvedValueOnce({ rowCount: 1 } as never) // assistant_members delete
+        .mockResolvedValueOnce({ rowCount: 1 } as never) // teamspace_members cleanup (mig 313)
         .mockResolvedValueOnce({ rowCount: 1 } as never) // workspace_members delete
 
       const removed = await store.removeMember('u_1', 't_1', 'u_2')
       expect(removed).toBe(true)
-      expect(mockQuery).toHaveBeenCalledTimes(2)
+      expect(mockQuery).toHaveBeenCalledTimes(3)
+      const teamspaceCleanupSql = mockQuery.mock.calls[1][0] as string
+      expect(teamspaceCleanupSql).toContain('DELETE FROM teamspace_members')
     })
 
     it('cannot remove the owner', async () => {
       mockQuery
         .mockResolvedValueOnce({ rowCount: 0 } as never)
+        .mockResolvedValueOnce({ rowCount: 0 } as never) // teamspace_members cleanup (mig 313)
         .mockResolvedValueOnce({ rowCount: 0 } as never)
 
       const removed = await store.removeMember('u_1', 't_1', 'u_owner')

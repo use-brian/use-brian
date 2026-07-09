@@ -327,6 +327,15 @@ export type SavedView = {
    */
   clearance: 'public' | 'internal' | 'confidential'
   /**
+   * The teamspace this page is filed in (migration 313), or `null` for a
+   * page private to its creator. Teamspace membership is a hard access
+   * boundary carried by the `saved_views` RLS policy; the sidebar groups
+   * sections by this value. See docs/architecture/features/teamspaces.md.
+   * Optional at the type level (like `nestParentId`) so pre-313 fixtures
+   * and mocks stay valid; the DB rows always carry the column.
+   */
+  teamspaceId?: string | null
+  /**
    * The user's *first prompt* — the chat message that created this page
    * (migration 231). Snapshotted at creation by the `renderPage` /
    * `createSubPage` doc tools from the turn's user message; `null` on
@@ -381,6 +390,7 @@ export type SavedViewListRow = Pick<
   | 'state'
   | 'nestParentId'
   | 'position'
+  | 'teamspaceId'
   | 'updatedAt'
 >
 
@@ -462,6 +472,18 @@ export type CreateDraftInput = {
    * pass the turn's user message; omitted / `null` on non-chat paths.
    */
   originPrompt?: string | null
+  /**
+   * Teamspace placement (migration 313). Tri-state:
+   *  - **omitted (`undefined`)** — inherit the parent's teamspace when
+   *    `nestParentId` is set, else file into the workspace's default
+   *    (General) teamspace. Every server-side / AI / workflow path takes
+   *    this default so team deliverables stay team-visible.
+   *  - **a teamspace id** — file into that teamspace (the sidebar section
+   *    "+" passes the section's id).
+   *  - **`null`** — explicitly private to the creator (the Private
+   *    section's create). See docs/architecture/features/teamspaces.md.
+   */
+  teamspaceId?: string | null
   /** Defaults to 30 days. */
   autoPruneDays?: number
   /**
@@ -640,6 +662,17 @@ export type SavedViewStore = {
     position: number,
     /** See {@link PageWriteActor}. Defaults to `'user'`. */
     writtenBy?: PageWriteActor,
+    /**
+     * Teamspace destination for a root drop (migration 313), meaningful only
+     * when `newNestParentId === null`: a teamspace id files the page at that
+     * section's root, `null` moves it to the caller's Private section, and
+     * `undefined` keeps the page's current teamspace (a plain reorder /
+     * promote-to-root). When `newNestParentId` is a page, the child always
+     * adopts that parent's teamspace and this argument is ignored. The move
+     * cascades `teamspace_id` across the page's whole descendant subtree so
+     * the denormalization stays true.
+     */
+    teamspaceId?: string | null,
   ): Promise<boolean>
 
   /**
