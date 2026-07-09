@@ -1821,6 +1821,8 @@ export const en = {
     uploading: "Uploading…",
     uploadFailed: "Couldn't upload. Try again.",
     dropToAttach: "Drop files to attach",
+    tooLarge: "That file is too large to attach (max 20 MB).",
+    videoUnsupported: "To use a video, upload it as a recording in Studio to transcribe it.",
   },
   kbGaps: {
     title: "Recurring questions",

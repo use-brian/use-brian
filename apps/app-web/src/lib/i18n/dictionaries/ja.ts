@@ -1633,6 +1633,8 @@ export const ja: Dictionary = {
     uploading: "アップロード中…",
     uploadFailed: "アップロードできませんでした。もう一度お試しください。",
     dropToAttach: "ファイルをドロップして添付",
+    tooLarge: "このファイルは大きすぎて添付できません（最大 20 MB）。",
+    videoUnsupported: "動画を使うには、スタジオで録画としてアップロードして文字起こししてください。",
   },
   kbGaps: {
     title: "繰り返される質問",
