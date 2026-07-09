@@ -1623,6 +1623,8 @@ export const zh: Dictionary = {
     uploading: "上傳中…",
     uploadFailed: "無法上傳，請再試一次。",
     dropToAttach: "拖放檔案以附加",
+    tooLarge: "此檔案太大，無法附加（上限 20 MB）。",
+    videoUnsupported: "若要使用影片，請在工作室中以錄音方式上傳以進行轉錄。",
   },
   kbGaps: {
     title: "重複出現的問題",

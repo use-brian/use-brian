@@ -171,6 +171,7 @@ import { useIsOffline } from "@/lib/offline/use-offline-sync";
 import type { AssistantRunState } from "@sidanclaw/doc-model";
 import { cn } from "@/lib/utils";
 import { imageFilesFromClipboard, useFileAttachments } from "@/lib/use-file-attachments";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -417,6 +418,7 @@ export function FloatingChat({
   const offline = useIsOffline();
   const tRun = useT().docPage.assistantRun;
   const tAttach = useT().attachments;
+  const tRec = useT().recordings;
   const router = useRouter();
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
@@ -479,7 +481,27 @@ export function FloatingChat({
   // (its creature icon) instead of a generic chat glyph. Only the floating
   // launcher renders the FAB, so the fetch is skipped in side-panel mode.
   const [assistant, setAssistant] = useState<AssistantIdentity | null>(null);
-  const att = useFileAttachments(() => sessionIdRef.current ?? undefined);
+  // Attached video is too large for the cache upload (Cloud Run's 32 MiB edge
+  // cap / the 20 MB multer limit) and the model can't consume it inline, so
+  // hand it to the recordings pipeline instead: direct-to-GCS upload → server
+  // cost estimate → transcribe + file to the brain. Brain-only ingest (no
+  // blueprint) here — `run` shows its own cost confirm, which is all the
+  // preflight invariant needs when there's no synthesized page.
+  // See docs/architecture/media/transcription.md.
+  const activeAssistantId = selectedAssistantId || assistantId;
+  const rec = useRecordingUpload(workspaceId, activeAssistantId);
+  const att = useFileAttachments(() => sessionIdRef.current ?? undefined, {
+    // Only offer routing when we have a workspace + assistant to bind the
+    // recording to; otherwise video falls to the guard (unsupported-here) chip.
+    onRouteMedia:
+      workspaceId && activeAssistantId
+        ? (videos) => {
+            void (async () => {
+              for (const file of videos) await rec.run(file);
+            })();
+          }
+        : undefined,
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   // Resolve the assistant's avatar identity for the floating launcher FAB.
@@ -2556,7 +2578,25 @@ export function FloatingChat({
             }
             sendLabel={t.send}
             slotAttachments={
-              <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+              <>
+                <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
+                {rec.status !== "idle" ? (
+                  <p
+                    className={
+                      rec.status === "error"
+                        ? "px-1 py-0.5 text-xs text-destructive"
+                        : "px-1 py-0.5 text-xs text-muted-foreground"
+                    }
+                    role="status"
+                  >
+                    {rec.status === "uploading"
+                      ? tRec.uploading
+                      : rec.status === "processing"
+                        ? tRec.processing
+                        : rec.message}
+                  </p>
+                ) : null}
+              </>
             }
             slotPreInput={
               <>

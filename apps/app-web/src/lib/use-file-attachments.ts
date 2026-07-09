@@ -27,8 +27,21 @@
 
 import * as React from "react";
 import { authFetch } from "@/lib/auth-fetch";
+import { useT } from "@/lib/i18n/client";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+
+/**
+ * Client-side upload ceiling. Mirrors the backend `MAX_FILE_SIZE` in
+ * `packages/api/src/routes/files.ts` (20 MB) so an oversized file is rejected
+ * with a clear chip here instead of dying as an opaque Cloud Run 413 (its
+ * platform 32 MiB request cap) or a generic 500 from the multer limit. Video is
+ * rejected regardless of size (the route's mime allowlist excludes `video/`);
+ * a host that supplies `onRouteMedia` diverts video to the recordings pipeline
+ * (direct-to-GCS + transcription) instead. See docs/architecture/features/files.md
+ * -> "Client-side upload guard" and docs/architecture/media/transcription.md.
+ */
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 type AttachmentStatus = "uploading" | "done" | "error";
 
@@ -110,6 +123,50 @@ export function readyFileIds(attachments: ReadonlyArray<Attachment>): string[] {
     .map((a) => a.fileId!);
 }
 
+/** Why a file was kept out of the `/api/files/upload` POST. */
+export type RejectReason = "too_large" | "video_unsupported";
+
+export type PartitionedUpload = {
+  /** Files that go through the normal cache upload. */
+  attach: File[];
+  /** Video handed to the recordings pipeline (only when the host can route). */
+  media: File[];
+  /** Files never POSTed — surfaced as clear error chips instead of a 413. */
+  rejected: Array<{ file: File; reason: RejectReason }>;
+};
+
+/**
+ * Split a picked/dropped/pasted batch into the three upload lanes. Pure so it
+ * unit-tests without a DOM (same stance as the reconciliation helpers above).
+ *
+ * - `video/*` → `media` when `canRouteMedia` (a host wired `onRouteMedia`);
+ *   otherwise `rejected` as `video_unsupported` (the cache route's mime
+ *   allowlist excludes video, so it could never attach here anyway).
+ * - non-video over `maxBytes` → `rejected` as `too_large`.
+ * - everything else → `attach` (the unchanged POST path).
+ */
+export function partitionUpload(
+  files: readonly File[],
+  opts: { maxBytes: number; canRouteMedia: boolean },
+): PartitionedUpload {
+  const attach: File[] = [];
+  const media: File[] = [];
+  const rejected: PartitionedUpload["rejected"] = [];
+  for (const file of files) {
+    const isVideo = file.type.startsWith("video/");
+    if (isVideo && opts.canRouteMedia) {
+      media.push(file);
+    } else if (isVideo) {
+      rejected.push({ file, reason: "video_unsupported" });
+    } else if (file.size > opts.maxBytes) {
+      rejected.push({ file, reason: "too_large" });
+    } else {
+      attach.push(file);
+    }
+  }
+  return { attach, media, rejected };
+}
+
 /**
  * The image files carried by a clipboard paste — but ONLY when the paste has
  * no plain-text payload. This is the standard "paste a screenshot / copied
@@ -138,20 +195,59 @@ export function imageFilesFromClipboard(
  *   cached against (e.g. a comment thread's `sessionId`). Read lazily on each
  *   upload so a session adopted mid-conversation is picked up. The `fileId`
  *   itself is session-agnostic on the read path, so this is best-effort.
+ * @param opts.maxBytes Reject non-video files over this size before POSTing
+ *   (default {@link MAX_ATTACHMENT_BYTES}). Guards against the opaque Cloud Run
+ *   413 / multer 500.
+ * @param opts.onRouteMedia When set, `video/*` files are diverted here (e.g. the
+ *   recordings transcription pipeline) instead of the cache upload, and no chip
+ *   is staged for them. When absent, video is rejected as unsupported-here.
  */
 export function useFileAttachments(
   getSessionId?: () => string | undefined,
+  opts?: { maxBytes?: number; onRouteMedia?: (files: File[]) => void },
 ): FileAttachmentsApi {
+  const t = useT();
   const [attachments, setAttachments] = React.useState<Attachment[]>([]);
 
-  // Keep the accessor in a ref so `upload` stays referentially stable.
+  // Keep accessors/config in refs so `upload` stays referentially stable.
   const sessionIdRef = React.useRef(getSessionId);
   sessionIdRef.current = getSessionId;
+  const optsRef = React.useRef(opts);
+  optsRef.current = opts;
+  const rejectCopyRef = React.useRef(t.attachments);
+  rejectCopyRef.current = t.attachments;
 
   const upload = React.useCallback(async (fileList: FileList | File[]) => {
-    const files = Array.from(fileList);
-    if (files.length === 0) return;
+    const all = Array.from(fileList);
+    if (all.length === 0) return;
 
+    const { attach, media, rejected } = partitionUpload(all, {
+      maxBytes: optsRef.current?.maxBytes ?? MAX_ATTACHMENT_BYTES,
+      canRouteMedia: !!optsRef.current?.onRouteMedia,
+    });
+
+    // Divert video to the host's media pipeline (recordings). No chip staged —
+    // that flow owns its own cost-confirm + status UI.
+    if (media.length > 0) optsRef.current?.onRouteMedia?.(media);
+
+    // Guard: rejected files never POST; they surface as clear error chips so the
+    // user gets a message instead of an opaque 413 / silent failure.
+    if (rejected.length > 0) {
+      const copy = rejectCopyRef.current;
+      const rejectedChips: Attachment[] = rejected.map(({ file, reason }) => ({
+        localId: crypto.randomUUID(),
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        sizeBytes: file.size,
+        status: "error" as const,
+        error: reason === "too_large" ? copy.tooLarge : copy.videoUnsupported,
+      }));
+      setAttachments((prev) => [...prev, ...rejectedChips]);
+    }
+
+    if (attach.length === 0) return;
+
+    const files = attach;
     const staged: Attachment[] = files.map((f) => ({
       localId: crypto.randomUUID(),
       fileName: f.name,
