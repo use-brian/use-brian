@@ -6,6 +6,8 @@ export {
   uploadAudioToGeminiFiles,
   parseTranscriptLines,
   mergeUtterances,
+  stripDegenerateTail,
+  stripDegenerateUtterances,
   type TranscribedUtterance,
   type RecordingTranscriptionResult,
   type TranscribeRecordingOptions,

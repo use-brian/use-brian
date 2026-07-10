@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import {
   parseTranscriptLines,
   mergeUtterances,
+  stripDegenerateTail,
+  stripDegenerateUtterances,
   transcribeRecording,
   type TranscribedUtterance,
 } from './transcribe-recording.js'
@@ -67,10 +69,83 @@ describe('[COMP:media/transcribe-recording] mergeUtterances', () => {
   })
 })
 
+describe('[COMP:media/transcribe-recording] stripDegenerateTail', () => {
+  it('leaves normal transcript text untouched', () => {
+    const text = [
+      '[0:00:00] Speaker 1: Hello and welcome, welcome back everyone.',
+      '[0:00:08] Speaker 2: Thanks, thanks. Happy to be here today.',
+    ].join('\n')
+    expect(stripDegenerateTail(text)).toEqual({ text, degenerate: false })
+  })
+
+  it('cuts a CJK filler loop at its start, keeping the clean line head', () => {
+    const clean = '[0:00:05] Speaker 1: 應該差多八年,我主要啦,就做,'
+    const res = stripDegenerateTail(clean + '就,'.repeat(60))
+    expect(res.degenerate).toBe(true)
+    expect(res.text.startsWith('[0:00:05] Speaker 1: 應該差多八年')).toBe(true)
+    expect(res.text).not.toContain('就,就,就,就,就')
+  })
+
+  it('cuts a multi-word English loop (longer period)', () => {
+    const res = stripDegenerateTail('[0:00:01] A: he said ' + 'you know, '.repeat(30))
+    expect(res.degenerate).toBe(true)
+    expect(res.text.length).toBeLessThan(60)
+  })
+
+  it('tolerates natural short repetition below the threshold', () => {
+    const text = '[0:00:01] A: no, no, no, no, no, that is not what I meant.'
+    expect(stripDegenerateTail(text)).toEqual({ text, degenerate: false })
+  })
+})
+
+describe('[COMP:media/transcribe-recording] stripDegenerateUtterances', () => {
+  const utt = (startMs: number, speaker: string, text: string): TranscribedUtterance => ({
+    startMs,
+    endMs: startMs,
+    speaker,
+    text,
+  })
+
+  it('leaves varied real speech untouched', () => {
+    const u = Array.from({ length: 30 }, (_, i) => utt(i * 1000, `Speaker ${(i % 2) + 1}`, `utterance number ${i}`))
+    expect(stripDegenerateUtterances(u)).toEqual({ utterances: u, degenerate: false })
+  })
+
+  it('cuts a run of identical texts at the start of the run', () => {
+    const clean = [utt(0, 'A', 'hello.'), utt(2000, 'B', 'hi there.')]
+    const loop = Array.from({ length: 12 }, (_, i) => utt(3000 + i * 1000, 'A', '其實最辛苦的幾年。'))
+    const res = stripDegenerateUtterances([...clean, ...loop])
+    expect(res.degenerate).toBe(true)
+    expect(res.utterances).toEqual(clean)
+  })
+
+  it('catches two phrases alternating with drifting timestamps and speakers (2026-07-10 shape)', () => {
+    const clean = [utt(0, 'A', 'real opening line.')]
+    const loop = Array.from({ length: 20 }, (_, i) =>
+      utt(1000 + i * 997, `Speaker ${(i % 2) + 1}`, i % 2 === 0 ? '其實最辛苦的幾年。' : '我覺得最辛苦的幾年。'),
+    )
+    const res = stripDegenerateUtterances([...clean, ...loop])
+    expect(res.degenerate).toBe(true)
+    expect(res.utterances).toEqual(clean)
+  })
+
+  it('tolerates a genuinely repeated phrase below both thresholds', () => {
+    const u = [
+      utt(0, 'A', 'okay.'),
+      utt(1000, 'B', 'okay.'),
+      utt(2000, 'A', 'okay.'),
+      utt(3000, 'B', 'so, moving on to pricing.'),
+      utt(4000, 'A', 'sounds good.'),
+    ]
+    expect(stripDegenerateUtterances(u)).toEqual({ utterances: u, degenerate: false })
+  })
+})
+
 describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
   function makeMockFetch(windowTexts: Array<{ text: string; finishReason: string }>) {
     let gen = 0
     const calls: string[] = []
+    const generateBodies: Array<{ prompt: string; temperature: number }> = []
     const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url)
       calls.push(u)
@@ -84,6 +159,14 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
         )
       }
       if (u.includes(':streamGenerateContent')) {
+        const req = JSON.parse(String(init?.body ?? '{}')) as {
+          contents?: Array<{ parts?: Array<{ text?: string }> }>
+          generationConfig?: { temperature?: number }
+        }
+        generateBodies.push({
+          prompt: req.contents?.[0]?.parts?.[0]?.text ?? '',
+          temperature: req.generationConfig?.temperature ?? -1,
+        })
         const w = windowTexts[Math.min(gen, windowTexts.length - 1)]
         gen++
         // SSE wire shape: the text arrives split across chunks (proving the
@@ -103,7 +186,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       }
       throw new Error('unexpected fetch url: ' + u)
     }) as unknown as typeof fetch
-    return { fetchFn, calls: () => calls }
+    return { fetchFn, calls: () => calls, generateBodies: () => generateBodies }
   }
 
   it('stitches a MAX_TOKENS window with its STOP continuation, covering the audio', async () => {
@@ -162,5 +245,113 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     })
     expect(res.truncated).toBe(true)
     expect(res.windows).toBe(1) // STOP -> no continuation attempted
+  })
+
+  it('retries a degenerate window with the temperature nudge and recovers coverage', async () => {
+    const degenerateWindow = {
+      text: [
+        '[0:00:00] Speaker 1: Hello and welcome to the call.',
+        '[0:00:08] Speaker 2: Thanks, happy to be here.',
+        '[0:00:15] Speaker 1: ' + '就,'.repeat(80), // the loop
+      ].join('\n'),
+      finishReason: 'STOP', // retry must trigger on degeneration even on STOP
+    }
+    const nudgedRetry = {
+      text: [
+        '[0:00:08] Speaker 2: Thanks, happy to be here.', // re-emitted seam — dropped
+        '[0:01:30] Speaker 2: We can offer a 10 percent discount.',
+        '[0:01:58] Speaker 1: Great, we will finalize by Friday.',
+      ].join('\n'),
+      finishReason: 'STOP',
+    }
+    const { fetchFn, generateBodies } = makeMockFetch([degenerateWindow, nudgedRetry])
+
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 120_000,
+      fetchFn,
+    })
+
+    expect(res.degenerateWindows).toBe(1)
+    expect(res.windows).toBe(2)
+    expect(res.truncated).toBe(false)
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'Hello and welcome to the call.',
+      'Thanks, happy to be here.',
+      'We can offer a 10 percent discount.',
+      'Great, we will finalize by Friday.',
+    ])
+    // First window is greedy; the retry carries the nudge.
+    expect(generateBodies()[0].temperature).toBe(0)
+    expect(generateBodies()[0].prompt).not.toContain('repeating a filler word')
+    expect(generateBodies()[1].temperature).toBe(0.3)
+    expect(generateBodies()[1].prompt).toContain('repeating a filler word')
+    expect(generateBodies()[1].prompt).toContain('AFTER 0:00:08') // resumes from last clean line
+  })
+
+  it('retries a line-level loop with hallucinated timestamps instead of treating it as coverage', async () => {
+    // The 2026-07-10 live shape: one real line, then the same sentence re-emitted
+    // for hundreds of lines with timestamps drifting far past the audio end. The
+    // hallucinated timestamps must NOT satisfy the coverage check (that would
+    // bill garbage); the loop must be cut and the window retried.
+    const loopLines = Array.from({ length: 40 }, (_, i) => {
+      const totalS = 10 + i * 30 // climbs to 0:20:10 — audio is only 10 min
+      const m = Math.floor(totalS / 60)
+      const s = totalS % 60
+      return `[0:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}] Speaker ${(i % 2) + 1}: 其實最辛苦的幾年。`
+    })
+    const degenerateWindow = {
+      text: ['[0:00:02] Speaker 1: real content here.', ...loopLines].join('\n'),
+      finishReason: 'STOP',
+    }
+    const nudgedRetry = {
+      text: ['[0:00:02] Speaker 1: real content here.', '[0:05:00] Speaker 2: middle of the call.', '[0:09:50] Speaker 1: wrapping up now.'].join('\n'),
+      finishReason: 'STOP',
+    }
+    const { fetchFn, generateBodies } = makeMockFetch([degenerateWindow, nudgedRetry])
+
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 600_000,
+      fetchFn,
+    })
+
+    expect(res.degenerateWindows).toBe(1)
+    expect(res.windows).toBe(2)
+    expect(res.truncated).toBe(false)
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'real content here.',
+      'middle of the call.',
+      'wrapping up now.',
+    ])
+    // The retry resumed from the last CLEAN utterance, not the hallucinated tail.
+    expect(generateBodies()[1].prompt).toContain('AFTER 0:00:02')
+    expect(generateBodies()[1].temperature).toBe(0.3)
+  })
+
+  it('gives up on an unrecoverable loop and marks the transcript truncated', async () => {
+    const loop = '[0:00:05] Speaker 1: ' + '就,'.repeat(80)
+    const first = { text: '[0:00:02] Speaker 1: hello there.\n' + loop, finishReason: 'STOP' }
+    const stuckRetry = { text: '[0:00:02] Speaker 1: hello there.\n' + loop, finishReason: 'STOP' }
+    const { fetchFn, calls } = makeMockFetch([first, stuckRetry])
+
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 600_000,
+      fetchFn,
+    })
+
+    // Nudged retry made no forward progress at the same seam -> stop, do not spin.
+    expect(res.windows).toBe(2)
+    expect(res.degenerateWindows).toBe(2)
+    expect(res.truncated).toBe(true) // -> caller bills 0
+    expect(res.utterances.map((u) => u.text)).toEqual(['hello there.'])
+    expect(calls().filter((u) => u.includes(':streamGenerateContent'))).toHaveLength(2)
   })
 })

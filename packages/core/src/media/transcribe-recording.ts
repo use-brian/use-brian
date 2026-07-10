@@ -31,9 +31,31 @@
  * neither idle cutoff can fire; the per-window AbortController bounds
  * total stream time instead.
  *
- * Pure helpers (`parseTranscriptLines`, `mergeUtterances`) carry the parsing /
- * seam-dedup logic and unit-test without a network. The network calls take an
- * injectable `fetchFn`.
+ * Why degeneration detect-and-retry: at temperature 0 (greedy decoding) the
+ * model can lock into a repetition loop instead of transcribing — observed on
+ * long Cantonese WhatsApp recordings (2026-07-10, both test files) in two
+ * distinct shapes, so there are two detectors:
+ *   1. Character-level (`stripDegenerateTail`): one line loops a short filler
+ *      token forever (「就,就,就,…」). Periodic at the char level; scan each
+ *      window's raw text for a short unit repeated past a threshold.
+ *   2. Line-level (`stripDegenerateUtterances`): whole lines loop — the same
+ *      sentence re-emitted across thousands of utterances with drifting
+ *      timestamps and alternating speakers, so no short char period exists.
+ *      Detected as a stretch of utterances with (almost) no distinct texts.
+ *      That run also hallucinated timestamps to 291 min on a 96-min file, so
+ *      utterances past the audio end are dropped BEFORE the coverage math —
+ *      otherwise a looping transcript "covers" the audio and gets billed.
+ * On detection the looping tail is cut at the last clean utterance and the
+ * window is retried (bounded per recording) with a small temperature bump +
+ * an anti-repetition prompt note — greedy decoding is exactly the sticky
+ * setting, so sampling usually breaks the cycle. An unrecoverable loop stops
+ * the run and falls through to the existing coverage math: the transcript is
+ * `truncated`, so the caller bills nothing (charge-on-full-coverage).
+ *
+ * Pure helpers (`parseTranscriptLines`, `mergeUtterances`,
+ * `stripDegenerateTail`, `stripDegenerateUtterances`) carry the parsing /
+ * seam-dedup / loop-detection logic and unit-test without a network. The
+ * network calls take an injectable `fetchFn`.
  *
  * Spec: docs/architecture/media/transcription.md §Architecture(b).
  */
@@ -52,6 +74,23 @@ const DEFAULT_TIMEOUT_MS = 600_000
 const MAX_SSE_BUFFER_BYTES = 8 * 1024 * 1024
 const MAX_CONTINUATION_WINDOWS = 12
 const COVERAGE_TOLERANCE_MS = 30_000 // last line within 30s of the end = "covered"
+// Degeneration guard: a window whose text repeats a short unit (period ≤ 16
+// chars) for ≥ 64 consecutive matching chars is looping, not transcribing.
+// 64 chars of exact short-period repetition never occurs in real speech text.
+const DEGEN_MAX_PERIOD = 16
+const DEGEN_MIN_RUN_CHARS = 64
+// Line-level loop guard: 8 consecutive identical utterance texts, or a window
+// of 16 utterances with ≤ 2 distinct texts (catches two phrases alternating),
+// is a loop — real speech never sustains that.
+const DEGEN_IDENTICAL_RUN = 8
+const DEGEN_UTTERANCE_WINDOW = 16
+const DEGEN_MAX_DISTINCT_IN_WINDOW = 2
+// A degenerate window is retried from its last clean utterance with this
+// temperature (greedy temperature-0 decoding is what makes loops sticky).
+const DEGEN_RETRY_TEMPERATURE = 0.3
+// Total nudged retries per recording — bounds the extra COGS a pathological
+// file can burn.
+const MAX_DEGEN_RETRIES = 2
 const FILE_ACTIVE_POLL_MS = 2_000
 const FILE_ACTIVE_MAX_POLLS = 60 // up to 2 min for the file to become ACTIVE
 
@@ -80,6 +119,8 @@ export type RecordingTranscriptionResult = {
   windows: number
   /** True when the last utterance fell short of the audio end (coverage gap). */
   truncated: boolean
+  /** Windows whose output hit the degeneration guard (loop cut + maybe retried). */
+  degenerateWindows: number
 }
 
 const LINE_RE = /^\[(\d+):(\d{2}):(\d{2})\]\s*([^:]+?):\s*(.+)$/
@@ -135,6 +176,65 @@ export function mergeUtterances(
   const merged = [...prev]
   merged[merged.length - 1] = { ...merged[merged.length - 1], endMs: Math.max(lastStart, fresh[0].startMs) }
   return [...merged, ...fresh]
+}
+
+/**
+ * Detect a degeneration loop — a short unit (≤ `DEGEN_MAX_PERIOD` chars, e.g.
+ * 「就,」) repeated consecutively for ≥ `DEGEN_MIN_RUN_CHARS` matching chars —
+ * and cut the text at the start of the earliest loop. Everything before the
+ * cut is real transcript (a loop that starts mid-line leaves the line's clean
+ * prefix parseable). Pure; linear scan per period.
+ */
+export function stripDegenerateTail(text: string): { text: string; degenerate: boolean } {
+  let cutAt = -1
+  for (let p = 1; p <= DEGEN_MAX_PERIOD; p++) {
+    const need = Math.max(DEGEN_MIN_RUN_CHARS, p * 6)
+    let run = 0 // consecutive positions where text[i] repeats text[i - p]
+    for (let i = p; i < text.length; i++) {
+      run = text[i] === text[i - p] ? run + 1 : 0
+      if (run >= need) {
+        const start = i - run - p + 1 // include the template unit itself
+        if (cutAt === -1 || start < cutAt) cutAt = start
+        break // earliest hit for this period; smaller periods may still cut earlier
+      }
+    }
+  }
+  if (cutAt === -1) return { text, degenerate: false }
+  return { text: text.slice(0, cutAt), degenerate: true }
+}
+
+/**
+ * Detect a line-level loop — the model re-emitting the same sentence(s) as
+ * fresh utterances (timestamps drift, speakers alternate, so the char-level
+ * scan can't see it). Two triggers: `DEGEN_IDENTICAL_RUN` consecutive
+ * identical texts, or `DEGEN_UTTERANCE_WINDOW` consecutive utterances with
+ * ≤ `DEGEN_MAX_DISTINCT_IN_WINDOW` distinct texts. Cuts at the loop's start
+ * (dropping the whole run — the retry re-covers from the last clean line).
+ * Pure.
+ */
+export function stripDegenerateUtterances(
+  utterances: TranscribedUtterance[],
+): { utterances: TranscribedUtterance[]; degenerate: boolean } {
+  let cutAt = -1
+  let run = 1
+  for (let i = 1; i < utterances.length; i++) {
+    run = utterances[i].text === utterances[i - 1].text ? run + 1 : 1
+    if (run >= DEGEN_IDENTICAL_RUN) {
+      cutAt = i - run + 1
+      break
+    }
+  }
+  if (cutAt === -1) {
+    for (let i = 0; i + DEGEN_UTTERANCE_WINDOW <= utterances.length; i++) {
+      const distinct = new Set(utterances.slice(i, i + DEGEN_UTTERANCE_WINDOW).map((u) => u.text))
+      if (distinct.size <= DEGEN_MAX_DISTINCT_IN_WINDOW) {
+        cutAt = i
+        break
+      }
+    }
+  }
+  if (cutAt === -1) return { utterances, degenerate: false }
+  return { utterances: utterances.slice(0, cutAt), degenerate: true }
 }
 
 function lastTimestampMs(utterances: TranscribedUtterance[]): number {
@@ -247,15 +347,19 @@ async function generateWindow(
   opts: TranscribeRecordingOptions,
   fileUri: string,
   continueFromMs: number | null,
+  degenNudge: boolean,
 ): Promise<{ text: string; finishReason: string; usage: TokenUsage | null }> {
   const fetchFn = opts.fetchFn ?? fetch
   const model = opts.model ?? DEFAULT_MODEL
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  const prompt =
+  let prompt =
     continueFromMs === null
       ? TRANSCRIBE_PROMPT
       : `${TRANSCRIBE_PROMPT}\n\nThis continues a transcript already produced up to ${formatTimestamp(continueFromMs)}. Resume from the next utterance AFTER ${formatTimestamp(continueFromMs)}. Do NOT repeat earlier lines.`
+  if (degenNudge) {
+    prompt += `\n\nIMPORTANT: a previous attempt got stuck repeating a filler word over and over. Never repeat a word or phrase more than three times in a row; if a passage is repetitive filler or unclear, write [inaudible] as the text and move on to the next utterance.`
+  }
 
   const body = {
     contents: [
@@ -264,7 +368,12 @@ async function generateWindow(
         parts: [{ text: prompt }, { file_data: { mime_type: opts.mime, file_uri: fileUri } }],
       },
     ],
-    generationConfig: { temperature: 0, maxOutputTokens: opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS },
+    generationConfig: {
+      // Greedy (0) is the fidelity default, but it is exactly what makes a
+      // repetition loop sticky — the retry samples its way out of the cycle.
+      temperature: degenNudge ? DEGEN_RETRY_TEMPERATURE : 0,
+      maxOutputTokens: opts.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+    },
   }
 
   // Stream (SSE) so the socket carries bytes from the first tokens — see the
@@ -364,18 +473,49 @@ export async function transcribeRecording(
   const model = opts.model ?? DEFAULT_MODEL
   let windows = 0
   let continueFrom: number | null = null
+  let degenerateWindows = 0
+  let degenRetriesLeft = MAX_DEGEN_RETRIES
+  let nudge = false
 
   while (windows < MAX_CONTINUATION_WINDOWS) {
-    const win = await generateWindow(opts, fileUri, continueFrom)
+    const win = await generateWindow(opts, fileUri, continueFrom, nudge)
     windows++
     usages.push({ usage: win.usage, model })
 
-    const parsed = parseTranscriptLines(win.text)
+    // Cut a char-level loop before parsing: the clean prefix (including a
+    // looping line's clean head) is real transcript and is kept.
+    const scan = stripDegenerateTail(win.text)
+    const parsed = parseTranscriptLines(scan.text)
+    // Drop hallucinated timestamps — a line-level loop has drifted timestamps
+    // far past the audio end (291 min claimed on a 96-min file, 2026-07-10);
+    // left in, they satisfy the coverage check and the garbage gets billed.
+    const inRange = parsed.filter((u) => u.startMs <= opts.durationMs + COVERAGE_TOLERANCE_MS)
+    // Then cut a line-level loop (same sentence re-emitted as fresh utterances).
+    const lineScan = stripDegenerateUtterances(inRange)
+    const degenerate = scan.degenerate || lineScan.degenerate
     const before = utterances.length
-    utterances = mergeUtterances(utterances, parsed)
+    utterances = mergeUtterances(utterances, lineScan.utterances)
     const added = utterances.length - before
 
     const reachedEnd = lastTimestampMs(utterances) >= opts.durationMs - COVERAGE_TOLERANCE_MS
+
+    if (degenerate) {
+      degenerateWindows++
+      if (reachedEnd) break
+      // Retry from the last clean utterance with the temperature nudge — but
+      // only while the retry budget lasts AND we are not spinning in place (a
+      // nudged retry that added nothing hit the same wall; give up and let the
+      // coverage math mark the transcript truncated → billed 0).
+      if (degenRetriesLeft > 0 && (added > 0 || !nudge)) {
+        degenRetriesLeft--
+        nudge = true
+        continueFrom = lastTimestampMs(utterances)
+        continue
+      }
+      break
+    }
+    nudge = false
+
     const hitMaxTokens = win.finishReason === 'MAX_TOKENS'
 
     // Stop when the model said it's done, when we've covered the audio, or when
@@ -391,5 +531,5 @@ export async function transcribeRecording(
   }
 
   const truncated = utterances.length === 0 || lastTimestampMs(utterances) < opts.durationMs - COVERAGE_TOLERANCE_MS
-  return { utterances, usages, windows, truncated }
+  return { utterances, usages, windows, truncated, degenerateWindows }
 }
