@@ -333,6 +333,32 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     expect(generateBodies()[1].temperature).toBe(0.3)
   })
 
+  it('retries a transient socket reset on a leg instead of failing the whole run', async () => {
+    const inner = makeMockFetch([
+      { text: '[0:00:02] Speaker 1: short and sweet.', finishReason: 'STOP' },
+    ])
+    // First TWO calls (upload start, then its retry target) reject like undici
+    // does on a connection reset; everything after flows to the normal mock.
+    let failures = 2
+    const flaky = (async (url: string | URL | Request, init?: RequestInit) => {
+      if (failures > 0) {
+        failures--
+        throw new TypeError('fetch failed', { cause: new Error('read ECONNRESET') })
+      }
+      return (inner.fetchFn as typeof fetch)(url as string, init)
+    }) as unknown as typeof fetch
+
+    const res = await transcribeRecording({
+      apiKey: 'k',
+      buffer: Buffer.from('x'),
+      mime: 'audio/mp4',
+      durationMs: 10_000,
+      fetchFn: flaky,
+    })
+    expect(res.utterances.map((u) => u.text)).toEqual(['short and sweet.'])
+    expect(res.truncated).toBe(false)
+  }, 15_000)
+
   it('gives up on an unrecoverable loop and marks the transcript truncated', async () => {
     const loop = '[0:00:05] Speaker 1: ' + '就,'.repeat(80)
     const first = { text: '[0:00:02] Speaker 1: hello there.\n' + loop, finishReason: 'STOP' }

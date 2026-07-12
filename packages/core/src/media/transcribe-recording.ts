@@ -85,6 +85,15 @@ const DEGEN_MIN_RUN_CHARS = 64
 const DEGEN_IDENTICAL_RUN = 8
 const DEGEN_UTTERANCE_WINDOW = 16
 const DEGEN_MAX_DISTINCT_IN_WINDOW = 2
+// Transient-socket retry: undici surfaces a connection reset as an opaque
+// `TypeError: fetch failed` (cause ECONNRESET / UND_ERR_SOCKET "other side
+// closed"). Observed 2026-07-10 as bursts lasting many minutes with a high
+// per-request failure rate — without a per-call retry, one reset kills a
+// whole job attempt and the worker re-uploads everything just to roll the
+// same dice. Retry only when the fetch call ITSELF rejects (no bytes of the
+// response consumed yet) — never mid-stream.
+const TRANSIENT_FETCH_ATTEMPTS = 3
+const TRANSIENT_FETCH_BACKOFF_MS = 2_000
 // A degenerate window is retried from its last clean utterance with this
 // temperature (greedy temperature-0 decoding is what makes loops sticky).
 const DEGEN_RETRY_TEMPERATURE = 0.3
@@ -267,6 +276,33 @@ function extractUsage(meta: GeminiUsageMetadata | undefined): TokenUsage | null 
   }
 }
 
+function isTransientFetchError(err: unknown): boolean {
+  const msg = err instanceof Error ? `${err.message} ${String((err as { cause?: unknown }).cause ?? '')}` : String(err)
+  return /fetch failed|ECONNRESET|UND_ERR_SOCKET|other side closed/i.test(msg)
+}
+
+/**
+ * `fetchFn` with a bounded retry on transient socket resets. Retries ONLY when
+ * the fetch call itself rejects — once a response object exists (even a non-OK
+ * one) the request reached the server and is never replayed. Abort errors are
+ * not retried (the caller's deadline stands).
+ */
+async function fetchWithTransientRetry(
+  fetchFn: typeof fetch,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fetchFn(url, init)
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError'
+      if (aborted || !isTransientFetchError(err) || attempt >= TRANSIENT_FETCH_ATTEMPTS) throw err
+      await new Promise((r) => setTimeout(r, TRANSIENT_FETCH_BACKOFF_MS * attempt))
+    }
+  }
+}
+
 export type TranscribeRecordingOptions = {
   apiKey: string
   /** Raw audio bytes. */
@@ -293,7 +329,7 @@ export async function uploadAudioToGeminiFiles(
   const numBytes = opts.buffer.length
 
   // 1. Start resumable upload — returns the upload URL in a response header.
-  const startRes = await fetchFn(`${FILES_BASE}/upload/v1beta/files`, {
+  const startRes = await fetchWithTransientRetry(fetchFn, `${FILES_BASE}/upload/v1beta/files`, {
     method: 'POST',
     headers: {
       'x-goog-api-key': opts.apiKey,
@@ -311,8 +347,10 @@ export async function uploadAudioToGeminiFiles(
   const uploadUrl = startRes.headers.get('x-goog-upload-url') ?? startRes.headers.get('X-Goog-Upload-URL')
   if (!uploadUrl) throw new Error('Gemini File API start: missing upload URL header')
 
-  // 2. Upload + finalize the bytes in one command.
-  const uploadRes = await fetchFn(uploadUrl, {
+  // 2. Upload + finalize the bytes in one command. (Replaying after a reset is
+  // safe: if the first attempt actually finalized, the single-use upload URL
+  // rejects the replay and we throw — same outcome as not retrying.)
+  const uploadRes = await fetchWithTransientRetry(fetchFn, uploadUrl, {
     method: 'POST',
     headers: {
       'Content-Length': String(numBytes),
@@ -334,7 +372,7 @@ export async function uploadAudioToGeminiFiles(
     if (file.state === 'FAILED') throw new Error('Gemini File API: file processing FAILED')
     if (polls++ >= FILE_ACTIVE_MAX_POLLS) throw new Error('Gemini File API: file did not become ACTIVE in time')
     await new Promise((r) => setTimeout(r, FILE_ACTIVE_POLL_MS))
-    const pollRes = await fetchFn(`${FILES_BASE}/v1beta/${file.name}`, {
+    const pollRes = await fetchWithTransientRetry(fetchFn, `${FILES_BASE}/v1beta/${file.name}`, {
       headers: { 'x-goog-api-key': opts.apiKey },
     })
     if (!pollRes.ok) throw new Error(`Gemini File API poll failed (HTTP ${pollRes.status})`)
@@ -383,7 +421,8 @@ async function generateWindow(
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await fetchFn(
+    const res = await fetchWithTransientRetry(
+      fetchFn,
       `${FILES_BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`,
       {
         method: 'POST',
