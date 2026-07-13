@@ -222,12 +222,15 @@ import { createMemoryRecallEventsStore } from './db/memory-recall-events-store.j
 import { createDbTaskStore } from './db/tasks-store.js'
 import { createDbGoalStore } from './db/goals-store.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
-import { createGoalDriver, type GoalLoopState } from './goals/driver.js'
+import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
+import { createGoalStallReaper } from './goals/reaper.js'
 import { createGoalWorkTools } from './goals/work-tools.js'
 import { gatherGoalEvidence } from './goals/evidence.js'
 import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
+  getGoalByIdSystem,
+  updateGoalSystem,
   getGoalAwaitingEventSystem,
   setGoalAwaitingEventSystem,
   clearGoalAwaitingEventSystem,
@@ -825,6 +828,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
     if (!goal.createdByUserId) return
+    // Terminal analytics (goal_done / goal_blocked): this seam is the one place
+    // BOTH terminal paths (acting loop + structural rollup) converge, so the
+    // taxonomy is covered without touching either loop. Emit before the channel
+    // delivery so a delivery failure never loses the event.
+    analytics.logEvent({
+      userId: goal.createdByUserId,
+      channelType: 'workflow',
+      eventName: terminal === 'done' ? 'goal_done' : 'goal_blocked',
+      metadata: {
+        goal_id: sanitizeAnalytics(goal.id),
+        ...(reason ? { reason: sanitizeAnalytics(reason) } : {}),
+      },
+    })
     const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
     if (!assistantId) return
     const text =
@@ -1733,6 +1749,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       }
     : undefined
+  // The goal-tick writer, shared by the driver's re-arm and the stall reaper's
+  // recovery re-arm. A goal tick intentionally carries NO workflow_id — see
+  // driver.ts GOAL_TICK_KIND.
+  const scheduleGoalTick = async (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> => {
+    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+    if (!assistantId) {
+      // A workspace with no primary assistant cannot re-arm — log loudly, the
+      // stall reaper will keep retrying rather than the chain dying silently.
+      console.error(`[goals] cannot arm tick for goal ${goal.id}: workspace ${goal.workspaceId} has no primary assistant`)
+      return
+    }
+    await jobStore.create({
+      assistantId,
+      userId: goal.createdByUserId ?? assistantId,
+      schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
+      timezone: 'UTC',
+      mode: 'local',
+      instructions: JSON.stringify({ kind: GOAL_TICK_KIND, goalId: goal.id, state }),
+      channelType: 'workflow',
+      channelId: goal.id,
+      nextRunAt: fireAt,
+    })
+  }
+
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
@@ -1810,19 +1850,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     },
     deliver: deliverGoalTerminal,
-    scheduleGoalTick: async (goal, fireAt, state) => {
-      const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
-      if (!assistantId) return
-      await jobStore.create({
-        assistantId,
-        userId: goal.createdByUserId ?? assistantId,
-        schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
-        timezone: 'UTC',
-        mode: 'local',
-        instructions: JSON.stringify({ kind: 'goal_tick', goalId: goal.id, state }),
+    scheduleGoalTick,
+    // No unbudgeted autonomy: kickoff persists the default budget when the
+    // author set none (see driver.ts DEFAULT_GOAL_BUDGET).
+    applyDefaultBudget: (goalId, budget) => updateGoalSystem(goalId, { budget }),
+    // Tick-error observability (the driver handled the error — this is the
+    // taxonomy's goal_tick_error, not a failure path).
+    onTickError: (goal, error, willRetry) => {
+      if (!goal.createdByUserId) return
+      const msg = error instanceof Error ? error.message : String(error)
+      analytics.logEvent({
+        userId: goal.createdByUserId,
         channelType: 'workflow',
-        channelId: goal.id,
-        nextRunAt: fireAt,
+        eventName: 'goal_tick_error',
+        metadata: {
+          goal_id: sanitizeAnalytics(goal.id),
+          error_message: sanitizeAnalytics(msg.slice(0, 200)),
+          will_retry: willRetry,
+        },
       })
     },
     // until:event park persistence (mig 293). The store keeps `state` opaque; the
@@ -2407,6 +2452,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       saveFileToBrain: fileTools.saveFileToBrain,
       saveFileBytes: fileTools.saveFileBytes,
     }
+
     // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
     // port; open default leaves it null (no /api/files/ingest ingest).
     if (ports.buildFileIngestor && brainEpisodeIngestor) {
@@ -3551,18 +3597,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const jobExecutor = createJobExecutor({
     jobStore,
     analytics,
+    // A goal tick carries no `workflow_id` by design; exempt it from the
+    // executor's straggler invariant so it reaches `runWorkflowFromJob` below
+    // (single source of truth for the shape is `parseGoalTick`).
+    isDelegateHandledWithoutWorkflow: (job) => parseGoalTick(job.instructions) !== null,
     runWorkflowFromJob: async (job) => {
       // Goal-tick (acting loop, R1): the job carries no workflowId/stepRunId —
       // the goal's own means.workflowId is what each iteration runs. The
       // poll-worker's once-job handling deletes this row after we return, and
       // the tick's own re-arm writes the next one-shot (or terminates).
-      let goalTick: { goalId: string; state?: GoalLoopState } | null = null
-      try {
-        const p = JSON.parse(job.instructions) as { kind?: string; goalId?: string; state?: GoalLoopState }
-        if (p.kind === 'goal_tick' && p.goalId) goalTick = { goalId: p.goalId, state: p.state }
-      } catch {
-        /* not JSON / not a goal tick — fall through to the workflow paths */
-      }
+      const goalTick = parseGoalTick(job.instructions)
       if (goalTick) {
         await goalDriver.tickGoal(goalTick.goalId, goalTick.state)
         return `goal tick: ${goalTick.goalId}`
@@ -4180,6 +4224,29 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       publishSessionEvent({ kind: 'turn_completed', sessionId, payload: { senderUserId: 'sweeper' } }),
   })
   if (runWorkers) stuckSessionSweeper.start()
+
+  // ── Goal stall reaper ──
+  // The acting loop's external watchdog: recovers goals wedged `running` by a
+  // crash mid-tick and confirmed acting goals whose re-arm chain died. See
+  // goals.md → "Stall recovery — the goal reaper".
+  const goalStallReaper = createGoalStallReaper({
+    rearm: async (goalId) => {
+      const goal = await getGoalByIdSystem(goalId)
+      if (goal) await scheduleGoalTick(goal, new Date(), INITIAL_GOAL_LOOP_STATE)
+    },
+    onRecovered: ({ id, sweep }) => {
+      void getGoalByIdSystem(id).then((goal) => {
+        if (!goal?.createdByUserId) return
+        analytics.logEvent({
+          userId: goal.createdByUserId,
+          channelType: 'workflow',
+          eventName: 'goal_stall_recovered',
+          metadata: { goal_id: sanitizeAnalytics(id), sweep: sanitizeAnalytics(sweep) },
+        })
+      }).catch(() => {})
+    },
+  })
+  if (runWorkers) goalStallReaper.start()
 
   // ── Views auto-prune worker ──
   const viewsPruneWorker = createViewsPruneWorker({ savedViewStore })

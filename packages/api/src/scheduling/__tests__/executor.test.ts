@@ -113,6 +113,59 @@ describe('[COMP:scheduling/trigger-orchestration] Trigger-orchestration runner',
     expect(runWorkflowFromJob).not.toHaveBeenCalled()
   })
 
+  it('delegates a goal-tick job (no workflow_id, exempted) instead of failing the invariant', async () => {
+    // Regression for the 2026-07-13 autopilot stall: a goal tick carries no
+    // workflow_id by design (the goal's means.workflowId drives each
+    // iteration). The `isDelegateHandledWithoutWorkflow` exemption must let it
+    // reach the delegate rather than dying at the straggler invariant.
+    const logEvent = vi.fn()
+    const runWorkflowFromJob = vi.fn().mockResolvedValue('goal tick: g_1')
+    const executor = createJobExecutor({
+      jobStore: makeJobStore(),
+      analytics: { logEvent } as never,
+      runWorkflowFromJob,
+      isDelegateHandledWithoutWorkflow: (job) => {
+        try {
+          return (JSON.parse(job.instructions) as { kind?: string }).kind === 'goal_tick'
+        } catch {
+          return false
+        }
+      },
+    })
+
+    const goalTickJob: ScheduledJob = {
+      ...baseJob,
+      workflowId: null,
+      schedule: { type: 'once', datetime: '2026-07-13T16:22:58' },
+      instructions: JSON.stringify({ kind: 'goal_tick', goalId: 'g_1' }),
+      channelType: 'workflow',
+      channelId: 'g_1',
+    }
+    const result = await executor(goalTickJob)
+
+    expect(runWorkflowFromJob).toHaveBeenCalledWith(goalTickJob)
+    expect(result).toBe('goal tick: g_1')
+    // It ran the delegate to completion — no invariant failure was emitted.
+    const failed = logEvent.mock.calls.find(([e]) => e?.eventName === 'scheduled_job.failed')
+    expect(failed).toBeUndefined()
+  })
+
+  it('still fails loudly for a no-workflow_id straggler the exemption rejects', async () => {
+    // The exemption is narrow: a row that is NOT a goal tick still trips the
+    // invariant, preserving the loud-fail for genuine pre-migration stragglers.
+    const runWorkflowFromJob = vi.fn()
+    const executor = createJobExecutor({
+      jobStore: makeJobStore(),
+      runWorkflowFromJob,
+      isDelegateHandledWithoutWorkflow: () => false,
+    })
+
+    const result = await executor({ ...baseJob, workflowId: null, instructions: 'Check the weather' })
+
+    expect(result).toContain('post-cutover invariant violation')
+    expect(runWorkflowFromJob).not.toHaveBeenCalled()
+  })
+
   it('opens activeNag on a nag-enabled parent and advances its own next_run_at by nagIntervalMins (no follow-up row)', async () => {
     const jobStore = makeJobStore()
     const executor = createJobExecutor({

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import type { EventSubscription, GoalRecord, GoalStore } from '@sidanclaw/core'
 import {
   createGoalDriver,
+  DEFAULT_GOAL_BUDGET,
   type DispatchRunResult,
   type GoalAwaitingEvent,
   type GoalDriverDeps,
@@ -133,7 +134,7 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     expect(h.statuses.at(-1)).toEqual({ status: 'active', reason: null }) // continue → active
     expect(h.ticks).toHaveLength(1)
     expect(h.ticks[0].fireAt).toEqual(NOW) // now
-    expect(h.ticks[0].state).toEqual({ iteration: 1, spend: 0, noProgressStreak: 0, runId: null })
+    expect(h.ticks[0].state).toEqual({ iteration: 1, spend: 0, noProgressStreak: 0, runId: null, errorStreak: 0 })
     expect(h.delivered).toHaveLength(0)
   })
 
@@ -246,7 +247,7 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     // loop state (so the budget counters survive the wait).
     const marker = h.awaiting.get('g1')
     expect(marker?.subscriptions).toEqual([SUB])
-    expect(marker?.state).toEqual({ iteration: 1, spend: 0, noProgressStreak: 0, runId: null })
+    expect(marker?.state).toEqual({ iteration: 1, spend: 0, noProgressStreak: 0, runId: null, errorStreak: 0 })
 
     // Status active (continue), and the re-arm is the FAR safety net (now + 1h),
     // NOT the 60s paused-run poll.
@@ -307,5 +308,94 @@ describe('[COMP:workflow/goal-seeker] goal driver tick', () => {
     const { driver, h } = makeDriver({ awaitingSeed: {} }) // no marker
     await driver.resumeOnEvent('g1')
     expect(h.ticks).toHaveLength(0) // nothing scheduled — a concurrent tick already owns it
+  })
+})
+
+describe('[COMP:goals/tick-resilience] tick error resilience + default budget', () => {
+  const boom = new Error('provider exploded')
+
+  it('an errored tick releases the claim (active) and re-arms with backoff carrying errorStreak — never a dead chain', async () => {
+    const { driver, h } = makeDriver({
+      overrides: { dispatchRun: async () => { throw boom } },
+    })
+    await expect(driver.tickGoal('g1', { iteration: 2, spend: 0.3, noProgressStreak: 1, runId: null })).resolves.toBeUndefined()
+    // Claim released — the goal is claimable again, never wedged in `running`.
+    expect(h.statuses.at(-1)).toEqual({ status: 'active', reason: null })
+    // Re-armed on the error backoff (streak 1 → 60s), iteration/spend/streak carried unchanged.
+    expect(h.ticks).toHaveLength(1)
+    expect(h.ticks[0].fireAt.getTime()).toBe(NOW.getTime() + 60_000)
+    expect(h.ticks[0].state).toEqual({ iteration: 2, spend: 0.3, noProgressStreak: 1, runId: null, errorStreak: 1 })
+    expect(h.delivered).toHaveLength(0) // not terminal — no message
+  })
+
+  it('backoff doubles with the carried errorStreak (capped at 15 min)', async () => {
+    const { driver, h } = makeDriver({ overrides: { dispatchRun: async () => { throw boom } } })
+    await driver.tickGoal('g1', { iteration: 0, spend: 0, noProgressStreak: 0, runId: null, errorStreak: 2 })
+    // streak 3 → 60 * 2^2 = 240s
+    expect(h.ticks[0].fireAt.getTime()).toBe(NOW.getTime() + 240_000)
+    expect(h.ticks[0].state.errorStreak).toBe(3)
+  })
+
+  it('gives up LOUDLY at the consecutive-error ceiling: blocked (tick_error) + delivered, no re-arm', async () => {
+    const { driver, h } = makeDriver({ overrides: { dispatchRun: async () => { throw boom } } })
+    await driver.tickGoal('g1', { iteration: 9, spend: 1, noProgressStreak: 4, runId: null, errorStreak: 4 })
+    expect(h.statuses.at(-1)?.status).toBe('blocked')
+    expect(h.statuses.at(-1)?.reason).toMatch(/^tick_error: provider exploded/)
+    expect(h.delivered).toHaveLength(1)
+    expect(h.delivered[0].terminal).toBe('blocked')
+    expect(h.ticks).toHaveLength(0)
+  })
+
+  it('fires onTickError with willRetry on both paths', async () => {
+    const seen: Array<{ willRetry: boolean }> = []
+    const overrides = {
+      dispatchRun: async () => { throw boom },
+      onTickError: (_g: GoalRecord, _e: unknown, willRetry: boolean) => { seen.push({ willRetry }) },
+    }
+    const retry = makeDriver({ overrides })
+    await retry.driver.tickGoal('g1')
+    const giveUp = makeDriver({ overrides })
+    await giveUp.driver.tickGoal('g1', { iteration: 0, spend: 0, noProgressStreak: 0, runId: null, errorStreak: 4 })
+    expect(seen).toEqual([{ willRetry: true }, { willRetry: false }])
+  })
+
+  it('a completed iteration resets the carried errorStreak to 0', async () => {
+    const { driver, h } = makeDriver({ openSubGoals: 1, dispatch: { runId: 'r1', terminal: true, completed: true } })
+    await driver.tickGoal('g1', { iteration: 0, spend: 0, noProgressStreak: 0, runId: null, errorStreak: 3 })
+    expect(h.ticks[0].state.errorStreak).toBe(0)
+  })
+
+  it('rethrows the ORIGINAL error when the recovery itself fails (the reaper is the backstop)', async () => {
+    const { driver } = makeDriver({
+      overrides: {
+        dispatchRun: async () => { throw boom },
+        scheduleGoalTick: async () => { throw new Error('db down') },
+      },
+    })
+    await expect(driver.tickGoal('g1')).rejects.toBe(boom)
+  })
+
+  it('kickoff applies DEFAULT_GOAL_BUDGET to a budget-less acting goal, and leaves an authored budget alone', async () => {
+    const applied: Array<{ goalId: string; budget: unknown }> = []
+    const budgeted = makeGoal({ budget: {}, outcome: 'defaulted' })
+    const bare = makeDriver({
+      goal: budgeted,
+      overrides: {
+        applyDefaultBudget: async (goalId, budget) => {
+          applied.push({ goalId, budget })
+          return { ...budgeted, budget }
+        },
+      },
+    })
+    await bare.driver.kickoffGoal('g1')
+    expect(applied).toEqual([{ goalId: 'g1', budget: DEFAULT_GOAL_BUDGET }])
+    expect(bare.h.ticks).toHaveLength(1)
+
+    const authored = makeDriver({
+      goal: makeGoal({ budget: { maxSpend: 2 } }),
+      overrides: { applyDefaultBudget: async () => { throw new Error('must not be called') } },
+    })
+    await authored.driver.kickoffGoal('g1')
+    expect(authored.h.ticks).toHaveLength(1) // armed without touching the budget
   })
 })
