@@ -267,6 +267,7 @@ function makeAllTools(opts?: {
     userId: string
     toolName: string
     assistantId?: string
+    workspaceId?: string | null
   }) => Promise<{
     ok: boolean
     provider: string
@@ -1456,7 +1457,7 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     const r = await tools.createWorkflow.execute({ name: 'X', definition: def }, makeContext())
     expect(r.isError).toBe(true)
     expect((r.data as { errors: string[] }).errors.join(' ')).toContain('GitHub')
-    expect(preflightConnectorTool).toHaveBeenCalledWith({ userId: USER_ID, toolName: 'githubListPullRequests' })
+    expect(preflightConnectorTool).toHaveBeenCalledWith({ userId: USER_ID, toolName: 'githubListPullRequests', workspaceId: WORKSPACE_ID })
   })
 
   it('skips preflight for a tool that is not a connector tool (returns null)', async () => {
@@ -1494,11 +1495,13 @@ describe('[COMP:workflow/tools] external-dependency authoring checks', () => {
     expect(errors).toContain('ask-policy')
     expect(errors).toContain('tool_call')
     expect(errors).toContain('Approvals')
-    // The step's target assistant threads through for the L2 policy lookup.
+    // The step's target assistant threads through for the L2 policy lookup;
+    // the workspace id threads through for team credential resolution.
     expect(preflightConnectorTool).toHaveBeenCalledWith({
       userId: USER_ID,
       toolName: 'gmailSendMessage',
       assistantId: 'primary',
+      workspaceId: WORKSPACE_ID,
     })
   })
 

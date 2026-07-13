@@ -155,11 +155,26 @@ export async function createTask(
     compartments?: string[]
     /**
      * Fresh-insert `source`. Default `'user'` (interactive chat / API writes;
-     * matches the mig-128 DB default). The structural-synthesis engine passes
-     * `'extracted'` so synthesis-captured tasks surface in Brain Reviews
-     * (`?includeExtracted=true`).
+     * matches the mig-128 DB default). The structural-synthesis engine and
+     * Pipeline B pass `'extracted'` so extraction-captured tasks surface in
+     * Brain Reviews (`?includeExtracted=true`).
      */
     source?: 'user' | 'extracted'
+    /**
+     * Interactive-write provenance anchor (mig 316) — the `sessions` row of
+     * the conversation that created this task. Chat `saveTask` stamps
+     * `context.sessionId`; REST creates have no session and leave it NULL.
+     * Advisory (no FK); read by the brain-inbox explain ladder.
+     */
+    sourceSessionId?: string | null
+    /**
+     * Extraction provenance anchor — the Episode this task was derived from.
+     * Pipeline B and the synthesis engine pass `episode.id`; interactive
+     * writes leave it NULL. (Column existed since mig 128; unwritten pre-316.)
+     */
+    sourceEpisodeId?: string | null
+    /** The assistant that mediated the write (chat/workflow saveTask). */
+    createdByAssistantId?: string | null
     /** Task ids this task depends on — each becomes a task→task
      *  `depends_on` edge (fire-and-forget; v1 append-only). */
     dependsOn?: readonly string[]
@@ -182,8 +197,8 @@ export async function createTask(
   assertAuthorshipPresent('createTask', userId)
   const result = await queryWithRLS<TaskRow>(
     userId,
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source, source_session_id, source_episode_id, created_by_assistant_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -198,6 +213,9 @@ export async function createTask(
       userId,
       params.compartments ?? [],
       params.source ?? 'user',
+      params.sourceSessionId ?? null,
+      params.sourceEpisodeId ?? null,
+      params.createdByAssistantId ?? null,
     ],
   )
   const task = toRecord(result.rows[0])
@@ -339,6 +357,8 @@ type OldTaskRow = {
   assistant_id: string | null
   source: string
   source_episode_id: string | null
+  source_session_id: string | null
+  created_by_assistant_id: string | null
 }
 
 /**
@@ -471,7 +491,8 @@ export async function updateTask(
 
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
-                sensitivity, user_id, assistant_id, source, source_episode_id
+                sensitivity, user_id, assistant_id, source, source_episode_id,
+                source_session_id, created_by_assistant_id
          FROM tasks WHERE id = $1 AND valid_to IS NULL`,
         [liveId],
       )
@@ -494,11 +515,13 @@ export async function updateTask(
         `INSERT INTO tasks (
            workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
            sensitivity, user_id, assistant_id, source, source_episode_id,
+           source_session_id, created_by_assistant_id,
            created_by_user_id, valid_from, valid_to, superseded_by
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
                  $10, $11, $12, $13, $14,
-                 $15, now(), NULL, NULL)
+                 $15, $16,
+                 $17, now(), NULL, NULL)
          RETURNING ${FULL_SELECT}`,
         [
           old.workspace_id,
@@ -515,6 +538,11 @@ export async function updateTask(
           old.assistant_id,
           old.source,
           old.source_episode_id,
+          // Provenance anchors carry forward through supersession — the
+          // originating conversation/assistant stays answerable after edits
+          // (matches updateMemory). created_by_user_id re-stamps the editor.
+          old.source_session_id,
+          old.created_by_assistant_id,
           userId,
         ],
       )

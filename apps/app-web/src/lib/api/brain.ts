@@ -90,6 +90,13 @@ export type BrainRow = {
    *  `todo` | `in_progress` | `blocked` | `done` | `archived`. Drives the
    *  grouped view's status chip + the completed-task partition. */
   status?: string;
+  /** Task tags — only present on `kind:'tasks'` rows that have tags.
+   *  Rendered as tag chips in the grouped view. */
+  tags?: string[];
+  /** Task assignee — a `workspace_members` row id (NOT a user id), only
+   *  present on assigned `kind:'tasks'` rows. Resolved against the workspace
+   *  roster for the grouped view's assignee avatar. */
+  assigneeId?: string;
   // ── file_segment-only fields (camelCase mirror of the `search()` row's
   //    `file_id`/`file_name`/`heading_path`/`snippet`/`segment_index`). Absent
   //    on every other kind; the backend `/api/brain/list` mapping populates

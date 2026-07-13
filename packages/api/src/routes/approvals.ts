@@ -56,6 +56,13 @@ export type UnifiedApprovalRouteOptions = {
    * retryable). When absent, staged_write keeps the 422 deep-link.
    */
   stagedWriteDeps?: import('../agent-surface/staged-write.js').StagedWriteDeps
+  /**
+   * Computer-use R2 grants (R2-2): lets the `browser_skill_send` card's
+   * third button — Allow always for this block+profile — mint a standing
+   * grant at approve time (THE grant is the review). Absent → the card
+   * still offers Deny / Allow once.
+   */
+  browserSkillGrants?: import('@sidanclaw/core').BrowserSkillGrantStore | null
 }
 
 /** Where a non-workflow approval kind is actually resolved. */
@@ -69,6 +76,10 @@ const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
   // renders inline in the suspended turn. See
   // docs/architecture/engine/askquestion-suspend-resume.md.
   question: 'chat',
+  // Logic-block terminal sends (R2-5) resolve on the web Approvals queue —
+  // the 3-button card (Deny / Allow once / Allow always for this
+  // block+profile). The block's runner polls the row.
+  browser_skill_send: 'web',
 }
 
 export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
@@ -143,7 +154,7 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
       return
     }
     const id = req.params.id
-    const body = (req.body ?? {}) as { decision?: string; reason?: string }
+    const body = (req.body ?? {}) as { decision?: string; reason?: string; grantAlways?: boolean }
     if (body.decision !== 'approved' && body.decision !== 'rejected') {
       res.status(400).json({ error: "decision must be 'approved' or 'rejected'" })
       return
@@ -211,6 +222,43 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
       }
       const updated = await opts.approvalsStore.respond(id, 'approved', userId, reason)
       res.json({ kind: 'staged_write', status: updated?.status ?? 'approved', result: outcome.resultText })
+      return
+    }
+
+    // Logic-block terminal send (R2-2/R2-5): the block's runner polls this
+    // row, so responding in place IS the resume — no re-dispatch. The third
+    // button, Allow always for this block+profile, mints the standing grant
+    // (the grant is the review); the verb ceiling never offers it.
+    if (approval.kind === 'browser_skill_send') {
+      const updated = await opts.approvalsStore.respond(id, decision, userId, reason)
+      if (!updated) {
+        const settled = await opts.approvalsStore.getById(userId, id)
+        res.json({ kind: 'browser_skill_send', status: settled?.status ?? 'unknown', idempotent: true })
+        return
+      }
+      let grantId: string | null = null
+      const payload = approval.approvalPayload as {
+        skillId?: string
+        profileId?: string
+        ceiling?: string | null
+      }
+      if (
+        decision === 'approved' &&
+        body.grantAlways === true &&
+        opts.browserSkillGrants &&
+        payload.skillId &&
+        payload.profileId &&
+        !payload.ceiling // ceiling verbs are never grantable (R2-1)
+      ) {
+        const grant = await opts.browserSkillGrants.create({
+          workspaceId: approval.workspaceId,
+          skillId: payload.skillId,
+          profileId: payload.profileId,
+          grantedBy: userId,
+        })
+        grantId = grant.id
+      }
+      res.json({ kind: 'browser_skill_send', status: updated.status, grantId })
       return
     }
 

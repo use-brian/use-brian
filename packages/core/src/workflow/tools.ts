@@ -192,6 +192,12 @@ export type WorkflowToolDeps = {
     userId: string
     toolName: string
     assistantId?: string
+    /**
+     * The workspace/team id the workflow is authored in, so the credential
+     * probe resolves team-native + team-grant sources the same way the runtime
+     * does (not just the per-user store). Absent → per-user only.
+     */
+    workspaceId?: string | null
   }) => Promise<{
     ok: boolean
     provider: string
@@ -731,6 +737,7 @@ async function dependencyIssues(
           userId: context.userId,
           toolName: ref.toolName,
           assistantId: ref.assistantId,
+          workspaceId: context.workspaceId,
         })
         if (!res) continue
         if (!res.ok) {

@@ -93,6 +93,31 @@ import {
   type EntityRecord,
   type EngineHooks,
   createIntrospectionTools,
+  createComputerTools,
+  createComputeTools,
+  createLocalBrowserProvider,
+  createCloudBrowserProvider,
+  createSandboxOrchestrator,
+  createInMemorySandboxTaskStore,
+  createSandboxReaper,
+  createSandboxMeter,
+  createInMemorySpendAccumulator,
+  resolveUnattendedComputerUse,
+  DEFAULT_SESSION_BUDGET_USD,
+  createE2bCloudProvider,
+  createE2bRuntime,
+  createSkillRunnerTools,
+  createBuFallbackTool,
+  RESEARCH_BUDGET_CEILING,
+  type BlockApprovalsPort,
+  type BrowserSkillGrantStore,
+  type ComputerToolPolicy,
+  type BrowserProfileStore,
+  type SandboxOrchestrator,
+  type SandboxProvider,
+  type SandboxTaskStore,
+  type Sensitivity,
+  type SessionVault,
 } from '@sidanclaw/core'
 
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
@@ -100,6 +125,7 @@ import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/sha
 // ── OPEN package imports (@sidanclaw/api) ──────────────────────────
 import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { getTaskByIdSystem } from './db/tasks.js'
+import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
@@ -121,6 +147,9 @@ import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
+import { browserExtensionRoutes } from './routes/browser-extension.js'
+import { computerRoutes } from './routes/computer.js'
+import { createRelayCommandTransport, relayExtensionConnected } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import { memoryRoutes } from './routes/memories.js'
@@ -243,6 +272,7 @@ import { createApprovalDeliveryDispatcher } from './workflow/approval-deliveries
 import { workflowApprovalsRoutes } from './routes/workflow-approvals.js'
 import { approvalsRoutes } from './routes/approvals.js'
 import { workflowsRoutes } from './routes/workflows.js'
+import { pageActionsRoutes } from './routes/page-actions.js'
 import { workflowWebhookRoutes } from './routes/workflow-webhooks.js'
 import { createWorkflowChannelDelivery } from './workflow/channel-delivery.js'
 import { createWorkflowDependencyPreflight } from './workflow/dependency-preflight.js'
@@ -269,6 +299,10 @@ import {
 import { createDbPageGrantStore } from './db/page-grant-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
+import { createDbPageActionsStore } from './db/page-actions-store.js'
+import { createDbPageSendLogStore } from './db/page-send-log-store.js'
+import { createGmailSendSeam } from './google/send-seam.js'
+import { createSendPagePort } from './workflow/send-page.js'
 import { createDbWorkspaceGroupStore } from './db/workspace-group-store.js'
 import { createDbDocThemesStore } from './db/doc-themes-store.js'
 import { createDbDocPageStore } from './db/doc-page-store.js'
@@ -388,6 +422,20 @@ export interface OpenApiEnv {
   SKILLS_AUTO_GEN_ENABLED?: boolean
   // Workflow staleness/digestion/archival sweep ships dark unless on.
   WORKFLOW_LIFECYCLE_ENABLED?: boolean
+  // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
+  // the browser-relay's HTTP base + shared secret. Unset (open default) →
+  // the local browser backend reports not_configured.
+  BROWSER_RELAY_URL?: string
+  BROWSER_RELAY_SECRET?: string
+  // Computer-use cloud mode (§5): E2B Cloud credentials + the pre-baked
+  // sandbox template (agent-browser + python3 + unshare). Unset → the cloud
+  // backend reports not_configured and routing falls back to local.
+  E2B_API_KEY?: string
+  E2B_TEMPLATE_ID?: string
+  // Barrier 2 (§4.9): the deploy flag for the unattended acting path. The
+  // flag is necessary but NOT sufficient — boot also requires live metering
+  // (resolveUnattendedComputerUse). Ships dark.
+  COMPUTER_USE_UNATTENDED_ENABLED?: boolean
 }
 
 /**
@@ -471,6 +519,32 @@ export interface OpenApiPorts {
   // ── Chat draft-title helpers — open default: passthrough ──
   isPlaceholderTitle?: (title: string | null | undefined) => boolean
   getTitleChannelPrefix?: (title: string | null | undefined) => string | null
+
+  // ── Computer use (closed halves) — open default: undefined ──
+  /**
+   * The encrypted session vault (§4.4, R2-4) — closed impl over
+   * `browser_sessions` (envelope-encrypted, profile-scoped RLS). Absent →
+   * cloud browsing works but no session reuse: every login-guarded task
+   * needs a fresh Take-Over.
+   */
+  browserSessionVault?: SessionVault
+  /**
+   * Durable sandbox-task ledger (§4.10) — closed impl over `sandbox_tasks`.
+   * Absent → in-memory task binding (fine for OSS; a restart just costs a
+   * fresh sandbox, the vault holds the durable session).
+   */
+  sandboxTaskStore?: SandboxTaskStore
+  /**
+   * Browser profiles (R2-4) — closed impl over `browser_profiles`. Absent →
+   * identity-less browsing only (no profile gate, no session reuse,
+   * Profile-Management reports unconfigured).
+   */
+  browserProfileStore?: BrowserProfileStore
+  /**
+   * Block-scoped grants (R2-2) — closed impl over `browser_skill_grants`.
+   * Absent → every terminal send a logic-block reaches queues async.
+   */
+  browserSkillGrantStore?: BrowserSkillGrantStore
 
   // ── Closed stores fronted as ports — open default: undefined (routes guard) ──
   /** Self-heal candidate queue; absent → reclassification + self-heal worker off. */
@@ -1257,6 +1331,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const blueprintRecordTools: Tool[] = createBlueprintRecordTools({
     pageTemplateStore,
     blueprintRecordStore,
+    // Page-projection deps → builds `projectBlueprintRecordPage`, the one
+    // workflow-reachable record→page linkage (page-actions buttons resolve
+    // through `blueprint_records.page_id`).
+    savedViewStore,
+    docPageStore: createDbDocPageStore(),
   })
   const buildBlueprintPromptFragment = async (userId: string, workspaceId: string): Promise<string> => {
     try {
@@ -1468,11 +1547,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }).then(() => undefined)
     : undefined
 
+  // Page-actions substrate (mig 321): button bindings + the at-most-once
+  // send ledger + the deterministic send_page port. The port composes the
+  // whole verbatim-send pipeline (egress gate → ledger claim → Gmail seam →
+  // stamp-back); core's dispatchSendPage adds the button-trigger gate.
+  // See docs/architecture/features/page-actions.md.
+  const pageActionsStore = createDbPageActionsStore()
+  const pageSendLogStore = createDbPageSendLogStore()
+  const sendPagePort = createSendPagePort({
+    savedViewStore,
+    docPageStore: createDbDocPageStore(),
+    blueprintRecordStore,
+    pageSendLog: pageSendLogStore,
+    acquireGmailSender: createGmailSendSeam({ connectorStore, connectorInstanceStore }),
+  })
+
   const workflowExecutorDeps: WorkflowExecutorDeps = {
     workflowStore,
     runStore: workflowRunStore,
     consultTransport,
     resolvePrimary: resolvePrimaryAssistantForWorkspace,
+    sendPage: sendPagePort,
     buildToolRegistry: ({ workspaceId, assistantId, userId }) => buildWorkflowToolRegistry(
       {
         firstParty: allTools,
@@ -1617,6 +1712,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Closed credit gate (injected by the platform; absent in OSS). Captured so
   // the `workspaceBudgetOk` closure narrows it cleanly.
   const creditGate = ports.checkCreditBudget
+
+  // Hosted paid gate for autonomous workflow compute (scheduled jobs, event
+  // triggers, manual runs — everything advances through advanceWorkflowRun).
+  // Only `blocked` stops a run: that means the workspace has no active plan
+  // (the 2026-07-10 Free-plan removal; see cost-and-pricing.md → "No free
+  // plan: the hosted paid gate"). `downgraded` (paid plan over its cap) still
+  // runs — tier clamping happens on the consult path, matching chat. Fails
+  // OPEN on errors so a transient billing hiccup never strands paid runs.
+  // Absent in the open build (no creditGate) → runs are never gated.
+  workflowExecutorDeps.workspaceComputeAllowed = creditGate
+    ? async (workspaceId) => {
+        try {
+          const plan = await getWorkspacePlan(workspaceId)
+          const { status } = await creditGate(workspaceId, plan)
+          return status !== 'blocked'
+        } catch (err) {
+          console.error('[workflow] workspace compute gate failed, allowing:', err)
+          return true
+        }
+      }
+    : undefined
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
@@ -1744,6 +1860,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       assistantId,
       name: isVerify ? 'Work a goal to done' : 'Complete a task',
       instructions,
+      // Goal iterations get the wall-clock CEILING (not the 90s reminder
+      // default): an autonomous iteration doing real work — a browser-skill
+      // run in the cloud sandbox, a research pass, file writes — routinely
+      // outlives 90s, and clipping it mid-tool made the goal loop burn
+      // iterations on timeouts. Cost stays bounded by the unchanged turn /
+      // tool-call caps + the driver's own spend guards (maxSpend,
+      // workspaceBudgetOk); only the wall-clock allowance widens. See
+      // docs/architecture/engine/computer-use.md → "Working a task's goal".
+      depth: { timeoutMs: RESEARCH_BUDGET_CEILING.timeoutMs },
     })
   }
 
@@ -1757,6 +1882,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
     connectorStore,
+    // Team credential sources — the connector preflight resolves creds with the
+    // same precedence as the runtime (team-native instance → member grant →
+    // per-user), so a workflow whose connector lives in a team-owned/granted
+    // instance is not falsely rejected as "not connected".
+    connectorInstanceStore,
+    connectorGrantStore,
     // Policy-aware preflight: lets authoring reject an `ask`-policy tool
     // pinned on an `assistant_call` step (never executable there — the callee
     // surface drops ask-policy tools; see dependencyIssues) instead of
@@ -2288,6 +2419,346 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
   }
 
+  // ── Computer use (browser tool surface) ──
+  // docs/architecture/engine/computer-use.md §3-§4: five discrete browser
+  // tools over the BrowserProvider seam. Local mode drives the user's own
+  // Chrome through the browser-relay (BROWSER_RELAY_URL/SECRET; unset →
+  // honest not_configured errors). The cloud backend arrives with the
+  // SandboxProvider phase and stays not_configured here. Governance mirrors
+  // the files pattern: L1/L2 strictest-wins policy over mcp_tool_settings
+  // (serverName='computer'), metadata-only analytics audit, and the
+  // in-tool send gate + autonomous-path block (§8).
+  const browserRelayTransport =
+    env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+      ? createRelayCommandTransport({
+          relayUrl: env.BROWSER_RELAY_URL,
+          relaySecret: env.BROWSER_RELAY_SECRET,
+        })
+      : null
+  // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
+  // the only E2B-SDK importer; everything here talks to the interface.
+  const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
+    ? createE2bCloudProvider(
+        createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
+      )
+    : null
+  // The §4.9 meter: all three COGS lines record through the usage spine, and
+  // the per-session dollar cap accumulates on the task row. Barrier 2 rides
+  // meteringActive(): no usage store → unattended can never enable.
+  const sandboxTaskStoreImpl = ports.sandboxTaskStore ?? createInMemorySandboxTaskStore()
+  const sandboxMeter = createSandboxMeter({
+    usageStore: usageStore ?? null,
+    addSpend: sandboxTaskStoreImpl.addSpend
+      ? sandboxTaskStoreImpl.addSpend.bind(sandboxTaskStoreImpl)
+      : createInMemorySpendAccumulator(DEFAULT_SESSION_BUDGET_USD).addSpend,
+  })
+  const unattendedComputerUse = () =>
+    resolveUnattendedComputerUse({
+      flagEnabled: env.COMPUTER_USE_UNATTENDED_ENABLED === true,
+      meter: sandboxMeter,
+    })
+  const sandboxOrchestrator: SandboxOrchestrator | null = sandboxProvider
+    ? createSandboxOrchestrator({
+        provider: sandboxProvider,
+        taskStore: sandboxTaskStoreImpl,
+        meter: sandboxMeter,
+        vault: ports.browserSessionVault ?? null,
+        profileStore: ports.browserProfileStore ?? null,
+        budget: {
+          // The workspace credit-cap gate (§4.9): a blocked workspace cannot
+          // start a cloud computer task. Mirrors the goals-driver pattern —
+          // plan resolved system-side, transient gate errors fail OPEN (the
+          // per-session dollar cap + fuse remain as backstops).
+          checkCreditBudget: creditGate
+            ? async (browseCtx) => {
+                let status: string
+                try {
+                  const plan = await getWorkspacePlan(browseCtx.workspaceId)
+                  status = (await creditGate(browseCtx.workspaceId, plan)).status
+                } catch (err) {
+                  console.error('[computer] credit gate check failed, allowing:', err)
+                  return
+                }
+                if (status === 'blocked') {
+                  throw new Error(
+                    'This workspace is out of credit for the current period, so a cloud browser task cannot start. Upgrade the plan or wait for the period to reset.',
+                  )
+                }
+              }
+            : undefined,
+        },
+        // Downloads auto-pull into workspace_files (§4.12) — scoped by the
+        // TASK's workspace, resolved above the provider seam.
+        saveDownload: filesApi
+          ? async (dlCtx, file) => {
+              const name = file.path.split('/').pop() || 'download'
+              await filesApi!.writeBytes(
+                { userId: dlCtx.userId, workspaceId: dlCtx.workspaceId, assistantId: null, assistantKind: 'standard' },
+                {
+                  path: `computer/downloads/${Date.now()}-${name.replace(/[^\w.-]+/g, '_')}`,
+                  bytes: file.bytes,
+                  mime: 'application/octet-stream',
+                  title: name,
+                },
+              )
+            }
+          : undefined,
+      })
+    : null
+  const COMPUTER_CONNECTOR_ID = 'computer'
+  const computerToolDefaults = new Map(
+    (OFFICIAL_CONNECTOR_TOOLS[COMPUTER_CONNECTOR_ID] ?? []).map((t) => [t.name, t.defaultPolicy]),
+  )
+  const COMPUTER_POLICY_STRICTNESS: Record<string, number> = { allow: 0, ask: 1, block: 2 }
+  const resolveComputerToolPolicy = async (
+    toolName: string,
+    context: { userId: string; assistantId: string },
+  ): Promise<ComputerToolPolicy> => {
+    const fallback = (computerToolDefaults.get(toolName) ?? 'allow') as ComputerToolPolicy
+    const [l1, l2] = await Promise.all([
+      mcpSettingsStore.getPolicy({
+        assistantId: APP_LEVEL_ASSISTANT_ID, userId: context.userId,
+        serverName: COMPUTER_CONNECTOR_ID, toolName,
+      }),
+      mcpSettingsStore.getPolicy({
+        assistantId: context.assistantId, userId: context.userId,
+        serverName: COMPUTER_CONNECTOR_ID, toolName,
+      }),
+    ])
+    const a = (l1?.policy as ComputerToolPolicy) ?? fallback
+    const b = (l2?.policy as ComputerToolPolicy) ?? fallback
+    return (COMPUTER_POLICY_STRICTNESS[a] ?? 0) >= (COMPUTER_POLICY_STRICTNESS[b] ?? 0) ? a : b
+  }
+  // The acting assistant's clearance for the profile gate (R2-4) — resolved
+  // from the assistant row, defensively 'public' (lowest → most restrictive
+  // profile access) on any lookup failure.
+  const getAssistantClearance = async (assistantId: string): Promise<Sensitivity> => {
+    try {
+      const res = await query<{ clearance: string | null }>(
+        `SELECT clearance FROM assistants WHERE id = $1`,
+        [assistantId],
+      )
+      const c = res.rows[0]?.clearance
+      return c === 'public' || c === 'internal' || c === 'confidential' ? c : 'confidential'
+    } catch {
+      return 'public'
+    }
+  }
+  const computerTools = createComputerTools({
+    local: createLocalBrowserProvider({ transport: browserRelayTransport }),
+    cloud: createCloudBrowserProvider({
+      provider: sandboxProvider,
+      binding: sandboxOrchestrator?.binding ?? null,
+    }),
+    cloudAvailable: () => sandboxProvider !== null,
+    // Browser profiles (R2-4/R2-10): the closed store when the platform
+    // wires it; OSS boots browse identity-less.
+    profiles: ports.browserProfileStore
+      ? {
+          store: ports.browserProfileStore,
+          vault: ports.browserSessionVault ?? null,
+          assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+        }
+      : null,
+    // Channel escalate-to-web (§4.8): a cloud login wall surfaces a deep link
+    // into the Take-Over live view for this chat session.
+    takeoverLinkFor: (toolCtx) =>
+      toolCtx.workspaceId
+        ? `${(env.AUTHED_APP_URL ?? env.APP_URL).replace(/\/$/, '')}/w/${toolCtx.workspaceId}/computer/${toolCtx.sessionId}`
+        : null,
+    onCloudLoginWall: sandboxOrchestrator
+      ? async (toolCtx) => sandboxOrchestrator.pauseForTakeover(toolCtx.sessionId)
+      : undefined,
+    resolvePolicy: resolveComputerToolPolicy,
+    // Barrier 2 (§4.9): the flag alone cannot enable unattended computer-use
+    // — resolveUnattendedComputerUse also requires live metering, so a
+    // metering-absent boot stays attended-only no matter the env.
+    unattendedEnabled: unattendedComputerUse,
+    // R2-8: unattended is paid-gated on top of Barrier 2.
+    getWorkspacePlan,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'browser_action',
+        metadata: {
+          op: sanitizeAnalytics(evt.op),
+          backend: sanitizeAnalytics(evt.backend),
+          host: sanitizeAnalytics(evt.host ?? ''),
+          ok: evt.ok,
+          ...(evt.code ? { code: sanitizeAnalytics(evt.code) } : {}),
+        },
+      })
+    },
+  })
+  allTools.set('browserNavigate', computerTools.browserNavigate)
+  allTools.set('browserSnapshot', computerTools.browserSnapshot)
+  allTools.set('browserClick', computerTools.browserClick)
+  allTools.set('browserType', computerTools.browserType)
+  allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
+
+  // Isolated Python + the workspace-scoped file-bridge (§4.7, §4.12). The
+  // files port wraps FilesApi so every byte movement stays under workspace
+  // RLS; the workspace id always comes from the ToolContext, never input.
+  const computeTools = createComputeTools({
+    provider: sandboxProvider,
+    binding: sandboxOrchestrator?.binding ?? null,
+    files: filesApi
+      ? {
+          readBytes: async (fctx, fileIdOrPath) => {
+            const res = await filesApi!.readBytes(
+              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
+              fileIdOrPath,
+            )
+            if (!res.ok) return null
+            return {
+              bytes: new Uint8Array(res.value.bytes),
+              name: res.value.file.path.split('/').pop() || res.value.file.path,
+            }
+          },
+          writeBytes: async (fctx, params) => {
+            const res = await filesApi!.writeBytes(
+              { userId: fctx.userId, workspaceId: fctx.workspaceId, assistantId: null, assistantKind: 'standard' },
+              { path: params.path, bytes: params.bytes, mime: 'application/octet-stream', title: params.title },
+            )
+            if (!res.ok) throw new Error('Could not save the file to the workspace (quota or conflict).')
+            return { fileId: res.value.id, path: res.value.path }
+          },
+        }
+      : null,
+    getWorkspacePlan,
+    resolvePolicy: resolveComputerToolPolicy,
+    unattendedEnabled: unattendedComputerUse,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'computer_compute',
+        metadata: {
+          kind: sanitizeAnalytics(evt.type),
+          ok: evt.ok,
+          ...(evt.detail !== undefined ? { detail: evt.detail } : {}),
+        },
+      })
+    },
+  })
+  allTools.set('runPython', computeTools.runPython)
+  allTools.set('loadFromWorkspace', computeTools.loadFromWorkspace)
+  allTools.set('saveToWorkspace', computeTools.saveToWorkspace)
+
+  // Logic-blocks (R2-5/R2-9/R2-10): reviewed browsing code in brain, run
+  // through the governed runner whose terminal sends hit the same
+  // grant/approval/verb-ceiling gate the browser tools use. The approvals
+  // bridge parks un-granted sends as kind='browser_skill_send' rows and
+  // writes 'auto_approved' AUDIT rows for grant-satisfied ones (R2-2).
+  const browserSkillsStore = createBrowserSkillsStore()
+  const blockApprovals: BlockApprovalsPort = {
+    async createSendApproval(p) {
+      const row = await pendingApprovalsStore.createBrowserSkillSend({
+        workspaceId: p.workspaceId,
+        approverUserId: p.approverUserId,
+        sessionId: p.sessionId ?? null,
+        payload: p.payload as unknown as Record<string, unknown>,
+        expiresAt: p.expiresAt ? new Date(p.expiresAt) : null,
+      })
+      return { id: row.id }
+    },
+    async getStatus(id) {
+      const row = await pendingApprovalsStore.getByIdSystem(id)
+      return row ? row.status : null
+    },
+    async expire(id) {
+      await pendingApprovalsStore.expireById(id)
+    },
+    async recordAutoApproved(p) {
+      await pendingApprovalsStore.createBrowserSkillAudit({
+        workspaceId: p.workspaceId,
+        approverUserId: p.approverUserId,
+        sessionId: p.sessionId ?? null,
+        grantId: p.grantId,
+        payload: p.payload as unknown as Record<string, unknown>,
+      })
+    },
+  }
+  const skillRunnerTools = createSkillRunnerTools({
+    provider: sandboxProvider,
+    binding: sandboxOrchestrator?.binding ?? null,
+    skills: browserSkillsStore,
+    grants: ports.browserSkillGrantStore ?? null,
+    approvals: blockApprovals,
+    profiles: ports.browserProfileStore
+      ? {
+          store: ports.browserProfileStore,
+          vault: ports.browserSessionVault ?? null,
+          assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+        }
+      : null,
+    resolvePolicy: resolveComputerToolPolicy,
+    unattendedEnabled: unattendedComputerUse,
+    getWorkspacePlan,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'browser_skill_run',
+        metadata: {
+          skill: sanitizeAnalytics(evt.skill),
+          site: sanitizeAnalytics(evt.site),
+          rehearsal: evt.rehearsal,
+          ok: evt.ok,
+          sends: evt.sends,
+          autoApproved: evt.autoApproved,
+          queued: evt.queued,
+          denied: evt.denied,
+        },
+      })
+    },
+  })
+  allTools.set('runBrowserSkill', skillRunnerTools.runBrowserSkill)
+  allTools.set('listBrowserSkills', skillRunnerTools.listBrowserSkills)
+  allTools.set('listBrowserProfiles', skillRunnerTools.listBrowserProfiles)
+
+  // The watched agentic fallback (R2-1/R2-7): browser-use for novel flows,
+  // cloud-only, always self-healing into a draft logic-block (R2-5).
+  const buFallback = createBuFallbackTool({
+    provider: sandboxProvider,
+    binding: sandboxOrchestrator?.binding ?? null,
+    skills: browserSkillsStore,
+    profiles: ports.browserProfileStore
+      ? {
+          store: ports.browserProfileStore,
+          vault: ports.browserSessionVault ?? null,
+          assistantClearance: (toolCtx) => getAssistantClearance(toolCtx.assistantId),
+        }
+      : null,
+    resolvePolicy: resolveComputerToolPolicy,
+    unattendedEnabled: unattendedComputerUse,
+    getWorkspacePlan,
+    onEvent: (evt, ctx) => {
+      analytics.logEvent({
+        userId: ctx.userId,
+        assistantId: ctx.assistantId,
+        sessionId: ctx.sessionId,
+        channelType: ctx.channelType,
+        eventName: 'browser_explore',
+        metadata: {
+          site: sanitizeAnalytics(evt.site),
+          steps: evt.steps,
+          distilled: evt.distilled,
+          ok: evt.ok,
+          ...(evt.skillName ? { skill: sanitizeAnalytics(evt.skillName) } : {}),
+        },
+      })
+    },
+  })
+  allTools.set('browserExplore', buFallback.browserExplore)
+
   // ── Agent capability toolset ──
   const agentControlPlaneReader = createControlPlaneReader({
     capabilityStore,
@@ -2436,6 +2907,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     filesApi: filesApi ?? undefined,
     assistantConnectorGrantsStore,
     engineHooks: ports.engineHooks,
+    checkCreditBudget: ports.checkCreditBudget,
   }))
 
   app.use('/api/v1', assistantMcpRoutes({
@@ -2461,6 +2933,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     agentTools: { reads: agentToolset.reads, writes: agentToolset.writes },
     // Powers the searchRecording tool's vector arm (recording-to-brain).
     embedder: createGeminiEmbedder(env.GEMINI_API_KEY),
+    // Computer-use R2: writeBrowserSkill — the OSS authoring skill's sync tool.
+    browserSkills: browserSkillsStore,
   }))
 
   app.use(oauthMetadataRoutes({ apiUrl: env.API_URL, webUrl: env.APP_URL }))
@@ -2696,6 +3170,39 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceStore,
   }))
 
+  // Browser-extension pairing (computer-use local mode, P1.3). The relay's
+  // WS endpoint derives from the HTTP base: https://relay → wss://relay/ext.
+  const browserRelayWsUrl = env.BROWSER_RELAY_URL
+    ? `${env.BROWSER_RELAY_URL.replace(/\/$/, '').replace(/^http/, 'ws')}/ext`
+    : null
+  // Take-Over live view + backend toggle + Profile-Management
+  // (computer-use.md §5, §7; R2-3/R2-4).
+  app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
+    orchestrator: sandboxOrchestrator,
+    provider: sandboxProvider,
+    vault: ports.browserSessionVault ?? null,
+    profileStore: ports.browserProfileStore ?? null,
+    grants: ports.browserSkillGrantStore ?? null,
+    skills: browserSkillsStore,
+    getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+    setSessionBackend: computerTools.setSessionBackendOverride,
+  }))
+
+  app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
+    jwtSecret: env.JWT_SECRET,
+    workspaceStore,
+    relayWsUrl: browserRelayWsUrl,
+    extensionConnected:
+      env.BROWSER_RELAY_URL && env.BROWSER_RELAY_SECRET
+        ? (userId) =>
+            relayExtensionConnected({
+              relayUrl: env.BROWSER_RELAY_URL as string,
+              relaySecret: env.BROWSER_RELAY_SECRET as string,
+              userId,
+            })
+        : null,
+  }))
+
   app.use('/api', publicShareRoutes({
     pageGrantStore,
     taskStore,
@@ -2760,6 +3267,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       tryResolveLive: tryResolveLiveToolApproval,
     },
     stagedWriteDeps: { rawWrites: agentToolset.rawWrites },
+    // Computer-use R2: "Allow always for this block+profile" mints a grant.
+    browserSkillGrants: ports.browserSkillGrantStore ?? null,
   }))
 
   // Goals board — read-only observability over the goal-seeker primitive.
@@ -2795,6 +3304,23 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         details: { name: event.name },
       })
     },
+    listButtonBindings: (actorUserId, workspaceId, workflowId) =>
+      pageActionsStore.listForWorkflow(actorUserId, workspaceId, workflowId),
+  }))
+
+  // Page-action buttons: bindings CRUD + per-page resolve + invoke dispatch
+  // (workflow runs stamped trigger_kind='button', inline-advanced; goal kind
+  // through the same GoalStore.create path as setGoal). Same auth posture as
+  // the workflows router. See docs/architecture/features/page-actions.md.
+  app.use('/api', requireAuth(env.JWT_SECRET), pageActionsRoutes({
+    pageActionsStore,
+    workspaceStore,
+    savedViewStore,
+    pageTemplateStore,
+    workflowStore,
+    runStore: workflowRunStore,
+    executorDeps: workflowExecutorDeps,
+    goalStore,
   }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), viewsRoutes({
@@ -3423,6 +3949,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) workflowLifecycleWorker.start()
+
+  // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
+  //    the Take-Over abandonment window + runs the vault's per-plan purge.
+  //    Only exists when a sandbox provider is configured. ──
+  if (sandboxOrchestrator) {
+    const sandboxReaper = createSandboxReaper({
+      orchestrator: sandboxOrchestrator,
+      vault: ports.browserSessionVault ?? null,
+      onEvent: (event) => {
+        if (event.reaped > 0 || event.purged > 0) {
+          console.log(`[sandbox-reaper] tick — reaped:${event.reaped} purged:${event.purged}`)
+        }
+      },
+    })
+    if (runWorkers) sandboxReaper.start()
+  }
 
   // ── Classifier self-heal worker — needs the closed pending-classification
   //    queue. Only started when injected (platform); open omits it. ──

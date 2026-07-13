@@ -41,6 +41,7 @@ import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { originClue } from "./source-origin";
 import {
   type BrainRow,
   type EntityKind,
@@ -114,6 +115,7 @@ import {
   DateProperty,
   MoreProperties,
   PageTitle,
+  PersonProperty,
   SelectProperty,
   StaticProperty,
   TagsProperty,
@@ -128,7 +130,11 @@ import {
   flattenAttributes,
   humaniseKey,
   isoToDateInput,
+  memberDisplayName,
+  resolveAssignee,
+  type AssignableMember,
 } from "@/components/brain/property-edit";
+import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 
 // (The NEXT_PUBLIC_CHAT_HOME_ENABLED inline-actions rollback flag retired
 // with the Notion-style entry page: all page actions live in the drawer's
@@ -273,6 +279,8 @@ function propertyIcon(key: string): React.ReactNode {
       return <Shield />;
     case "scope":
       return <Users />;
+    case "assignee_id":
+      return <UserRound />;
     case "saved":
     case "created_at":
     case "updated_at":
@@ -1942,6 +1950,40 @@ function PrimitiveSection({
   const taskStatus = isTask ? String(detail.body.status ?? "todo") : "todo";
   const taskDueDate = isTask ? isoToDateInput(detail.body.due_at) : "";
 
+  // Task assignee — `assignee_id` is a `workspace_members` row id, resolved
+  // to the member's name/avatar/role against the workspace roster (cached
+  // per workspace). Read-only: assignee is not in the adjust wire, same as
+  // task sensitivity.
+  const taskAssigneeId =
+    isTask && typeof detail.body.assignee_id === "string"
+      ? detail.body.assignee_id
+      : "";
+  const [roster, setRoster] = useState<AssignableMember[] | null>(null);
+  const [rosterLoading, setRosterLoading] = useState(false);
+  useEffect(() => {
+    if (taskAssigneeId.length === 0) return;
+    let cancelled = false;
+    setRosterLoading(true);
+    loadWorkspaceRoster(workspaceId)
+      .then((rows) => {
+        if (!cancelled) setRoster(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setRoster([]);
+      })
+      .finally(() => {
+        if (!cancelled) setRosterLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [taskAssigneeId, workspaceId]);
+  const assigneeMember =
+    taskAssigneeId.length > 0 && roster
+      ? resolveAssignee(roster, taskAssigneeId)
+      : null;
+  const memberRoleLabels = labels.memberRole as Record<string, string>;
+
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
   const [whyContext, setWhyContext] = useState<ExplainContext | null>(null);
@@ -2087,6 +2129,27 @@ function PrimitiveSection({
               value={taskDueDate}
               onCommit={(v) => commitChanges({ due_at: dateInputToIso(v) })}
             />
+            {taskAssigneeId.length > 0 && (
+              <PersonProperty
+                icon={propertyIcon("assignee_id")}
+                label={propLabels.assignee_id}
+                loading={rosterLoading}
+                unknownLabel={labels.memberUnknown}
+                value={
+                  assigneeMember
+                    ? {
+                        name:
+                          memberDisplayName(assigneeMember) ??
+                          labels.memberUnknown,
+                        email: assigneeMember.email,
+                        avatarUrl: assigneeMember.avatarUrl,
+                        roleLabel:
+                          memberRoleLabels[assigneeMember.role] ?? null,
+                      }
+                    : null
+                }
+              />
+            )}
             <TagsProperty
               icon={propertyIcon("tags")}
               label={propLabels.tags}
@@ -2541,10 +2604,22 @@ function WhyBody({
       </div>
     );
   }
+
+  const clue = originClue(
+    context.origin,
+    review,
+    context.savedAt,
+    context.savedByAssistantName,
+  );
+
   if (context.messages.length === 0) {
+    // No chat to show — the origin clue is the whole Source story
+    // ("Extracted from a meeting on …", "Added manually by …"). The bare
+    // "No source chat captured" line survives only when even the
+    // descriptor can't name an origin.
     return (
       <div className="border-l-2 border-border pl-3 text-xs text-muted-foreground">
-        {review.whyNoMessages}
+        {clue ?? review.whyNoMessages}
       </div>
     );
   }
@@ -2554,12 +2629,16 @@ function WhyBody({
     context.messages,
     primitiveSummary,
   );
+  // Chat keeps the classic lead-in; workflow / scheduled sessions get the
+  // origin clue instead (the lead-in's "during a chat" would misattribute).
+  const leadIn =
+    context.origin && context.origin.kind !== "chat" && clue
+      ? clue
+      : format(review.whyLeadIn, { assistant });
 
   return (
     <div className="flex flex-col gap-3 border-l-2 border-border pl-3 text-xs">
-      <p className="text-muted-foreground italic">
-        {format(review.whyLeadIn, { assistant })}
-      </p>
+      <p className="text-muted-foreground italic">{leadIn}</p>
 
       {(userTrigger || capture) && (
         <div className="flex flex-col gap-2">

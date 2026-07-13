@@ -137,6 +137,8 @@ function summarizeStep(step: WorkflowStep): { type: string; summary: string } {
       return { type: step.type, summary: 'wait for a datetime / duration' }
     case 'branch':
       return { type: step.type, summary: 'conditional branch' }
+    case 'send_page':
+      return { type: step.type, summary: 'send a page verbatim via email' }
   }
 }
 

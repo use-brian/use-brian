@@ -81,6 +81,7 @@ function makeFakeStore(): { store: RetrievalStore; calls: StoreCalls } {
       createdByUserId: USER_ID,
       createdByAssistantId: null,
       sourceEpisodeId: null,
+      sourceSessionId: null,
       source: 'user',
       verifiedByUserId: null,
       verifiedAt: null,

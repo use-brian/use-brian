@@ -192,6 +192,15 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     async createQuestion() {
       throw new Error('createQuestion not used in workflow approval tests')
     },
+    async createBrowserSkillSend() {
+      throw new Error('createBrowserSkillSend not used in workflow approval tests')
+    },
+    async createBrowserSkillAudit() {
+      throw new Error('createBrowserSkillAudit not used in workflow approval tests')
+    },
+    async expireById() {
+      /* not used in workflow approval tests */
+    },
     async recordAnswer() {
       throw new Error('recordAnswer not used in workflow approval tests')
     },

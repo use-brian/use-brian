@@ -5,6 +5,7 @@ import { CustomThemesProvider } from "@/lib/custom-themes";
 import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
+import { PlanGate } from "@/components/chrome/plan-gate";
 
 type TeamApiResponse = {
   id: string;
@@ -67,6 +68,10 @@ export default async function WorkspaceLayout(props: {
               </WorkspaceChrome>
             </BrainSurfaceProvider>
           </DocSidebarDataProvider>
+          {/* Hosted paid gate — renders only when the workspace has no
+              active plan ([COMP:app-web/plan-gate]); the OSS edition never
+              shows it. */}
+          <PlanGate workspaceId={workspaceId} />
         </div>
       </CustomThemesProvider>
     </WorkspaceContextProvider>

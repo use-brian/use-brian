@@ -996,13 +996,14 @@ async function searchTasksScope(
       row_id: string
       title: string
       status: string
+      assignee_id: string | null
       tags: string[]
       sensitivity: string
       valid_from: Date
     }
   >(
     actor.userId,
-    `SELECT id AS row_id, title, status, tags, sensitivity, valid_from,
+    `SELECT id AS row_id, title, status, assignee_id, tags, sensitivity, valid_from,
             source, verified_by_user_id, retracted_at
        FROM tasks
       WHERE ${visibility}${filters}
@@ -1018,6 +1019,9 @@ async function searchTasksScope(
         row_id: r.row_id,
         title: r.title,
         status: r.status,
+        // `workspace_members` row id (docs/architecture/features/tasks.md
+        // design decision #2) — resolve to a person via listWorkspaceMembers.
+        assignee_id: r.assignee_id,
         tags: r.tags,
         sensitivity: r.sensitivity,
         valid_from: r.valid_from.toISOString(),

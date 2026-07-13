@@ -23,12 +23,15 @@ export type RecordingEstimate = {
   surchargeCredits: number;
 };
 
-export type RecordingResult = {
-  utteranceCount: number;
-  segmentsInserted: number;
-  truncated: boolean;
-  surchargeCredits: number;
-  surcharged: boolean;
+/**
+ * The `/process` 202 body — the job is QUEUED for the worker service, not
+ * done. (The old synchronous shape with `utteranceCount`/`truncated` died
+ * with the worker offload; the client must not claim "transcribed" here.)
+ */
+export type RecordingQueued = {
+  recordingId: string;
+  status: "queued";
+  jobId: string | null;
 };
 
 /** Error carrying the backend's machine code (`too_long`, `could_not_read_duration`, ...). */
@@ -95,16 +98,18 @@ export async function estimateRecording(recordingId: string): Promise<RecordingE
 }
 
 /**
- * Transcribe + segment + ingest + charge-on-success. `blueprintSlug` (optional)
- * selects the synthesis blueprint the engine fills from the transcript (a
- * workspace blueprint template id) to author a brief page. Omit it (the default)
- * and the recording is ingested into the brain only, with no page.
- * See structural-synthesis.md -> "The first source".
+ * ENQUEUE transcribe + segment + ingest + charge-on-success (202; the worker
+ * service drains the job off the request thread, so success here means
+ * "queued", NOT "transcribed"). `blueprintSlug` (optional) selects the
+ * synthesis blueprint the engine fills from the transcript (a workspace
+ * blueprint template id) to author a brief page. Omit it (the default) and
+ * the recording is ingested into the brain only, with no page.
+ * See structural-synthesis.md -> "The first source" and transcription.md.
  */
 export async function processRecording(
   recordingId: string,
   blueprintSlug?: string,
-): Promise<RecordingResult> {
+): Promise<RecordingQueued> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

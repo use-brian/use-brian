@@ -587,16 +587,24 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             // it executes directly for the whole consult. Clearing the flags
             // also closes the mid-consult policy-flip edge — this lane has no
             // confirmation resolver to service a late `ask` event.
-            tool.requiresConfirmation = false
-            tool.resolveConfirmation = undefined
+            //
+            // Strip on a SHALLOW CLONE, never the shared object: `options.tools`
+            // holds the boot-time singletons every surface shares, and an
+            // in-place `tool.resolveConfirmation = undefined` here would
+            // permanently disarm the interactive chat's confirmation gates
+            // (browserClick's send gate, saveToWorkspace's ask default, every
+            // policy-'ask' resolver) after the first workflow consult.
+            calleeTools.set(name, { ...tool, requiresConfirmation: false, resolveConfirmation: undefined })
           }
         }),
       )
       droppedAskTools.sort()
     } else if (!deferredConfirmations) {
-      for (const [, tool] of calleeTools) {
-        tool.requiresConfirmation = false
-        tool.resolveConfirmation = undefined
+      // Same clone rule as the workflow lane above: the strip applies to THIS
+      // consult's surface only — mutating the shared singletons would disarm
+      // every other surface's confirmation gates process-wide.
+      for (const [name, tool] of calleeTools) {
+        calleeTools.set(name, { ...tool, requiresConfirmation: false, resolveConfirmation: undefined })
       }
     }
 

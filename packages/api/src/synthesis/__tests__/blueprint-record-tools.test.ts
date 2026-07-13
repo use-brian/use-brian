@@ -70,6 +70,7 @@ function build() {
     ),
     getById: vi.fn().mockResolvedValue(record()),
     getByAnchor: vi.fn(),
+    getByPageId: vi.fn(),
     getLatestForSource: vi.fn(),
     getLatestBySubject: vi.fn().mockResolvedValue(record({ status: 'complete', missing: [], fields: { summary: 'x' } })),
     listForBlueprint: vi.fn().mockResolvedValue([record()]),
@@ -190,5 +191,79 @@ describe('[COMP:api/blueprint-record-tools] direct record surface', () => {
     expect(prompt).toContain('saveBlueprintRecord')
     expect(prompt).toContain('never save unbound work silently')
     expect(prompt).not.toContain('Plain skeleton')
+  })
+
+  // ── projectBlueprintRecordPage (page-actions §4.6) ──────────────────────
+
+  function buildWithProjection() {
+    const base = build()
+    const createDraft = vi.fn().mockResolvedValue({ id: 'page-9' })
+    const findIdByAnchorKey = vi.fn().mockResolvedValue(null)
+    const applyPatch = vi.fn().mockResolvedValue({ newVersion: 2 })
+    const getVersionedPage = vi.fn().mockResolvedValue({
+      page: { blocks: [{ id: 'old-1', kind: 'text', text: 'stale' }] },
+      version: 1,
+    })
+    const tools = createBlueprintRecordTools({
+      pageTemplateStore: base.pageTemplateStore as never,
+      blueprintRecordStore: base.blueprintRecordStore as never,
+      savedViewStore: { createDraft, findIdByAnchorKey } as never,
+      docPageStore: { getVersionedPage, applyPatch } as never,
+    })
+    const byName = new Map<string, Tool>(tools.map((t) => [t.name, t]))
+    return { ...base, byName, createDraft, findIdByAnchorKey, applyPatch, getVersionedPage }
+  }
+
+  it('is built only when the projection deps are wired', () => {
+    const { byName } = build()
+    expect(byName.has('projectBlueprintRecordPage')).toBe(false)
+    const withDeps = buildWithProjection()
+    expect(withDeps.byName.has('projectBlueprintRecordPage')).toBe(true)
+  })
+
+  it('projects a record to a new page with a verbatim draftMarkdown body and links pageId', async () => {
+    const h = buildWithProjection()
+    const res = await h.byName.get('projectBlueprintRecordPage')!.execute(
+      {
+        blueprint: 'Discovery Brief',
+        subject: 'Acme',
+        parentPageId: '00000000-0000-0000-0000-00000000abcd',
+        draftMarkdown: 'Hi Bernard,\n\nQuick intro about Siu Gam.',
+      },
+      CTX,
+    )
+    expect(res.isError).toBeUndefined()
+    expect(res.data).toMatchObject({ projected: true, pageId: 'page-9', recordId: 'r-1', body: 'draft' })
+    // find-or-create on the record's own anchor key, nested + system-written.
+    expect(h.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        anchorKey: blueprintSubjectAnchorKey('ws-1', 'bp-1', 'Acme'),
+        nestParentId: '00000000-0000-0000-0000-00000000abcd',
+        writtenBy: 'system',
+      }),
+    )
+    // Body = the draft markdown ONLY — no record-field scaffolding leaks into
+    // what send_page will email.
+    const patch = h.applyPatch.mock.calls[0][0] as { nextPage: { blocks: Array<{ text?: string }> } }
+    const bodyText = JSON.stringify(patch.nextPage.blocks)
+    expect(bodyText).toContain('Quick intro about Siu Gam')
+    expect(bodyText).not.toContain('Summary')
+    // The projection is linked back onto the record.
+    expect(h.blueprintRecordStore.finalize).toHaveBeenCalledWith(
+      'u-1',
+      'r-1',
+      expect.objectContaining({ pageId: 'page-9' }),
+    )
+  })
+
+  it('errors honestly when the record does not exist yet', async () => {
+    const h = buildWithProjection()
+    h.blueprintRecordStore.getLatestBySubject.mockResolvedValueOnce(null)
+    const res = await h.byName.get('projectBlueprintRecordPage')!.execute(
+      { blueprint: 'Discovery Brief', subject: 'Nobody' },
+      CTX,
+    )
+    expect(res.isError).toBe(true)
+    expect(String((res.data as { error: string }).error)).toContain('saveBlueprintRecord')
   })
 })

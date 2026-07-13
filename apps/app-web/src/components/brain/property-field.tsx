@@ -26,6 +26,12 @@ import {
   SelectItem,
   SelectTrigger,
 } from "@/components/ui/select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { UserAvatar } from "@/components/ui/user-avatar";
 import { parseTagsInput, tagsEqual } from "@/components/brain/property-edit";
 
 export type CommitResult = { ok: boolean; error?: string };
@@ -516,6 +522,107 @@ export function TagsProperty({
           {chips}
         </button>
       )}
+    </PropertyRow>
+  );
+}
+
+// ── Person property ────────────────────────────────────────────────
+
+export type PersonPropertyValue = {
+  name: string;
+  email: string | null;
+  avatarUrl: string | null;
+  /** Pre-localised role label ("Owner" / "Admin" / "Member"), or null. */
+  roleLabel: string | null;
+};
+
+/**
+ * Read-only person row (e.g. a task's assignee): avatar + name in the value
+ * cell, click opens a small member card (avatar, name, email, role). The
+ * caller resolves the person and localises the role label; `unknownLabel`
+ * renders when an id is set but the person can't be resolved (roster fetch
+ * failed or a stale id).
+ */
+export function PersonProperty({
+  icon,
+  label,
+  value,
+  loading,
+  unknownLabel,
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  /** Resolved person, or null when unset / unresolved. */
+  value: PersonPropertyValue | null;
+  /** Roster still loading — render a quiet placeholder, not "Empty". */
+  loading?: boolean;
+  /** Set when an id exists but no person resolved. */
+  unknownLabel?: string | null;
+}) {
+  if (!value) {
+    return (
+      <PropertyRow icon={icon} label={label}>
+        <div className="flex min-h-9 items-center py-1">
+          {loading ? (
+            <span
+              className="h-4 w-24 animate-pulse rounded bg-muted"
+              aria-hidden
+            />
+          ) : unknownLabel ? (
+            <span className="text-sm text-muted-foreground/60">
+              {unknownLabel}
+            </span>
+          ) : (
+            <EmptyValue />
+          )}
+        </div>
+      </PropertyRow>
+    );
+  }
+
+  return (
+    <PropertyRow icon={icon} label={label}>
+      <Popover>
+        <PopoverTrigger
+          aria-label={label}
+          className={cn(VALUE_BUTTON_CLASS, "gap-1.5")}
+        >
+          <UserAvatar
+            name={value.name}
+            email={value.email ?? undefined}
+            avatarUrl={value.avatarUrl}
+            size={18}
+          />
+          <span className="truncate">{value.name}</span>
+        </PopoverTrigger>
+        <PopoverContent align="start" className="w-64 p-3">
+          <div className="flex items-center gap-3">
+            <UserAvatar
+              name={value.name}
+              email={value.email ?? undefined}
+              avatarUrl={value.avatarUrl}
+              size={36}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="truncate text-sm font-medium">
+                  {value.name}
+                </span>
+                {value.roleLabel && (
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {value.roleLabel}
+                  </span>
+                )}
+              </div>
+              {value.email && (
+                <div className="truncate text-xs text-muted-foreground">
+                  {value.email}
+                </div>
+              )}
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
     </PropertyRow>
   );
 }

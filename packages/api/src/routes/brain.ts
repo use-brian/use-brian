@@ -65,6 +65,15 @@ type WebBrainRow = {
    * `taskStatus` param). Absent on every other primitive.
    */
   status?: string
+  /** Task tags — only set on `kind:'tasks'` rows (the list's tag chips). */
+  tags?: string[]
+  /**
+   * Task assignee — a `workspace_members` row id (NOT a user id; see
+   * docs/architecture/features/tasks.md design decision #2). Only set on
+   * `kind:'tasks'` rows; the web client resolves it against the workspace
+   * roster for the list's assignee avatar.
+   */
+  assigneeId?: string | null
 }
 
 type WebEntityRollup = {
@@ -441,14 +450,20 @@ function projectSearchRow(row: SearchResultRow): WebBrainRow | null {
         name: str(row.title) ?? str(row.name) ?? '(file)',
         sensitivity,
       }
-    case 'task':
+    case 'task': {
+      const tags = Array.isArray(row.tags)
+        ? row.tags.filter((t): t is string => typeof t === 'string')
+        : []
       return {
         id: row.row_id,
         kind: 'tasks',
         name: str(row.title) ?? '(task)',
         sensitivity,
         status: str(row.status) ?? undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        assigneeId: str(row.assignee_id) ?? undefined,
       }
+    }
     case 'entity':
       return {
         id: row.row_id,

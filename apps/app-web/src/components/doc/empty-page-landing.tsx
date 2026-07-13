@@ -58,6 +58,7 @@ import {
 } from "@/components/doc/attachment-chips";
 import { useFileAttachments } from "@/lib/use-file-attachments";
 import { useFileDrop } from "@/lib/use-file-drop";
+import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { SetupChecklist } from "./setup-checklist";
@@ -72,6 +73,12 @@ type BuildOptions = {
 type Props = {
   /** Workspace id — backs model-tier plan gating. */
   workspaceId: string;
+  /**
+   * Workspace primary assistant — lets an attached `video/*` route to the
+   * recordings pipeline (direct-to-GCS + transcribe-to-brain) instead of being
+   * rejected by the upload guard. Absent → video falls to the guard chip.
+   */
+  assistantId?: string;
   /** Recently-opened pages (saved rows), most-recent first, pre-capped. */
   cards: ViewListRow[];
   /** Open a card's page in the active tab. */
@@ -105,6 +112,7 @@ type Props = {
 
 export function EmptyPageLanding({
   workspaceId,
+  assistantId,
   cards,
   onOpenCard,
   onSubmitPrompt,
@@ -114,6 +122,7 @@ export function EmptyPageLanding({
 }: Props) {
   const t = useT().docPage;
   const tAttach = useT().attachments;
+  const tRec = useT().recordings;
   const [prompt, setPrompt] = useState("");
   // Landing defaults to Pro (respecting any cached choice), shared with the
   // floating dock via the `doc-chat-model` key + plan-gated.
@@ -125,11 +134,27 @@ export function EmptyPageLanding({
   // composer. Quota / exhaustion surface on the build turn's own SSE (in the
   // chat dock), so the landing only holds the armed flag.
   const [researchMode, setResearchMode] = useState(false);
+  // Attached video routes to the recordings pipeline (direct-to-GCS upload →
+  // cost confirm → transcribe + file to the brain) exactly like the chat dock
+  // — a video can't ride the cache upload (20 MB cap, no video/ mime) and the
+  // model can't consume it inline anyway. Brain-only ingest (no blueprint);
+  // `run` shows its own cost confirm. See
+  // docs/architecture/media/transcription.md → "Chat-attached video".
+  const rec = useRecordingUpload(workspaceId, assistantId ?? "");
   // File attachments staged on the landing. `fileId`s are session-agnostic on
   // the read path (see `useFileAttachments`), so we upload here — before any
   // draft / session exists — and hand the ready ids to the build turn via the
   // chat-seed (`onSubmitPrompt` → `handleBuildPage` → seed → `/api/chat`).
-  const att = useFileAttachments();
+  const att = useFileAttachments(undefined, {
+    onRouteMedia:
+      workspaceId && assistantId
+        ? (videos) => {
+            void (async () => {
+              for (const file of videos) await rec.run(file);
+            })();
+          }
+        : undefined,
+  });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const drop = useFileDrop((files) => void att.upload(files));
 
@@ -207,12 +232,31 @@ export function EmptyPageLanding({
             placeholder={t.landing.placeholder}
             allowEmptySend={att.hasReady}
             slotAttachments={
-              att.attachments.length > 0 ? (
+              att.attachments.length > 0 || rec.status !== "idle" ? (
                 <div className="px-1 pb-2">
-                  <AttachmentChips
-                    attachments={att.attachments}
-                    onRemove={att.remove}
-                  />
+                  {att.attachments.length > 0 ? (
+                    <AttachmentChips
+                      attachments={att.attachments}
+                      onRemove={att.remove}
+                    />
+                  ) : null}
+                  {rec.status !== "idle" ? (
+                    <p
+                      className={cn(
+                        "py-0.5 text-left text-xs",
+                        rec.status === "error"
+                          ? "text-destructive"
+                          : "text-muted-foreground",
+                      )}
+                      role="status"
+                    >
+                      {rec.status === "uploading"
+                        ? tRec.uploading
+                        : rec.status === "processing"
+                          ? tRec.processing
+                          : rec.message}
+                    </p>
+                  ) : null}
                 </div>
               ) : null
             }

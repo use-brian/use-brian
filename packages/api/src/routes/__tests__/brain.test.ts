@@ -464,21 +464,50 @@ describe('[COMP:brain/list-http] GET /api/brain/list', () => {
   // Task completion partition — the Brain leads with live work. By default the
   // list hides `done` + `archived` tasks; `taskStatus=completed` returns only
   // those (the "Show completed" reveal); `taskStatus=all` keeps everything.
-  // The status field is projected onto every task row so the UI can chip it.
+  // The status field is projected onto every task row so the UI can chip it;
+  // tags + assignee_id (a workspace_members row id) project onto rows that
+  // carry them so the list can render tag chips + the assignee avatar.
   const taskRows = [
-    { primitive: 'task', row_id: 't-open', title: 'Ship pricing', status: 'in_progress', sensitivity: 'internal' },
+    {
+      primitive: 'task',
+      row_id: 't-open',
+      title: 'Ship pricing',
+      status: 'in_progress',
+      sensitivity: 'internal',
+      tags: ['launch', 'pricing'],
+      assignee_id: 'wm-1',
+    },
     { primitive: 'task', row_id: 't-done', title: 'Wire webhook', status: 'done', sensitivity: 'internal' },
     { primitive: 'task', row_id: 't-arch', title: 'Old task', status: 'archived', sensitivity: 'internal' },
   ] as unknown as SearchResultRow[]
 
-  it('hides done + archived tasks by default and projects status', async () => {
+  it('hides done + archived tasks by default and projects status + tags + assigneeId', async () => {
     mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
     const res = await request(makeApp(makeEntityStore(null), makeRetrievalStore(taskRows)))
       .get('/api/brain/list?workspaceId=ws-1&kinds=tasks')
       .expect(200)
     expect(res.body.results).toEqual([
-      { id: 't-open', kind: 'tasks', name: 'Ship pricing', sensitivity: 'internal', status: 'in_progress' },
+      {
+        id: 't-open',
+        kind: 'tasks',
+        name: 'Ship pricing',
+        sensitivity: 'internal',
+        status: 'in_progress',
+        tags: ['launch', 'pricing'],
+        assigneeId: 'wm-1',
+      },
     ])
+  })
+
+  it('omits tags + assigneeId on task rows without them (lean wire)', async () => {
+    mockQuery.mockResolvedValueOnce(memberRow).mockResolvedValueOnce(assistantRow)
+    const res = await request(makeApp(makeEntityStore(null), makeRetrievalStore(taskRows)))
+      .get('/api/brain/list?workspaceId=ws-1&kinds=tasks&taskStatus=completed')
+      .expect(200)
+    const done = res.body.results.find((r: { id: string }) => r.id === 't-done')
+    expect(done).toEqual({ id: 't-done', kind: 'tasks', name: 'Wire webhook', sensitivity: 'internal', status: 'done' })
+    expect('tags' in done).toBe(false)
+    expect('assigneeId' in done).toBe(false)
   })
 
   it('taskStatus=completed returns only done + archived tasks', async () => {

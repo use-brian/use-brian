@@ -117,8 +117,18 @@ export type TaskStore = {
     attributes?: TaskAttributes
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
-    /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
+    /** Fresh-insert source; default 'user'; synthesis + Pipeline B pass 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /**
+     * Interactive-write provenance anchor (mig 316) — the session of the
+     * conversation that created this task. Chat saveTask stamps
+     * `context.sessionId`; sessionless paths leave it unset.
+     */
+    sourceSessionId?: string | null
+    /** Extraction provenance anchor — the Episode this task derives from (Pipeline B / synthesis). */
+    sourceEpisodeId?: string | null
+    /** The assistant that mediated the write (chat/workflow saveTask). */
+    createdByAssistantId?: string | null
     /**
      * Task ids this task depends on — each becomes a task→task
      * `depends_on` edge (graph layer; fire-and-forget). v1 append-only.

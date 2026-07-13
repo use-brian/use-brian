@@ -711,13 +711,17 @@ function ApprovalCard({
       : []),
   ].join(" · ");
 
-  async function respond(decision: "approved" | "rejected") {
+  async function respond(
+    decision: "approved" | "rejected",
+    extra?: { grantAlways?: boolean },
+  ) {
     setBusy(true);
     setError(null);
     const result = await respondByKind(
       row,
       decision,
       reason.trim() || undefined,
+      extra,
     );
     if (result.ok) {
       onResolved(row.id);
@@ -805,6 +809,9 @@ function ApprovalCard({
                 detailsLoaded={skillDetailsLoaded}
               />
             )}
+            {row.kind === "browser_skill_send" && (
+              <BrowserSkillSendBody row={row} />
+            )}
             <div className="text-xs text-muted-foreground mt-0.5">
               {metaLine}
             </div>
@@ -820,25 +827,64 @@ function ApprovalCard({
                 disabled={busy || batchBusy}
                 className="text-xs px-2 py-1.5 rounded border border-border bg-background w-full max-w-md"
               />
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={busy || batchBusy || approveBlocked}
-                  onClick={() => respond("approved")}
-                  className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
-                >
-                  {t.approvalsPage.approveAction}
-                </button>
-                <button
-                  type="button"
-                  disabled={busy || batchBusy}
-                  onClick={() => respond("rejected")}
-                  className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
-                >
-                  {t.approvalsPage.rejectAction}
-                </button>
-                {error && <span className="text-xs text-red-500">{error}</span>}
-              </div>
+              {row.kind === "browser_skill_send" ? (
+                // The R2-2 three-button card: Deny / Allow once / Allow always
+                // for this block+profile. "Allow always" mints the standing
+                // grant (the grant IS the review) — never offered on
+                // verb-ceiling sends.
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || batchBusy}
+                    onClick={() => respond("rejected")}
+                    className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
+                  >
+                    {t.approvalsPage.browserSkillSend.deny}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || batchBusy}
+                    onClick={() => respond("approved")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                  >
+                    {t.approvalsPage.browserSkillSend.allowOnce}
+                  </button>
+                  {!row.approvalPayload.ceiling && (
+                    <button
+                      type="button"
+                      disabled={busy || batchBusy}
+                      onClick={() => respond("approved", { grantAlways: true })}
+                      className="text-xs px-3 py-1.5 rounded-md border border-primary/50 text-primary hover:bg-primary/10 disabled:opacity-50"
+                    >
+                      {format(t.approvalsPage.browserSkillSend.allowAlways, {
+                        skill: row.approvalPayload.skillName ?? "",
+                        profile: row.approvalPayload.profileName ?? "",
+                      })}
+                    </button>
+                  )}
+                  {error && <span className="text-xs text-red-500">{error}</span>}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || batchBusy || approveBlocked}
+                    onClick={() => respond("approved")}
+                    className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50"
+                  >
+                    {t.approvalsPage.approveAction}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || batchBusy}
+                    onClick={() => respond("rejected")}
+                    className="text-xs px-3 py-1.5 rounded-md border border-border hover:bg-muted disabled:opacity-50"
+                  >
+                    {t.approvalsPage.rejectAction}
+                  </button>
+                  {error && <span className="text-xs text-red-500">{error}</span>}
+                </div>
+              )}
             </div>
           ) : row.kind === "distribution_draft" && activeWorkspaceId ? (
             // Feed drafts resolve in the in-app Feed inbox now
@@ -858,6 +904,44 @@ function ApprovalCard({
         </div>
       </div>
     </li>
+  );
+}
+
+/** Detail body for `browser_skill_send` cards (computer-use R2-5): which
+ *  block wants to send, as which profile, on which site — plus the ceiling /
+ *  drift badges that explain why "Allow always" is (not) on offer. The
+ *  effect-contract summary is the review artifact the grant decision reads. */
+function BrowserSkillSendBody({ row }: { row: PendingApprovalRow }) {
+  const t = useT();
+  const p = row.approvalPayload;
+  return (
+    <div className="mt-1 flex flex-col gap-1">
+      <div className="text-xs text-muted-foreground">
+        {format(t.approvalsPage.browserSkillSend.context, {
+          skill: p.skillName ?? "",
+          profile: p.profileName ?? "",
+          site: p.site ?? "",
+        })}
+      </div>
+      {p.label ? (
+        <div className="text-xs text-muted-foreground truncate">
+          {format(t.approvalsPage.browserSkillSend.target, { label: p.label })}
+        </div>
+      ) : null}
+      {p.contractSummary ? (
+        <div className="text-xs text-muted-foreground">{p.contractSummary}</div>
+      ) : null}
+      {p.ceiling ? (
+        <span className="w-fit text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide bg-destructive/15 text-destructive">
+          {format(t.approvalsPage.browserSkillSend.ceiling, { reason: p.ceiling })}
+        </span>
+      ) : null}
+      {p.drift ? (
+        <span className="w-fit text-[10px] px-1.5 py-0.5 rounded uppercase tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400">
+          {format(t.approvalsPage.browserSkillSend.drift, { reason: p.drift })}
+        </span>
+      ) : null}
+    </div>
   );
 }
 

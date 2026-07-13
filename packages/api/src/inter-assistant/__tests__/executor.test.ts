@@ -65,6 +65,26 @@ vi.mock('../../doc/inject.js', () => ({
 }))
 
 import { createCalleeExecutor } from '../executor.js'
+// Real (unmocked) core factories — the '@sidanclaw/core' mock above spreads the
+// actual module, so everything but queryLoop/runPreflight resolves for real.
+// Used by the goal-path browser-surface describes at the bottom of this file.
+import {
+  createComputerTools,
+  createSkillRunnerTools,
+  createBuFallbackTool,
+  createLocalBrowserProvider,
+  createCloudBrowserProvider,
+  StubSandboxProvider,
+  createSandboxOrchestrator,
+  createInMemorySandboxTaskStore,
+  createInMemoryBrowserProfileStore,
+  createInMemorySessionVault,
+  createInMemoryBrowserSkillStore,
+  createInMemoryBrowserSkillGrantStore,
+  createInMemoryBlockApprovals,
+  extractEffectContract,
+  RESULT_PATH,
+} from '@sidanclaw/core'
 import { findAssistantById, findUserById } from '../../db/users.js'
 import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
 import { billingPartyForAssistant } from '../../billing-party.js'
@@ -454,6 +474,45 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(call.systemPrompt as string).not.toContain(
       '## Approval-gated tools are NOT available in this step',
     )
+  })
+
+  it('the confirmation strip NEVER mutates the shared tool singletons (chat gates survive consults)', async () => {
+    // `options.tools` is boot's shared allTools map — the same Tool objects the
+    // interactive chat surface dispatches. The strip must clone per consult:
+    // an in-place `tool.resolveConfirmation = undefined` would permanently
+    // disarm chat's confirmation gates (browserClick's send gate, every
+    // policy-'ask' resolver) after the first A2A/workflow consult.
+    yieldsText()
+    const sharedAsk = askTool() // requiresConfirmation: true
+    const resolver = vi.fn().mockResolvedValue(false) // dynamic allow → KEPT on the workflow lane
+    const sharedDynamic = { ...plainTool('browserNavigateish'), resolveConfirmation: resolver }
+    await executorWithTools(
+      new Map<string, unknown>([
+        ['gmailSendMessage', sharedAsk],
+        ['browserNavigateish', sharedDynamic],
+      ]),
+    )(baseParams) // ordinary A2A lane: strips every kept tool's flags
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<
+      string,
+      { requiresConfirmation?: boolean; resolveConfirmation?: unknown }
+    >
+    // The consult's own surface is stripped…
+    expect(passed.get('gmailSendMessage')?.requiresConfirmation).toBe(false)
+    expect(passed.get('browserNavigateish')?.resolveConfirmation).toBeUndefined()
+    // …but the shared singletons are untouched.
+    expect(sharedAsk.requiresConfirmation).toBe(true)
+    expect(sharedDynamic.resolveConfirmation).toBe(resolver)
+
+    // Workflow lane: the kept-allow tool is stripped on a clone too.
+    mockQueryLoop.mockClear()
+    yieldsText()
+    await executorWithTools(new Map<string, unknown>([['browserNavigateish', sharedDynamic]]))({
+      ...baseParams,
+      callerChannelType: 'workflow',
+    })
+    const wfPassed = mockQueryLoop.mock.calls[0][0].tools as Map<string, { resolveConfirmation?: unknown }>
+    expect(wfPassed.get('browserNavigateish')?.resolveConfirmation).toBeUndefined()
+    expect(sharedDynamic.resolveConfirmation).toBe(resolver)
   })
 
   // ── Record-creation restraint (Pattern 2 of the duplicate-task incident) ──
@@ -1462,5 +1521,176 @@ describe('[COMP:api/inter-assistant-executor] workflow research fan-out + memory
     })
     // Completeness stamped from required coverage.
     expect(blueprintRecordStore.finalize.mock.calls[0][2]).toMatchObject({ status: 'complete', missing: [] })
+  })
+})
+
+// ── Browser tools on the goal path (task+goal → workflow-origin consult) ──
+// A task's goal works through the workflow executor: the goal driver runs a
+// one-step assistant_call each iteration (callerChannelType 'workflow'), and
+// THAT consult's tool surface is what a "spin up the browser for this task"
+// goal actually holds. Two contracts, per computer-use.md → "Working a task's
+// goal": (1) the one-call-in-VM tools (runBrowserSkill / browserExplore) and
+// the flat READ tools survive the ask-drop, while browserClick — the
+// click-altitude primitive — drops fail-closed (its send gate cannot resolve
+// a label with no live session), so autonomous acting happens through the
+// governed runner, never a model-driven click loop; (2) with Barrier 2 + the
+// paid gate satisfied, a goal-shaped context executes a read-only skill end
+// to end, and with the flag off it refuses honestly.
+describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflow-origin consult)', () => {
+  function browserExecutor(baseTools: Map<string, unknown>) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: baseTools as never,
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+    })
+  }
+
+  async function realBrowserTools(opts: { unattended: boolean }) {
+    const provider = new StubSandboxProvider()
+    const profileStore = createInMemoryBrowserProfileStore()
+    const skillStore = createInMemoryBrowserSkillStore()
+    const orchestrator = createSandboxOrchestrator({
+      provider,
+      taskStore: createInMemorySandboxTaskStore(),
+      vault: createInMemorySessionVault(),
+      profileStore,
+    })
+    const profiles = {
+      store: profileStore,
+      vault: null,
+      assistantClearance: async () => 'confidential' as const,
+    }
+    const unattendedEnabled = () => opts.unattended
+    const getWorkspacePlan = async () => 'pro'
+    const computer = createComputerTools({
+      local: createLocalBrowserProvider({ transport: null }),
+      cloud: createCloudBrowserProvider({ provider, binding: orchestrator.binding }),
+      cloudAvailable: () => true,
+      profiles,
+      unattendedEnabled,
+      getWorkspacePlan,
+    })
+    const skillTools = createSkillRunnerTools({
+      provider,
+      binding: orchestrator.binding,
+      skills: skillStore,
+      grants: createInMemoryBrowserSkillGrantStore(),
+      approvals: createInMemoryBlockApprovals(),
+      profiles,
+      unattendedEnabled,
+      getWorkspacePlan,
+      approvalWaitMs: 300,
+      pollMs: 5,
+    })
+    const bu = createBuFallbackTool({
+      provider,
+      binding: orchestrator.binding,
+      skills: skillStore,
+      profiles,
+      unattendedEnabled,
+      getWorkspacePlan,
+    })
+    const tools = new Map<string, unknown>([
+      ['browserNavigate', computer.browserNavigate],
+      ['browserSnapshot', computer.browserSnapshot],
+      ['browserClick', computer.browserClick],
+      ['browserType', computer.browserType],
+      ['browserCurrentUrl', computer.browserCurrentUrl],
+      ['runBrowserSkill', skillTools.runBrowserSkill],
+      ['listBrowserSkills', skillTools.listBrowserSkills],
+      ['listBrowserProfiles', skillTools.listBrowserProfiles],
+      ['browserExplore', bu.browserExplore],
+    ])
+    return { tools, provider, profileStore, skillStore }
+  }
+
+  type RunnableTool = {
+    execute: (input: never, context: never) => Promise<{ data: unknown; isError?: boolean }>
+    inputSchema: { parse: (v: unknown) => unknown }
+  }
+
+  /** The ToolContext shape a goal iteration's callee turn stamps. */
+  const goalContext = () => ({
+    userId: 'owner-1',
+    assistantId: 'callee-1',
+    sessionId: 'sess-1',
+    appId: 'sidanclaw',
+    channelType: 'assistant-call',
+    channelId: 'caller-1',
+    workspaceId: 'ws-1',
+    abortSignal: new AbortController().signal,
+  })
+
+  it('workflow-origin consults keep the one-call browser tools and drop browserClick (fail-closed)', async () => {
+    yieldsText()
+    const { tools } = await realBrowserTools({ unattended: true })
+    await browserExecutor(tools)({ ...baseParams, callerChannelType: 'workflow' })
+    const call = mockQueryLoop.mock.calls[0][0]
+    const passed = call.tools as Map<string, unknown>
+    for (const name of [
+      'browserNavigate',
+      'browserSnapshot',
+      'browserType',
+      'browserCurrentUrl',
+      'runBrowserSkill',
+      'listBrowserSkills',
+      'listBrowserProfiles',
+      'browserExplore',
+    ]) {
+      expect(passed.has(name), `expected ${name} on the goal-path surface`).toBe(true)
+    }
+    expect(passed.has('browserClick')).toBe(false)
+    // The drop note names the tool so the callee steers to the governed paths.
+    expect(call.systemPrompt as string).toContain('browserClick')
+  })
+
+  it('a goal iteration executes a read-only browser skill end-to-end (unattended + paid)', async () => {
+    yieldsText()
+    const { tools, provider, profileStore, skillStore } = await realBrowserTools({ unattended: true })
+    await profileStore.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'owner-1',
+      name: 'Ops',
+      defaultBackend: 'cloud',
+      enabledAssistantIds: ['callee-1'],
+    })
+    const code = 'def run(runner, params):\n    runner.open("https://www.example.com/")\n    return "collected"\n'
+    await skillStore.create({
+      workspaceId: 'ws-1',
+      name: 'collect-example',
+      site: 'example.com',
+      code,
+      contract: extractEffectContract({ code, site: 'example.com' }),
+      recording: [{ step: 1, action: 'open', url: 'https://www.example.com/' }],
+      origin: 'assistant',
+    })
+    provider.scriptSkillRun(async (io) => {
+      io.writeFile(RESULT_PATH, JSON.stringify({ ok: true, summary: 'collected 3 items' }))
+      return { stdout: '', stderr: '', exitCode: 0 }
+    })
+    await browserExecutor(tools)({ ...baseParams, callerChannelType: 'workflow' })
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, RunnableTool>
+    const runSkill = passed.get('runBrowserSkill')!
+    const res = await runSkill.execute(
+      runSkill.inputSchema.parse({ skill: 'collect-example' }) as never,
+      goalContext() as never,
+    )
+    expect(res.isError ?? false).toBe(false)
+    expect(String(res.data)).toContain('collected 3 items')
+  })
+
+  it('the same surface refuses honestly on the goal path while unattended computer-use is OFF', async () => {
+    yieldsText()
+    const { tools } = await realBrowserTools({ unattended: false })
+    await browserExecutor(tools)({ ...baseParams, callerChannelType: 'workflow' })
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, RunnableTool>
+    const runSkill = passed.get('runBrowserSkill')!
+    const res = await runSkill.execute(
+      runSkill.inputSchema.parse({ skill: 'whatever' }) as never,
+      goalContext() as never,
+    )
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('unattended')
   })
 })

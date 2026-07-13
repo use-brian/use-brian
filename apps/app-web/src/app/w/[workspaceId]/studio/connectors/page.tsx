@@ -1650,12 +1650,9 @@ function ConnectorsList() {
 
   return (
     <div className="space-y-5">
-      {/* Intro row — the section description (the topbar breadcrumb names the
-          section) + the page's one primary action, the Add menu. */}
-      <div className="flex items-start justify-between gap-4">
-        <p className="text-[13px] text-muted-foreground max-w-prose">
-          {tc.pageDesc}
-        </p>
+      {/* Intro row — the page's one primary action, the Add menu (the topbar
+          breadcrumb names the section; no description paragraph). */}
+      <div className="flex justify-end">
         <AddConnectorMenu
           label={tc.addConnector}
           browseLabel={tc.browseDirectory}

@@ -139,7 +139,9 @@ export function computePercent(cost: number, cap: number) {
  * the whole workspace, and `plan` is the workspace's plan (`workspaces.plan`,
  * one of free/pro/max_5x/max_10x/enterprise). Enforcement is the **monthly
  * credit cap** (`creditCapForPlan`): at the cap, paid plans downgrade to
- * Standard and free blocks. `resetsAt` is the current billing-period end.
+ * Standard; `'free'` (no active plan since the 2026-07-10 Free-plan
+ * removal) always blocks on hosted. `resetsAt` is the current
+ * billing-period end.
  *
  * Replaced the rolling-dollar budget (weekly + 5h burst windows) on
  * 2026-06-05. See docs/architecture/platform/cost-and-pricing.md → "Budget

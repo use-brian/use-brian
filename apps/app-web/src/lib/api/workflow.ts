@@ -310,14 +310,28 @@ export type WorkflowFull = {
   pinned?: boolean;
   /** Present on GET detail. The real firing rows; see WorkflowTriggerJob. */
   triggerJobs?: WorkflowTriggerJob[];
+  /**
+   * Present on GET detail (mig 321). Page-action buttons whose action starts
+   * this workflow — the same read-surface honesty as `triggerJobs`: the
+   * trigger column can say "Manual" while buttons fire it.
+   */
+  buttonBindings?: WorkflowButtonBinding[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type WorkflowButtonBinding = {
+  id: string;
+  label: string;
+  blueprintId: string | null;
+  pageId: string | null;
+  enabled: boolean;
 };
 
 export type WorkflowRunSummary = {
   id: string;
   workflowId: string;
-  triggerKind: "manual" | "schedule" | "event";
+  triggerKind: "manual" | "schedule" | "event" | "button";
   status:
     | "pending"
     | "running"

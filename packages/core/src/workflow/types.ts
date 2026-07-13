@@ -230,11 +230,43 @@ export type BranchStep = WorkflowStepCommon & {
   nextStepIdIfFalse: string | null
 }
 
+/**
+ * Where a `send_page` step's recipient / subject comes from. `recordField`
+ * reads the named typed field off the page's blueprint record at execution
+ * time; `literal` is a fixed string (interpolatable). Never model-composed —
+ * the whole point of the step is that no model sits between the human's
+ * approval and the send. See docs/architecture/features/page-actions.md.
+ */
+export type SendPageValueSource = { recordField: string } | { literal: string }
+
+/**
+ * Deterministic external send of a doc page's content — the verbatim send
+ * lane behind page-action buttons. The executor runs it with NO model call:
+ * the body is the page's markdown export, byte-for-byte what the human
+ * approved. Runtime-gated to `run.triggerKind === 'button'` (every v1
+ * external send has a human click behind it) and executed through the
+ * `ExecutorDeps.sendPage` port, which owns the egress clearance gate, the
+ * `page_send_log` at-most-once claim, and the Gmail send.
+ * See docs/architecture/features/page-actions.md → "send_page".
+ */
+export type SendPageStep = WorkflowStepCommon & {
+  type: 'send_page'
+  /** Page to send: a uuid or exactly one `{{vars.x}}` / `{{input.x}}` token (typically `{{input.event.pageId}}`). */
+  page: string
+  /** Send channel. v1 is Gmail-only; browser channels are a later, separate unlock. */
+  via: 'gmail'
+  to: SendPageValueSource
+  subject: SendPageValueSource
+  /** Optional Gmail connector instance id (multi-account); absent = primary. */
+  instanceId?: string
+}
+
 export type WorkflowStep =
   | AssistantCallStep
   | ToolCallStep
   | WaitStep
   | BranchStep
+  | SendPageStep
 
 export type WorkflowStepType = WorkflowStep['type']
 
@@ -243,6 +275,7 @@ export const WORKFLOW_STEP_TYPES = [
   'tool_call',
   'wait',
   'branch',
+  'send_page',
 ] as const satisfies ReadonlyArray<WorkflowStepType>
 
 export type WorkflowDefinition = {
@@ -460,7 +493,11 @@ export type WorkflowStepRunStatus = (typeof WORKFLOW_STEP_RUN_STATUSES)[number]
 // `'manual'` for event runs (the old shortcut) let the drainer resurrect
 // orphaned inline runs — the 2026-07-06 reminder storm. See workflow-store.ts
 // → claimNextPendingRunSystem and docs → "Event run queue".
-export type WorkflowTriggerKind = 'manual' | 'schedule' | 'event'
+// `'button'` (mig 321) = a page-action button click: inline-advanced like
+// manual (NOT queue-owned), but distinguishable because it is the runtime
+// gate for `send_page` steps — every v1 external send has a human click
+// behind it. See docs/architecture/features/page-actions.md.
+export type WorkflowTriggerKind = 'manual' | 'schedule' | 'event' | 'button'
 
 /**
  * Mig 308. The workflow lifecycle ladder — `active` → `stale` (idle past the

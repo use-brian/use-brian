@@ -164,3 +164,143 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(mockUpdateTask).not.toHaveBeenCalled()
   })
 })
+
+describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
+  beforeEach(() => {
+    mockQuery.mockReset()
+  })
+
+  const SAVED_AT = new Date('2026-07-09T10:00:00Z')
+
+  it('resolves a chat origin from the row source_session_id (mig 316) with channel + messages', async () => {
+    // 1. meta
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: SAVED_AT,
+        created_by_assistant_id: 'a_1',
+        created_by_user_id: 'u_1',
+        source_episode_id: null,
+        source_session_id: 'ses-1111',
+        source: 'user',
+        tags: null,
+      }],
+    } as never)
+    // 2. assistant name
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Nova' }] } as never)
+    // 3. user name
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Hinson' }] } as never)
+    // 4. sessions verify
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'ses-1111', channel_type: 'telegram' }] } as never)
+    // 5. surrounding messages
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'm1', role: 'user', content: 'hello', createdAt: SAVED_AT, rn: 1 }],
+    } as never)
+
+    const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/task/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.sourceSessionId).toBe('ses-1111')
+    expect(res.body.messages).toHaveLength(1)
+    expect(res.body.origin).toMatchObject({
+      kind: 'chat',
+      channelType: 'telegram',
+      source: 'user',
+      workflowId: null,
+      createdByUserName: 'Hinson',
+    })
+  })
+
+  it('labels consolidation output without a session or episode', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: SAVED_AT,
+        created_by_assistant_id: null,
+        created_by_user_id: 'u_1',
+        source_episode_id: null,
+        source_session_id: null,
+        source: 'consolidation',
+        tags: [],
+      }],
+    } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Hinson' }] } as never)
+
+    const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/memory/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.messages).toHaveLength(0)
+    expect(res.body.origin.kind).toBe('consolidation')
+    expect(res.body.origin.source).toBe('consolidation')
+  })
+
+  it('falls through a dangling episode session to an extraction origin', async () => {
+    // Legacy pre-316 task: no own session, episode carries a session id in
+    // source_ref that no longer resolves — must NOT 500 and must NOT claim
+    // a chat origin; the episode detail is the clue.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: SAVED_AT,
+        created_by_assistant_id: null,
+        created_by_user_id: 'u_1',
+        source_episode_id: 'ep-9',
+        source_session_id: null,
+        source: 'extracted',
+        tags: null,
+      }],
+    } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Hinson' }] } as never)
+    // episode — session pointer only in source_ref (the legacy shape)
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        id: 'ep-9',
+        source_kind: 'meeting',
+        occurred_at: SAVED_AT,
+        summary_text: 'Weekly sync',
+        content_ref: null,
+        source_ref: { session_id: 'dead-session' },
+      }],
+    } as never)
+    // sessions verify — dangling
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+
+    const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/task/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.sourceSessionId).toBeNull()
+    expect(res.body.messages).toHaveLength(0)
+    expect(res.body.origin.kind).toBe('extraction')
+    expect(res.body.origin.episode).toMatchObject({
+      id: 'ep-9',
+      sourceKind: 'meeting',
+      summaryText: 'Weekly sync',
+    })
+  })
+
+  it('labels a workflow run from the assistant-call session + workflow tag', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{
+        workspace_id: WS,
+        created_at: SAVED_AT,
+        created_by_assistant_id: 'a_1',
+        created_by_user_id: 'u_1',
+        source_episode_id: null,
+        source_session_id: 'ses-wf',
+        source: 'model',
+        tags: ['research', 'workflow:wf-42'],
+      }],
+    } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Nova' }] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Hinson' }] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'ses-wf', channel_type: 'assistant-call' }] } as never)
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never)
+
+    const res = await request(makeApp()).get(`/api/brain-inbox/${WS}/memory/${ROW}/explain`)
+
+    expect(res.status).toBe(200)
+    expect(res.body.origin.kind).toBe('workflow')
+    expect(res.body.origin.workflowId).toBe('wf-42')
+    expect(res.body.origin.channelType).toBe('assistant-call')
+  })
+})

@@ -68,7 +68,6 @@ type RepoOption = {
 export default function StudioKnowledgePage() {
   const t = useT();
   const copy = t.studioPage.knowledgePage;
-  const descriptionsCopy = t.studioPage.sectionDescriptions;
   const { activeId } = useWorkspaces();
   const params = useParams<{ workspaceId: string }>();
   const workspaceId = params?.workspaceId ?? "";
@@ -287,9 +286,6 @@ export default function StudioKnowledgePage() {
   if (!activeId) {
     return (
       <div className="flex flex-col gap-6">
-        <header>
-          <p className="text-[13px] text-muted-foreground max-w-prose">{descriptionsCopy.knowledge}</p>
-        </header>
         <div className="text-sm text-muted-foreground">{copy.noConnectorWorkspace}</div>
       </div>
     );
@@ -297,12 +293,6 @@ export default function StudioKnowledgePage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Intro row — the topbar breadcrumb names the section
-          (docs/architecture/features/studio.md → "Page headers"). */}
-      <header>
-        <p className="text-[13px] text-muted-foreground max-w-prose">{copy.description}</p>
-      </header>
-
       {connectWarning && (
         <div className="text-[13px] text-amber-600 dark:text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
           {format(copy.validationWarning, { message: connectWarning })}

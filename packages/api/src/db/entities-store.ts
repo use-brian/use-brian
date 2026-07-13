@@ -65,6 +65,7 @@ const FULL_SELECT = `
   created_by_user_id AS "createdByUserId",
   created_by_assistant_id AS "createdByAssistantId",
   source_episode_id AS "sourceEpisodeId",
+  source_session_id AS "sourceSessionId",
   source,
   verified_by_user_id AS "verifiedByUserId",
   verified_at AS "verifiedAt",
@@ -106,6 +107,7 @@ type EntityRow = {
   createdByUserId: string
   createdByAssistantId: string | null
   sourceEpisodeId: string | null
+  sourceSessionId: string | null
   source: string
   verifiedByUserId: string | null
   verifiedAt: Date | null
@@ -136,6 +138,7 @@ function toEntity(row: EntityRow): EntityRecord {
     createdByUserId: row.createdByUserId,
     createdByAssistantId: row.createdByAssistantId,
     sourceEpisodeId: row.sourceEpisodeId,
+    sourceSessionId: row.sourceSessionId,
     source: row.source as EntitySource,
     verifiedByUserId: row.verifiedByUserId,
     verifiedAt: row.verifiedAt,
@@ -184,13 +187,13 @@ export async function createEntity(params: EntityCreateParams): Promise<EntityRe
        kind, display_name, canonical_id, aliases, attributes, sensitivity,
        workspace_id, user_id, assistant_id,
        created_by_user_id, created_by_assistant_id, source_episode_id,
-       source, compartments
+       source, compartments, source_session_id
      )
      VALUES (
        $1, $2, $3, $4::text[], $5::jsonb, $6,
        $7, $8, $9,
        $10, $11, $12,
-       $13, $14::text[]
+       $13, $14::text[], $15
      )
      RETURNING ${FULL_SELECT}`,
     [
@@ -208,6 +211,7 @@ export async function createEntity(params: EntityCreateParams): Promise<EntityRe
       params.sourceEpisodeId ?? null,
       params.source,
       params.compartments ?? [],
+      params.sourceSessionId ?? null,
     ],
   )
   return toEntity(result.rows[0])
@@ -909,6 +913,7 @@ export async function supersedeEntity(
            workspace_id, user_id, assistant_id,
            created_by_user_id, created_by_assistant_id, source_episode_id,
            source, verified_by_user_id, verified_at,
+           source_session_id,
            valid_from, valid_to, superseded_by
          )
          VALUES (
@@ -916,6 +921,7 @@ export async function supersedeEntity(
            $7, $8, $9,
            $10, $11, $12,
            $13, $14, $15,
+           $16,
            now(), NULL, NULL
          )
          RETURNING ${FULL_SELECT}`,
@@ -940,6 +946,9 @@ export async function supersedeEntity(
           patch.source ?? old.source,
           old.verifiedByUserId,
           old.verifiedAt,
+          // The originating conversation carries forward — supersession
+          // changes the belief, not where the row came from.
+          old.sourceSessionId,
         ],
       )
       const newRow = insertRes.rows[0]

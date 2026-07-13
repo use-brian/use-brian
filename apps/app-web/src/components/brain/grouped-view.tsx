@@ -22,11 +22,12 @@
  * toggle's alternate). This file is the list/overview the toggle returns to.
  */
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { entityColorVar } from "@/lib/brain-colors";
 import { useT, format } from "@/lib/i18n/client";
+import { useWorkspaces } from "@/contexts/workspace-context";
 import type {
   BrainGraph,
   BrainGraphNode,
@@ -34,6 +35,13 @@ import type {
   BrainRow,
 } from "@/lib/api/brain";
 import { BrainFallbackCard } from "@/components/brain/file-segment-card";
+import { UserAvatar } from "@/components/ui/user-avatar";
+import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
+import {
+  memberDisplayName,
+  resolveAssignee,
+  type AssignableMember,
+} from "@/components/brain/property-edit";
 
 type Props = {
   rows: BrainRow[];
@@ -84,6 +92,62 @@ function TaskStatusChip({ status }: { status: string }) {
     >
       {labels[status] ?? status}
     </span>
+  );
+}
+
+/** How many tag chips a task row shows before collapsing into "+N". */
+const TASK_ROW_TAG_CAP = 3;
+
+/**
+ * Per-task row decoration: tag chips (capped, "+N" overflow) and the
+ * assignee's avatar (resolved from the workspace roster by the task's
+ * `assignee_id` — a `workspace_members` row id). Renders nothing it can't
+ * resolve: no roster yet (or a stale id) simply omits the avatar so the
+ * list never blocks on the fetch. Tags hide below `sm` — the same
+ * treatment as the entity rows' neighbour-kind dots.
+ */
+function TaskRowMeta({
+  row,
+  roster,
+}: {
+  row: BrainRow;
+  roster: AssignableMember[] | null;
+}) {
+  const tags = row.tags ?? [];
+  const overflow = tags.length - TASK_ROW_TAG_CAP;
+  const assignee =
+    row.assigneeId && roster ? resolveAssignee(roster, row.assigneeId) : null;
+  const assigneeName = assignee ? memberDisplayName(assignee) : null;
+  return (
+    <>
+      {tags.length > 0 && (
+        <span className="hidden sm:flex shrink-0 items-center gap-1">
+          {tags.slice(0, TASK_ROW_TAG_CAP).map((tag) => (
+            <span
+              key={tag}
+              className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground border border-border"
+            >
+              {tag}
+            </span>
+          ))}
+          {overflow > 0 && (
+            <span className="text-[10px] text-muted-foreground/70 tabular-nums">
+              +{overflow}
+            </span>
+          )}
+        </span>
+      )}
+      {assignee && (
+        <span className="shrink-0" title={assigneeName ?? undefined}>
+          <UserAvatar
+            name={assigneeName ?? undefined}
+            email={assignee.email ?? undefined}
+            avatarUrl={assignee.avatarUrl}
+            size={18}
+          />
+        </span>
+      )}
+    </>
   );
 }
 
@@ -288,6 +352,31 @@ export function BrainGroupedView({
   const filters = t.brainPage.filters;
   const completedCount = completedTasks?.length ?? 0;
 
+  // Workspace roster for the task rows' assignee avatars — fetched once per
+  // workspace (module cache in lib/api/workspace-roster.ts) and only when an
+  // assigned task is actually visible. Best-effort: a failed fetch just
+  // renders rows without avatars.
+  const { activeId: workspaceId } = useWorkspaces();
+  const hasAssignedTask = useMemo(
+    () =>
+      rows.some((r) => r.kind === "tasks" && r.assigneeId) ||
+      (completedTasks ?? []).some((r) => r.assigneeId),
+    [rows, completedTasks],
+  );
+  const [roster, setRoster] = useState<AssignableMember[] | null>(null);
+  useEffect(() => {
+    if (!workspaceId || !hasAssignedTask) return;
+    let cancelled = false;
+    loadWorkspaceRoster(workspaceId)
+      .then((members) => {
+        if (!cancelled) setRoster(members);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, hasAssignedTask]);
+
   // Human label per group — composed from the existing filter-chip + graph
   // legend dictionaries (no new i18n keys needed).
   const groupLabel: Record<GroupKey, string> = {
@@ -487,6 +576,9 @@ export function BrainGroupedView({
                           </>
                         ) : (
                           <>
+                            {group.key === "tasks" && (
+                              <TaskRowMeta row={row} roster={roster} />
+                            )}
                             {group.key === "tasks" && row.status && (
                               <TaskStatusChip status={row.status} />
                             )}
@@ -561,6 +653,7 @@ export function BrainGroupedView({
                             <span className="flex-1 min-w-0 text-sm font-medium truncate line-through decoration-muted-foreground/40">
                               {row.name}
                             </span>
+                            <TaskRowMeta row={row} roster={roster} />
                             {row.status && <TaskStatusChip status={row.status} />}
                           </button>
                         </li>

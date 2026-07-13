@@ -112,6 +112,19 @@ function FilesIcon() {
   );
 }
 
+function ComputerIcon() {
+  // Computer use — monitor + cursor glyph. Strokes only, no fill, so it
+  // inherits the surrounding text color in both dark and light themes.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="4" width="20" height="13" rx="2" />
+      <path d="M8 21h8" />
+      <path d="M12 17v4" />
+      <path d="m10 8 4 2-2 1-1 2-1-5Z" />
+    </svg>
+  );
+}
+
 function NotionIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 100 100" fill="none">
@@ -177,6 +190,7 @@ export function ConnectorIcon({
     case "fathom": return <FathomIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
+    case "computer": return <ComputerIcon />;
     case "gcs": return <GcsIcon />;
     default:
       if (iconUrl) {

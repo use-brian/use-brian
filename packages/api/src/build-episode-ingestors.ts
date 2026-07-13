@@ -130,6 +130,11 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
   const chatEpisodeIngestor: ChatEpisodeIngestor = async (input) => {
     // A compacted chat window → one `web_chat` Episode carrying the session +
     // message range as its back-edge, then the same extraction pipeline.
+    // `contentRef` mirrors the hosted twin (`api-platform` pipeline-b-processor
+    // `createChatEpisodeIngestor`): the brain-inbox explain route resolves the
+    // source chat through `content_ref.session_id`, so omitting it here left
+    // every OSS chat-derived row with "No source chat captured" (2026-07-10
+    // source audit — twin drift).
     const episode = await deps.episodesStore.createEpisode(input.userId, {
       sourceKind: 'web_chat',
       sourceRef: {
@@ -144,6 +149,11 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
       createdByUserId: input.userId,
       createdByAssistantId: input.assistantId,
       sensitivity: 'internal',
+      contentRef: {
+        source_kind: 'web_chat',
+        session_id: input.sessionId,
+        message_id_range: input.messageIdRange,
+      },
     })
 
     const pbEpisode: PipelineBEpisode = {

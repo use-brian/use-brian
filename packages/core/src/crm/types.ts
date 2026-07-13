@@ -168,6 +168,12 @@ export type CrmStore = {
     compartments?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saves). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
     /**
      * Viewer projection for the upsert-dedupe scan: candidates are selected
      * under this access context so the write never merges into a row the
@@ -211,6 +217,12 @@ export type CrmStore = {
     compartments?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saves). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
     /**
      * Viewer projection for the upsert-dedupe scan: candidates are selected
      * under this access context so the write never merges into a row the
@@ -248,6 +260,12 @@ export type CrmStore = {
     compartments?: string[]
     /** Fresh-insert source; default 'user'; synthesis passes 'extracted' so the row surfaces in Brain Reviews. */
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this row derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saves). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
   }): Promise<DealRecord>
 
   getDealById(ctx: AccessContext, id: string): Promise<DealRecord | null>

@@ -48,6 +48,7 @@ import { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
   SensitivityAccumulator,
+  extractEffectContract,
   isSensitivity,
   minSensitivity,
   applyOps,
@@ -66,6 +67,8 @@ import {
 import type {
   BindingConfig,
   Block,
+  BrowserSkillRecordingStep,
+  BrowserSkillStore,
   DocPageStore,
   Op,
   Page,
@@ -311,6 +314,12 @@ type BuildOpts = {
    * are write tools (`read_write` keys only). See `BrainDocTools`.
    */
   docTools?: BrainDocTools
+  /**
+   * Computer-use R2: the logic-block store behind `writeBrowserSkill` — the
+   * OSS authoring skill's brain-sync tool. Optional; absent → no browser-
+   * skill write surface. Write-scope keys only.
+   */
+  browserSkills?: BrowserSkillStore
 }
 
 /**
@@ -1462,10 +1471,119 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
         ]
       : []),
     ...agentWriteBridges,
+    // Computer-use R2 (R2-5/R2-9): the OSS authoring skill's sync target —
+    // external agents (Claude Code) write a logic-block into brain. Write
+    // scope only (never in READ_TOOL_NAMES): the key IS the trust gate.
+    ...(opts.browserSkills ? [buildWriteBrowserSkillTool(opts.browserSkills, workspaceId)] : []),
   ]
   return opts.scope === 'read'
     ? all.filter((t) => READ_TOOL_NAMES.has(t.name) || agentReadNames.has(t.name))
     : all
+}
+
+/**
+ * Computer-use R2 (R2-5/R2-9): `writeBrowserSkill` — the brain-MCP sync
+ * target the OSS authoring skill (and any external agent on a `read_write`
+ * brain key) writes logic-blocks through. The schema REQUIRES the two review
+ * artifacts — a non-empty authoring RECORDING and a declared effect CONTRACT
+ * summary — and the server re-extracts the contract from the code
+ * (fail-closed: flagged constructs reject; a terminal-send mismatch between
+ * the declaration and the code rejects — the author must have looked at what
+ * the block sends). Saved blocks are immediately usable and gated by
+ * default: their sends queue until a human grants the block on a profile.
+ */
+export function buildWriteBrowserSkillTool(store: BrowserSkillStore, workspaceId: string): BrainTool {
+  return {
+    name: 'writeBrowserSkill',
+    description:
+      'Save (or update) a browser logic-block in the company brain: Python driving the governed ' +
+      'runner verbs (runner.open/snapshot/find/click/fill/eval/scroll/wait/current_url/log and the ' +
+      'terminal runner.submit). Requires the authoring recording (storyboard of the run you watched) ' +
+      'and a declared contract: the terminal sends you expect the code to perform. The server ' +
+      're-extracts the effect contract from the code and rejects on any mismatch or non-runner ' +
+      'construct. Saved skills run via runBrowserSkill; their sends stay approval-gated until a ' +
+      'human grants the skill on a profile.',
+    inputSchema: {
+      name: z.string().min(1).max(120).describe('Skill name (unique per workspace; same name updates)'),
+      site: z.string().min(1).max(253).describe('Registrable domain the skill drives, e.g. instagram.com'),
+      description: z.string().max(2_000).describe('What the skill does, for humans'),
+      code: z.string().min(1).max(60_000).describe('Python: def run(runner, params) using runner.* verbs only'),
+      paramsSchema: z.record(z.string(), z.unknown()).optional().describe('JSON schema of the params object'),
+      recording: z
+        .array(
+          z.object({
+            step: z.number().int(),
+            action: z.string().max(60),
+            url: z.string().max(2_000).nullish(),
+            detail: z.string().max(500).nullish(),
+          }),
+        )
+        .min(1)
+        .describe('REQUIRED: the authoring storyboard - one entry per step of the watched run'),
+      declaredSends: z
+        .array(z.string().max(300))
+        .describe('REQUIRED: the terminal sends you expect (empty array = read-only skill)'),
+    },
+    handler: async (args) => {
+      const input = args as {
+        name: string
+        site: string
+        description: string
+        code: string
+        paramsSchema?: Record<string, unknown>
+        recording: BrowserSkillRecordingStep[]
+        declaredSends: string[]
+      }
+      const contract = extractEffectContract({
+        code: input.code,
+        site: input.site,
+        paramsSchema: input.paramsSchema ?? null,
+      })
+      if (contract.flagged.length > 0) {
+        return text(
+          `Rejected: the code uses constructs outside the governed runner (${contract.flagged.join(', ')}). ` +
+            'Rewrite it to use only runner.* verbs - the runner is the only sanctioned way a skill touches the browser.',
+          true,
+        )
+      }
+      if (contract.terminalSends.length !== input.declaredSends.length) {
+        return text(
+          `Rejected: the code performs ${contract.terminalSends.length} terminal send(s) ` +
+            `(${contract.terminalSends.map((s) => s.description ?? 'unnamed').join(' | ') || 'none'}) but you declared ` +
+            `${input.declaredSends.length}. Declare exactly what the skill sends - the contract is the review artifact.`,
+          true,
+        )
+      }
+      const existing = await store.getByName({ workspaceId, name: input.name })
+      const skill = existing
+        ? await store.update(existing.id, {
+            description: input.description,
+            code: input.code,
+            paramsSchema: input.paramsSchema ?? {},
+            contract,
+            recording: input.recording,
+          })
+        : await store.create({
+            workspaceId,
+            name: input.name,
+            site: input.site,
+            description: input.description,
+            code: input.code,
+            paramsSchema: input.paramsSchema ?? {},
+            contract,
+            recording: input.recording,
+            origin: 'external',
+          })
+      if (!skill) return text('Could not save the skill (it may have been deleted mid-update).', true)
+      const sends = contract.terminalSends.length
+        ? `${contract.terminalSends.length} terminal send(s) - approval-gated until a human grants the skill on a profile`
+        : 'read-only - runs without approvals'
+      return text(
+        `Saved browser skill "${skill.name}" v${skill.version} for ${skill.site} (${sends}). ` +
+          'Run it with runBrowserSkill; rehearse with rehearsal:true.',
+      )
+    },
+  }
 }
 
 /**

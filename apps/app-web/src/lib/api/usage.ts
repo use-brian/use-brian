@@ -20,6 +20,9 @@ export type Credits = {
   used: number;
   /** `null` = uncapped (enterprise). */
   cap: number | null;
+  /** Prepaid extra-usage pack credits purchased this billing period —
+   *  the effective allowance is `cap + extra`. Absent on older servers. */
+  extra?: number;
   percent: number;
   rawPercent: number;
   /** Billing-period END (a date, weeks away) — not an hour countdown. */
@@ -28,6 +31,9 @@ export type Credits = {
 
 export type UsageResponse = {
   plan?: string;
+  /** `plan === 'free'` (no active plan) and the workspace never trialed —
+   *  drives the trial CTA on the plan gate and the marketing plans page. */
+  trialEligible?: boolean;
   percent?: number;
   rawPercent?: number;
   credits?: Credits;
@@ -36,6 +42,7 @@ export type UsageResponse = {
 export const EMPTY_CREDITS: Credits = {
   used: 0,
   cap: null,
+  extra: 0,
   percent: 0,
   rawPercent: 0,
   resetsAt: null,
@@ -48,4 +55,26 @@ export async function getUsage(workspaceId: string): Promise<UsageResponse | nul
   );
   if (!res.ok) return null;
   return (await res.json()) as UsageResponse;
+}
+
+/**
+ * Start a Stripe Checkout for one prepaid extra-usage pack
+ * ($100 / 2,500 credits, current billing cycle only). Owner-only on the
+ * server (`POST /api/billing/extra-usage/checkout`); resolves to the
+ * checkout URL, or a typed error code the caller maps to dictionary copy.
+ */
+export async function startExtraUsageCheckout(
+  workspaceId: string,
+): Promise<{ url: string } | { error: string }> {
+  const res = await authFetch(`${API_URL}/api/billing/extra-usage/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: workspaceId }),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    url?: string;
+    error?: string;
+  };
+  if (res.ok && data.url) return { url: data.url };
+  return { error: data.error ?? `http_${res.status}` };
 }

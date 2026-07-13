@@ -26,6 +26,7 @@ import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
 import { UsageSection } from "./sections/usage-section";
+import { BrowserProfilesSection } from "./sections/browser-profiles-section";
 import {
   WorkspaceGeneralSection,
   WorkspaceMembersSection,
@@ -41,7 +42,8 @@ export type SettingsSection =
   | "ws-members"
   | "ws-llm-key"
   | "ws-plan"
-  | "ws-usage";
+  | "ws-usage"
+  | "ws-browser-profiles";
 
 // Cross-component request to open the settings modal at a given section. The
 // modal is owned by `workspace-switcher.tsx` (local state), so surfaces that
@@ -84,6 +86,9 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-llm-key",
   "ws-plan",
   "ws-usage",
+  // Computer-use Profile-Management (hosted-only: profiles + the vault are
+  // closed platform halves, so the OSS list below omits it).
+  "ws-browser-profiles",
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
 // entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
@@ -170,6 +175,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                 "ws-llm-key": t.chrome.settingsModal.workspace.llmKey,
                 "ws-plan": t.chrome.settingsModal.workspace.plan,
                 "ws-usage": t.chrome.settingsModal.workspace.usage,
+                "ws-browser-profiles": t.chrome.settingsModal.workspace.browserProfiles,
               }}
             />
             <div className="mt-4">
@@ -295,6 +301,11 @@ function SectionBody({
       // allowance + reset date for the active workspace. OSS has no billing;
       // defensive upgrade pitch (the nav hides this section in OSS).
       return isOssEdition() ? <HostedUpgradeSection /> : <UsageSection />;
+    case "ws-browser-profiles":
+      // Computer-use Profile-Management (computer-use.md §7, R2-4). Profiles
+      // + the vault are closed platform halves; OSS nav hides the section,
+      // this is defensive.
+      return isOssEdition() ? <HostedUpgradeSection /> : <BrowserProfilesSection />;
   }
 }
 

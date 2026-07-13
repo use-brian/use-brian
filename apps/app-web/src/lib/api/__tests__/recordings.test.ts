@@ -67,13 +67,10 @@ describe("[COMP:web/recording-upload] recordings SDK", () => {
     expect(err.status).toBe(413);
   });
 
-  it("processRecording returns the pipeline result", async () => {
-    mockAuthFetch.mockResolvedValueOnce(json({
-      utteranceCount: 40, segmentsInserted: 12, truncated: false,
-      surchargeCredits: 11, surcharged: true,
-    }));
+  it("processRecording returns the 202 queued acknowledgement (worker transcribes async)", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ recordingId: "rec-1", status: "queued", jobId: "job-1" }, 202));
     const res = await processRecording("rec-1");
-    expect(res.surcharged).toBe(true);
-    expect(res.segmentsInserted).toBe(12);
+    expect(res.status).toBe("queued");
+    expect(res.jobId).toBe("job-1");
   });
 });

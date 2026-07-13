@@ -983,17 +983,26 @@ export async function runReflectionConsolidation(
   const affected: string[] = []
   for (const p of patterns) {
     try {
+      // No cast: the type-erasing `as Parameters<...>` here used to hide a
+      // missing `createdByUserId`, so every create threw against the WU-4.5
+      // authorship guard and the catch below swallowed it — reflection
+      // memories never persisted (2026-07-10 source audit, dead write path).
+      // `scope` is the DB vocabulary ('workspace', per the header contract
+      // "synthesized memories are workspace-scoped") — the old 'team' value
+      // was the tool-surface alias and violates the valid_scope CHECK.
       const memory = await store.create({
         assistantId: params.assistantId,
         userId: params.userId,
         workspaceId: params.workspaceId,
-        scope: 'team',
+        scope: 'workspace',
         tags: [REFLECTION_OUTPUT_TAG, ...(p.tags ?? [])],
         summary: p.summary,
         detail: p.detail,
         source: 'reflection',
         sensitivity: 'internal',
-      } as Parameters<typeof store.create>[0])
+        createdByUserId: params.userId,
+        createdByAssistantId: params.assistantId,
+      })
       affected.push(memory.id)
     } catch (err) {
       // Per-pattern failure shouldn't kill the whole reflection run —

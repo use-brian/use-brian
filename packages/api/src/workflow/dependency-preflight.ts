@@ -27,6 +27,8 @@ import { createSlackApi } from '@sidanclaw/channels'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
+import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { getAuthenticatedUser } from '../github/client.js'
 
 /**
@@ -51,8 +53,28 @@ export type WorkflowDependencyPreflightOptions = {
   /** WhatsApp delivery via the wa-connector — presence makes a WhatsApp target reachable. */
   waConnectorUrl?: string
   waConnectorSecret?: string
-  /** Built-in connector credentials, for the connector preflight. */
+  /**
+   * Legacy per-user built-in connector credentials, for the connector
+   * preflight. Lowest-precedence credential source (see
+   * `preflightConnectorTool`).
+   */
   connectorStore?: ConnectorStore
+  /**
+   * Team-owned (`scope='workspace'`) connector instances — the HIGHEST-
+   * precedence credential source in the runtime's team overlay
+   * (`mcp/inject.ts` → team-native overlay). Wired so the preflight resolves
+   * credentials the same way the executor does; absent → the team-native arm
+   * is skipped (legacy call sites / tests unaffected).
+   */
+  connectorInstanceStore?: ConnectorInstanceStore
+  /**
+   * Member-exposure grants of a user-scoped instance to the workspace — the
+   * middle-precedence credential source in the runtime's team overlay
+   * (`mcp/inject.ts` → team-grant overlay). Reads the granted instance's
+   * credentials via `connectorInstanceStore.getCredentialsSystem`, so both
+   * stores must be wired for the grant arm to resolve.
+   */
+  connectorGrantStore?: ConnectorGrantStore
   /**
    * L1/L2 tool-policy rows (`mcp_tool_settings`) — powers the preflight's
    * `policy` answer so authoring can reject an `ask`-policy tool pinned on an
@@ -95,6 +117,73 @@ const CONNECTOR_LABEL: Record<string, string> = {
   files: 'Workspace Files',
 }
 
+/** The one field the preflight reads off resolved credentials (GitHub PAT). */
+type ProbeableCredential = { client_secret?: string }
+
+/**
+ * Resolve a connector's credential with the SAME source precedence the
+ * runtime uses in `mcp/inject.ts`'s team overlays:
+ *
+ *   1. Team-native — a `scope='workspace'` `connector_instance` for this
+ *      provider (highest precedence; the team admin's shared credential).
+ *   2. Team-grant — a member-exposure grant of a user-scoped instance to this
+ *      workspace, read via the granted instance's system credentials.
+ *   3. Per-user — the legacy `getCredentials(userId, connectorId)` lookup.
+ *
+ * Returns the first source that yields a credential, or null when none do.
+ * Team sources require `workspaceId`; the grant arm also needs
+ * `connectorInstanceStore` (grants read the instance's credentials through
+ * it). Every arm is fail-open — a store throw is logged and skipped so a flaky
+ * lookup degrades to the next source (and ultimately to "not connected"),
+ * never blocking authoring with an exception.
+ */
+async function resolveConnectorCredential(
+  options: WorkflowDependencyPreflightOptions,
+  args: { userId: string; connectorId: string; workspaceId?: string | null },
+): Promise<ProbeableCredential | null> {
+  const { userId, connectorId, workspaceId } = args
+
+  // 1. Team-native instance (scope='workspace').
+  if (workspaceId && options.connectorInstanceStore) {
+    try {
+      const instances = await options.connectorInstanceStore.listByWorkspaceSystem(workspaceId)
+      const inst = instances.find((i) => i.connected && i.provider === connectorId)
+      if (inst) {
+        const creds = await options.connectorInstanceStore.getCredentialsSystem(inst.id)
+        if (creds) return creds as ProbeableCredential
+      }
+    } catch (err) {
+      console.warn('[workflow/dependencyIssues] team-native credential lookup threw (skipping source):', err)
+    }
+  }
+
+  // 2. Member-exposure grant of a user-scoped instance to the workspace.
+  if (workspaceId && options.connectorGrantStore && options.connectorInstanceStore) {
+    try {
+      const grants = await options.connectorGrantStore.listForTargetSystem('workspace', workspaceId)
+      const grant = grants.find((g) => g.instance.connected && g.instance.provider === connectorId)
+      if (grant) {
+        const creds = await options.connectorInstanceStore.getCredentialsSystem(grant.instance.id)
+        if (creds) return creds as ProbeableCredential
+      }
+    } catch (err) {
+      console.warn('[workflow/dependencyIssues] team-grant credential lookup threw (skipping source):', err)
+    }
+  }
+
+  // 3. Legacy per-user store.
+  if (options.connectorStore) {
+    try {
+      const creds = await options.connectorStore.getCredentials(userId, connectorId)
+      if (creds) return creds as ProbeableCredential
+    } catch (err) {
+      console.warn('[workflow/dependencyIssues] per-user credential lookup threw (skipping source):', err)
+    }
+  }
+
+  return null
+}
+
 export type ValidateDeliveryTarget = (args: {
   assistantId: string
   channelType: 'telegram' | 'slack' | 'whatsapp'
@@ -110,6 +199,13 @@ export type PreflightConnectorTool = (args: {
    * default only.
    */
   assistantId?: string
+  /**
+   * The workspace/team id the workflow is authored in. Enables the runtime-
+   * identical team credential resolution (team-native instance, then member-
+   * exposure grant) before the legacy per-user lookup. Absent → per-user only
+   * (a workflow authored outside any team, or a legacy caller).
+   */
+  workspaceId?: string | null
 }) => Promise<{
   ok: boolean
   provider: string
@@ -200,7 +296,7 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
     return { ok: true }
   }
 
-  const preflightConnectorTool: PreflightConnectorTool = async ({ userId, toolName, assistantId }) => {
+  const preflightConnectorTool: PreflightConnectorTool = async ({ userId, toolName, assistantId, workspaceId }) => {
     const connectorId = TOOL_TO_CONNECTOR[toolName]
     if (!connectorId || connectorId === 'files') return null // not a (probeable) connector tool
     const provider = CONNECTOR_LABEL[connectorId] ?? connectorId
@@ -233,18 +329,33 @@ export function createWorkflowDependencyPreflight(options: WorkflowDependencyPre
       }
     }
 
-    if (!options.connectorStore) return { ok: true, provider, policy } // can't check → don't block
+    // No credential source wired at all → can't check → don't block.
+    if (!options.connectorStore && !options.connectorInstanceStore && !options.connectorGrantStore) {
+      return { ok: true, provider, policy }
+    }
 
-    const creds = await options.connectorStore.getCredentials(userId, connectorId)
+    // Resolve credentials with the SAME precedence the runtime uses
+    // (mcp/inject.ts team overlays): a team-owned (`scope='workspace'`)
+    // instance wins, then a member-exposure grant of a user instance, then
+    // the legacy per-user store. The preflight previously read ONLY the
+    // per-user store, so a workflow whose connector lived in a team-native /
+    // team-grant instance was rejected as "not connected" even though the
+    // executor would run it — the invariant "authoring must never reject a
+    // workflow the runtime would run" was violated (prod, 2026-07-13). Every
+    // arm is fail-open: a store throw skips that source, never blocks
+    // authoring. Only when NO source yields a credential is it "not connected".
+    const creds = await resolveConnectorCredential(options, { userId, connectorId, workspaceId })
     if (!creds) {
       return { ok: false, provider, reason: `${provider} is not connected in this workspace`, policy }
     }
 
-    // GitHub gets a real token probe (the incident). Other connectors are
-    // recognized but not yet probed here — a live token-refresh probe per
-    // provider is a tracked follow-up; presence of credentials is the check.
+    // GitHub gets a real token probe (the incident) against whichever source
+    // resolved — team credentials carry `client_secret` (the PAT) the same way
+    // the per-user row does. Other connectors are recognized but not yet
+    // probed here — a live token-refresh probe per provider is a tracked
+    // follow-up; presence of credentials is the check.
     if (connectorId === 'github') {
-      const pat = (creds as { client_secret?: string }).client_secret
+      const pat = creds.client_secret
       if (!pat) return { ok: false, provider, reason: 'GitHub credentials are incomplete', policy }
       try {
         await getAuthenticatedUser(pat)

@@ -106,6 +106,7 @@ function member(
   overrides: Partial<FeedWorkspaceMember> = {},
 ): FeedWorkspaceMember {
   return {
+    id: `wm-${userId}`,
     userId,
     email: `${userId}@acme.io`,
     userName: null,

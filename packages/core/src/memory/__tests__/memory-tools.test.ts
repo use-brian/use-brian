@@ -793,6 +793,7 @@ function makeFakeEntityStore(seed: Array<Pick<EntityRecord, 'id' | 'kind' | 'dis
       createdByUserId: 'user_1',
       createdByAssistantId: null,
       sourceEpisodeId: null,
+      sourceSessionId: null,
       source: 'user',
       verifiedByUserId: null,
       verifiedAt: null,

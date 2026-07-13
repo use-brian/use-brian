@@ -62,6 +62,14 @@ export type TaskToolOptions = {
    * synthesis-captured tasks surface in Brain Reviews (`?includeExtracted=true`).
    */
   writeSource?: 'user' | 'extracted'
+  /**
+   * Extraction provenance anchor stamped on tasks this tool creates —
+   * synthesis runs pass their source Episode id (the recording synthesizer's
+   * recordingId IS its episode id) so the row back-edges to what it was
+   * derived from. Absent for interactive chat, which anchors on the session
+   * instead (`context.sessionId`, stamped unconditionally by saveTask).
+   */
+  writeSourceEpisodeId?: string | null
 }
 
 const STATUS_VALUES = [...TASK_STATUSES] as [TaskRecordStatus, ...TaskRecordStatus[]]
@@ -210,6 +218,16 @@ export function createTaskTools(
             context.assistantDefaultCompartments,
           ),
           source: opts?.writeSource,
+          // Provenance anchors (mig 316). Extraction runs (writeSource
+          // 'extracted') and the programmatic brain-MCP surface carry a
+          // SYNTHETIC context.sessionId (randomUUID, no sessions row) — a
+          // real session is only stamped for interactive/workflow chat.
+          sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+          sourceSessionId:
+            opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted' || context.channelType === 'programmatic'
+              ? null
+              : context.sessionId,
+          createdByAssistantId: context.assistantId,
           dependsOn: input.depends_on,
           // Assistant-mediated write (incl. interactive chat) — the workflow
           // task-event self-loop guard keys on this (fromBots gate).

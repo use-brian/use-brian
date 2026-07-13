@@ -123,6 +123,16 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['workspace', 'productivity'],
   },
   {
+    id: 'computer',
+    name: 'Computer Use',
+    description: 'Let the assistant browse and act in a controlled browser: your own Chrome via the sidanclaw extension for account-sensitive sites, or a cloud browser for public ones. Sends require your approval.',
+    category: 'official',
+    auth_type: 'none',
+    oauth_required: false,
+    enabled: true,
+    tags: ['automation', 'browser', 'workspace'],
+  },
+  {
     id: 'gcs',
     name: 'Google Cloud Storage',
     description: 'Store your workspace file bytes in your own Google Cloud Storage bucket, under your own key. Your files, your bucket, revocable by you.',

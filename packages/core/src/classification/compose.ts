@@ -210,6 +210,12 @@ async function writeCrmEntity(
         workspaceId: ctx.workspaceId,
         name: ent.display_name,
         email,
+        // Extraction provenance — previously omitted, so compose-written
+        // CRM rows landed source='user' with no episode back-edge while the
+        // non-CRM branch stamped both (2026-07-10 source audit).
+        source: 'extracted',
+        sourceEpisodeId: ctx.sourceEpisodeId ?? null,
+        createdByAssistantId: ctx.assistantId ?? null,
       })
       return resolveCrmEntityId(deps, ctx, ent.display_name, ent.canonical_id ?? null, 'person')
     }
@@ -223,6 +229,10 @@ async function writeCrmEntity(
         workspaceId: ctx.workspaceId,
         name: ent.display_name,
         domain,
+        // Extraction provenance — see createContact above.
+        source: 'extracted',
+        sourceEpisodeId: ctx.sourceEpisodeId ?? null,
+        createdByAssistantId: ctx.assistantId ?? null,
       })
       return resolveCrmEntityId(deps, ctx, ent.display_name, domain, 'company')
     }
@@ -230,6 +240,10 @@ async function writeCrmEntity(
       const deal = await deps.crm.createDeal({
         userId: ctx.actorUserId,
         workspaceId: ctx.workspaceId,
+        // Extraction provenance — see createContact above.
+        source: 'extracted',
+        sourceEpisodeId: ctx.sourceEpisodeId ?? null,
+        createdByAssistantId: ctx.assistantId ?? null,
       })
       // Deals don't have a name column on the specialization row; the
       // entity row is the addressable one. CRM.createDeal writes both

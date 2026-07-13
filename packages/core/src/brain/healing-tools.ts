@@ -349,6 +349,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               ctx.workspaceId,
               context.userId,
               ctx.assistantId,
+              context.sessionId,
             )
             if (!recreated) return { data: 'Drop snapshot missing — cannot reconstruct memory.', isError: true }
             await deps.candidates.markUndone(candidate.id, context.userId)
@@ -375,6 +376,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
               ctx.workspaceId,
               context.userId,
               ctx.assistantId,
+              context.sessionId,
             )
             await deps.candidates.markUndone(candidate.id, context.userId)
             return {
@@ -916,6 +918,7 @@ async function recreateMemoryFromSnapshot(
   workspaceId: string,
   actorUserId: string,
   actorAssistantId: string,
+  actorSessionId?: string,
 ): Promise<{ id: string } | null> {
   if (!snapshot || typeof snapshot !== 'object') return null
   const s = snapshot as Record<string, unknown>
@@ -943,6 +946,12 @@ async function recreateMemoryFromSnapshot(
     tags: Array.isArray(s.tags) ? (s.tags as string[]) : undefined,
     sensitivity,
     source: 'undo-reclassification',
+    // Source anchor: prefer the ORIGINAL memory's session (the recreated
+    // row's origin is the conversation that first saved it), falling back
+    // to the undoing chat's session (2026-07-10 source audit — this path
+    // held the session in scope and dropped it).
+    sourceSessionId:
+      typeof s.sourceSessionId === 'string' ? s.sourceSessionId : actorSessionId,
     createdByUserId: actorUserId,
     createdByAssistantId: actorAssistantId,
   })

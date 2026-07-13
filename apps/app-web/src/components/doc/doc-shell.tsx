@@ -1286,6 +1286,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
               <div className="flex-1 min-h-0 overflow-y-auto">
                 <EmptyPageLanding
                   workspaceId={workspaceId}
+                  assistantId={assistantId}
                   cards={landingCards}
                   onOpenCard={navigateToView}
                   onSubmitPrompt={(text, opts) =>

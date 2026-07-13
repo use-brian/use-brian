@@ -22,6 +22,8 @@ import type { Tool, ToolContext } from '../tools/types.js'
 import type {
   AssistantCallStep,
   BranchStep,
+  SendPageStep,
+  SendPageValueSource,
   ToolCallStep,
   WaitStep,
   WorkflowDefinition,
@@ -253,6 +255,28 @@ export type WorkflowAuditEvent =
       delivery: DeliveryOutcome
     }
 
+/**
+ * Outcome of the `ExecutorDeps.sendPage` port. `sent` / `already_sent` map to
+ * step success (`already_sent` is the idempotent re-click no-op); `blocked`
+ * maps to a typed step failure — visible, never silent (the send-step
+ * incident rule). Transport errors THROW and fail the step as `send_failed`.
+ */
+export type SendPageResult =
+  | { status: 'sent'; recipient: string; subject: string; externalId: string | null }
+  | { status: 'already_sent'; recipient: string | null; sentAt: string | null }
+  | {
+      status: 'blocked'
+      reason:
+        | 'egress_blocked'
+        | 'missing_recipient'
+        | 'send_in_flight'
+        | 'gmail_not_connected'
+        | 'page_not_found'
+        | 'record_not_found'
+        | 'empty_page'
+      message: string
+    }
+
 export type ExecutorDeps = {
   workflowStore: WorkflowStore
   runStore: WorkflowRunStore
@@ -260,6 +284,40 @@ export type ExecutorDeps = {
   resolvePrimary: ResolvePrimaryAssistant
   buildToolRegistry: BuildToolRegistry
   emitAudit?: EmitAuditEvent
+  /**
+   * Deterministic page-send port backing `send_page` steps (page-actions
+   * verbatim send lane). The API layer implements the whole pipeline —
+   * resolve page + blueprint record, confidential egress gate,
+   * `page_send_log` at-most-once claim, `pageToMarkdown` body, Gmail send,
+   * ledger + record stamp-back — so core stays store- and network-free.
+   * Absent = `send_page` steps fail typed `send_page_unavailable` (the
+   * `createAnchorPage` absence pattern). See
+   * docs/architecture/features/page-actions.md → "send_page".
+   */
+  sendPage?: (params: {
+    workspaceId: string
+    /** Acting user — `run.triggeredBy ?? workflow.createdBy`. */
+    userId: string
+    pageId: string
+    workflowId: string
+    runId: string
+    stepId: string
+    via: 'gmail'
+    to: SendPageValueSource
+    subject: SendPageValueSource
+    instanceId?: string
+  }) => Promise<SendPageResult>
+  /**
+   * Hosted paid gate for autonomous compute (scheduled, event-trigger, and
+   * manual runs all advance through here). Injected by the platform from the
+   * closed credit gate; absent in the open build → runs are never gated.
+   * Returning `false` fails the run before any step executes
+   * (`reason: 'workspace_compute_blocked'`) — since the 2026-07-10 Free-plan
+   * removal that means the workspace has no active plan. Implementations
+   * should fail OPEN on lookup errors (a transient billing hiccup must not
+   * strand a paid workspace's runs).
+   */
+  workspaceComputeAllowed?: (workspaceId: string) => Promise<boolean>
   /**
    * Optional channel delivery. When wired, an `assistant_call` step with a
    * `deliver` target pushes its text output to that channel after the
@@ -369,6 +427,19 @@ export async function advanceWorkflowRun(
     const err: ExecutorError = { message: `Workflow ${run.workflowId} not found.`, reason: 'workflow_not_found' }
     await markRunFailed(deps, run, '<unknown>', err)
     return failOutcome(runId, '<unknown>', err, 0)
+  }
+
+  // Hosted paid gate (see ExecutorDeps.workspaceComputeAllowed): a workspace
+  // with no active plan cannot spend autonomous compute. Checked on every
+  // advance (fresh runs AND wait/approval resumes) so a run paused before
+  // the workspace lost its plan does not slip through on wake-up.
+  if (deps.workspaceComputeAllowed && !(await deps.workspaceComputeAllowed(run.workspaceId))) {
+    const err: ExecutorError = {
+      message: 'This workspace has no active plan, so scheduled and workflow runs are paused. Pick a plan to resume, or self-host the open-source version.',
+      reason: 'workspace_compute_blocked',
+    }
+    await markRunFailed(deps, run, run.currentStepId ?? '<unknown>', err)
+    return failOutcome(runId, run.currentStepId ?? '<unknown>', err, 0)
   }
 
   // Build the per-run tool registry (first-party + allow-policy MCP).
@@ -706,6 +777,8 @@ async function dispatchStep(step: WorkflowStep, ctx: DispatchContext): Promise<S
       return dispatchBranch(step, ctx)
     case 'wait':
       return dispatchWait(step)
+    case 'send_page':
+      return dispatchSendPage(step, ctx)
   }
 }
 
@@ -1249,6 +1322,117 @@ function dispatchWait(step: WaitStep): StepDispatchResult {
   return { kind: 'paused_wait', dueAt }
 }
 
+/**
+ * `send_page` — the deterministic verbatim send lane (page-actions plan).
+ * No model call anywhere in this path. Core enforces the two structural
+ * gates (button-triggered run; port wired) and delegates the pipeline to
+ * `deps.sendPage`; the port's `blocked` outcomes become typed step failures
+ * so a refused send is always VISIBLE (send-step incident rule), while
+ * `already_sent` is the idempotent no-op success a re-click produces.
+ */
+async function dispatchSendPage(
+  step: SendPageStep,
+  ctx: DispatchContext,
+): Promise<StepDispatchResult> {
+  // Every v1 external send has a human click behind it. The gate reads the
+  // run row (server-stamped), never the interpolatable input — a crafted
+  // manual run's input cannot impersonate a button click.
+  if (ctx.run.triggerKind !== 'button') {
+    return {
+      kind: 'failed',
+      error: {
+        message:
+          `send_page step "${step.id}" only executes on a button-triggered run (this run is '${ctx.run.triggerKind}'). ` +
+          `External sends require a human click on the page action button; unattended sends are not supported.`,
+        reason: 'requires_button_trigger',
+      },
+    }
+  }
+  const sendPage = ctx.deps.sendPage
+  if (!sendPage) {
+    return {
+      kind: 'failed',
+      error: {
+        message: `send_page step "${step.id}" is not available in this deployment (no send port wired).`,
+        reason: 'send_page_unavailable',
+      },
+    }
+  }
+
+  const pageId = interpolateString(step.page, ctx.scope).trim()
+  if (!UUID_RE.test(pageId)) {
+    return {
+      kind: 'failed',
+      error: {
+        message: `send_page step "${step.id}" resolved page "${pageId}", which is not a page id.`,
+        reason: 'invalid_send_page',
+        detail: { configured: step.page, resolved: pageId },
+      },
+    }
+  }
+
+  // Literals may interpolate ({{vars.x}} / {{input.x}}); recordField names
+  // pass through untouched — the port resolves them against the page's
+  // blueprint record at execution time.
+  const resolveSource = (src: SendPageValueSource): SendPageValueSource =>
+    'literal' in src ? { literal: interpolateString(src.literal, ctx.scope) } : src
+
+  let result: SendPageResult
+  try {
+    result = await sendPage({
+      workspaceId: ctx.run.workspaceId,
+      userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
+      pageId,
+      workflowId: ctx.workflow.id,
+      runId: ctx.run.id,
+      stepId: step.id,
+      via: step.via,
+      to: resolveSource(step.to),
+      subject: resolveSource(step.subject),
+      ...(step.instanceId ? { instanceId: step.instanceId } : {}),
+    })
+  } catch (err) {
+    return {
+      kind: 'failed',
+      error: {
+        message: `send_page step "${step.id}" failed to send: ${err instanceof Error ? err.message : String(err)}`,
+        reason: 'send_failed',
+        detail: { pageId },
+      },
+    }
+  }
+
+  switch (result.status) {
+    case 'sent':
+      return {
+        kind: 'success',
+        output: {
+          sent: true,
+          pageId,
+          recipient: result.recipient,
+          subject: result.subject,
+          externalId: result.externalId,
+        },
+      }
+    case 'already_sent':
+      return {
+        kind: 'success',
+        output: {
+          sent: false,
+          alreadySent: true,
+          pageId,
+          recipient: result.recipient,
+          sentAt: result.sentAt,
+        },
+      }
+    case 'blocked':
+      return {
+        kind: 'failed',
+        error: { message: result.message, reason: result.reason, detail: { pageId } },
+      }
+  }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function nextStepIdFor(
@@ -1289,6 +1473,16 @@ function buildStepRunInput(
       return { until: step.until, at: step.at }
     case 'branch':
       return { condition: step.condition }
+    case 'send_page':
+      return {
+        page: interpolateString(step.page, scope),
+        via: step.via,
+        to: 'literal' in step.to ? { literal: interpolateString(step.to.literal, scope) } : step.to,
+        subject:
+          'literal' in step.subject
+            ? { literal: interpolateString(step.subject.literal, scope) }
+            : step.subject,
+      }
   }
 }
 

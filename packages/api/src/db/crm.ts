@@ -209,6 +209,12 @@ export async function createCompany(
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this company derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saveCompany). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
     access?: AccessContext
   },
 ): Promise<CompanyRecord> {
@@ -246,7 +252,10 @@ export async function createCompany(
     workspaceId: params.workspaceId,
     userId,
     createdByUserId: userId,
+    createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
+    sourceEpisodeId: params.sourceEpisodeId ?? null,
+    sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
   })
   return companyFromEntity(entity)
@@ -394,6 +403,12 @@ export async function createContact(
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this contact derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saveContact). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
     access?: AccessContext
   },
   entityLinks?: EntityLinksStore,
@@ -447,7 +462,10 @@ export async function createContact(
     workspaceId: params.workspaceId,
     userId,
     createdByUserId: userId,
+    createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
+    sourceEpisodeId: params.sourceEpisodeId ?? null,
+    sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
   })
 
@@ -625,6 +643,12 @@ export async function createDeal(
     sensitivity?: Sensitivity
     compartments?: string[]
     source?: 'user' | 'extracted'
+    /** Extraction provenance anchor — the Episode this deal derives from (Pipeline B / compose / synthesis). */
+    sourceEpisodeId?: string | null
+    /** Interactive-write provenance anchor (mig 316) — the creating conversation's session (chat saveDeal). */
+    sourceSessionId?: string | null
+    /** The assistant that mediated the write. */
+    createdByAssistantId?: string | null
   },
   entityLinks?: EntityLinksStore,
 ): Promise<DealRecord> {
@@ -651,7 +675,10 @@ export async function createDeal(
     workspaceId: params.workspaceId,
     userId,
     createdByUserId: userId,
+    createdByAssistantId: params.createdByAssistantId ?? null,
     source: params.source ?? 'user',
+    sourceEpisodeId: params.sourceEpisodeId ?? null,
+    sourceSessionId: params.sourceSessionId ?? null,
     compartments: params.compartments ?? [],
   })
 

@@ -33,9 +33,8 @@
  * the client bundle) — the single source of truth, same as apps/web. No local
  * mirror.
  *
- * Strings live under `workspace.home.miniApps.*`; the studio section name /
- * description live under `studioPage.sections.miniApps` and
- * `studioPage.sectionDescriptions.miniApps`.
+ * Strings live under `workspace.home.miniApps.*`; the studio section name
+ * lives under `studioPage.sections.miniApps`.
  *
  * Spec: docs/architecture/features/web-ui.md → Studio.
  * [COMP:app-web/studio-mini-apps]
@@ -99,13 +98,6 @@ export default function StudioMiniAppsPage() {
 
   return (
     <section>
-      {/* Intro row — the topbar breadcrumb names the section
-          (docs/architecture/features/studio.md → "Page headers"). */}
-      <header className="mb-5">
-        <p className="text-[13px] text-muted-foreground max-w-prose">
-          {t.studioPage.sectionDescriptions.miniApps}
-        </p>
-      </header>
       <Gallery workspaceId={activeId} />
     </section>
   );

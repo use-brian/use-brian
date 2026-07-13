@@ -3,9 +3,10 @@
 /**
  * Recording upload flow hook (recording-to-brain). Drives: pick file → upload
  * (direct-to-GCS) → server estimate → confirm-dialog cost preview → process
- * (transcribe + segment + ingest + charge-on-success). Returns inline status +
- * message (app-web has no global toast; feedback renders inline). All strings
- * come from `useT()`.
+ * (ENQUEUE: the worker service transcribes + segments + ingests + charges in
+ * the background, so terminal success here means "queued", never
+ * "transcribed"). Returns inline status + message (app-web has no global
+ * toast; feedback renders inline). All strings come from `useT()`.
  */
 
 import { useState, useCallback } from "react";
@@ -16,7 +17,7 @@ import {
   estimateRecording,
   processRecording,
   RecordingApiError,
-  type RecordingResult,
+  type RecordingQueued,
 } from "@/lib/api/recordings";
 
 export type RecordingUploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
@@ -25,7 +26,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const t = useT();
   const [status, setStatus] = useState<RecordingUploadStatus>("idle");
   const [message, setMessage] = useState<string>("");
-  const [result, setResult] = useState<RecordingResult | null>(null);
+  const [result, setResult] = useState<RecordingQueued | null>(null);
 
   const run = useCallback(
     async (file: File, blueprintSlug?: string) => {
@@ -57,7 +58,10 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         const res = await processRecording(recordingId, blueprintSlug);
         setResult(res);
         setStatus("done");
-        setMessage(res.truncated ? t.recordings.partialDone : t.recordings.done);
+        // The 202 means QUEUED — the worker transcribes in the background.
+        // Claiming "transcribed and filed" here was the 2026-07-10 honesty
+        // bug: the message showed before (or instead of) the actual work.
+        setMessage(t.recordings.queued);
       } catch (e) {
         setStatus("error");
         const code = e instanceof RecordingApiError ? e.code : undefined;

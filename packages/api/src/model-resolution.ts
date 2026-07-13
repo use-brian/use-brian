@@ -289,6 +289,40 @@ export function chatTierBudget(args: {
   return null
 }
 
+// ── Computer-use model routing (§4.14, computer-use.md §6) ─────
+//
+// The sandbox loop has three legs, each riding THIS tier router — no sandbox
+// tool or module hardcodes a model id (grep-asserted by
+// `packages/api/src/__tests__/sandbox-model-routing.test.ts`):
+//
+//   - orchestrator      → the TOP agentic tier ('max'). Non-negotiable in
+//                         v1: reliability compounds over a 30-60-step task.
+//                         Downgrades are gated on cost-per-COMPLETED-task
+//                         evals over our own suite, never $/token.
+//   - browserGrounding  → the cheap tier: agent-browser's ref-based a11y
+//                         snapshots carry the grounding, so the model reads
+//                         structure, not pixels.
+//   - leaf              → the cheap tier: one-shot extractions/summaries.
+//
+// Plan allowances + budget downgrades apply exactly as they do for chat
+// (resolveModel), so a free workspace's legs all resolve to Standard.
+
+export type SandboxLeg = 'orchestrator' | 'browserGrounding' | 'leaf'
+
+export const SANDBOX_LEG_TIERS: Record<SandboxLeg, string> = {
+  orchestrator: 'max',
+  browserGrounding: 'standard',
+  leaf: 'standard',
+}
+
+export function resolveSandboxModel(
+  leg: SandboxLeg,
+  plan: string,
+  budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok',
+): string {
+  return resolveModel(SANDBOX_LEG_TIERS[leg], plan, budgetStatus)
+}
+
 /**
  * Max execution-plan continuation nudges per attempt, tier-scaled (locked
  * decision D, docs/architecture/context-engine/execution-plan.md). Lives beside

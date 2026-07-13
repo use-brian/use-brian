@@ -905,6 +905,12 @@ export async function processEpisode(
           workspaceId: episode.workspaceId,
           title: ex.text,
           due,
+          // Extraction provenance — without these the task landed as
+          // source='user' with no back-edge, indistinguishable from a
+          // human-created row (2026-07-10 source audit).
+          source: 'extracted',
+          sourceEpisodeId: episode.id,
+          createdByAssistantId: episode.createdByAssistantId,
         })
         tasksWritten.push({ id: task.id })
       } catch (err) {
@@ -1505,6 +1511,12 @@ async function writeEntity(
       name: ex.display_name,
       email,
       ...(externalRef ? { externalRef } : {}),
+      // Extraction provenance — previously omitted, so extracted contacts
+      // landed source='user' with no back-edge (2026-07-10 source audit).
+      // Fresh inserts only; the upsert/merge path keeps the existing row's.
+      source: 'extracted',
+      sourceEpisodeId: episode.id,
+      createdByAssistantId: episode.createdByAssistantId,
     })
     // CRM wrapper writes a single `entities` row (kind='person', typed
     // fields in `attributes`; entity.canonical_id = email when present).
@@ -1522,6 +1534,10 @@ async function writeEntity(
       workspaceId: episode.workspaceId,
       name: ex.display_name,
       domain,
+      // Extraction provenance — see createContact above.
+      source: 'extracted',
+      sourceEpisodeId: episode.id,
+      createdByAssistantId: episode.createdByAssistantId,
     })
     return resolveCrmEntity(deps, actorUserId, episode.workspaceId, ex.display_name, domain, 'company')
   }

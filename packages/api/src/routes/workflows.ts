@@ -110,6 +110,25 @@ export type WorkflowsRouteOptions = {
    * whose token is revoked. Absent → skipped.
    */
   preflightConnectorTool?: PreflightConnectorTool
+  /**
+   * Page-action buttons whose action starts this workflow (mig 321) — the
+   * trigger-honesty read: a workflow can display trigger "Manual" while
+   * buttons fire it, so the detail response names those bindings (the same
+   * drift discipline as `triggerJobs`). Absent → field omitted.
+   */
+  listButtonBindings?: (
+    userId: string,
+    workspaceId: string,
+    workflowId: string,
+  ) => Promise<
+    Array<{
+      id: string
+      label: string
+      blueprintId: string | null
+      pageId: string | null
+      enabled: boolean
+    }>
+  >
 }
 
 export type WorkflowAuditDelta =
@@ -294,7 +313,7 @@ async function dependencyIssues(
         if (probed.has(tn)) continue
         probed.add(tn)
         try {
-          const res = await opts.preflightConnectorTool({ userId: ctx.userId, toolName: tn })
+          const res = await opts.preflightConnectorTool({ userId: ctx.userId, toolName: tn, workspaceId: ctx.workspaceId })
           if (res && !res.ok) {
             issues.push({
               path: ['definition', 'steps', i],
@@ -475,7 +494,24 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
         }))
       : undefined
 
-    res.json({ ...serializeWorkflow(workflow), ...(triggerJobs ? { triggerJobs } : {}) })
+    // Button bindings that fire this workflow (page-actions, mig 321) — the
+    // same read-surface honesty as triggerJobs: no "shows Manual but fires
+    // from a button" drift.
+    const buttonBindings = opts.listButtonBindings
+      ? (await opts.listButtonBindings(userId, workflow.workspaceId, workflow.id)).map((b) => ({
+          id: b.id,
+          label: b.label,
+          blueprintId: b.blueprintId,
+          pageId: b.pageId,
+          enabled: b.enabled,
+        }))
+      : undefined
+
+    res.json({
+      ...serializeWorkflow(workflow),
+      ...(triggerJobs ? { triggerJobs } : {}),
+      ...(buttonBindings ? { buttonBindings } : {}),
+    })
   })
 
   // ── POST /workflows ────────────────────────────────────────────────────
