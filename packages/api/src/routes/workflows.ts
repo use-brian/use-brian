@@ -294,7 +294,7 @@ async function dependencyIssues(
         if (probed.has(tn)) continue
         probed.add(tn)
         try {
-          const res = await opts.preflightConnectorTool({ userId: ctx.userId, toolName: tn })
+          const res = await opts.preflightConnectorTool({ userId: ctx.userId, toolName: tn, workspaceId: ctx.workspaceId })
           if (res && !res.ok) {
             issues.push({
               path: ['definition', 'steps', i],

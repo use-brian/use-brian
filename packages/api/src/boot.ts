@@ -1757,6 +1757,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
     connectorStore,
+    // Team credential sources — the connector preflight resolves creds with the
+    // same precedence as the runtime (team-native instance → member grant →
+    // per-user), so a workflow whose connector lives in a team-owned/granted
+    // instance is not falsely rejected as "not connected".
+    connectorInstanceStore,
+    connectorGrantStore,
     // Policy-aware preflight: lets authoring reject an `ask`-policy tool
     // pinned on an `assistant_call` step (never executable there — the callee
     // surface drops ask-policy tools; see dependencyIssues) instead of

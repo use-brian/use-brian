@@ -2,9 +2,12 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { createWorkflowDependencyPreflight } from '../dependency-preflight.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
+import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../../db/connector-grant-store.js'
 
 const ASSISTANT_ID = 'a1'
 const USER_ID = 'u1'
+const WORKSPACE_ID = 'w1'
 
 function integrationStoreWith(
   creds: Record<string, { credentials: Record<string, unknown>; botUserId?: string | null } | null>,
@@ -19,6 +22,32 @@ function connectorStoreWith(creds: Record<string, { client_secret?: string } | n
   return {
     getCredentials: async (_userId: string, connectorId: string) => creds[connectorId] ?? null,
   } as unknown as ConnectorStore
+}
+
+/**
+ * Team-native + team-grant credential sources — the runtime overlays the
+ * preflight must now mirror. `instances` are `scope='workspace'` rows keyed by
+ * instance id; `credsById` are what `getCredentialsSystem(id)` returns. Both
+ * team stores share the same instance-credential reader (grants read the
+ * granted instance's credentials through the instance store), matching
+ * `mcp/inject.ts`.
+ */
+function connectorInstanceStoreWith(
+  instances: Array<{ id: string; provider: string; connected: boolean }>,
+  credsById: Record<string, { client_secret?: string } | null>,
+): ConnectorInstanceStore {
+  return {
+    listByWorkspaceSystem: async (_workspaceId: string) => instances,
+    getCredentialsSystem: async (id: string) => credsById[id] ?? null,
+  } as unknown as ConnectorInstanceStore
+}
+
+function connectorGrantStoreWith(
+  grants: Array<{ instance: { id: string; provider: string; connected: boolean }; grantedByUserId: string }>,
+): ConnectorGrantStore {
+  return {
+    listForTargetSystem: async (_targetType: string, _targetId: string) => grants,
+  } as unknown as ConnectorGrantStore
 }
 
 afterEach(() => {
@@ -197,6 +226,137 @@ describe('[COMP:workflow/dependency-preflight] preflightConnectorTool', () => {
       assistantId: ASSISTANT_ID,
     })
     expect(loosened?.policy).toBe('allow')
+  })
+
+  // Team credential resolution (prod 2026-07-13): the preflight must resolve
+  // credentials with the SAME precedence the runtime uses (team-native
+  // instance → member grant → per-user), or it rejects a workflow the executor
+  // would run. The per-user store below is EMPTY in these cases — the only
+  // credential lives in a team-owned / team-granted instance.
+  it('accepts GitHub when the credential is a team-native (scope=workspace) instance', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ login: 'octocat' }), { status: 200 })))
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({}), // no per-user GitHub
+      connectorInstanceStore: connectorInstanceStoreWith(
+        [{ id: 'inst-team', provider: 'github', connected: true }],
+        { 'inst-team': { client_secret: 'ghp_team' } },
+      ),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubListPullRequests',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r).toEqual({ ok: true, provider: 'GitHub', policy: 'allow' })
+  })
+
+  it('probes the team-native token — a revoked team PAT is blocked (not silently accepted)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Bad credentials', { status: 401 })))
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({}),
+      connectorInstanceStore: connectorInstanceStoreWith(
+        [{ id: 'inst-team', provider: 'github', connected: true }],
+        { 'inst-team': { client_secret: 'ghp_team_revoked' } },
+      ),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubGetRepository',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r?.ok).toBe(false)
+    expect(r?.reason).toMatch(/invalid or revoked/i)
+  })
+
+  it('accepts GitHub when the credential is a member-exposure grant (team-grant)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ login: 'octocat' }), { status: 200 })))
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({}), // no per-user GitHub
+      // No team-native instance for github; only a grant of a user instance.
+      connectorInstanceStore: connectorInstanceStoreWith([], { 'inst-granted': { client_secret: 'ghp_granted' } }),
+      connectorGrantStore: connectorGrantStoreWith([
+        { instance: { id: 'inst-granted', provider: 'github', connected: true }, grantedByUserId: 'u2' },
+      ]),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubListPullRequests',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r).toEqual({ ok: true, provider: 'GitHub', policy: 'allow' })
+  })
+
+  it('accepts a non-GitHub connector on presence of a team-grant credential', async () => {
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({}),
+      connectorInstanceStore: connectorInstanceStoreWith([], { 'inst-notion': { client_secret: 'tok' } }),
+      connectorGrantStore: connectorGrantStoreWith([
+        { instance: { id: 'inst-notion', provider: 'notion', connected: true }, grantedByUserId: 'u2' },
+      ]),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'notionSearch',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r).toEqual({ ok: true, provider: 'Notion', policy: 'allow' })
+  })
+
+  it('team-native precedence: a disconnected team instance falls through to the per-user credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ login: 'octocat' }), { status: 200 })))
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ github: { client_secret: 'ghp_personal' } }),
+      // Team instance exists but is NOT connected → skipped; per-user wins.
+      connectorInstanceStore: connectorInstanceStoreWith(
+        [{ id: 'inst-team', provider: 'github', connected: false }],
+        { 'inst-team': { client_secret: 'ghp_team' } },
+      ),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubGetRepository',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r?.ok).toBe(true)
+  })
+
+  it('reports not-connected only when NO source (team-native, team-grant, per-user) has a credential', async () => {
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({}),
+      connectorInstanceStore: connectorInstanceStoreWith([], {}),
+      connectorGrantStore: connectorGrantStoreWith([]),
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubListPullRequests',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r).toEqual({
+      ok: false,
+      provider: 'GitHub',
+      reason: expect.stringMatching(/not connected/i),
+      policy: 'allow',
+    })
+  })
+
+  it('a team store that throws is fail-open — falls through to the per-user credential', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ login: 'octocat' }), { status: 200 })))
+    const throwingInstanceStore = {
+      listByWorkspaceSystem: async () => {
+        throw new Error('db down')
+      },
+      getCredentialsSystem: async () => null,
+    } as unknown as ConnectorInstanceStore
+    const { preflightConnectorTool } = createWorkflowDependencyPreflight({
+      connectorStore: connectorStoreWith({ github: { client_secret: 'ghp_personal' } }),
+      connectorInstanceStore: throwingInstanceStore,
+    })
+    const r = await preflightConnectorTool({
+      userId: USER_ID,
+      toolName: 'githubGetRepository',
+      workspaceId: WORKSPACE_ID,
+    })
+    expect(r?.ok).toBe(true)
   })
 })
 
