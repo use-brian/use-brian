@@ -72,7 +72,7 @@ import type { ContentBlock, EngineHooks } from '@sidanclaw/core'
 import { sanitizeDeliveryText } from '@sidanclaw/shared'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { resolveModel } from '../model-resolution.js'
-import { checkUsageBudget } from './route-helpers.js'
+import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import {
   parseAuthToken,
   verifySecret,
@@ -142,6 +142,14 @@ export type PublicApiRouteOptions = {
   maxTurns?: number
   /** Hard cap on inbound message length, defaults to 16k chars. */
   maxMessageChars?: number
+  /**
+   * The real DB-backed credit gate (closed `billing/credit-gate.ts`),
+   * injected by the platform via `boot()` ports — same seam as `chat.ts`.
+   * Open default = unset → `checkUsageBudget` allow-alls (self-host is
+   * never gated). `blocked` means the workspace has no active plan; see
+   * cost-and-pricing.md → "No free plan: the hosted paid gate".
+   */
+  checkCreditBudget?: CreditBudgetGate
 }
 
 const historyQuerySchema = z.object({
@@ -407,6 +415,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         const gate = await checkUsageBudget(
           assistant.workspaceId,
           workspacePlan,
+          options.checkCreditBudget,
         )
         budgetStatus = gate.status
         if (gate.status === 'blocked') {
@@ -414,7 +423,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             res,
             429,
             'budget_exhausted',
-            "This assistant has hit its usage limit. The assistant owner needs to upgrade their plan.",
+            "This workspace has no active sidanclaw plan. The workspace owner can pick a plan at sidan.ai/plans, or self-host the open-source version.",
           )
         }
       }

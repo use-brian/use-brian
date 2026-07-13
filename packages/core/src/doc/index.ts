@@ -17,6 +17,9 @@ export type {
 // Phase 0 wire format
 export * from './page-types.js'
 export * from './page-schemas.js'
+
+// Page actions — button bindings on blueprints/pages (mig 318).
+export * from './page-action-types.js'
 export * from './ops.js'
 export * from './outline.js'
 export * from './undo.js'

@@ -8,9 +8,12 @@ import {
   formatValue,
   humaniseKey,
   isoToDateInput,
+  memberDisplayName,
   parseAdjustNewId,
   parseTagsInput,
+  resolveAssignee,
   tagsEqual,
+  type AssignableMember,
 } from "../property-edit";
 
 describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
@@ -114,6 +117,51 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
       nullish: null,
     });
     expect(rows).toEqual([["priority", "high"]]);
+  });
+
+  it("excludes assignee_id from a task's generic remainder (dedicated Assignee row)", () => {
+    const rows = extraBodyFields("task", {
+      assignee_id: "c97f1dcd-cd3a-467e-94e0-e8789f7f35dc",
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it("resolves an assignee by workspace_members row id, not user id", () => {
+    const members: AssignableMember[] = [
+      {
+        id: "wm-1",
+        userName: "Jack",
+        email: "jack@example.com",
+        avatarUrl: null,
+        role: "member",
+      },
+      {
+        id: "wm-2",
+        userName: null,
+        email: "no-name@example.com",
+        avatarUrl: null,
+        role: "admin",
+      },
+    ];
+    expect(resolveAssignee(members, "wm-1")?.userName).toBe("Jack");
+    // A user id must not match — assignee_id stores the member-row id.
+    expect(resolveAssignee(members, "jack@example.com")).toBeNull();
+    expect(resolveAssignee(members, "wm-missing")).toBeNull();
+    expect(resolveAssignee(members, "")).toBeNull();
+    expect(resolveAssignee(members, null)).toBeNull();
+    expect(resolveAssignee(members, 42)).toBeNull();
+    expect(resolveAssignee([], "wm-1")).toBeNull();
+  });
+
+  it("prefers the member's name, falls back to email, then null", () => {
+    const base = { id: "wm", avatarUrl: null, role: "member" };
+    expect(
+      memberDisplayName({ ...base, userName: "Jack", email: "j@x.com" }),
+    ).toBe("Jack");
+    expect(memberDisplayName({ ...base, userName: null, email: "j@x.com" })).toBe(
+      "j@x.com",
+    );
+    expect(memberDisplayName({ ...base, userName: "", email: null })).toBeNull();
   });
 
   it("keeps generic fields for primitives without a dedicated set", () => {

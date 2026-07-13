@@ -1,21 +1,23 @@
 "use client";
 
 /**
- * Studio → Channels section (app-web).
- *
- * Ported from `apps/web/src/app/(app)/studio/channels/page.tsx` for the app
- * consolidation (docs/architecture/features/doc.md §9 #5, CHUNK 4).
- * Rendered inside the Studio full-page layout, NOT the doc three-column
- * page shell.
+ * Studio → Channels section (app-web), master-detail.
  *
  * The workspace-channels operator surface (Phase D of
- * docs/architecture/channels/adapter-pattern.md). Channels are owned by the
- * workspace — this page lists them, edits each one's clearance and enabled
- * capabilities, and wires per-surface assistant routing. Channels are
- * *created* by connecting a bot from the inline "+ Add channel" form; there is
- * no separate "new channel" page.
+ * docs/architecture/channels/adapter-pattern.md → "Workspace channels").
+ * Channels are owned by the workspace — this page lists them, edits each
+ * one's clearance and enabled capabilities, and wires per-surface assistant
+ * routing. Channels are *created* by connecting a bot from the inline
+ * "+ Add channel" form; there is no separate "new channel" page.
  *
- * app-web deltas vs apps/web:
+ * Mirrors Studio → Connectors / Events: a left rail groups every channel by
+ * status — Needs attention (revoked/invalid) / Active / the hosted-only
+ * official WhatsApp shared-bot pseudo-row — and the selected row's management
+ * panel renders beside it (clearance + capabilities, bot behavior config,
+ * assistant routing, disconnect). Bucketing is the pure helper
+ * `@/lib/channel-rail-groups` ([COMP:app-web/channel-rail-groups]).
+ *
+ * app-web deltas vs the retired apps/web page:
  *   - `activeId` comes from the app-web `useWorkspaces()` adapter (route-
  *     derived id + fetched workspace list); the Studio layout mounts
  *     `useWorkspaceFetch` so the plan-gated `RoutingModelPicker` resolves
@@ -32,9 +34,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { cn } from "@/lib/utils";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { authFetch } from "@/lib/auth-fetch";
 import { buildManifest } from "@/components/slack-setup-inline";
+import { ConnectorIcon } from "@/components/connectors/connector-icon";
+import {
+  groupChannelRail,
+  type ChannelRailGroupId,
+} from "@/lib/channel-rail-groups";
 import { QRCodeSVG } from "qrcode.react";
 import {
   connectWhatsappIngest,
@@ -127,6 +135,29 @@ function DiscordGlyph() {
   );
 }
 
+/**
+ * Platform mark for a channel row — Discord gets the brand SVG, WhatsApp the
+ * shared brand icon (`ConnectorIcon`, same as the Events rail), Telegram /
+ * Slack their text glyphs. Legacy/unknown types fall back to a dot.
+ */
+function ChannelTypeIcon({ type }: { type: Channel["channelType"] }) {
+  if (type === "discord") return <DiscordGlyph />;
+  if (type === "whatsapp") return <ConnectorIcon connectorId="whatsapp" />;
+  return <>{PLATFORM_GLYPH[type] ?? "•"}</>;
+}
+
+/** Status pill — shared by the detail headers (Connectors/Events parity). */
+function pillCls(tone: "on" | "off" | "attention"): string {
+  return cn(
+    "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
+    tone === "attention"
+      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+      : tone === "on"
+        ? "bg-primary/10 text-primary"
+        : "bg-muted text-muted-foreground",
+  );
+}
+
 // Server-invite URL for a freshly connected Discord bot. A bot must be in a
 // server before any user can message it, so the connect success state offers
 // this. `client_id` is the bot's Application id (== bot user id). Permissions
@@ -189,6 +220,9 @@ export default function StudioChannelsPage() {
   const [myClearance, setMyClearance] = useState<ChannelClearance>("internal");
   const [error, setError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // Master-detail selection — a rail row key (channel UUID or "official");
+  // null / stale keys resolve to the first rail row.
+  const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeId) {
@@ -254,8 +288,10 @@ export default function StudioChannelsPage() {
         }
         return [created, ...prev];
       });
+      // Jump the detail panel to the fresh install.
+      setSelected(created.id);
       // The backend may have seeded a default `channel_assistants` row when
-      // `defaultAssistantId` was provided — pull routing so the new card
+      // `defaultAssistantId` was provided — pull routing so the new panel
       // shows it.
       await refreshRouting(created.id);
     },
@@ -272,22 +308,94 @@ export default function StudioChannelsPage() {
     });
   }, []);
 
+  const tr = t.studioPage.channels;
+
+  // ── Rail bucketing + selection resolution ─────────────────────
+  //
+  // The official shared bot (hosted-only, gated behind isHostedEdition() so
+  // the open OSS core never renders it — its backend lives in closed
+  // api-platform; docs/architecture/channels/whatsapp.md) joins the rail as a
+  // page-level pseudo-row: it has no `channels` row.
+  const officialPresent = isHostedEdition() && !!activeId;
+  const railGroups = groupChannelRail({
+    channels: channels ?? [],
+    official: officialPresent,
+  });
+  const groupLabels: Record<ChannelRailGroupId, string> = {
+    attention: tr.sectionAttention,
+    active: tr.sectionActive,
+    official: tr.sectionOfficial,
+  };
+  const railOrder = railGroups.flatMap((g) => g.rows);
+  const sel = railOrder.find((r) => r.key === selected) ?? railOrder[0] ?? null;
+  const selKey = sel?.key ?? null;
+
+  const platformLabel = (type: Channel["channelType"]): string =>
+    (tr.platforms as Partial<Record<Channel["channelType"], string>>)[type] ??
+    type;
+
+  function railRowButton(row: (typeof railOrder)[number]) {
+    const isSel = selKey === row.key;
+    const isChannel = row.kind === "channel";
+    const label = isChannel ? row.channel.displayName : tr.whatsappOfficial.title;
+    const subtitle = isChannel
+      ? platformLabel(row.channel.channelType)
+      : platformLabel("whatsapp");
+    const dot: "on" | "attention" | null = !isChannel
+      ? null
+      : row.channel.status === "active"
+        ? "on"
+        : "attention";
+    return (
+      <li key={row.key}>
+        <button
+          type="button"
+          onClick={() => setSelected(row.key)}
+          aria-current={isSel ? "true" : undefined}
+          className={cn(
+            "flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+            isSel
+              ? "bg-muted font-medium text-foreground"
+              : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+          )}
+        >
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+            <ChannelTypeIcon
+              type={isChannel ? row.channel.channelType : "whatsapp"}
+            />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{label}</span>
+            <span className="block truncate text-[11px] font-normal text-muted-foreground">
+              {subtitle}
+            </span>
+          </span>
+          {dot && (
+            <span
+              aria-hidden
+              className={cn(
+                "h-1.5 w-1.5 shrink-0 rounded-full",
+                dot === "attention" ? "bg-amber-500" : "bg-primary",
+              )}
+            />
+          )}
+        </button>
+      </li>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6">
-      {/* Intro row — the topbar breadcrumb names the section; this row is the
-          description + the one primary action
-          (docs/architecture/features/studio.md → "Page headers"). */}
-      <header className="flex items-start justify-between gap-4">
-        <p className="text-[13px] text-muted-foreground max-w-prose">
-          {t.studioPage.channels.intro}
-        </p>
+      {/* Intro row — the one primary action; the topbar breadcrumb names the
+          section (docs/architecture/features/studio.md → "Page headers"). */}
+      <header className="flex justify-end">
         {activeId && (
           <button
             type="button"
             onClick={() => setAddOpen((v) => !v)}
             className="shrink-0 text-sm font-medium rounded-md bg-primary text-primary-foreground px-3 py-1.5"
           >
-            {addOpen ? t.studioPage.channels.add.close : t.studioPage.channels.add.cta}
+            {addOpen ? tr.add.close : tr.add.cta}
           </button>
         )}
       </header>
@@ -301,56 +409,78 @@ export default function StudioChannelsPage() {
         />
       )}
 
-      {/* Official shared bot: hosted-only. Gated behind isHostedEdition() so the
-          open OSS core never renders it (its backend lives in closed
-          api-platform). See docs/architecture/channels/whatsapp.md. */}
-      {isHostedEdition() && activeId && (
-        <WhatsappOfficialCard workspaceId={activeId} />
-      )}
-
       {!activeId ? (
         <div className="text-sm text-muted-foreground border border-border rounded-md p-4">
-          {t.studioPage.channels.noActiveWorkspace}
+          {tr.noActiveWorkspace}
         </div>
       ) : error ? (
         <div className="text-sm text-muted-foreground border border-border rounded-md p-4">
-          {t.studioPage.channels.loadError}
+          {tr.loadError}
         </div>
       ) : channels === null ? (
-        <div className="text-sm text-muted-foreground">
-          {t.studioPage.channels.loading}
+        <div className="text-sm text-muted-foreground py-10 text-center">
+          {tr.loading}
         </div>
-      ) : channels.length === 0 ? (
+      ) : railOrder.length === 0 ? (
         <div className="border border-border rounded-md bg-card/50 p-6 flex flex-col gap-1">
-          <div className="font-medium text-sm">
-            {t.studioPage.channels.emptyTitle}
-          </div>
-          <p className="text-sm text-muted-foreground">
-            {t.studioPage.channels.emptyBody}
-          </p>
+          <div className="font-medium text-sm">{tr.emptyTitle}</div>
+          <p className="text-sm text-muted-foreground">{tr.emptyBody}</p>
         </div>
       ) : (
-        <ul className="flex flex-col gap-4">
-          {channels.map((c) => (
-            <ChannelCard
-              key={c.id}
-              workspaceId={activeId}
-              channel={c}
-              routing={routing[c.id] ?? []}
-              assistants={assistants}
-              myClearance={myClearance}
-              onUpdated={onChannelUpdated}
-              onRoutingChanged={() => refreshRouting(c.id)}
-              onDeleted={onChannelDeleted}
-            />
-          ))}
-        </ul>
+        /* ── Master-detail: status-grouped rail + selected channel panel ── */
+        <div className="flex flex-col gap-6 md:flex-row">
+          <aside className="w-full md:w-64 shrink-0 self-start">
+            <nav aria-label={tr.railAriaLabel} className="flex flex-col gap-3">
+              {railGroups.map((g) => (
+                <div key={g.id}>
+                  <div className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {groupLabels[g.id]}
+                    <span className="font-normal text-muted-foreground/50">
+                      {g.rows.length}
+                    </span>
+                  </div>
+                  <ul className="flex flex-col gap-0.5">
+                    {g.rows.map(railRowButton)}
+                  </ul>
+                </div>
+              ))}
+            </nav>
+          </aside>
+
+          {/* Detail — the selected channel's management panel. */}
+          <div className="min-w-0 flex-1">
+            {!sel ? (
+              <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
+                {tr.selectPrompt}
+              </div>
+            ) : sel.kind === "official" ? (
+              <WhatsappOfficialDetail workspaceId={activeId} />
+            ) : (
+              <ChannelDetail
+                key={sel.channel.id}
+                workspaceId={activeId}
+                channel={sel.channel}
+                routing={routing[sel.channel.id] ?? []}
+                assistants={assistants}
+                myClearance={myClearance}
+                onUpdated={onChannelUpdated}
+                onRoutingChanged={() => refreshRouting(sel.channel.id)}
+                onDeleted={onChannelDeleted}
+              />
+            )}
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
-function ChannelCard({
+/**
+ * The selected channel's management panel — the master-detail right pane.
+ * Header (platform mark, name, status pill), clearance + capabilities, the
+ * per-platform bot-behavior config, assistant routing, and disconnect.
+ */
+function ChannelDetail({
   workspaceId,
   channel,
   routing,
@@ -380,17 +510,25 @@ function ChannelCard({
   const [attachSurface, setAttachSurface] = useState("");
   const [attaching, setAttaching] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState(false);
 
-  async function onConfirmDisconnect(): Promise<void> {
+  async function onDisconnect(): Promise<void> {
+    const dc = t.studioPage.channels.disconnect;
+    const ok = await confirmDialog({
+      title: dc.confirmTitle,
+      description: dc.warning,
+      confirmLabel: dc.confirm,
+      cancelLabel: dc.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
     setDeleting(true);
     setDeleteError(false);
     try {
       await deleteChannel(workspaceId, channel.id);
       onDeleted(channel.id);
-      // On success the card unmounts via onDeleted — leave `deleting` true
+      // On success the panel unmounts via onDeleted — leave `deleting` true
       // so the button stays disabled during the brief unmount window.
     } catch {
       setDeleteError(true);
@@ -463,32 +601,26 @@ function ChannelCard({
   const statusActive = channel.status === "active";
 
   return (
-    <li className="border border-border rounded-md bg-card p-5 flex flex-col gap-4">
+    <div className="space-y-4">
+      {/* Header — platform mark, name, platform line, status pill. */}
       <div className="flex items-start gap-3">
         <div
           aria-hidden
-          className="h-9 w-9 rounded-md bg-muted text-muted-foreground flex items-center justify-center text-base font-medium shrink-0"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted text-base font-medium text-muted-foreground"
         >
-          {channel.channelType === "discord" ? (
-            <DiscordGlyph />
-          ) : (
-            (PLATFORM_GLYPH[channel.channelType] ?? "•")
-          )}
+          <ChannelTypeIcon type={channel.channelType} />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="font-medium text-sm truncate">{channel.displayName}</div>
-          <div className="text-xs text-muted-foreground">
+          <h2 className="truncate text-[15px] font-semibold tracking-tight">
+            {channel.displayName}
+          </h2>
+          <p className="truncate text-[12px] text-muted-foreground">
             {(t.studioPage.channels.platforms as Partial<Record<Channel["channelType"], string>>)[
               channel.channelType
             ] ?? channel.channelType}
-          </div>
+          </p>
         </div>
-        <span
-          className={
-            "text-xs font-medium shrink-0 " +
-            (statusActive ? "text-emerald-600 dark:text-emerald-400" : "text-destructive")
-          }
-        >
+        <span className={pillCls(statusActive ? "on" : "attention")}>
           {t.studioPage.channels.status[channel.status]}
         </span>
       </div>
@@ -598,7 +730,7 @@ function ChannelCard({
         <WhatsappCardSection workspaceId={workspaceId} />
       )}
 
-      <div className="flex flex-col gap-2 border-t border-border pt-3">
+      <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
         <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
           {t.studioPage.channels.routingTitle}
         </div>
@@ -680,51 +812,27 @@ function ChannelCard({
         )}
       </div>
 
+      {/* Disconnect — destructive, confirmed via the shared confirmDialog. */}
       <div className="flex flex-col gap-2 border-t border-border pt-3">
-        {confirmDelete ? (
-          <>
-            <p className="text-xs text-muted-foreground">
-              {t.studioPage.channels.disconnect.warning}
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmDelete(false)}
-                disabled={deleting}
-                className="text-xs font-medium rounded-md border border-border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
-              >
-                {t.studioPage.channels.disconnect.cancel}
-              </button>
-              <button
-                type="button"
-                onClick={() => void onConfirmDisconnect()}
-                disabled={deleting}
-                className="text-xs font-medium rounded-md bg-destructive text-destructive-foreground px-2.5 py-1 hover:bg-destructive/90 disabled:opacity-50"
-              >
-                {deleting
-                  ? t.studioPage.channels.disconnect.confirming
-                  : t.studioPage.channels.disconnect.confirm}
-              </button>
-            </div>
-          </>
-        ) : (
-          <div className="flex items-center justify-end">
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(true)}
-              className="text-xs font-medium text-destructive hover:underline"
-            >
-              {t.studioPage.channels.disconnect.cta}
-            </button>
-          </div>
-        )}
+        <div className="flex items-center justify-end">
+          <button
+            type="button"
+            onClick={() => void onDisconnect()}
+            disabled={deleting}
+            className="text-xs font-medium text-destructive/70 hover:text-destructive transition-colors disabled:opacity-50"
+          >
+            {deleting
+              ? t.studioPage.channels.disconnect.confirming
+              : t.studioPage.channels.disconnect.cta}
+          </button>
+        </div>
         {deleteError && (
           <p className="text-xs text-destructive text-right">
             {t.studioPage.channels.disconnect.error}
           </p>
         )}
       </div>
-    </li>
+    </div>
   );
 }
 
@@ -970,7 +1078,7 @@ function ChannelConfigSection({
   }
 
   return (
-    <div className="flex flex-col gap-3 border-t border-border pt-3">
+    <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
       <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
         {cfg.title}
       </div>
@@ -2195,7 +2303,7 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
   const chatEnabled = config?.chatEnabled ?? false;
 
   return (
-    <div className="flex flex-col gap-3 border-t border-border pt-3">
+    <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
       <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
         {t.studioPage.channels.config.title}
       </div>
@@ -2368,12 +2476,13 @@ function WhatsappRepliesSection({ workspaceId }: { workspaceId: string }) {
  * the Studio → Events page now (the Channels/Events split — Channels owns the
  * chat/broadcast surface, Events owns ingestion).
  */
-// Official shared-bot surface (hosted-only). The number is paired centrally; a
+// Official shared-bot surface (hosted-only), rendered as the detail panel of
+// the rail's "official" pseudo-row. The number is paired centrally; a
 // workspace doesn't pair it - users add the number to a group (which binds that
 // group to the adder's workspace) and manage their bound groups here. Backend:
 // packages/api-platform/src/routes/whatsapp-official-admin.ts.
 // [COMP:app-web/whatsapp-official-card]
-function WhatsappOfficialCard({ workspaceId }: { workspaceId: string }) {
+function WhatsappOfficialDetail({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const c = t.studioPage.channels.whatsappOfficial;
   const [state, setState] = useState<{
@@ -2417,34 +2526,55 @@ function WhatsappOfficialCard({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <section className="border border-border rounded-md bg-card/50 p-4 flex flex-col gap-3">
-      <div className="flex flex-col gap-1">
-        <h3 className="text-sm font-medium">{c.title}</h3>
-        <p className="text-[13px] text-muted-foreground max-w-prose">{c.intro}</p>
+    <div className="space-y-4">
+      {/* Header — brand mark, title, the shared number as the identity line. */}
+      <div className="flex items-start gap-3">
+        <div
+          aria-hidden
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted"
+        >
+          <ConnectorIcon connectorId="whatsapp" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="truncate text-[15px] font-semibold tracking-tight">
+            {c.title}
+          </h2>
+          <p className="truncate text-[12px] text-muted-foreground">
+            {state?.officialNumber ?? c.numberUnconfigured}
+          </p>
+        </div>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <span className="text-xs text-muted-foreground">{c.numberLabel}</span>
-        {state?.officialNumber ? (
-          <code className="text-sm font-medium">{state.officialNumber}</code>
-        ) : (
-          <span className="text-[13px] text-muted-foreground">
-            {c.numberUnconfigured}
-          </span>
-        )}
+      <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+        {c.intro}
       </div>
 
-      <div className="flex flex-col gap-1">
-        <span className="text-xs font-medium">{c.howToTitle}</span>
-        <ol className="list-decimal list-inside text-[13px] text-muted-foreground flex flex-col gap-1">
-          <li>{c.howToStep1}</li>
-          <li>{c.howToStep2}</li>
-          <li>{c.howToStep3}</li>
-        </ol>
+      <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">{c.numberLabel}</span>
+          {state?.officialNumber ? (
+            <code className="text-sm font-medium">{state.officialNumber}</code>
+          ) : (
+            <span className="text-[13px] text-muted-foreground">
+              {c.numberUnconfigured}
+            </span>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium">{c.howToTitle}</span>
+          <ol className="list-decimal list-inside text-[13px] text-muted-foreground flex flex-col gap-1">
+            <li>{c.howToStep1}</li>
+            <li>{c.howToStep2}</li>
+            <li>{c.howToStep3}</li>
+          </ol>
+        </div>
       </div>
 
-      <div className="flex flex-col gap-2 border-t border-border pt-3">
-        <span className="text-xs font-medium">{c.groupsTitle}</span>
+      <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          {c.groupsTitle}
+        </span>
         {error ? (
           <p className="text-xs text-amber-600 dark:text-amber-400">{error}</p>
         ) : null}
@@ -2476,7 +2606,7 @@ function WhatsappOfficialCard({ workspaceId }: { workspaceId: string }) {
           </ul>
         )}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -2511,7 +2641,7 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
 
   if (connected === false) {
     return (
-      <div className="flex flex-col gap-2 border-t border-border pt-3">
+      <div className="flex flex-col gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
         <p className="text-xs text-amber-600 dark:text-amber-400">
           {wa.disconnectedNote}
         </p>

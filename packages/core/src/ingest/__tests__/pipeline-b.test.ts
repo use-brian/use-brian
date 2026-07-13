@@ -149,6 +149,7 @@ function makeEntity(over: Partial<EntityRecord> & Pick<EntityRecord, 'id' | 'kin
     createdByUserId: 'u-1',
     createdByAssistantId: null,
     sourceEpisodeId: 'ep-1',
+    sourceSessionId: null,
     source: 'extracted',
     verifiedByUserId: null,
     verifiedAt: null,
@@ -362,6 +363,7 @@ function spyEntities(world?: World): SpyEntities {
         createdByUserId: params.createdByUserId,
         createdByAssistantId: params.createdByAssistantId ?? null,
         sourceEpisodeId: params.sourceEpisodeId ?? null,
+        sourceSessionId: null,
         source: params.source,
       })
     },
@@ -404,6 +406,7 @@ function spyEntities(world?: World): SpyEntities {
         displayName: 'superseded',
         attributes: patch.attributes,
         sourceEpisodeId: patch.sourceEpisodeId ?? null,
+        sourceSessionId: null,
       })
     },
     async getEntity(_ctx, _idOrName: string, _opts?: GetEntityOpts): Promise<EntityRollup | null> {
@@ -961,10 +964,25 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     const memories = spyMemories()
     const episodes = spyEpisodes()
 
-    const taskRows: Array<{ title: string }> = []
+    const taskRows: Array<{
+      title: string
+      source?: string
+      sourceEpisodeId?: string | null
+      createdByAssistantId?: string | null
+    }> = []
     const tasks = {
-      create: async (params: { title: string }) => {
-        taskRows.push({ title: params.title })
+      create: async (params: {
+        title: string
+        source?: string
+        sourceEpisodeId?: string | null
+        createdByAssistantId?: string | null
+      }) => {
+        taskRows.push({
+          title: params.title,
+          source: params.source,
+          sourceEpisodeId: params.sourceEpisodeId,
+          createdByAssistantId: params.createdByAssistantId,
+        })
         return { id: `task-${taskRows.length}`, title: params.title }
       },
     } as unknown as PipelineBDeps['tasks']
@@ -1010,6 +1028,11 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     expect(crm.contacts).toHaveLength(1)
     expect(entities.created).toHaveLength(1)
     expect(taskRows).toHaveLength(1)
+    // Extraction provenance (2026-07-10 source audit): tasks used to land
+    // source='user' (the DB default) with no episode back-edge — mislabelled
+    // as human-created and unresolvable by the Source descriptor.
+    expect(taskRows[0].source).toBe('extracted')
+    expect(taskRows[0].sourceEpisodeId).toBe('ep-1')
     expect(memories.created).toHaveLength(1)
     expect(result.ephemeralCount).toBe(0)
   })

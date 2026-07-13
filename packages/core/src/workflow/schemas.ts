@@ -273,6 +273,36 @@ const branchStepSchema = z.object({
   nextStepIdIfFalse: stepIdSchema.nullable(),
 })
 
+// ── send_page ───────────────────────────────────────────────────────────
+
+/**
+ * Recipient / subject source for `send_page`. Strict variants so an unknown
+ * key fails loudly at authoring. `recordField` names a typed field on the
+ * page's blueprint record; `literal` is a fixed string (interpolatable).
+ */
+const sendPageValueSourceSchema = z.union([
+  z.object({ recordField: z.string().min(1).max(128) }).strict(),
+  z.object({ literal: z.string().min(1).max(512) }).strict(),
+])
+
+/**
+ * Deterministic verbatim send of a doc page (the page-action button lane).
+ * No model call: body = the page's markdown export; to/subject come from the
+ * page's blueprint record or literals. Runtime-gated to button-triggered
+ * runs and executed via the `ExecutorDeps.sendPage` port (egress clearance
+ * gate + `page_send_log` at-most-once claim + Gmail send live there).
+ * See docs/architecture/features/page-actions.md → "send_page".
+ */
+const sendPageStepSchema = z.object({
+  ...commonSchema,
+  type: z.literal('send_page'),
+  page: z.union([z.string().uuid(), interpolationTokenSchema]),
+  via: z.literal('gmail'),
+  to: sendPageValueSourceSchema,
+  subject: sendPageValueSourceSchema,
+  instanceId: z.string().min(1).max(256).optional(),
+})
+
 // ── Step union + definition ─────────────────────────────────────────────
 
 export const WorkflowStepSchema = z.discriminatedUnion('type', [
@@ -280,6 +310,7 @@ export const WorkflowStepSchema = z.discriminatedUnion('type', [
   toolCallStepSchema,
   waitStepSchema,
   branchStepSchema,
+  sendPageStepSchema,
 ])
 
 /**

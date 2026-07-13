@@ -16,6 +16,7 @@ import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type {
   ScheduleConfig,
+  WorkflowButtonBinding,
   WorkflowTrigger,
   WorkflowTriggerJob,
 } from "@/lib/api/workflow";
@@ -113,6 +114,55 @@ export function TriggerJobsList({
                   {b.triggerJobsTeammate}
                 </span>
               )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Page-action buttons that fire this workflow (mig 321) — the second honesty
+ * block: the trigger column can say "Manual" while buttons start runs. Same
+ * card recipe as the trigger-jobs list; renders nothing without bindings.
+ */
+export function ButtonBindingsList({ bindings }: { bindings: WorkflowButtonBinding[] }) {
+  const t = useT();
+  const b = t.workflowPage.builder;
+  if (bindings.length === 0) return null;
+
+  return (
+    <div className="border border-border/60 rounded-xl bg-card overflow-hidden">
+      <div className="px-4 py-2 border-b border-border/60 flex items-center gap-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+          {b.buttonBindingsHeading}
+        </span>
+        <InfoTip text={b.buttonBindingsHint} />
+      </div>
+      <div className="p-4">
+        <ul className="flex flex-col gap-1.5">
+          {bindings.map((binding) => (
+            <li
+              key={binding.id}
+              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-sm"
+            >
+              <span
+                className={cn(
+                  "inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium",
+                  binding.enabled
+                    ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    : "bg-muted text-muted-foreground",
+                )}
+              >
+                {binding.enabled ? b.triggerJobsEnabled : b.triggerJobsPaused}
+              </span>
+              <span className="font-medium">
+                {format(b.buttonBindingsRow, { label: binding.label })}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {binding.blueprintId ? b.buttonBindingsScopeBlueprint : b.buttonBindingsScopePage}
+              </span>
             </li>
           ))}
         </ul>

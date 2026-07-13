@@ -68,6 +68,7 @@ describe("[COMP:app-web/approvals] isActionable", () => {
       "staged_write",
       "staged_skill_creation",
       "staged_skill_update",
+      "browser_skill_send",
     ];
     for (const kind of inPlace) {
       expect(isActionable(kind)).toBe(true);
@@ -84,9 +85,10 @@ describe("[COMP:app-web/approvals] isActionable", () => {
     }
   });
 
-  it("ACTIONABLE_KINDS holds exactly the five in-place kinds", () => {
+  it("ACTIONABLE_KINDS holds exactly the six in-place kinds", () => {
     expect([...ACTIONABLE_KINDS].sort()).toEqual(
       [
+        "browser_skill_send",
         "staged_skill_creation",
         "staged_skill_update",
         "staged_write",
@@ -94,6 +96,12 @@ describe("[COMP:app-web/approvals] isActionable", () => {
         "workflow_step",
       ].sort(),
     );
+  });
+});
+
+describe("[COMP:app-web/approval-grants] browser_skill_send resolves on the queue's 3-button card (R2-2)", () => {
+  it("is actionable in place - the block's runner polls the row, so responding IS the resume", () => {
+    expect(isActionable("browser_skill_send")).toBe(true);
   });
 });
 

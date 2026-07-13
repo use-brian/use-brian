@@ -37,6 +37,7 @@ function entity(id: string, displayName: string, kind = 'company'): EntityRecord
     createdByUserId: 'u1',
     createdByAssistantId: null,
     sourceEpisodeId: null,
+    sourceSessionId: null,
     source: 'user',
     verifiedByUserId: null,
     verifiedAt: null,

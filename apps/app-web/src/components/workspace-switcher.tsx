@@ -68,9 +68,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 // `@/lib/primary-auth` so billing-section / composer-controls resolve the same
 // prod-safe default. Don't reintroduce a local `?? "http://localhost:3000"`.
 
-/** Mirror of `apps/web` `formatPlanLabel` — pretty-prints the raw plan tier. */
-function formatPlanLabel(plan: string | undefined | null): string {
-  if (!plan) return "free";
+/** Mirror of `apps/web` `formatPlanLabel` — pretty-prints the raw plan tier.
+ *  `'free'` is handled by the caller (it is the no-active-plan state, not a
+ *  plan name, since the 2026-07-10 Free-plan removal). */
+function formatPlanLabel(plan: string): string {
   if (plan === "max_5x") return "max 5x";
   if (plan === "max_10x") return "max 10x";
   if (plan === "max_plus") return "max+";
@@ -369,7 +370,11 @@ export function WorkspaceSwitcher() {
           <div className="px-1">
             <div className="font-semibold text-sm truncate">{ctx.name}</div>
             <div className="text-xs text-muted-foreground">
-              {format(t.planLabel, { plan: formatPlanLabel(planRaw) })}
+              {planRaw === null
+                ? ""
+                : planRaw === "free"
+                  ? t.noPlanLabel
+                  : format(t.planLabel, { plan: formatPlanLabel(planRaw) })}
             </div>
           </div>
 

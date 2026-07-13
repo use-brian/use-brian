@@ -104,6 +104,20 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   saveFileBytes: 'Save file bytes to brain',
   sendFile: 'Send a file to the chat',
 
+  // Computer use (docs/architecture/engine/computer-use.md)
+  browserNavigate: 'Open a page in the browser',
+  browserSnapshot: 'Look at the browser page',
+  browserClick: 'Click in the browser',
+  browserType: 'Type in the browser',
+  browserCurrentUrl: 'Check the browser address',
+  runBrowserSkill: 'Run a browser skill',
+  listBrowserSkills: 'List browser skills',
+  listBrowserProfiles: 'List browser profiles',
+  browserExplore: 'Explore a browsing flow',
+  runPython: 'Run Python in the sandbox',
+  loadFromWorkspace: 'Load a file into the sandbox',
+  saveToWorkspace: 'Save a sandbox file to the workspace',
+
   // Knowledge base
   searchKnowledge: 'Search knowledge base',
   browseKnowledge: 'Browse knowledge base',

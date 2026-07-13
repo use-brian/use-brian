@@ -340,6 +340,58 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
     expect(updated?.finishedAt).toBeInstanceOf(Date)
   })
 
+  it("fails the run before any step when workspaceComputeAllowed denies (the hosted paid gate)", async () => {
+    // A no-plan ('free') workspace's autonomous compute is blocked on hosted:
+    // the injected gate returns false and the run fails with
+    // 'workspace_compute_blocked' before the consult transport is touched.
+    let consulted = false
+    const gated = new Array<string>()
+    const deps = makeDeps({
+      consultTransport: {
+        async send() {
+          consulted = true
+          throw new Error('must not be reached')
+        },
+      } as unknown as ConsultTransport,
+      workspaceComputeAllowed: async (workspaceId) => {
+        gated.push(workspaceId)
+        return false
+      },
+    })
+
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        { id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' },
+      ],
+    }
+
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    const outcome = await advanceWorkflowRun(deps, run.id)
+
+    expect(outcome.kind).toBe('failed')
+    if (outcome.kind === 'failed') {
+      expect(outcome.error.reason).toBe('workspace_compute_blocked')
+    }
+    expect(gated).toEqual([WORKSPACE_ID])
+    expect(consulted).toBe(false)
+  })
+
+  it('runs normally when workspaceComputeAllowed is absent (the open build injects no gate)', async () => {
+    const deps = makeDeps({
+      consultTransport: makeConsultTransport({ responseText: 'ok' }),
+    })
+    const definition: WorkflowDefinition = {
+      startStepId: 's1',
+      steps: [
+        { id: 's1', type: 'assistant_call', target: { assistantId: 'primary' }, prompt: 'go' },
+      ],
+    }
+    const { run } = await seedWorkflowAndRun(deps, definition)
+    const outcome = await advanceWorkflowRun(deps, run.id)
+    expect(outcome.kind).toBe('completed')
+  })
+
   it('[COMP:integrations/connector-health] a completed run names a dead connector in its outcome and notifies the owner', async () => {
     // The dead-GitHub-token incident: the run COMPLETES (the model apologizes),
     // so the surfacing must key off persisted connector health, not run failure.

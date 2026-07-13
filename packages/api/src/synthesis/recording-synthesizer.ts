@@ -167,9 +167,11 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
       )
     }
 
-    // Brain-write tools — write `source='extracted'`, so they surface in Brain Reviews.
-    const crm = createCrmTools(deps.crmStore, { writeSource: 'extracted' })
-    const tasks = createTaskTools(deps.taskStore, { writeSource: 'extracted' })
+    // Brain-write tools — write `source='extracted'`, so they surface in
+    // Brain Reviews, back-edged to the recording's Episode (recordingId IS
+    // the episode id — `routes/recordings.ts` returns `recordingId: episode.id`).
+    const crm = createCrmTools(deps.crmStore, { writeSource: 'extracted', writeSourceEpisodeId: args.recordingId })
+    const tasks = createTaskTools(deps.taskStore, { writeSource: 'extracted', writeSourceEpisodeId: args.recordingId })
     const brainWriteTools = new Map<string, Tool>([
       ['saveCompany', crm.saveCompany],
       ['saveContact', crm.saveContact],

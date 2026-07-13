@@ -162,6 +162,16 @@ const docPageContentRefSchema = z.object({
   version: z.number().int().nonnegative(),
 })
 
+// Audio/video recording upload. The stored bytes live in GCS; `file_id` is
+// the recording's storage identity (episode `source_ref` carries the full
+// {fileId, gcsKey, fileName, mime} envelope). Recording episodes commonly
+// carry a NULL content_ref today — this arm legitimises the vocabulary
+// (2026-07-10 source audit: three writers emitted the kind unvocabularied).
+const recordingContentRefSchema = z.object({
+  source_kind: z.literal('recording'),
+  file_id: z.string().min(1),
+})
+
 export const episodeContentRefSchema = z.discriminatedUnion('source_kind', [
   webChatContentRefSchema,
   slackThreadContentRefSchema,
@@ -178,6 +188,7 @@ export const episodeContentRefSchema = z.discriminatedUnion('source_kind', [
   voiceMemoContentRefSchema,
   platformEngagementDigestContentRefSchema,
   docPageContentRefSchema,
+  recordingContentRefSchema,
 ])
 
 // ── Envelope supporting schemas ──────────────────────────────────────

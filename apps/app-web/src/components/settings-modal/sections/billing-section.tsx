@@ -45,11 +45,15 @@ type PlanConfig = {
 
 const PLANS: PlanConfig[] = [
   {
+    // Not a plan since the Free-plan removal (2026-07-10) — the "no active
+    // plan" state (fresh signup pre-trial, post-trial, post-cancel). The
+    // header special-cases it to `noPlanTitle`; assistant compute is paused
+    // server-side until a paid plan is active.
     id: "free",
-    name: "Free",
+    name: "No plan",
     price: "$0",
-    tagline: "Get started with basic features",
-    features: ["Gemini Flash model", "20 memories", "Web and Telegram"],
+    tagline: "Subscribe to activate this workspace",
+    features: [],
     Icon: SparklesIcon,
   },
   {
@@ -373,7 +377,9 @@ export function BillingSection() {
           </div>
           <div className="flex-1 min-w-0">
             <div className="text-base font-semibold">
-              {format(t.settings.billing.planSuffix, { plan: config.name })}
+              {plan === "free"
+                ? t.settings.billing.noPlanTitle
+                : format(t.settings.billing.planSuffix, { plan: config.name })}
             </div>
             {plan !== "free" ? (
               <div className="text-sm text-muted-foreground mt-0.5">

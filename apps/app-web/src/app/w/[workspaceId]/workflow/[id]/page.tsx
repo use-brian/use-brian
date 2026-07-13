@@ -61,7 +61,7 @@ import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skill
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { StepEditor } from "@/components/workflow/step-editor";
 import { TriggerEditor } from "@/components/workflow/trigger-editor";
-import { TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
+import { ButtonBindingsList, TriggerJobsList } from "@/components/workflow/trigger-jobs-list";
 import { RunHistory } from "@/components/workflow/run-history";
 import { LiveRunBanner } from "@/components/workflow/live-run-banner";
 import {
@@ -716,6 +716,13 @@ export default function WorkflowDetailPage({
           not the in-edit draft. */}
       {workflow.triggerJobs && workflow.triggerJobs.length > 0 && (
         <TriggerJobsList trigger={workflow.trigger} jobs={workflow.triggerJobs} />
+      )}
+
+      {/* Page-action buttons that fire this workflow (mig 321) — the second
+          honesty block: "shows Manual but runs from a button" must be
+          visible here, same discipline as the trigger-jobs reality check. */}
+      {workflow.buttonBindings && workflow.buttonBindings.length > 0 && (
+        <ButtonBindingsList bindings={workflow.buttonBindings} />
       )}
 
       {/* Editor panel — always live (no edit mode). Shows only the editor

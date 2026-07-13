@@ -1443,15 +1443,27 @@ export function brainInboxRoutes({
 
   // ── GET /:workspaceId/:primitive/:rowId/explain ─────────────────
   //
-  // Returns the actual source-session context that motivated the save:
-  //   - The saving assistant's id + name
-  //   - Source-session id (link target for the frontend)
-  //   - Up to 6 surrounding session_messages (3 before, 3 after the
-  //     save's created_at) — these are what the user reads to verify
-  //     "is this an accurate read of what I said?"
+  // Returns the source context that motivated the save — the "where did
+  // this come from?" answer for the entry page's Source block:
+  //   - The saving assistant's id + name and the creating user
+  //   - An `origin` descriptor (kind + channel/workflow/episode detail)
+  //     so the UI always has a clue line, even without a chat to show
+  //   - Source-session id (link target for the frontend) when a REAL
+  //     session resolves, plus up to 6 surrounding session_messages
+  //     (3 before, 3 after the save's created_at)
+  //
+  // Session resolution ladder: the row's own `source_session_id`
+  // (memory / task / entity-backed primitives, mig 316) → episode
+  // `content_ref.session_id` → episode `source_ref.session_id`
+  // (tolerating the legacy `{kind: ...}` field-name drift), then
+  // VERIFIED against `sessions` — a dangling id (e.g. the brain-MCP
+  // surface's synthetic randomUUID) resolves to nothing and falls
+  // through to the next origin kind.
   //
   // No LLM call. Cheap. The "Ask about this" drawer is where the
   // model-mediated deliberation happens.
+  // Spec: docs/architecture/brain/corrections.md → "Source descriptor".
+  // [COMP:api/brain-inbox-explain]
 
   router.get('/:workspaceId/:primitive/:rowId/explain', async (req, res) => {
     const role = await requireWorkspaceMember(req as any, res)
@@ -1469,21 +1481,30 @@ export function brainInboxRoutes({
 
     try {
       // Pull the universal-column fields we need. Every brain primitive
-      // carries created_by_assistant_id + source_episode_id; only some
-      // carry source_session_id (memory has it directly). We use the
-      // memory column when present; for other primitives we walk the
-      // source_episode_id to recover the originating session if any.
+      // carries created_by_* + source_episode_id + source; memory, task,
+      // and the entity-backed primitives (entity / contact / company /
+      // deal) also carry source_session_id (mig 316). Edges and files
+      // anchor through their episode only.
       const targetTable = primitiveToTable(primitiveParam)
-      const sourceSessionCol = primitiveParam === 'memory' ? 'source_session_id' : 'NULL'
+      const sourceSessionCol =
+        primitiveParam === 'entity_link' || primitiveParam === 'workspace_file'
+          ? 'NULL'
+          : 'source_session_id'
+      // Workflow tagging (`workflow:<id>`) exists on memories only.
+      const tagsCol = primitiveParam === 'memory' ? 'tags' : 'NULL::text[]'
       const meta = await query<{
         workspace_id: string
         created_at: Date
         created_by_assistant_id: string | null
+        created_by_user_id: string | null
         source_episode_id: string | null
         source_session_id: string | null
+        source: string | null
+        tags: string[] | null
       }>(
-        `SELECT workspace_id, created_at, created_by_assistant_id,
-                source_episode_id, ${sourceSessionCol} AS source_session_id
+        `SELECT workspace_id, created_at, created_by_assistant_id, created_by_user_id,
+                source_episode_id, ${sourceSessionCol} AS source_session_id,
+                source, ${tagsCol} AS tags
          FROM ${targetTable}
          WHERE id = $1`,
         [rowId],
@@ -1508,20 +1529,104 @@ export function brainInboxRoutes({
         assistantName = a.rows[0]?.name ?? null
       }
 
-      // Resolve the source session if any. For non-memory primitives,
-      // attempt to walk episodes.content_ref for a 'web_chat' session
-      // pointer — if found, use it. Otherwise the explain response has
-      // no session messages, just the row metadata.
-      let sourceSessionId = row.source_session_id
-      if (!sourceSessionId && row.source_episode_id) {
-        const ep = await query<{ content_ref: { source_kind?: string; session_id?: string } }>(
-          `SELECT content_ref FROM episodes WHERE id = $1`,
+      // Resolve the creating user's name (the "Added manually by …" /
+      // author-fallback label).
+      let createdByUserName: string | null = null
+      if (row.created_by_user_id) {
+        const u = await query<{ name: string | null }>(
+          `SELECT name FROM users WHERE id = $1`,
+          [row.created_by_user_id],
+        )
+        createdByUserName = u.rows[0]?.name ?? null
+      }
+
+      // Load the source episode when the row has one — both a session-id
+      // fallback and the extraction-origin detail for the descriptor.
+      type EpisodeRef = { source_kind?: string; kind?: string; session_id?: string }
+      let episode: {
+        id: string
+        source_kind: string
+        occurred_at: Date
+        summary_text: string | null
+        content_ref: EpisodeRef | null
+        source_ref: EpisodeRef | null
+      } | null = null
+      if (row.source_episode_id) {
+        const ep = await query<{
+          id: string
+          source_kind: string
+          occurred_at: Date
+          summary_text: string | null
+          content_ref: EpisodeRef | null
+          source_ref: EpisodeRef | null
+        }>(
+          `SELECT id, source_kind, occurred_at, summary_text, content_ref, source_ref
+           FROM episodes WHERE id = $1`,
           [row.source_episode_id],
         )
-        const ref = ep.rows[0]?.content_ref
-        if (ref?.source_kind === 'web_chat' && typeof ref.session_id === 'string') {
-          sourceSessionId = ref.session_id
+        episode = ep.rows[0] ?? null
+      }
+
+      // Session ladder: own column → content_ref → source_ref.
+      let candidateSessionId = row.source_session_id
+      if (!candidateSessionId && episode) {
+        for (const ref of [episode.content_ref, episode.source_ref]) {
+          if (ref && typeof ref.session_id === 'string') {
+            candidateSessionId = ref.session_id
+            break
+          }
         }
+      }
+
+      // Verify the candidate against `sessions` — dangling ids fall
+      // through (the row keeps its non-chat origin) — and pick up the
+      // channel type for the origin label.
+      let sourceSessionId: string | null = null
+      let sessionChannelType: string | null = null
+      if (candidateSessionId) {
+        const s = await query<{ id: string; channel_type: string }>(
+          `SELECT id, channel_type FROM sessions WHERE id = $1`,
+          [candidateSessionId],
+        )
+        if (s.rows[0]) {
+          sourceSessionId = s.rows[0].id
+          sessionChannelType = s.rows[0].channel_type
+        }
+      }
+
+      // Workflow provenance rides on the memory's `workflow:<id>` tag.
+      const workflowId =
+        row.tags
+          ?.find((t) => typeof t === 'string' && t.startsWith('workflow:'))
+          ?.slice('workflow:'.length) ?? null
+
+      // Origin kind precedence: manual → consolidation → session-backed
+      // (workflow / scheduled / chat) → extraction → unknown.
+      let originKind:
+        | 'manual'
+        | 'consolidation'
+        | 'workflow'
+        | 'scheduled'
+        | 'chat'
+        | 'extraction'
+        | 'unknown'
+      if (row.source === 'manual') {
+        originKind = 'manual'
+      } else if (row.source === 'consolidation' || row.source === 'reflection') {
+        originKind = 'consolidation'
+      } else if (sourceSessionId) {
+        originKind =
+          workflowId || sessionChannelType === 'assistant-call'
+            ? 'workflow'
+            : sessionChannelType === 'cron'
+              ? 'scheduled'
+              : 'chat'
+      } else if (workflowId) {
+        originKind = 'workflow'
+      } else if (episode) {
+        originKind = 'extraction'
+      } else {
+        originKind = 'unknown'
       }
 
       // Pull up to 3 messages before + 3 after the row's created_at,
@@ -1571,6 +1676,22 @@ export function brainInboxRoutes({
         sourceSessionId,
         sourceEpisodeId: row.source_episode_id,
         messages,
+        origin: {
+          kind: originKind,
+          source: row.source,
+          channelType: sessionChannelType,
+          workflowId,
+          episode: episode
+            ? {
+                id: episode.id,
+                sourceKind: episode.source_kind,
+                occurredAt: episode.occurred_at,
+                summaryText: episode.summary_text,
+              }
+            : null,
+          createdByUserId: row.created_by_user_id,
+          createdByUserName,
+        },
       })
     } catch (err) {
       console.error('[brain-inbox] explain failed:', err)

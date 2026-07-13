@@ -43,6 +43,12 @@ export const SOURCE_KINDS = [
   // points at the exact block it came from. "Canvas is just another
   // source_kind" — it rides Pipeline B, trust, and supersession unmodified.
   'doc_page',
+  // Audio/video recording upload (recording-to-brain). Three platform
+  // writers (`routes/recordings.ts`, `routes/telegram-byo.ts`,
+  // `ingest/channel-media-intake.ts`) were already emitting this literal —
+  // the column has no CHECK, so it persisted while missing from this
+  // vocabulary (2026-07-10 source audit).
+  'recording',
 ] as const
 
 export type SourceKind = typeof SOURCE_KINDS[number]
@@ -198,6 +204,12 @@ export type DocPageContentRef = {
   version: number
 }
 
+/** Audio/video recording upload — `file_id` is the GCS storage identity. */
+type RecordingContentRef = {
+  source_kind: 'recording'
+  file_id: string
+}
+
 export type EpisodeContentRef =
   | WebChatContentRef
   | SlackThreadContentRef
@@ -214,6 +226,7 @@ export type EpisodeContentRef =
   | VoiceMemoContentRef
   | PlatformEngagementDigestContentRef
   | DocPageContentRef
+  | RecordingContentRef
 
 // ── EpisodeEnvelope universal contract ────────────────────────────────
 

@@ -3287,22 +3287,22 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Budget gate — see docs/architecture/platform/cost-and-pricing.md
       //
-      // Research-mode turns bypass this gate entirely. The research quota
-      // (5 lifetime per workspace, mig 185, gated above) is the ONLY cap
-      // on free-tier deep research — the cost-cap that would normally
-      // downgrade or block at the workspace level is suppressed so users
-      // get a true unobstructed taste of coordinator + max model. Once
-      // the 5 freebies are spent they upgrade, at which point they have
-      // headroom under the paid budget anyway. For paid plans we also
-      // skip the gate on research turns: explicit-Pro user invokes
-      // research → they get research, no surprise mid-week downgrades.
+      // Research-mode turns on PAID plans bypass this gate: an explicit-Pro
+      // user who invokes research gets research, no surprise mid-week
+      // downgrades. The bypass no longer extends to `'free'` (2026-07-10,
+      // the Free-plan removal): a no-plan workspace's research turn hits the
+      // gate and blocks like any other turn, closing the hole where the
+      // 5-lifetime mig-185 taster was the only cap. That quota (gated above)
+      // survives as the OSS build's research cap — the open build injects no
+      // credit gate, so this branch allow-alls there either way.
       let budgetStatus: 'ok' | 'downgraded' | 'blocked' = 'ok'
-      if (!researchMode && options.usageStore && assistant.workspaceId) {
+      const researchGateBypass = researchMode && userPlan !== 'free'
+      if (!researchGateBypass && options.usageStore && assistant.workspaceId) {
         const gate = await checkUsageBudget(assistant.workspaceId, userPlan, options.checkCreditBudget)
         budgetStatus = gate.status
         if (gate.status === 'blocked') {
           sendEvent('error', {
-            message: "You've used this month's free credits. Upgrade to Pro to keep going.",
+            message: "This workspace has no active plan. Pick a plan to keep going, or self-host the open-source version.",
             code: 'budget_exhausted',
             resetsAt: gate.resetsAt,
           })

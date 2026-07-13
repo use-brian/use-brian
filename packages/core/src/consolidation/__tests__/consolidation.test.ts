@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeConsolidationScore, runLightConsolidation, runREMConsolidation } from '../phases.js'
+import { computeConsolidationScore, runLightConsolidation, runREMConsolidation, runReflectionConsolidation } from '../phases.js'
 import type { MemoryStore } from '../../memory/types.js'
 
 describe('[COMP:consolidation/phases] computeConsolidationScore', () => {
@@ -735,5 +735,112 @@ describe('[COMP:consolidation/phases] Light merge detail cap', () => {
     // Cap is 16384 chars + "\n... [truncated]" suffix; leave a small buffer.
     expect(merged.length).toBeLessThanOrEqual(16_500)
     expect(merged).toMatch(/\[truncated\]$/)
+  })
+})
+
+describe('[COMP:consolidation/phases] Reflection phase authorship', () => {
+  // Regression (2026-07-10 source audit): the reflection create used a
+  // type-erasing cast that dropped the required `createdByUserId`, so a
+  // WU-4.5-style authorship guard threw on EVERY pattern write and the
+  // per-pattern catch swallowed it — reflection memories never persisted.
+  // The mock's create mirrors the real store's guard.
+  function makeReflectionStore() {
+    const created: Array<{
+      summary: string
+      scope?: string
+      source?: string
+      createdByUserId?: string
+      createdByAssistantId?: string | null
+    }> = []
+    const workspaceLogs: Array<{ phase: string; memoriesAffected: string[] }> = []
+    const notImpl = async () => {
+      throw new Error('not implemented')
+    }
+    const store = {
+      async create(params: Parameters<MemoryStore['create']>[0]) {
+        if (!params.createdByUserId) {
+          throw new Error('createMemory: createdByUserId is required (authorship guard)')
+        }
+        created.push({
+          summary: params.summary,
+          scope: params.scope,
+          source: params.source,
+          createdByUserId: params.createdByUserId,
+          createdByAssistantId: params.createdByAssistantId,
+        })
+        return {
+          id: `refl-${created.length}`,
+          summary: params.summary,
+          detail: params.detail ?? null,
+          tags: params.tags ?? [],
+          confidence: 0.6,
+          scope: params.scope ?? 'shared',
+          sensitivity: params.sensitivity,
+        } as never
+      },
+      async listForReflection() {
+        return [
+          { id: 'v1', action: 'adjust_scope', primitive: 'memory', rowId: 'm1', rowSummary: 'A', reason: null, modelValue: 'workspace', userValue: 'personal', at: new Date() },
+          { id: 'v2', action: 'adjust_scope', primitive: 'memory', rowId: 'm2', rowSummary: 'B', reason: null, modelValue: 'workspace', userValue: 'personal', at: new Date() },
+          { id: 'v3', action: 'delete', primitive: 'memory', rowId: 'm3', rowSummary: 'C', reason: 'noise', modelValue: null, userValue: null, at: new Date() },
+        ]
+      },
+      async logWorkspaceConsolidation(params: Parameters<MemoryStore['logWorkspaceConsolidation']>[0]) {
+        workspaceLogs.push({ phase: params.phase, memoriesAffected: params.memoriesAffected })
+      },
+      getIndexSystem: notImpl as never,
+      getByIdSystem: notImpl as never,
+      update: notImpl as never,
+      deleteMemory: notImpl as never,
+      logConsolidation: notImpl as never,
+      listCronContextCandidatesForPrune: notImpl as never,
+      search: notImpl as never,
+      getIdentity: notImpl as never,
+      trackRecall: notImpl as never,
+      trackRecallOutcome: notImpl as never,
+      getWorkspaceIdentity: notImpl as never,
+      getWorkspaceIndex: notImpl as never,
+      getWorkspaceMemoriesByCategory: notImpl as never,
+      searchTeam: notImpl as never,
+      listWorkspaceMemoryGroups: notImpl as never,
+      listTeamWithMetrics: notImpl as never,
+      getLastWorkspacePhaseAt: notImpl as never,
+      count: notImpl as never,
+      getSoul: async () => null,
+      listOpenCommitments: async () => [],
+      listWithMetrics: notImpl as never,
+      writeConsolidationScore: notImpl as never,
+      listForSoulSynthesis: notImpl as never,
+      upsertSoul: notImpl as never,
+      upsertDomainSummary: notImpl as never,
+      pruneStaleDomainSummaries: notImpl as never,
+      listMemoryUsers: notImpl as never,
+      getLastPhaseAt: notImpl as never,
+      hasRecentActivity: notImpl as never,
+    } as unknown as MemoryStore
+    return { store, created, workspaceLogs }
+  }
+
+  it('persists synthesized patterns with authorship + DB-vocabulary scope', async () => {
+    const { store, created, workspaceLogs } = makeReflectionStore()
+    const llmOutput = JSON.stringify([
+      { summary: 'The user prefers personal scope for behavioural inferences.' },
+    ])
+
+    const result = await runReflectionConsolidation(store, async () => llmOutput, {
+      workspaceId: 'ws-1',
+      assistantId: 'a1',
+      userId: 'u1',
+    })
+
+    expect(created).toHaveLength(1)
+    expect(created[0].createdByUserId).toBe('u1')
+    expect(created[0].createdByAssistantId).toBe('a1')
+    expect(created[0].source).toBe('reflection')
+    // 'team' is the tool-surface alias and violates the memories
+    // valid_scope CHECK — the store vocabulary is 'workspace'.
+    expect(created[0].scope).toBe('workspace')
+    expect(result.memoriesAffected).toHaveLength(1)
+    expect(workspaceLogs).toHaveLength(1)
   })
 })

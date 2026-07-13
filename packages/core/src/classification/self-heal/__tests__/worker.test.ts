@@ -27,6 +27,7 @@ function makeEntity(p: Partial<EntityRecord> & Pick<EntityRecord, 'id'>): Entity
     createdByUserId: 'user-1',
     createdByAssistantId: null,
     sourceEpisodeId: null,
+    sourceSessionId: null,
     source: 'extracted',
     verifiedByUserId: null,
     verifiedAt: null,

@@ -60,6 +60,7 @@ import { CollabStatusIndicator } from "./error-states";
 import { PresenceAvatars } from "./presence-avatars";
 import { ScheduleBadge } from "./schedule-badge";
 import { PageWorkflowRuns } from "./page-workflow-runs";
+import { PageActionButtons } from "./page-action-buttons";
 import { CommentHistory } from "./comment-history";
 import { ShareDialog } from "./share-dialog";
 
@@ -316,6 +317,10 @@ export function PageHeader({
           {view.scheduledJobs && view.scheduledJobs.length > 0 && (
             <ScheduleBadge jobs={view.scheduledJobs} />
           )}
+
+          {/* Page-action buttons (mig 321) — the human approval gesture.
+              Self-fetches; renders nothing when no binding resolves. */}
+          <PageActionButtons pageId={view.id} workspaceId={view.workspaceId} />
 
           {/* Workflow runs this page triggered (migration 282) — self-fetches
               and renders nothing unless the page has fired a run. */}

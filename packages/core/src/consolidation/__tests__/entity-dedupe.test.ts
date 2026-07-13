@@ -332,6 +332,7 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
     createdByUserId: 'u-1',
     createdByAssistantId: null,
     sourceEpisodeId: null,
+    sourceSessionId: null,
     source: 'user',
     verifiedByUserId: null,
     verifiedAt: null,

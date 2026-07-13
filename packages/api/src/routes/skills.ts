@@ -532,7 +532,10 @@ export function skillRoutes({
     const plan = await getWorkspacePlan(workspaceId)
     const budget = await checkUsageBudget(workspaceId, plan)
     if (budget.status === 'blocked') {
-      res.status(429).json({ error: 'Monthly usage limit reached — try again after the reset' }); return
+      // `blocked` means the workspace has no active plan (the hosted paid
+      // gate; paid plans downgrade instead of blocking). See
+      // cost-and-pricing.md → "No free plan: the hosted paid gate".
+      res.status(429).json({ error: 'This workspace has no active plan. Pick a plan to keep going, or self-host the open-source version.' }); return
     }
     const resolvedModel = resolveModel(model, plan, budget.status)
 

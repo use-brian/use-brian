@@ -19,6 +19,12 @@ export type PendingApprovalStatus =
   | 'rejected'
   | 'expired'
   | 'superseded'
+  /**
+   * R2-2 audit rows (mig 319): a browser-skill grant auto-approved the send.
+   * Never a *pending* state — rows are born `auto_approved` with
+   * `responded_at` stamped, so the queue UI shows them as history, not work.
+   */
+  | 'auto_approved'
 
 export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp'
 
@@ -35,6 +41,7 @@ export type ApprovalKind =
   | 'staged_skill_creation'
   | 'staged_skill_update'
   | 'question'
+  | 'browser_skill_send'
 
 /**
  * Note on nullability of `workflowRunId`, `workflowStepRunId`, `toolName`,
@@ -112,6 +119,26 @@ export type CreateToolInvocationParams = {
   deliveryChannelType: ApprovalDeliveryChannel
   deliveryChannelId?: string | null
   expiresAt?: Date | null
+}
+
+/** Computer-use R2 (R2-5): a queued logic-block terminal send. */
+export type CreateBrowserSkillSendParams = {
+  workspaceId: string
+  approverUserId: string
+  /** The chat session the block run belongs to (context, not suspension). */
+  sessionId?: string | null
+  /** BlockSendApprovalPayload from core — skill/profile/site/ref/label/ceiling/drift. */
+  payload: Record<string, unknown>
+  expiresAt?: Date | null
+}
+
+/** Computer-use R2 (R2-2): the auto-approved audit row for a granted send. */
+export type CreateBrowserSkillAuditParams = {
+  workspaceId: string
+  approverUserId: string
+  sessionId?: string | null
+  grantId: string
+  payload: Record<string, unknown>
 }
 
 const COLS = `
@@ -304,6 +331,28 @@ export type PendingApprovalsStore = {
    * docs/architecture/engine/askquestion-suspend-resume.md.
    */
   createQuestion(params: CreateQuestionParams): Promise<PendingApproval>
+
+  /**
+   * Computer-use R2 — queue a logic-block's terminal send
+   * (`kind='browser_skill_send'`, R2-5). The block's host-side gate polls
+   * this row (`getByIdSystem`) while the sandbox waits; the approvals route
+   * offers Deny / Allow once / Allow always for this block+profile.
+   */
+  createBrowserSkillSend(params: CreateBrowserSkillSendParams): Promise<PendingApproval>
+
+  /**
+   * Computer-use R2 — the R2-2 AUDIT row for a grant auto-approval: born
+   * `status='auto_approved'` with `responded_at` stamped. Auto-approve is
+   * never invisible.
+   */
+  createBrowserSkillAudit(params: CreateBrowserSkillAuditParams): Promise<PendingApproval>
+
+  /**
+   * Expire ONE pending row (the block runner's send-wait deadline). The
+   * periodic `expireDue()` sweep also catches it; this makes the state flip
+   * immediate so the queue never shows a send the sandbox stopped waiting on.
+   */
+  expireById(id: string): Promise<void>
 
   /**
    * Atomic answer — flips a `kind='question'` row from 'pending' to
@@ -714,6 +763,65 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
       notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
       return approval
+    },
+
+    async createBrowserSkillSend(params) {
+      const result = await query(
+        `INSERT INTO pending_approvals (
+           workspace_id, kind, blocking_session_id, approver_user_id,
+           tool_name, arguments, approval_payload,
+           delivery_channel_type, expires_at,
+           workflow_run_id, workflow_step_run_id
+         )
+         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $4, 'web', $5, NULL, NULL)
+         RETURNING ${COLS}`,
+        [
+          params.workspaceId,
+          params.sessionId ?? null,
+          params.approverUserId,
+          JSON.stringify(params.payload),
+          params.expiresAt ?? null,
+        ],
+      )
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
+    },
+
+    async createBrowserSkillAudit(params) {
+      // Born auto_approved (R2-2): history, never work. responded_by is the
+      // grant's beneficiary — the human whose standing grant fired.
+      const result = await query(
+        `INSERT INTO pending_approvals (
+           workspace_id, kind, blocking_session_id, approver_user_id,
+           tool_name, arguments, approval_payload,
+           delivery_channel_type, status, responded_at, responded_by,
+           workflow_run_id, workflow_step_run_id
+         )
+         VALUES ($1, 'browser_skill_send', $2, $3, 'runBrowserSkill', $4, $5, 'web', 'auto_approved', now(), $3, NULL, NULL)
+         RETURNING ${COLS}`,
+        [
+          params.workspaceId,
+          params.sessionId ?? null,
+          params.approverUserId,
+          JSON.stringify(params.payload),
+          JSON.stringify({ ...params.payload, grantId: params.grantId }),
+        ],
+      )
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
+    },
+
+    async expireById(id) {
+      const result = await query(
+        `UPDATE pending_approvals SET status = 'expired', responded_at = now()
+          WHERE id = $1 AND status = 'pending'
+          RETURNING workspace_id AS "workspaceId"`,
+        [id],
+      )
+      const row = result.rows[0] as { workspaceId: string } | undefined
+      if (row) notifyWorkspaceChange(row.workspaceId, 'approval', 'update', id)
     },
 
     async createQuestion(params) {

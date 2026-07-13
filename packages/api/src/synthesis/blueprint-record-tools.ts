@@ -18,23 +18,30 @@
 // See docs/architecture/brain/structural-synthesis.md → "The record" and
 // docs/architecture/brain/structural-synthesis.md §6.
 
+import { randomUUID } from 'node:crypto'
+
 import { z } from 'zod'
 import {
   buildTool,
+  blueprintRecordToBlocks,
   extractionSpecSchema,
   extractionSpecToBlocks,
   fieldKeyFromHeading,
+  markdownToBlocks,
   recordCompleteness,
   validateFieldValue,
   BLUEPRINT_CAPTURE_KINDS,
   EXTRACTION_FIELD_TYPES,
   type BlueprintRecordFields,
   type CustomPageTemplateSummary,
+  type DocPageStore,
   type ExtractionSpec,
   type Tool,
 } from '@sidanclaw/core'
+import type { SavedViewStore } from '@sidanclaw/core'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
+import { createRecordPageProjector } from './synthesize.js'
 
 /**
  * Stable per-(workspace, blueprint, subject) record/page anchor. SAME literal
@@ -51,9 +58,23 @@ export function blueprintSubjectAnchorKey(
   return `generate-synthesis:${workspaceId}:${blueprintId}:${subjectKey}`
 }
 
+/**
+ * The slice of the saved-views store `projectBlueprintRecordPage` needs to
+ * find-or-create the projection page on the record's anchor key — the exact
+ * store methods, so the real `SavedViewStore` is assignable as-is.
+ */
+export type ProjectionViewStore = Pick<SavedViewStore, 'createDraft' | 'findIdByAnchorKey'>
+
 export type BlueprintRecordToolDeps = {
   pageTemplateStore: PageTemplateStore
   blueprintRecordStore: BlueprintRecordStore
+  /**
+   * Page-projection deps. Both present → `projectBlueprintRecordPage` is
+   * built; absent → the four record tools ship without it (schema-honest:
+   * the tool simply doesn't exist where pages can't be projected).
+   */
+  savedViewStore?: ProjectionViewStore
+  docPageStore?: Pick<DocPageStore, 'getVersionedPage' | 'applyPatch'>
 }
 
 /** Blueprints = templates carrying an extraction contract, id/name-resolvable. */
@@ -360,7 +381,140 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     },
   })
 
-  return [listBlueprints, getBlueprintRecord, saveBlueprintRecord, createBlueprint]
+  const tools = [listBlueprints, getBlueprintRecord, saveBlueprintRecord, createBlueprint]
+
+  // ── projectBlueprintRecordPage — record → linked page (+ draft body) ──
+  // The one workflow-reachable path that produces `blueprint_records.page_id`
+  // linkage (synthesis is engine-side; the REST projection route is not a
+  // tool). Without this, blueprint-scoped page-action buttons never resolve
+  // on generator-made pages. With `draftMarkdown` the page body becomes the
+  // draft VERBATIM (no record-field scaffolding) — that page is exactly what
+  // `send_page` emails, so the record fields must never leak into it.
+  // See docs/architecture/features/page-actions.md → "Record→page projection".
+  const { savedViewStore, docPageStore } = deps
+  if (savedViewStore && docPageStore) {
+    const projectPage = createRecordPageProjector(docPageStore)
+    tools.push(
+      buildTool({
+        name: 'projectBlueprintRecordPage',
+        description:
+          'Create (or refresh) the doc page linked to a blueprint record. Resolve the record by recordId, or by blueprint (name or id) + subject. ' +
+          'With `draftMarkdown`, the page body becomes exactly that markdown — use for review-then-send drafts where the page IS the outgoing message. ' +
+          'Without it, the page renders the record\'s field projection. Idempotent per record: the same record always converges on one page. ' +
+          'Returns the pageId. Optionally nest the page under `parentPageId`.',
+        inputSchema: z.object({
+          recordId: z.string().uuid().optional().describe('The record id (from saveBlueprintRecord / getBlueprintRecord).'),
+          blueprint: z.string().min(1).optional().describe('Blueprint name or id — used with `subject` when recordId is absent.'),
+          subject: z.string().min(1).max(512).optional().describe('The record subject — used with `blueprint`.'),
+          parentPageId: z.string().uuid().optional().describe('Nest the created page under this page.'),
+          title: z.string().min(1).max(256).optional().describe('Page title; defaults to the record subject.'),
+          draftMarkdown: z
+            .string()
+            .min(1)
+            .max(40_000)
+            .optional()
+            .describe('When set, the page body is exactly this markdown (a review-then-send draft), not the record projection.'),
+        }),
+        async execute(input, context) {
+          if (!context.workspaceId) {
+            return { data: { error: 'Blueprint records need a workspace context.' }, isError: true }
+          }
+          // Resolve the record.
+          let record: BlueprintRecord | null = null
+          if (input.recordId) {
+            record = await deps.blueprintRecordStore.getById(context.userId, input.recordId)
+            if (record && record.workspaceId !== context.workspaceId) record = null
+          } else if (input.blueprint && input.subject) {
+            const blueprints = await listWorkspaceBlueprints(deps, context.userId, context.workspaceId)
+            const match = resolveBlueprint(blueprints, input.blueprint)
+            if (!match) {
+              return { data: { error: `No blueprint matching "${input.blueprint}".` }, isError: true }
+            }
+            record = await deps.blueprintRecordStore.getLatestBySubject(
+              context.userId,
+              context.workspaceId,
+              match.id,
+              input.subject.trim(),
+            )
+          } else {
+            return {
+              data: { error: 'Pass recordId, or blueprint + subject.' },
+              isError: true,
+            }
+          }
+          if (!record) {
+            return { data: { error: 'Record not found — save it first with saveBlueprintRecord.' }, isError: true }
+          }
+
+          // Find-or-create the page on the record's own anchor key (the same
+          // 23505-converge identity the REST projection route uses).
+          let pageId = record.pageId
+          if (!pageId) {
+            pageId = await savedViewStore.findIdByAnchorKey(
+              context.userId,
+              context.workspaceId,
+              record.anchorKey,
+            )
+          }
+          if (!pageId) {
+            try {
+              const draft = await savedViewStore.createDraft({
+                userId: context.userId,
+                workspaceId: context.workspaceId,
+                name: input.title ?? record.subject,
+                nameOrigin: input.title ? 'user' : 'placeholder',
+                entity: 'tasks',
+                viewType: 'table',
+                binding: { entity: 'tasks', viewType: 'table' },
+                page: { blocks: [] },
+                anchorKey: record.anchorKey,
+                originPrompt: `blueprint record: ${record.subject}`,
+                nestParentId: input.parentPageId ?? null,
+                writtenBy: 'system',
+              })
+              pageId = draft.id
+            } catch {
+              pageId = await savedViewStore.findIdByAnchorKey(
+                context.userId,
+                context.workspaceId,
+                record.anchorKey,
+              )
+            }
+          }
+          if (!pageId) {
+            return { data: { error: 'Could not create the projection page.' }, isError: true }
+          }
+
+          const blocks = input.draftMarkdown
+            ? markdownToBlocks(input.draftMarkdown, { genId: () => randomUUID() })
+            : blueprintRecordToBlocks(record.specSnapshot, record.fields, () => randomUUID())
+          const projected = await projectPage({ userId: context.userId, pageId, blocks })
+          if (!projected) {
+            return {
+              data: { error: 'The page is being edited right now — try again.' },
+              isError: true,
+            }
+          }
+          await deps.blueprintRecordStore.finalize(context.userId, record.id, {
+            status: record.status,
+            missing: record.missing,
+            pageId,
+          })
+          return {
+            data: {
+              projected: true,
+              pageId,
+              recordId: record.id,
+              subject: record.subject,
+              body: input.draftMarkdown ? 'draft' : 'record-projection',
+            },
+          }
+        },
+      }),
+    )
+  }
+
+  return tools
 }
 
 /**

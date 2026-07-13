@@ -74,6 +74,15 @@ import { requestBrainRefresh } from "@/lib/brain-events";
 import { docPagePath } from "@/lib/doc-page-url";
 import { useGenerateFromBrain } from "@/components/brain/use-generate-from-brain";
 import {
+  createPageAction,
+  deletePageAction,
+  listBlueprintPageActions,
+  updatePageAction,
+  type PageActionRow,
+} from "@/lib/api/page-actions";
+import { listWorkflows, type WorkflowSummary } from "@/lib/api/workflow";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import {
   fieldUnderlineCls,
   quietFieldCls,
 } from "@/components/brain/skill-document";
@@ -391,6 +400,8 @@ function BlueprintEditor({
           </div>
 
           <RecordsSection workspaceId={workspaceId} blueprintId={template.id} />
+
+          <PageActionsSection workspaceId={workspaceId} blueprintId={template.id} />
         </div>
 
         {/* ── Right rail — actions + about ──────────────────────────────── */}
@@ -818,6 +829,233 @@ function RecordsSection({
             </li>
           ))}
         </ul>
+      )}
+    </>
+  );
+}
+
+// ── Buttons — page-action bindings on this blueprint (mig 318) ─────────
+// Every page this blueprint projects carries these buttons in its header;
+// a click confirms and dispatches (workflow run / Autopilot goal). Authoring
+// lives here because the blueprint IS the scope.
+
+function PageActionsSection({
+  workspaceId,
+  blueprintId,
+}: {
+  workspaceId: string;
+  blueprintId: string;
+}) {
+  const t = useT();
+  const copy = t.brainPage.blueprintEditor.actionsSection;
+
+  const [rows, setRows] = useState<PageActionRow[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  const [adding, setAdding] = useState(false);
+  const [label, setLabel] = useState("");
+  const [kind, setKind] = useState<"workflow" | "goal">("workflow");
+  const [workflowId, setWorkflowId] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await listBlueprintPageActions(workspaceId, blueprintId));
+    } catch {
+      setFailed(true);
+    }
+  }, [workspaceId, blueprintId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    listWorkflows(workspaceId)
+      .then(setWorkflows)
+      .catch(() => setWorkflows([]));
+  }, [workspaceId]);
+
+  async function handleAdd() {
+    if (!label.trim()) return;
+    if (kind === "workflow" && !workflowId) return;
+    setSaving(true);
+    setError(null);
+    const result = await createPageAction({
+      workspaceId,
+      scope: { blueprintId },
+      label: label.trim(),
+      action:
+        kind === "workflow"
+          ? { kind: "workflow", workflowId }
+          : { kind: "goal", ...(outcome.trim() ? { outcome: outcome.trim() } : {}) },
+    });
+    setSaving(false);
+    if (!result.ok) {
+      setError(result.error || copy.saveFailed);
+      return;
+    }
+    setAdding(false);
+    setLabel("");
+    setWorkflowId("");
+    setOutcome("");
+    void load();
+  }
+
+  async function handleDelete(row: PageActionRow) {
+    const confirmed = await confirmDialog({
+      title: copy.deleteTitle,
+      description: format(copy.deleteDescription, { label: row.label }),
+      confirmLabel: copy.deleteConfirm,
+      variant: "destructive",
+    });
+    if (!confirmed) return;
+    await deletePageAction(row.id);
+    void load();
+  }
+
+  async function handleToggle(row: PageActionRow, enabled: boolean) {
+    const result = await updatePageAction(row.id, { enabled });
+    if (result.ok) {
+      setRows((prev) =>
+        prev ? prev.map((r) => (r.id === row.id ? result.action : r)) : prev,
+      );
+    }
+  }
+
+  const workflowName = (id: string) =>
+    workflows.find((w) => w.id === id)?.name ?? id.slice(0, 8);
+
+  return (
+    <>
+      <div className="mt-8 flex items-center gap-3">
+        <div className="h-px flex-1 bg-border/60" aria-hidden />
+        <span className="text-[10px] uppercase tracking-wide text-muted-foreground/50">
+          {copy.title}
+        </span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">{copy.hint}</p>
+      {failed ? (
+        <p className="mt-2 text-xs text-muted-foreground">{copy.loadFailed}</p>
+      ) : rows === null ? (
+        <p className="mt-2 text-xs text-muted-foreground">…</p>
+      ) : rows.length === 0 && !adding ? (
+        <p className="mt-2 text-xs text-muted-foreground">{copy.empty}</p>
+      ) : (
+        <ul className="mt-2 flex flex-col gap-0.5">
+          {rows.map((row) => (
+            <li
+              key={row.id}
+              className="group/action flex items-center gap-2 rounded px-1.5 py-1.5 hover:bg-muted/40"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+                {row.label}
+              </span>
+              <span className="shrink-0 rounded border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                {row.action.kind === "workflow"
+                  ? format(copy.kindWorkflowRow, {
+                      name: workflowName(row.action.workflowId),
+                    })
+                  : copy.kindGoalRow}
+              </span>
+              <Switch
+                checked={row.enabled}
+                onCheckedChange={(v: boolean) => void handleToggle(row, v)}
+                aria-label={copy.enabledAria}
+              />
+              <button
+                type="button"
+                aria-label={format(copy.deleteAria, { label: row.label })}
+                title={copy.deleteConfirm}
+                onClick={() => void handleDelete(row)}
+                className={cn(
+                  "shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity",
+                  "hover:bg-muted hover:text-destructive group-hover/action:opacity-100",
+                  "focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                )}
+              >
+                <Trash2 className="size-3.5" aria-hidden />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <div className="mt-3 flex flex-col gap-2 rounded-md border border-border p-3">
+          <input
+            type="text"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder={copy.labelPlaceholder}
+            maxLength={64}
+            className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <SearchableSelect
+              value={kind}
+              onValueChange={(v) => setKind(v === "goal" ? "goal" : "workflow")}
+              items={[
+                { value: "workflow", label: copy.kindWorkflow },
+                { value: "goal", label: copy.kindGoal },
+              ]}
+              aria-label={copy.kindAria}
+              className="w-52"
+            />
+            {kind === "workflow" ? (
+              <SearchableSelect
+                value={workflowId}
+                onValueChange={setWorkflowId}
+                items={workflows.map((w) => ({ value: w.id, label: w.name }))}
+                placeholder={copy.workflowPlaceholder}
+                searchPlaceholder={copy.workflowSearch}
+                emptyMessage={copy.workflowEmpty}
+                aria-label={copy.workflowPlaceholder}
+                className="w-64"
+              />
+            ) : (
+              <input
+                type="text"
+                value={outcome}
+                onChange={(e) => setOutcome(e.target.value)}
+                placeholder={copy.outcomePlaceholder}
+                maxLength={2000}
+                className="w-64 rounded-md border border-border bg-transparent px-2 py-1.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              />
+            )}
+          </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={saving || !label.trim() || (kind === "workflow" && !workflowId)}
+              onClick={() => void handleAdd()}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              {copy.save}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAdding(false);
+                setError(null);
+              }}
+              className="rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted"
+            >
+              {copy.cancel}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          className="mt-2 inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Plus className="size-3.5" aria-hidden />
+          {copy.add}
+        </button>
       )}
     </>
   );

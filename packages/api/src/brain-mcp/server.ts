@@ -89,6 +89,11 @@ type Options = {
    * to keyword (ILIKE) search. The same embedder that powers `retrievalTools`.
    */
   embedder?: Pick<Embedder, 'embed'>
+  /**
+   * Computer-use R2: the logic-block store behind `writeBrowserSkill` — the
+   * OSS authoring skill's brain-sync tool. Optional; write-scope keys only.
+   */
+  browserSkills?: import('@sidanclaw/core').BrowserSkillStore
 }
 
 export function brainMcpRoutes(opts: Options): Router {
@@ -130,6 +135,7 @@ export function brainMcpRoutes(opts: Options): Router {
       agentTools: opts.agentTools,
       agentWritesEnabled,
       embedder: opts.embedder,
+      browserSkills: opts.browserSkills,
     })) {
       server.registerTool(
         tool.name,

@@ -66,6 +66,7 @@ export {
   type BuildToolRegistry,
   type DeliverToChannel,
   type DeliveryOutcome,
+  type SendPageResult,
 } from './executor.js'
 
 export {

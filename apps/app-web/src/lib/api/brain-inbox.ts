@@ -396,6 +396,32 @@ export async function deleteBrainRow(
   return { ok: false, error: data.error ?? `Delete failed (${res.status})` };
 }
 
+/** Where a brain row came from — the Source block's clue line. */
+export type ExplainOrigin = {
+  kind:
+    | "manual"
+    | "consolidation"
+    | "workflow"
+    | "scheduled"
+    | "chat"
+    | "extraction"
+    | "unknown";
+  /** The row's raw `source` column (model / extracted / manual / ...). */
+  source: string | null;
+  /** `sessions.channel_type` when a real session resolved (web / telegram / ...). */
+  channelType: string | null;
+  /** Workflow id from the memory's `workflow:<id>` tag, when present. */
+  workflowId: string | null;
+  episode: {
+    id: string;
+    sourceKind: string;
+    occurredAt: string;
+    summaryText: string | null;
+  } | null;
+  createdByUserId: string | null;
+  createdByUserName: string | null;
+};
+
 /** Source-session context for the "Why?" expansion. No LLM call. */
 export type ExplainContext = {
   savedAt: string;
@@ -409,6 +435,8 @@ export type ExplainContext = {
     content: unknown;
     createdAt: string;
   }>;
+  /** Absent on pre-2026-07 API deploys; the drawer falls back to the old empty-state line. */
+  origin?: ExplainOrigin;
 };
 
 export async function explainBrainRow(

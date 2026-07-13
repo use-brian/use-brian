@@ -37,7 +37,8 @@ export type ApprovalKind =
   | "staged_write"
   | "distribution_draft"
   | "staged_skill_creation"
-  | "staged_skill_update";
+  | "staged_skill_update"
+  | "browser_skill_send";
 
 /** Provenance surface for `staged_write` rows — which credential class the agent used. */
 type StagedWriteSurface = "brain_mcp" | "assistant_mcp" | "public_api";
@@ -57,6 +58,18 @@ export type PendingApprovalRow = {
     credentialId?: string;
     originLabel?: string;
     originatingAssistantId?: string;
+    // browser_skill_send (computer-use R2-2/R2-5) — the block send's context
+    skillId?: string;
+    skillName?: string;
+    profileId?: string;
+    profileName?: string;
+    site?: string;
+    label?: string | null;
+    /** Verb-ceiling hit — "Allow always" is never offered (R2-1). */
+    ceiling?: string | null;
+    /** Drift that voided a grant and re-gated this send (R2-2). */
+    drift?: string | null;
+    contractSummary?: string;
   };
   approverUserId: string;
   originatingAssistantId: string | null;
@@ -93,13 +106,14 @@ async function respondToApproval(
   id: string,
   decision: "approved" | "rejected",
   reason?: string,
+  extra?: { grantAlways?: boolean },
 ): Promise<RespondResult> {
   const res = await authFetch(
     `${API_URL}/api/approvals/${encodeURIComponent(id)}/respond`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ decision, reason }),
+      body: JSON.stringify({ decision, reason, ...(extra?.grantAlways ? { grantAlways: true } : {}) }),
     },
   );
   const data = (await res.json().catch(() => ({}))) as {
@@ -193,13 +207,16 @@ export async function respondToSkillApproval(
   return { ok: false, error: data.detail ?? data.error ?? "Request failed" };
 }
 
-/** Kind-aware respond dispatch — the queue's single action entry point. */
+/** Kind-aware respond dispatch — the queue's single action entry point.
+ *  `grantAlways` applies only to `browser_skill_send` rows: approve AND mint
+ *  the standing block+profile grant (R2-2's third button). */
 export function respondByKind(
   row: Pick<PendingApprovalRow, "id" | "kind">,
   decision: "approved" | "rejected",
   reason?: string,
+  extra?: { grantAlways?: boolean },
 ): Promise<RespondResult> {
   return isSkillApprovalKind(row.kind)
     ? respondToSkillApproval(row.id, decision, reason)
-    : respondToApproval(row.id, decision, reason);
+    : respondToApproval(row.id, decision, reason, extra);
 }

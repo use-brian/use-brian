@@ -43,7 +43,15 @@ const HIDDEN_BODY_KEYS = new Set([
  * them so a field never shows up twice.
  */
 export const PRIMITIVE_DEDICATED_KEYS: Record<string, ReadonlySet<string>> = {
-  task: new Set(["title", "status", "due_at", "tags", "sensitivity", "attributes"]),
+  task: new Set([
+    "title",
+    "status",
+    "due_at",
+    "tags",
+    "sensitivity",
+    "attributes",
+    "assignee_id",
+  ]),
   memory: new Set(["summary", "detail", "scope", "sensitivity", "tags"]),
   workspace_file: new Set(["name", "sensitivity", "tags"]),
   contact: new Set(["name", "display_name", "sensitivity", "kind"]),
@@ -178,4 +186,35 @@ export function formatValue(v: unknown): string {
 
 export function humaniseKey(key: string): string {
   return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+/**
+ * The slice of a workspace-roster row the task Assignee property needs.
+ * `id` is the `workspace_members` row id — that is what `tasks.assignee_id`
+ * stores (docs/architecture/features/tasks.md → design decision #2), NOT the
+ * account's `users.id`.
+ */
+export type AssignableMember = {
+  id: string;
+  userName: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+  role: string;
+};
+
+/** Resolve a task's `assignee_id` against the workspace roster. Null when
+ *  unassigned or when the member row no longer exists (the FK is SET NULL on
+ *  member removal, so a dangling id only appears on a stale roster). */
+export function resolveAssignee(
+  members: AssignableMember[],
+  assigneeId: unknown,
+): AssignableMember | null {
+  if (typeof assigneeId !== "string" || assigneeId.length === 0) return null;
+  return members.find((m) => m.id === assigneeId) ?? null;
+}
+
+/** Display name for a roster member: name, else email, else null (the
+ *  caller renders its own unknown-member fallback). */
+export function memberDisplayName(m: AssignableMember): string | null {
+  return m.userName || m.email || null;
 }

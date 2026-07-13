@@ -96,6 +96,14 @@ export type CrmToolOptions = {
    * path preserves the existing row's source.
    */
   writeSource?: 'user' | 'extracted'
+  /**
+   * Extraction provenance anchor stamped on rows these tools create —
+   * synthesis runs pass their source Episode id so fresh CRM rows back-edge
+   * to what they were derived from. Absent for interactive chat, which
+   * anchors on the session instead (`context.sessionId`). Fresh inserts
+   * only; the upsert/merge path preserves the existing row's provenance.
+   */
+  writeSourceEpisodeId?: string | null
 }
 
 /**
@@ -234,6 +242,22 @@ function eventCtx(context: { userId: string; assistantId: string; sessionId: str
     sessionId: context.sessionId,
     channelType: context.channelType,
   }
+}
+
+/**
+ * The `source_session_id` to stamp on a fresh CRM row (mig 316). Extraction
+ * runs (`writeSource: 'extracted'`, incl. synthesis) and the programmatic
+ * brain-MCP surface mint a SYNTHETIC `context.sessionId` (randomUUID, no
+ * `sessions` row) — stamping it would store a dangling anchor. Only
+ * interactive/workflow chat, where the session is real, gets the anchor.
+ */
+function crmSessionAnchor(
+  opts: { writeSource?: 'user' | 'extracted'; writeSourceEpisodeId?: string | null } | undefined,
+  context: { sessionId: string; channelType: string },
+): string | null {
+  if (opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted') return null
+  if (context.channelType === 'programmatic') return null
+  return context.sessionId
 }
 
 // ── Dedupe-merge visibility (Tier B, write-gating-decision-brief.md §3) ──
@@ -546,6 +570,13 @@ export function createCrmTools(
             context.assistantDefaultCompartments,
           ),
           source: opts?.writeSource,
+          // Provenance anchors (mig 316). Extraction runs and the
+          // programmatic brain-MCP surface carry a SYNTHETIC sessionId
+          // (randomUUID, no sessions row) — only interactive/workflow chat
+          // stamps a real session anchor. See saveTask.
+          sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+          sourceSessionId: crmSessionAnchor(opts, context),
+          createdByAssistantId: context.assistantId,
         })
         opts?.onEvent?.({ type: 'contact_created', contactId: contact.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({
@@ -809,6 +840,10 @@ export function createCrmTools(
           context.assistantDefaultCompartments,
         ),
         source: opts?.writeSource,
+        // Provenance anchors (mig 316) — see saveContact.
+        sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+        sourceSessionId: crmSessionAnchor(opts, context),
+        createdByAssistantId: context.assistantId,
       })
       opts?.onEvent?.({ type: 'company_created', companyId: company.id }, eventCtx(context))
       const linksSummary = await applyExplicitLinks({
@@ -1038,6 +1073,10 @@ export function createCrmTools(
             context.assistantDefaultCompartments,
           ),
           source: opts?.writeSource,
+          // Provenance anchors (mig 316) — see saveContact.
+          sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+          sourceSessionId: crmSessionAnchor(opts, context),
+          createdByAssistantId: context.assistantId,
         })
         opts?.onEvent?.({ type: 'deal_created', dealId: deal.id }, eventCtx(context))
         const linksSummary = await applyExplicitLinks({

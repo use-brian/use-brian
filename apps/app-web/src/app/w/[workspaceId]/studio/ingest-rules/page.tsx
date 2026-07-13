@@ -826,14 +826,6 @@ export default function StudioIngestRulesPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Intro row — the topbar breadcrumb names the section
-          (docs/architecture/features/studio.md → "Page headers"). */}
-      <header>
-        <p className="text-[13px] text-muted-foreground max-w-prose">
-          {t.studioPage.sectionDescriptions.ingestRules}
-        </p>
-      </header>
-
       <section className="border border-dashed border-border rounded-md bg-muted/30 p-4 text-xs text-muted-foreground leading-relaxed">
         {copy.statusNote}
       </section>

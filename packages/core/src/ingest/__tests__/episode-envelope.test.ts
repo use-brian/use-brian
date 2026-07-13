@@ -33,8 +33,10 @@ const ENVELOPE_FIXTURE: EpisodeEnvelope = {
 
 describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
   describe('SourceKind vocabulary', () => {
-    it('declares all 15 locked source kinds', () => {
-      expect(SOURCE_KINDS).toHaveLength(15)
+    it('declares all 16 locked source kinds', () => {
+      // 15 from the data-model lock + `recording` (2026-07-10 — three
+      // platform writers already emitted it; the vocabulary caught up).
+      expect(SOURCE_KINDS).toHaveLength(16)
     })
 
     it('includes SV 2026-05-14 additions', () => {
@@ -225,9 +227,16 @@ describe('[COMP:brain/episode-envelope] Episode envelope contract', () => {
           version: 7,
         },
       },
+      {
+        name: 'recording',
+        fixture: {
+          source_kind: 'recording',
+          file_id: 'rec-file-1',
+        },
+      },
     ]
 
-    it('covers all 15 source kinds', () => {
+    it('covers all 16 source kinds', () => {
       expect(variants.map((v) => v.name)).toEqual(Array.from(SOURCE_KINDS))
     })
 

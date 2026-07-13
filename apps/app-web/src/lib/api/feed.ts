@@ -1090,8 +1090,11 @@ export async function disconnectFeedProfile(
   return { ok: false, error: data.error ?? null };
 }
 
-/** One workspace member row as the feed settings members page renders it. */
+/** One workspace member row as the feed settings members page renders it.
+ *  `id` is the `workspace_members` row id — what `tasks.assignee_id` stores,
+ *  distinct from the account-level `userId`. */
 export type FeedWorkspaceMember = {
+  id: string;
   userId: string;
   email: string | null;
   userName: string | null;

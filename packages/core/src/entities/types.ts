@@ -123,6 +123,8 @@ export type EntityRecord = {
   createdByUserId: string
   createdByAssistantId: string | null
   sourceEpisodeId: string | null
+  /** Interactive-write provenance anchor (mig 316) — the creating conversation's session, when there was one. */
+  sourceSessionId: string | null
   source: EntitySource
   verifiedByUserId: string | null
   verifiedAt: Date | null
@@ -160,6 +162,13 @@ export type EntityCreateParams = {
   aliases?: readonly string[]
   createdByAssistantId?: string | null
   sourceEpisodeId?: string | null
+  /**
+   * Interactive-write provenance anchor (mig 316) — the session of the
+   * conversation that created this entity. Chat CRM saves stamp
+   * `context.sessionId`; extraction paths leave it unset (they anchor on
+   * `sourceEpisodeId` instead).
+   */
+  sourceSessionId?: string | null
 }
 
 export type EntityUpdateFields = {

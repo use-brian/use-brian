@@ -139,8 +139,10 @@ export type TranscribedUtterance = {
 
 export type RecordingTranscriptionResult = {
   utterances: TranscribedUtterance[]
-  /** One entry per generate window, for COGS attribution via recordUsage. */
-  usages: Array<{ usage: TokenUsage | null; model: string }>
+  /** One entry per generate window, for COGS attribution via recordUsage.
+   *  Flat-rate (per-audio-hour) providers set `costUsd` directly; token-billed
+   *  providers leave it unset and the factory prices `usage` instead. */
+  usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number }>
   /** Number of continuation windows used (1 = no continuation). */
   windows: number
   /** True when the last utterance fell short of the audio end (coverage gap). */
@@ -149,10 +151,14 @@ export type RecordingTranscriptionResult = {
   degenerateWindows: number
 }
 
-const LINE_RE = /^\[(\d+):(\d{2}):(\d{2})\]\s*([^:]+?):\s*(.+)$/
+// Accepts `[H:MM:SS]` or `[MM:SS]`, and an ASCII or full-width colon after the
+// speaker label — Chinese-mode output drifts to `：`, which silently dropped
+// lines under the stricter pre-refactor pattern.
+const LINE_RE = /^\[(?:(\d+):)?(\d{1,2}):(\d{2})\]\s*([^:：]+?)[:：]\s*(.+)$/
 
-/** Parse `[H:MM:SS] Speaker: text` lines. Ignores blank/malformed lines (e.g. a
- *  trailing partial line from a MAX_TOKENS cut). Pure. */
+/** Parse `[H:MM:SS] Speaker: text` (or `[MM:SS]`) lines. Ignores
+ *  blank/malformed lines (e.g. a trailing partial line from a MAX_TOKENS cut).
+ *  Pure. */
 export function parseTranscriptLines(text: string): TranscribedUtterance[] {
   const out: TranscribedUtterance[] = []
   for (const raw of text.split('\n')) {
@@ -160,7 +166,7 @@ export function parseTranscriptLines(text: string): TranscribedUtterance[] {
     if (!line) continue
     const m = LINE_RE.exec(line)
     if (!m) continue
-    const h = Number(m[1])
+    const h = m[1] !== undefined ? Number(m[1]) : 0
     const min = Number(m[2])
     const s = Number(m[3])
     const startMs = (h * 3600 + min * 60 + s) * 1000
@@ -623,4 +629,177 @@ export async function transcribeRecording(
 
   const truncated = utterances.length === 0 || lastTimestampMs(utterances) < opts.durationMs - COVERAGE_TOLERANCE_MS
   return { utterances, usages, windows, truncated, degenerateWindows }
+}
+
+// ── Chunked mode (cantonese-transcription-refactor Phase 2) ─────────────
+//
+// The continuation loop above is structurally drift-prone on long audio:
+// model-emitted timestamps compound across windows, and conditioning each
+// window on prior output increases hallucination (WhisperX, Interspeech 2023
+// — see the plan §2). Chunked mode transcribes silence-split chunks
+// INDEPENDENTLY — no cross-chunk conditioning, timestamps offset by the
+// chunk's known start, coverage derived from chunks completed rather than
+// model stamps. Thinking is disabled on models that accept a budget: it only
+// eats the output window on a verbatim task.
+
+export type RecordingAudioChunk = {
+  buffer: Buffer
+  mime: string
+  /** Chunk start relative to the recording start. */
+  offsetMs: number
+  durationMs: number
+}
+
+const CHUNK_TRANSCRIBE_PROMPT = [
+  'Transcribe this audio segment VERBATIM, in the language(s) actually spoken.',
+  'If the speech is Cantonese (廣東話), write it as spoken written Cantonese',
+  '(粵文 — 嘅/咗/係/唔, traditional characters). Do NOT convert it into',
+  'Standard Written Chinese or Mandarin phrasing, and do NOT translate.',
+  'If the speaker mixes English words into a sentence, keep them exactly as spoken.',
+  'Output ONE line per utterance, formatted EXACTLY as:',
+  '[MM:SS] Speaker N: spoken text',
+  'where MM:SS counts from the start of THIS segment.',
+  'No commentary, no headings, no markdown, no summaries.',
+  'If the segment is silence or music with no speech, output nothing.',
+].join('\n')
+
+/** Chunks are transcribed with bounded parallelism — enough to matter on a
+ *  3 h file (~18 chunks), low enough to stay clear of TPM limits. */
+const CHUNK_CONCURRENCY = 3
+const CHUNK_MAX_OUTPUT_TOKENS = 16_384
+
+/** thinkingBudget is a 2.5-family knob; gen-3 models reject it (they take
+ *  thinkingLevel, whose default is fine here). */
+function thinkingConfigFor(model: string): Record<string, unknown> {
+  return /gemini-2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}
+}
+
+async function transcribeOneChunk(
+  opts: TranscribeRecordingOptions,
+  chunk: RecordingAudioChunk,
+  index: number,
+): Promise<{ utterances: TranscribedUtterance[]; usage: TokenUsage | null }> {
+  const fetchFn = opts.fetchFn ?? fetch
+  const model = opts.model ?? DEFAULT_MODEL
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+
+  const { fileUri } = await uploadAudioToGeminiFiles({
+    apiKey: opts.apiKey,
+    buffer: chunk.buffer,
+    mime: chunk.mime,
+    displayName: `${opts.displayName ?? 'recording'}-chunk-${index}`,
+    fetchFn: opts.fetchFn,
+  })
+
+  const body = {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          { text: CHUNK_TRANSCRIBE_PROMPT },
+          { file_data: { mime_type: chunk.mime, file_uri: fileUri } },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature: 0,
+      maxOutputTokens: opts.maxOutputTokens ?? CHUNK_MAX_OUTPUT_TOKENS,
+      ...thinkingConfigFor(model),
+    },
+  }
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  let res: Response
+  try {
+    res = await fetchFn(`${FILES_BASE}/v1beta/models/${model}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!res.ok) {
+    throw new Error(`Gemini chunk transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
+  }
+  const payload = (await res.json()) as GeminiGenerateResponse
+  const text = (payload.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+
+  let utterances = parseTranscriptLines(text).map((u) => ({
+    ...u,
+    startMs: Math.min(u.startMs, chunk.durationMs) + chunk.offsetMs,
+    endMs: Math.min(Math.max(u.endMs, u.startMs), chunk.durationMs) + chunk.offsetMs,
+  }))
+  if (utterances.length === 0 && text.trim().length > 0) {
+    // The model ignored the line format — keep the text, spanning the chunk.
+    utterances = [
+      {
+        startMs: chunk.offsetMs,
+        endMs: chunk.offsetMs + chunk.durationMs,
+        speaker: null,
+        text: text.trim(),
+      },
+    ]
+  }
+  // Clamp the chunk's final utterance to the chunk end.
+  if (utterances.length > 0) {
+    const last = utterances[utterances.length - 1]
+    last.endMs = Math.max(last.startMs, Math.min(last.endMs, chunk.offsetMs + chunk.durationMs))
+  }
+  return { utterances, usage: extractUsage(payload.usageMetadata) }
+}
+
+/**
+ * Transcribe pre-split chunks independently (bounded parallelism, one retry
+ * per chunk). `truncated` is true iff any chunk failed both attempts — a
+ * silent chunk that transcribes to nothing is legitimately covered. Failed
+ * chunks contribute no text; everything that succeeded is still returned so
+ * the caller can ingest the partial (unbilled, per the coverage contract).
+ */
+export async function transcribeRecordingChunks(
+  opts: TranscribeRecordingOptions,
+  chunks: RecordingAudioChunk[],
+): Promise<RecordingTranscriptionResult> {
+  const model = opts.model ?? DEFAULT_MODEL
+  const usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number }> = []
+  const perChunk: TranscribedUtterance[][] = new Array(chunks.length)
+  let failedChunks = 0
+
+  let next = 0
+  const worker = async () => {
+    while (true) {
+      const i = next++
+      if (i >= chunks.length) return
+      try {
+        let out: Awaited<ReturnType<typeof transcribeOneChunk>>
+        try {
+          out = await transcribeOneChunk(opts, chunks[i], i)
+        } catch {
+          out = await transcribeOneChunk(opts, chunks[i], i) // one retry
+        }
+        perChunk[i] = out.utterances
+        usages.push({ usage: out.usage, model })
+      } catch (err) {
+        failedChunks++
+        perChunk[i] = []
+        console.warn(
+          `[transcribe-recording] chunk ${i}/${chunks.length} failed twice:`,
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(CHUNK_CONCURRENCY, Math.max(1, chunks.length)) }, worker),
+  )
+
+  const utterances = perChunk.flat()
+  return {
+    utterances,
+    usages,
+    windows: chunks.length,
+    truncated: failedChunks > 0 || utterances.length === 0,
+  }
 }

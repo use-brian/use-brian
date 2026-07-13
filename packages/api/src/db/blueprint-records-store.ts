@@ -77,6 +77,12 @@ export type BlueprintRecordStore = {
   ): Promise<BlueprintRecord | null>
   getById(userId: string, id: string): Promise<BlueprintRecord | null>
   getByAnchor(userId: string, workspaceId: string, anchorKey: string): Promise<BlueprintRecord | null>
+  /**
+   * The record a page PROJECTS (mig 321 index) — the forward read behind
+   * page-action button resolution and `send_page`'s recordField lookup.
+   * Newest first if several records ever point at one page (SET NULL churn).
+   */
+  getByPageId(userId: string, workspaceId: string, pageId: string): Promise<BlueprintRecord | null>
   /** Latest record a given source produced (e.g. workflow runId) — `{{lastRun.output.*}}`. */
   getLatestForSource(
     userId: string,
@@ -214,6 +220,18 @@ export function createDbBlueprintRecordStore(): BlueprintRecordStore {
         userId,
         `SELECT ${SELECT} FROM blueprint_records WHERE workspace_id = $1 AND anchor_key = $2`,
         [workspaceId, anchorKey],
+      )
+      return result.rows[0] ? rowToRecord(result.rows[0]) : null
+    },
+
+    async getByPageId(userId, workspaceId, pageId) {
+      const result = await queryWithRLS<Row>(
+        userId,
+        `SELECT ${SELECT} FROM blueprint_records
+         WHERE workspace_id = $1 AND page_id = $2
+         ORDER BY updated_at DESC
+         LIMIT 1`,
+        [workspaceId, pageId],
       )
       return result.rows[0] ? rowToRecord(result.rows[0]) : null
     },
