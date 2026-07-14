@@ -41,6 +41,11 @@ const issueRow = (i: Json) => ({
   is_pull_request: i.pull_request != null,
 })
 
+// `merged_at` is the only field that distinguishes a MERGED pull request from
+// one that was closed unmerged — GitHub reports both as `state: 'closed'`.
+// Without it a caller asking "what shipped?" has to re-fetch every closed PR
+// through `githubGetPullRequest` just to read its boolean `merged`, an N+1 the
+// list payload already carries the answer to (null unless merged).
 const prRow = (p: Json) => ({
   number: num(p, 'number'),
   title: str(p, 'title'),
@@ -51,6 +56,7 @@ const prRow = (p: Json) => ({
   draft: bool(p, 'draft'),
   url: str(p, 'html_url'),
   updated_at: str(p, 'updated_at'),
+  merged_at: str(p, 'merged_at'),
 })
 
 /** Repo search: `{ total_count, items: [...] }` → concise rows, total preserved. */
@@ -236,7 +242,10 @@ export function createGitHubTools(api: GitHubApi): Tool[] {
 
   const listPullRequests = buildTool({
     name: 'githubListPullRequests',
-    description: 'List pull requests for a GitHub repository. Returns PR title, state, author, head/base branches, and draft status.',
+    description:
+      'List pull requests for a GitHub repository. Returns PR title, state, author, head/base branches, draft status, and `merged_at`. ' +
+      'A closed PR is only MERGED when `merged_at` is present — a closed PR without it was abandoned, not shipped. ' +
+      'To find what shipped since a date, list with state=closed sort=updated direction=desc and keep the rows whose `merged_at` is after that date; no follow-up call per PR is needed.',
     inputSchema: z.object({
       owner: z.string().describe('Repository owner.'),
       repo: z.string().describe('Repository name.'),

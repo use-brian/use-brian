@@ -76,10 +76,13 @@ import {
   getBrainGraph,
   listBrain,
   primitivesToGraphKinds,
+  projectInboxRowToBrainRow,
   type BrainFacets,
   type BrainGraph,
   type BrainRow,
 } from "@/lib/api/brain";
+import { fetchBrainRow } from "@/lib/api/brain-inbox";
+import { parseBrainDeepLink } from "@/lib/brain-deep-link";
 import {
   listWorkspaceSkills,
   type WorkspaceSkillSummary,
@@ -182,6 +185,38 @@ function BrainPageInner() {
 
   const [rows, setRows] = useState<BrainRow[] | null>(null);
   const [selected, setSelected] = useState<BrainRow | null>(null);
+
+  // Row deep link — `?row=<id>[&kind=<primitive>]` opens that row's drawer
+  // (`[COMP:app-web/brain-deep-link]`). The row is fetched by id rather than
+  // looked up in `rows`, because the list is paginated and hides done tasks
+  // behind the "completed" fold — the two cases an inbound link (a Slack
+  // digest pointing at a shipped task) hits most. A miss (deleted row, wrong
+  // workspace, revoked clearance) leaves the plain list standing.
+  const deepLinkedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeId) return;
+    const link = parseBrainDeepLink(
+      new URLSearchParams(searchParams.toString()),
+    );
+    if (!link) return;
+    if (deepLinkedRef.current === link.rowId) return;
+    deepLinkedRef.current = link.rowId;
+
+    let cancelled = false;
+    void fetchBrainRow(activeId, link.primitive, link.rowId).then((detail) => {
+      if (cancelled || !detail) return;
+      setSelected({
+        ...projectInboxRowToBrainRow(detail),
+        // The projection hardcodes `hasPending` — it exists for the inbox,
+        // which by definition holds unverified rows. A deep link addresses ANY
+        // live row, so the real verified state decides.
+        hasPending: detail.verifiedAt == null,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, searchParams]);
   // Completed (done / archived) tasks — fetched separately from the main list
   // (which hides them) so the grouped view can tuck them behind a "Show
   // completed" disclosure that leads with live work. Only fetched when tasks
