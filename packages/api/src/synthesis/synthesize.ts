@@ -151,6 +151,12 @@ export type SynthesizeDeps = {
 
 /** Enough turns/tool-calls for a multi-section brief over a long transcript. */
 const SYNTHESIS_BUDGET_FALLBACK = { maxTurns: 30, maxToolCalls: 40, timeoutMs: 180_000 }
+// A recording sweep is the expensive source: reading an hour-plus transcript
+// end to end (the coverage discipline in `buildSystemPrompt`) costs one tool
+// call per window plus the drafting turns, and the 3-minute default wall clock
+// aborted mid-sweep — the brief then reflected only the opening minutes
+// (2026-07-13, a 96-min meeting). Sized for ~500 segments at 40/window.
+const RECORDING_SYNTHESIS_BUDGET = { maxTurns: 60, maxToolCalls: 80, timeoutMs: 900_000 }
 
 function titleFromSlug(slug: string): string {
   return slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -175,8 +181,19 @@ function buildSystemPrompt(
   let gatherLine: string
   let citeLine: string
   if (source.kind === 'recording') {
-    gatherLine = `- Pull facts with \`${sourceToolName}\` (this recording only); never paste the whole transcript into the page.`
-    citeLine = `- Cite the moment for every claim (the segment \`start_ms\`).`
+    // READ THE WHOLE RECORDING FIRST. Top-K search alone returns a handful of
+    // segments, so on an hour-plus transcript the model drafted a thin brief
+    // from a fraction of the conversation (2026-07-13: a 96-min meeting, 411
+    // segments, produced 5 shallow bullets). Sweeping sequential windows is
+    // what makes a long recording's brief actually cover the meeting.
+    gatherLine = [
+      `- FIRST read the recording END TO END with \`${sourceToolName}\`, before drafting anything: page sequential windows (\`fromIndex\`/\`toIndex\`, e.g. 0-39, then 40-79, and so on) until a window comes back empty — that is how you learn the transcript's true length. Do NOT rely on \`query\` top-K search for coverage; use it only to re-find a specific moment afterwards.`,
+      `- Draft from the WHOLE conversation, in the order it happened. Cover the later parts of the recording as thoroughly as the opening — a brief that only reflects the first few minutes is a failed brief. Never paste the whole transcript into the page.`,
+    ].join('\n')
+    citeLine = [
+      `- Cite the moment for every claim, as a timestamp in \`[H:MM:SS]\` form converted from that segment's \`start_ms\` (e.g. \`start_ms: 2841000\` → \`[0:47:21]\`). Minutes and seconds are always 00-59 — a citation like \`[00:85]\` is impossible and means you invented it.`,
+      `- Never cite a moment you did not read; if you cannot ground a claim in a segment, leave it out.`,
+    ].join('\n')
   } else if (source.kind === 'brain') {
     gatherLine = `- Pull facts with \`${sourceToolName}\` — draft ONLY from what the brain returns; do not invent facts it does not hold.`
     citeLine = `- Ground every claim in a brain row \`${sourceToolName}\` returned; if the brain has nothing for a section, say so rather than guessing.`
@@ -354,7 +371,10 @@ export async function synthesizeFromSource(
   // 3. Bounded server-side loop. The blueprint recipe IS the system prompt
   //    (executed, not nudged); on the legacy path the page is pinned via
   //    context.docViewId.
-  const budget = resolveResearchBudget(deps.budget, SYNTHESIS_BUDGET_FALLBACK)
+  const budget = resolveResearchBudget(
+    deps.budget,
+    source.kind === 'recording' ? RECORDING_SYNTHESIS_BUDGET : SYNTHESIS_BUDGET_FALLBACK,
+  )
   const sessionId = randomUUID()
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), budget.timeoutMs)
