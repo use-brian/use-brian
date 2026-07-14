@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { canDeleteWorkspace, isSharedWorkspace } from "../workspace-permissions";
+import { canDeleteWorkspace } from "../workspace-permissions";
 
 describe("[COMP:app-web/workspace-delete-guard] canDeleteWorkspace", () => {
   it("lets the owner delete a non-personal (team) workspace", () => {
@@ -15,21 +15,5 @@ describe("[COMP:app-web/workspace-delete-guard] canDeleteWorkspace", () => {
   it("refuses non-owners regardless of the personal flag", () => {
     expect(canDeleteWorkspace("admin", false)).toBe(false);
     expect(canDeleteWorkspace("member", false)).toBe(false);
-  });
-});
-
-describe("[COMP:app-web/workspace-delete-guard] isSharedWorkspace", () => {
-  it("is shared once there is more than one member", () => {
-    expect(isSharedWorkspace(2)).toBe(true);
-    expect(isSharedWorkspace(10)).toBe(true);
-  });
-
-  it("is solo at one member — keyed on count, never on is_personal", () => {
-    expect(isSharedWorkspace(1)).toBe(false);
-    expect(isSharedWorkspace(0)).toBe(false);
-  });
-
-  it("treats an absent count as solo (fail to 'not shared')", () => {
-    expect(isSharedWorkspace(undefined)).toBe(false);
   });
 });

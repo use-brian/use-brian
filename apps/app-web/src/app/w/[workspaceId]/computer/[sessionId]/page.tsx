@@ -10,6 +10,12 @@
  * tasks skip the login; closing/stopping ends the task (close-to-stop).
  * Channel tasks (Telegram/Slack) deep-link here when they hit a login wall.
  *
+ * `?flow=login&site=<site>` marks a Profile-Management "Sign in to a site"
+ * task (§7): the site prefills from the query, and a successful capture
+ * offers "Done" — completing the task (the sandbox existed only for this
+ * sign-in) and returning to the workspace. A chat task never shows Done:
+ * completing it would kill the sandbox the assistant is still using.
+ *
  * [COMP:app-web/sandbox-takeover] — spec: docs/architecture/engine/computer-use.md §5.
  */
 
@@ -41,6 +47,14 @@ export default function ComputerTakeoverPage(props: {
   const t = useT();
   const router = useRouter();
 
+  // Read once from the URL (window.location over useSearchParams keeps this
+  // fully-client page out of the Suspense-boundary requirement).
+  const [loginFlow] = useState(() => {
+    if (typeof window === "undefined") return { isLogin: false, site: "" };
+    const params = new URLSearchParams(window.location.search);
+    return { isLogin: params.get("flow") === "login", site: params.get("site") ?? "" };
+  });
+
   const [task, setTask] = useState<ComputerTask | null | "loading">("loading");
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [stalled, setStalled] = useState(false);
@@ -64,14 +78,14 @@ export default function ComputerTakeoverPage(props: {
       if (cancelled) return;
       setTask(found);
       if (found) {
-        setSite(found.injectedSite ?? "");
+        setSite(found.injectedSite ?? loginFlow.site);
         await resumeComputerTask(sessionId).catch(() => {});
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, loginFlow.site]);
 
   // Frame poll loop.
   useEffect(() => {
@@ -149,6 +163,13 @@ export default function ComputerTakeoverPage(props: {
     setCapturing(false);
     setCaptureStatus(result.ok ? "saved" : result.profileRequired ? "profile_required" : "failed");
   }, [profileId, sessionId, site]);
+
+  // Login-flow exit: the sandbox existed only for this sign-in, so a
+  // successful capture can complete the task (capture + kill) and go home.
+  const onLoginDone = useCallback(async () => {
+    await completeComputerTask(sessionId, "completed").catch(() => {});
+    router.push(`/w/${workspaceId}`);
+  }, [router, sessionId, workspaceId]);
 
   const onStop = useCallback(async () => {
     const confirmed = await confirmDialog({
@@ -274,6 +295,15 @@ export default function ComputerTakeoverPage(props: {
                 ? t.computer.profileRequired
                 : t.computer.captureFailed}
           </p>
+        ) : null}
+        {loginFlow.isLogin && captureStatus === "saved" ? (
+          <button
+            type="button"
+            onClick={() => void onLoginDone()}
+            className="rounded-md border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
+          >
+            {t.computer.loginDoneCta}
+          </button>
         ) : null}
       </div>
     </div>

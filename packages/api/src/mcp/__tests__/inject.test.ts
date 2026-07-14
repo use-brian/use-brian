@@ -38,14 +38,6 @@ vi.mock('../../google/client.js', async (importOriginal) => ({
     getGoogleTask(token, taskListId, taskId),
 }))
 
-// The workspace-scoping gate calls `isSoloWorkspaceSystem`; mock the
-// store module so the test never touches the DB client. Default to `false`
-// (suppress — shared or multi-member) — individual tests override per case.
-const isSoloWorkspaceSystem = vi.fn<(id: string) => Promise<boolean>>().mockResolvedValue(false)
-vi.mock('../../db/workspace-store.js', () => ({
-  isSoloWorkspaceSystem: (id: string) => isSoloWorkspaceSystem(id),
-}))
-
 // Custom remote MCP discovery / calls — stubbed so the tests never hit the
 // network. Discovery returns a tiny server; tests that don't connect a custom
 // MCP simply never invoke it.
@@ -74,8 +66,7 @@ function settingsStoreStub() {
 beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
   vi.spyOn(console, 'debug').mockImplementation(() => {})
-  // Reset only the discovery stubs — leave isSoloWorkspaceSystem's
-  // default `false` intact (a blanket clearAllMocks would wipe it).
+  // Reset only the discovery stubs.
   discoverMcpServer.mockReset()
   callRemoteMcpTool.mockReset()
 })
@@ -193,19 +184,18 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
 })
 
 describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
-  // Regression guard for the 2026-06-01 cross-member leak: a shared
-  // (non-personal) workspace assistant must NOT load the workspace owner's
-  // personal connectors. The base `connectorStore.list(userId)` load is the
-  // leak source, so we assert whether it is called per workspace kind.
+  // Regression guard for the 2026-06-01 cross-member leak and the 2026-07-14
+  // cross-workspace leak: NO workspace assistant may load the workspace
+  // owner's personal connectors as its base tool set — exposure
+  // (connector_grant) is the injection boundary in every workspace, solo
+  // included. The base `connectorStore.list(userId)` load is the leak source,
+  // so we assert whether it is called per assistant context.
 
   function listSpy() {
     return vi.fn().mockResolvedValue([])
   }
 
-  it('SHARED / multi-member workspace: does NOT load the owner-personal connector base', async () => {
-    // The gate returns false for any workspace with more than one member
-    // (member count > 1), regardless of is_personal.
-    isSoloWorkspaceSystem.mockResolvedValueOnce(false)
+  it('workspace assistant (any member count): does NOT load the owner-personal connector base', async () => {
     const list = listSpy()
     await injectMcpTools({
       userId: 'owner-1',
@@ -213,29 +203,12 @@ describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
       tools: new Map(),
       connectorStore: { list } as never,
       settingsStore: settingsStoreStub() as never,
-      assistantTeamId: 'ws-shared',
+      assistantTeamId: 'ws-any',
     })
-    expect(isSoloWorkspaceSystem).toHaveBeenCalledWith('ws-shared')
     expect(list).not.toHaveBeenCalled()
   })
 
-  it('SOLO personal workspace: DOES load the owner-personal connector base', async () => {
-    isSoloWorkspaceSystem.mockResolvedValueOnce(true)
-    const list = listSpy()
-    await injectMcpTools({
-      userId: 'owner-1',
-      assistantId: 'a-1',
-      tools: new Map(),
-      connectorStore: { list } as never,
-      settingsStore: settingsStoreStub() as never,
-      assistantTeamId: 'ws-personal',
-    })
-    expect(isSoloWorkspaceSystem).toHaveBeenCalledWith('ws-personal')
-    expect(list).toHaveBeenCalledWith('owner-1')
-  })
-
-  it('no workspace (personal assistant): loads the connector base without a gate check', async () => {
-    isSoloWorkspaceSystem.mockClear()
+  it('no workspace (personal assistant): loads the connector base', async () => {
     const list = listSpy()
     await injectMcpTools({
       userId: 'u-1',
@@ -244,7 +217,6 @@ describe('[COMP:api/mcp-inject] workspace connector-scoping gate', () => {
       connectorStore: { list } as never,
       settingsStore: settingsStoreStub() as never,
     })
-    expect(isSoloWorkspaceSystem).not.toHaveBeenCalled()
     expect(list).toHaveBeenCalledWith('u-1')
   })
 })
@@ -256,7 +228,6 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
   // owner-personal base load is suppressed, so the grant is the only source —
   // it must be discovered and surfaced through mcp_search / mcp_call.
   it('discovers and injects a user-scoped custom MCP granted to a shared workspace', async () => {
-    isSoloWorkspaceSystem.mockResolvedValueOnce(false) // shared workspace
     discoverMcpServer.mockResolvedValueOnce({
       name: 'My MCP',
       tools: [{ name: 'doThing', description: 'does a thing', inputSchema: { type: 'object', properties: {} } }],
@@ -294,7 +265,6 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
   })
 
   it('skips a disconnected granted custom MCP', async () => {
-    isSoloWorkspaceSystem.mockResolvedValueOnce(false)
     const tools = new Map()
     const connectorGrantStore = {
       listForTargetSystem: vi.fn().mockResolvedValue([
@@ -823,7 +793,6 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
   }
 
   it('sends from the GRANTED instance, never the grantor\'s oldest personal account', async () => {
-    isSoloWorkspaceSystem.mockResolvedValueOnce(false) // multi-member → base load suppressed
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
 
@@ -851,7 +820,6 @@ describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
   })
 
   it('does not let an ungranted sibling Google service ride along on a granted one', async () => {
-    isSoloWorkspaceSystem.mockResolvedValueOnce(false)
     const tools = new Map()
     const { connectorStore, connectorInstanceStore, connectorGrantStore } = stores()
 

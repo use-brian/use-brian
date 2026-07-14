@@ -4,7 +4,7 @@
  *
  * Groups every connector row by sharing state:
  *   - `shared`    — connected instances exposed (a connector_grant) to the
- *                   active *shared* workspace.
+ *                   active workspace.
  *   - `personal`  — connected instances visible only to the member's own
  *                   assistants.
  *   - `available` — everything not connected: never-connected built-in
@@ -21,11 +21,10 @@
  *                   have no meaningful connected/disconnected state and
  *                   bucket here regardless of the row's `connected` flag.
  *
- * In a SOLO workspace the personal/workspace distinction collapses — the
- * caller renders `personal` under a "Connected" header and `shared` stays
- * empty (grants are never minted without an audience). The `workspace` group
- * is independent of member count: a legacy team-native connector can exist in
- * a solo workspace, and it's still read-only-available there.
+ * The buckets are the same in EVERY workspace, solo included: exposure gates
+ * runtime injection and the config pickers alike (the solo auto-load default
+ * was removed 2026-07-14), so a connected-but-unexposed connector is
+ * `personal` even when the member is the workspace's only member.
  *
  * Spec: docs/architecture/integrations/mcp.md → "Unified connectors — the
  * master-detail Studio surface".
@@ -52,8 +51,6 @@ export type GroupableConnector = {
 export function groupConnectors<C extends GroupableConnector>(
   connectors: readonly C[],
   opts: {
-    /** True when the active workspace has more than one member. */
-    sharedWorkspace: boolean;
     /** connectorInstanceId → grantId for the active workspace. */
     exposedGrants: Record<string, string>;
     /** Provider slugs of built-in primitives (BUILTIN_PRIMITIVE_CONNECTOR_IDS). */
@@ -75,7 +72,6 @@ export function groupConnectors<C extends GroupableConnector>(
     } else if (!c.connected) {
       available.push(c);
     } else if (
-      opts.sharedWorkspace &&
       c.connectorInstanceId &&
       opts.exposedGrants[c.connectorInstanceId]
     ) {

@@ -349,13 +349,23 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
   // tapping its highlighted text. `null` → the drawer is closed.
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const streamKey = source.kind === "link" ? `${source.token}:${source.pageId ?? ""}` : source.pageId;
+  const streamKey =
+    source.kind === "link"
+      ? `${source.token}:${source.pageId ?? ""}`
+      : source.kind === "site"
+        ? `${source.host}:${source.path}`
+        : source.pageId;
   // Breadcrumb href shape: a token sub-page view stays inside the token
-  // context (`/share/<token>`, `/share/<token>/p/<id>`); everything else
-  // (published view, or a token root inside a published subtree) uses the
-  // universal `/share/p/<id>` URLs the server's chain guarantees resolvable.
+  // context (`/share/<token>`, `/share/<token>/p/<id>`); a custom-domain
+  // view uses the server-provided site paths (`/`, `/<slug>`, `/p/<id>`);
+  // everything else (published view, or a token root inside a published
+  // subtree) uses the universal `/share/p/<id>` URLs the server's chain
+  // guarantees resolvable.
   const tokenScoped = source.kind === "link" && Boolean(source.pageId);
   const crumbHref = (crumbPageId: string, index: number): string => {
+    if (source.kind === "site") {
+      return page.paths?.[crumbPageId] ?? `/p/${encodeURIComponent(crumbPageId)}`;
+    }
     if (tokenScoped && source.kind === "link") {
       return index === 0
         ? `/share/${encodeURIComponent(source.token)}`
@@ -431,7 +441,9 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
           )}
         </nav>
         <a
-          href="/"
+          // On a customer domain "/" is the customer's root page — the
+          // acquisition CTA must point at the product site instead.
+          href={source.kind === "site" ? "https://sidan.ai" : "/"}
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0 rounded-md bg-foreground px-3 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90"
@@ -468,6 +480,7 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
               payload={page.payload}
               source={source}
               comments={comments}
+              paths={page.paths}
             />
             {source.kind === "link" && page.role !== "view" ? (
               <GuestComments token={source.token} pageId={source.pageId} />

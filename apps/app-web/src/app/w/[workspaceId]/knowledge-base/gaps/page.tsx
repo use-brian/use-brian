@@ -117,7 +117,9 @@ export default function KbGapsPage() {
 
   return (
     <div className="h-full w-full px-8 py-6 flex flex-col gap-5 overflow-y-auto">
-      <header className="flex flex-col gap-1">
+      {/* max-md:pl-6 clears the chrome's fixed mobile hamburger (left-2
+          top-2, md:hidden) — without it the title sits underneath. */}
+      <header className="flex flex-col gap-1 max-md:pl-6">
         <h1 className="text-lg font-semibold flex items-center gap-2">
           {t.kbGaps.title}
           {hasRows && (

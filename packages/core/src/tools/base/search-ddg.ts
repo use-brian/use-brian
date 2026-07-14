@@ -23,6 +23,11 @@ export const duckDuckGoProvider: SearchProvider = {
   // on error or empty results (DDG rate-limiting frequently produces both).
   available: () => true,
 
+  // A DDG rate-limit/challenge page is HTTP 200 with no result blocks, which
+  // parses as an empty array — so an empty result here is NOT evidence that
+  // the query has no matches. See SearchProvider.trustEmpty.
+  trustEmpty: false,
+
   async search(query, maxResults, signal): Promise<SearchResult[]> {
     const url = `${DDG_ENDPOINT}?q=${encodeURIComponent(query)}`
     const res = await fetch(url, {

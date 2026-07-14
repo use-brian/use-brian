@@ -4,6 +4,8 @@ import { braveProvider } from '../base/search-brave.js'
 import { serperProvider } from '../base/search-serper.js'
 import { tavilyProvider } from '../base/search-tavily.js'
 import { duckDuckGoProvider } from '../base/search-ddg.js'
+import { webSearchTool } from '../base/web-search.js'
+import type { ToolContext } from '../types.js'
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -74,7 +76,35 @@ describe('[COMP:tools/search] Search stack composer', () => {
       mockProvider('c', { throws: new Error('boom') }),
     ])
     const out = await stack('q', 5)
-    expect(out).toEqual({ provider: null, results: [] })
+    expect(out).toEqual({
+      provider: null,
+      results: [],
+      failures: [{ provider: 'c', error: 'boom' }],
+      trustedEmpty: true,
+    })
+  })
+
+  it('records every provider failure and trustedEmpty=false when all throw', async () => {
+    const stack = createSearchStack([
+      mockProvider('a', { throws: new Error('Tavily HTTP 432') }),
+      mockProvider('b', { throws: new Error('Brave HTTP 402') }),
+    ])
+    const out = await stack('q', 5)
+    expect(out.provider).toBeNull()
+    expect(out.trustedEmpty).toBe(false)
+    expect(out.failures).toEqual([
+      { provider: 'a', error: 'Tavily HTTP 432' },
+      { provider: 'b', error: 'Brave HTTP 402' },
+    ])
+  })
+
+  it('an empty from a trustEmpty:false provider does not set trustedEmpty', async () => {
+    const scraper = mockProvider('ddg-like', { results: [] })
+    scraper.trustEmpty = false
+    const stack = createSearchStack([mockProvider('a', { throws: new Error('quota') }), scraper])
+    const out = await stack('q', 5)
+    expect(out.trustedEmpty).toBe(false)
+    expect(out.failures).toEqual([{ provider: 'a', error: 'quota' }])
   })
 
   it('applies sanitizeDeep to returned results (strips zero-width chars)', async () => {
@@ -110,7 +140,8 @@ describe('[COMP:tools/search] Search stack composer', () => {
       },
     ])
     const out = await stack('q', 5, controller.signal)
-    expect(out).toEqual({ provider: null, results: [] })
+    expect(out.provider).toBeNull()
+    expect(out.results).toEqual([])
     expect(calls).toEqual(['a'])
   })
 })
@@ -150,6 +181,63 @@ describe('[COMP:tools/search] Provider availability gates', () => {
 
   it('duckDuckGoProvider is always available (no-token fallback)', () => {
     expect(duckDuckGoProvider.available()).toBe(true)
+  })
+
+  it('duckDuckGoProvider empties are untrusted (challenge pages parse as zero results)', () => {
+    expect(duckDuckGoProvider.trustEmpty).toBe(false)
+  })
+})
+
+// ── webSearch tool: outage vs genuine no-results ─────────────────
+
+describe('[COMP:tools/search] webSearch outage surfacing', () => {
+  const ENV_KEYS = ['BRAVE_SEARCH_API_KEY', 'SERPER_API_KEY', 'TAVILY_API_KEY'] as const
+  let savedEnv: Record<string, string | undefined>
+  let fetchSpy: MockInstance<typeof fetch>
+
+  const ctx = { abortSignal: new AbortController().signal } as ToolContext
+
+  beforeEach(() => {
+    savedEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]))
+    delete process.env.BRAVE_SEARCH_API_KEY
+    delete process.env.SERPER_API_KEY
+    process.env.TAVILY_API_KEY = 'test-token'
+    fetchSpy = vi.spyOn(globalThis, 'fetch') as unknown as MockInstance<typeof fetch>
+  })
+
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k]
+      else process.env[k] = savedEnv[k]
+    }
+    fetchSpy.mockRestore()
+  })
+
+  it('returns an isError result when every provider fails (quota outage, not "no results")', async () => {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('tavily')) return new Response('plan limit', { status: 432 })
+      return new Response('blocked', { status: 403 }) // DDG
+    })
+
+    const out = await webSearchTool.execute({ query: 'David Yeung Green Monday LinkedIn' }, ctx)
+    expect(out.isError).toBe(true)
+    expect(String(out.data)).toMatch(/temporarily unavailable/)
+    expect(String(out.data)).not.toMatch(/No results found/)
+    expect(out.meta?.searchProviderErrors).toContain('tavily: Tavily HTTP 432')
+    expect(out.meta?.searchProviderErrors).toContain('duckduckgo: DuckDuckGo HTTP 403')
+  })
+
+  it('still reports "No results found" when a keyed provider returns a real empty set', async () => {
+    fetchSpy.mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('tavily')) return new Response(JSON.stringify({ results: [] }), { status: 200 })
+      return new Response('blocked', { status: 403 }) // DDG
+    })
+
+    const out = await webSearchTool.execute({ query: 'xzqv-no-such-thing' }, ctx)
+    expect(out.isError).toBeUndefined()
+    expect(out.data).toBe('No results found. Try a different query.')
   })
 })
 

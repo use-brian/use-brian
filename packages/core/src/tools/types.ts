@@ -4,6 +4,7 @@ import type { SessionStateStore } from '../memory/session-state-types.js'
 import type { ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import type { Sensitivity, SensitivityAccumulator } from '../security/sensitivity.js'
 import type { CompartmentAccumulator } from '../security/compartments.js'
+import type { EvidenceAccumulator } from '../security/evidence.js'
 import type { AttachmentCollector } from '../workspace-files/attachments.js'
 
 // ── Tool context ───────────────────────────────────────────────
@@ -185,6 +186,16 @@ export type ToolContext = {
    * See docs/plans/compartment-axis.md.
    */
   compartmentAccumulator?: CompartmentAccumulator
+  /**
+   * Per-run identifier-evidence accumulator (the mechanical anti-fabrication
+   * gate for unattended runs). The tool executor `note()`s every tool
+   * result; before a gated write tool executes, its validated input is
+   * scanned and rejected if it contains an identifier (email / URL / handle
+   * / phone) never observed this run. Threaded only by unattended callers
+   * (the workflow callee executor); undefined = accumulate-and-gate off.
+   * See docs/architecture/engine/identifier-provenance-gate.md.
+   */
+  evidence?: EvidenceAccumulator
   /**
    * True when this is a research-mode turn (the explicit `mode:'research'`
    * toggle or the adaptive research-intent upgrade). Research findings are

@@ -10,6 +10,7 @@ import {
 } from "@/lib/auth-cookies";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { computeDocRedirect } from "@/lib/doc-redirect";
+import { isAppHost, isGuardedPath, normalizeHostHeader } from "@/lib/site-hosts";
 
 const API_URL = process.env.API_URL ?? "http://localhost:4000";
 
@@ -45,6 +46,31 @@ type RefreshResult = {
  * cookies can't be shared across `localhost:300X` origins anyway.
  */
 export async function proxy(request: NextRequest) {
+  // ── Custom-domain host routing ─────────────────────────────────────
+  // A request whose Host isn't one of ours is a customer site: rewrite
+  // EVERY path to the public site renderer. The site route 404s anything
+  // it can't resolve, so no app route leaks onto customer hosts.
+  // Classification lives in lib/site-hosts.ts (unit-tested).
+  const rawHost =
+    request.headers.get("x-forwarded-host") ?? request.headers.get("host") ?? "";
+  const host = normalizeHostHeader(rawHost);
+  const { pathname } = request.nextUrl;
+  if (!isAppHost(host)) {
+    const url = request.nextUrl.clone();
+    url.pathname = `/site/${host}${pathname === "/" ? "" : pathname}`;
+    return NextResponse.rewrite(url);
+  }
+  // On app origins the internal /site/* segment is not addressable — it only
+  // exists as a rewrite target for customer hosts.
+  if (pathname === "/site" || pathname.startsWith("/site/")) {
+    return new NextResponse(null, { status: 404 });
+  }
+  // Everything below is the pre-existing auth guard, scoped to the operator
+  // prefixes; other app-origin paths (e.g. /share) pass through untouched.
+  if (!isGuardedPath(pathname)) {
+    return NextResponse.next();
+  }
+
   // Doc v1 URL refactor (§9.3): legacy `/w/<wid>/doc?viewId=<id>`
   // links 301 to `/w/<wid>/p/<id>`, and `/w/<wid>/doc` with no viewId
   // 302s to the `/p` index. This runs *before* the auth guard so the
@@ -181,6 +207,12 @@ function rebuildCookieHeader(
 
 export const config = {
   matcher: [
+    // Custom-domain host routing: the middleware must see every page path
+    // (dotless, non-internal) to classify the Host header. App-origin paths
+    // outside the guarded prefixes pass straight through.
+    "/((?!api|_next|.*\\..*).*)",
+    // The original guarded entries stay: they also cover dot-containing
+    // subpaths the broad entry's `.*\\..*` exclusion would skip.
     "/w/:path*",
     "/teams",
     // In-app promo redemption (moved here from marketing `apps/web`). Gating

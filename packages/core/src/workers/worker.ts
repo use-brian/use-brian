@@ -178,6 +178,7 @@ const WORKER_SYSTEM_PROMPT = `You are a research assistant. Your job is to find 
 Rules:
 - Answer the question directly, no preamble
 - Include specific details (names, prices, addresses, times)
+- Every specific detail must come from a tool result in THIS task. Never fill a gap with a plausible name, email, URL, handle, phone number, or address from memory — a detail your searches did not surface must be reported as not found, not invented.
 - Format as a structured list when returning multiple items
 - If you can't find what's asked, say so clearly
 - Do NOT interact with the user — return your findings to the main assistant
@@ -231,6 +232,24 @@ Your final text MUST be exactly this XML. No preamble. No prose outside the tags
 </worker-findings>
 
 Failure codes: \`paywall\`, \`robots-blocked\`, \`js-required\`, \`empty\`, \`4xx\`, \`5xx\`, \`rate-limited\`, \`stale\`, \`off-topic\`.`
+
+/**
+ * Appended to the research system prompt ONLY when the governed read-browse
+ * tool is actually in this worker's tool map (boot wires it via
+ * `setResearchBrowseTools`; absent on deployments without a cloud sandbox).
+ * Injected-when-present is the tool-awareness rule's dynamic-injection
+ * carve-out — the static prompt above never names it.
+ * Spec: docs/architecture/engine/computer-use.md → "Reaching the browser".
+ */
+const WORKER_RESEARCH_BROWSE_ADDENDUM = `
+
+# Governed browser (fallback reader)
+
+\`browserReadPage\` opens a URL in a governed cloud browser and returns the rendered page's elements. It satisfies rule 1 the same as \`urlReader\`.
+
+- Use it when \`urlReader\` fails on a URL you need: \`js-required\`, \`empty\`, or a bot-blocked \`4xx\`. Pivot order on a failed read: different URL → \`browserReadPage\` on the URL that matters most → new search angle.
+- It is READ-ONLY. You cannot click, type, sign in, or act. A "behind a login" result means the URL itself is the finding — report it with a note that it needs a signed-in session.
+- Reads on this session run one at a time across all workers — reserve it for the 1-2 URLs that matter, never every link.`
 
 const WORKER_MAX_TURNS = 10
 const WORKER_RESEARCH_MAX_TURNS = 30
@@ -317,6 +336,14 @@ export function createWorkerManager(options: WorkerOptions) {
   // their fan-outs are small (2-3 workers) and bounded by the classifier.
   let maxConcurrent: number | null = null
 
+  // Boot-time browse injection (computer-use.md §12 "Part 2"): the
+  // sends-forbidden read-browse tool map, handed over AFTER the sandbox
+  // tools register (the manager itself is created from a pre-sandbox
+  // `createBaseTools()` snapshot — this setter is the re-snapshot seam).
+  // Process-lifetime config like `options.tools`, so deliberately NOT
+  // cleared in `reset()`. Merged into research workers' tool maps only.
+  let researchBrowseTools: Map<string, Tool> | null = null
+
   // ── Persistence (Phase 3 of askQuestion suspend-resume) ──────────
   // Per-request store + session context. Wired by the chat route via
   // `setPersistence(...)` at the start of each turn; reset to null in
@@ -393,7 +420,7 @@ export function createWorkerManager(options: WorkerOptions) {
 
     // Use request-time tools if provided (includes MCP connectors),
     // filtered to read-only. Fall back to boot-time tools.
-    const workerTools = requestTools
+    let workerTools = requestTools
       ? new Map([...requestTools].filter(([_, t]) => t.isReadOnly))
       : options.tools
 
@@ -401,7 +428,20 @@ export function createWorkerManager(options: WorkerOptions) {
     // flipping `researchMode` mid-turn doesn't retroactively change a worker
     // already running, which matches `setOnEvent`'s semantics.
     const isResearch = researchMode
-    const systemPrompt = isResearch ? WORKER_RESEARCH_SYSTEM_PROMPT : WORKER_SYSTEM_PROMPT
+    // Research workers additionally get the governed read-browse tools
+    // (sends-forbidden by construction — see setResearchBrowseTools). Standard
+    // preflight workers and non-research spawns never see them: a cheap
+    // context-gathering pass must not be able to spin up a sandbox.
+    if (isResearch && researchBrowseTools && researchBrowseTools.size > 0) {
+      workerTools = new Map([...workerTools, ...researchBrowseTools])
+    }
+    const hasBrowse =
+      isResearch && !!researchBrowseTools && [...researchBrowseTools.keys()].some((k) => workerTools.has(k))
+    const systemPrompt = isResearch
+      ? hasBrowse
+        ? WORKER_RESEARCH_SYSTEM_PROMPT + WORKER_RESEARCH_BROWSE_ADDENDUM
+        : WORKER_RESEARCH_SYSTEM_PROMPT
+      : WORKER_SYSTEM_PROMPT
     const maxTurns = options.maxTurns
       ?? (isResearch ? WORKER_RESEARCH_MAX_TURNS : WORKER_MAX_TURNS)
     // Research workers need much more tool-call headroom than the loop
@@ -524,7 +564,10 @@ export function createWorkerManager(options: WorkerOptions) {
             responseText += event.text
           }
           if (event.type === 'tool_start') {
-            if (event.name === 'urlReader') urlReaderCalls++
+            // browserReadPage counts as a page read: the enforcement below
+            // is "snippets are not evidence", and a governed-browser read is
+            // evidence the same way a urlReader read is.
+            if (event.name === 'urlReader' || event.name === 'browserReadPage') urlReaderCalls++
             else if (event.name === 'webSearch') webSearchCalls++
           }
           if (event.type === 'turn_complete' && ownOnUsage && ownSessionId) {
@@ -748,6 +791,18 @@ EMPTY — the worker ran but returned no findings. Do not treat this as a negati
       persistenceStore = params.store
       persistenceSessionId = params.sessionId
       persistenceWorkspaceId = params.workspaceId
+    },
+
+    /**
+     * Boot-time (once, post-sandbox-registration) hand-over of the governed
+     * read-browse tool map for research workers — the re-snapshot seam the
+     * boot-order gap requires (the manager is created before sandbox tools
+     * exist). Survives `reset()` by design: it is deployment config, not
+     * per-request state. See docs/architecture/engine/computer-use.md →
+     * "Reaching the browser".
+     */
+    setResearchBrowseTools(tools: Map<string, Tool> | null) {
+      researchBrowseTools = tools
     },
 
     /**

@@ -9,6 +9,11 @@
  * skills, assistants, channels, sensitivity, ingest rules) lives in the
  * core web app's Studio, NOT here.
  *
+ * Below the `sm` breakpoint the modal goes full-screen master-detail: the
+ * section rail is the first (and only) pane; picking a section swaps to the
+ * section body with a Back control. Two-rail from `sm:` up. The 224px rail
+ * plus a squeezed body simply doesn't fit a phone.
+ *
  * Unlike apps/web — which reuses the `(app)/settings/*` route page
  * components directly — app-web has no settings routes, so the
  * section bodies are imported as named-export components ported into
@@ -18,6 +23,7 @@
 
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
+import { ArrowLeft } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { isOssEdition, HOSTED_UPGRADE_URL } from "@/lib/edition";
@@ -104,6 +110,10 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
   const oss = isOssEdition();
   const workspaceSections = oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
   const [section, setSection] = useState<SettingsSection>(initialSection);
+  // Which pane shows below the `sm` breakpoint (no effect from `sm:` up,
+  // where both panes render side by side): the modal opens on the section
+  // rail; picking a section swaps to its body with a Back control.
+  const [mobilePane, setMobilePane] = useState<"nav" | "body">("nav");
   // Track previous open/initialSection so we can reset `section` when the
   // modal transitions from closed→open or initialSection changes while
   // open. "Adjusting state during render" per React docs — avoids the
@@ -113,8 +123,16 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
   if (open !== prevOpen || initialSection !== prevInitial) {
     setPrevOpen(open);
     setPrevInitial(initialSection);
-    if (open) setSection(initialSection);
+    if (open) {
+      setSection(initialSection);
+      setMobilePane("nav");
+    }
   }
+
+  const selectSection = (s: SettingsSection) => {
+    setSection(s);
+    setMobilePane("body");
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -146,27 +164,30 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
       className="fixed inset-0 z-50 bg-background/40 backdrop-blur-sm overflow-y-auto"
       onClick={onClose}
     >
-      <div className="min-h-full flex items-center justify-center p-6">
+      <div className="min-h-full flex items-center justify-center p-0 sm:p-6">
         <div
           role="dialog"
           aria-label={t.chrome.settingsModal.title}
           className={cn(
-            "relative w-full max-w-4xl bg-popover border border-border rounded-xl shadow-2xl",
+            "relative w-full max-w-4xl bg-popover border border-border rounded-none sm:rounded-xl shadow-2xl",
             "flex overflow-hidden",
-            "h-[85vh]",
+            "h-[100dvh] sm:h-[85vh]",
           )}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Left rail */}
+          {/* Left rail — the only pane on phones until a section is picked */}
           <nav
             aria-label="Settings sections"
-            className="w-56 shrink-0 border-r border-border p-3 overflow-y-auto"
+            className={cn(
+              "w-full sm:w-56 shrink-0 sm:border-r border-border p-3 overflow-y-auto",
+              mobilePane === "body" && "hidden sm:block",
+            )}
           >
             <SectionGroup
               label={t.chrome.settingsModal.workspace.section}
               sections={workspaceSections}
               active={section}
-              onSelect={setSection}
+              onSelect={selectSection}
               labels={{
                 "ws-general": t.chrome.settingsModal.workspace.general,
                 "ws-members": oss
@@ -183,7 +204,7 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
                 label={t.chrome.settingsModal.account.section}
                 sections={ACCOUNT_SECTIONS}
                 active={section}
-                onSelect={setSection}
+                onSelect={selectSection}
                 labels={{
                   profile: t.chrome.settingsModal.account.profile,
                   preferences: t.chrome.settingsModal.account.preferences,
@@ -194,8 +215,21 @@ export function SettingsModal({ open, initialSection = "profile", onClose }: Pro
             </div>
           </nav>
 
-          {/* Right pane */}
-          <div className="flex-1 overflow-y-auto p-6">
+          {/* Right pane — swaps in for the rail on phones */}
+          <div
+            className={cn(
+              "flex-1 overflow-y-auto p-6",
+              mobilePane === "nav" && "hidden sm:block",
+            )}
+          >
+            <button
+              type="button"
+              onClick={() => setMobilePane("nav")}
+              className="sm:hidden -ml-2 mb-4 inline-flex items-center gap-1.5 rounded px-2 py-1 text-sm text-muted-foreground hover:text-foreground hover:bg-muted"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden />
+              {t.chrome.settingsModal.back}
+            </button>
             <SectionBody section={section} onClose={onClose} />
           </div>
 

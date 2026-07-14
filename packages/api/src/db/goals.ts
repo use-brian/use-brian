@@ -228,15 +228,17 @@ export async function setGoalStatusSystem(
 /** Update a goal's curated fields and/or confirm it (autopilot §4). `confirm:
  *  true` sets `confirmed_at = now()` (arming a draft); `outcome` / `doneWhen`
  *  let the creator amend the auto-drafted detail; `means` sets the workflow the
- *  acting loop runs (spin-up). System path (the route/tool is the authz gate). */
+ *  acting loop runs (spin-up); `budget` backs the kickoff default (no
+ *  unbudgeted autonomy). System path (the route/tool is the authz gate). */
 export async function updateGoalSystem(
   id: string,
-  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; confirm?: boolean },
+  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; confirm?: boolean },
 ): Promise<GoalRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
   let idx = 1
   if (fields.outcome !== undefined) { sets.push(`outcome = $${idx++}`); values.push(fields.outcome) }
+  if (fields.budget !== undefined) { sets.push(`budget = $${idx++}::jsonb`); values.push(JSON.stringify(fields.budget)) }
   if (fields.doneWhen !== undefined) { sets.push(`done_when = $${idx++}::jsonb`); values.push(JSON.stringify(fields.doneWhen)) }
   if (fields.means !== undefined) { sets.push(`means = $${idx++}::jsonb`); values.push(JSON.stringify(fields.means)) }
   if (fields.confirm) {

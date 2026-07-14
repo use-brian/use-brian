@@ -34,10 +34,31 @@ export type GoalDeliver = (
   reason: string | null,
 ) => Promise<void>
 
+/** Validate an `entityCount` predicate payload (authored by `setGoal`, so it
+ *  arrives as untyped jsonb). Malformed → null → the predicate stays
+ *  not-confirmed rather than throwing inside the evaluator. */
+function parseEntityCount(
+  raw: unknown,
+): { kind: string; min: number; attributeEquals?: { key: string; value: string } } | null {
+  if (!raw || typeof raw !== 'object') return null
+  const p = raw as { kind?: unknown; min?: unknown; attributeEquals?: unknown }
+  if (typeof p.kind !== 'string' || p.kind.length === 0) return null
+  if (typeof p.min !== 'number' || !Number.isFinite(p.min) || p.min < 1) return null
+  let attributeEquals: { key: string; value: string } | undefined
+  if (p.attributeEquals !== undefined && p.attributeEquals !== null) {
+    const a = p.attributeEquals as { key?: unknown; value?: unknown }
+    if (typeof a.key !== 'string' || a.key.length === 0 || typeof a.value !== 'string') return null
+    attributeEquals = { key: a.key, value: a.value }
+  }
+  return { kind: p.kind, min: p.min, attributeEquals }
+}
+
 /** `done_when` resolvers shared by the rollup (non-acting) and the driver
  *  (acting): `subtasks` is real (host adapter for a host-bound goal, sub-goal
- *  count for self-hosted); `query` / `tool` resolve to NOT-confirmed (`false`)
- *  pending a real evaluator, so an unverified predicate never false-completes. */
+ *  count for self-hosted); `query` evaluates `entityCount` + `hostTaskDone` for
+ *  real; any other `query` / all `tool` resolve to NOT-confirmed (`false`)
+ *  pending a general evaluator, so an unverified predicate never
+ *  false-completes. */
 export function buildGoalResolvers(goal: GoalRecord, goalStore: GoalStore): DoneWhenResolvers {
   return {
     subtasksClosed: async () => {
@@ -52,13 +73,34 @@ export function buildGoalResolvers(goal: GoalRecord, goalStore: GoalStore): Done
       return (await goalStore.countOpenSubGoalsSystem(goal.id)) === 0
     },
     query: async (q) => {
-      // The one query predicate the autopilot uses today: the bound task is
-      // done. A task-completion goal's done_when is
-      // `{kind:'query', query:{predicate:{hostTaskDone:true}}}` — it holds when
+      // Two query predicates are evaluated for real; any other predicate stays
+      // not-confirmed (a general predicate engine is a follow-up), so it never
+      // false-completes. See goals.md → "done_when — the acceptance language".
+      //
+      // (1) `{entityCount:{kind,min,attributeEquals?}}` — at least `min` live,
+      // non-retracted entities of `kind` exist in the goal's workspace,
+      // optionally filtered by one attribute equality. The engine-verifiable
+      // "until N records exist" stop condition (e.g. run discovery until 20
+      // prospect companies are saved with a marker attribute).
+      const ec = parseEntityCount(q.predicate?.entityCount)
+      if (ec) {
+        const params: unknown[] = [goal.workspaceId, ec.kind]
+        let attrFilter = ''
+        if (ec.attributeEquals) {
+          params.push(ec.attributeEquals.key, ec.attributeEquals.value)
+          attrFilter = ` AND attributes->>$3 = $4`
+        }
+        const res = await query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM entities
+             WHERE workspace_id = $1 AND kind = $2
+               AND valid_to IS NULL AND retracted_at IS NULL${attrFilter}`,
+          params,
+        )
+        return Number(res.rows[0]?.count ?? '0') >= ec.min
+      }
+      // (2) `{hostTaskDone:true}` — the task-autopilot default: it holds when
       // the host task's active row has status 'done' (the acting loop's
-      // workflow closes the task; the next iteration verifies it here). Any
-      // other predicate stays not-confirmed (a general predicate engine is a
-      // follow-up), so it never false-completes. See task-goal-autopilot.md.
+      // workflow closes the task; the next iteration verifies it here).
       if (goal.host?.type === 'task' && q.predicate?.hostTaskDone === true) {
         // Follow the bi-temporal supersession chain from the (possibly stale)
         // host id to the LIVE row: `updateTask` mints a new id on every edit,
@@ -110,5 +152,13 @@ export async function finishGoal(
     const hostStore = createHostStore({ actorUserId: goal.createdByUserId })
     await hostStore.adapterFor(goal.host.type).setTerminal(goal.host, terminal, reason)
   }
-  await deps.deliver(goal, terminal, reason)
+  // Best-effort, per the GoalDeliver contract: the terminal status is already
+  // persisted above, and a delivery failure must never wedge the loop (in the
+  // driver's tick it would count as an errored tick and re-arm a goal that is
+  // in fact finished).
+  try {
+    await deps.deliver(goal, terminal, reason)
+  } catch (err) {
+    console.error(`[goals] terminal delivery failed for goal ${goal.id} (${terminal}):`, err)
+  }
 }

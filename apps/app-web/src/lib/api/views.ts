@@ -779,6 +779,114 @@ export async function unpublishPage(viewId: string): Promise<void> {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
 }
 
+// ── Custom domains + page slugs (migration 324) ───────────────────────
+// docs/architecture/features/custom-domains.md
+
+export type PageDomain = {
+  id: string;
+  workspaceId: string;
+  pageId: string;
+  hostname: string;
+  status: "pending_dns" | "live" | "error";
+  provider: "manual" | "vercel";
+  verificationError: string | null;
+  lastCheckedAt: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DnsInstruction = { type: "CNAME" | "A" | "TXT"; name: string; value: string };
+
+/** This page's position under a domain-fronted root (the slug editor context). */
+export type PageSiteContext = {
+  domainId: string;
+  hostname: string;
+  status: PageDomain["status"];
+  rootPageId: string;
+  isRoot: boolean;
+  slug: string | null;
+  suggestedSlug: string | null;
+};
+
+export type SiteState = { domains: PageDomain[]; sites: PageSiteContext[] };
+
+/** Publish-tab site state: domains attached to this page + slug context. */
+export async function getSiteState(viewId: string): Promise<SiteState> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/site`);
+  return json<SiteState>(res);
+}
+
+/** Attach a custom hostname to this published page. Throws the server's
+ *  error `code` (not_published / hostname_taken / invalid_hostname /
+ *  domain_limit) so the dialog can map it to copy. */
+export async function addPageDomain(
+  viewId: string,
+  hostname: string,
+): Promise<{ domain: PageDomain; instructions: DnsInstruction[] }> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ hostname }),
+  });
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+export async function checkPageDomain(
+  viewId: string,
+  domainId: string,
+): Promise<{ domain: PageDomain; live: boolean; instructions: DnsInstruction[] }> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains/${domainId}/check`, {
+    method: "POST",
+  });
+  return json(res);
+}
+
+export async function removePageDomain(viewId: string, domainId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/domains/${domainId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+}
+
+/** Set/replace this page's slug on a domain (old slug 301s to the new one). */
+export async function setPageSlug(
+  viewId: string,
+  domainId: string,
+  slug: string,
+): Promise<{ slug: string; previousSlug: string | null }> {
+  const res = await authFetch(`${API_URL}/api/views/${viewId}/slug`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ domainId, slug }),
+  });
+  if (!res.ok) throw new Error(await errorCode(res));
+  return json(res);
+}
+
+export async function checkSlugAvailability(
+  viewId: string,
+  domainId: string,
+  slug: string,
+): Promise<{ valid: boolean; available: boolean; current: boolean }> {
+  const res = await authFetch(
+    `${API_URL}/api/views/${viewId}/slug-availability?domainId=${encodeURIComponent(domainId)}&slug=${encodeURIComponent(slug)}`,
+  );
+  return json(res);
+}
+
+/** The server's short error `code` when present, else `HTTP <status>`. */
+async function errorCode(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { code?: string };
+    if (body.code) return body.code;
+  } catch {
+    // fall through
+  }
+  return `HTTP ${res.status}`;
+}
+
 /** Invite a member/group, or set the workspace-default ("General access") role. */
 export async function upsertIdentityGrant(
   viewId: string,

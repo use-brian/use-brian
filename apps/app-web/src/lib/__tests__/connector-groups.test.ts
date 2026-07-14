@@ -3,10 +3,11 @@
  * Component tag: [COMP:app-web/connector-groups].
  *
  * Pure unit tests — `connector-groups.ts` has no runtime imports. Covers the
- * four buckets (shared / personal / available / builtin), the solo-workspace
- * collapse (grants never bucket as shared without an audience), grant-less
- * connected instances, placeholder rows without an instance UUID, and the
- * builtin bucket's connected-state independence + custom-slug guard.
+ * buckets (shared / personal / available / workspace / builtin) — identical in
+ * every workspace, solo included (the solo collapse died with the solo
+ * injection default, 2026-07-14) — grant-less connected instances, placeholder
+ * rows without an instance UUID, and the builtin bucket's connected-state
+ * independence + custom-slug guard.
  *
  * Spec: docs/architecture/integrations/mcp.md → "Unified connectors — the
  * master-detail Studio surface".
@@ -30,9 +31,8 @@ const all = [
 ];
 
 describe("[COMP:app-web/connector-groups] groupConnectors", () => {
-  it("buckets a granted instance as shared in a shared workspace", () => {
+  it("buckets a granted instance as shared", () => {
     const grouped = groupConnectors(all, {
-      sharedWorkspace: true,
       exposedGrants: { "inst-gh": "grant-1" },
     });
     expect(grouped.shared).toEqual([rows.exposedGithub]);
@@ -45,20 +45,7 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
 
   it("keeps every connected row personal when nothing is granted", () => {
     const grouped = groupConnectors(all, {
-      sharedWorkspace: true,
       exposedGrants: {},
-    });
-    expect(grouped.shared).toEqual([]);
-    expect(grouped.personal).toEqual([
-      rows.exposedGithub,
-      rows.personalNotion,
-    ]);
-  });
-
-  it("collapses shared into personal in a solo workspace, even with a stale grant", () => {
-    const grouped = groupConnectors(all, {
-      sharedWorkspace: false,
-      exposedGrants: { "inst-gh": "grant-1" },
     });
     expect(grouped.shared).toEqual([]);
     expect(grouped.personal).toEqual([
@@ -70,7 +57,7 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
   it("buckets disconnected instances and placeholders as available", () => {
     const grouped = groupConnectors(
       [rows.disconnectedGcal, rows.placeholderGmail],
-      { sharedWorkspace: true, exposedGrants: {} },
+      { exposedGrants: {} },
     );
     expect(grouped.shared).toEqual([]);
     expect(grouped.personal).toEqual([]);
@@ -83,7 +70,6 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
   it("never buckets a grant-less placeholder as shared (no instance UUID)", () => {
     const connectedPlaceholder = { connected: true, name: "Files" };
     const grouped = groupConnectors([connectedPlaceholder], {
-      sharedWorkspace: true,
       exposedGrants: {},
     });
     expect(grouped.personal).toEqual([connectedPlaceholder]);
@@ -99,7 +85,6 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
     };
     for (const row of [filesPlaceholder, filesInstance]) {
       const grouped = groupConnectors([row], {
-        sharedWorkspace: true,
         exposedGrants: { "inst-files": "grant-1" },
         builtinIds: new Set(["files"]),
       });
@@ -113,7 +98,6 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
   it("keeps a custom MCP row out of builtin even on a slug collision", () => {
     const customFiles = { id: "files", connected: true, custom: true, name: "files" };
     const grouped = groupConnectors([customFiles], {
-      sharedWorkspace: false,
       exposedGrants: {},
       builtinIds: new Set(["files"]),
     });
@@ -130,7 +114,6 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
       readonly: true,
     };
     const grouped = groupConnectors([rows.exposedGithub, teammateGithub], {
-      sharedWorkspace: true,
       // Even if a stale grant entry exists for the read-only row, it stays in
       // `workspace` — readonly is checked first.
       exposedGrants: { "inst-gh": "grant-1", "inst-mate": "grant-2" },
@@ -141,26 +124,9 @@ describe("[COMP:app-web/connector-groups] groupConnectors", () => {
     expect(grouped.available).toEqual([]);
   });
 
-  it("read-only rows bucket to `workspace` even in a solo workspace (legacy team-native)", () => {
-    const teamNative = {
-      id: "github",
-      connectorInstanceId: "inst-tn",
-      connected: true,
-      name: "GitHub",
-      readonly: true,
-    };
-    const grouped = groupConnectors([teamNative], {
-      sharedWorkspace: false,
-      exposedGrants: {},
-    });
-    expect(grouped.workspace).toEqual([teamNative]);
-    expect(grouped.personal).toEqual([]);
-  });
-
   it("buckets nothing as builtin when no builtinIds are passed", () => {
     const filesPlaceholder = { id: "files", connected: false, name: "Workspace Files" };
     const grouped = groupConnectors([filesPlaceholder], {
-      sharedWorkspace: false,
       exposedGrants: {},
     });
     expect(grouped.builtin).toEqual([]);

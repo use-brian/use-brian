@@ -55,6 +55,55 @@ export type GoalLoopState = {
   /** The in-flight run id, advanced next tick rather than re-created. Null when
    *  the prior run reached a terminal state (the next tick starts fresh). */
   runId: string | null
+  /** Consecutive ticks that ERRORED (threw) rather than completed an iteration.
+   *  Optional so pre-existing handoffs parse as 0. Reset by every successful
+   *  re-arm; at `MAX_CONSECUTIVE_TICK_ERRORS` the goal blocks loudly. */
+  errorStreak?: number
+}
+
+/** Budget applied at kickoff when the author set none of maxIterations /
+ *  maxSpend / deadline — an acting goal never runs unbudgeted (a goal whose
+ *  workflow completes without meeting `done_when` would otherwise re-arm on
+ *  the `now` cadence forever, bounded only by the workspace credit cap). */
+export const DEFAULT_GOAL_BUDGET = { maxIterations: 30, maxSpend: 5 } as const
+
+/** Consecutive errored ticks before the goal gives up loudly (`blocked`,
+ *  `tick_error: …`) instead of re-arming another backoff retry. */
+export const MAX_CONSECUTIVE_TICK_ERRORS = 5
+
+/** Backoff for an errored tick: 60s doubling per consecutive error, capped at
+ *  15 min. Distinct from the continuation gate's no-progress backoff — an
+ *  errored tick never reaches the gate. */
+export function tickErrorBackoffSeconds(errorStreak: number): number {
+  return Math.min(900, 60 * 2 ** Math.max(0, errorStreak - 1))
+}
+
+/** The `scheduled_jobs.instructions` discriminant that marks a row as a goal
+ *  tick (the acting-loop re-arm), written by `scheduleGoalTick` (boot). A
+ *  goal-tick row intentionally carries NO `workflow_id` column — the goal's own
+ *  `means.workflowId` drives each iteration and the tick payload rides in
+ *  `instructions`. Because the executor's `!workflow_id` invariant would
+ *  otherwise reject the row before the delegate can run it, both the delegate
+ *  (`runWorkflowFromJob`) and that invariant's exemption key off THIS shape —
+ *  so it lives in one place. */
+export const GOAL_TICK_KIND = 'goal_tick'
+
+/** Parse a scheduled-job `instructions` string as a goal tick, or `null` when it
+ *  is not one (plain reminder text, a workflow trigger, or malformed JSON). The
+ *  single source of truth for the `{ kind, goalId, state }` shape — the writer,
+ *  the job delegate, and the executor's no-`workflow_id` exemption all go through
+ *  here so they can never drift (the drift is exactly what stalled the autopilot
+ *  acting loop on 2026-07-13). */
+export function parseGoalTick(
+  instructions: string,
+): { goalId: string; state?: GoalLoopState } | null {
+  try {
+    const p = JSON.parse(instructions) as { kind?: string; goalId?: string; state?: GoalLoopState }
+    if (p.kind === GOAL_TICK_KIND && p.goalId) return { goalId: p.goalId, state: p.state }
+  } catch {
+    /* not JSON / not a goal tick — the caller falls through to the workflow paths */
+  }
+  return null
 }
 
 /** The durable event-park marker the driver persists while a goal waits on an
@@ -112,11 +161,22 @@ export type GoalDriverDeps = {
   /** Drop the event-park marker. Returns true iff a marker was actually cleared
    *  — so an event resume is claimed exactly once under concurrent events. */
   clearAwaitingEvent: (goalId: string) => Promise<boolean>
+  /** Persist `DEFAULT_GOAL_BUDGET` onto a goal arming with an empty budget and
+   *  return the updated record. Optional: absent → arm with whatever the goal
+   *  has (tests / minimal wirings). */
+  applyDefaultBudget?: (goalId: string, budget: typeof DEFAULT_GOAL_BUDGET) => Promise<GoalRecord | null>
+  /** Observability hook for a tick that threw: fired after the driver handled
+   *  the error (backoff re-arm, or the loud terminal block when `willRetry` is
+   *  false). Boot wires a `goal_tick_error` analytics event. Best-effort. */
+  onTickError?: (goal: GoalRecord, error: unknown, willRetry: boolean) => void
   /** Injected clock (api side; the core takes `now` as a string param). */
   now: () => Date
 }
 
-const INITIAL_STATE: GoalLoopState = { iteration: 0, spend: 0, noProgressStreak: 0, runId: null }
+/** The fresh loop state a chain starts (or restarts — the reaper's recovery
+ *  re-arm) from. */
+export const INITIAL_GOAL_LOOP_STATE: GoalLoopState = { iteration: 0, spend: 0, noProgressStreak: 0, runId: null }
+const INITIAL_STATE = INITIAL_GOAL_LOOP_STATE
 
 /** A paused (approval / wait) run is "waiting on the world" with no external
  *  event to wake it — the goal polls its in-flight run on this fixed backoff
@@ -169,6 +229,52 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
     // re-arm racing an event wake) already owns it.
     if (!(await deps.tryClaim(goalId))) return
 
+    // From here the claim is OURS: an unhandled throw would strand the goal in
+    // `running` (unclaimable — no re-trigger can flip it back) AND kill the
+    // re-arm chain (the poll worker never retries a failed once-job). Handle
+    // every error: re-arm with backoff, or give up loudly at the ceiling.
+    try {
+      await runClaimedTick(goal, carried)
+    } catch (err) {
+      await handleTickError(goal, carried, err)
+    }
+  }
+
+  async function handleTickError(
+    goal: GoalRecord,
+    carried: GoalLoopState | undefined,
+    err: unknown,
+  ): Promise<void> {
+    const streak = (carried?.errorStreak ?? 0) + 1
+    const willRetry = streak < MAX_CONSECUTIVE_TICK_ERRORS
+    console.error(
+      `[goals] tick errored for goal ${goal.id} (${streak}/${MAX_CONSECUTIVE_TICK_ERRORS}${willRetry ? ', retrying' : ', giving up'}):`,
+      err,
+    )
+    try {
+      if (willRetry) {
+        // Release the claim and re-arm on the error backoff, carrying the
+        // bumped streak. `iteration`/`spend`/`noProgressStreak` carry unchanged
+        // — an errored attempt is not a completed iteration.
+        await deps.goalStore.setStatusSystem(goal.id, 'active')
+        const state = carried ?? INITIAL_STATE
+        const fireAt = new Date(deps.now().getTime() + tickErrorBackoffSeconds(streak) * 1000)
+        await deps.scheduleGoalTick(goal, fireAt, { ...state, errorStreak: streak })
+      } else {
+        const msg = err instanceof Error ? err.message : String(err)
+        await finishGoal(goal, 'blocked', `tick_error: ${msg.slice(0, 200)}`, finishDeps)
+      }
+      deps.onTickError?.(goal, err, willRetry)
+    } catch (recoveryErr) {
+      // The recovery itself failed — rethrow the ORIGINAL error so the poll
+      // worker marks the job failed; the stall reaper is the backstop.
+      console.error(`[goals] tick-error recovery failed for goal ${goal.id}:`, recoveryErr)
+      throw err
+    }
+  }
+
+  async function runClaimedTick(goal: GoalRecord, carried?: GoalLoopState): Promise<void> {
+    const goalId = goal.id
     // This tick is acting NOW (a resume, a safety-net fire, or a normal tick),
     // so drop any stale `until:event` park marker: a fresh decision (park again,
     // or not) follows from this iteration. Clearing here also takes the goal out
@@ -229,6 +335,9 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
           spend: state.spend + lastSpend,
           noProgressStreak: lastProgressed ? 0 : state.noProgressStreak + 1,
           runId: activeRunId,
+          // A completed iteration (even a no-progress one) clears the errored-
+          // tick streak — only CONSECUTIVE throws count toward the ceiling.
+          errorStreak: 0,
         }
         if (resume.kind === 'until') {
           // `until:event` — two shapes carry through the (opaque) resume event:
@@ -267,10 +376,17 @@ export function createGoalDriver(deps: GoalDriverDeps): GoalDriver {
   }
 
   async function kickoffGoal(goalId: string): Promise<void> {
-    const goal = await deps.goalStore.getByIdSystem(goalId)
+    let goal = await deps.goalStore.getByIdSystem(goalId)
     // Only a confirmed, acting goal (a workflow means) self-drives; a draft, or
     // a no-means monitor / structural goal, is not kicked off here.
     if (!goal || !goal.means.workflowId || !goal.confirmedAt) return
+    // No unbudgeted autonomy: every arming path converges here, so a goal whose
+    // author set none of the three hard backstops arms with the default budget
+    // (the task-autopilot draft path always arrives with `budget = {}`).
+    const b = goal.budget
+    if (deps.applyDefaultBudget && b.maxIterations === undefined && b.maxSpend === undefined && !b.deadline) {
+      goal = (await deps.applyDefaultBudget(goal.id, DEFAULT_GOAL_BUDGET)) ?? goal
+    }
     await deps.scheduleGoalTick(goal, deps.now(), INITIAL_STATE)
   }
 

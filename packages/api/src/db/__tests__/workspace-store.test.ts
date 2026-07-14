@@ -11,7 +11,7 @@ vi.mock('../client.js', () => ({
   })),
 }))
 
-import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, isSoloWorkspaceSystem, resolveReadCompartmentsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
+import { createWorkspaceStore, canMemberDraftRole, resolveReadClearanceSystem, resolveReadCompartmentsSystem, effectiveReadCompartments, intersectCompartments, getWorkspaceDefaultRecordingBlueprint, InvalidRecordingBlueprintError } from '../workspace-store.js'
 import { query, queryWithRLS, getPool } from '../client.js'
 
 const mockQuery = vi.mocked(query)
@@ -750,40 +750,6 @@ describe('[COMP:api/workspace-store] effectiveReadCompartments / intersectCompar
     // uncompartmented rows) must NOT collapse to null (universe).
     expect(effectiveReadCompartments('member', [], ['sales'])).toEqual([])
     expect(effectiveReadCompartments('member', [], null)).toEqual([])
-  })
-})
-
-describe('[COMP:api/workspace-store] isSoloWorkspaceSystem (connector base-load gate)', () => {
-  // The DB computes `solo = member_count <= 1`, keyed purely on the live
-  // workspace_members count and NEVER on is_personal (the flag is only a label;
-  // gating on it caused the 2026-06-02 regression where a 3-member is_personal
-  // workspace leaked the owner's connectors). These tests assert (a) the boolean
-  // is passed through, (b) the SQL counts workspace_members and does NOT branch
-  // on is_personal, and (c) fail-closed behavior.
-  it('returns true when the DB says the workspace is solo (member count <= 1)', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ solo: true }], rowCount: 1 } as never)
-    expect(await isSoloWorkspaceSystem('ws-1')).toBe(true)
-
-    // The query gates on the live member count, never on is_personal.
-    const sql = mockQuery.mock.calls[0][0] as string
-    expect(sql).toContain('count(*)')
-    expect(sql).toContain('workspace_members')
-    expect(sql).not.toContain('is_personal')
-  })
-
-  it('returns false when the workspace has teammates (count > 1), any kind', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ solo: false }], rowCount: 1 } as never)
-    expect(await isSoloWorkspaceSystem('ws-multi')).toBe(false)
-  })
-
-  it('returns false (fail-closed) when the workspace row is missing', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
-    expect(await isSoloWorkspaceSystem('ws-missing')).toBe(false)
-  })
-
-  it('returns false (fail-closed) when the lookup throws', async () => {
-    mockQuery.mockRejectedValueOnce(new Error('connection reset'))
-    expect(await isSoloWorkspaceSystem('ws-err')).toBe(false)
   })
 })
 

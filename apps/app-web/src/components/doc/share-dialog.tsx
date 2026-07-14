@@ -31,19 +31,30 @@ import { Switch } from "@/components/ui/switch";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { docPagePath } from "@/lib/doc-page-url";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
+  addPageDomain,
+  checkPageDomain,
+  checkSlugAvailability,
+  getSiteState,
   listShareableMembers,
   listShareGrants,
   listWorkspaceGroups,
   publishPage,
+  removePageDomain,
   revokeGrant,
+  setPageSlug,
   unpublishPage,
   updateGrantRole,
   upsertIdentityGrant,
+  type DnsInstruction,
   type GrantRole,
   type IdentityGrant,
+  type PageDomain,
+  type PageSiteContext,
   type PublishState,
   type ShareMember,
+  type SiteState,
   type WorkspaceGroup,
 } from "@/lib/api/views";
 
@@ -124,6 +135,306 @@ function Avatar({ name, url }: { name: string; url?: string | null }) {
   );
 }
 
+function DomainStatusChip({ status, t }: { status: PageDomain["status"]; t: ShareT }) {
+  const label =
+    status === "live" ? t.site.statusLive : status === "error" ? t.site.statusError : t.site.statusPending;
+  const cls =
+    status === "live"
+      ? "text-emerald-600 dark:text-emerald-400"
+      : status === "error"
+        ? "text-destructive"
+        : "text-muted-foreground";
+  return <span className={`shrink-0 text-xs font-medium ${cls}`}>{label}</span>;
+}
+
+function DnsInstructionRows({ instructions, t }: { instructions: DnsInstruction[]; t: ShareT }) {
+  if (instructions.length === 0) return null;
+  return (
+    <div className="rounded-md border border-border bg-muted/40 p-2 text-xs">
+      <p className="mb-1 text-muted-foreground">{t.site.dnsHint}</p>
+      <div className="space-y-1 font-mono">
+        {instructions.map((ins, i) => (
+          <div key={`${ins.type}-${i}`} className="flex flex-wrap gap-x-3">
+            <span className="font-semibold">{ins.type}</span>
+            <span className="min-w-0 break-all">{ins.name}</span>
+            <span className="min-w-0 break-all text-muted-foreground">{ins.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Custom-domain management on the published page itself: attach a hostname,
+ *  show DNS instructions + verification status, detach. */
+function DomainSection({
+  pageId,
+  domains,
+  t,
+  onChanged,
+}: {
+  pageId: string;
+  domains: PageDomain[];
+  t: ShareT;
+  onChanged: () => Promise<void>;
+}) {
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [instructions, setInstructions] = useState<Record<string, DnsInstruction[]>>({});
+
+  const errCopy = (code: string): string => {
+    switch (code) {
+      case "not_published":
+        return t.site.errNotPublished;
+      case "hostname_taken":
+        return t.site.errHostnameTaken;
+      case "invalid_hostname":
+        return t.site.errInvalidHostname;
+      case "domain_limit":
+        return t.site.errDomainLimit;
+      default:
+        return code;
+    }
+  };
+
+  const connect = async () => {
+    const hostname = input.trim();
+    if (!hostname) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const { domain, instructions: ins } = await addPageDomain(pageId, hostname);
+      setInstructions((m) => ({ ...m, [domain.id]: ins }));
+      setInput("");
+      await onChanged();
+    } catch (e) {
+      setErr(errCopy(e instanceof Error ? e.message : String(e)));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const check = async (domainId: string) => {
+    setChecking(domainId);
+    setErr(null);
+    try {
+      const r = await checkPageDomain(pageId, domainId);
+      setInstructions((m) => ({ ...m, [domainId]: r.live ? [] : r.instructions }));
+      await onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setChecking(null);
+    }
+  };
+
+  const remove = async (domain: PageDomain) => {
+    const ok = await confirmDialog({
+      title: t.site.removeConfirmTitle,
+      description: format(t.site.removeConfirmBody, { hostname: domain.hostname }),
+      confirmLabel: t.site.removeConfirmCta,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setErr(null);
+    try {
+      await removePageDomain(pageId, domain.id);
+      await onChanged();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <p className="text-xs font-medium text-muted-foreground">{t.site.domainsLabel}</p>
+      {domains.map((d) => (
+        <div key={d.id} className="space-y-1.5">
+          <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5">
+            <Globe className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="min-w-0 flex-1 truncate text-sm">{d.hostname}</span>
+            <DomainStatusChip status={d.status} t={t} />
+            {d.status !== "live" ? (
+              <button
+                type="button"
+                onClick={() => void check(d.id)}
+                disabled={checking === d.id}
+                className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+              >
+                {checking === d.id ? t.site.checking : t.site.recheck}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => void remove(d)}
+              className="shrink-0 rounded-md px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+            >
+              {t.site.removeDomain}
+            </button>
+          </div>
+          {d.status !== "live" && instructions[d.id]?.length ? (
+            <DnsInstructionRows instructions={instructions[d.id]} t={t} />
+          ) : null}
+          {d.status !== "live" && d.verificationError && !instructions[d.id]?.length ? (
+            <p className="break-all text-xs text-muted-foreground">{d.verificationError}</p>
+          ) : null}
+        </div>
+      ))}
+      <div className="flex items-center gap-2">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              void connect();
+            }
+          }}
+          placeholder={t.site.domainPlaceholder}
+          className="min-w-0 flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm outline-none focus:border-primary"
+        />
+        <button
+          type="button"
+          onClick={() => void connect()}
+          disabled={busy || !input.trim()}
+          className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-50"
+        >
+          {busy ? t.site.connecting : t.site.connect}
+        </button>
+      </div>
+      {err ? (
+        <p role="alert" className="break-all text-xs text-destructive">
+          {err}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** The page's pretty URL on a domain-fronted ancestor: `hostname/` prefix +
+ *  slug input with a debounced availability check. Renames keep the old slug
+ *  as a 301 (the note under the field). */
+function SlugRow({
+  pageId,
+  ctx,
+  t,
+  onChanged,
+}: {
+  pageId: string;
+  ctx: PageSiteContext;
+  t: ShareT;
+  onChanged: () => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(ctx.slug ?? ctx.suggestedSlug ?? "");
+  const [state, setState] = useState<"idle" | "checking" | "available" | "taken" | "invalid" | "saving">(
+    "idle",
+  );
+  const [renamed, setRenamed] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(ctx.slug ?? ctx.suggestedSlug ?? "");
+    setState("idle");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx.domainId, ctx.slug]);
+
+  // Debounced availability check while typing (400ms).
+  useEffect(() => {
+    const slug = draft.trim();
+    if (!slug || slug === ctx.slug) {
+      setState("idle");
+      return;
+    }
+    setState("checking");
+    const timer = window.setTimeout(async () => {
+      try {
+        const r = await checkSlugAvailability(pageId, ctx.domainId, slug);
+        setState(!r.valid ? "invalid" : r.available ? "available" : "taken");
+      } catch {
+        setState("idle");
+      }
+    }, 400);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+
+  const save = async () => {
+    const slug = draft.trim();
+    if (!slug || slug === ctx.slug) return;
+    setState("saving");
+    setErr(null);
+    try {
+      const r = await setPageSlug(pageId, ctx.domainId, slug);
+      setRenamed(Boolean(r.previousSlug));
+      setState("idle");
+      await onChanged();
+    } catch (e) {
+      const code = e instanceof Error ? e.message : String(e);
+      if (code === "slug_taken") setState("taken");
+      else if (code === "invalid_slug") setState("invalid");
+      else {
+        setState("idle");
+        setErr(code);
+      }
+    }
+  };
+
+  const hint =
+    state === "checking"
+      ? t.site.slugChecking
+      : state === "available"
+        ? t.site.slugAvailable
+        : state === "taken"
+          ? t.site.slugTaken
+          : state === "invalid"
+            ? t.site.slugInvalid
+            : null;
+
+  return (
+    <div className="space-y-1.5 border-t border-border pt-3">
+      <p className="text-xs font-medium text-muted-foreground">{t.site.pageLinkLabel}</p>
+      <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background px-3 py-1.5 text-sm focus-within:border-primary">
+          <span className="shrink-0 text-muted-foreground">{ctx.hostname}/</span>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void save();
+              }
+            }}
+            className="min-w-0 flex-1 bg-transparent outline-none"
+            aria-label={t.site.pageLinkLabel}
+          />
+        </div>
+        <button
+          type="button"
+          onClick={() => void save()}
+          disabled={state === "saving" || state === "taken" || state === "invalid" || !draft.trim() || draft.trim() === ctx.slug}
+          className="shrink-0 rounded-md border border-border px-3 py-1.5 text-sm font-medium transition-colors hover:bg-muted disabled:opacity-50"
+        >
+          {state === "saving" ? t.site.slugSaving : t.site.slugSave}
+        </button>
+      </div>
+      {hint ? (
+        <p className={`text-xs ${state === "taken" || state === "invalid" ? "text-destructive" : "text-muted-foreground"}`}>
+          {hint}
+        </p>
+      ) : null}
+      {renamed ? <p className="text-xs text-muted-foreground">{t.site.redirectNote}</p> : null}
+      {err ? (
+        <p role="alert" className="break-all text-xs text-destructive">
+          {err}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function ShareDialog({
   pageId,
   workspaceId,
@@ -154,20 +465,28 @@ export function ShareDialog({
   const [busy, setBusy] = useState(false);
   const [copiedPublish, setCopiedPublish] = useState(false);
 
+  // Custom domains + page slug (docs/architecture/features/custom-domains.md)
+  const [site, setSite] = useState<SiteState | null>(null);
+  const refreshSite = async () => {
+    setSite(await getSiteState(pageId).catch(() => null));
+  };
+
   const publishUrl =
     typeof window !== "undefined" ? `${window.location.origin}/share/p/${pageId}` : `/share/p/${pageId}`;
 
   async function reload() {
     try {
-      const [g, m, gr] = await Promise.all([
+      const [g, m, gr, st] = await Promise.all([
         listShareGrants(pageId),
         listShareableMembers(pageId).catch(() => [] as ShareMember[]),
         listWorkspaceGroups(pageId).catch(() => [] as WorkspaceGroup[]),
+        getSiteState(pageId).catch(() => null),
       ]);
       setIdentityGrants(g.identityGrants);
       setMembers(m);
       setGroups(gr);
       setPublish(g.publish);
+      setSite(st);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -517,6 +836,14 @@ export function ShareDialog({
 
         {tab === "publish" ? (
           <div className="space-y-3 p-3">
+            {/* Pretty URL on a domain-fronted ancestor (custom-domains.md).
+                Outside the published branch on purpose: a child under a
+                published root is publicly reachable via the cascade without
+                being individually published, so its site address is editable
+                either way. */}
+            {site?.sites?.[0] && !site.sites[0].isRoot ? (
+              <SlugRow pageId={pageId} ctx={site.sites[0]} t={t} onChanged={refreshSite} />
+            ) : null}
             {publish.published ? (
               <>
                 {/* One universal URL */}
@@ -549,6 +876,14 @@ export function ShareDialog({
                     aria-label={t.searchIndexing}
                   />
                 </label>
+
+                {/* Attach/manage custom domains on this published page */}
+                <DomainSection
+                  pageId={pageId}
+                  domains={site?.domains ?? []}
+                  t={t}
+                  onChanged={refreshSite}
+                />
 
                 {error ? <p role="alert" className="break-all text-xs text-destructive">{error}</p> : null}
 

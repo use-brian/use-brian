@@ -95,7 +95,9 @@ export default function WorkflowPage() {
 
   return (
     <div className="h-full w-full px-8 py-6 flex flex-col gap-5 overflow-y-auto">
-      <header className="flex items-start justify-between gap-3">
+      {/* max-md:pl-6 clears the chrome's fixed mobile hamburger (left-2
+          top-2, md:hidden) — without it the title sits underneath. */}
+      <header className="flex items-start justify-between gap-3 max-md:pl-6">
         <div className="flex flex-col gap-1">
           <h1 className="text-lg font-semibold">{t.workflowPage.title}</h1>
           <p className="text-sm text-muted-foreground">

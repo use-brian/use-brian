@@ -3,7 +3,7 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, up
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
-import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock } from '@sidanclaw/core'
+import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent } from '@sidanclaw/core'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
@@ -775,6 +775,34 @@ export function buildViewingSkillBlock(skill: {
 }
 
 /**
+ * The `# Currently viewing — deck` turn-context block for a turn whose
+ * request carried `viewingDeckId` (the app-web floating dock on the deck
+ * preview route sends it, path-derived). Lets "this deck" / "slide 3"
+ * resolve to what the user is watching; the preview refreshes live after
+ * every deck edit. Tool-agnostic on purpose (tool-awareness rule) — the
+ * deck id is the handle, not a capability promise. Kept pure + exported
+ * for chat.test.ts. Spec: docs/architecture/features/deck-generation.md.
+ */
+export function buildViewingDeckBlock(deck: {
+  id: string
+  title: string
+  version: number
+  slides: { title: string; layout?: string }[]
+}): string {
+  const outline = deck.slides
+    .map((s, i) => `${i}: ${JSON.stringify(s.title)}${s.layout && s.layout !== 'content' ? ` (${s.layout})` : ''}`)
+    .join('\n')
+  return (
+    `# Currently viewing — deck\n` +
+    `The user has this presentation deck open in the live preview right now. ` +
+    `When they say "this deck", "the presentation", or reference a slide by number or name, they mean this one. ` +
+    `The preview updates automatically whenever the deck changes.\n\n` +
+    `Deck: ${JSON.stringify(deck.title)} (deckId: ${deck.id}, version: ${deck.version})\n` +
+    `Slides (0-based index, title slide excluded):\n${outline}`
+  )
+}
+
+/**
  * Attach the per-turn `<turn_context>` envelope to the newest user message.
  *
  * Returns the new messages array, or `null` when no plain trailing user
@@ -1167,7 +1195,7 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId } = req.body as {
       message?: string
       sessionId?: string
       model?: string
@@ -1222,6 +1250,13 @@ export function chatRoutes(options: WebChatOptions): Router {
        * user couldn't open.
        */
       viewingSkillRowId?: string
+      /**
+       * Deck id the app-web floating dock sends while the user is on the
+       * deck preview route (path-derived). Injected as turn context so
+       * "this deck" / "slide 3" resolve to what they are watching.
+       * Workspace-checked against the requesting assistant's workspace.
+       */
+      viewingDeckId?: string
       /**
        * Optional caller-supplied channel id. Used by per-surface chats
        * (feed-web tuning chat, draft iteration) that want a sticky
@@ -1492,6 +1527,20 @@ export function chatRoutes(options: WebChatOptions): Router {
       // The LLM call happens here; usage gets recorded later, once the
       // session + user message rows exist for attribution. We carry the
       // classifier result through `adaptiveResearchOverhead`.
+      // Operate-site override (docs/architecture/engine/coordinator-pattern.md
+      // → "Adaptive entry and the operate-site override"): a request to open /
+      // browse / log into / act on ONE named site or URL must keep the normal
+      // query loop — the coordinator allowlist and the research workers'
+      // read-only boot snapshot structurally exclude every computer-use tool,
+      // so entering delegation makes the browse impossible (incident
+      // 2026-07-13: "browse luma" → 69-webSearch coordinator fan-out, zero
+      // browser calls). Computed deterministically here so `mode:'default'`
+      // and classifier-ineligible turns are covered too; the adaptive
+      // classifier below ORs in its language-agnostic verdict. It only gates
+      // the AUTOMATIC delegation triggers (adaptive entry, the Pro/Max
+      // splitter, the Flash standard preflight) — the explicit research
+      // toggle wins, which the `!researchMode` guard encodes.
+      let operateSiteIntent = !researchMode && !!message && detectOperateSiteIntent(message)
       let adaptiveResearchOverhead: {
         model: string | null
         usage: TokenUsage | null
@@ -1511,12 +1560,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
-        }).catch(() => ({ research: false, reason: null, usage: null, model: null }))
+        }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
           usage: adaptive.usage,
           reason: adaptive.reason,
         }
+        operateSiteIntent = operateSiteIntent || adaptive.operateSite
         if (adaptive.research) {
           researchMode = true
           // `phase` is a stable, client-localizable code; `message` stays for
@@ -2776,6 +2826,33 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
+      // ── Viewing-deck context (deck live preview) ────────────────
+      // The app-web floating dock sends `viewingDeckId` while the user is
+      // on the deck preview route. Workspace-checked against the assistant's
+      // workspace so a foreign deck id injects nothing.
+      if (
+        typeof requestedViewingDeckId === 'string' &&
+        requestedViewingDeckId &&
+        assistant.workspaceId
+      ) {
+        try {
+          const { createDeckStore } = await import('../db/deck-store.js')
+          const viewedDeck = await createDeckStore().getSystem(requestedViewingDeckId)
+          if (viewedDeck && viewedDeck.workspaceId === assistant.workspaceId) {
+            turnContextParts.push(
+              buildViewingDeckBlock({
+                id: viewedDeck.id,
+                title: viewedDeck.title,
+                version: viewedDeck.version,
+                slides: viewedDeck.spec.slides,
+              }),
+            )
+          }
+        } catch (err) {
+          console.error('[chat] viewing-deck context injection failed:', err)
+        }
+      }
+
       // ── Pending message delivery hook ──────────────────────────
       if (options.pendingMessageStore) {
         try {
@@ -3178,14 +3255,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
 
       // Inject user's connected MCP tools (custom connectors + built-in Google).
-      // For a *personal* workspace, `getConnectorUserId` resolves the owner
-      // (== sole member) so their personal connectors are available. For a
-      // *shared* workspace the owner's personal connectors are NOT exposed to
-      // members — `injectMcpTools` suppresses the owner-personal base load and
-      // draws tools only from team-native instances + `connector_grant`
-      // overlays (incident 2026-06-01). Shared with the public API channel via
-      // `applyMcpInjection` — both routes must surface the same tool set or
-      // assistants degrade silently when consumers switch transports.
+      // `getConnectorUserId` resolves the workspace owner, but for ANY
+      // workspace assistant `injectMcpTools` suppresses the owner-personal
+      // base load and draws tools only from team-native instances +
+      // `connector_grant` overlays — exposure is the injection boundary, solo
+      // included (incidents 2026-06-01 / 2026-07-14). Shared with the public
+      // API channel via `applyMcpInjection` — both routes must surface the
+      // same tool set or assistants degrade silently when consumers switch
+      // transports.
       const connectorUserId = await getConnectorUserId(user.id, assistant.workspaceId)
       const { enrichConfirmation, unavailable: unavailableCapabilities } = await applyMcpInjection({
         scope: 'chat',
@@ -3441,7 +3518,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           // asked for deep mode; running Gemini just to confirm is waste)
           // and seeds the coordinator path unconditionally.
           let splitterDecidedCoordinator = false
-          if (!researchMode) {
+          // Operate-site turns never consult the splitter — a browse of one
+          // named site must not be decomposed into search workers that cannot
+          // browse (see the operateSiteIntent block above). researchMode
+          // being true here means the explicit toggle: splitter is moot.
+          if (!researchMode && !operateSiteIntent) {
             const { classifySplit } = await import('@sidanclaw/core')
             const splitResult = await classifySplit({ provider: options.provider, message })
               .catch(() => ({ tasks: null, usage: null, model: null }))
@@ -3557,7 +3638,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               }
             })
           }
-        } else if (!isDocResearchTurn) {
+        } else if (!isDocResearchTurn && !operateSiteIntent) {
           // Standard: application-layer pre-flight.
           //
           // Skipped for a doc research turn: the preflight can return
@@ -3567,6 +3648,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           // turn's soul (RESEARCH_MODE_BLOCK) tells the model to search the web
           // and author findings itself — so it must keep those tools. Letting
           // it run its own search→author loop is the whole point of the mode.
+          //
+          // Also skipped for an operate-site turn (see operateSiteIntent
+          // above): pre-searching a site the model is about to open directly
+          // wastes worker calls and biases the turn toward synthesis-from-
+          // snippets instead of the browse the user asked for.
           try {
             const preflight = await runPreflight({
               provider: options.provider,

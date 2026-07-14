@@ -341,6 +341,8 @@ export const ja: Dictionary = {
   sharedPage: {
     footer: "sidanclaw で共有",
     unavailable: "この共有ページは利用できなくなりました。",
+    siteNotFoundTitle: "ページが見つかりません",
+    siteNotFoundBody: "このページは存在しないか、公開が終了しています。",
     poweredByCta: "sidanclaw を無料で試す",
     commentsHeading: "コメント",
     commentDrawerTitle: "コメント",
@@ -688,6 +690,34 @@ export const ja: Dictionary = {
       publishCta: "ウェブに公開",
       viewSite: "サイトを表示",
       unpublish: "公開を停止",
+      site: {
+        domainsLabel: "カスタムドメイン",
+        domainPlaceholder: "docs.yourcompany.com",
+        connect: "接続",
+        connecting: "接続中...",
+        statusLive: "公開中",
+        statusPending: "DNS 待ち",
+        statusError: "エラー",
+        recheck: "確認",
+        checking: "確認中...",
+        removeDomain: "削除",
+        removeConfirmTitle: "ドメインを切断しますか?",
+        removeConfirmBody: "{hostname} でのこのページの配信はすぐに停止します。",
+        removeConfirmCta: "切断",
+        dnsHint: "ドメインプロバイダーで次の DNS レコードを追加してください:",
+        pageLinkLabel: "ページリンク",
+        slugSave: "保存",
+        slugSaving: "保存中...",
+        slugAvailable: "利用できます",
+        slugTaken: "このドメインで既に使われています",
+        slugInvalid: "小文字の英数字とハイフンのみ使えます",
+        slugChecking: "確認中...",
+        redirectNote: "以前のリンクはここにリダイレクトされます。",
+        errNotPublished: "先にページを公開してください。",
+        errHostnameTaken: "このホスト名は既に接続されています。",
+        errInvalidHostname: "docs.yourcompany.com のようなホスト名を入力してください。",
+        errDomainLimit: "このワークスペースのドメイン数が上限に達しました。",
+      },
       generalAccessHint: "ワークスペース全員の既定",
       addPerson: "名前またはメールでメンバーを追加",
       noPeopleYet: "まだメンバーがいません。",
@@ -1466,7 +1496,6 @@ export const ja: Dictionary = {
       exposeRowError: "共有を更新できませんでした。もう一度お試しください。",
       groupShared: "ワークスペースと共有中",
       groupPersonal: "個人用",
-      groupConnected: "接続済み",
       groupAvailable: "利用可能",
       groupWorkspaceShared: "このワークスペースで利用可能",
       groupBuiltin: "ビルトイン",
@@ -1569,6 +1598,8 @@ export const ja: Dictionary = {
       editLabelLabel: "名前",
       editSensitivityLabel: "機密レベル",
       sensitivityHint: "このレベル以上の権限を持つメンバーのみが、このコネクターを表示および管理できます。",
+      confidentialVisibilityNote:
+        "機密のコネクターは、ワークスペースのオーナー、管理者、および機密権限を持つメンバーにのみ表示されます。他のメンバーには、ワークスペース内のどこにも表示されません。",
       sensitivityPublic: "公開",
       sensitivityInternal: "社内",
       sensitivityConfidential: "機密",
@@ -1585,6 +1616,7 @@ export const ja: Dictionary = {
     settingsModal: {
       title: "設定",
       close: "閉じる",
+      back: "戻る",
       account: {
         section: "アカウント",
         profile: "プロフィール",
@@ -3942,6 +3974,8 @@ export const ja: Dictionary = {
       statusOff: "取り込みオフ",
       scopePersonal: "個人",
       scopeWorkspace: "ワークスペース",
+      confidentialVisibilityNote:
+        "このソースは機密です。ワークスペースのオーナー、管理者、および機密権限を持つメンバーのみがここで確認できます。",
       personalGlobalNote:
         "オンとオフの設定は、このコネクターに対してすべてのワークスペースに適用されます。",
       personalRoutingNote:
@@ -4846,6 +4880,11 @@ export const ja: Dictionary = {
     stopConfirmBody:
       "クラウドブラウザを今すぐ閉じます。ダウンロード済みのファイルはワークスペースのファイルに保存済みです。",
     stopConfirmAction: "タスクを停止",
+    loginDoneCta: "完了: このブラウザを閉じる",
+    liveChip: {
+      active: "アシスタントのブラウザが動作中です",
+      watch: "ライブで見る",
+    },
     profiles: {
       title: "ブラウザプロフィール",
       description:
@@ -4888,6 +4927,24 @@ export const ja: Dictionary = {
       grantRevokeConfirmTitle: "この常時許可を取り消しますか？",
       grantRevokeConfirmBody: "「{skill}」は、このプロフィールでの送信のたびに再度確認するようになります。",
       grantRevokeConfirmAction: "取り消す",
+      loginLabel: "サイトにサインイン",
+      loginPlaceholder: "instagram.com または完全な URL",
+      loginAction: "サインイン用ブラウザを開く",
+      loginOpening: "開いています...",
+      loginFailed:
+        "サインイン用ブラウザを開けませんでした。サインインできるのはプロフィールの所有者のみで、このデプロイでクラウドブラウジングが設定されている必要があります。",
+      loginHint:
+        "あなたが操作するクラウドブラウザでサイトを開きます。そこでサインインして、セッションをこのプロフィールに保存してください。パスワードはサイトにのみ送られ、私たちには届きません。",
     },
+  },
+  deckPage: {
+    back: "ホーム",
+    loading: "デッキを読み込み中...",
+    notFound: "このワークスペースにそのデッキは見つかりませんでした。別の場所で作成されたか、削除された可能性があります。",
+    slides: "スライド",
+    slideCount: "{count} 枚のスライド",
+    liveHint: "アシスタントの編集に合わせてライブ更新されます",
+    download: ".pptx をダウンロード",
+    downloadFailed: "ダウンロードに失敗しました。ファイルがまだ生成中の可能性があります。もう一度お試しください。",
   },
 };

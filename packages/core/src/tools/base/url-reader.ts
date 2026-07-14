@@ -6,6 +6,7 @@ import { jinaProvider } from './fetch-jina.js'
 import { rawFetchProvider } from './fetch-raw.js'
 import { xApiFetchProvider } from './fetch-x-api.js'
 import { xaiFetchProvider } from './fetch-xai.js'
+import { isAuthWalledUrl, authWalledGuidance } from './auth-walled-hosts.js'
 import { encodeExternalCostMeta } from '../../billing/external-cost.js'
 
 /**
@@ -38,7 +39,7 @@ const fetchStack = createFetchStack({
 export const urlReaderTool = buildTool({
   name: 'urlReader',
   description:
-    'Read the main readable content of a web page by URL. Returns the extracted text, page title, and which extractor produced it. Use after `webSearch` to get full content for the URLs the model wants to cite.',
+    'Read the main readable content of a web page by URL. Returns the extracted text, page title, and which extractor produced it. Use after `webSearch` to get full content for the URLs the model wants to cite. Login-gated pages (social-network profiles like LinkedIn and similar sites that require a signed-in session) cannot be read this way; for those, surface the `webSearch` result URL and its snippet directly instead of reporting a failure.',
   inputSchema: z.object({
     url: z.string().url().describe('URL to read'),
     maxChars: z.number().optional().describe('Maximum characters to return (default 5000)'),
@@ -49,6 +50,24 @@ export const urlReaderTool = buildTool({
   maxResultSizeChars: 10_000,
 
   async execute(input, context) {
+    // Auth-walled short-circuit: pages behind a login wall (LinkedIn member
+    // profiles, Instagram, …) can never be read by the HTTP fetch stack — it
+    // 403/999s or returns the "sign in" interstitial as if it were content.
+    // Return the URL back as an actionable, non-error result so the model
+    // surfaces the link it already has instead of dead-ending and punting to
+    // the user. Discovery (finding the URL via webSearch) is unaffected.
+    // See docs/architecture/integrations/search-and-fetch.md.
+    if (isAuthWalledUrl(input.url)) {
+      return {
+        data: {
+          url: input.url,
+          readable: false,
+          reason: 'login_required',
+          note: authWalledGuidance(input.url),
+        },
+      }
+    }
+
     // Build a one-off fetch stack when maxChars differs or when a DB cache
     // store is available for write-through persistence. Otherwise reuse the
     // module-level stack which is warm on its lazy deps.

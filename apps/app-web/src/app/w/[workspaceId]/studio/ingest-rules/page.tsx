@@ -32,6 +32,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
+import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { WhatsappGroupManager } from "@/components/ingest/whatsapp-groups";
 import { IngestRuleEditor, type EditableRule } from "@/components/ingest/rule-editor";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -64,6 +65,11 @@ type IngestSource = {
   scope: "user" | "workspace";
   /** Owning workspace's name for workspace-scoped sources; null for user-scoped. */
   workspaceName: string | null;
+  /**
+   * Visibility tier — members below this clearance never receive the row
+   * (server-side filter), so the header badges it for those who can see it.
+   */
+  sensitivity: "public" | "internal" | "confidential";
   label: string;
   connectedEmail: string | null;
   connected: boolean;
@@ -547,6 +553,7 @@ export default function StudioIngestRulesPage() {
                   ? (s.workspaceName ?? copy.scopeWorkspace)
                   : copy.scopePersonal}
               </span>
+              <SensitivityBadge tier={s.sensitivity} size="xs" />
             </div>
             <p className="truncate text-[12px] text-muted-foreground">
               {s.connectedEmail
@@ -578,6 +585,16 @@ export default function StudioIngestRulesPage() {
               {copy.emptyCta}
             </Link>
           </AttentionBanner>
+        )}
+
+        {/* Confidential sources are invisible to members below that
+            clearance (only owners, admins, and confidential-cleared members
+            receive the row) — say so, or teammates comparing screens read
+            the difference as a bug. */}
+        {s.sensitivity === "confidential" && (
+          <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
+            {copy.confidentialVisibilityNote}
+          </div>
         )}
 
         {/* Personal (scope='user') sources are account-level. The API only

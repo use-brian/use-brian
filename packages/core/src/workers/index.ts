@@ -3,7 +3,7 @@ export type { WorkerManager, WorkerResult, WorkerStatus, WorkerOptions, WorkerRu
 export { createWorkerTools } from './tools.js'
 export { classifySplit } from './splitter.js'
 export type { SplitResult, SplitOptions } from './splitter.js'
-export { classifyResearchIntent } from './research-classifier.js'
+export { classifyResearchIntent, detectOperateSiteIntent } from './research-classifier.js'
 export type {
   ResearchClassifyOptions,
   ResearchClassifyResult,

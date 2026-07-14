@@ -156,6 +156,13 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'saveFileBytes', description: 'Save a file from raw bytes (base64) to the workspace, preserving the original', classification: 'write', defaultPolicy: 'ask' },
     { name: 'sendFile',    description: 'Attach a workspace file to the reply as a downloadable document', classification: 'read',       defaultPolicy: 'allow' },
     { name: 'fileDelete',  description: 'Permanently delete a workspace file',                           classification: 'destructive', defaultPolicy: 'ask' },
+    // Deck tools (docs/architecture/features/deck-generation.md): 'allow' by
+    // default because they only write the deck artifact inside the workspace
+    // (row + decks/<id>.pptx file); outbound delivery stays gated by
+    // sendFile / gmail confirmations.
+    { name: 'generatePowerpoint', description: 'Create a PowerPoint deck as a workspace artifact (spec + .pptx file, live preview)', classification: 'write', defaultPolicy: 'allow' },
+    { name: 'updatePowerpoint',   description: 'Edit a deck by slide operations and rebuild its .pptx in place',                     classification: 'write', defaultPolicy: 'allow' },
+    { name: 'getPowerpoint',      description: 'Read a deck\'s current slides and version',                                          classification: 'read',  defaultPolicy: 'allow' },
   ],
   // Google Cloud Storage (bring-your-own storage) — a credentialed connector
   // with NO assistant tools. It only rebinds where the Workspace Files bytes
@@ -175,6 +182,11 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'browserClick', description: 'Click an element by ref (send-like clicks require approval)', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserType', description: 'Type text into an element by ref', classification: 'write', defaultPolicy: 'allow' },
     { name: 'browserCurrentUrl', description: 'Get the current URL and title of the controlled tab', classification: 'read', defaultPolicy: 'allow' },
+    // browserReadPage is the sends-forbidden reader research workers use
+    // (cloud-only, identity-less, no click/type surface at all). It is not
+    // injected into interactive turns — see computer-use.md → "Reaching the
+    // browser" — but it is model-callable, so it stays governable here.
+    { name: 'browserReadPage', description: 'Read a rendered page in the governed cloud browser (read-only; used by research workers)', classification: 'read', defaultPolicy: 'allow' },
     // runBrowserSkill is 'allow' by default for the same reason browserClick
     // is: the governed runner gates every terminal send in-flight
     // (grant / async approval / verb ceiling) — a static 'ask' would gate
@@ -244,6 +256,9 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'saveFileToBrain',
     'sendFile',
     'fileDelete',
+    'generatePowerpoint',
+    'updatePowerpoint',
+    'getPowerpoint',
   ],
   // Computer use (docs/architecture/engine/computer-use.md): wired at boot
   // from packages/core/src/sandbox/tools.ts, always present (a missing
@@ -254,6 +269,7 @@ export const BOOT_INJECTED_BUILTIN_TOOLS: Record<string, readonly string[]> = {
     'browserClick',
     'browserType',
     'browserCurrentUrl',
+    'browserReadPage',
     'runBrowserSkill',
     'listBrowserSkills',
     'listBrowserProfiles',

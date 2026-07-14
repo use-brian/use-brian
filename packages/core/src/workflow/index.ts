@@ -75,6 +75,8 @@ export {
   type WorkflowToolEvent,
 } from './tools.js'
 
+export { stepAdvisories, type StepAdvisory } from './advisories.js'
+
 export {
   createScheduleWorkflowTool,
   type ScheduleWorkflowToolDeps,

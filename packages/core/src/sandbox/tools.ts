@@ -4,7 +4,9 @@
  * picked by the live toggle seeded from `profile.defaultBackend` (R2-3),
  * send-gated (§8 "no unattended state-change"), fused (P1.8), and
  * hard-blocked on autonomous paths unless unattended computer-use is enabled
- * AND the workspace is on a paid plan (Barrier 2 + R2-8).
+ * AND the workspace is on a paid plan (Barrier 2 + R2-8). Plus one
+ * sends-forbidden reader, `browserReadPage` (§12 "Part 2") — research
+ * workers' only browser surface, deliberately NOT in the boot tool map.
  *
  * Registered at boot via the files pattern: rows in
  * `OFFICIAL_CONNECTOR_TOOLS.computer` + `BOOT_INJECTED_BUILTIN_TOOLS.computer`
@@ -44,7 +46,7 @@ export type ResolveComputerToolPolicy = (
 
 export type ComputerToolEvent = {
   type: 'browser_action'
-  op: 'navigate' | 'snapshot' | 'click' | 'type' | 'currentUrl'
+  op: 'navigate' | 'snapshot' | 'click' | 'type' | 'currentUrl' | 'readPage'
   backend: BrowserBackendKind
   /** Hostname only — never the full URL, never page content. */
   host: string | null
@@ -147,6 +149,13 @@ export type ComputerTools = {
   browserClick: Tool
   browserType: Tool
   browserCurrentUrl: Tool
+  /**
+   * The sends-forbidden one-shot reader (computer-use.md §12 "Part 2"):
+   * navigate + snapshot as one atomic, serialized, identity-less, cloud-only
+   * call. NOT registered into the boot tool map — boot hands it exclusively
+   * to the WorkerManager for research workers.
+   */
+  browserReadPage: Tool
   /**
    * The live backend toggle (R2-3): a user flip that wins for the session
    * (the Profile-Management/computer routes call this; `null` clears it back
@@ -427,9 +436,18 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             meta: { backend, loginWall: true },
           }
         }
+        // The live view is not only for login walls: sites like Instagram
+        // embed their login form at a plain URL the wall regex can never
+        // match, and "let me watch / take over" is a user ask the model must
+        // be able to answer. Every cloud navigate carries the link.
+        const liveLink = backend === 'cloud' ? opts.takeoverLinkFor?.(context) : null
         return {
-          data: `Opened ${res.url} (${backend} browser). Take browserSnapshot to see the page.`,
-          meta: { backend },
+          data:
+            `Opened ${res.url} (${backend} browser). Take browserSnapshot to see the page.` +
+            (liveLink
+              ? ` The user can watch this browser live and take over (e.g. to sign in) at: ${liveLink} — share that link whenever they ask to watch, sign in, or take over.`
+              : ''),
+          meta: { backend, ...(liveLink ? { takeoverUrl: liveLink } : {}) },
         }
       } catch (err) {
         emit(
@@ -633,12 +651,136 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     },
   })
 
+  // ── browserReadPage (research read-browse, §12 Part 2) ──────
+  //
+  // The sends-forbidden variant: one atomic navigate + snapshot on the CLOUD
+  // backend only, browsing identity-less (this tool never resolves a
+  // profile; if the session's sandbox already carries a signed-in state the
+  // user built interactively, reads run in it — the tool just never
+  // *initiates* an identity). Cloud-only is a hard rule: this tool's caller
+  // is a headless research worker, and a headless worker must never drive
+  // the user's real Chrome tab through the local extension.
+  //
+  // Concurrent research workers share the spawning session's sessionId and
+  // therefore ONE sandbox browser, so reads serialize through a per-session
+  // promise chain — without it, worker B's navigate lands between worker A's
+  // navigate and snapshot and A reads B's page.
+
+  const readLocks = new Map<string, Promise<unknown>>()
+
+  function withReadLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = readLocks.get(sessionId) ?? Promise.resolve()
+    const run = prev.then(fn, fn)
+    const guard = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    readLocks.set(sessionId, guard)
+    void guard.then(() => {
+      if (readLocks.get(sessionId) === guard) readLocks.delete(sessionId)
+    })
+    return run
+  }
+
+  function renderReadPage(snapshot: BrowserSnapshot): string {
+    // Same content as renderSnapshot minus the @ref tokens — the reader has
+    // no click/type surface, so refs would only tempt the model to act.
+    const lines = snapshot.nodes.slice(0, SNAPSHOT_MAX_LINES).map((n) => {
+      const value = n.value ? ` value=${JSON.stringify(n.value)}` : ''
+      return `${n.role} ${JSON.stringify(n.name)}${value}`
+    })
+    const truncated =
+      snapshot.nodes.length > SNAPSHOT_MAX_LINES
+        ? `\n… ${snapshot.nodes.length - SNAPSHOT_MAX_LINES} more elements (page continues beyond this cap)`
+        : ''
+    return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${truncated}`
+  }
+
+  const browserReadPage = buildTool({
+    name: 'browserReadPage',
+    description:
+      'Open a URL in the governed cloud browser and return the rendered page as a list of its elements. Read-only: no clicking, typing, signing in, or acting — for that the user must run a normal chat turn. Use when a page needs JavaScript to render or blocks plain HTTP readers. Reads on the same session run one at a time, so read the 1-2 URLs that matter, not every link.',
+    inputSchema: z.object({
+      url: z.string().min(1).describe('Absolute http(s) URL to read'),
+    }),
+    isReadOnly: true,
+    isConcurrencySafe: false,
+    requiresConfirmation: false,
+    resolveConfirmation: policyAsk('browserReadPage'),
+    timeoutMs: 90_000,
+    maxResultSizeChars: 24_000,
+    async execute(input, context) {
+      const gate = await gates('browserReadPage', context)
+      if ('error' in gate) return gate.error
+      let parsed: URL
+      try {
+        parsed = new URL(input.url)
+      } catch {
+        return { data: `ERROR: "${input.url}" is not a valid absolute URL.`, isError: true }
+      }
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        return { data: 'ERROR: Only http(s) URLs can be opened in the browser.', isError: true }
+      }
+      if (!cloudAvailable()) {
+        return {
+          data:
+            'ERROR: The governed cloud browser is not configured on this deployment, so pages cannot be read this way. Report the URL itself as the finding, citing the search snippet.',
+          isError: true,
+        }
+      }
+      // Identity-less on purpose: no profile resolution, no profileId in the
+      // call context — a worker read never initiates a vault injection.
+      const ctx: BrowserCallContext = {
+        userId: context.userId,
+        workspaceId: context.workspaceId ?? '',
+        sessionId: context.sessionId,
+      }
+      return withReadLock(context.sessionId, async (): Promise<ToolResult> => {
+        try {
+          const res = await opts.cloud.navigate(ctx, input.url)
+          // Interactive refs (if any) are stale now — the sandbox page moved.
+          gate.state.refLabels.clear()
+          if (looksLikeLoginWall(res.url)) {
+            // No pause, no Take-Over link: a headless worker cannot wait for
+            // a sign-in, and other workers may need the sandbox next. The
+            // URL itself is the deliverable — same posture as urlReader's
+            // auth-walled short-circuit.
+            emit({ type: 'browser_action', op: 'readPage', backend: 'cloud', host: hostOf(res.url), ok: true }, context)
+            return {
+              data:
+                `This page sits behind a login (${res.url}), and this reader cannot sign in. ` +
+                `Report the URL as the finding and note it needs a signed-in session — the user can open it from a normal chat turn, where sign-in is possible. Do not retry this URL.`,
+              meta: { backend: 'cloud', loginWall: true },
+            }
+          }
+          const snapshot = await opts.cloud.snapshot(ctx)
+          emit({ type: 'browser_action', op: 'readPage', backend: 'cloud', host: hostOf(snapshot.url), ok: true }, context)
+          return { data: renderReadPage(snapshot), meta: { backend: 'cloud', nodes: snapshot.nodes.length } }
+        } catch (err) {
+          emit(
+            {
+              type: 'browser_action',
+              op: 'readPage',
+              backend: 'cloud',
+              host: hostOf(input.url),
+              ok: false,
+              code: err instanceof BrowserBackendError ? err.code : undefined,
+            },
+            context,
+          )
+          return backendErrorResult(err)
+        }
+      })
+    },
+  })
+
   return {
     browserNavigate,
     browserSnapshot,
     browserClick,
     browserType,
     browserCurrentUrl,
+    browserReadPage,
     setSessionBackendOverride(sessionId, backend) {
       const state = sessions.get(sessionId)
       if (state) {

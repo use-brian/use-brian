@@ -8,15 +8,14 @@
  * free-tier workspace cap, and deletion-protection. It gates **no** connector
  * or sharing behavior — every workspace is treated identically there.
  *
- * **Connector scoping (security):** while a workspace's owner is its *sole*
- * member, the owner's personal (`scope='user'`) connectors are that
- * workspace's connectors. The instant it has teammates it must NOT expose
- * the owner's personal connectors to other members — its tool access comes
+ * **Connector scoping (security):** a workspace assistant's tool access comes
  * only from team-native (`scope='workspace'`) instances + member-exposure
- * grants (`connector_grant`). `injectMcpTools` enforces this via
- * `isSoloWorkspaceSystem` — live member count ≤ 1, regardless of
- * `is_personal` (see incident 2026-06-01 / 2026-06-02 and
- * docs/architecture/integrations/mcp.md → "Workspace connector scoping").
+ * grants (`connector_grant`) — a member's personal (`scope='user'`)
+ * connectors never load implicitly, whatever the member count. Exposure is
+ * the boundary between teammates AND between the owner's own workspaces
+ * (incidents 2026-06-01 / 2026-06-02 / 2026-07-14; the old solo-workspace
+ * base load and its `isSoloWorkspaceSystem` gate were removed 2026-07-14).
+ * See docs/architecture/integrations/mcp.md → "Workspace connector scoping".
  *
  * See docs/architecture/platform/workspaces.md and migration 110 (the
  * team→workspace rename + primary assistant + personal collapse).
@@ -49,19 +48,19 @@ export type Workspace = {
    * (named "Personal"). A pure **label/anchor**: it enforces the free-tier
    * "only paid users can create more workspaces" cap, anchors default-assistant
    * lookup + ingest routing, and protects the workspace from deletion. It gates
-   * **no** connector/sharing behavior — that all keys on `memberCount` (solo vs
-   * shared) so every workspace is treated identically. See migration 110 §7.
+   * **no** connector/sharing behavior — connector access is exposure-driven
+   * (`connector_grant`) in every workspace, so all are treated identically.
+   * See migration 110 §7.
    */
   isPersonal: boolean
   /**
    * Live count of `workspace_members` rows. Computed by `list()` / `get()` via
    * `memberCountsSystem` (the OWNER pool) — NOT as a subquery inside the
    * RLS-enforced read, where the `wm_own_workspace` policy would confine the
-   * count to the caller's own row and always yield 1. The frontend reads it to
-   * decide solo-vs-shared behavior (e.g. whether to auto-expose a connector and
-   * whether to show the "Share with this workspace" control). Undefined on the
-   * create/update/system return paths that don't compute it — treat absent as 1
-   * (solo).
+   * count to the caller's own row and always yield 1. The frontend reads it
+   * for member-count display and shared-workspace affordances. Undefined on
+   * the create/update/system return paths that don't compute it — treat
+   * absent as 1 (solo).
    */
   memberCount?: number
   /**
@@ -165,9 +164,8 @@ const MEMBER_COLUMNS = `
 // (`wm_own_workspace`: `user_id = current_user_id`) confines any read of that
 // table to the caller's single membership row. A count taken under RLS is
 // therefore ALWAYS 1, which made every multi-member workspace mis-render as
-// "solo" in the connector-sharing UI — `isSharedWorkspace(memberCount)` keys on
-// `memberCount > 1` (incident 2026-07-01). We mirror `isSoloWorkspaceSystem` /
-// `listMembers`, which use the owner pool for exactly this reason. Membership
+// "solo" in the connector-sharing UI of the time (incident 2026-07-01). We
+// mirror `listMembers`, which uses the owner pool for exactly this reason. Membership
 // size is not sensitive to a member (they can already call `listMembers`), so
 // lifting only the count onto the owner pool exposes nothing new; the workspace
 // rows themselves stay RLS-gated.
@@ -228,17 +226,18 @@ export type WorkspaceStore = {
 /**
  * Resolve the userId whose *personal* connector credentials a turn may
  * use. This always returns the workspace owner for a workspace assistant.
- * That is only *acted on* when the owner is the sole member — `injectMcpTools`
- * gates the owner-personal base-load on `isSoloWorkspaceSystem`
- * (live member count ≤ 1) and SUPPRESSES it for any multi-member workspace,
- * which draws tools only from team-native instances + `connector_grant`
- * overlays. Falls back to `baseUserId` if lookup fails or the assistant is
+ * Since 2026-07-14 that identity is never *acted on* for the connector base
+ * load — `injectMcpTools` suppresses owner-personal connectors for EVERY
+ * workspace assistant (tools come solely from team-native instances +
+ * `connector_grant` overlays; only workspace-less personal assistants
+ * base-load). Falls back to `baseUserId` if lookup fails or the assistant is
  * not workspace-bound.
  *
- * NOTE: this does NOT itself enforce the shared-workspace isolation — the
- * gate lives in `injectMcpTools`. Retiring this resolver entirely (per the
- * Stage-5 `resolveConnectorInstances` plan) is blocked until solo workspaces
- * stop relying on `scope='user'` connectors. See incident 2026-06-01.
+ * NOTE: this does NOT itself enforce the workspace isolation — the gate
+ * lives in `injectMcpTools`. With no workspace path relying on the
+ * `scope='user'` base load anymore, fully retiring this resolver (per the
+ * Stage-5 `resolveConnectorInstances` plan) is unblocked; it survives only
+ * as the legacy credential-owner resolution at the call sites.
  */
 export async function getConnectorUserId(
   baseUserId: string,
@@ -257,56 +256,6 @@ export async function getConnectorUserId(
     console.error('[workspace-store] workspace owner lookup failed, falling back to base user:', err)
   }
   return baseUserId
-}
-
-/**
- * System-level check that gates the owner-personal connector **base load**
- * in `injectMcpTools` (and the editor list in `GET /:assistantId/connectors`):
- * may this workspace inject the owner's personal `scope='user'` connectors as
- * its base tool set? True only when the owner is still the workspace's **sole
- * member** — keyed purely on the live `workspace_members` count, never on
- * `is_personal`.
- *
- * Why member count, not `is_personal` (incident 2026-06-01, re-opened
- * 2026-06-02): `is_personal` is NOT a "solo" flag. Per
- * `docs/architecture/platform/workspaces.md`, it is only a label marking the
- * auto-created **default** workspace, and teammates are invited *into that
- * same workspace* with no "promote to team" migration. So an `is_personal=true`
- * workspace routinely has multiple members — keying the gate on the flag loaded
- * the owner's private Gmail/Notion/etc. for every member (owner impersonation).
- * The real "is the owner the only one who could be impersonated" signal is the
- * live member count, so we check it directly and treat every workspace
- * identically: a solo workspace of any kind loads the owner's personal
- * connectors (the owner is the only identity that could be acted as, so there
- * is nothing to leak); a multi-member workspace of any kind suppresses them,
- * drawing tools solely from team-native instances + explicit `connector_grant`
- * exposures.
- *
- * Uses bare `query()` (system bypass) so the member COUNT sees every row, not
- * just the caller's own `workspace_members` row under RLS.
- *
- * Fails CLOSED: on a missing row or a lookup error this returns `false`
- * (suppress the owner's personal connectors). A transient failure therefore
- * degrades to "tools temporarily missing" for that turn, never to re-opening
- * the leak.
- */
-export async function isSoloWorkspaceSystem(
-  workspaceId: string,
-): Promise<boolean> {
-  try {
-    const result = await query<{ solo: boolean }>(
-      `SELECT (
-         (SELECT count(*) FROM workspace_members wm WHERE wm.workspace_id = w.id) <= 1
-       ) AS solo
-       FROM workspaces w
-       WHERE w.id = $1`,
-      [workspaceId],
-    )
-    return result.rows[0]?.solo === true
-  } catch (err) {
-    console.error('[workspace-store] isSoloWorkspaceSystem failed, treating as shared:', err)
-    return false
-  }
 }
 
 /**

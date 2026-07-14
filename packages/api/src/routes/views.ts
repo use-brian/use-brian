@@ -29,6 +29,13 @@ import multer from 'multer'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import {
+  isValidPageSlug,
+  normalizeHostname,
+  suggestPageSlug,
+} from '@sidanclaw/shared/page-slugs'
+import type { PageDomainStore } from '../db/page-domain-store.js'
+import type { DomainProvisioner } from '../domains/provisioner.js'
+import {
   AUTO_TITLE_MIN_CHARS,
   type AnalyticsLogger,
   bindingConfigSchema,
@@ -130,6 +137,17 @@ export type ViewsRouteOptions = {
    * the share routes return 503 (sharing not configured).
    */
   pageGrantStore?: PageGrantStore
+  /**
+   * Custom domains + page slugs (migration 324). When wired, the
+   * `GET /views/:id/site`, domain-attach/check/detach, and slug routes are
+   * live; when absent they return 503. `domainProvisioner` handles DNS
+   * instructions + verification (manual or Vercel — see
+   * docs/architecture/features/custom-domains.md → "Provisioner seam").
+   */
+  pageDomainStore?: PageDomainStore
+  domainProvisioner?: DomainProvisioner
+  /** Per-workspace attached-domain cap (default 5). */
+  pageDomainsMaxPerWorkspace?: number
   /**
    * Workspace groups (migration 252) — backs the Share-tab "Groups" + the
    * member/group pickers. Optional: when absent the group routes return 503.
@@ -875,6 +893,205 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     await opts.pageGrantStore.unpublishPage(userId, view.id)
     publishPageShareChange(view.id)
     res.json({ published: false })
+  })
+
+  // ── Custom domains + page slugs (migration 324) ──────────────────────
+  // docs/architecture/features/custom-domains.md. A domain fronts a
+  // PUBLISHED page's subtree; slugs are domain-scoped pretty paths.
+
+  // GET /views/:id/site — Publish-tab state: domains attached to THIS page,
+  // plus this page's position under any domain-fronted ancestor (the slug
+  // editor's context). `sites[0]` is the nearest.
+  router.get('/views/:id/site', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const view = await opts.savedViewStore.getById(userId, req.params.id)
+    if (!view) return notFound(res, 'View not found')
+    const [domains, context] = await Promise.all([
+      opts.pageDomainStore.listDomainsForPage(userId, view.id),
+      opts.pageDomainStore.getSiteContext(userId, view.id),
+    ])
+    const sites = await Promise.all(
+      context.map(async ({ domain, depth, currentSlug }) => {
+        const isRoot = depth === 0
+        let suggestedSlug: string | null = null
+        if (!isRoot && !currentSlug) {
+          const taken = new Set(await opts.pageDomainStore!.listSlugs(userId, domain.id))
+          suggestedSlug = suggestPageSlug(view.name ?? '', taken)
+        }
+        return {
+          domainId: domain.id,
+          hostname: domain.hostname,
+          status: domain.status,
+          rootPageId: domain.pageId,
+          isRoot,
+          slug: currentSlug,
+          suggestedSlug,
+        }
+      }),
+    )
+    res.json({ domains, sites })
+  })
+
+  const domainInputSchema = z.object({ hostname: z.string().min(1).max(300) })
+
+  // POST /views/:id/domains — attach a custom hostname to this (published)
+  // page. Provisions edge/TLS on the hosted path; returns DNS instructions.
+  router.post('/views/:id/domains', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore || !opts.domainProvisioner) {
+      return res.status(503).json({ error: 'Custom domains are not configured' })
+    }
+    const parsed = domainInputSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return badRequest(res, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '))
+    }
+    const view = await opts.savedViewStore.getById(userId, req.params.id)
+    if (!view) return notFound(res, 'View not found')
+    if (!(await canManageShare(userId, view))) {
+      return res.status(403).json({ error: 'Only the page owner or a workspace admin can manage domains' })
+    }
+    const hostname = normalizeHostname(parsed.data.hostname)
+    if (!hostname) {
+      return res.status(400).json({ error: 'Not a usable public hostname', code: 'invalid_hostname' })
+    }
+    if (opts.pageGrantStore) {
+      const publish = await opts.pageGrantStore.getPublishState(userId, view.id)
+      if (!publish.published) {
+        return res.status(409).json({ error: 'Publish the page before attaching a domain', code: 'not_published' })
+      }
+    }
+    const cap = opts.pageDomainsMaxPerWorkspace ?? 5
+    const count = await opts.pageDomainStore.countDomainsForWorkspace(userId, view.workspaceId)
+    if (count >= cap) {
+      return res.status(409).json({ error: `Workspace domain limit reached (${cap})`, code: 'domain_limit' })
+    }
+    const created = await opts.pageDomainStore.createDomain({
+      userId,
+      workspaceId: view.workspaceId,
+      pageId: view.id,
+      hostname,
+      provider: opts.domainProvisioner.kind,
+    })
+    if ('error' in created) {
+      return res.status(409).json({ error: 'This hostname is already connected', code: 'hostname_taken' })
+    }
+    let domain = created
+    let instructions: unknown[] = []
+    try {
+      instructions = (await opts.domainProvisioner.add(hostname)).instructions
+    } catch (err) {
+      console.error('[views] domain provisioning failed:', err)
+      domain =
+        (await opts.pageDomainStore.updateDomainStatus(userId, created.id, {
+          status: 'error',
+          verificationError: (err as Error).message,
+        })) ?? created
+    }
+    opts.analytics?.logEvent({
+      userId,
+      eventName: 'page_domain_added',
+      metadata: { provider: sanitize(domain.provider) },
+    })
+    res.status(201).json({ domain, instructions })
+  })
+
+  // POST /views/:id/domains/:domainId/check — re-run DNS/ownership
+  // verification and refresh the stored status.
+  router.post('/views/:id/domains/:domainId/check', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore || !opts.domainProvisioner) {
+      return res.status(503).json({ error: 'Custom domains are not configured' })
+    }
+    const domain = await opts.pageDomainStore.getDomain(userId, req.params.domainId)
+    if (!domain || domain.pageId !== req.params.id) return notFound(res, 'Domain not found')
+    const result = await opts.domainProvisioner.check(domain.hostname)
+    const updated = await opts.pageDomainStore.updateDomainStatus(userId, domain.id, {
+      status: result.live ? 'live' : 'pending_dns',
+      verificationError: result.error,
+    })
+    res.json({ domain: updated ?? domain, live: result.live, instructions: result.instructions })
+  })
+
+  // DELETE /views/:id/domains/:domainId — detach. Deprovisioning is
+  // best-effort; the row delete (cascading slugs) is the source of truth.
+  router.delete('/views/:id/domains/:domainId', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const view = await opts.savedViewStore.getById(userId, req.params.id)
+    if (!view) return notFound(res, 'View not found')
+    if (!(await canManageShare(userId, view))) {
+      return res.status(403).json({ error: 'Only the page owner or a workspace admin can manage domains' })
+    }
+    const domain = await opts.pageDomainStore.getDomain(userId, req.params.domainId)
+    if (!domain || domain.pageId !== view.id) return notFound(res, 'Domain not found')
+    await opts.domainProvisioner?.remove(domain.hostname).catch((err) => {
+      console.warn('[views] domain deprovision failed:', err)
+    })
+    await opts.pageDomainStore.deleteDomain(userId, domain.id)
+    opts.analytics?.logEvent({ userId, eventName: 'page_domain_removed', metadata: {} })
+    publishPageShareChange(view.id)
+    res.json({ deleted: true })
+  })
+
+  const slugInputSchema = z.object({
+    domainId: z.string().uuid(),
+    slug: z.string().min(1).max(64),
+  })
+
+  // PUT /views/:id/slug — set/replace this page's slug on a domain. The old
+  // slug stays behind as a 301 source (history swap in the store).
+  router.put('/views/:id/slug', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const parsed = slugInputSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      return badRequest(res, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '))
+    }
+    const view = await opts.savedViewStore.getById(userId, req.params.id)
+    if (!view) return notFound(res, 'View not found')
+    if (!(await canManageShare(userId, view))) {
+      return res.status(403).json({ error: 'Only the page owner or a workspace admin can edit the page link' })
+    }
+    if (!isValidPageSlug(parsed.data.slug)) {
+      return res.status(400).json({ error: 'Not a usable slug', code: 'invalid_slug' })
+    }
+    const result = await opts.pageDomainStore.setSlug({
+      userId,
+      domainId: parsed.data.domainId,
+      pageId: view.id,
+      slug: parsed.data.slug,
+    })
+    if (!result.ok) {
+      const status = result.reason === 'domain_not_found' ? 404 : result.reason === 'slug_taken' ? 409 : 400
+      return res.status(status).json({ error: 'Could not set the page link', code: result.reason })
+    }
+    const domain = await opts.pageDomainStore.getDomain(userId, parsed.data.domainId)
+    opts.analytics?.logEvent({ userId, eventName: 'page_slug_set', metadata: {} })
+    publishPageShareChange(view.id)
+    if (domain) publishPageShareChange(domain.pageId)
+    res.json({ slug: result.slug, previousSlug: result.previousSlug })
+  })
+
+  // GET /views/:id/slug-availability?domainId&slug — the debounced editor
+  // check. `current` marks "this page already holds it".
+  router.get('/views/:id/slug-availability', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    if (!opts.pageDomainStore) return res.status(503).json({ error: 'Custom domains are not configured' })
+    const domainId = typeof req.query.domainId === 'string' ? req.query.domainId : ''
+    const slug = typeof req.query.slug === 'string' ? req.query.slug : ''
+    if (!domainId || !slug) return badRequest(res, 'domainId and slug are required')
+    const valid = isValidPageSlug(slug)
+    const holder = valid ? await opts.pageDomainStore.getSlugHolder(userId, domainId, slug) : null
+    const available = valid && (!holder || holder.pageId === req.params.id)
+    const current = Boolean(holder && holder.pageId === req.params.id && holder.isCurrent)
+    res.json({ valid, available, current })
   })
 
   const identityGrantSchema = z.object({

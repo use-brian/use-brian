@@ -123,13 +123,16 @@ export function BrainTopbar({
       </button>
       <div className="w-12 shrink-0 md:hidden" aria-hidden />
 
-      {/* Browser history — back / forward (no in-surface tab history in v1). */}
+      {/* Browser history — back / forward (no in-surface tab history in v1).
+          Hidden below `sm`: bar width is scarce there (drawer spacer +
+          breadcrumb + view toggle + counts collide at 360px) and phones have
+          OS/browser back gestures. */}
       <button
         type="button"
         onClick={() => router.back()}
         aria-label={docCopy.topbarBackAria}
         title={docCopy.topbarBackAria}
-        className={iconBtnCls}
+        className={cn(iconBtnCls, "max-sm:hidden")}
       >
         <ChevronLeft className="size-4" aria-hidden />
       </button>
@@ -138,7 +141,7 @@ export function BrainTopbar({
         onClick={() => router.forward()}
         aria-label={docCopy.topbarForwardAria}
         title={docCopy.topbarForwardAria}
-        className={cn(iconBtnCls, "mr-1")}
+        className={cn(iconBtnCls, "mr-1", "max-sm:hidden")}
       >
         <ChevronRight className="size-4" aria-hidden />
       </button>
@@ -181,8 +184,13 @@ export function BrainTopbar({
         )}
       </nav>
 
-      {/* Page-injected clusters. */}
-      <div className="flex min-w-0 flex-1 items-center gap-2 pl-2">{center}</div>
+      {/* Page-injected clusters. The center slot scrolls instead of letting
+          content paint over the right cluster when the bar is cramped — a
+          flex-shrunk `min-w-0` parent does NOT stop an inline-flex child
+          (e.g. the entries List|Graph toggle) from overflowing visually. */}
+      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto pl-2">
+        {center}
+      </div>
       {right && (
         <div className="flex shrink-0 items-center gap-2">{right}</div>
       )}

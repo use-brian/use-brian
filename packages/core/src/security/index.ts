@@ -17,4 +17,10 @@ export {
   unionCompartments,
   subsetCompartments,
 } from './compartments.js'
+export { EvidenceAccumulator } from './evidence.js'
+export type {
+  EvidenceAccumulatorOptions,
+  IdentifierKind,
+  UnverifiedIdentifier,
+} from './evidence.js'
 export type { AccessContext, AssistantKind } from './access-context.js'

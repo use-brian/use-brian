@@ -534,6 +534,69 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(systemPrompt).not.toContain("## Produce this step's output, do not restate it as a record")
   })
 
+  // ── Anti-fabrication guard, identifier-provenance widening ──
+  // A research-shaped workflow step that exhausted its tool budget mid-gather
+  // used to fill the prompt's required contact fields (emails, IG handles,
+  // LinkedIn URLs, addresses) from parametric memory; the next step then
+  // persisted the guesses as CRM records (fls.com.hk HKTVmall prospect runs,
+  // 2026-07-13). The guard now binds specific identifiers to THIS run's tool
+  // results, not just the tool-failure case.
+  it('injects the identifier-provenance fabrication guard on the workflow lane', async () => {
+    yieldsText()
+    await executorWithTools(new Map())({ ...baseParams, callerChannelType: 'workflow' })
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).toContain('## Automated run — do not fabricate')
+    expect(systemPrompt).toContain('unless it appears in a tool result from THIS run')
+    expect(systemPrompt).toContain('write "not verified" for that field')
+  })
+
+  it('omits the fabrication guard on ordinary A2A consults', async () => {
+    yieldsText()
+    await executorWithTools(new Map())(baseParams)
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).not.toContain('## Automated run — do not fabricate')
+  })
+
+  // ── Mechanical half of the fabrication guard: the evidence gate ──
+  // The prompt guard alone could not make "never persist an invented
+  // identifier" a guarantee (the HKTVmall runs shipped fabricated contacts
+  // THROUGH the widened prompt). The workflow lane now threads an
+  // EvidenceAccumulator on ToolContext: the tool executor feeds every
+  // successful tool result and hard-rejects a gated record write whose
+  // email / URL / handle / phone was observed nowhere this run.
+  it('threads a seeded, gated EvidenceAccumulator on the workflow lane', async () => {
+    yieldsText()
+    await executorWithTools(new Map())({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      question: 'Follow up with ops@fls.com.hk about the pilot.',
+    })
+    const call = mockQueryLoop.mock.calls[0][0]
+    const evidence = call.context.evidence
+    expect(evidence).toBeDefined()
+    // Gated set derives from the brain-write registry + the extras.
+    expect(evidence.shouldGate('saveContact')).toBe(true)
+    expect(evidence.shouldGate('saveCompany')).toBe(true)
+    expect(evidence.shouldGate('saveBlueprintRecord')).toBe(true)
+    expect(evidence.shouldGate('saveMemory')).toBe(true)
+    expect(evidence.shouldGate('gmailSendMessage')).toBe(true)
+    expect(evidence.shouldGate('saveFileBytes')).toBe(false)
+    expect(evidence.shouldGate('webSearch')).toBe(false)
+    // Caller-provided identifiers are seeded as legitimate provenance…
+    expect(evidence.findUnverified('{"email":"ops@fls.com.hk"}')).toEqual([])
+    // …while an unobserved one is flagged.
+    expect(evidence.findUnverified('{"email":"vicky.chen@slowood.hk"}')).toHaveLength(1)
+    // And the prompt guard names the mechanical rejection so the model
+    // reacts to it correctly instead of retrying the same value.
+    expect(call.systemPrompt as string).toContain('identifier_not_in_evidence')
+  })
+
+  it('threads no EvidenceAccumulator on ordinary A2A consults', async () => {
+    yieldsText()
+    await executorWithTools(new Map())(baseParams)
+    expect(mockQueryLoop.mock.calls[0][0].context.evidence).toBeUndefined()
+  })
+
   it('fails fast with tools_unavailable when the pinned allow-list survives as nothing (run 0477b50d)', async () => {
     // The incident's second run: `tools: ["gmailSendMessage"]` on an
     // assistant_call step → ask-drop left a zero-tool surface → the model

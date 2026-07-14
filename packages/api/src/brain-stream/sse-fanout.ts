@@ -73,6 +73,7 @@ export type BrainPrimitive =
   | 'approval'
   | 'skill'
   | 'scheduled_job'
+  | 'deck'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive

@@ -55,6 +55,7 @@ import {
   WORKFLOW_REFRESH_EVENT,
   type WorkflowRefreshDetail,
 } from "@/lib/workflow-events";
+import { DECK_REFRESH_EVENT, type DeckRefreshDetail } from "@/lib/deck-events";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -73,7 +74,8 @@ type WorkspacePrimitive =
   | "workflow_run"
   | "approval"
   | "skill"
-  | "scheduled_job";
+  | "scheduled_job"
+  | "deck";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -162,6 +164,16 @@ export function routeWorkspaceChange(
           detail: { workspaceId: payload.workspaceId, rowId: payload.rowId },
         },
       ];
+    case "deck":
+      return [
+        {
+          event: DECK_REFRESH_EVENT,
+          detail: {
+            workspaceId: payload.workspaceId,
+            rowId: payload.rowId,
+          } satisfies DeckRefreshDetail,
+        },
+      ];
     default:
       return [];
   }
@@ -175,6 +187,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: WORKFLOW_REFRESH_EVENT, detail: { workspaceId, primitive: null } },
     { event: SKILL_REFRESH_EVENT, detail: { workspaceId } },
     { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId } },
+    { event: DECK_REFRESH_EVENT, detail: { workspaceId } },
   ];
 }
 

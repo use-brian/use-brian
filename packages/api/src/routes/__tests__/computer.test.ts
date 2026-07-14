@@ -223,6 +223,47 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       expect(revoked.status).toBe(200)
       expect(vault.bundles.size).toBe(0)
     })
+
+    it('starts a user-initiated sign-in task ("Sign in to a site", owner only)', async () => {
+      const started = await request(app)
+        .post(`/api/computer/profiles/${profileId}/login`)
+        .send({ url: 'https://www.instagram.com/' })
+      expect(started.status).toBe(200)
+      expect(started.body.site).toBe('instagram.com')
+      const sessionId = started.body.sessionId as string
+      expect(sessionId.startsWith('plogin_')).toBe(true)
+
+      // The synthetic-session task is owned by the caller and pre-bound to
+      // the profile — the Take-Over live view + capture work on it unchanged.
+      const task = await request(app).get(`/api/computer/tasks/${sessionId}`)
+      expect(task.status).toBe(200)
+      expect(task.body).toMatchObject({ status: 'running', profileId, workspaceId: 'ws-1' })
+
+      const captured = await request(app)
+        .post(`/api/computer/tasks/${sessionId}/captured`)
+        .send({ site: 'instagram.com' })
+      expect(captured.status).toBe(200)
+      expect(vault.bundles.get(`${profileId}:instagram.com`)).toBeTruthy()
+
+      // A stranger cannot start a sign-in on someone else's identity.
+      const stranger = makeApp('intruder')
+      expect(
+        (
+          await request(stranger)
+            .post(`/api/computer/profiles/${profileId}/login`)
+            .send({ url: 'https://x.com/' })
+        ).status,
+      ).toBe(404)
+
+      // Only http(s) URLs can be opened.
+      expect(
+        (
+          await request(app)
+            .post(`/api/computer/profiles/${profileId}/login`)
+            .send({ url: 'file:///etc/passwd' })
+        ).status,
+      ).toBe(400)
+    })
   })
 
   it('answers honestly when nothing is configured', async () => {

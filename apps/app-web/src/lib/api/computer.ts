@@ -13,6 +13,7 @@
  *   POST   /api/computer/sessions/:sessionId/backend   live backend toggle (R2-3)
  *   GET    /api/computer/profiles?workspaceId=         Profile-Management list (R2-4)
  *   POST   /api/computer/profiles                      create a profile
+ *   POST   /api/computer/profiles/:id/login            start a user-initiated sign-in task (owner only)
  *   PATCH  /api/computer/profiles/:id                  update (owner only)
  *   DELETE /api/computer/profiles/:id                  delete (owner only)
  *   DELETE /api/computer/profiles/:id/sessions/:site   revoke one site's session
@@ -176,6 +177,28 @@ export async function createBrowserProfile(params: {
   if (!res.ok) return null;
   const body = (await res.json()) as { profile: Omit<BrowserProfile, "sessions" | "grants"> | null };
   return body.profile ? { ...body.profile, sessions: [], grants: [] } : null;
+}
+
+/**
+ * "Sign in to a site" (owner only): opens a cloud browser task bound to the
+ * profile and returns the synthetic session id for the Take-Over live view
+ * (`/w/<ws>/computer/<sessionId>?flow=login&site=<site>`), where the user
+ * signs in and captures the session into the profile.
+ */
+export async function startProfileLogin(
+  profileId: string,
+  url: string,
+): Promise<{ sessionId: string; site: string | null } | null> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/profiles/${encodeURIComponent(profileId)}/login`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    },
+  );
+  if (!res.ok) return null;
+  return (await res.json()) as { sessionId: string; site: string | null };
 }
 
 export async function updateBrowserProfile(

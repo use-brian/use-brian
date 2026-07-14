@@ -51,6 +51,7 @@ import {
   ASSISTANT_CALL_DEFAULT_BUDGET,
   runPreflight,
   buildPreflightPrompt,
+  EvidenceAccumulator,
 } from '@sidanclaw/core'
 import type { SavedViewStore, EngineHooks } from '@sidanclaw/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
@@ -60,7 +61,7 @@ import {
   getSessionMessages,
 } from '../db/sessions.js'
 import { MODEL_MAP } from '../model-resolution.js'
-import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
+import { notifyBrainWriteIfMatch, BRAIN_WRITE_TOOL_SIGNALS } from '../brain-stream/notify.js'
 import { runProactiveCompaction } from '../routes/proactive-compaction.js'
 import { registerSchedulerResolver, unregisterSchedulerResolver } from '../scheduling/confirmation-registry.js'
 import { sendConfirmationPrompt } from '../scheduling/confirmation-prompt.js'
@@ -953,12 +954,21 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // not connected, 401/"bad credentials", empty result), the model must NOT
     // substitute data from memory/training and present it as fetched; that
     // ships a fabricated deliverable (the GitHub `Bad credentials` → invented
-    // summary incident). The hard structural guarantee is a dedicated
-    // `tool_call` step (halts the run on a tool error — workflow.md "Authoring
-    // validation"); this prompt guard covers data fetched inside the consult.
+    // summary incident). Widened 2026-07-14 to successful-but-INSUFFICIENT
+    // evidence: a research-shaped step that exhausts its standard tool budget
+    // (10 calls) mid-gather used to fill the prompt's required contact fields
+    // from parametric memory — the fls.com.hk HKTVmall prospect runs shipped
+    // invented emails, Instagram handles, LinkedIn URLs, and addresses that
+    // the next step persisted as CRM records. Specific identifiers must now
+    // trace to a tool result from THIS consult or be output as "not verified";
+    // the loop-detector's budget-exhaustion copy carries the matching
+    // instruction (core/engine/tool-executor.ts). The hard structural
+    // guarantee is a dedicated `tool_call` step (halts the run on a tool
+    // error — workflow.md "Authoring validation"); this prompt guard covers
+    // data fetched inside the consult.
     const workflowGuardBlock =
       params.callerChannelType === 'workflow'
-        ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.`
+        ? `\n\n## Automated run — do not fabricate\nYou are running inside an automated workflow step with no user present to correct you. If a tool you need fails or returns an error (a connector is not connected, a token is invalid, a 401 / "bad credentials", or an empty result), do NOT substitute information from your memory or training and present it as if it were freshly fetched. Report the failure plainly and stop — a surfaced failure is the correct outcome; a fabricated or stale-from-memory result is not.\nThe same rule applies when your tool results are merely insufficient: never present a specific identifier (an email address, a social media handle or profile URL, a store or website URL, a phone number, a street address, a person's name or title) unless it appears in a tool result from THIS run. If the instruction asks for a field you could not verify before the tool budget or turn limit ran out, write "not verified" for that field instead of a plausible value; a guessed identifier presented as data becomes a false record downstream. Only when the instruction itself explicitly asks for a labelled guess may you provide one, and it must stay clearly marked as a guess wherever it appears.\nRecord writes are checked mechanically: a save that contains an email, URL, handle, or phone number you never observed this run is rejected with "identifier_not_in_evidence". If that happens, do not retry the same value or reword it; either verify it with a tool first or leave the field out and report it as not verified.`
         : ''
 
     // Record-creation restraint for workflow-origin callees. A recurring
@@ -1279,6 +1289,40 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       outputBindingBlock +
       deliveryFormatBlock
 
+    // Identifier-provenance write-gate — the MECHANICAL half of the fix-C
+    // anti-fabrication guard (`workflowGuardBlock` above is the prompt half).
+    // Workflow-origin consults run unattended, and the 2026-07-13 HKTVmall
+    // prospect incident showed the prompt guard alone cannot make "never
+    // persist an invented identifier" a guarantee: under budget pressure the
+    // callee filled required contact fields from parametric memory and the
+    // write tools persisted them. The accumulator is seeded with everything
+    // the model is SHOWN at loop start (system prompt including fan-out
+    // findings and prior-run memories, the step instruction, compacted
+    // history — caller-provided material is legitimate provenance), then the
+    // tool executor feeds every successful tool result (input-echo excluded)
+    // and rejects a gated write whose input carries an email / URL / handle /
+    // phone observed nowhere. Gated set = the brain-write registry
+    // (BRAIN_WRITE_TOOL_SIGNALS — single source of truth for "this tool
+    // writes a brain row") plus the record/KB/send writes outside it.
+    // `saveFileBytes` is deliberately NOT gated: base64 payloads can match
+    // digit patterns by chance. See
+    // docs/architecture/engine/identifier-provenance-gate.md.
+    const evidenceAccumulator =
+      params.callerChannelType === 'workflow'
+        ? new EvidenceAccumulator({
+            gatedTools: [
+              ...Object.keys(BRAIN_WRITE_TOOL_SIGNALS).filter((t) => t !== 'saveFileBytes'),
+              'saveBlueprintRecord',
+              'addKnowledgeEntry',
+              'gmailSendMessage',
+            ],
+          })
+        : undefined
+    if (evidenceAccumulator) {
+      evidenceAccumulator.note(loopSystemPrompt)
+      evidenceAccumulator.note(JSON.stringify(messages))
+    }
+
     // When the blueprint-research fill authored the page above, SKIP the
     // free-form authoring loop (don't double-author) — but stay inside this
     // try/finally so the wall-clock timer is still cleared and any registered
@@ -1322,6 +1366,9 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           workflowRunId: params.workflowRunId ?? null,
           abortSignal: abortController.signal,
           activeCapabilities: calleeCapabilities,
+          // Mechanical anti-fabrication gate (workflow-origin only; see the
+          // EvidenceAccumulator construction above).
+          evidence: evidenceAccumulator,
         },
         maxTurns: budget.maxTurns,
         maxToolCalls: budget.maxToolCalls,

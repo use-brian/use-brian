@@ -21,7 +21,6 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
-import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
 import type { McpSettingsStore, JobStore, CapabilityStore } from '@sidanclaw/core'
 import { APP_LEVEL_ASSISTANT_ID, BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
 import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@sidanclaw/core'
@@ -612,17 +611,15 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       const assistantTeamId = teamRow.rows[0]?.workspace_id ?? null
 
       // Workspace connector-scoping gate — MUST mirror injectMcpTools
-      // (packages/api/src/mcp/inject.ts, incident 2026-06-01 / 2026-06-02). The
-      // personal layer below pulls the viewer's `scope='user'` connectors. The
-      // engine only injects owner-personal connectors while the workspace is
-      // *solo* (live member count <= 1, any kind — `is_personal` is irrelevant);
-      // the moment a teammate joins it suppresses them. Surfacing them here as
+      // (packages/api/src/mcp/inject.ts, incidents 2026-06-01 / 2026-06-02 /
+      // 2026-07-14). The personal layer below pulls the viewer's `scope='user'`
+      // connectors. The engine never injects owner-personal connectors for a
+      // workspace assistant — exposure (`connector_grant`) is the injection
+      // boundary in every workspace, solo included. Surfacing them here as
       // assistant toggles otherwise advertises dead toggles AND re-draws the
-      // owner-impersonation surface that gate closed. Workspace-less personal
-      // assistants (no workspace) always load them. Fails CLOSED via the helper.
-      const loadPersonal = assistantTeamId
-        ? await isSoloWorkspaceSystem(assistantTeamId)
-        : true
+      // owner-impersonation surface that gate closed. Only workspace-less
+      // personal assistants load them.
+      const loadPersonal = !assistantTeamId
       const userConnectors = loadPersonal
         ? await options.connectorStore.list(member.userId)
         : []

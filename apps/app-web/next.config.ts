@@ -8,6 +8,14 @@ dotenv.config({ path: resolve(import.meta.dirname, "..", "..", ".env") });
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 const nextConfig: NextConfig = {
+  // Pin the turbopack workspace root to the OSS submodule root. Without
+  // this, Next's lockfile inference in the platform checkout picks the
+  // PLATFORM root (two pnpm workspaces up) and dev watches both giant
+  // trees — Watchpack dies with EMFILE and every route 404s. The OSS root
+  // covers all workspace packages app-web imports (packages/shared etc.).
+  turbopack: {
+    root: resolve(import.meta.dirname, "..", ".."),
+  },
   env: {
     NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
     API_URL: API_URL,

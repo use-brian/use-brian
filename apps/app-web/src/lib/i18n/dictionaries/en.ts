@@ -403,6 +403,8 @@ export const en = {
   sharedPage: {
     footer: "Shared with sidanclaw",
     unavailable: "This shared page is no longer available.",
+    siteNotFoundTitle: "Page not found",
+    siteNotFoundBody: "This page doesn't exist or is no longer published.",
     poweredByCta: "Try sidanclaw free",
     commentsHeading: "Comments",
     commentDrawerTitle: "Comment",
@@ -780,6 +782,34 @@ export const en = {
       publishCta: "Publish to web",
       viewSite: "View site",
       unpublish: "Unpublish",
+      site: {
+        domainsLabel: "Custom domain",
+        domainPlaceholder: "docs.yourcompany.com",
+        connect: "Connect",
+        connecting: "Connecting...",
+        statusLive: "Live",
+        statusPending: "Waiting for DNS",
+        statusError: "Error",
+        recheck: "Check",
+        checking: "Checking...",
+        removeDomain: "Remove",
+        removeConfirmTitle: "Disconnect domain?",
+        removeConfirmBody: "{hostname} will stop serving this page immediately.",
+        removeConfirmCta: "Disconnect",
+        dnsHint: "Add this DNS record at your domain provider:",
+        pageLinkLabel: "Page link",
+        slugSave: "Save",
+        slugSaving: "Saving...",
+        slugAvailable: "Available",
+        slugTaken: "Already used on this domain",
+        slugInvalid: "Use lowercase letters, numbers, and hyphens",
+        slugChecking: "Checking...",
+        redirectNote: "The previous link now redirects here.",
+        errNotPublished: "Publish the page first.",
+        errHostnameTaken: "That hostname is already connected.",
+        errInvalidHostname: "Enter a hostname like docs.yourcompany.com.",
+        errDomainLimit: "This workspace reached its domain limit.",
+      },
       generalAccessHint: "Default for everyone in the workspace",
       addPerson: "Add people by name or email",
       noPeopleYet: "No people added yet.",
@@ -1645,7 +1675,6 @@ export const en = {
       exposeRowError: "Couldn't update sharing. Try again.",
       groupShared: "Shared with workspace",
       groupPersonal: "Personal",
-      groupConnected: "Connected",
       groupAvailable: "Available",
       groupWorkspaceShared: "Available in this workspace",
       groupBuiltin: "Built-in",
@@ -1749,6 +1778,8 @@ export const en = {
       editLabelLabel: "Name",
       editSensitivityLabel: "Sensitivity",
       sensitivityHint: "Only members cleared to at least this level can see and manage this connector.",
+      confidentialVisibilityNote:
+        "Confidential connectors are visible only to workspace owners, admins, and members with confidential clearance. Other members will not see this connector anywhere in the workspace.",
       sensitivityPublic: "Public",
       sensitivityInternal: "Internal",
       sensitivityConfidential: "Confidential",
@@ -1768,6 +1799,7 @@ export const en = {
     settingsModal: {
       title: "Settings",
       close: "Close",
+      back: "Back",
       account: {
         section: "Account",
         profile: "Profile",
@@ -4150,6 +4182,8 @@ export const en = {
       statusOff: "Not ingesting",
       scopePersonal: "Personal",
       scopeWorkspace: "Workspace",
+      confidentialVisibilityNote:
+        "This source is confidential. Only workspace owners, admins, and members with confidential clearance can see it here.",
       personalGlobalNote:
         "On and off applies to this connector across all your workspaces.",
       personalRoutingNote:
@@ -5059,6 +5093,11 @@ export const en = {
     stopConfirmBody:
       "The cloud browser closes now. Anything it downloaded is already saved to your workspace files.",
     stopConfirmAction: "Stop task",
+    loginDoneCta: "Done: close this browser",
+    liveChip: {
+      active: "The assistant's browser is running",
+      watch: "Watch live",
+    },
     profiles: {
       title: "Browser profiles",
       description:
@@ -5102,7 +5141,25 @@ export const en = {
       grantRevokeConfirmBody:
         "\"{skill}\" will ask you again before every send on this profile.",
       grantRevokeConfirmAction: "Revoke",
+      loginLabel: "Sign in to a site",
+      loginPlaceholder: "instagram.com or a full URL",
+      loginAction: "Open sign-in browser",
+      loginOpening: "Opening...",
+      loginFailed:
+        "Could not open the sign-in browser. Only the profile's owner can sign in, and cloud browsing must be configured on this deployment.",
+      loginHint:
+        "Opens the site in a cloud browser you control. Sign in there and save the session into this profile; your password goes to the site only, never to us.",
     },
+  },
+  deckPage: {
+    back: "Home",
+    loading: "Loading deck...",
+    notFound: "This deck was not found in this workspace. It may have been created elsewhere or deleted.",
+    slides: "Slides",
+    slideCount: "{count} slides",
+    liveHint: "updates live as your assistant edits",
+    download: "Download .pptx",
+    downloadFailed: "Download failed. The deck file may still be building; try again.",
   },
 };
 

@@ -197,6 +197,7 @@ Principles:
 - **Parallelism**: multiple workers per wave, multiple waves until gaps close.
 - **Triangulation**: ≥2 sources = high-confidence; single-source claims must be flagged "(single-source)".
 - **Never fabricate** worker results. They arrive as later user-role messages with \`<worker-findings>\` XML.
+- **Identifiers are evidence-bound**: a specific email address, social handle or profile URL, website URL, or phone number may appear in your answer or in a saved record ONLY if a worker finding or tool result from this conversation contains it. A field you could not verify is written as "not verified" — never filled with a plausible value.
 - **Synthesize yourself** — don't write follow-up worker prompts that say "based on prior findings."
 
 "No public footprint" is valid only after ≥3 distinct angles failed under urlReader-backed inspection.

@@ -57,13 +57,13 @@ import { BrowseDirectory } from "./browse-directory";
 import { DrivePicker, type PickedFile } from "@/components/drive-picker";
 import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
+import { SensitivityBadge } from "@/components/sensitivity-badge";
 import { AddConnectorMenu } from "@/components/connectors/add-connector-menu";
 import { PreflightHeadersSection } from "@/components/connectors/preflight-headers-section";
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
 import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
 import { useWorkspaces } from "@/contexts/workspace-context";
-import { isSharedWorkspace } from "@/lib/workspace-permissions";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { cn } from "@/lib/utils";
@@ -1575,28 +1575,17 @@ function ConnectorsList() {
   // bare provider slug (the OAuth `?connected=` return arms selection by slug
   // before the refetched row carries its instance UUID); null / stale keys
   // fall back to the first rail row.
-  const sharedWorkspace = active ? isSharedWorkspace(active.memberCount) : false;
   const grouped = groupConnectors(connectors, {
-    sharedWorkspace,
     exposedGrants,
     builtinIds: BUILTIN_PRIMITIVE_CONNECTOR_IDS,
   });
-  const railGroups = (
-    sharedWorkspace
-      ? [
-          { id: "shared", label: tc.groupShared, rows: grouped.shared },
-          { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
-          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
-          { id: "available", label: tc.groupAvailable, rows: grouped.available },
-          { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
-        ]
-      : [
-          { id: "personal", label: tc.groupConnected, rows: grouped.personal },
-          { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
-          { id: "available", label: tc.groupAvailable, rows: grouped.available },
-          { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
-        ]
-  ).filter((g) => g.rows.length > 0);
+  const railGroups = [
+    { id: "shared", label: tc.groupShared, rows: grouped.shared },
+    { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
+    { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
+    { id: "available", label: tc.groupAvailable, rows: grouped.available },
+    { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
+  ].filter((g) => g.rows.length > 0);
   const railOrder = railGroups.flatMap((g) => g.rows);
   const sel =
     railOrder.find((c) => rowId(c) === selected) ??
@@ -1836,9 +1825,15 @@ function ConnectorsList() {
                       <ConnectorIcon connectorId={sel.id} iconUrl={sel.icon_url} />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <h2 className="truncate text-[15px] font-semibold tracking-tight">
-                        {sel.label ?? sel.name}
-                      </h2>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h2 className="truncate text-[15px] font-semibold tracking-tight">
+                          {sel.label ?? sel.name}
+                        </h2>
+                        {/* Visibility tier — surfaced on the header, not only
+                            inside the Edit form, so an admin can tell at a
+                            glance why a member reports "I can't see this". */}
+                        <SensitivityBadge tier={sensitivity} size="xs" />
+                      </div>
                       <p className="text-[12px] text-muted-foreground">
                         {tc.workspaceSharedTeamNative}
                       </p>
@@ -1852,6 +1847,9 @@ function ConnectorsList() {
 
                   <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-[12px] leading-relaxed text-muted-foreground">
                     {tc.workspaceOwnedNote}
+                    {sensitivity === "confidential" && (
+                      <p className="mt-1">{tc.confidentialVisibilityNote}</p>
+                    )}
                   </div>
 
                   {wsManageError && (

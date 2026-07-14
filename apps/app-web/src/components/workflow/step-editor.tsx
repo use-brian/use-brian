@@ -719,7 +719,7 @@ function ToolsField({
             placeholder={b.toolsSearchPlaceholder}
             aria-label={b.toolsSearchPlaceholder}
             autoFocus
-            className="h-5 w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+            className="h-5 w-full bg-transparent text-sm text-foreground outline-none focus-visible:shadow-none placeholder:text-muted-foreground"
           />
         </div>
 
@@ -1309,8 +1309,10 @@ function SkillsField({
         <div className="text-xs text-muted-foreground">{b.skillsEmpty}</div>
       ) : (
         <div className="flex flex-col gap-2 rounded-lg border border-border bg-background p-2">
-          {/* Search bar (template-gallery pattern) */}
-          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5">
+          {/* Search bar (template-gallery pattern). Composite field: the box
+              draws the focus ring; the inner input opts out of the global
+              :focus-visible ring (`focus-visible:shadow-none`). */}
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
             <Search className="size-4 shrink-0 text-muted-foreground" aria-hidden />
             <input
               type="text"
@@ -1318,7 +1320,7 @@ function SkillsField({
               onChange={(e) => setQuery(e.target.value)}
               placeholder={b.skillsSearchPlaceholder}
               disabled={disabled}
-              className="w-full bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+              className="w-full bg-transparent text-sm text-foreground outline-none focus-visible:shadow-none placeholder:text-muted-foreground"
             />
           </div>
 

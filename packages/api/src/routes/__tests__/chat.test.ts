@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
 import type { Message } from '@sidanclaw/core'
 
 describe('[COMP:api/chat-route] sanitizeTitle', () => {
@@ -299,6 +299,37 @@ describe('[COMP:api/chat-route] buildViewingSkillBlock', () => {
     const long = buildViewingSkillBlock({ ...base, content: 'x'.repeat(7000) })
     expect(long).toContain('…(truncated)')
     expect(long.length).toBeLessThan(7000)
+  })
+})
+
+describe('[COMP:api/chat-viewing-deck] buildViewingDeckBlock', () => {
+  const deck = {
+    id: 'deck-1',
+    title: 'Seed Round Deck',
+    version: 3,
+    slides: [
+      { title: 'The problem', layout: 'statement' },
+      { title: 'Agenda' },
+      { title: 'Traction', layout: 'stats' },
+    ],
+  }
+
+  it('carries the identity, the 0-based slide outline, and the "this deck" resolution line', () => {
+    const out = buildViewingDeckBlock(deck)
+    expect(out).toContain('# Currently viewing — deck')
+    expect(out).toContain('"Seed Round Deck"')
+    expect(out).toContain('deckId: deck-1')
+    expect(out).toContain('version: 3')
+    expect(out).toContain('0: "The problem" (statement)')
+    expect(out).toContain('1: "Agenda"')
+    expect(out).not.toContain('1: "Agenda" (content)') // default layout unannotated
+    expect(out).toContain('this deck')
+    expect(out).toContain('title slide excluded')
+  })
+
+  it('is tool-agnostic (tool-awareness rule)', () => {
+    const out = buildViewingDeckBlock(deck)
+    expect(out).not.toMatch(/updatePowerpoint|generatePowerpoint|getPowerpoint|sendFile/)
   })
 })
 

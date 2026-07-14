@@ -56,7 +56,8 @@ export function createGoalTools(store: GoalStore, opts?: GoalToolOptions): { set
     inputSchema: z.object({
       outcome: z.string().min(1).max(2000).describe('The end-state in one line (e.g. "Close the Acme deal").'),
       done_when: doneWhenSchema.describe(
-        'The verifiable completion predicate. {"kind":"subtasks"} = all sub-tasks/sub-goals of the host are closed; {"kind":"query","query":{"predicate":{...}}} = a brain/DB condition; combine with {"all":[...]} / {"any":[...]} / {"not":...}. Must be checkable, never prose.',
+        'The verifiable completion predicate. {"kind":"subtasks"} = all sub-tasks/sub-goals of the host are closed; {"kind":"query","query":{"predicate":{...}}} = a brain/DB condition; combine with {"all":[...]} / {"any":[...]} / {"not":...}. Must be checkable, never prose. ' +
+          'Evaluated query predicates: {"hostTaskDone":true} (the bound task is done) and {"entityCount":{"kind":"company","min":20,"attributeEquals":{"key":"prospect","value":"true"}}} (at least `min` saved entities of that kind exist, optionally filtered by ONE attribute equality) — for "until N records exist" goals, have each iteration save entities with a marker attribute and this counts them. Any other query predicate is not evaluated yet and will NEVER complete the goal.',
       ),
       host_type: hostTypeEnum.optional().describe('Bind the goal to drive an existing object. Omit for a self-hosted goal measured over its own sub-goals.'),
       host_id: idShape.optional().describe('UUID of the host object — required when host_type is set.'),

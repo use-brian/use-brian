@@ -304,6 +304,7 @@ function renderChildBlocks(
   block: PublicBlock,
   source: PublicSource,
   mounted: boolean,
+  paths?: Record<string, string>,
 ): ReactNode {
   const children = (block as { children?: PublicBlock[] }).children;
   if (!Array.isArray(children) || children.length === 0) return null;
@@ -327,7 +328,7 @@ function renderChildBlocks(
     const child = children[i];
     out.push(
       <Fragment key={child.id || `${block.id}-c${i}`}>
-        <BlockView block={child} widget={undefined} source={source} mounted={mounted} />
+        <BlockView block={child} widget={undefined} source={source} mounted={mounted} paths={paths} />
       </Fragment>,
     );
     i++;
@@ -341,11 +342,14 @@ function BlockView({
   source,
   mounted,
   commentThreadId,
+  paths,
 }: {
   block: PublicBlock;
   widget: A2UIWidget | undefined;
   source: PublicSource;
   mounted: boolean;
+  /** Custom-domain (site) sources only: canonical site path per page id. */
+  paths?: Record<string, string>;
   /** Thread anchored to this block (heading / text only — atoms are wrapped by
    *  the caller). When set, the block's text carries the comment swatch + anchor. */
   commentThreadId?: string;
@@ -380,7 +384,7 @@ function BlockView({
           <div className="flex-shrink-0 pt-[2px] text-lg leading-none">{String(block.icon ?? "💡")}</div>
           <div className="min-w-0 flex-1">
             <RichText value={block.richText} />
-            {renderChildBlocks(block, source, mounted)}
+            {renderChildBlocks(block, source, mounted, paths)}
           </div>
         </div>
       );
@@ -399,7 +403,7 @@ function BlockView({
     }
     case "toggle": {
       const doc = block.richText as TipNode | undefined;
-      return renderToggle(doc?.content, block.id, renderChildBlocks(block, source, mounted));
+      return renderToggle(doc?.content, block.id, renderChildBlocks(block, source, mounted, paths));
     }
     case "table": {
       // Native simple table — cells are rich text (mentions already scrubbed
@@ -488,9 +492,11 @@ function BlockView({
       if (!childId || !title) return null;
       const emoji = typeof block.icon === "string" && block.icon ? block.icon : null;
       const href =
-        source.kind === "link" && block.via === "subtree"
-          ? `/share/${encodeURIComponent(source.token)}/p/${encodeURIComponent(childId)}`
-          : `/share/p/${encodeURIComponent(childId)}`;
+        source.kind === "site"
+          ? (paths?.[childId] ?? `/p/${encodeURIComponent(childId)}`)
+          : source.kind === "link" && block.via === "subtree"
+            ? `/share/${encodeURIComponent(source.token)}/p/${encodeURIComponent(childId)}`
+            : `/share/p/${encodeURIComponent(childId)}`;
       return (
         <a
           href={href}
@@ -522,10 +528,14 @@ export function ReadOnlyPageBlocks({
   payload,
   source,
   comments = [],
+  paths,
 }: {
   blocks: PublicBlock[];
   payload: ViewPayload;
   source: PublicSource;
+  /** Custom-domain (site) sources only: canonical site path per page id
+   *  (child_page links). See docs/architecture/features/custom-domains.md. */
+  paths?: Record<string, string>;
   /** Page comment threads — used to rebuild each block's highlight + rail anchor
    *  from `anchorBlockId` (the inline `comment` mark is lost for heading / text
    *  blocks once they serialize to a flat `text` string). */
@@ -567,6 +577,7 @@ export function ReadOnlyPageBlocks({
           source={source}
           mounted={mounted}
           commentThreadId={threadId}
+          paths={paths}
         />
       );
       // An anchored atom (chart / image / file / … — no inline text to carry the

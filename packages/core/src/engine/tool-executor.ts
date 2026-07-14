@@ -225,12 +225,19 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // Two ways the turn can be force-stopped: the absolute tool-call budget,
       // or a single tool failing FAIL_STREAK_LIMIT× in a row (the fuse). Quote
       // the culprit in the latter so the model's forced reply is specific.
+      // The budget branch also pins the forced reply to gathered evidence:
+      // without that clause, a research-shaped consult stopped mid-gather
+      // filled its prompt's required output fields from parametric memory
+      // (the 2026-07-13 fls.com.hk HKTVmall prospect runs fabricated emails,
+      // IG handles, and LinkedIn URLs that a later step persisted as records).
       const failedTool = options.loopDetector.failureStopTool()
       const content = failedTool
         ? `ERROR: "${failedTool}" failed ${FAIL_STREAK_LIMIT} times in a row this turn, so no further tools will run. ` +
           `Stop retrying. Write a direct reply to the user now: summarize what you did accomplish, and state plainly what "${failedTool}" could not complete and why (quote its last error).`
         : 'ERROR: the tool-call budget for this turn is exhausted. ' +
-          'No further tools will run this turn. Write a direct reply to the user now using what the prior tool results already gathered.'
+          'No further tools will run this turn. Write a direct reply to the user now using what the prior tool results already gathered. ' +
+          'State only what those results support: anything requested that you could not verify before the budget ran out, name it plainly as not verified. ' +
+          'Never fill a gap with specific names, URLs, handles, emails, or numbers from memory.'
       t.result = {
         type: 'tool_result',
         toolUseId: t.id,
@@ -591,6 +598,43 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         return
       }
 
+      // Identifier-provenance write-gate (the mechanical half of the
+      // workflow anti-fabrication guard). When the run's owner threaded an
+      // EvidenceAccumulator and gated this tool, every identifier-shaped
+      // value in the validated input (email / URL / handle / phone) must
+      // have been observed this run — in a tool result (note()d below) or
+      // in the caller-seeded instruction. A miss rejects the write with an
+      // error the model can act on: re-verify with a tool, or drop the
+      // field / write "not verified". This is what stops a budget-pressed
+      // unattended callee from persisting invented contact identifiers as
+      // records (the 2026-07-13 HKTVmall prospect fabrications). See
+      // docs/architecture/engine/identifier-provenance-gate.md.
+      const evidence = options.context.evidence
+      if (evidence?.shouldGate(t.name)) {
+        const unverified = evidence.findUnverified(JSON.stringify(validated))
+        if (unverified.length > 0) {
+          clearTimeout(timer)
+          const listing = unverified
+            .map((u) => `${u.value} (${u.kind})`)
+            .join(', ')
+          t.result = {
+            type: 'tool_result',
+            toolUseId: t.id,
+            name: t.name,
+            content:
+              `ERROR: identifier_not_in_evidence: "${t.name}" was not executed. ` +
+              `These values do not appear in any tool result or instruction from this run: ${listing}. ` +
+              `A record write may only contain identifiers you actually observed this run. ` +
+              `Either verify each value with a tool first, or retry the write without those fields and state "not verified" for them in your reply. Do not restate a rejected value as if it were confirmed.`,
+            isError: true,
+          }
+          t.status = 'completed'
+          options.loopDetector.recordOutcome(t.name, true)
+          wake()
+          return
+        }
+      }
+
       // Build a notifyConfirmationRequired callback that pushes the event
       // and wakes the executor — so getRemainingResults yields and the
       // query loop can flush the confirmation event to the user.
@@ -628,6 +672,14 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       content = capToolResultTokens(content)
 
       t.result = { type: 'tool_result', toolUseId: t.id, name: t.name, content, isError: result.isError }
+      // Feed the identifier-evidence sets with exactly what the model will
+      // see (post-cap content) — identifiers observed here become fair game
+      // for gated record writes later in the run. Errors are never fed, and
+      // noteToolResult excludes input-echoed identifiers (a search result
+      // echoing its own query is not verification).
+      if (result.isError !== true) {
+        evidence?.noteToolResult(content, JSON.stringify(t.input))
+      }
       // Inline images (e.g. an MCP tool returning sampled frames) become `image`
       // content blocks emitted right after the tool_result, so a multimodal
       // provider sees them. Capped + validated; a text-only provider drops them.

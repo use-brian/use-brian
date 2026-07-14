@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
+import { createCloudBrowserProvider, registrableSiteOf } from '@sidanclaw/core'
 import type {
   BrowserProfileStore,
   BrowserSkillGrantStore,
@@ -320,6 +322,54 @@ export function computerRoutes(deps: {
     }
     await deps.profileStore.delete(req.params.id)
     res.json({ ok: true })
+  })
+
+  // User-initiated sign-in (§7): "Sign in to a site" in Profile-Management
+  // starts a cloud browser task bound to THIS profile under a synthetic
+  // session id, navigates to the login page, and hands back the session id
+  // for the Take-Over live view (`/w/<ws>/computer/<sessionId>?flow=login`).
+  // The user signs in there and captures the session into the profile —
+  // no assistant turn involved. Owner-only: a capture writes the identity.
+  // Explicitly cloud regardless of the profile's default backend (capture
+  // only exists in the cloud sandbox; the button says so — this is the
+  // user's own deliberate routing, not the silent re-route R2-7 forbids).
+  router.post('/profiles/:id/login', async (req, res) => {
+    const profile = await ownedProfile(req.params.id, req.userId as string)
+    if (!profile) {
+      res.status(404).json({ error: 'No such profile (or not yours to sign in)' })
+      return
+    }
+    if (!deps.orchestrator || !deps.provider) {
+      res.status(501).json({ error: 'Cloud browsing is not configured on this deployment' })
+      return
+    }
+    const body = z.object({ url: z.string().url().max(2048) }).safeParse(req.body)
+    if (!body.success || !/^https?:\/\//i.test(body.data.url)) {
+      res.status(400).json({ error: 'url must be an http(s) URL' })
+      return
+    }
+    const sessionId = `plogin_${randomUUID()}`
+    const cloud = createCloudBrowserProvider({
+      provider: deps.provider,
+      binding: deps.orchestrator.binding,
+    })
+    try {
+      // Rides the same task-creation path as a chat browse: credit gate,
+      // budget authorization, vault injection, and metering all apply.
+      await cloud.navigate(
+        {
+          userId: req.userId as string,
+          workspaceId: profile.workspaceId,
+          sessionId,
+          profileId: profile.id,
+        },
+        body.data.url,
+      )
+    } catch (err) {
+      res.status(502).json({ error: err instanceof Error ? err.message : 'could not open the browser' })
+      return
+    }
+    res.json({ sessionId, site: registrableSiteOf(body.data.url) })
   })
 
   // Revoke one site's session inside a profile (the cookie jar keeps the rest).

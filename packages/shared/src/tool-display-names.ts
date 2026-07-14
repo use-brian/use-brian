@@ -104,12 +104,18 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   saveFileBytes: 'Save file bytes to brain',
   sendFile: 'Send a file to the chat',
 
+  // Decks (docs/architecture/features/deck-generation.md)
+  generatePowerpoint: 'Create a PowerPoint deck',
+  updatePowerpoint: 'Edit a PowerPoint deck',
+  getPowerpoint: 'Read a PowerPoint deck',
+
   // Computer use (docs/architecture/engine/computer-use.md)
   browserNavigate: 'Open a page in the browser',
   browserSnapshot: 'Look at the browser page',
   browserClick: 'Click in the browser',
   browserType: 'Type in the browser',
   browserCurrentUrl: 'Check the browser address',
+  browserReadPage: 'Read a page in the browser',
   runBrowserSkill: 'Run a browser skill',
   listBrowserSkills: 'List browser skills',
   listBrowserProfiles: 'List browser profiles',

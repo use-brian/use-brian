@@ -690,6 +690,31 @@ describe('[COMP:workflow/tools] createWorkflowTools', () => {
     expect(data.warnings).toEqual([])
   })
 
+  it('proposeWorkflow surfaces the researchMode advisory (parity with the REST path)', async () => {
+    const { tools } = makeAllTools()
+    const r = await tools.proposeWorkflow.execute(
+      {
+        name: 'Prospect discovery',
+        definition: {
+          startStepId: 's1',
+          steps: [
+            {
+              id: 's1',
+              type: 'assistant_call',
+              target: { assistantId: 'primary' },
+              prompt: 'List HKTV Mall eco stores',
+              researchMode: true,
+            },
+          ],
+        },
+      },
+      makeContext(),
+    )
+    expect(r.isError).toBeFalsy()
+    const warnings = (r.data as { warnings: string[] }).warnings
+    expect(warnings.some((w) => w.includes('research mode') && w.includes('maxToolCalls'))).toBe(true)
+  })
+
   it('proposeWorkflow surfaces a wait warning in Phase A', async () => {
     const { tools } = makeAllTools()
     const r = await tools.proposeWorkflow.execute({

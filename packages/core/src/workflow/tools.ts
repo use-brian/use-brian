@@ -34,6 +34,7 @@ import {
 } from './schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
 import { isRecurringTrigger } from './lifecycle.js'
+import { stepAdvisories } from './advisories.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
   AssistantCallStep,
@@ -1296,6 +1297,10 @@ export function createWorkflowTools(deps: WorkflowToolDeps): {
             ...skillIssues.warnings,
             ...triggerWarnings(definition, trigger),
             ...reservedOutcomeVarWarnings(definition, trigger),
+            // Same non-blocking advisories the REST/web-builder path returns
+            // (researchMode fan-out trap; contact research on the default
+            // budget) — the chat path used to ship these steps unwarned.
+            ...stepAdvisories(definition).map((a) => a.message),
           ],
           definition,
           confirmationHint:

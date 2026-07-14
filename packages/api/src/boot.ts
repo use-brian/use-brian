@@ -75,6 +75,7 @@ import {
   createRetrievalTools,
   createViewTools,
   createFileTools,
+  createDeckTools,
   type FileToolPolicy,
   createFindPageTool,
   createIngestRuleTools,
@@ -222,12 +223,15 @@ import { createMemoryRecallEventsStore } from './db/memory-recall-events-store.j
 import { createDbTaskStore } from './db/tasks-store.js'
 import { createDbGoalStore } from './db/goals-store.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
-import { createGoalDriver, type GoalLoopState } from './goals/driver.js'
+import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
+import { createGoalStallReaper } from './goals/reaper.js'
 import { createGoalWorkTools } from './goals/work-tools.js'
 import { gatherGoalEvidence } from './goals/evidence.js'
 import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
+  getGoalByIdSystem,
+  updateGoalSystem,
   getGoalAwaitingEventSystem,
   setGoalAwaitingEventSystem,
   clearGoalAwaitingEventSystem,
@@ -280,7 +284,11 @@ import { createDeliveryTargetResolver } from './scheduling/delivery-target.js'
 import { viewsRoutes } from './routes/views.js'
 import { teamspacesRoutes } from './routes/teamspaces.js'
 import { createTeamspaceStore } from './db/teamspace-store.js'
+import { decksRoutes } from './routes/decks.js'
+import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
+import { publicSiteRoutes } from './routes/public-sites.js'
+import { createDomainProvisioner } from './domains/provisioner.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
@@ -297,6 +305,7 @@ import {
   createBlueprintRecordTools,
 } from './synthesis/blueprint-record-tools.js'
 import { createDbPageGrantStore } from './db/page-grant-store.js'
+import { createDbPageDomainStore } from './db/page-domain-store.js'
 import { createDbPageTemplateStore } from './db/page-templates-store.js'
 import { createDbBlueprintRecordStore } from './db/blueprint-records-store.js'
 import { createDbPageActionsStore } from './db/page-actions-store.js'
@@ -436,6 +445,14 @@ export interface OpenApiEnv {
   // flag is necessary but NOT sufficient — boot also requires live metering
   // (resolveUnattendedComputerUse). Ships dark.
   COMPUTER_USE_UNATTENDED_ENABLED?: boolean
+  // Custom domains for published pages (migration 324;
+  // docs/architecture/features/custom-domains.md). Vercel pair set → hosted
+  // provisioner; else manual-DNS verification against the CNAME target.
+  PAGE_DOMAIN_VERCEL_TOKEN?: string
+  PAGE_DOMAIN_VERCEL_PROJECT_ID?: string
+  PAGE_DOMAIN_VERCEL_TEAM_ID?: string
+  PAGE_DOMAIN_CNAME_TARGET?: string
+  PAGE_DOMAINS_MAX_PER_WORKSPACE?: string
 }
 
 /**
@@ -825,6 +842,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // goals.md §7).
   const deliverGoalTerminal: GoalDeliver = async (goal, terminal, reason) => {
     if (!goal.createdByUserId) return
+    // Terminal analytics (goal_done / goal_blocked): this seam is the one place
+    // BOTH terminal paths (acting loop + structural rollup) converge, so the
+    // taxonomy is covered without touching either loop. Emit before the channel
+    // delivery so a delivery failure never loses the event.
+    analytics.logEvent({
+      userId: goal.createdByUserId,
+      channelType: 'workflow',
+      eventName: terminal === 'done' ? 'goal_done' : 'goal_blocked',
+      metadata: {
+        goal_id: sanitizeAnalytics(goal.id),
+        ...(reason ? { reason: sanitizeAnalytics(reason) } : {}),
+      },
+    })
     const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
     if (!assistantId) return
     const text =
@@ -878,6 +908,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const homeDockStore = createDbHomeDockStore()
   const docEntityStore = createDbDocEntityStore()
   const pageGrantStore = createDbPageGrantStore()
+  const pageDomainStore = createDbPageDomainStore()
+  const domainProvisioner = createDomainProvisioner(env)
   const workspaceGroupStore = createDbWorkspaceGroupStore()
   const docThemesStore = createDbDocThemesStore()
   const episodicStore = createDbEpisodicStore()
@@ -1369,6 +1401,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
+  let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
     provider,
@@ -1733,6 +1766,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         }
       }
     : undefined
+  // The goal-tick writer, shared by the driver's re-arm and the stall reaper's
+  // recovery re-arm. A goal tick intentionally carries NO workflow_id — see
+  // driver.ts GOAL_TICK_KIND.
+  const scheduleGoalTick = async (goal: GoalRecord, fireAt: Date, state: GoalLoopState): Promise<void> => {
+    const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
+    if (!assistantId) {
+      // A workspace with no primary assistant cannot re-arm — log loudly, the
+      // stall reaper will keep retrying rather than the chain dying silently.
+      console.error(`[goals] cannot arm tick for goal ${goal.id}: workspace ${goal.workspaceId} has no primary assistant`)
+      return
+    }
+    await jobStore.create({
+      assistantId,
+      userId: goal.createdByUserId ?? assistantId,
+      schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
+      timezone: 'UTC',
+      mode: 'local',
+      instructions: JSON.stringify({ kind: GOAL_TICK_KIND, goalId: goal.id, state }),
+      channelType: 'workflow',
+      channelId: goal.id,
+      nextRunAt: fireAt,
+    })
+  }
+
   const goalDriver = createGoalDriver({
     goalStore,
     tryClaim: tryClaimGoalForTick,
@@ -1810,19 +1867,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }
     },
     deliver: deliverGoalTerminal,
-    scheduleGoalTick: async (goal, fireAt, state) => {
-      const assistantId = await getPrimaryAssistantForWorkspace(goal.workspaceId)
-      if (!assistantId) return
-      await jobStore.create({
-        assistantId,
-        userId: goal.createdByUserId ?? assistantId,
-        schedule: { type: 'once', datetime: fireAt.toISOString().slice(0, 19) },
-        timezone: 'UTC',
-        mode: 'local',
-        instructions: JSON.stringify({ kind: 'goal_tick', goalId: goal.id, state }),
+    scheduleGoalTick,
+    // No unbudgeted autonomy: kickoff persists the default budget when the
+    // author set none (see driver.ts DEFAULT_GOAL_BUDGET).
+    applyDefaultBudget: (goalId, budget) => updateGoalSystem(goalId, { budget }),
+    // Tick-error observability (the driver handled the error — this is the
+    // taxonomy's goal_tick_error, not a failure path).
+    onTickError: (goal, error, willRetry) => {
+      if (!goal.createdByUserId) return
+      const msg = error instanceof Error ? error.message : String(error)
+      analytics.logEvent({
+        userId: goal.createdByUserId,
         channelType: 'workflow',
-        channelId: goal.id,
-        nextRunAt: fireAt,
+        eventName: 'goal_tick_error',
+        metadata: {
+          goal_id: sanitizeAnalytics(goal.id),
+          error_message: sanitizeAnalytics(msg.slice(0, 200)),
+          will_retry: willRetry,
+        },
       })
     },
     // until:event park persistence (mig 293). The store keeps `state` opaque; the
@@ -2407,6 +2469,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       saveFileToBrain: fileTools.saveFileToBrain,
       saveFileBytes: fileTools.saveFileBytes,
     }
+
+    // ── Decks (first-party PPTX) ──
+    // Persistent deck artifacts: workspace_decks row (spec) + stable
+    // workspace file decks/<id>.pptx. Rides the files capability (output is
+    // a workspace file), so tools live inside the filesBlobClient guard.
+    // The read/export ROUTER mounts with the other authed routers at the
+    // END of boot — an early bare `/api` requireAuth guard here would 401
+    // every public mount registered after it (the Mini App outage class;
+    // graded by invariants/route-mount-order). See
+    // docs/architecture/features/deck-generation.md.
+    // previewUrl targets the AUTHENTICATED app origin (app.sidan.ai) — the
+    // /w/… deck route lives in app-web, and the marketing site does NOT
+    // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
+    // paths). Same fallback chain as the computer-use take-over link below.
+    deckStore = createDeckStore()
+    for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
+      allTools.set(tool.name, tool)
+    }
     // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
     // port; open default leaves it null (no /api/files/ingest ingest).
     if (ports.buildFileIngestor && brainEpisodeIngestor) {
@@ -2598,6 +2678,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('browserClick', computerTools.browserClick)
   allTools.set('browserType', computerTools.browserType)
   allTools.set('browserCurrentUrl', computerTools.browserCurrentUrl)
+  // Research read-browse (computer-use.md §12): browserReadPage is
+  // deliberately NOT in allTools — interactive turns have the full flat
+  // tools, and the standard preflight's cheap read-only pass must never be
+  // able to spin up a sandbox. It reaches exactly one surface: research
+  // workers, via the manager's post-sandbox-registration injection seam
+  // (the WorkerManager itself was built from a pre-sandbox tool snapshot).
+  workerManager.setResearchBrowseTools(
+    new Map([['browserReadPage', computerTools.browserReadPage]]),
+  )
 
   // Isolated Python + the workspace-scoped file-bridge (§4.7, §4.12). The
   // files port wraps FilesApi so every byte movement stays under workspace
@@ -3212,6 +3301,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     gcs: filesBlobClient,
   }))
 
+  // Custom-domain site render — PUBLIC, same containment as publicShareRoutes
+  // (docs/architecture/features/custom-domains.md). MUST stay before the bare
+  // `/api` requireAuth guards below.
+  app.use('/api', publicSiteRoutes({
+    pageDomainStore,
+    taskStore,
+    crmStore,
+    workflowRunStore,
+    workspaceDirectory: workspaceDirectoryStore,
+    gcs: filesBlobClient,
+  }))
+
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
   // below. Mounting them via `mountExtraRoutes` (which runs last) lets the first
   // bare guard 401 them first. See OpenApiPorts.mountPublicExtraRoutes.
@@ -3328,6 +3429,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pageTemplateStore,
     blueprintRecordStore,
     pageGrantStore,
+    pageDomainStore,
+    domainProvisioner,
+    pageDomainsMaxPerWorkspace: env.PAGE_DOMAINS_MAX_PER_WORKSPACE
+      ? Number(env.PAGE_DOMAINS_MAX_PER_WORKSPACE)
+      : undefined,
     workspaceGroupStore,
     analytics,
     taskStore,
@@ -3374,6 +3480,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const docNotificationsStore = createDbDocNotificationsStore()
   app.use('/api', requireAuth(env.JWT_SECRET), commentRoutes({ commentThreadStore }))
   app.use('/api', requireAuth(env.JWT_SECRET), inboxRoutes({ commentThreadStore, docNotificationsStore }))
+  // Deck live-preview read + export surface (tools registered in the files
+  // block above; absent files backend = no decks, so the mount is guarded).
+  if (deckStore && filesApi) {
+    app.use('/api', requireAuth(env.JWT_SECRET), decksRoutes({ deckStore, filesApi }))
+  }
 
   // (The public /api/brain/stream SSE mount lives ABOVE the bare `/api`
   // requireAuth guards — see the block next to workflowWebhookRoutes.)
@@ -3551,18 +3662,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const jobExecutor = createJobExecutor({
     jobStore,
     analytics,
+    // A goal tick carries no `workflow_id` by design; exempt it from the
+    // executor's straggler invariant so it reaches `runWorkflowFromJob` below
+    // (single source of truth for the shape is `parseGoalTick`).
+    isDelegateHandledWithoutWorkflow: (job) => parseGoalTick(job.instructions) !== null,
     runWorkflowFromJob: async (job) => {
       // Goal-tick (acting loop, R1): the job carries no workflowId/stepRunId —
       // the goal's own means.workflowId is what each iteration runs. The
       // poll-worker's once-job handling deletes this row after we return, and
       // the tick's own re-arm writes the next one-shot (or terminates).
-      let goalTick: { goalId: string; state?: GoalLoopState } | null = null
-      try {
-        const p = JSON.parse(job.instructions) as { kind?: string; goalId?: string; state?: GoalLoopState }
-        if (p.kind === 'goal_tick' && p.goalId) goalTick = { goalId: p.goalId, state: p.state }
-      } catch {
-        /* not JSON / not a goal tick — fall through to the workflow paths */
-      }
+      const goalTick = parseGoalTick(job.instructions)
       if (goalTick) {
         await goalDriver.tickGoal(goalTick.goalId, goalTick.state)
         return `goal tick: ${goalTick.goalId}`
@@ -4180,6 +4289,29 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       publishSessionEvent({ kind: 'turn_completed', sessionId, payload: { senderUserId: 'sweeper' } }),
   })
   if (runWorkers) stuckSessionSweeper.start()
+
+  // ── Goal stall reaper ──
+  // The acting loop's external watchdog: recovers goals wedged `running` by a
+  // crash mid-tick and confirmed acting goals whose re-arm chain died. See
+  // goals.md → "Stall recovery — the goal reaper".
+  const goalStallReaper = createGoalStallReaper({
+    rearm: async (goalId) => {
+      const goal = await getGoalByIdSystem(goalId)
+      if (goal) await scheduleGoalTick(goal, new Date(), INITIAL_GOAL_LOOP_STATE)
+    },
+    onRecovered: ({ id, sweep }) => {
+      void getGoalByIdSystem(id).then((goal) => {
+        if (!goal?.createdByUserId) return
+        analytics.logEvent({
+          userId: goal.createdByUserId,
+          channelType: 'workflow',
+          eventName: 'goal_stall_recovered',
+          metadata: { goal_id: sanitizeAnalytics(id), sweep: sanitizeAnalytics(sweep) },
+        })
+      }).catch(() => {})
+    },
+  })
+  if (runWorkers) goalStallReaper.start()
 
   // ── Views auto-prune worker ──
   const viewsPruneWorker = createViewsPruneWorker({ savedViewStore })

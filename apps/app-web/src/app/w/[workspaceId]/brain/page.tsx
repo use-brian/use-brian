@@ -573,7 +573,10 @@ function BrainPageInner() {
     section === "entries" ? (
       <>
         {rows !== null && (
-          <span className="text-xs tabular-nums text-muted-foreground">
+          /* Counts are a nicety — hidden below `sm`, where the bar can't fit
+             breadcrumb + view toggle + count without the toggle painting
+             over this span. */
+          <span className="text-xs tabular-nums text-muted-foreground max-sm:hidden">
             {rows.length === 1
               ? topbarCopy.entryCountOne
               : format(topbarCopy.entryCountMany, { count: rows.length })}
@@ -585,10 +588,12 @@ function BrainPageInner() {
             onClick={clearFilters}
             className="rounded-full border border-border bg-card px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
-            {activeFilterCount === 1
-              ? topbarCopy.filtersOne
-              : format(topbarCopy.filtersMany, { count: activeFilterCount })}
-            {" · "}
+            <span className="max-sm:hidden">
+              {activeFilterCount === 1
+                ? topbarCopy.filtersOne
+                : format(topbarCopy.filtersMany, { count: activeFilterCount })}
+              {" · "}
+            </span>
             {topbarCopy.clearFilters}
           </button>
         )}
@@ -596,7 +601,7 @@ function BrainPageInner() {
     ) : section === "skills" ? (
       <>
         {skills !== null && (
-          <span className="text-xs tabular-nums text-muted-foreground">
+          <span className="text-xs tabular-nums text-muted-foreground max-sm:hidden">
             {skills.length === 1
               ? t.brainPage.skillsLibrary.countOne
               : format(t.brainPage.skillsLibrary.countMany, {
@@ -627,7 +632,7 @@ function BrainPageInner() {
     ) : section === "blueprints" ? (
       <>
         {blueprints !== null && (
-          <span className="text-xs tabular-nums text-muted-foreground">
+          <span className="text-xs tabular-nums text-muted-foreground max-sm:hidden">
             {filterBlueprints(blueprints).length === 1
               ? t.brainPage.blueprints.countOne
               : format(t.brainPage.blueprints.countMany, {

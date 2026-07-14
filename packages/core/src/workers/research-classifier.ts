@@ -31,7 +31,14 @@ Research mode is OFF for:
 - Tasks the assistant can do with its own memory + a couple of tool calls
 - Messages under ~10 words
 
+Research mode is OFF — and this is a SITE OPERATION — when the user asks to open, browse,
+log into, or act on ONE specific named website / web app / URL ("browse luma for events in hk",
+"log into stripe and download the latest invoice", "check what's listed on lu.ma"). Getting
+information from one named site is a site operation, not research. Broad multi-site
+investigation ("research the HK events landscape") is still research even if sites are named.
+
 If research warranted: {"research":true,"reason":"<one short phrase, lower-case>"}
+If a site operation: {"research":false,"operate_site":true}
 Otherwise: {"research":false}`
 
 const MIN_MESSAGE_LENGTH = 40
@@ -47,12 +54,51 @@ export type ResearchClassifyOptions = {
 export type ResearchClassifyResult = {
   /** Whether the classifier flagged the message as needing research mode. */
   research: boolean
+  /**
+   * The message asks to open / browse / log into / act on ONE specific named
+   * site or URL — a site operation, not research. Mutually exclusive with
+   * `research`. The chat route uses this to keep the turn on the normal query
+   * loop (full tool surface, incl. computer-use) instead of entering
+   * coordinator mode, whose toolset structurally excludes every browser tool
+   * (incident 2026-07-13: "browse luma" → 69-webSearch coordinator fan-out).
+   * Spec: docs/architecture/engine/coordinator-pattern.md → "Adaptive entry
+   * and the operate-site override".
+   */
+  operateSite: boolean
   /** Optional one-phrase reason the classifier emitted (telemetry only). */
   reason: string | null
   /** Token usage from the classifier call — null when no call was made. */
   usage: TokenUsage | null
   /** Model used for the call — null when no call was made. */
   model: string | null
+}
+
+// ── Operate-site deterministic fast-path ──────────────────────────
+//
+// Strong verbs are inherently site operations ("browse X", "log into X",
+// "sign in to X") — no URL required. The denylist keeps "browse the web /
+// the internet / online" research-eligible. Weak verbs ("open", "go to",
+// "visit", "check", …) are everyday words, so they only count next to a
+// URL-ish token (http(s)://, www., or a bare domain like lu.ma).
+//
+// English-only by construction — the LLM verdict in the classifier prompt is
+// the language-agnostic recall net. False positives are cheap: the normal
+// loop keeps spawnWorker + webSearch, so a misrouted research ask degrades
+// to ordinary tooling; a false negative costs a multi-worker search fan-out
+// on a task the browser answers in one call. Bias accordingly.
+const STRONG_OPERATE_VERB = /\b(?:browse|log(?:\s+(?:me|us))?\s*in(?:to)?|sign(?:\s+(?:me|us))?\s*in(?:to)?)\b/i
+const STRONG_OPERATE_DENY = /\b(?:browse|log(?:\s+(?:me|us))?\s*in(?:to)?|sign(?:\s+(?:me|us))?\s*in(?:to)?)\s+(?:the\s+(?:web|internet)|online)\b/i
+const WEAK_OPERATE_VERB = /\b(?:open|go\s+to|goto|visit|navigate\s+to|pull\s+up|look\s+at|check)\b/i
+const URLISH = /https?:\/\/\S+|\bwww\.\S+|\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b/i
+
+/**
+ * Deterministic operate-site detection — the zero-cost fast-path in front of
+ * `classifyResearchIntent`, also used standalone by the chat route for turns
+ * the adaptive classifier never sees (`mode: 'default'`, ineligible callers).
+ */
+export function detectOperateSiteIntent(message: string): boolean {
+  if (STRONG_OPERATE_VERB.test(message) && !STRONG_OPERATE_DENY.test(message)) return true
+  return WEAK_OPERATE_VERB.test(message) && URLISH.test(message)
 }
 
 /**
@@ -68,9 +114,15 @@ export async function classifyResearchIntent(
 ): Promise<ResearchClassifyResult> {
   const { provider, message, minMessageLength = MIN_MESSAGE_LENGTH } = options
 
+  // Operate-site fast-path — before the length check (site operations are
+  // length-independent) and before the LLM call (zero classifier cost).
+  if (detectOperateSiteIntent(message)) {
+    return { research: false, operateSite: true, reason: 'operate_site_fast_path', usage: null, model: null }
+  }
+
   // Short messages never warrant research — short-circuit before the LLM call.
   if (message.length <= minMessageLength) {
-    return { research: false, reason: null, usage: null, model: null }
+    return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 
   try {
@@ -90,18 +142,26 @@ export async function classifyResearchIntent(
 
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { research: false, reason: null, usage: response.usage, model: CLASSIFIER_MODEL }
+      return { research: false, operateSite: false, reason: null, usage: response.usage, model: CLASSIFIER_MODEL }
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as {
       research?: unknown
+      operate_site?: unknown
       reason?: unknown
     }
     if (parsed.research !== true) {
-      return { research: false, reason: null, usage: response.usage, model: CLASSIFIER_MODEL }
+      return {
+        research: false,
+        operateSite: parsed.operate_site === true,
+        reason: parsed.operate_site === true ? 'operate_site_classifier' : null,
+        usage: response.usage,
+        model: CLASSIFIER_MODEL,
+      }
     }
     return {
       research: true,
+      operateSite: false,
       reason: typeof parsed.reason === 'string' ? parsed.reason : null,
       usage: response.usage,
       model: CLASSIFIER_MODEL,
@@ -109,6 +169,6 @@ export async function classifyResearchIntent(
   } catch {
     // Any failure → safe default, no research. Usage is lost because the
     // stream didn't complete; caller records nothing.
-    return { research: false, reason: null, usage: null, model: null }
+    return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 }

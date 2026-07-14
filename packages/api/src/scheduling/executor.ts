@@ -39,6 +39,19 @@ export type JobExecutorOptions = {
    * wake-up case (workflowId + workflowStepRunId -> resume the paused run).
    */
   runWorkflowFromJob: (job: ScheduledJob) => Promise<string>
+  /**
+   * Predicate: does this `workflow_id`-less row legitimately belong to a
+   * delegate path rather than being a pre-migration straggler? The one such
+   * class is the autopilot goal tick — its `workflow_id` column is null by
+   * design (the goal's own `means.workflowId` drives each iteration; the tick
+   * payload rides in `instructions`), and `runWorkflowFromJob` dispatches it.
+   * Without this exemption the `!workflowId` invariant below fails EVERY goal
+   * tick with "missing workflow_id" before that delegate ever runs — the
+   * defect that stalled the acting loop platform-wide until 2026-07-13 (every
+   * autopilot goal sat `active` forever). Omitted (OSS) -> the invariant
+   * applies to every no-`workflow_id` row, as before.
+   */
+  isDelegateHandledWithoutWorkflow?: (job: ScheduledJob) => boolean
 }
 
 /**
@@ -47,7 +60,7 @@ export type JobExecutorOptions = {
  * job to the workflow path.
  */
 export function createJobExecutor(options: JobExecutorOptions): JobExecutor {
-  const { jobStore, analytics, runWorkflowFromJob } = options
+  const { jobStore, analytics, runWorkflowFromJob, isDelegateHandledWithoutWorkflow } = options
 
   return async function executeJob(job: ScheduledJob): Promise<string> {
     const startedAt = Date.now()
@@ -109,11 +122,14 @@ export function createJobExecutor(options: JobExecutorOptions): JobExecutor {
       },
     })
 
-    if (!job.workflowId) {
+    if (!job.workflowId && !isDelegateHandledWithoutWorkflow?.(job)) {
       // Post-cutover invariant: every scheduled_jobs row carries a
       // workflow_id (migration 159 + the rewritten cron tools). A row
       // without one is a hand-edited / pre-migration straggler — fail it
-      // loudly rather than mis-firing a fresh user-channel turn.
+      // loudly rather than mis-firing a fresh user-channel turn. The one
+      // legitimate exception is a delegate-handled row (an autopilot goal
+      // tick): `isDelegateHandledWithoutWorkflow` lets it through to
+      // `runWorkflowFromJob`, which knows how to run it.
       const msg = `Job ${job.id} has no workflow_id — post-cutover invariant violation`
       console.error(`[scheduler] ${msg}`)
       analytics?.logEvent({

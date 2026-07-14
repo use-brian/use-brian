@@ -78,6 +78,18 @@ export const metadata: Metadata = {
 // Same run-before-paint, no-flash shape as THEME_PREPAINT_SCRIPT; no user input.
 const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.sidanclawDesktop;if(!d)return;var c=document.documentElement.classList;c.add("is-canvas-desktop");if(d.platform==="win32")c.add("is-canvas-desktop-win");}catch(e){}})();`;
 
+// iOS Safari zooms the page when a form control with a computed font-size
+// under 16px receives focus, and the zoom persists after blur — the app then
+// reads as "loaded zoomed in" until the user pinches out. Capping
+// maximum-scale suppresses that auto-zoom; iOS has ignored maximum-scale for
+// *user* pinch gestures since iOS 10, so accessibility zoom still works.
+// iOS-only (iPadOS reports MacIntel + touch): Android Chrome honors the cap
+// by blocking pinch zoom and never auto-zooms inputs, so it must not get it.
+// Re-runs on DOMContentLoaded so it wins regardless of where the framework
+// emits the default viewport meta. Mirrors apps/web's layout; spec in
+// docs/architecture/features/web-ui.md → "Mobile viewport (iOS input zoom)".
+const IOS_VIEWPORT_PATCH_SCRIPT = `(()=>{try{var p=function(){try{var ios=/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==="MacIntel"&&navigator.maxTouchPoints>1);if(!ios)return;var m=document.querySelector('meta[name="viewport"]');if(!m){m=document.createElement("meta");m.name="viewport";document.head.appendChild(m);}m.setAttribute("content","width=device-width, initial-scale=1, maximum-scale=1");}catch(e){}};p();if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",p);}catch(e){}})();`;
+
 // Theme is user-switchable. THEME_PREPAINT_SCRIPT (a constant we ship,
 // no user input) runs before paint to read the saved choice from
 // localStorage and stamp the `dark` class onto <html>, avoiding a
@@ -102,6 +114,10 @@ export default async function RootLayout({
         <script
           // eslint-disable-next-line react/no-danger
           dangerouslySetInnerHTML={{ __html: THEME_PREPAINT_SCRIPT }}
+        />
+        <script
+          // eslint-disable-next-line react/no-danger
+          dangerouslySetInnerHTML={{ __html: IOS_VIEWPORT_PATCH_SCRIPT }}
         />
       </head>
       <body className="min-h-full flex flex-col">

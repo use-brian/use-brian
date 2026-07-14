@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { createToolExecutor } from '../tool-executor.js'
 import { createLoopDetector } from '../loop-detector.js'
 import { buildTool, type Tool, type ToolContext } from '../../tools/types.js'
+import { EvidenceAccumulator } from '../../security/evidence.js'
 import type { ContentBlock } from '../../providers/types.js'
 import type { ConfirmationResolver, ToolConfirmationRequest } from '../../mcp/types.js'
 
@@ -389,6 +390,11 @@ describe('[COMP:engine/tool-executor] loop detector integration', () => {
     )
     expect(hardStopped.length).toBe(1)
     expect(String(hardStopped[0].content)).toMatch(/write a direct reply to the user now/i)
+    // The evidence-pinning clause: a research-shaped consult stopped
+    // mid-gather must name unverified items instead of filling them from
+    // memory (the 2026-07-13 HKTVmall prospect fabrications).
+    expect(String(hardStopped[0].content)).toMatch(/name it plainly as not verified/i)
+    expect(String(hardStopped[0].content)).toMatch(/never fill a gap/i)
   })
 })
 
@@ -909,5 +915,131 @@ describe('[COMP:engine/tool-executor] image tool results', () => {
 
     expect(results).toHaveLength(2)
     expect(results[1]).toEqual({ type: 'image', mimeType: 'image/jpeg', data: 'GOOD' })
+  })
+})
+
+describe('[COMP:engine/tool-executor] identifier-provenance write-gate', () => {
+  function gatedCtx() {
+    const evidence = new EvidenceAccumulator({ gatedTools: ['saveContact'] })
+    return { ...ctx, evidence }
+  }
+
+  it('rejects a gated write whose identifier was never observed, without executing it', async () => {
+    const executed = vi.fn()
+    const tools = new Map<string, Tool>([
+      ['saveContact', makeTool({
+        name: 'saveContact',
+        fn: async () => {
+          executed()
+          return { data: 'saved' }
+        },
+      })],
+    ])
+    const executor = createToolExecutor({
+      tools,
+      context: gatedCtx(),
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'saveContact', {
+      name: 'Vicky Chen',
+      email: 'vicky.chen@slowood.hk',
+    })
+    const results = await drainResults(executor)
+    expect(results).toHaveLength(1)
+    expect(results[0]).toMatchObject({ type: 'tool_result', isError: true })
+    const content = (results[0] as { content: string }).content
+    expect(content).toContain('identifier_not_in_evidence')
+    expect(content).toContain('vicky.chen@slowood.hk')
+    expect(content).toContain('not verified')
+    expect(executed).not.toHaveBeenCalled()
+  })
+
+  it('allows the write once the identifier appeared in an earlier tool result', async () => {
+    const context = gatedCtx()
+    const tools = new Map<string, Tool>([
+      ['urlReader', makeTool({
+        name: 'urlReader',
+        isConcurrencySafe: true,
+        fn: async () => ({ data: 'Contact page: write to vicky.chen@slowood.hk' }),
+      })],
+      ['saveContact', makeTool({ name: 'saveContact' })],
+    ])
+    const readExecutor = createToolExecutor({ tools, context, loopDetector: createLoopDetector() })
+    readExecutor.addTool('call_1', 'urlReader', { url: 'https://slowood.hk/contact' })
+    await drainResults(readExecutor)
+
+    // Fresh per-turn executor, same threaded context — mirrors queryLoop.
+    const writeExecutor = createToolExecutor({ tools, context, loopDetector: createLoopDetector() })
+    writeExecutor.addTool('call_2', 'saveContact', { email: 'vicky.chen@slowood.hk' })
+    const results = await drainResults(writeExecutor)
+    expect(results[0]).toMatchObject({ type: 'tool_result', content: 'saveContact:ok' })
+  })
+
+  it('does not count a query echo or an error result as evidence', async () => {
+    const context = gatedCtx()
+    const tools = new Map<string, Tool>([
+      ['webSearch', makeTool({
+        name: 'webSearch',
+        isConcurrencySafe: true,
+        fn: async (input) => ({ data: { query: input.query, results: [] } }),
+      })],
+      ['failingReader', makeTool({
+        name: 'failingReader',
+        isConcurrencySafe: true,
+        fn: async () => ({ data: 'fetch failed for https://instagram.com/slowoodx', isError: true }),
+      })],
+      ['saveContact', makeTool({ name: 'saveContact' })],
+    ])
+    const gather = createToolExecutor({ tools, context, loopDetector: createLoopDetector() })
+    gather.addTool('call_1', 'webSearch', { query: 'vicky.chen@slowood.hk' })
+    gather.addTool('call_2', 'failingReader', { url: 'https://instagram.com/slowoodx' })
+    await drainResults(gather)
+
+    const write = createToolExecutor({ tools, context, loopDetector: createLoopDetector() })
+    write.addTool('call_3', 'saveContact', {
+      email: 'vicky.chen@slowood.hk',
+      instagram: 'https://instagram.com/slowoodx',
+    })
+    const results = await drainResults(write)
+    expect(results[0]).toMatchObject({ type: 'tool_result', isError: true })
+    const content = (results[0] as { content: string }).content
+    expect(content).toContain('vicky.chen@slowood.hk')
+    expect(content).toContain('instagram.com/slowoodx')
+  })
+
+  it('leaves non-gated tools untouched even with unobserved identifiers', async () => {
+    const tools = new Map<string, Tool>([
+      ['draftNote', makeTool({ name: 'draftNote' })],
+    ])
+    const executor = createToolExecutor({
+      tools,
+      context: gatedCtx(),
+      loopDetector: createLoopDetector(),
+    })
+    executor.addTool('call_1', 'draftNote', { text: 'try hello@nowhere.com' })
+    const results = await drainResults(executor)
+    expect(results[0]).toMatchObject({ type: 'tool_result', content: 'draftNote:ok' })
+  })
+
+  it('accepts identifiers seeded from caller-provided material', async () => {
+    const context = gatedCtx()
+    context.evidence.note('Step instruction: follow up with ops@fls.com.hk')
+    const tools = new Map<string, Tool>([
+      ['saveContact', makeTool({ name: 'saveContact' })],
+    ])
+    const executor = createToolExecutor({ tools, context, loopDetector: createLoopDetector() })
+    executor.addTool('call_1', 'saveContact', { email: 'ops@fls.com.hk' })
+    const results = await drainResults(executor)
+    expect(results[0]).toMatchObject({ type: 'tool_result', content: 'saveContact:ok' })
+  })
+
+  it('runs normally when no accumulator is threaded (feature off)', async () => {
+    const tools = new Map<string, Tool>([
+      ['saveContact', makeTool({ name: 'saveContact' })],
+    ])
+    const executor = createToolExecutor({ tools, context: ctx, loopDetector: createLoopDetector() })
+    executor.addTool('call_1', 'saveContact', { email: 'anyone@anywhere.com' })
+    const results = await drainResults(executor)
+    expect(results[0]).toMatchObject({ type: 'tool_result', content: 'saveContact:ok' })
   })
 })

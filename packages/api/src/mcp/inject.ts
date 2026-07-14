@@ -23,7 +23,6 @@ import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, 
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
-import { isSoloWorkspaceSystem } from '../db/workspace-store.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, type HealthReporter } from './connector-health.js'
@@ -362,35 +361,32 @@ export async function injectMcpTools(params: {
   // connector-instance store. See mcp/connector-health.ts.
   const reportHealth = createHealthReporter(connectorInstanceStore)
 
-  // ── Workspace connector-scoping gate (SECURITY — incident 2026-06-01,
-  //    re-opened 2026-06-02) ──
+  // ── Workspace connector-scoping gate (SECURITY — incidents 2026-06-01,
+  //    2026-06-02, 2026-07-14) ──
   //
   // The base load below pulls `userId`'s personal (scope='user') connectors.
-  // For a workspace assistant, `userId` was resolved to the workspace OWNER
-  // via `getConnectorUserId` in the route. That is safe ONLY while the owner
-  // is the workspace's SOLE member — then their personal connectors ARE the
-  // workspace's connectors.
+  // For a workspace assistant, `userId` is resolved to the workspace OWNER via
+  // `getConnectorUserId` in the route — so base-loading here would hand the
+  // owner's personal credentials to the workspace. That leaks in two
+  // directions: with teammates present it exposes the owner's private
+  // connectors to every member (owner impersonation), and even solo it
+  // dissolves the boundary between the owner's OWN workspaces — a connector
+  // connected in workspace A becomes callable from workspace B, defeating the
+  // context separation multiple workspaces exist for.
   //
-  // The gate is `isSoloWorkspaceSystem` (live member count <= 1), keyed purely
-  // on member count and NEVER on `is_personal`: per workspaces.md, `is_personal`
-  // is only a label marking the auto-created *default* workspace, and teammates
-  // are invited into that same workspace with no "promote to team" migration —
-  // so it routinely has multiple members. Keying on the flag re-exposed the
-  // owner's private Gmail/Notion to every member (a 3-member is_personal
-  // workspace was injecting the owner's connectors for everyone). Every
-  // workspace is treated identically: solo (any kind) loads the owner-personal
-  // base, multi-member (any kind) suppresses it. Once a second member joins,
-  // the workspace's tool access must come SOLELY from team-native
+  // Exposure is the injection boundary for EVERY workspace, any member count:
+  // a workspace assistant's tools come SOLELY from team-native
   // (scope='workspace') instances + member-exposure grants (`connector_grant`)
-  // — both applied as overlays further down — so we suppress the owner-personal
-  // base load.
+  // — both applied as overlays further down. Connect-in-context auto-exposes
+  // to the active workspace, so the bootstrap flow still works. Only a
+  // workspace-less personal assistant base-loads the owner's personal set —
+  // there is no workspace boundary to cross. (The solo-workspace base load
+  // this gate used to allow via `isSoloWorkspaceSystem` was removed
+  // 2026-07-14, clean break, no grant backfill.)
   //
   // See docs/architecture/integrations/mcp.md → "Workspace connector scoping"
   // and `resolveConnectorInstances` (the Stage-5 intent this enforces).
-  let loadOwnerPersonalConnectors = true
-  if (assistantTeamId) {
-    loadOwnerPersonalConnectors = await isSoloWorkspaceSystem(assistantTeamId)
-  }
+  const loadOwnerPersonalConnectors = !assistantTeamId
 
   let connectors
   try {

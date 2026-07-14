@@ -60,6 +60,13 @@ export type PublicPage = {
    *  (`/share/<token>`, `/share/<token>/p/<pageId>`). Empty for a link root
    *  that isn't inside any published subtree. */
   breadcrumb?: { pageId: string; title: string; icon: string | null }[];
+  /** Custom-domain (site) responses only — the resolved page id. */
+  pageId?: string;
+  /** Custom-domain responses only — this page's canonical site path. */
+  canonicalPath?: string;
+  /** Custom-domain responses only — canonical site path per referenced page
+   *  (breadcrumb + child_page blocks): `/`, `/<slug>`, or `/p/<id>`. */
+  paths?: Record<string, string>;
 };
 
 /** An emoji rendered as an SVG data-URL favicon (Notion uses the page icon). */
@@ -130,6 +137,14 @@ function publishedStreamUrl(pageId: string): string {
   return `${API_URL}/api/public/published/${encodeURIComponent(pageId)}/stream`;
 }
 
+/** Media/stream URLs for a page served on a customer's custom domain. */
+function siteMediaUrl(host: string, blockId: string, pageId?: string): string {
+  return `${API_URL}/api/public/sites/${encodeURIComponent(host)}/media/${encodeURIComponent(blockId)}${pageScope(pageId)}`;
+}
+function siteStreamUrl(host: string, pageId?: string): string {
+  return `${API_URL}/api/public/sites/${encodeURIComponent(host)}/stream${pageScope(pageId)}`;
+}
+
 /**
  * A public viewer's source: either an "anyone with the link" token (optionally
  * scoped to a sub-page of the shared root via `pageId` — the subtree cascade),
@@ -138,22 +153,73 @@ function publishedStreamUrl(pageId: string): string {
  */
 export type PublicSource =
   | { kind: "link"; token: string; pageId?: string }
-  | { kind: "published"; pageId: string };
+  | { kind: "published"; pageId: string }
+  | {
+      kind: "site";
+      /** The customer hostname the page is served on. */
+      host: string;
+      /** The site path being viewed ("" for the root). */
+      path: string;
+      /** The resolved page id (scopes media/stream for sub-pages). */
+      pageId?: string;
+    };
 
 export function publicMediaUrlFor(source: PublicSource, blockId: string): string {
+  if (source.kind === "site") return siteMediaUrl(source.host, blockId, source.pageId);
   return source.kind === "link"
     ? publicMediaUrl(source.token, blockId, source.pageId)
     : publishedMediaUrl(source.pageId, blockId);
 }
 export function publicStreamUrlFor(source: PublicSource): string {
+  if (source.kind === "site") return siteStreamUrl(source.host, source.pageId);
   return source.kind === "link"
     ? publicStreamUrl(source.token, source.pageId)
     : publishedStreamUrl(source.pageId);
 }
-export function fetchPublicPageFor(source: PublicSource, opts?: { signal?: AbortSignal }): Promise<PublicPage | null> {
+export async function fetchPublicPageFor(source: PublicSource, opts?: { signal?: AbortSignal }): Promise<PublicPage | null> {
+  if (source.kind === "site") {
+    const result = await getSitePage(source.host, source.path, opts);
+    if (!result) return null;
+    if (result.kind === "redirect") {
+      // A live viewer's slug changed under them — follow the new address.
+      if (typeof window !== "undefined") window.location.replace(result.location);
+      return null;
+    }
+    return result.page;
+  }
   return source.kind === "link"
     ? getPublicPage(source.token, source.pageId, opts)
     : getPublishedPage(source.pageId, opts);
+}
+
+export type SitePageResult =
+  | { kind: "page"; page: PublicPage }
+  | { kind: "redirect"; location: string };
+
+/**
+ * Fetch a page served on a custom domain by host + site path. Distinguishes
+ * a redirect directive (historical slug / canonicalization) from a render;
+ * null on any non-200 (unknown host, unpublished, bad path).
+ */
+export async function getSitePage(
+  host: string,
+  path: string,
+  opts?: { signal?: AbortSignal },
+): Promise<SitePageResult | null> {
+  try {
+    const res = await fetch(
+      `${fetchApiBase()}/api/public/sites/${encodeURIComponent(host)}/page?path=${encodeURIComponent(path)}`,
+      { cache: "no-store", signal: opts?.signal },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as PublicPage | { redirect: string };
+    if ("redirect" in body && typeof body.redirect === "string") {
+      return { kind: "redirect", location: body.redirect };
+    }
+    return { kind: "page", page: body as PublicPage };
+  } catch {
+    return null;
+  }
 }
 
 /**

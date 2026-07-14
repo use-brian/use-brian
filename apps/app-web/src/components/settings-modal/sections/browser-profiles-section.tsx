@@ -22,11 +22,25 @@ import {
   listBrowserProfiles,
   revokeProfileGrant,
   revokeProfileSession,
+  startProfileLogin,
   updateBrowserProfile,
   type BrowserBackend,
   type BrowserProfile,
   type BrowserProfileClearance,
 } from "@/lib/api/computer";
+
+/** "instagram.com" and "https://instagram.com/x" both work in the sign-in box. */
+function normalizeLoginUrl(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const url = new URL(withScheme);
+    return url.hostname.includes(".") ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
 
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
 const BACKENDS: BrowserBackend[] = ["cloud", "local"];
@@ -46,6 +60,9 @@ export function BrowserProfilesSection() {
   const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // "Sign in to a site" drafts + in-flight flag, keyed by profile id.
+  const [loginDrafts, setLoginDrafts] = useState<Record<string, string>>({});
+  const [loginBusyId, setLoginBusyId] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!workspaceId) {
@@ -123,6 +140,32 @@ export function BrowserProfilesSection() {
       void reload();
     },
     [reload, t],
+  );
+
+  // "Sign in to a site" (§7): open a cloud browser on the login page as this
+  // profile and jump to the Take-Over live view in a new tab (the settings
+  // modal stays put). Signing in there + "I signed in" captures the cookies
+  // into the profile; the ?flow=login view offers Done when saved.
+  const onLogin = useCallback(
+    async (profile: BrowserProfile) => {
+      const url = normalizeLoginUrl(loginDrafts[profile.id] ?? "");
+      if (!url || loginBusyId) return;
+      setActionError(null);
+      setLoginBusyId(profile.id);
+      const started = await startProfileLogin(profile.id, url).catch(() => null);
+      setLoginBusyId(null);
+      if (!started) {
+        setActionError(t.computer.profiles.loginFailed);
+        return;
+      }
+      const query = started.site ? `&site=${encodeURIComponent(started.site)}` : "";
+      window.open(
+        `/w/${workspaceId}/computer/${encodeURIComponent(started.sessionId)}?flow=login${query}`,
+        "_blank",
+        "noopener",
+      );
+    },
+    [loginBusyId, loginDrafts, t, workspaceId],
   );
 
   const onRevokeGrant = useCallback(
@@ -207,6 +250,44 @@ export function BrowserProfilesSection() {
                     >
                       {t.computer.profiles.deleteProfile}
                     </button>
+                  </div>
+
+                  {/* "Sign in to a site" (§7): user-initiated login capture —
+                      opens the Take-Over live view on the site's login page. */}
+                  <div className="mt-3">
+                    <p className="text-[11px] font-medium text-muted-foreground">
+                      {t.computer.profiles.loginLabel}
+                    </p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={loginDrafts[profile.id] ?? ""}
+                        onChange={(e) =>
+                          setLoginDrafts((d) => ({ ...d, [profile.id]: e.target.value }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void onLogin(profile);
+                        }}
+                        placeholder={t.computer.profiles.loginPlaceholder}
+                        className="h-8 flex-1 rounded-md border border-border bg-background px-2.5 text-sm outline-none focus:ring-1 focus:ring-ring"
+                      />
+                      <button
+                        type="button"
+                        disabled={
+                          loginBusyId !== null ||
+                          normalizeLoginUrl(loginDrafts[profile.id] ?? "") === null
+                        }
+                        onClick={() => void onLogin(profile)}
+                        className="h-8 shrink-0 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+                      >
+                        {loginBusyId === profile.id
+                          ? t.computer.profiles.loginOpening
+                          : t.computer.profiles.loginAction}
+                      </button>
+                    </div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {t.computer.profiles.loginHint}
+                    </p>
                   </div>
 
                   {/* Clearance rung (top rung = owner-only; lower = shared) */}

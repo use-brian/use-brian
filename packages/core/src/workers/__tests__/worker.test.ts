@@ -605,4 +605,136 @@ describe('[COMP:workers/manager] createWorkerManager', () => {
     const notifications = manager.drainNotifications()
     expect(notifications[0].status).toBe('failed')
   })
+
+  describe('research read-browse injection (setResearchBrowseTools)', () => {
+    /** Fake provider that records the tool names of every request it sees. */
+    function makeToolCapturingProvider(seenToolNames: string[][]): LLMProvider {
+      function* chunks(): Generator<StreamChunk> {
+        yield { type: 'message_start', model: 'gemini-flash' }
+        yield { type: 'text_delta', text: 'done' }
+        yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+      }
+      return {
+        name: 'fake',
+        models: ['gemini-flash'],
+        async *stream(req: ProviderRequest) {
+          seenToolNames.push((req.tools ?? []).map((t) => t.name))
+          yield* chunks()
+        },
+        createSession(): ProviderSession {
+          return {
+            send(_messages: Message[]): AsyncIterable<StreamChunk> {
+              return (async function* () {
+                yield* chunks()
+              })()
+            },
+          }
+        },
+      }
+    }
+
+    const readOnlyTool = (name: string) =>
+      [
+        name,
+        {
+          name,
+          description: name,
+          inputSchema: { _def: {} } as never,
+          isConcurrencySafe: true,
+          isReadOnly: true,
+          async execute() {
+            return { data: 'ok' }
+          },
+        } as never,
+      ] as const
+
+    it('research workers get the browse tools merged into their map', async () => {
+      const seen: string[][] = []
+      const manager = createWorkerManager({
+        provider: makeToolCapturingProvider(seen),
+        model: 'gemini-flash',
+        tools: new Map(),
+      })
+      manager.setResearchBrowseTools(new Map([readOnlyTool('browserReadPage')]))
+      manager.setResearchMode(true)
+      manager.spawn('dig into a gap', ctx, new Map([readOnlyTool('webSearch'), readOnlyTool('urlReader')]))
+      await manager.waitAll()
+      expect(seen[0]).toContain('browserReadPage')
+      expect(seen[0]).toContain('webSearch')
+    })
+
+    it('non-research workers never see the browse tools', async () => {
+      const seen: string[][] = []
+      const manager = createWorkerManager({
+        provider: makeToolCapturingProvider(seen),
+        model: 'gemini-flash',
+        tools: new Map(),
+      })
+      manager.setResearchBrowseTools(new Map([readOnlyTool('browserReadPage')]))
+      manager.spawn('quick lookup', ctx, new Map([readOnlyTool('webSearch')]))
+      await manager.waitAll()
+      expect(seen[0]).toContain('webSearch')
+      expect(seen[0]).not.toContain('browserReadPage')
+    })
+
+    it('the injection survives reset() — it is boot config, not per-request state', async () => {
+      const seen: string[][] = []
+      const manager = createWorkerManager({
+        provider: makeToolCapturingProvider(seen),
+        model: 'gemini-flash',
+        tools: new Map(),
+      })
+      manager.setResearchBrowseTools(new Map([readOnlyTool('browserReadPage')]))
+      manager.reset()
+      manager.setResearchMode(true)
+      manager.spawn('dig again', ctx, new Map([readOnlyTool('webSearch')]))
+      await manager.waitAll()
+      expect(seen[0]).toContain('browserReadPage')
+    })
+
+    it('a browserReadPage read satisfies the urlReader-or-die protocol enforcement', async () => {
+      // Provider that calls webSearch then browserReadPage, then answers.
+      let turn = 0
+      const provider: LLMProvider = {
+        name: 'fake',
+        models: ['gemini-flash'],
+        async *stream(_req: ProviderRequest) {
+          turn += 1
+          yield { type: 'message_start', model: 'gemini-flash' }
+          if (turn === 1) {
+            yield { type: 'tool_use_start', id: 't1', name: 'webSearch' }
+            yield { type: 'tool_use_delta', id: 't1', input: '{"query":"x"}' }
+            yield { type: 'tool_use_end', id: 't1' }
+            yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }
+          } else if (turn === 2) {
+            yield { type: 'tool_use_start', id: 't2', name: 'browserReadPage' }
+            yield { type: 'tool_use_delta', id: 't2', input: '{"url":"https://a.example/x"}' }
+            yield { type: 'tool_use_end', id: 't2' }
+            yield { type: 'message_end', stopReason: 'tool_use', usage: { inputTokens: 1, outputTokens: 1 } }
+          } else {
+            yield { type: 'text_delta', text: '<worker-findings>real findings</worker-findings>' }
+            yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+          }
+        },
+        createSession(): ProviderSession {
+          return {
+            send(_messages: Message[]): AsyncIterable<StreamChunk> {
+              return (async function* () {
+                yield { type: 'message_start', model: 'gemini-flash' }
+                yield { type: 'text_delta', text: 'unused' }
+                yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 1, outputTokens: 1 } }
+              })()
+            },
+          }
+        },
+      }
+      const manager = createWorkerManager({ provider, model: 'gemini-flash', tools: new Map() })
+      manager.setResearchBrowseTools(new Map([readOnlyTool('browserReadPage')]))
+      manager.setResearchMode(true)
+      const { workerId } = manager.spawn('read a js-heavy page', ctx, new Map([readOnlyTool('webSearch')]))!
+      await manager.waitAll()
+      expect(manager.getStatus(workerId)).toBe('completed')
+      expect(manager.getResult(workerId)).toContain('real findings')
+    })
+  })
 })
