@@ -49,7 +49,7 @@ git clone https://github.com/sidanclaw/sidanclaw.git
 cd sidanclaw
 export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.sidanclaw/
 pnpm install
-pnpm dev                    # api + canvas sidecar + web app, opens your browser
+pnpm dev                    # api + canvas + web + Discord bridge; opens your browser
 ```
 
 That is it. There is no step three. The store defaults to an embedded PGLite
@@ -80,6 +80,10 @@ in the first five minutes:
 Out of the box it can remember, search the web, and manage your tasks and docs.
 Connectors like Gmail, Calendar, and Notion switch on when you add their keys.
 The brain is the point: the more you drop in, the sharper the rest gets.
+
+Telegram and Slack bots are configured under **Studio → Channels** and need a
+public HTTPS tunnel to the local API webhook port (`4000`). Discord needs no
+inbound tunnel: the local launcher starts its open Gateway bridge on port `8090`.
 
 ### What it asks before doing
 
