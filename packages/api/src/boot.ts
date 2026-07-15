@@ -4213,6 +4213,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── Workspace-level prompt evolution worker ──
   const { createMemoryEvolutionWorker } = await import('./workers/memory-evolution-worker.js')
   const memoryEvolutionWorker = createMemoryEvolutionWorker({
+    // Staggered vs the other evolution workers: they all default to the same
+    // 30s first-tick delay, so a boot fired every heavy scan on the same
+    // instant (the tick-storm pattern startJitteredInterval exists for —
+    // deployment.md § "Worker tick jitter").
+    firstTickDelayMs: 45_000,
     onEvent: (event) => {
       if (event.type === 'workspace_processed' && event.snippetEmitted) {
         console.log(`[memory-evolution] emitted snippet for workspace ${event.workspaceId} (${event.totalVerifications} verifications over ${event.totalSaves} model saves)`)
@@ -4228,6 +4233,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── Brain-evolution worker ──
   const { createBrainEvolutionWorker } = await import('./workers/brain-evolution-worker.js')
   const brainEvolutionWorker = createBrainEvolutionWorker({
+    // See memoryEvolutionWorker above — distinct first-tick offsets keep the
+    // evolution workers' boot scans from landing on the same instant.
+    firstTickDelayMs: 75_000,
     onEvent: (event) => {
       if (event.type === 'workspace_processed' && event.snippetEmitted) {
         console.log(`[brain-evolution] emitted snippet for workspace ${event.workspaceId} (primitives above threshold: ${event.primitivesAboveThreshold.join(', ')})`)
