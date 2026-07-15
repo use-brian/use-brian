@@ -23,6 +23,9 @@ import { isXHost, parseStatusUrl } from './fetch-xai.js'
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const CACHE_TTL_MS = 15 * 60 * 1000
+// Entry cap bounding the cache inside one TTL window (payloads are a few KB
+// of Grok response each). Insertion-order (Map) eviction — oldest first.
+const CACHE_MAX_ENTRIES = 128
 const REQUEST_TIMEOUT_MS = 30_000
 
 const inputSchema = z.object({
@@ -67,7 +70,21 @@ function readCache(key: string): Record<string, unknown> | undefined {
 }
 
 function writeCache(key: string, payload: Record<string, unknown>): void {
-  cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, payload })
+  // Sweep expired entries on every write. readCache only deletes the exact
+  // key it re-reads, so one-shot queries (the common case) were never evicted
+  // and the map grew for the process lifetime — the same leak shape the fetch
+  // cache had before it was bounded. Writes are rare (one per un-cached xAI
+  // call), so a full sweep here is cheap.
+  const now = Date.now()
+  for (const [k, entry] of cache) {
+    if (entry.expiresAt < now) cache.delete(k)
+  }
+  cache.set(key, { expiresAt: now + CACHE_TTL_MS, payload })
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) break
+    cache.delete(oldest)
+  }
 }
 
 function cacheKey(model: string, inputText: string, toolOptions: Record<string, unknown>): string {
@@ -90,6 +107,11 @@ function buildXSearchTool(input: XSearchInput): Record<string, unknown> {
 /** Test-only: reset the in-memory cache between cases. */
 export function __resetXSearchCache(): void {
   cache.clear()
+}
+
+/** Test-only: observe cache size for the eviction-bound tests. */
+export function _getXSearchCacheSize(): number {
+  return cache.size
 }
 
 export const xSearchTool = buildTool({

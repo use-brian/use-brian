@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { xSearchTool, __resetXSearchCache } from '../base/x-search.js'
+import { xSearchTool, __resetXSearchCache, _getXSearchCacheSize } from '../base/x-search.js'
 
 const ctx = {
   userId: 'test-user',
@@ -268,6 +268,48 @@ describe('[COMP:tools/x-search] xSearch tool', () => {
       const result = await xSearchTool.execute({ query: 'unique-err' }, ctx)
       expect(result.isError).toBe(true)
       expect(String(result.data)).toContain('401')
+    })
+  })
+})
+
+describe('[COMP:tools/x-search] cache bounds', () => {
+  let fetchSpy: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    __resetXSearchCache()
+    fetchSpy = vi.fn(async () => mockXaiResponse(SAMPLE_RESPONSE))
+    vi.stubGlobal('fetch', fetchSpy)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  it('a write sweeps entries whose TTL lapsed — one-shot queries do not pin memory', async () => {
+    vi.useFakeTimers()
+    await withXaiKey(async () => {
+      await xSearchTool.execute({ query: 'one-shot-a' }, ctx)
+      await xSearchTool.execute({ query: 'one-shot-b' }, ctx)
+      expect(_getXSearchCacheSize()).toBe(2)
+      vi.advanceTimersByTime(16 * 60 * 1000) // past the 15-min TTL
+      // readCache only deletes the exact key it re-reads; the sweep on this
+      // unrelated write is what reclaims the expired one-shot entries.
+      await xSearchTool.execute({ query: 'one-shot-c' }, ctx)
+      expect(_getXSearchCacheSize()).toBe(1)
+    })
+  })
+
+  it('caps entries oldest-first so distinct queries cannot grow the map unboundedly', async () => {
+    await withXaiKey(async () => {
+      for (let i = 0; i < 130; i++) {
+        await xSearchTool.execute({ query: `distinct-query-${i}` }, ctx)
+      }
+      expect(_getXSearchCacheSize()).toBe(128)
+      // The first query fell off the cap: repeating it re-fetches (cache miss).
+      const callsBefore = fetchSpy.mock.calls.length
+      await xSearchTool.execute({ query: 'distinct-query-0' }, ctx)
+      expect(fetchSpy.mock.calls.length).toBe(callsBefore + 1)
     })
   })
 })

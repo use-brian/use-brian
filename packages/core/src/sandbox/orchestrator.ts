@@ -61,6 +61,18 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
   tasks: Map<string, SandboxTaskRecord>
 } {
   const tasks = new Map<string, SandboxTaskRecord>()
+  // Terminal records (completed/failed) are dead weight: every read on this
+  // store filters to running/paused, but completeTask/reapStale only ever
+  // status-flip via update() — so a long-lived process retained every task it
+  // ever ran. Keep terminals for a short debugging window, then drop them on
+  // the next write.
+  const TERMINAL_RETENTION_MS = 60 * 60 * 1000
+  const pruneTerminal = () => {
+    const cutoff = Date.now() - TERMINAL_RETENTION_MS
+    for (const [id, t] of tasks) {
+      if (t.status !== 'running' && t.status !== 'paused' && t.lastActivityAt < cutoff) tasks.delete(id)
+    }
+  }
   return {
     tasks,
     async getActiveBySession(sessionId) {
@@ -77,9 +89,11 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
       )
     },
     async create(record) {
+      pruneTerminal()
       tasks.set(record.taskId, record)
     },
     async update(taskId, patch) {
+      pruneTerminal()
       const existing = tasks.get(taskId)
       if (existing) tasks.set(taskId, { ...existing, ...patch })
     },

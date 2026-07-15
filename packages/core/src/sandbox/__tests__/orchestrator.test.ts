@@ -203,3 +203,38 @@ describe('[COMP:sandbox/provider] Seam swap (§4.3)', () => {
     expect(typeof sbx.options.taskId).toBe('string')
   })
 })
+
+describe('[COMP:sandbox/orchestrator] In-memory task store terminal pruning', () => {
+  const record = (taskId: string, status: 'running' | 'paused' | 'completed' | 'failed', lastActivityAt: number) => ({
+    taskId,
+    sandboxId: `sb-${taskId}`,
+    userId: 'user-1',
+    workspaceId: 'ws-1',
+    sessionId: `session-${taskId}`,
+    status,
+    profileId: null,
+    injectedSite: null,
+    authorizedBudgetUsd: 5,
+    createdAt: lastActivityAt,
+    lastActivityAt,
+  })
+
+  it('drops terminal records past the retention window on the next write; active records stay', async () => {
+    const store = createInMemorySandboxTaskStore()
+    const stale = Date.now() - 2 * 60 * 60 * 1000 // beyond the 1h retention
+    store.tasks.set('t-done-old', record('t-done-old', 'completed', stale))
+    store.tasks.set('t-failed-old', record('t-failed-old', 'failed', stale))
+    store.tasks.set('t-live-old', record('t-live-old', 'running', stale))
+    store.tasks.set('t-done-fresh', record('t-done-fresh', 'completed', Date.now() - 1000))
+    // Any write prunes: terminals past retention go, active records never age out.
+    await store.update('t-live-old', { lastActivityAt: Date.now() })
+    expect([...store.tasks.keys()].sort()).toEqual(['t-done-fresh', 't-live-old'])
+  })
+
+  it('create() prunes too, so a store that only ever creates cannot retain dead tasks', async () => {
+    const store = createInMemorySandboxTaskStore()
+    store.tasks.set('t-old', record('t-old', 'failed', Date.now() - 2 * 60 * 60 * 1000))
+    await store.create(record('t-new', 'running', Date.now()))
+    expect([...store.tasks.keys()]).toEqual(['t-new'])
+  })
+})

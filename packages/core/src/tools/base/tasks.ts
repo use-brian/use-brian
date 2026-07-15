@@ -22,8 +22,32 @@ type Task = {
 const sessionTasks = new Map<string, Task[]>()
 let taskCounter = 0
 
+// Bounds for the scratch store. Every distinct sessionId that ever touched
+// createTask used to pin its task array for the process lifetime — the
+// fastest-growing of the unbounded buffers behind the long-running local
+// install's memory exhaustion (session-keyed, so it grows with usage, not
+// content). Map insertion order doubles as recency: every write re-inserts
+// its session, so overflow eviction hits the longest-idle session.
+const MAX_SESSIONS = 256
+const MAX_TASKS_PER_SESSION = 200
+
+function touchSession(key: string, tasks: Task[]): void {
+  sessionTasks.delete(key)
+  sessionTasks.set(key, tasks)
+  while (sessionTasks.size > MAX_SESSIONS) {
+    const oldest = sessionTasks.keys().next().value
+    if (oldest === undefined) break
+    sessionTasks.delete(oldest)
+  }
+}
+
 export function _getSessionTasksSize(): number {
   return sessionTasks.size
+}
+
+/** Test-only: reset the scratch store between cases. */
+export function __resetSessionTasks(): void {
+  sessionTasks.clear()
 }
 
 // NAMING COLLISION (see updateTaskTool below): this `createTask` and the brain
@@ -60,7 +84,11 @@ export const createTaskTool = buildTool({
       createdAt: new Date(),
     }
     tasks.push(task)
-    sessionTasks.set(key, tasks)
+    // Scratch semantics: past the per-session cap the oldest entry falls off.
+    // A session juggling 200+ live scratch todos is pathological; losing the
+    // stalest one beats pinning them all.
+    while (tasks.length > MAX_TASKS_PER_SESSION) tasks.shift()
+    touchSession(key, tasks)
 
     return { data: { id: task.id, subject: task.subject, status: task.status } }
   },
@@ -96,6 +124,8 @@ export const updateTaskTool = buildTool({
 
     if (input.status) task.status = input.status
     if (input.result) task.result = input.result
+    // Refresh recency so an actively-updated session isn't the one evicted.
+    touchSession(key, tasks)
 
     return { data: { id: task.id, subject: task.subject, status: task.status, result: task.result } }
   },
