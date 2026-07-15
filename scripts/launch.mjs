@@ -18,9 +18,9 @@
  * The Postgres container is the code-identical escape hatch: set DATABASE_URL to
  * a real postgres:// string and the brain server step is skipped.
  */
-import { spawn } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,6 +32,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const CONFIG_DIR = join(homedir(), '.sidanclaw')
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 const BRAIN_DIR = join(CONFIG_DIR, 'brain')
+// Live process-group ledger for THIS boot (see reapStaleSet). Written on every
+// spawn, removed on clean shutdown — so its mere existence at boot means the
+// previous launcher died without tearing its tree down (SIGKILL, power loss).
+const PIDS_FILE = join(CONFIG_DIR, 'launch.pids.json')
 
 // Load sidanclaw/.env into process.env BEFORE any env read below, so `pnpm
 // start` honors it the same way the standalone migrate + doc-sync paths
@@ -146,6 +150,12 @@ const env = {
 
 // ── helpers ────────────────────────────────────────────────────────
 const children = []
+function writePidsFile() {
+  // Best-effort ledger; a failed write must never block the boot itself.
+  try {
+    writeFileSync(PIDS_FILE, JSON.stringify({ launcherPid: process.pid, root: ROOT, pgids: children.map((c) => c.pid).filter(Boolean) }))
+  } catch { /* ledger is advisory */ }
+}
 function run(label, cmd, args, extraEnv = {}) {
   // `detached: true` puts each child in its OWN process group, so shutdown()
   // can signal the whole group (pnpm wrapper + tsx/next + esbuild service)
@@ -158,10 +168,17 @@ function run(label, cmd, args, extraEnv = {}) {
     console.error(`[launch] failed to start ${label}: ${err.message}; shutting down.`)
     shutdown(1)
   })
-  child.on('exit', (code) => {
-    if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
+  // ANY exit while we're not shutting down is fatal — these are servers, there
+  // is no legitimate clean exit. The old `code`-truthy guard let a signal-kill
+  // (code=null) and a clean code-0 exit leave the launcher running over a dead
+  // child (verified: `kill <api-pid>` kept the launcher + siblings alive).
+  child.on('exit', (code, signal) => {
+    if (shuttingDown) return
+    console.error(`[launch] ${label} exited unexpectedly (${signal ? `signal ${signal}` : `code ${code}`}); shutting down.`)
+    shutdown(1)
   })
   children.push(child)
+  writePidsFile()
   return child
 }
 function waitForPort(port, label, timeoutMs = 60_000) {
@@ -179,10 +196,27 @@ function waitForPort(port, label, timeoutMs = 60_000) {
   })
 }
 function runOnce(label, cmd, args) {
+  // Detached + tracked like the long-lived children: a SIGTERM/SIGHUP to the
+  // launcher mid-build must tear the whole turbo worker tree down too, not
+  // just the servers that never got to start.
   return new Promise((res, rej) => {
-    const c = spawn(cmd, args, { cwd: ROOT, env, stdio: ['ignore', 'inherit', 'inherit'] })
+    const c = spawn(cmd, args, { cwd: ROOT, env, stdio: ['ignore', 'inherit', 'inherit'], detached: true })
     c.on('error', (err) => rej(new Error(`${label} failed to start: ${err.message}`)))
-    c.on('exit', (code) => (code ? rej(new Error(`${label} failed (${code})`)) : res()))
+    // When the exit is shutdown-induced, leave the promise pending: the
+    // launcher is exiting, and resolving would race the boot sequence forward.
+    // On any other exit, STOP tracking this pid: its process group is dead,
+    // and hours later the group id may be reused by an unrelated process —
+    // shutdown()'s SIGKILL sweep and the next boot's reaper must never
+    // signal a recycled group.
+    c.on('exit', (code) => {
+      if (shuttingDown) return
+      const i = children.indexOf(c)
+      if (i !== -1) children.splice(i, 1)
+      writePidsFile()
+      code ? rej(new Error(`${label} failed (${code})`)) : res()
+    })
+    children.push(c)
+    writePidsFile()
   })
 }
 function openBrowser(url) {
@@ -248,17 +282,26 @@ function shutdown(code = 0) {
     // grandchild that ignored SIGTERM can't outlive this early exit (no-op
     // ESRCH when the group is already empty).
     for (const c of children) signalTree(c, 'SIGKILL')
+    try { unlinkSync(PIDS_FILE) } catch { /* never written / already gone */ }
     process.exit(code)
   }
   for (const c of children) c.once('exit', exitIfDrained)
   setTimeout(() => {
     for (const c of children) signalTree(c, 'SIGKILL')
+    try { unlinkSync(PIDS_FILE) } catch { /* never written / already gone */ }
     process.exit(code)
   }, 3000)
   exitIfDrained()
 }
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
+// Terminal-window close sends SIGHUP to the launcher only — the children live
+// in their OWN process groups/sessions (detached, see run()), so they never
+// see the hangup themselves. Without this handler node's default SIGHUP
+// action killed the launcher with no JS cleanup and the full ~15-process set
+// survived headless (verified) — the most common orphan-set generator left
+// after the detached-group fix.
+process.on('SIGHUP', () => shutdown(0))
 // Any crash of the launcher itself must still tear the tree down. Without
 // these, an uncaught throw (e.g. a waitForPort timeout rejecting a top-level
 // await) exited the launcher and orphaned every child.
@@ -270,6 +313,81 @@ process.on('unhandledRejection', (err) => {
   console.error('[launch] fatal:', err)
   shutdown(1)
 })
+
+// ── stale-set recovery + port pre-flight ──────────────────────────
+// The in-process teardown above cannot survive a SIGKILL of the launcher
+// itself (or power loss). The recovery contract is: the NEXT `pnpm dev` heals
+// instead of stacking — it reaps whatever the pids-file ledger says the dead
+// launcher left behind, then verifies every port is actually free before
+// spawning anything (next dev otherwise silently drifts to :3004 on a taken
+// port and stacks a second app-web nobody asked for).
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms))
+function psSnapshot() {
+  // `-A -o pid=,pgid=,command=` is the macOS/Linux-portable spelling. On a
+  // platform without ps (win32) return [] — reaping degrades to a no-op and
+  // the port pre-flight below still catches a stacked set.
+  try {
+    return execFileSync('ps', ['-A', '-o', 'pid=,pgid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+      .split('\n')
+      .map((l) => l.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+      .filter(Boolean)
+      .map((m) => ({ pid: Number(m[1]), pgid: Number(m[2]), command: m[3] }))
+  } catch { return [] }
+}
+// A stale-ledger process only counts as OURS if its argv points into this
+// repo (tsx loader / next bin / pnpm filter args all embed ROOT or the
+// @sidanclaw scope). Guards against PID/pgid reuse killing an innocent
+// process that happens to occupy a recycled group id.
+const isOurs = (command) => command.includes(ROOT) || command.includes('@sidanclaw')
+async function reapStaleSet() {
+  if (!existsSync(PIDS_FILE)) return
+  let ledger
+  try { ledger = JSON.parse(readFileSync(PIDS_FILE, 'utf8')) } catch { ledger = null }
+  if (!ledger || !Array.isArray(ledger.pgids)) { try { unlinkSync(PIDS_FILE) } catch { /* gone */ } ; return }
+  // A ledger whose launcher is still alive is not stale — it's a second
+  // concurrent `pnpm dev`. Refuse instead of killing a healthy set.
+  if (ledger.launcherPid) {
+    const launcher = psSnapshot().find((p) => p.pid === ledger.launcherPid)
+    if (launcher && launcher.command.includes('launch.mjs')) {
+      console.error(`[launch] another sidanclaw launcher is already running (pid ${ledger.launcherPid}) — stop it first (Ctrl-C in its terminal, or: kill ${ledger.launcherPid}).`)
+      process.exit(1)
+    }
+  }
+  const bootSnap = psSnapshot()
+  const staleGroups = ledger.pgids.filter((pgid) => bootSnap.some((p) => p.pgid === pgid && isOurs(p.command)))
+  if (staleGroups.length) {
+    console.log(`[launch] previous launcher died without cleanup — reaping ${staleGroups.length} leftover process group(s)...`)
+    for (const pgid of staleGroups) { try { process.kill(-pgid, 'SIGTERM') } catch { /* already gone */ } }
+    // Give doc-sync's SIGTERM store-flush the same 3s grace shutdown() gives
+    // it, polling so the healthy-fast case doesn't wait the full window.
+    for (let waited = 0; waited < 3000; waited += 200) {
+      if (!psSnapshot().some((p) => staleGroups.includes(p.pgid) && isOurs(p.command))) break
+      await sleepMs(200)
+    }
+    let killed = 0
+    for (const p of psSnapshot()) {
+      if (staleGroups.includes(p.pgid) && isOurs(p.command)) { try { process.kill(p.pid, 'SIGKILL'); killed++ } catch { /* raced away */ } }
+    }
+    console.log(`[launch] reaped stale set${killed ? ` (${killed} survivor(s) needed SIGKILL)` : ''}.`)
+  }
+  try { unlinkSync(PIDS_FILE) } catch { /* gone */ }
+}
+function portTaken(port) {
+  return new Promise((res) => {
+    const sock = connect({ port, host: '127.0.0.1' }, () => { sock.end(); res(true) })
+    sock.on('error', () => { sock.destroy(); res(false) })
+  })
+}
+await reapStaleSet()
+{
+  const required = [...(useEmbedded ? [['embedded brain', PORTS.pglite]] : []), ['api', PORTS.api], ['doc-sync', PORTS.docSync], ['app-web', PORTS.appWeb]]
+  const taken = []
+  for (const [label, port] of required) if (await portTaken(port)) taken.push(`${label} :${port}`)
+  if (taken.length) {
+    console.error(`[launch] cannot boot — already in use: ${taken.join(', ')}.\n  Something else is listening there (a sidanclaw still running elsewhere, or another dev stack). Inspect with: lsof -i :${taken[0].split(':')[1]}`)
+    process.exit(1)
+  }
+}
 
 // ── boot sequence ──────────────────────────────────────────────────
 console.log('[launch] building workspace packages (turbo-cached)...')
