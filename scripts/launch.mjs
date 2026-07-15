@@ -147,7 +147,17 @@ const env = {
 // ── helpers ────────────────────────────────────────────────────────
 const children = []
 function run(label, cmd, args, extraEnv = {}) {
-  const child = spawn(cmd, args, { cwd: ROOT, env: { ...env, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'] })
+  // `detached: true` puts each child in its OWN process group, so shutdown()
+  // can signal the whole group (pnpm wrapper + tsx/next + esbuild service)
+  // with kill(-pid). Signalling only the direct child left grandchildren
+  // running headless whenever the pnpm wrapper died before relaying — the
+  // orphaned servers kept their ports and every `pnpm dev` retry stacked a
+  // fresh ~15-process set on top (verified failure mode, 2026-07-15).
+  const child = spawn(cmd, args, { cwd: ROOT, env: { ...env, ...extraEnv }, stdio: ['ignore', 'inherit', 'inherit'], detached: true })
+  child.on('error', (err) => {
+    console.error(`[launch] failed to start ${label}: ${err.message}; shutting down.`)
+    shutdown(1)
+  })
   child.on('exit', (code) => {
     if (!shuttingDown && code) { console.error(`[launch] ${label} exited with code ${code}; shutting down.`); shutdown(1) }
   })
@@ -171,12 +181,22 @@ function waitForPort(port, label, timeoutMs = 60_000) {
 function runOnce(label, cmd, args) {
   return new Promise((res, rej) => {
     const c = spawn(cmd, args, { cwd: ROOT, env, stdio: ['ignore', 'inherit', 'inherit'] })
+    c.on('error', (err) => rej(new Error(`${label} failed to start: ${err.message}`)))
     c.on('exit', (code) => (code ? rej(new Error(`${label} failed (${code})`)) : res()))
   })
 }
 function openBrowser(url) {
   const cmd = platform() === 'darwin' ? 'open' : platform() === 'win32' ? 'start' : 'xdg-open'
-  spawn(cmd, [url], { stdio: 'ignore', detached: true }).unref()
+  // A missing opener (headless Linux without xdg-open) must not crash the
+  // launcher: an unhandled spawn 'error' event is fatal, and it fires AFTER
+  // a fully successful boot — killing the launcher while every child kept
+  // running headless (the exact orphan-set generator behind the 2026-07-15
+  // "thousands of node processes" incident).
+  const child = spawn(cmd, [url], { stdio: 'ignore', detached: true })
+  child.on('error', () => {
+    console.log(`[launch] could not auto-open a browser (${cmd} not available) — open ${url} manually.`)
+  })
+  child.unref()
 }
 // Next 16 defaults to Turbopack, which HARD-REQUIRES the native @next/swc
 // binding for this platform (it crashes on boot with "native bindings are not
@@ -206,14 +226,50 @@ function nextHasNativeSwc() {
   }
 }
 let shuttingDown = false
+// Signal a child's entire process GROUP (negative pid — children are spawned
+// detached, so each group is rooted at the child). Falls back to the single
+// pid for a child that never got a group (spawn failed before fork).
+function signalTree(child, sig) {
+  if (!child.pid) return
+  try { process.kill(-child.pid, sig) } catch { try { child.kill(sig) } catch { /* already gone */ } }
+}
 function shutdown(code = 0) {
   if (shuttingDown) return
   shuttingDown = true
-  for (const c of children) c.kill('SIGTERM')
-  setTimeout(() => process.exit(code), 500)
+  for (const c of children) signalTree(c, 'SIGTERM')
+  // Exit as soon as every direct child is reaped (fast path: Ctrl-C returns
+  // the prompt in well under a second). The 3s backstop covers doc-sync's
+  // SIGTERM store-flush (≤ its 2s debounce window), then hard-kills whatever
+  // ignored SIGTERM so NOTHING outlives the launcher — a survivor keeps the
+  // ports and silently stacks with the next run.
+  const exitIfDrained = () => {
+    if (!children.every((c) => c.exitCode !== null || c.signalCode !== null)) return
+    // Direct children are dead; sweep each group once more so a straggling
+    // grandchild that ignored SIGTERM can't outlive this early exit (no-op
+    // ESRCH when the group is already empty).
+    for (const c of children) signalTree(c, 'SIGKILL')
+    process.exit(code)
+  }
+  for (const c of children) c.once('exit', exitIfDrained)
+  setTimeout(() => {
+    for (const c of children) signalTree(c, 'SIGKILL')
+    process.exit(code)
+  }, 3000)
+  exitIfDrained()
 }
 process.on('SIGINT', () => shutdown(0))
 process.on('SIGTERM', () => shutdown(0))
+// Any crash of the launcher itself must still tear the tree down. Without
+// these, an uncaught throw (e.g. a waitForPort timeout rejecting a top-level
+// await) exited the launcher and orphaned every child.
+process.on('uncaughtException', (err) => {
+  console.error('[launch] fatal:', err)
+  shutdown(1)
+})
+process.on('unhandledRejection', (err) => {
+  console.error('[launch] fatal:', err)
+  shutdown(1)
+})
 
 // ── boot sequence ──────────────────────────────────────────────────
 console.log('[launch] building workspace packages (turbo-cached)...')
