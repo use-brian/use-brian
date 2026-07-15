@@ -149,6 +149,14 @@ export type RecordingTranscriptionResult = {
   truncated: boolean
   /** Windows whose output hit the degeneration guard (loop cut + maybe retried). */
   degenerateWindows: number
+  /**
+   * Providers that threw before this result was produced, in ladder order —
+   * populated by `withTranscriberFallback` so the caller (which holds the
+   * recording/user context this layer doesn't) can surface a silent downgrade,
+   * e.g. a permanently misconfigured primary key 401-ing every recording onto
+   * the fallback. Absent/empty when the first provider succeeded.
+   */
+  fallthroughs?: Array<{ provider: string; message: string }>
 }
 
 // Accepts `[H:MM:SS]` or `[MM:SS]`, and an ASCII or full-width colon after the

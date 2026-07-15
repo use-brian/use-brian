@@ -78,11 +78,21 @@ export function withTranscriberFallback(
     name: chain.map((p) => p.name).join('→'),
     async transcribe(req) {
       let lastErr: unknown
+      // Reported on the result so the CALLER (which holds recording/user
+      // context) can surface the downgrade — a fall-through here is invisible
+      // in analytics otherwise, and a config error (e.g. an under-scoped key
+      // 401-ing) silently reroutes every recording to the fallback provider.
+      const fallthroughs: Array<{ provider: string; message: string }> = []
       for (const provider of chain) {
         try {
-          return await provider.transcribe(req)
+          const result = await provider.transcribe(req)
+          return fallthroughs.length > 0 ? { ...result, fallthroughs } : result
         } catch (err) {
           lastErr = err
+          fallthroughs.push({
+            provider: provider.name,
+            message: err instanceof Error ? err.message : String(err),
+          })
           console.warn(
             `[recording-transcriber] ${provider.name} failed, falling through:`,
             err instanceof Error ? err.message : err,

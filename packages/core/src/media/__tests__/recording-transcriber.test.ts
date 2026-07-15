@@ -81,9 +81,37 @@ describe('[COMP:media/recording-transcriber] withTranscriberFallback', () => {
     expect(ladder.name).toBe('a→b')
     const out = await ladder.transcribe(REQ)
 
-    expect(out).toBe(ok)
+    // The result carries the fall-through report — the caller (which holds the
+    // recording/user context) surfaces the downgrade in analytics. Everything
+    // else is the backup's result untouched.
+    expect(out).toEqual({ ...ok, fallthroughs: [{ provider: 'a', message: 'a down' }] })
     expect(backup.transcribe).toHaveBeenCalledOnce()
     expect(warn).toHaveBeenCalledOnce()
+  })
+
+  it('reports every failed provider in ladder order on the eventual result', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const a = provider('a', async () => {
+      throw new Error('missing permission speech_to_text')
+    })
+    const b = provider('b', async () => {
+      throw new Error('b down')
+    })
+    const ok = result()
+    const c = provider('c', async () => ok)
+
+    const out = await withTranscriberFallback(a, b, c).transcribe(REQ)
+
+    expect(out.fallthroughs).toEqual([
+      { provider: 'a', message: 'missing permission speech_to_text' },
+      { provider: 'b', message: 'b down' },
+    ])
+  })
+
+  it('reports NO fallthroughs when the primary succeeds (field absent)', async () => {
+    const ok = result()
+    const out = await withTranscriberFallback(provider('a', async () => ok)).transcribe(REQ)
+    expect(out.fallthroughs).toBeUndefined()
   })
 
   it('rethrows the LAST error when every provider fails', async () => {

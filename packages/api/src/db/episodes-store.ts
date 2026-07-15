@@ -451,6 +451,29 @@ export async function updateStatus(
   return toEpisode(result.rows[0])
 }
 
+/**
+ * Merge a patch into an Episode's `source_ref` JSONB. The recording pipeline
+ * advances `sourceRef.status` ('processed' / 'failed') when the async worker
+ * finishes — without this, a recording Episode reads its creation-time
+ * 'awaiting_upload' forever, and anything rendering the Episode (the assistant
+ * browsing the brain, a recordings view) reports a fully-transcribed recording
+ * as still queued (2026-07-14 incident). Merge, not replace: gcsKey / fileName
+ * / mime survive. Runs as the acting user — the recording's creator, a
+ * workspace member, so the episodes RLS policy passes (same identity the
+ * worker reads and bills as).
+ */
+export async function mergeEpisodeSourceRef(
+  actorUserId: string,
+  id: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  await queryWithRLS(
+    actorUserId,
+    `UPDATE episodes SET source_ref = source_ref || $2::jsonb WHERE id = $1`,
+    [id, JSON.stringify(patch)],
+  )
+}
+
 export async function updateCheckpoint(
   actorUserId: string,
   id: string,
