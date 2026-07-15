@@ -38,7 +38,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@sidanclaw/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@sidanclaw/core'
-import { transcribeFirstAudio } from '@sidanclaw/core'
+import { transcribeFirstAudio, sanitize as sanitizeAnalytics } from '@sidanclaw/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -80,6 +80,7 @@ type TelegramByoRouteOptions = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   usageStore?: UsageStore
+  checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   /** Absolute base URL for the web app; used by the /connect Mini App button. */
   appUrl?: string
   /**
@@ -399,6 +400,27 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       ackReaction: storedConfig.ackReaction,
       requireMention: requireMentionResolved,
     }
+    const routeAssistantId = assistant.id
+    function reportIncomingFailure(kind: 'message' | 'media group', channelId: string, err: unknown): void {
+      console.error(`[telegram-byo] error processing ${kind} for chat ${channelId}:`, err)
+      options.analytics?.logEvent({
+        userId: ownerId,
+        assistantId: routeAssistantId,
+        eventName: 'chat_route_error',
+        channelType: 'telegram',
+        metadata: {
+          error_type: sanitizeAnalytics((err as Error)?.name ?? 'unknown'),
+          error_message: sanitizeAnalytics(((err as Error)?.message ?? '').slice(0, 200)),
+          stage: sanitizeAnalytics('telegram_byo_route_catch'),
+        },
+      })
+      adapter.sendMessage(channelId, {
+        text: 'Sorry, something went wrong while handling that message. Please send it again.',
+      }).catch((sendErr) => {
+        console.error('[telegram-byo] failure notice send failed:', sendErr)
+      })
+    }
+
     const adapter = createTelegramAdapter({
       token: credentials.bot_token,
       botUsername: botUsername ?? undefined,
@@ -413,7 +435,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // both photos vanished entirely from `session_messages`).
       onMessage: (msg) => {
         handleIncoming(msg).catch((err) => {
-          console.error(`[telegram-byo] error processing message for chat ${msg.channelId}:`, err)
+          reportIncomingFailure('message', msg.channelId, err)
         })
       },
       onChatSeen: (evt) => {
@@ -905,7 +927,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           files,
         }
         handleIncoming(merged).catch((err) => {
-          console.error(`[telegram-byo] error processing media group for chat ${merged.channelId}:`, err)
+          reportIncomingFailure('media group', merged.channelId, err)
         })
       }, MEDIA_GROUP_BUFFER_MS)
 
@@ -937,6 +959,7 @@ type ProcessMessageParams = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   usageStore?: UsageStore
+  checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   linkedAccountStore?: LinkedAccountStore
   channelUserStore?: ChannelUserStore
   workerManager?: import('@sidanclaw/core').WorkerManager
@@ -1222,6 +1245,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     tools: params.tools,
     memoryStore: params.memoryStore,
     usageStore: params.usageStore,
+    checkCreditBudget: params.checkCreditBudget,
     analytics: params.analytics,
     connectorStore: params.connectorStore,
     mcpSettingsStore: params.mcpSettingsStore,
@@ -1320,7 +1344,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           ? ` Resets ${new Date(resetsAt).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, weekday: 'short' })}.`
           : ''
         const noticeId = await adapter.sendMessage(incoming.channelId, {
-          text: `Running on the standard model — usage limit reached.${resetNote}`,
+          text: `Running on the standard model: usage limit reached.${resetNote} Buy extra usage or upgrade in workspace settings for full speed.`,
         })
         if (noticeId) {
           await adapter.pinMessage?.(incoming.channelId, noticeId, { silent: true })

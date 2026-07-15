@@ -48,6 +48,7 @@ export type DiscordRouteOptions = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   usageStore?: UsageStore
+  checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   channelUserStore?: ChannelUserStore
   workerManager?: import('@sidanclaw/core').WorkerManager
@@ -523,6 +524,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
       tools: extraTools,
       memoryStore: options.memoryStore,
       usageStore: options.usageStore,
+      checkCreditBudget: options.checkCreditBudget,
       analytics: options.analytics,
       connectorStore: options.connectorStore,
       mcpSettingsStore: options.mcpSettingsStore,
@@ -629,7 +631,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             ? ` Resets ${new Date(resetsAt).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, weekday: 'short' })}.`
             : ''
           await adapter.sendMessage(channelId, {
-            text: `Running on the standard model — usage limit reached.${resetNote}`,
+            text: `Running on the standard model: usage limit reached.${resetNote} Buy extra usage or upgrade in workspace settings for full speed.`,
           })
           return null
         },

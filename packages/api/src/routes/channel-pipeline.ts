@@ -62,6 +62,7 @@ import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
 import { createDbKnowledgeStore } from '../db/knowledge-store.js'
 import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
 import { buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
+import type { CreditBudgetGate } from './route-helpers.js'
 import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import {
   buildChannelSessionKey,
@@ -293,6 +294,7 @@ export type ChannelPipelineParams = {
    * WhatsApp/Web always true; Telegram/Slack may be false for shadow users.
    */
   isIdentified: boolean
+  checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
   channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord'
@@ -559,10 +561,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     ? await getWorkspacePlan(assistant.workspaceId)
     : 'free'
   if (usageStore && assistant.workspaceId) {
-    const gate = await checkUsageBudget(assistant.workspaceId, workspacePlan)
+    const gate = await checkUsageBudget(assistant.workspaceId, workspacePlan, params.checkCreditBudget)
     budgetStatus = gate.status
     if (gate.status === 'blocked') {
-      await hooks.sendError(new Error('This assistant has hit its usage limit. The assistant owner needs to upgrade their plan.'))
+      await hooks.sendError(new Error('This workspace has no active sidanclaw plan. The workspace owner can pick a plan at sidan.ai/plans, or self-host the open-source version.'))
       return
     }
     if (

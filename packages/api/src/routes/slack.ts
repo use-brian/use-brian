@@ -106,6 +106,7 @@ type SlackRouteOptions = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   usageStore?: UsageStore
+  checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   channelUserStore?: ChannelUserStore
   /** Link-code claim (identity healing). When both set, a 6-char code in DM merges the Slack user into the code owner. See docs/architecture/platform/identity-healing.md. */
@@ -985,6 +986,7 @@ type ProcessMessageParams = {
   tools: Map<string, Tool>
   memoryStore: MemoryStore
   usageStore?: UsageStore
+  checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   workerManager?: import('@sidanclaw/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
@@ -1210,6 +1212,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     tools: extraTools,
     memoryStore: params.memoryStore,
     usageStore: params.usageStore,
+    checkCreditBudget: params.checkCreditBudget,
     analytics: params.analytics,
     connectorStore: params.connectorStore,
     mcpSettingsStore: params.mcpSettingsStore,
@@ -1303,7 +1306,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           ? ` Resets ${new Date(resetsAt).toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, weekday: 'short' })}.`
           : ''
         await adapter.sendMessage(incoming.channelId, {
-          text: `Running on the standard model — usage limit reached.${resetNote}`,
+          text: `Running on the standard model: usage limit reached.${resetNote} Buy extra usage or upgrade in workspace settings for full speed.`,
         }, threadOpts)
         return null
       },
