@@ -1336,6 +1336,11 @@ export function chatRoutes(options: WebChatOptions): Router {
     // Set when this turn opened an assistant-run presence entry on a doc
     // page (see below) so the outer `finally` can close it on every exit path.
     let docRunPageId: string | null = null
+    // This turn's confirmation resolver, tracked outside the try so the outer
+    // `finally` can evict it from the module-level maps on error/abort exits —
+    // the success-path cleanup never runs on those, and each missed eviction
+    // is a permanent entry in a process-lifetime Map.
+    let turnResolver: ConfirmationResolver | null = null
 
     try {
       const jwtUserId = (req as { userId?: string }).userId
@@ -4100,6 +4105,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       const confirmationResolver = createConfirmationResolver()
       activeResolvers.set(session.id, confirmationResolver)
+      turnResolver = confirmationResolver
 
       try {
         for await (const event of queryLoop({
@@ -5378,6 +5384,18 @@ export function chatRoutes(options: WebChatOptions): Router {
       }
       res.end()
     } finally {
+      // Evict this turn's confirmation state on error/abort exits — the
+      // success path already cleared it before `done`. Identity-guarded:
+      // the catch above flips the session back to idle, so a successor turn
+      // may have registered its own resolver under the same sessionId by the
+      // time this runs; only remove the entry if it is still OURS.
+      if (sessionIdForError && turnResolver &&
+          activeResolvers.get(sessionIdForError) === turnResolver) {
+        activeResolvers.delete(sessionIdForError)
+        for (const [approvalId, entry] of approvalResolverIndex) {
+          if (entry.sessionId === sessionIdForError) approvalResolverIndex.delete(approvalId)
+        }
+      }
       // Close the assistant-run presence entry on every exit path (success,
       // error, client-disconnect abort). Best-effort + idempotent; the
       // doc-sync TTL sweeper is the backstop if this POST never lands.
