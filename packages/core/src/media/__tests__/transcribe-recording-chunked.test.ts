@@ -41,7 +41,7 @@ function chunkFetch(perChunk: Record<number, string | number>) {
         { status: 200 },
       )
     }
-    if (u.includes(':generateContent')) {
+    if (u.includes(':generateContent') || u.includes(':streamGenerateContent')) {
       const body = JSON.parse(init!.body as string) as {
         contents: Array<{ parts: Array<{ file_data?: { file_uri: string } }> }>
       }
@@ -49,13 +49,13 @@ function chunkFetch(perChunk: Record<number, string | number>) {
       const idx = Number(/files\/chunk(\d+)$/.exec(body.contents[0].parts[1].file_data!.file_uri)![1])
       const val = perChunk[idx]
       if (typeof val === 'number') return new Response('boom', { status: val })
-      return new Response(
-        JSON.stringify({
-          candidates: [{ content: { parts: [{ text: val ?? '' }] }, finishReason: 'STOP' }],
-          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
-        }),
-        { status: 200 },
-      )
+      // Chunk windows STREAM (SSE) — a non-streaming call on a ~10-min chunk
+      // sits on a silent socket and gets dropped mid-transcription.
+      const sse = `data: ${JSON.stringify({
+        candidates: [{ content: { parts: [{ text: val ?? '' }] }, finishReason: 'STOP' }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      })}\n\n`
+      return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
     }
     throw new Error(`unexpected url: ${u}`)
   })
@@ -79,16 +79,25 @@ describe('[COMP:media/transcribe-recording] lenient line parsing', () => {
 describe('[COMP:media/transcribe-recording] transcribeRecordingChunks', () => {
   it('transcribes chunks independently, offsets chunk-local stamps, and disables 2.5 thinking', async () => {
     const { fetchFn, generateBodies } = chunkFetch({
-      0: '[0:05] Speaker 1: 今日開會\n[9:50] Speaker 2: ok',
-      1: '[2:00] Speaker 1： wrap up',
+      0: '[0:05] Speaker 1: 今日開會\n[1:30] Speaker 2: 明白\n[3:00] Speaker 1: 跟住\n[4:30] Speaker 2: 係\n[6:00] Speaker 1: 好\n[7:30] Speaker 2: 明\n[9:00] Speaker 1: 完\n[9:50] Speaker 2: ok',
+      1: '[0:30] Speaker 2: 跟住\n[2:00] Speaker 1: 再講\n[3:30] Speaker 2: 仲有\n[4:55] Speaker 1： wrap up',
     })
 
-    const res = await transcribeRecordingChunks({ apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn }, CHUNKS)
+    const res = await transcribeRecordingChunks({ apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn, retryBackoffMs: 0 }, CHUNKS)
 
     expect(res.utterances).toEqual([
-      { startMs: 5_000, endMs: 590_000, speaker: 'Speaker 1', text: '今日開會' },
+      { startMs: 5_000, endMs: 90_000, speaker: 'Speaker 1', text: '今日開會' },
+      { startMs: 90_000, endMs: 180_000, speaker: 'Speaker 2', text: '明白' },
+      { startMs: 180_000, endMs: 270_000, speaker: 'Speaker 1', text: '跟住' },
+      { startMs: 270_000, endMs: 360_000, speaker: 'Speaker 2', text: '係' },
+      { startMs: 360_000, endMs: 450_000, speaker: 'Speaker 1', text: '好' },
+      { startMs: 450_000, endMs: 540_000, speaker: 'Speaker 2', text: '明' },
+      { startMs: 540_000, endMs: 590_000, speaker: 'Speaker 1', text: '完' },
       { startMs: 590_000, endMs: 590_000, speaker: 'Speaker 2', text: 'ok' },
-      { startMs: 720_000, endMs: 720_000, speaker: 'Speaker 1', text: 'wrap up' },
+      { startMs: 630_000, endMs: 720_000, speaker: 'Speaker 2', text: '跟住' },
+      { startMs: 720_000, endMs: 810_000, speaker: 'Speaker 1', text: '再講' },
+      { startMs: 810_000, endMs: 895_000, speaker: 'Speaker 2', text: '仲有' },
+      { startMs: 895_000, endMs: 895_000, speaker: 'Speaker 1', text: 'wrap up' },
     ])
     expect(res.windows).toBe(2)
     expect(res.truncated).toBe(false)
@@ -108,7 +117,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecordingChunks', () => {
     const { fetchFn, generateBodies } = chunkFetch({ 0: '[0:01] Speaker 1: hi' })
 
     await transcribeRecordingChunks(
-      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 600_000, model: 'gemini-3-flash', fetchFn },
+      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 600_000, model: 'gemini-3-flash', fetchFn, retryBackoffMs: 0 },
       [CHUNKS[0]],
     )
 
@@ -121,7 +130,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecordingChunks', () => {
     const { fetchFn } = chunkFetch({ 0: '[0:05] Speaker 1: kept', 1: 500 })
 
     const res = await transcribeRecordingChunks(
-      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn },
+      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn, retryBackoffMs: 0 },
       CHUNKS,
     )
 
@@ -134,7 +143,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecordingChunks', () => {
     const { fetchFn } = chunkFetch({ 0: 'the model just wrote prose with no stamps' })
 
     const res = await transcribeRecordingChunks(
-      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 600_000, fetchFn },
+      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 600_000, fetchFn, retryBackoffMs: 0 },
       [CHUNKS[0]],
     )
 
@@ -148,7 +157,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecordingChunks', () => {
     const { fetchFn } = chunkFetch({ 0: '', 1: '' })
 
     const res = await transcribeRecordingChunks(
-      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn },
+      { apiKey: 'k', buffer: Buffer.from(''), mime: 'audio/aac', durationMs: 900_000, fetchFn, retryBackoffMs: 0 },
       CHUNKS,
     )
 

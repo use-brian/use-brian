@@ -9,6 +9,7 @@ export {
   mergeUtterances,
   stripDegenerateTail,
   stripDegenerateUtterances,
+  hasTranscriptHole,
   type TranscribedUtterance,
   type RecordingAudioChunk,
   type RecordingTranscriptionResult,

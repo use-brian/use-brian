@@ -4,7 +4,9 @@ import {
   mergeUtterances,
   stripDegenerateTail,
   stripDegenerateUtterances,
+  hasTranscriptHole,
   transcribeRecording,
+  transcribeRecordingChunks,
   type TranscribedUtterance,
 } from './transcribe-recording.js'
 
@@ -424,6 +426,7 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
       mime: 'audio/mp4',
       durationMs: 10_000,
       fetchFn: flaky,
+      retryBackoffMs: 0,
     })
     expect(res.utterances.map((u) => u.text)).toEqual(['short and sweet.'])
     expect(res.truncated).toBe(false)
@@ -449,5 +452,252 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     expect(res.truncated).toBe(true) // -> caller bills 0
     expect(res.utterances.map((u) => u.text)).toEqual(['hello there.'])
     expect(calls().filter((u) => u.includes(':streamGenerateContent'))).toHaveLength(2)
+  })
+})
+
+describe('[COMP:media/transcribe-recording] transcribeRecordingChunks resilience', () => {
+  /** A chunk mock whose upload leg fails `uploadFailures` times with a status,
+   *  then succeeds; the generate leg returns `text`. */
+  function chunkFetch(opts: { uploadStatus?: number; uploadFailures?: number; text: string }) {
+    let uploadsLeft = opts.uploadFailures ?? 0
+    return (async (url: string | URL | Request) => {
+      const u = String(url)
+      if (u.endsWith('/upload/v1beta/files')) {
+        if (uploadsLeft > 0) {
+          uploadsLeft--
+          return new Response('overloaded', { status: opts.uploadStatus ?? 503 })
+        }
+        return new Response('{}', { status: 200, headers: { 'x-goog-upload-url': 'https://up.example/s' } })
+      }
+      if (u === 'https://up.example/s') {
+        return new Response(
+          JSON.stringify({ file: { uri: 'files/c', name: 'files/c', state: 'ACTIVE', mimeType: 'audio/aac' } }),
+          { status: 200 },
+        )
+      }
+      if (u.includes(':generateContent') || u.includes(':streamGenerateContent')) {
+        const sse = `data: ${JSON.stringify({
+          candidates: [{ content: { parts: [{ text: opts.text }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        })}\n\n`
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error('unexpected url ' + u)
+    }) as unknown as typeof fetch
+  }
+
+  const chunk = (offsetMs: number) => ({ buffer: Buffer.from('a'), mime: 'audio/aac', offsetMs, durationMs: 60_000 })
+
+  it('rides out a Gemini 503 on the upload leg instead of dropping the chunk', async () => {
+    // 2026-07-14: chunk 3 of a 96-min recording died on a single 503, which
+    // truncated the whole transcript (no page, no charge) even though a retry
+    // would have succeeded.
+    const res = await transcribeRecordingChunks(
+      {
+        apiKey: 'k',
+        buffer: Buffer.from('x'),
+        mime: 'audio/aac',
+        durationMs: 60_000,
+        fetchFn: chunkFetch({ uploadStatus: 503, uploadFailures: 2, text: '[0:00:50] Speaker 1: recovered.' }),
+        retryBackoffMs: 0,
+      },
+      [chunk(0)],
+    )
+    expect(res.truncated).toBe(false)
+    expect(res.utterances.map((u) => u.text)).toEqual(['recovered.'])
+  }, 20_000)
+
+  it('continues a chunk that stops short instead of leaving a hole', async () => {
+    // 2026-07-14, the real failure: one generate call per chunk, and the model
+    // stopped after the first minutes of a ~10-min chunk. Five such chunks left
+    // 8-10 min HOLES in a 96-min transcript that was still billed as complete.
+    let gen = 0
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      if (u.endsWith('/upload/v1beta/files'))
+        return new Response('{}', { status: 200, headers: { 'x-goog-upload-url': 'https://up.example/s' } })
+      if (u === 'https://up.example/s')
+        return new Response(
+          JSON.stringify({ file: { uri: 'files/c', name: 'files/c', state: 'ACTIVE', mimeType: 'audio/aac' } }),
+          { status: 200 },
+        )
+      if (u.includes(':generateContent') || u.includes(':streamGenerateContent')) {
+        const prompt = JSON.parse(String(init?.body ?? '{}')).contents[0].parts[0].text as string
+        gen++
+        // Window 1 stops at 1:00 of a 10-min chunk; the continuation (which must
+        // carry the resume instruction) runs to the end.
+        const text = prompt.includes('Resume from the next utterance AFTER')
+          ? '[2:00] Speaker 2: carried on.\n[3:30] Speaker 1: the middle.\n[5:00] Speaker 2: and on.\n[6:30] Speaker 1: nearly done.\n[8:00] Speaker 2: wrapping.\n[9:40] Speaker 1: the end.'
+          : '[0:10] Speaker 1: the opening.\n[1:00] Speaker 2: stops short here.'
+        const sse = `data: ${JSON.stringify({
+          candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        })}\n\n`
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error('unexpected url ' + u)
+    }) as unknown as typeof fetch
+
+    const res = await transcribeRecordingChunks(
+      {
+        apiKey: 'k',
+        buffer: Buffer.from('x'),
+        mime: 'audio/aac',
+        durationMs: 600_000,
+        fetchFn,
+        retryBackoffMs: 0,
+      },
+      [{ buffer: Buffer.from('a'), mime: 'audio/aac', offsetMs: 0, durationMs: 600_000 }],
+    )
+    expect(res.truncated).toBe(false) // the chunk was carried to its end
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'the opening.',
+      'stops short here.',
+      'carried on.',
+      'the middle.',
+      'and on.',
+      'nearly done.',
+      'wrapping.',
+      'the end.',
+    ])
+    expect(gen).toBe(2) // one continuation, not a silent hole
+  }, 15_000)
+
+  it('skips past a stall inside a chunk instead of abandoning the rest of it', async () => {
+    // 2026-07-14: a chunk stalled mid-way and the loop gave up, leaving a
+    // 4.4-min hole at ~47 min of a 96-min recording (correctly unbilled, but
+    // the user got no brief). The chunk loop now skips the resume point ahead.
+    const prompts: string[] = []
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      if (u.endsWith('/upload/v1beta/files'))
+        return new Response('{}', { status: 200, headers: { 'x-goog-upload-url': 'https://up.example/s' } })
+      if (u === 'https://up.example/s')
+        return new Response(
+          JSON.stringify({ file: { uri: 'files/c', name: 'files/c', state: 'ACTIVE', mimeType: 'audio/aac' } }),
+          { status: 200 },
+        )
+      if (u.includes('enerateContent')) {
+        const prompt = JSON.parse(String(init?.body ?? '{}')).contents[0].parts[0].text as string
+        prompts.push(prompt)
+        // Resuming AFTER 2:00 stalls (re-emits the seam, no progress). Only a
+        // resume point PAST the stall (3:00, after the 60s skip) moves on.
+        let text: string
+        if (prompt.includes('AFTER 3:00'))
+          text = '[3:30] Speaker 1: past the stall.\n[5:30] Speaker 2: still going.\n[7:30] Speaker 1: nearly there.\n[9:40] Speaker 2: the end.'
+        else if (prompt.includes('AFTER 2:00')) text = '[2:00] Speaker 2: stuck here.'
+        else text = '[0:10] Speaker 1: opening.\n[2:00] Speaker 2: stuck here.'
+        const sse = `data: ${JSON.stringify({
+          candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        })}\n\n`
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error('unexpected url ' + u)
+    }) as unknown as typeof fetch
+
+    const res = await transcribeRecordingChunks(
+      { apiKey: 'k', buffer: Buffer.from('x'), mime: 'audio/aac', durationMs: 600_000, fetchFn, retryBackoffMs: 0 },
+      [{ buffer: Buffer.from('a'), mime: 'audio/aac', offsetMs: 0, durationMs: 600_000 }],
+    )
+    expect(res.truncated).toBe(false)
+    expect(res.utterances.map((u) => u.text)).toEqual([
+      'opening.',
+      'stuck here.',
+      'past the stall.',
+      'still going.',
+      'nearly there.',
+      'the end.',
+    ])
+    expect(prompts.some((p) => p.includes('AFTER 3:00'))).toBe(true) // the skip happened
+  }, 15_000)
+
+  it('fills the hole a stall-skip leaves with a targeted re-ask', async () => {
+    // The skip itself creates a gap (we jump the resume point past the stall),
+    // and an unfilled 3.7-min gap truncated a 96-min recording (2026-07-14).
+    // A targeted "transcribe only MM:SS-MM:SS" pass recovers the skipped audio.
+    const prompts: string[] = []
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url)
+      if (u.endsWith('/upload/v1beta/files'))
+        return new Response('{}', { status: 200, headers: { 'x-goog-upload-url': 'https://up.example/s' } })
+      if (u === 'https://up.example/s')
+        return new Response(
+          JSON.stringify({ file: { uri: 'files/c', name: 'files/c', state: 'ACTIVE', mimeType: 'audio/aac' } }),
+          { status: 200 },
+        )
+      if (u.includes('enerateContent')) {
+        const prompt = JSON.parse(String(init?.body ?? '{}')).contents[0].parts[0].text as string
+        prompts.push(prompt)
+        let text: string
+        if (prompt.includes('Transcribe ONLY the audio between')) {
+          text = '[2:30] Speaker 1: the audio we skipped over.' // the gap-fill
+        } else if (prompt.includes('AFTER')) {
+          text = '[5:00] Speaker 2: after the hole.\n[7:00] Speaker 1: still talking.\n[9:40] Speaker 1: the end.'
+        } else {
+          text = '[0:10] Speaker 1: opening.\n[1:00] Speaker 2: then it stalls.'
+        }
+        const sse = `data: ${JSON.stringify({
+          candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        })}\n\n`
+        return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }
+      throw new Error('unexpected url ' + u)
+    }) as unknown as typeof fetch
+
+    const res = await transcribeRecordingChunks(
+      { apiKey: 'k', buffer: Buffer.from('x'), mime: 'audio/aac', durationMs: 600_000, fetchFn, retryBackoffMs: 0 },
+      [{ buffer: Buffer.from('a'), mime: 'audio/aac', offsetMs: 0, durationMs: 600_000 }],
+    )
+    // The 1:00 -> 5:00 hole is filled, so the transcript has no 3-min void.
+    expect(prompts.some((p) => p.includes('Transcribe ONLY the audio between'))).toBe(true)
+    expect(res.utterances.map((u) => u.text)).toContain('the audio we skipped over.')
+    expect(res.truncated).toBe(false)
+  }, 15_000)
+
+  it('marks the transcript truncated when a chunk yields nothing, so a holed transcript is never billed', async () => {
+    const res = await transcribeRecordingChunks(
+      {
+        apiKey: 'k',
+        buffer: Buffer.from('x'),
+        mime: 'audio/aac',
+        durationMs: 120_000,
+        fetchFn: chunkFetch({ text: '' }), // every attempt comes back empty
+        retryBackoffMs: 0,
+      },
+      [chunk(0)],
+    )
+    expect(res.truncated).toBe(true)
+    expect(res.utterances).toHaveLength(0)
+  }, 30_000)
+})
+
+
+describe('[COMP:media/transcribe-recording] hasTranscriptHole', () => {
+  const u = (startMs: number, endMs: number): TranscribedUtterance => ({
+    startMs,
+    endMs,
+    speaker: 'A',
+    text: 'x',
+  })
+
+  it('accepts a transcript whose chunks end quiet (silence-split tails are not holes)', () => {
+    // The 2026-07-14 false positive: chunks are split AT silence, so a chunk's
+    // last line can sit a minute before its boundary. That is not a hole.
+    const utts = [u(0, 60_000), u(70_000, 130_000), u(200_000, 280_000)]
+    expect(hasTranscriptHole(utts, 300_000)).toBe(false)
+  })
+
+  it('flags a multi-minute stretch of audio with no transcript', () => {
+    // The real bug: 8-10 min holes shipped as a complete transcript, and billed.
+    const utts = [u(0, 60_000), u(600_000, 660_000)]
+    expect(hasTranscriptHole(utts, 700_000)).toBe(true)
+  })
+
+  it('flags a transcript that never starts, or dies well before the end', () => {
+    expect(hasTranscriptHole([u(400_000, 450_000)], 500_000)).toBe(true) // silent first 6.5 min
+    expect(hasTranscriptHole([u(0, 60_000)], 600_000)).toBe(true) // stops at 1 of 10 min
+    expect(hasTranscriptHole([], 60_000)).toBe(true)
   })
 })

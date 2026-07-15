@@ -304,24 +304,37 @@ function isTransientFetchError(err: unknown): boolean {
   return /fetch failed|ECONNRESET|UND_ERR_SOCKET|other side closed/i.test(msg)
 }
 
+/** Gemini overload / rate-limit / gateway statuses worth replaying. A 503 on
+ *  the File-API upload killed a chunk of a 96-min recording (2026-07-14) even
+ *  though the very next attempt would have succeeded. */
+const RETRYABLE_HTTP_STATUS = new Set([429, 500, 502, 503, 504])
+
 /**
- * `fetchFn` with a bounded retry on transient socket resets. Retries ONLY when
- * the fetch call itself rejects — once a response object exists (even a non-OK
- * one) the request reached the server and is never replayed. Abort errors are
- * not retried (the caller's deadline stands).
+ * `fetchFn` with a bounded retry on transient failures — both a rejected fetch
+ * (socket reset: undici surfaces it as an opaque `TypeError: fetch failed`) and
+ * a retryable HTTP status (429/5xx: Gemini overload). Never replays a request
+ * that got a usable response, never resumes mid-stream, and never retries an
+ * abort (the caller's deadline stands).
  */
 async function fetchWithTransientRetry(
   fetchFn: typeof fetch,
   url: string,
   init: RequestInit,
+  backoffMs: number = TRANSIENT_FETCH_BACKOFF_MS,
 ): Promise<Response> {
   for (let attempt = 1; ; attempt++) {
+    const backoff = (): Promise<void> => new Promise((r) => setTimeout(r, backoffMs * attempt))
     try {
-      return await fetchFn(url, init)
+      const res = await fetchFn(url, init)
+      if (RETRYABLE_HTTP_STATUS.has(res.status) && attempt < TRANSIENT_FETCH_ATTEMPTS) {
+        await backoff()
+        continue
+      }
+      return res
     } catch (err) {
       const aborted = err instanceof Error && err.name === 'AbortError'
       if (aborted || !isTransientFetchError(err) || attempt >= TRANSIENT_FETCH_ATTEMPTS) throw err
-      await new Promise((r) => setTimeout(r, TRANSIENT_FETCH_BACKOFF_MS * attempt))
+      await backoff()
     }
   }
 }
@@ -339,6 +352,8 @@ export type TranscribeRecordingOptions = {
   timeoutMs?: number
   displayName?: string
   fetchFn?: typeof fetch
+  /** Base backoff between retry attempts (chunk + transient-fetch). Tests set 0. */
+  retryBackoffMs?: number
   /** Per-window progress hook (observability — the worker logs it). */
   onWindow?: (info: {
     window: number
@@ -354,9 +369,17 @@ export type TranscribeRecordingOptions = {
  * `file_uri`. Polls until the file reaches ACTIVE. Throws on failure.
  */
 export async function uploadAudioToGeminiFiles(
-  opts: { apiKey: string; buffer: Buffer; mime: string; displayName?: string; fetchFn?: typeof fetch },
+  opts: {
+    apiKey: string
+    buffer: Buffer
+    mime: string
+    displayName?: string
+    fetchFn?: typeof fetch
+    retryBackoffMs?: number
+  },
 ): Promise<{ fileUri: string; name: string }> {
   const fetchFn = opts.fetchFn ?? fetch
+  const backoffMs = opts.retryBackoffMs ?? TRANSIENT_FETCH_BACKOFF_MS
   const numBytes = opts.buffer.length
 
   // 1. Start resumable upload — returns the upload URL in a response header.
@@ -371,7 +394,7 @@ export async function uploadAudioToGeminiFiles(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ file: { display_name: opts.displayName ?? 'recording' } }),
-  })
+  }, backoffMs)
   if (!startRes.ok) {
     throw new Error(`Gemini File API start failed (HTTP ${startRes.status}): ${(await startRes.text().catch(() => '')).slice(0, 300)}`)
   }
@@ -389,7 +412,7 @@ export async function uploadAudioToGeminiFiles(
       'X-Goog-Upload-Command': 'upload, finalize',
     },
     body: opts.buffer,
-  })
+  }, backoffMs)
   if (!uploadRes.ok) {
     throw new Error(`Gemini File API upload failed (HTTP ${uploadRes.status}): ${(await uploadRes.text().catch(() => '')).slice(0, 300)}`)
   }
@@ -405,7 +428,7 @@ export async function uploadAudioToGeminiFiles(
     await new Promise((r) => setTimeout(r, FILE_ACTIVE_POLL_MS))
     const pollRes = await fetchWithTransientRetry(fetchFn, `${FILES_BASE}/v1beta/${file.name}`, {
       headers: { 'x-goog-api-key': opts.apiKey },
-    })
+    }, backoffMs)
     if (!pollRes.ok) throw new Error(`Gemini File API poll failed (HTTP ${pollRes.status})`)
     file = (await pollRes.json()) as GeminiFile
   }
@@ -472,52 +495,60 @@ async function generateWindow(
     if (!res.ok) {
       throw new Error(`Gemini transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
     }
-    if (!res.body) throw new Error('Gemini transcription: no response body')
-
-    // Accumulate across chunks: text concatenates; finishReason + usage come
-    // on the final chunk (usageMetadata totals are cumulative — last wins).
-    let text = ''
-    let finishReason = 'STOP'
-    let usageMeta: GeminiUsageMetadata | undefined
-
-    const consume = (data: string): void => {
-      if (!data) return
-      let chunk: GeminiGenerateResponse
-      try {
-        chunk = JSON.parse(data) as GeminiGenerateResponse
-      } catch {
-        return // skip malformed JSON (same stance as streamGeminiSSE)
-      }
-      const cand = chunk.candidates?.[0]
-      text += (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('')
-      if (cand?.finishReason) finishReason = cand.finishReason
-      if (chunk.usageMetadata) usageMeta = chunk.usageMetadata
-    }
-
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      if (buffer.length > MAX_SSE_BUFFER_BYTES) {
-        throw new Error(
-          `Gemini transcription SSE buffer exceeded ${MAX_SSE_BUFFER_BYTES} bytes without a newline — aborting to avoid OOM.`,
-        )
-      }
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        if (line.startsWith('data: ')) consume(line.slice(6).trim())
-      }
-    }
-    if (buffer.startsWith('data: ')) consume(buffer.slice(6).trim())
-
-    return { text, finishReason, usage: extractUsage(usageMeta) }
+    return await consumeGeminiSSE(res)
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Read a Gemini SSE response to completion: text concatenates across events;
+ * `finishReason` + `usageMetadata` ride the last one (usage totals are
+ * cumulative — last wins). Shared by the whole-file window loop and the
+ * per-chunk loop, so both get the same OOM guard and parse stance.
+ */
+async function consumeGeminiSSE(
+  res: Response,
+): Promise<{ text: string; finishReason: string; usage: TokenUsage | null }> {
+  if (!res.body) throw new Error('Gemini transcription: no response body')
+  let text = ''
+  let finishReason = 'STOP'
+  let usageMeta: GeminiUsageMetadata | undefined
+
+  const consume = (data: string): void => {
+    if (!data) return
+    let chunk: GeminiGenerateResponse
+    try {
+      chunk = JSON.parse(data) as GeminiGenerateResponse
+    } catch {
+      return // skip malformed JSON (same stance as streamGeminiSSE)
+    }
+    const cand = chunk.candidates?.[0]
+    text += (cand?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+    if (cand?.finishReason) finishReason = cand.finishReason
+    if (chunk.usageMetadata) usageMeta = chunk.usageMetadata
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+      throw new Error(
+        `Gemini transcription SSE buffer exceeded ${MAX_SSE_BUFFER_BYTES} bytes without a newline — aborting to avoid OOM.`,
+      )
+    }
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      if (line.startsWith('data: ')) consume(line.slice(6).trim())
+    }
+  }
+  if (buffer.startsWith('data: ')) consume(buffer.slice(6).trim())
+  return { text, finishReason, usage: extractUsage(usageMeta) }
 }
 
 function formatTimestamp(ms: number): string {
@@ -666,7 +697,39 @@ const CHUNK_TRANSCRIBE_PROMPT = [
 /** Chunks are transcribed with bounded parallelism — enough to matter on a
  *  3 h file (~18 chunks), low enough to stay clear of TPM limits. */
 const CHUNK_CONCURRENCY = 3
+/** Attempts per chunk (upload + generate), with backoff between them. Each
+ *  attempt already runs its own continuation loop, so 2 is enough — 3 made a
+ *  stubborn chunk a 24-call worst case. */
+const CHUNK_ATTEMPTS = 2
+const CHUNK_RETRY_BACKOFF_MS = 5_000
 const CHUNK_MAX_OUTPUT_TOKENS = 16_384
+// A chunk is ONE model call today, but the model routinely stops after the
+// first minutes of a ~10-minute chunk (a premature STOP, exactly as on the
+// whole-file path). Unchecked, that shipped a 96-min recording with five
+// 8-10 min HOLES, counted as complete, and billed it (2026-07-14). So each
+// chunk continues from its last line until the chunk is covered.
+const MAX_CHUNK_WINDOWS = 8
+/** Chunks are split at silence, so allow a quiet tail before continuing. This
+ *  drives the CONTINUATION decision (keep transcribing this chunk), NOT the
+ *  truncation verdict — chunks legitimately end in silence, so a short tail is
+ *  not a hole. Holes are judged on the merged transcript (`MAX_TRANSCRIPT_GAP_MS`). */
+const CHUNK_COVERAGE_TOLERANCE_MS = 45_000
+/** A stretch of audio this long with NO transcript is a hole, not a pause: the
+ *  chunked path once shipped five 8-10 min holes as a complete transcript and
+ *  billed it (2026-07-14). Real conversation silence never runs this long. */
+const MAX_TRANSCRIPT_GAP_MS = 180_000
+/** Stall recovery INSIDE a chunk: when a continuation window adds nothing, jump
+ *  the resume point forward rather than abandoning the rest of the chunk. */
+const CHUNK_STALL_SKIP_MS = 60_000
+const MAX_CHUNK_STALL_SKIPS = 3
+/** After a chunk's continuation loop, any interior stretch this long with no
+ *  transcript gets a TARGETED re-ask ("transcribe only MM:SS-MM:SS"). Skipping
+ *  past a stall is what leaves these; without the fill, the skip itself becomes
+ *  the hole that truncates the whole recording (2026-07-14). Set BELOW the hole
+ *  threshold (3 min) but well above a natural pause, so ordinary conversational
+ *  silence never buys an extra model call. */
+const MIN_GAP_FILL_MS = 120_000
+const MAX_GAP_FILLS = 4
 
 /** thinkingBudget is a 2.5-family knob; gen-3 models reject it (they take
  *  thinkingLevel, whose default is fine here). */
@@ -674,29 +737,32 @@ function thinkingConfigFor(model: string): Record<string, unknown> {
   return /gemini-2\.5/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {}
 }
 
-async function transcribeOneChunk(
+/** One generate call over a chunk, optionally resuming after `continueFromMs`
+ *  (chunk-relative). Returns the raw text + usage. */
+async function generateChunkWindow(
   opts: TranscribeRecordingOptions,
   chunk: RecordingAudioChunk,
-  index: number,
-): Promise<{ utterances: TranscribedUtterance[]; usage: TokenUsage | null }> {
+  fileUri: string,
+  continueFromMs: number | null,
+  /** Gap-fill: transcribe ONLY this window of the chunk (chunk-relative ms). */
+  range?: { fromMs: number; toMs: number },
+): Promise<{ text: string; usage: TokenUsage | null }> {
   const fetchFn = opts.fetchFn ?? fetch
   const model = opts.model ?? DEFAULT_MODEL
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  const { fileUri } = await uploadAudioToGeminiFiles({
-    apiKey: opts.apiKey,
-    buffer: chunk.buffer,
-    mime: chunk.mime,
-    displayName: `${opts.displayName ?? 'recording'}-chunk-${index}`,
-    fetchFn: opts.fetchFn,
-  })
+  const prompt = range
+    ? `${CHUNK_TRANSCRIBE_PROMPT}\n\nTranscribe ONLY the audio between ${formatChunkTimestamp(range.fromMs)} and ${formatChunkTimestamp(range.toMs)} of this segment. Output nothing for any other part. Keep timestamps relative to the START of the segment, as always.`
+    : continueFromMs === null
+      ? CHUNK_TRANSCRIBE_PROMPT
+      : `${CHUNK_TRANSCRIBE_PROMPT}\n\nThis segment is already transcribed up to ${formatChunkTimestamp(continueFromMs)}. Resume from the next utterance AFTER ${formatChunkTimestamp(continueFromMs)} and continue to the END of the segment. Do NOT repeat earlier lines.`
 
   const body = {
     contents: [
       {
         role: 'user',
         parts: [
-          { text: CHUNK_TRANSCRIBE_PROMPT },
+          { text: prompt },
           { file_data: { mime_type: chunk.mime, file_uri: fileUri } },
         ],
       },
@@ -708,55 +774,187 @@ async function transcribeOneChunk(
     },
   }
 
+  // STREAM the chunk, exactly as the whole-file path does. A chunk is ~10
+  // minutes of audio and the model thinks for minutes before emitting: a
+  // non-streaming `generateContent` sits on a silent socket and gets dropped
+  // (`fetch failed` / UND_ERR_SOCKET) or runs past the abort deadline — which
+  // is precisely how the chunked path failed on a 96-min recording
+  // (2026-07-14), the same incident the whole-file path was fixed for on
+  // 2026-07-10. Streaming keeps bytes flowing from the first tokens.
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
-  let res: Response
   try {
-    res = await fetchFn(`${FILES_BASE}/v1beta/models/${model}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    })
+    const res = await fetchWithTransientRetry(
+      fetchFn,
+      `${FILES_BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+      opts.retryBackoffMs ?? TRANSIENT_FETCH_BACKOFF_MS,
+    )
+    if (!res.ok) {
+      throw new Error(`Gemini chunk transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
+    }
+    const out = await consumeGeminiSSE(res)
+    return { text: out.text, usage: out.usage }
   } finally {
     clearTimeout(timer)
   }
-  if (!res.ok) {
-    throw new Error(`Gemini chunk transcription failed (HTTP ${res.status}): ${(await res.text().catch(() => '')).slice(0, 300)}`)
-  }
-  const payload = (await res.json()) as GeminiGenerateResponse
-  const text = (payload.candidates?.[0]?.content?.parts ?? []).map((p) => p.text ?? '').join('')
+}
 
-  let utterances = parseTranscriptLines(text).map((u) => ({
+/** The first interior stretch (chunk-relative) with no transcript at all, at
+ *  least `minMs` long. Pure. Returns null when the chunk has no such hole. */
+function firstInteriorGap(
+  utterances: TranscribedUtterance[],
+  durationMs: number,
+  minMs: number,
+): { fromMs: number; toMs: number } | null {
+  if (utterances.length === 0) return null
+  // START-to-START (endMs is back-filled and would hide every interior hole).
+  const starts = utterances.map((u) => u.startMs).sort((a, b) => a - b)
+  if (starts[0] >= minMs) return { fromMs: 0, toMs: starts[0] }
+  for (let i = 1; i < starts.length; i++) {
+    if (starts[i] - starts[i - 1] >= minMs) return { fromMs: starts[i - 1], toMs: starts[i] }
+  }
+  const last = starts[starts.length - 1]
+  return durationMs - last >= minMs ? { fromMs: last, toMs: durationMs } : null
+}
+
+/** `M:SS` / `MM:SS` — the chunk prompt's clock (relative to the chunk start). */
+function formatChunkTimestamp(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
+/**
+ * Transcribe ONE chunk to its end: generate, and while the transcript falls
+ * short of the chunk's duration and the last window made progress, resume from
+ * the last line. `covered` reports whether the chunk was actually transcribed
+ * end to end — the caller turns a short chunk into `truncated`, so a holed
+ * transcript is never billed or synthesized as complete.
+ */
+async function transcribeOneChunk(
+  opts: TranscribeRecordingOptions,
+  chunk: RecordingAudioChunk,
+  index: number,
+): Promise<{
+  utterances: TranscribedUtterance[]
+  usages: Array<TokenUsage | null>
+  covered: boolean
+  /** Absolute span this chunk covers WITHOUT per-line timestamps (the
+   *  format-ignoring fallback). Hole detection must not scan inside it. */
+  opaqueRange?: { fromMs: number; toMs: number }
+}> {
+  const { fileUri } = await uploadAudioToGeminiFiles({
+    apiKey: opts.apiKey,
+    buffer: chunk.buffer,
+    mime: chunk.mime,
+    displayName: `${opts.displayName ?? 'recording'}-chunk-${index}`,
+    fetchFn: opts.fetchFn,
+    ...(opts.retryBackoffMs != null ? { retryBackoffMs: opts.retryBackoffMs } : {}),
+  })
+
+  // Work in CHUNK-RELATIVE ms; offset to absolute once, at the end.
+  let rel: TranscribedUtterance[] = []
+  const usages: Array<TokenUsage | null> = []
+  let continueFrom: number | null = null
+  let firstText = ''
+
+  let stallSkipsLeft = MAX_CHUNK_STALL_SKIPS
+  for (let win = 0; win < MAX_CHUNK_WINDOWS; win++) {
+    const out = await generateChunkWindow(opts, chunk, fileUri, continueFrom)
+    usages.push(out.usage)
+    if (win === 0) firstText = out.text
+
+    const scan = stripDegenerateTail(out.text)
+    const parsed = parseTranscriptLines(scan.text).filter((u) => u.startMs <= chunk.durationMs)
+    const before = rel.length
+    rel = mergeUtterances(rel, parsed)
+    const added = rel.length - before
+
+    const lastMs = rel.length > 0 ? rel[rel.length - 1].startMs : 0
+    if (lastMs >= chunk.durationMs - CHUNK_COVERAGE_TOLERANCE_MS) break
+    if (added === 0) {
+      // Stall INSIDE a chunk: the model will not advance past this spot (it
+      // left a 4.4-min hole at ~47 min of a 96-min recording, 2026-07-14).
+      // Skip the resume point forward and try again — the same recovery the
+      // whole-file loop uses — rather than abandoning the rest of the chunk.
+      if (stallSkipsLeft <= 0) break
+      stallSkipsLeft--
+      continueFrom = Math.min((continueFrom ?? lastMs) + CHUNK_STALL_SKIP_MS, chunk.durationMs)
+      continue
+    }
+    stallSkipsLeft = MAX_CHUNK_STALL_SKIPS // progress resets the skip budget
+    continueFrom = lastMs
+  }
+
+  // Fill the holes the stall-skips left: ask for each missing stretch directly.
+  for (let fill = 0; fill < MAX_GAP_FILLS; fill++) {
+    const gap = firstInteriorGap(rel, chunk.durationMs, MIN_GAP_FILL_MS)
+    if (!gap) break
+    const out = await generateChunkWindow(opts, chunk, fileUri, null, gap)
+    usages.push(out.usage)
+    // Keep only lines that land INSIDE the hole (a fill that re-emits the
+    // bracketing lines would duplicate them), and never re-add one we have.
+    const seen = new Set(rel.map((u) => `${u.startMs}|${u.text}`))
+    const parsed = parseTranscriptLines(stripDegenerateTail(out.text).text).filter(
+      (u) =>
+        u.startMs >= Math.max(0, gap.fromMs - 5_000) &&
+        u.startMs < gap.toMs &&
+        !seen.has(`${u.startMs}|${u.text}`),
+    )
+    if (parsed.length === 0) break // the model has nothing more to give here
+    rel = [...rel, ...parsed].sort((a, b) => a.startMs - b.startMs)
+  }
+
+  let utterances = rel.map((u) => ({
     ...u,
     startMs: Math.min(u.startMs, chunk.durationMs) + chunk.offsetMs,
     endMs: Math.min(Math.max(u.endMs, u.startMs), chunk.durationMs) + chunk.offsetMs,
   }))
-  if (utterances.length === 0 && text.trim().length > 0) {
+  let coveredByFallback = false
+  if (utterances.length === 0 && firstText.trim().length > 0) {
     // The model ignored the line format — keep the text, spanning the chunk.
+    // It is assigned the chunk's whole span, so it covers the chunk by
+    // construction; only a chunk with NO text at all is a hole.
     utterances = [
       {
         startMs: chunk.offsetMs,
         endMs: chunk.offsetMs + chunk.durationMs,
         speaker: null,
-        text: text.trim(),
+        text: firstText.trim(),
       },
     ]
+    coveredByFallback = true
   }
-  // Clamp the chunk's final utterance to the chunk end.
   if (utterances.length > 0) {
     const last = utterances[utterances.length - 1]
     last.endMs = Math.max(last.startMs, Math.min(last.endMs, chunk.offsetMs + chunk.durationMs))
   }
-  return { utterances, usage: extractUsage(payload.usageMetadata) }
+  const lastRelMs = rel.length > 0 ? rel[rel.length - 1].startMs : 0
+  const covered =
+    coveredByFallback ||
+    (utterances.length > 0 && lastRelMs >= chunk.durationMs - CHUNK_COVERAGE_TOLERANCE_MS)
+  return {
+    utterances,
+    usages,
+    covered,
+    ...(coveredByFallback
+      ? { opaqueRange: { fromMs: chunk.offsetMs, toMs: chunk.offsetMs + chunk.durationMs } }
+      : {}),
+  }
 }
 
 /**
- * Transcribe pre-split chunks independently (bounded parallelism, one retry
- * per chunk). `truncated` is true iff any chunk failed both attempts — a
- * silent chunk that transcribes to nothing is legitimately covered. Failed
- * chunks contribute no text; everything that succeeded is still returned so
- * the caller can ingest the partial (unbilled, per the coverage contract).
+ * Transcribe pre-split chunks independently (bounded parallelism, bounded
+ * retries with backoff). Each chunk is transcribed to ITS end (see
+ * `transcribeOneChunk` — a single generate call routinely stops after the
+ * first minutes of a ~10-min chunk). `truncated` is true iff any chunk came
+ * back short or empty, so a transcript with holes is ingested for recall but
+ * never billed or synthesized as complete (the coverage contract).
  */
 export async function transcribeRecordingChunks(
   opts: TranscribeRecordingOptions,
@@ -765,6 +963,7 @@ export async function transcribeRecordingChunks(
   const model = opts.model ?? DEFAULT_MODEL
   const usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number }> = []
   const perChunk: TranscribedUtterance[][] = new Array(chunks.length)
+  const opaqueRanges: Array<{ fromMs: number; toMs: number }> = []
   let failedChunks = 0
 
   let next = 0
@@ -772,21 +971,49 @@ export async function transcribeRecordingChunks(
     while (true) {
       const i = next++
       if (i >= chunks.length) return
-      try {
-        let out: Awaited<ReturnType<typeof transcribeOneChunk>>
+      // Retry with BACKOFF, not instantly: the failures that kill a chunk are
+      // Gemini overload (503) and socket resets, and an immediate re-hit lands
+      // in the same overloaded window (2026-07-14: chunk 3 of a 96-min
+      // recording "failed twice" in the same second). An empty result is
+      // retried too — a chunk that silently returns nothing punched 8-19 min
+      // holes in the transcript that no error surfaced.
+      let out: Awaited<ReturnType<typeof transcribeOneChunk>> | null = null
+      let lastErr: unknown
+      for (let attempt = 1; attempt <= CHUNK_ATTEMPTS; attempt++) {
         try {
-          out = await transcribeOneChunk(opts, chunks[i], i)
-        } catch {
-          out = await transcribeOneChunk(opts, chunks[i], i) // one retry
+          const got = await transcribeOneChunk(opts, chunks[i], i)
+          for (const u of got.usages) usages.push({ usage: u, model })
+          // Keep the best attempt: a covered chunk wins; otherwise the longest.
+          if (!out || got.covered || got.utterances.length > out.utterances.length) out = got
+          if (got.covered) break
+          lastErr = new Error(
+            got.utterances.length === 0
+              ? 'chunk returned no utterances'
+              : 'chunk transcript stopped short of the chunk end',
+          )
+        } catch (err) {
+          lastErr = err
         }
-        perChunk[i] = out.utterances
-        usages.push({ usage: out.usage, model })
-      } catch (err) {
+        if (attempt < CHUNK_ATTEMPTS) {
+          const base = opts.retryBackoffMs ?? CHUNK_RETRY_BACKOFF_MS
+          if (base > 0) await new Promise((r) => setTimeout(r, base * attempt))
+        }
+      }
+      perChunk[i] = out?.utterances ?? []
+      if (out?.opaqueRange) opaqueRanges.push(out.opaqueRange)
+      // A chunk that produced NOTHING (threw, or came back empty every attempt)
+      // is a hard failure. A chunk that merely ended quiet is not — chunks are
+      // silence-split, so a short tail is expected; holes are judged on the
+      // merged transcript below.
+      if (!out || out.utterances.length === 0) {
         failedChunks++
-        perChunk[i] = []
         console.warn(
-          `[transcribe-recording] chunk ${i}/${chunks.length} failed twice:`,
-          err instanceof Error ? err.message : err,
+          `[transcribe-recording] chunk ${i}/${chunks.length} produced nothing after ${CHUNK_ATTEMPTS} attempts:`,
+          lastErr instanceof Error ? lastErr.message : lastErr,
+        )
+      } else if (!out.covered) {
+        console.warn(
+          `[transcribe-recording] chunk ${i}/${chunks.length} ended early (quiet tail or short transcript) — coverage judged on the merged transcript`,
         )
       }
     }
@@ -800,9 +1027,44 @@ export async function transcribeRecordingChunks(
     utterances,
     usages,
     windows: chunks.length,
-    truncated: failedChunks > 0 || utterances.length === 0,
+    // Judge truncation on the MERGED transcript, not per chunk: a chunk that
+    // ends quiet is normal (they are split at silence), but a multi-minute
+    // stretch of audio with no transcript at all is a hole. `failedChunks`
+    // still counts a chunk that threw or returned nothing.
+    truncated:
+      failedChunks > 0 ||
+      utterances.length === 0 ||
+      hasTranscriptHole(utterances, opts.durationMs, opaqueRanges),
     // Chunk-parallel mode has no per-window degeneration guard (that runs on the
     // continuation-window path only), so nothing degenerates to count here.
     degenerateWindows: 0,
   }
+}
+
+/**
+ * True when the transcript leaves a `MAX_TRANSCRIPT_GAP_MS`+ stretch of the
+ * audio with nothing at all — at the start, between utterances, or at the end.
+ * This is the honest coverage test for chunk-parallel mode: it measures the
+ * holes a user would actually notice, instead of trusting each chunk's tail.
+ * Pure.
+ */
+export function hasTranscriptHole(
+  utterances: TranscribedUtterance[],
+  durationMs: number,
+  /** Spans known to be covered without per-line stamps (format-ignoring chunks). */
+  opaqueRanges: Array<{ fromMs: number; toMs: number }> = [],
+): boolean {
+  if (utterances.length === 0) return opaqueRanges.length === 0
+  const inOpaque = (a: number, b: number): boolean =>
+    opaqueRanges.some((r) => r.fromMs <= a + 1 && r.toMs >= b - 1)
+  const starts = utterances.map((u) => u.startMs).sort((a, b) => a - b)
+  // START-to-START, never endMs: `endMs` is BACK-FILLED to the next line's
+  // start (see parseTranscriptLines/mergeUtterances), so an interior hole
+  // computes as a zero gap and hides. No single spoken line spans minutes.
+  if (starts[0] > MAX_TRANSCRIPT_GAP_MS && !inOpaque(0, starts[0])) return true
+  for (let i = 1; i < starts.length; i++) {
+    if (starts[i] - starts[i - 1] > MAX_TRANSCRIPT_GAP_MS && !inOpaque(starts[i - 1], starts[i])) return true
+  }
+  const last = starts[starts.length - 1]
+  return durationMs - last > MAX_TRANSCRIPT_GAP_MS && !inOpaque(last, durationMs)
 }
