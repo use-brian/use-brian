@@ -4433,8 +4433,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const viewsPruneWorker = createViewsPruneWorker({ savedViewStore })
   if (runWorkers) viewsPruneWorker.start()
 
-  // (Anonymous shadow-user pruning rides the CLOSED channel-user store, so the
-  // platform starts it from mountExtraRoutes — not here.)
+  // The hosted composition starts anonymous shadow-user pruning from
+  // mountExtraRoutes; the open store itself is exposed on BootContext.
 
   // ── Hourly approval / question / worker-run sweeps ──
   if (runWorkers) {
