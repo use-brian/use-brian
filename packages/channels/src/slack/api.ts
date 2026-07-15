@@ -100,6 +100,15 @@ export function createSlackApi(options: SlackApiOptions) {
           text,
           mrkdwn: opts?.mrkdwn ?? true,
           thread_ts: opts?.threadTs,
+          // Suppress link previews on bot outbound. Every link the assistant
+          // posts is either an auth-gated app.sidan.ai page — which all unfurl
+          // to the SAME generic marketing card ("The shared brain for your
+          // small team"), since the crawler can't see past the login — or an
+          // occasional external link where a preview in a notification is
+          // noise. A digest is a LIST of task links, so default unfurling
+          // buried the actual content under a stack of identical cards.
+          unfurl_links: false,
+          unfurl_media: false,
         })
         await safeAudit({
           kind: 'post_message',
