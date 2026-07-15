@@ -61,7 +61,7 @@ import { injectMcpTools } from '../mcp/inject.js'
 import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
 import { createDbKnowledgeStore } from '../db/knowledge-store.js'
 import { createSyncCredentialProvider } from '../knowledge/sync-credentials.js'
-import { buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
+import { buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget } from './route-helpers.js'
 import type { CreditBudgetGate } from './route-helpers.js'
 import { getConnectorUserId, getWorkspacePurpose, getWorkspacePlan, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import {
@@ -297,7 +297,7 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
-  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord'
+  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email'
   channelId: string
   /**
    * The acting user's channel-native id captured from the inbound webhook —
@@ -1105,6 +1105,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     fullSystemPrompt += skillResult.promptFragment
   }
   fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+  fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
 
   // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──
   // If a big recording in THIS conversation is awaiting the user's confirmation,
