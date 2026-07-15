@@ -120,6 +120,11 @@ export type CreateSkillInput = {
   /** D4 — `'all'` writes enablement rows for every current workspace
    *  assistant; an explicit id list restricts at birth. */
   enabledAssistantIds?: string[] | "all";
+  /** Skill import: folder support files written to `workspace_skill_files`
+   *  after the row insert (the body's {{kind:name}} appendix resolves them). */
+  supportFiles?: SkillImportSupportFile[];
+  /** Skill import: provenance blob stored verbatim on the row. */
+  importSource?: Record<string, unknown>;
 };
 
 /**
@@ -406,4 +411,166 @@ export async function listSkillCatalog(): Promise<SkillCatalogEntry[]> {
     skills?: SkillCatalogEntry[];
   };
   return Array.isArray(data.skills) ? data.skills : [];
+}
+
+// ── Skill import (GitHub / URL) ───────────────────────────────
+// Spec: docs/architecture/engine/skill-system.md → "Importing skills".
+
+type SkillImportWarning = { code: string; detail: string };
+
+export type SkillImportSupportFile = {
+  kind: "reference" | "template" | "script";
+  name: string;
+  content: string;
+};
+
+export type SkillImportResult = {
+  dialect: string;
+  draft: {
+    name: string;
+    slug: string;
+    description: string;
+    whenToUse?: string;
+    category: string;
+    requiresConnectors: string[];
+    content: string;
+  };
+  supportFiles: SkillImportSupportFile[];
+  warnings: SkillImportWarning[];
+  importSource: Record<string, unknown>;
+};
+
+export type SkillImportSource =
+  | { kind: "url"; url: string }
+  | {
+      kind: "github";
+      connectorInstanceId: string;
+      owner: string;
+      repo: string;
+      path: string;
+      ref?: string;
+    };
+
+/**
+ * Parse a skill file from GitHub or a public URL into a draft — no row is
+ * written; the caller opens the creator pre-filled with the result. Backed by
+ * `POST /api/skills/import`.
+ */
+export async function importSkill(
+  workspaceId: string,
+  source: SkillImportSource,
+): Promise<
+  | { ok: true; result: SkillImportResult }
+  | { ok: false; status: number; error: string }
+> {
+  const res = await authFetch(`${API_URL}/api/skills/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, source }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return {
+      ok: false,
+      status: res.status,
+      error: data.error ?? "Failed to import the skill",
+    };
+  }
+  const result = (await res.json().catch(() => null)) as SkillImportResult | null;
+  if (!result || !result.draft) {
+    return { ok: false, status: 500, error: "Failed to import the skill" };
+  }
+  return { ok: true, result };
+}
+
+export type SkillImportGithubInstance = {
+  id: string;
+  label: string;
+  connectedEmail: string | null;
+};
+
+/** Usable GitHub connector instances for the import picker. `409` (no
+ *  connector) maps to `{ ok: true, instances: [] }` so the dialog can show
+ *  its connect hint instead of an error. */
+export async function listImportGithubInstances(
+  workspaceId: string,
+): Promise<
+  | { ok: true; instances: SkillImportGithubInstance[] }
+  | { ok: false; error: string }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/skills/import/github/instances?workspaceId=${encodeURIComponent(workspaceId)}`,
+  );
+  if (res.status === 409) return { ok: true, instances: [] };
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to list GitHub connectors" };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    instances?: SkillImportGithubInstance[];
+  };
+  return { ok: true, instances: Array.isArray(data.instances) ? data.instances : [] };
+}
+
+export type SkillImportGithubRepo = {
+  fullName: string;
+  name: string;
+  owner: string;
+  private: boolean;
+  description: string | null;
+};
+
+export async function listImportGithubRepos(
+  workspaceId: string,
+  connectorInstanceId: string,
+): Promise<
+  { ok: true; repos: SkillImportGithubRepo[] } | { ok: false; error: string }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/skills/import/github/repos?workspaceId=${encodeURIComponent(workspaceId)}&connectorInstanceId=${encodeURIComponent(connectorInstanceId)}`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to list repositories" };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    repos?: SkillImportGithubRepo[];
+  };
+  return { ok: true, repos: Array.isArray(data.repos) ? data.repos : [] };
+}
+
+export type SkillImportGithubEntry = {
+  type: "file" | "dir";
+  name: string;
+  path: string;
+  size: number;
+};
+
+export async function listImportGithubContents(
+  workspaceId: string,
+  connectorInstanceId: string,
+  owner: string,
+  repo: string,
+  path: string,
+): Promise<
+  { ok: true; entries: SkillImportGithubEntry[] } | { ok: false; error: string }
+> {
+  const params = new URLSearchParams({
+    workspaceId,
+    connectorInstanceId,
+    owner,
+    repo,
+    path,
+  });
+  const res = await authFetch(
+    `${API_URL}/api/skills/import/github/contents?${params.toString()}`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to read the repository" };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    entries?: SkillImportGithubEntry[];
+  };
+  return { ok: true, entries: Array.isArray(data.entries) ? data.entries : [] };
 }

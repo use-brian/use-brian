@@ -956,3 +956,45 @@ describe('[COMP:api/mcp-inject] _getMcpDiscoveryCacheSize', () => {
     expect(size).toBeGreaterThanOrEqual(0)
   })
 })
+
+describe('[COMP:api/mcp-inject] built-in fold vs direct (keepBuiltinsDirect)', () => {
+  // The contract a workflow `assistant_call` step's `tools` allow-list depends
+  // on. With the flag OFF, a built-in connector tool is DELETED from the map
+  // and reachable only through `mcp_search` — so pinning it by name resolves to
+  // nothing. The callee sets the flag whenever the caller pins an allow-list;
+  // this suite is what makes that safe to rely on.
+  function githubConnector() {
+    return {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-1', connectorId: 'github', name: 'GitHub', connected: true, createdAt: new Date(0) },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_secret: 'ghp_test' }),
+    }
+  }
+
+  async function injectWith(keepBuiltinsDirect: boolean) {
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: githubConnector() as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect,
+    })
+    return tools
+  }
+
+  it('keeps githubListPullRequests under its own name when direct', async () => {
+    const tools = await injectWith(true)
+    expect(tools.has('githubListPullRequests')).toBe(true)
+    expect(tools.has('githubGetPullRequest')).toBe(true)
+  })
+
+  it('folds it behind mcp_search when NOT direct (why a pinned name resolved to nothing)', async () => {
+    const tools = await injectWith(false)
+    expect(tools.has('githubListPullRequests')).toBe(false)
+    expect(tools.has('mcp_search')).toBe(true)
+    expect(tools.has('mcp_call')).toBe(true)
+  })
+})

@@ -148,6 +148,10 @@ export type ViewsRouteOptions = {
   domainProvisioner?: DomainProvisioner
   /** Per-workspace attached-domain cap (default 5). */
   pageDomainsMaxPerWorkspace?: number
+  /** Hostnames a customer may not attach (exact hosts or `.suffix` entries).
+   *  Config, never code: boot derives the deployment's own origin hosts and
+   *  appends `PAGE_DOMAIN_BLOCKED_HOSTS`. */
+  pageDomainBlockedHosts?: string[]
   /**
    * Workspace groups (migration 252) — backs the Share-tab "Groups" + the
    * member/group pickers. Optional: when absent the group routes return 503.
@@ -953,7 +957,9 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!(await canManageShare(userId, view))) {
       return res.status(403).json({ error: 'Only the page owner or a workspace admin can manage domains' })
     }
-    const hostname = normalizeHostname(parsed.data.hostname)
+    const hostname = normalizeHostname(parsed.data.hostname, {
+      block: opts.pageDomainBlockedHosts,
+    })
     if (!hostname) {
       return res.status(400).json({ error: 'Not a usable public hostname', code: 'invalid_hostname' })
     }

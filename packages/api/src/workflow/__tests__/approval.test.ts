@@ -198,6 +198,9 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     async createBrowserSkillAudit() {
       throw new Error('createBrowserSkillAudit not used in workflow approval tests')
     },
+    async createEmailSenderCard() {
+      throw new Error('createEmailSenderCard not used in workflow approval tests')
+    },
     async expireById() {
       /* not used in workflow approval tests */
     },

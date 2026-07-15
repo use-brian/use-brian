@@ -125,6 +125,18 @@ function ComputerIcon() {
   );
 }
 
+function AgentmailIcon() {
+  // Assistant Email (AgentMail) — envelope + spark glyph. Strokes only, no
+  // fill, so it inherits the surrounding text color in both themes (the
+  // first-party-primitive style, like Files / Computer).
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="5" width="20" height="14" rx="2" />
+      <path d="m2 7 10 7 10-7" />
+    </svg>
+  );
+}
+
 function NotionIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 100 100" fill="none">
@@ -192,6 +204,7 @@ export function ConnectorIcon({
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;
     case "gcs": return <GcsIcon />;
+    case "agentmail": return <AgentmailIcon />;
     default:
       if (iconUrl) {
         return (

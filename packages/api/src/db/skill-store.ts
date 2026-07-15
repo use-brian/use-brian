@@ -64,6 +64,10 @@ export type CreateSkillInput = {
    *  choice: `sensitivity_overridden = true` so edge inheritance won't move
    *  it. Defaults to the column default ('internal'), inheritable. */
   sensitivity?: 'public' | 'internal' | 'confidential'
+  /** Import provenance (mig 328 — skill-system.md → "Importing skills").
+   *  `{ kind, owner?, repo?, path?, ref?, sha?, url? }`, stamped when the
+   *  draft came from the GitHub/URL importer. Write-only today. */
+  importSource?: Record<string, unknown> | null
 }
 
 export type UpdateSkillInput = {
@@ -506,10 +510,10 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
            write_origin, originating_assistant_id, auto_generated_at,
            induction_source, confidence, activated_at,
            verified_by_user_id, verified_at,
-           sensitivity, sensitivity_overridden
+           sensitivity, sensitivity_overridden, import_source
          )
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-                 ${bornVer ? 'now()' : 'NULL'},$18,$19)
+                 ${bornVer ? 'now()' : 'NULL'},$18,$19,$20)
          RETURNING ${COLS_ALL}`,
         [
           input.slug,
@@ -533,6 +537,7 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
           // inheritance; otherwise the 'internal' default stays inheritable.
           input.sensitivity ?? 'internal',
           input.sensitivity !== undefined,
+          input.importSource ? JSON.stringify(input.importSource) : null,
         ],
       )
       const skill = rowToWorkspaceSkill(result.rows[0])

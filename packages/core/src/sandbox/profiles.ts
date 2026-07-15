@@ -159,7 +159,11 @@ export function describeProfileResolution(res: Exclude<ProfileResolution, { kind
       }
       break
     case 'none':
-      return 'No browser profile is enabled for this assistant. Ask the user to create one and enable it under Settings > Browser profiles.'
+      // Only the block-run path (runBrowserSkill) surfaces this — navigate
+      // and explore proceed identity-less on 'none' (R2-10). Keep the
+      // requirement honest but never let it read as "browsing is blocked"
+      // (the 2026-07-15 refusal was the model echoing exactly that belief).
+      return 'No browser profile is enabled for this assistant. Running a saved browser skill requires one (skills replay signed-in flows) — the user can create and enable it under Settings > Browser profiles. Public pages need no profile: browse them directly with browserNavigate or browserExplore instead.'
   }
 }
 

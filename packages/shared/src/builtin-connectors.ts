@@ -135,6 +135,14 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'fathomGetTranscript', description: 'Read the transcript of a Fathom meeting', classification: 'read', defaultPolicy: 'allow' },
     { name: 'fathomGetSummary', description: 'Read the AI summary and action items for a Fathom meeting', classification: 'read', defaultPolicy: 'allow' },
   ],
+  // Assistant Email (AgentMail) — the assistant's OWN mailbox. Sends go out
+  // from the assistant's address, never the user's (that is Gmail); see
+  // docs/architecture/integrations/agentmail.md → "Connector tools".
+  agentmail: [
+    { name: 'agentmailSendMessage', description: "Send an email from the assistant's own address", classification: 'write', defaultPolicy: 'ask' },
+    { name: 'agentmailSearchThreads', description: "Search the assistant's own mailbox threads", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'agentmailCreateDraft', description: "Create an unsent draft in the assistant's mailbox (supports scheduled send)", classification: 'write', defaultPolicy: 'ask' },
+  ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.
   // Runtime injection happens at boot in packages/api/src/boot.ts using the

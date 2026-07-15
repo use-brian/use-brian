@@ -31,7 +31,12 @@ import {
   type SessionBundle,
   type TakeoverInputEvent,
 } from '../../types.js'
-import { cli, parseSnapshotOutput, sessionEnv } from './agent-browser-cli.js'
+import { chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
+import {
+  TAKEOVER_INPUT_HELPER_MJS,
+  TAKEOVER_INPUT_HELPER_PATH,
+  takeoverInputCommand,
+} from './takeover-input.js'
 import type { E2bRuntime, E2bSandboxHandle } from './runtime.js'
 
 export const SCRATCH_DIR = '/home/user/scratch'
@@ -63,6 +68,9 @@ type PerSandbox = {
   proxyUrl?: string
   unshareChecked?: boolean
   stateInjected?: boolean
+  /** Take-Over trusted input (§4.8): helper written + CDP endpoint cached. */
+  takeoverHelperWritten?: boolean
+  cdpUrl?: string
   pythonRunCounter: number
 }
 
@@ -112,20 +120,24 @@ export function createE2bCloudProvider(
 
   function browser(sandboxId: string): SandboxBrowser {
     return {
+      // Multi-verb ops chain into ONE sandbox exec (chainCommands): every
+      // E2B command is a network round trip, and browse latency is round
+      // trips, not compute.
       navigate: async (url) => {
         const proxy = meta(sandboxId).proxyUrl
         const open = proxy ? `${cli.open(url)} -p '${proxy.replace(/'/g, '')}'` : cli.open(url)
-        await runBrowserCommand(sandboxId, open)
-        const current = (await runBrowserCommand(sandboxId, cli.getUrl())).trim()
+        const out = await runBrowserCommand(sandboxId, chainCommands(open, cli.getUrl()))
+        const parts = splitCommandParts(out)
+        const current = (parts[1] ?? '').trim()
         return { url: current || url }
       },
       snapshot: async (): Promise<BrowserSnapshot> => {
-        const [raw, url, title] = [
-          await runBrowserCommand(sandboxId, cli.snapshot()),
-          (await runBrowserCommand(sandboxId, cli.getUrl())).trim(),
-          (await runBrowserCommand(sandboxId, cli.getTitle())).trim(),
-        ]
-        return parseSnapshotOutput(raw, { url, title })
+        const out = await runBrowserCommand(
+          sandboxId,
+          chainCommands(cli.snapshot(), cli.getUrl(), cli.getTitle()),
+        )
+        const [raw, url, title] = splitCommandParts(out)
+        return parseSnapshotOutput(raw ?? '', { url: (url ?? '').trim(), title: (title ?? '').trim() })
       },
       click: async (ref) => {
         await runBrowserCommand(sandboxId, cli.click(ref))
@@ -134,9 +146,9 @@ export function createE2bCloudProvider(
         await runBrowserCommand(sandboxId, cli.fill(ref, text))
       },
       currentUrl: async () => {
-        const url = (await runBrowserCommand(sandboxId, cli.getUrl())).trim()
-        const title = (await runBrowserCommand(sandboxId, cli.getTitle())).trim()
-        return { url, title }
+        const out = await runBrowserCommand(sandboxId, chainCommands(cli.getUrl(), cli.getTitle()))
+        const [url, title] = splitCommandParts(out)
+        return { url: (url ?? '').trim(), title: (title ?? '').trim() }
       },
       captureStorageState: async (site): Promise<SessionBundle> => {
         const handle = await handleFor(sandboxId)
@@ -203,12 +215,38 @@ export function createE2bCloudProvider(
           },
           input: async (event: TakeoverInputEvent) => {
             if (closed) return
-            if (event.kind === 'click') {
-              await runBrowserCommand(sandboxId, cli.clickAt(event.x, event.y))
-            } else if (event.kind === 'key') {
-              await runBrowserCommand(sandboxId, cli.press(event.text))
-            } else {
-              await runBrowserCommand(sandboxId, cli.scrollBy(event.deltaY))
+            // Trusted CDP dispatch (takeover-input.ts): real input events,
+            // never DOM synthesis — bot checks, iframes, and focus all
+            // behave as if a human sat at the sandbox browser.
+            const handle = await handleFor(sandboxId)
+            const m = meta(sandboxId)
+            if (!m.takeoverHelperWritten) {
+              await handle.writeFile(
+                TAKEOVER_INPUT_HELPER_PATH,
+                new TextEncoder().encode(TAKEOVER_INPUT_HELPER_MJS),
+              )
+              m.takeoverHelperWritten = true
+            }
+            if (!m.cdpUrl) {
+              m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
+              if (!m.cdpUrl) {
+                throw new BrowserBackendError(
+                  'The sandbox browser reported no CDP endpoint (is a page open yet?)',
+                  'backend_error',
+                )
+              }
+            }
+            const res = await handle.runCommand(
+              takeoverInputCommand(m.cdpUrl, JSON.stringify(event)),
+              { timeoutMs: 15_000 },
+            )
+            if (res.exitCode !== 0) {
+              // A dead daemon invalidates the cached endpoint — refresh next call.
+              m.cdpUrl = undefined
+              throw new BrowserBackendError(
+                (res.stderr || res.stdout || 'takeover input dispatch failed').trim().slice(0, 500),
+                'backend_error',
+              )
             }
           },
           close: async () => {

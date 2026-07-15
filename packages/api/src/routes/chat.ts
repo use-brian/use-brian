@@ -30,7 +30,7 @@ import { resolveModel, isStandardTier, chatTierBudget, planNudgeCap } from '../m
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@sidanclaw/shared'
-import { resolveUser, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
+import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
 import type { AssistantRunChannel } from '@sidanclaw/doc-model'
 import {
@@ -3331,6 +3331,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Inject unavailable capabilities so the model doesn't waste turns
       // searching for tools that don't exist.
       fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+
+      // Browser-escalation guidance — dynamic injection gated on the acting
+      // browser tools being in the map (tool-awareness carve-out): search
+      // that can't produce the exact figure escalates to the browser, and
+      // zero profiles never blocks a public-site browse.
+      fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
 
       // Dynamic workspace-blueprints section (blueprint output contract):
       // present only when the workspace has blueprints, naming only blueprints

@@ -81,11 +81,23 @@ describe('[COMP:doc/page-slug-helpers] Page slug + hostname helpers', () => {
       expect(normalizeHostname('has space.acme.com')).toBeNull();
     });
 
-    it('rejects our own product surfaces', () => {
-      expect(normalizeHostname('app.sidan.ai')).toBeNull();
-      expect(normalizeHostname('sidan.ai')).toBeNull();
-      expect(normalizeHostname('anything.vercel.app')).toBeNull();
+    it('always rejects non-routable hosts (universal, not policy)', () => {
       expect(normalizeHostname('evil.localhost')).toBeNull();
+      expect(normalizeHostname('localhost')).toBeNull();
+    });
+
+    it('honors the config-provided blocklist: exact hosts and .suffix entries', () => {
+      const block = ['app.example.com', '.example.io'];
+      // exact entry blocks only that host
+      expect(normalizeHostname('app.example.com', { block })).toBeNull();
+      expect(normalizeHostname('page.example.com', { block })).toBe('page.example.com');
+      // .suffix entry blocks the apex and every subdomain
+      expect(normalizeHostname('example.io', { block })).toBeNull();
+      expect(normalizeHostname('deep.sub.example.io', { block })).toBeNull();
+      // suffix tricks don't match
+      expect(normalizeHostname('notexample.io', { block })).toBe('notexample.io');
+      // no blocklist -> any well-shaped public hostname is accepted
+      expect(normalizeHostname('app.example.com')).toBe('app.example.com');
     });
   });
 });

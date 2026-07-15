@@ -63,7 +63,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus } from "lucide-react";
+import { ArrowDownToLine, Plus } from "lucide-react";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
@@ -76,10 +76,13 @@ import {
   getBrainGraph,
   listBrain,
   primitivesToGraphKinds,
+  projectInboxRowToBrainRow,
   type BrainFacets,
   type BrainGraph,
   type BrainRow,
 } from "@/lib/api/brain";
+import { fetchBrainRow } from "@/lib/api/brain-inbox";
+import { parseBrainDeepLink } from "@/lib/brain-deep-link";
 import {
   listWorkspaceSkills,
   type WorkspaceSkillSummary,
@@ -115,7 +118,11 @@ import { BrainDetailDrawer } from "@/components/brain/detail-drawer";
 import { BrainGraphView } from "@/components/brain/graph-view";
 import { BrainGroupedView } from "@/components/brain/grouped-view";
 import { SkillsLibrary } from "@/components/brain/skills-library";
-import { SkillCreator } from "@/components/brain/skill-creator";
+import {
+  SkillCreator,
+  type SkillImportPrefill,
+} from "@/components/brain/skill-creator";
+import { SkillImportDialog } from "@/components/brain/skill-import-dialog";
 import { BlueprintsLibrary } from "@/components/brain/blueprints-library";
 import { ProvenanceProvider, useProvenanceState } from "@/components/provenance/provenance-context";
 import { ProvenanceSheet } from "@/components/provenance/provenance-sheet";
@@ -182,6 +189,38 @@ function BrainPageInner() {
 
   const [rows, setRows] = useState<BrainRow[] | null>(null);
   const [selected, setSelected] = useState<BrainRow | null>(null);
+
+  // Row deep link — `?row=<id>[&kind=<primitive>]` opens that row's drawer
+  // (`[COMP:app-web/brain-deep-link]`). The row is fetched by id rather than
+  // looked up in `rows`, because the list is paginated and hides done tasks
+  // behind the "completed" fold — the two cases an inbound link (a Slack
+  // digest pointing at a shipped task) hits most. A miss (deleted row, wrong
+  // workspace, revoked clearance) leaves the plain list standing.
+  const deepLinkedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeId) return;
+    const link = parseBrainDeepLink(
+      new URLSearchParams(searchParams.toString()),
+    );
+    if (!link) return;
+    if (deepLinkedRef.current === link.rowId) return;
+    deepLinkedRef.current = link.rowId;
+
+    let cancelled = false;
+    void fetchBrainRow(activeId, link.primitive, link.rowId).then((detail) => {
+      if (cancelled || !detail) return;
+      setSelected({
+        ...projectInboxRowToBrainRow(detail),
+        // The projection hardcodes `hasPending` — it exists for the inbox,
+        // which by definition holds unverified rows. A deep link addresses ANY
+        // live row, so the real verified state decides.
+        hasPending: detail.verifiedAt == null,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeId, searchParams]);
   // Completed (done / archived) tasks — fetched separately from the main list
   // (which hides them) so the grouped view can tuck them behind a "Show
   // completed" disclosure that leads with live work. Only fetched when tasks
@@ -193,6 +232,12 @@ function BrainPageInner() {
   // page-level copy backs the library pane, the graph-node → drawer
   // resolution, and the pristine-nudge count.
   const [skills, setSkills] = useState<WorkspaceSkillSummary[] | null>(null);
+  // Skill import (skill-system.md → "Importing skills"): the dialog's parsed
+  // draft is held here and handed to the creator via `initialImport`; the
+  // seq keys the creator so a fresh import re-seeds its mount state.
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPrefill, setImportPrefill] = useState<SkillImportPrefill | null>(null);
+  const [importSeq, setImportSeq] = useState(0);
   const [selectedSkill, setSelectedSkill] = useState<WorkspaceSkillSummary | null>(
     null,
   );
@@ -622,6 +667,14 @@ function BrainPageInner() {
         )}
         <button
           type="button"
+          onClick={() => setImportOpen(true)}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <ArrowDownToLine className="size-3.5" aria-hidden />
+          {t.brainPage.skillImport.importCta}
+        </button>
+        <button
+          type="button"
           onClick={openSkillCreator}
           className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
@@ -658,6 +711,20 @@ function BrainPageInner() {
         center={topbarCenter}
         right={topbarRight}
       />
+
+      {activeId && (
+        <SkillImportDialog
+          workspaceId={activeId}
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onImported={(prefill) => {
+            setImportPrefill(prefill);
+            setImportSeq((n) => n + 1);
+            setImportOpen(false);
+            openSkillCreator();
+          }}
+        />
+      )}
 
       {/* Mobile-only inline controls — the section switch + entry filters
           live in the sidebar on desktop, but the sidebar is a slide-in drawer
@@ -737,13 +804,22 @@ function BrainPageInner() {
           activeId ? (
             skillCreatorOpen || (skills !== null && skills.length === 0) ? (
               <SkillCreator
+                /* The key re-seeds the creator's mount state when an import
+                   lands (or a fresh one replaces it) — its doc-stage fields
+                   are lazy initial state. */
+                key={importPrefill ? `import-${importSeq}` : "create"}
                 workspaceId={activeId}
+                initialImport={importPrefill ?? undefined}
                 onBack={
                   skillCreatorOpen && (skills?.length ?? 0) > 0
-                    ? closeSkillCreator
+                    ? () => {
+                        setImportPrefill(null);
+                        closeSkillCreator();
+                      }
                     : undefined
                 }
                 onCreated={(skill) => {
+                  setImportPrefill(null);
                   closeSkillCreator();
                   requestBrainRefresh(activeId);
                   openSkillEditor(skill);

@@ -16,6 +16,7 @@ vi.mock('../../mcp/inject.js', () => ({
 import {
   computePercent,
   isValidDateString,
+  buildBrowserEscalationPrompt,
   buildUnavailableCapabilitiesPrompt,
   requireAssistantMember,
   requireAssistantOwner,
@@ -94,6 +95,30 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
       expect(result).toContain('listed above')
       expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
       expect(result).not.toContain('an unavailable service')
+    })
+  })
+
+  describe('buildBrowserEscalationPrompt', () => {
+    it('is EMPTY when the acting browser tools are not in the tool map (tool-awareness rule)', () => {
+      expect(buildBrowserEscalationPrompt(new Map())).toBe('')
+    })
+
+    it('steers escalation + the no-profile posture when browserNavigate is present', () => {
+      const tools = new Map([['browserNavigate', {}]])
+      const result = buildBrowserEscalationPrompt(tools)
+      expect(result).toContain('browserNavigate')
+      expect(result).toContain('Never refuse to browse because the workspace has no browser profile')
+      expect(result).toContain('open the authoritative site')
+      // browserExplore is absent from this map, so it must not be named.
+      expect(result).not.toContain('browserExplore')
+    })
+
+    it('names browserExplore only when it is actually injected', () => {
+      const tools = new Map([
+        ['browserNavigate', {}],
+        ['browserExplore', {}],
+      ])
+      expect(buildBrowserEscalationPrompt(tools)).toContain('browserExplore')
     })
   })
 

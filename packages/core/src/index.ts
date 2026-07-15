@@ -56,6 +56,7 @@ export * from './ingest/adapters/github/index.js'
 export * from './ingest/adapters/calendar/index.js'
 export * from './ingest/adapters/fathom/index.js'
 export * from './ingest/adapters/whatsapp/index.js'
+export * from './ingest/adapters/email/index.js'
 
 // Embedding worker surface — the worker factory + Gemini embedder are the
 // boot-time public API (started from `apps/api`); `EMBEDDED_PRIMITIVES` is

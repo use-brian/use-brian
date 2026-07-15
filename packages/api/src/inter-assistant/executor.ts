@@ -456,6 +456,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           userId: connectorUserId,
           assistantId: params.calleeAssistantId,
           tools: calleeTools,
+          // A PINNED allow-list must be able to name a built-in connector tool.
+          // By default `injectMcpTools` DELETES every built-in (github*, gmail*,
+          // notion*, …) from the map and folds it behind `mcp_search`/`mcp_call`
+          // for the token win — so a step pinning `githubListPullRequests` filtered
+          // down to nothing and died `tools_unavailable`, and a step that ALSO
+          // pinned a first-party tool (listTasks) was worse: it ran for weeks with
+          // silently zero GitHub access. Keeping built-ins direct only when the
+          // caller pins tools preserves the token saving on every unpinned callee,
+          // which reaches connectors through `mcp_search` exactly as before.
+          keepBuiltinsDirect: (params.allowedTools?.length ?? 0) > 0,
           connectorStore: options.connectorStore,
           settingsStore: options.mcpSettingsStore,
           assistantConnectorStore: options.assistantConnectorStore,

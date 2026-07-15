@@ -24,6 +24,7 @@ import { extractEffectContract } from './effect-contract.js'
 import {
   describeProfileResolution,
   resolveProfileForCall,
+  type BrowserProfile,
   type BrowserProfileStore,
 } from './profiles.js'
 import type { BrowserSkillStore } from './browser-skills.js'
@@ -87,7 +88,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
   const browserExplore = buildTool({
     name: 'browserExplore',
     description:
-      'Explore a NOVEL browsing flow with the watched agentic fallback when no saved browser skill covers it (check listBrowserSkills first). Runs in the cloud browser as a browser profile, and always distills the successful run into a draft browser skill for deterministic reuse. Terminal sends in the draft stay approval-gated. Prefer runBrowserSkill whenever a skill already exists.',
+      'Explore a NOVEL browsing flow with the watched agentic fallback when no saved browser skill covers it (check listBrowserSkills first). Runs in the cloud browser — as a browser profile when one is enabled (signed-in flows), or identity-less otherwise; public sites need NO profile. Always distills the successful run into a draft browser skill for deterministic reuse. Terminal sends in the draft stay approval-gated. Prefer runBrowserSkill whenever a skill already exists. Use this for multi-step research on a site (finding exact prices, availability, listings) when plain web search cannot produce the exact data.',
     inputSchema: z.object({
       goal: z.string().min(1).max(2_000).describe('What to accomplish, concretely (site, action, content)'),
       url: z.string().min(1).describe('Absolute http(s) URL to start from'),
@@ -160,30 +161,33 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
       }
       const site = registrableSiteOf(input.url) ?? parsed.hostname
 
-      // Profile at call time (R2-10) — and the R2-7 cloud-only edge.
-      if (!opts.profiles) {
-        return {
-          data: 'ERROR: Browser profiles are not configured on this deployment, and exploration must run as a profile.',
-          isError: true,
+      // Profile at call time (R2-10) — and the R2-7 cloud-only edge. Zero
+      // matching profiles (or no profile config at all, the OSS posture) →
+      // IDENTITY-LESS exploration in the cloud sandbox: no vault injection,
+      // no identity at stake, so nothing R2-7 protects. A missing profile
+      // must never block exploring a public site (2026-07-15 incident: a
+      // public price-check was refused for want of a profile).
+      let profile: BrowserProfile | null = null
+      if (opts.profiles) {
+        const resolution = await resolveProfileForCall({
+          store: opts.profiles.store,
+          vault: opts.profiles.vault,
+          actor: {
+            userId: context.userId,
+            workspaceId: context.workspaceId,
+            assistantId: context.assistantId,
+            assistantClearance: await opts.profiles.assistantClearance(context),
+          },
+          site,
+          profileName: input.profile,
+        })
+        if (resolution.kind === 'ok') {
+          profile = resolution.profile
+        } else if (resolution.kind !== 'none') {
+          return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
         }
       }
-      const resolution = await resolveProfileForCall({
-        store: opts.profiles.store,
-        vault: opts.profiles.vault,
-        actor: {
-          userId: context.userId,
-          workspaceId: context.workspaceId,
-          assistantId: context.assistantId,
-          assistantClearance: await opts.profiles.assistantClearance(context),
-        },
-        site,
-        profileName: input.profile,
-      })
-      if (resolution.kind !== 'ok') {
-        return { data: `ERROR: ${describeProfileResolution(resolution)}`, isError: true }
-      }
-      const profile = resolution.profile
-      if (profile.defaultBackend === 'local') {
+      if (profile && profile.defaultBackend === 'local') {
         // R2-7: an autonomous agent is never loose in the user's real
         // browser — and an account-sensitive (local-default) identity is
         // never silently re-routed to a datacenter IP either. Unattended OR
@@ -203,7 +207,7 @@ export function createBuFallbackTool(opts: CreateBuFallbackToolOptions): { brows
             userId: context.userId,
             workspaceId: context.workspaceId,
             sessionId: context.sessionId,
-            profileId: profile.id,
+            ...(profile ? { profileId: profile.id } : {}),
           },
           { url: input.url },
         )

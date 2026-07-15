@@ -205,7 +205,9 @@ export function createToolExecutor(options: ToolExecutorOptions) {
     // 2026-05-27 10:40 — model emitted that single sentence as the whole
     // turn after seeing 2 of these errors back). Action-oriented copy
     // tells the model concretely what to do instead.
-    const action: LoopAction = options.loopDetector.check(t.name, t.input)
+    const action: LoopAction = options.loopDetector.check(t.name, t.input, {
+      repeatTolerant: toolDef.allowsRepeatCalls === true,
+    })
     if (action === 'block') {
       t.result = {
         type: 'tool_result',

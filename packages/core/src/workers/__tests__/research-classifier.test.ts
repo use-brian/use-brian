@@ -54,6 +54,17 @@ describe('[COMP:workers/research-classifier] detectOperateSiteIntent', () => {
     expect(detectOperateSiteIntent('check www.ycombinator.com for the latest batch companies')).toBe(true)
   })
 
+  it('hits on non-English operate phrasing (the 2026-07-15 Cantonese price-check incident)', () => {
+    // Naming the feature is the strongest possible signal, any language.
+    expect(detectOperateSiteIntent('翻翻去我果三個 trip 可唔可以幫我用 computer use 去睇 exactly 要幾錢')).toBe(true)
+    // CJK strong verbs need no URL (like English "browse X").
+    expect(detectOperateSiteIntent('幫我瀏覽下國泰官網有無平飛')).toBe(true)
+    expect(detectOperateSiteIntent('帮我浏览一下国泰官网')).toBe(true)
+    // CJK weak verbs count only next to a URL-ish token.
+    expect(detectOperateSiteIntent('去 cathaypacific.com 睇下班次幾錢')).toBe(true)
+    expect(detectOperateSiteIntent('聽日想去日本玩')).toBe(false)
+  })
+
   it('does not hit on "browse the web / the internet / online" (research phrasing)', () => {
     expect(detectOperateSiteIntent('browse the web for the top AI conferences in asia')).toBe(false)
     expect(detectOperateSiteIntent('browse the internet for competitor pricing analysis')).toBe(false)

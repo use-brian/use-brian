@@ -289,6 +289,7 @@ import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
+import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
@@ -453,6 +454,20 @@ export interface OpenApiEnv {
   PAGE_DOMAIN_VERCEL_TEAM_ID?: string
   PAGE_DOMAIN_CNAME_TARGET?: string
   PAGE_DOMAINS_MAX_PER_WORKSPACE?: string
+  // Comma-separated hostnames customers may NOT attach as custom domains —
+  // exact hosts or `.suffix` entries (e.g. `.example-status.io`). Boot always
+  // also blocks the deployment's own origin hosts (derived from
+  // API_URL/APP_URL/AUTHED_APP_URL); this adds policy on top. No hostname
+  // policy lives in code.
+  PAGE_DOMAIN_BLOCKED_HOSTS?: string
+  // AgentMail assistant-owned email (docs/architecture/integrations/agentmail.md).
+  // Hosted passes the platform org key; OSS/self-host passes a BYO key. Unset
+  // (open default) → the email surface is dark: inbox provisioning routes 503,
+  // the /webhook/agentmail route is not mounted, the UI hides the section.
+  AGENTMAIL_API_KEY?: string
+  // Fallback Svix signing secret for a manually-registered org-level webhook;
+  // per-inbox webhook secrets live on channel_integrations credentials.
+  AGENTMAIL_WEBHOOK_SECRET?: string
 }
 
 /**
@@ -910,6 +925,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const pageGrantStore = createDbPageGrantStore()
   const pageDomainStore = createDbPageDomainStore()
   const domainProvisioner = createDomainProvisioner(env)
+  // Assistant Email vendor seam — bind the late-bound global once so every
+  // injectMcpTools call site (chat, channels, workflows, public API) sees the
+  // assistant-mailbox tools when AGENTMAIL_API_KEY is set. Null (default) =
+  // the surface stays dark. See agentmail/provider.ts.
+  setGlobalEmailInboxProvider(
+    createEmailInboxProvider({ AGENTMAIL_API_KEY: env.AGENTMAIL_API_KEY }),
+  )
   const workspaceGroupStore = createDbWorkspaceGroupStore()
   const docThemesStore = createDbDocThemesStore()
   const episodicStore = createDbEpisodicStore()
@@ -3224,6 +3246,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getDraftContext: getSkillDraftContext,
     fileStore,
     checkUsageBudget: ports.checkCreditBudget,
+    // Skill import (GitHub / URL): the connector stores back the GitHub
+    // browse + PAT resolution; the files store backs imported support files.
+    connectorInstanceStore,
+    connectorGrantStore,
+    workspaceSkillFilesStore,
   }))
 
   const workspaceInvitationStore = createWorkspaceInvitationStore()
@@ -3370,6 +3397,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     stagedWriteDeps: { rawWrites: agentToolset.rawWrites },
     // Computer-use R2: "Allow always for this block+profile" mints a grant.
     browserSkillGrants: ports.browserSkillGrantStore ?? null,
+    // Email stranger-sender cards (agentmail.md D4): approve = the sender
+    // joins the inbox integration's allowlist. Config-only here; the vendor
+    // Lists mirror (the belt) is applied lazily the next time the webhook
+    // route touches the inbox. Absent without a channel credential key.
+    emailSenderDeps: integrationStore
+      ? {
+          async allowlistSender(channelIntegrationId, sender) {
+            await integrationStore.mergeConfigSystem(channelIntegrationId, (cfg) => ({
+              ...cfg,
+              allowedUserIds: [...new Set([...(cfg.allowedUserIds ?? []), sender.toLowerCase()])],
+            }))
+          },
+        }
+      : undefined,
   }))
 
   // Goals board — read-only observability over the goal-seeker primitive.
@@ -3434,6 +3475,24 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pageDomainsMaxPerWorkspace: env.PAGE_DOMAINS_MAX_PER_WORKSPACE
       ? Number(env.PAGE_DOMAINS_MAX_PER_WORKSPACE)
       : undefined,
+    // Blocked hostnames = this deployment's own origins (derived, exact) +
+    // operator policy from PAGE_DOMAIN_BLOCKED_HOSTS. Nothing hardcoded.
+    pageDomainBlockedHosts: [
+      ...[env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
+        .map((url) => {
+          if (!url) return null
+          try {
+            return new URL(url).hostname.toLowerCase()
+          } catch {
+            return null
+          }
+        })
+        .filter((h): h is string => Boolean(h)),
+      ...(env.PAGE_DOMAIN_BLOCKED_HOSTS ?? '')
+        .split(',')
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
+    ],
     workspaceGroupStore,
     analytics,
     taskStore,

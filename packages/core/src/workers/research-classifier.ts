@@ -36,6 +36,8 @@ log into, or act on ONE specific named website / web app / URL ("browse luma for
 "log into stripe and download the latest invoice", "check what's listed on lu.ma"). Getting
 information from one named site is a site operation, not research. Broad multi-site
 investigation ("research the HK events landscape") is still research even if sites are named.
+This holds in EVERY language, and asking for the computer/browser BY NAME is always a site
+operation ("用 computer use 去睇下要幾錢", "幫我上官網睇下價錢", "ブラウザで公式サイトを見て").
 
 If research warranted: {"research":true,"reason":"<one short phrase, lower-case>"}
 If a site operation: {"research":false,"operate_site":true}
@@ -86,10 +88,19 @@ export type ResearchClassifyResult = {
 // loop keeps spawnWorker + webSearch, so a misrouted research ask degrades
 // to ordinary tooling; a false negative costs a multi-worker search fan-out
 // on a task the browser answers in one call. Bias accordingly.
-const STRONG_OPERATE_VERB = /\b(?:browse|log(?:\s+(?:me|us))?\s*in(?:to)?|sign(?:\s+(?:me|us))?\s*in(?:to)?)\b/i
+const STRONG_OPERATE_VERB = /\b(?:browse|computer\s+use|log(?:\s+(?:me|us))?\s*in(?:to)?|sign(?:\s+(?:me|us))?\s*in(?:to)?)\b/i
 const STRONG_OPERATE_DENY = /\b(?:browse|log(?:\s+(?:me|us))?\s*in(?:to)?|sign(?:\s+(?:me|us))?\s*in(?:to)?)\s+(?:the\s+(?:web|internet)|online)\b/i
 const WEAK_OPERATE_VERB = /\b(?:open|go\s+to|goto|visit|navigate\s+to|pull\s+up|look\s+at|check)\b/i
 const URLISH = /https?:\/\/\S+|\bwww\.\S+|\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b/i
+// CJK operate verbs. `\b` never matches around CJK characters (they are not
+// `\w` in JS regex), so these live in boundary-free patterns. Strong: an
+// explicit browse/open-site verb. Weak: everyday motion/look verbs (去/上/
+// 睇/查/看/開), which — like the English weak verbs — only count next to a
+// URL-ish token. False positives are cheap (the normal loop keeps webSearch);
+// a false negative sends a Cantonese "幫我用 computer use 去睇價錢" into the
+// coordinator, which has NO browser tools (2026-07-15 incident).
+const STRONG_OPERATE_VERB_CJK = /瀏覽|浏览|打開網[站頁]|打开网[站页]|上網站|上网站/
+const WEAK_OPERATE_VERB_CJK = /[去上開开睇查看]/
 
 /**
  * Deterministic operate-site detection — the zero-cost fast-path in front of
@@ -98,7 +109,8 @@ const URLISH = /https?:\/\/\S+|\bwww\.\S+|\b[a-z0-9][a-z0-9-]*\.[a-z]{2,}\b/i
  */
 export function detectOperateSiteIntent(message: string): boolean {
   if (STRONG_OPERATE_VERB.test(message) && !STRONG_OPERATE_DENY.test(message)) return true
-  return WEAK_OPERATE_VERB.test(message) && URLISH.test(message)
+  if (STRONG_OPERATE_VERB_CJK.test(message)) return true
+  return (WEAK_OPERATE_VERB.test(message) || WEAK_OPERATE_VERB_CJK.test(message)) && URLISH.test(message)
 }
 
 /**

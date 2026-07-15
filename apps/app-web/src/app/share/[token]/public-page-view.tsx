@@ -42,6 +42,7 @@ import {
   type CommentAuthor,
 } from "@/components/doc/comment-primitives";
 import { placeRailCards, RAIL_CARD_GAP } from "@/lib/comment-rail-layout";
+import { webAppUrl } from "@/lib/primary-auth";
 import { useT } from "@/lib/i18n/client";
 
 /**
@@ -442,8 +443,9 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
         </nav>
         <a
           // On a customer domain "/" is the customer's root page — the
-          // acquisition CTA must point at the product site instead.
-          href={source.kind === "site" ? "https://sidan.ai" : "/"}
+          // acquisition CTA must point at the product site instead
+          // (config-derived, same source as every app→marketing deep-link).
+          href={source.kind === "site" ? webAppUrl() : "/"}
           target="_blank"
           rel="noopener noreferrer"
           className="shrink-0 rounded-md bg-foreground px-3 py-1.5 text-xs font-semibold text-background transition-opacity hover:opacity-90"

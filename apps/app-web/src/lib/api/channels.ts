@@ -19,7 +19,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord";
+export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 type ChannelStatus = "active" | "revoked" | "invalid";

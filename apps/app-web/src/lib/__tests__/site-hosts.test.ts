@@ -1,25 +1,54 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { isAppHost, isGuardedPath, normalizeHostHeader } from "../site-hosts";
 
 describe("[COMP:app-web/site-route] Custom-domain host classification", () => {
   describe("isAppHost", () => {
-    it("treats our origins and dev hosts as app hosts", () => {
-      expect(isAppHost("app.sidan.ai")).toBe(true);
-      expect(isAppHost("sidan.ai")).toBe(true);
-      expect(isAppHost("ai-api.sidan.io")).toBe(true);
-      expect(isAppHost("preview-abc.vercel.app")).toBe(true);
+    async function withEnv(vars: Record<string, string>, fn: (m: typeof import("../site-hosts")) => void) {
+      vi.resetModules();
+      for (const [k, v] of Object.entries(vars)) vi.stubEnv(k, v);
+      try {
+        fn(await import("../site-hosts"));
+      } finally {
+        vi.unstubAllEnvs();
+        vi.resetModules();
+      }
+    }
+
+    it("always treats localhost and a missing Host header as the app", () => {
       expect(isAppHost("localhost")).toBe(true);
       expect(isAppHost("127.0.0.1")).toBe(true);
       expect(isAppHost("docs.acme.localhost")).toBe(true);
       expect(isAppHost("")).toBe(true); // no Host header — never a customer site
     });
 
-    it("treats everything else as a customer domain", () => {
+    it("unconfigured: dev treats non-local hosts as customer sites", () => {
+      // (test env is not production; NEXT_PUBLIC_APP_HOSTS is unset)
       expect(isAppHost("docs.acme.com")).toBe(false);
-      expect(isAppHost("acme.com")).toBe(false);
-      // suffix tricks don't qualify
-      expect(isAppHost("evilsidan.ai.attacker.com")).toBe(false);
-      expect(isAppHost("notsidan.ai.co")).toBe(false);
+    });
+
+    it("unconfigured: production stays DARK — every host is the app", async () => {
+      await withEnv({ NODE_ENV: "production" }, (m) => {
+        expect(m.isAppHost("app.example.com")).toBe(true);
+        expect(m.isAppHost("docs.acme.com")).toBe(true); // feature off, fail-safe
+      });
+    });
+
+    it("configured: exact entries and .suffix entries classify app origins", async () => {
+      await withEnv(
+        { NEXT_PUBLIC_APP_HOSTS: "app.example.com, Example.com, .vercel.app", NODE_ENV: "production" },
+        (m) => {
+          expect(m.isAppHost("app.example.com")).toBe(true);
+          expect(m.isAppHost("example.com")).toBe(true);
+          expect(m.isAppHost("preview-abc.vercel.app")).toBe(true);
+          expect(m.isAppHost("vercel.app")).toBe(true);
+          // everything else — including sibling subdomains of the apex — is a site
+          expect(m.isAppHost("page.example.com")).toBe(false);
+          expect(m.isAppHost("docs.acme.com")).toBe(false);
+          // suffix tricks don't qualify
+          expect(m.isAppHost("evilexample.com")).toBe(false);
+          expect(m.isAppHost("app.example.com.attacker.net")).toBe(false);
+        },
+      );
     });
   });
 

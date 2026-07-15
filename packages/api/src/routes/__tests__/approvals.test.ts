@@ -207,3 +207,89 @@ describe('[COMP:api/unified-approvals-route] POST /:id/respond', () => {
     expect(res.body.nativeSurface).toBe('feed')
   })
 })
+
+describe('[COMP:api/unified-approvals-route] email_sender respond (agentmail.md D4)', () => {
+  function makeEmailApp(over: { getById?: ReturnType<typeof vi.fn>; respond?: ReturnType<typeof vi.fn>; allowlistSender?: ReturnType<typeof vi.fn>; withDeps?: boolean } = {}) {
+    const getById =
+      over.getById ??
+      vi.fn(async () =>
+        makeApproval({
+          kind: 'email_sender',
+          toolName: 'emailSenderReview',
+          approvalPayload: {
+            kind: 'email_sender',
+            inboxAddress: 'ada@agentmail.to',
+            channelIntegrationId: 'integ-1',
+            sender: 'stranger@example.com',
+            senderName: 'Stranger',
+            subject: 'Hello',
+            preview: 'Hi there',
+          },
+        }),
+      )
+    const respond =
+      over.respond ?? vi.fn(async (_id: string, decision: string) => makeApproval({ status: decision as never }))
+    const allowlistSender = over.allowlistSender ?? vi.fn(async () => undefined)
+
+    const app = express()
+    app.use(express.json())
+    app.use((req, _res, next) => {
+      ;(req as { userId?: string }).userId = 'u-1'
+      next()
+    })
+    app.use(
+      '/api/approvals',
+      approvalsRoutes({
+        approvalsStore: { listPendingForWorkspace: vi.fn(async () => []), getById, respond } as never,
+        workspaceStore: { getRole: vi.fn(async () => 'member') } as never,
+        bridgeDeps: {} as never,
+        ...(over.withDeps === false ? {} : { emailSenderDeps: { allowlistSender } }),
+      }),
+    )
+    return { app, respond, allowlistSender }
+  }
+
+  it('approve allowlists the sender on the inbox integration, then settles', async () => {
+    const { app, respond, allowlistSender } = makeEmailApp()
+    const res = await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'approved' })
+      .expect(200)
+    expect(res.body.kind).toBe('email_sender')
+    expect(allowlistSender).toHaveBeenCalledWith('integ-1', 'stranger@example.com')
+    expect(respond).toHaveBeenCalledWith('ap-1', 'approved', 'u-1', undefined)
+  })
+
+  it('reject dismisses without touching the allowlist (NOT a blocklist)', async () => {
+    const { app, respond, allowlistSender } = makeEmailApp()
+    await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'rejected' })
+      .expect(200)
+    expect(allowlistSender).not.toHaveBeenCalled()
+    expect(respond).toHaveBeenCalledWith('ap-1', 'rejected', 'u-1', undefined)
+  })
+
+  it('a failed allowlist write leaves the card pending and retryable (502)', async () => {
+    const { app, respond } = makeEmailApp({
+      allowlistSender: vi.fn(async () => {
+        throw new Error('config write failed')
+      }),
+    })
+    await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'approved' })
+      .expect(502)
+    expect(respond).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the 422 deep-link when emailSenderDeps is not wired', async () => {
+    const { app } = makeEmailApp({ withDeps: false })
+    const res = await request(app)
+      .post('/api/approvals/ap-1/respond')
+      .send({ decision: 'approved' })
+      .expect(422)
+    expect(res.body.kind).toBe('email_sender')
+    expect(res.body.nativeSurface).toBe('web')
+  })
+})

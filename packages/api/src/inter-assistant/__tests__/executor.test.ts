@@ -616,6 +616,48 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockQueryLoop).not.toHaveBeenCalled()
   })
 
+  // ── The pinned built-in must survive injection ──
+  // `injectMcpTools` folds every built-in connector tool behind
+  // `mcp_search`/`mcp_call` unless `keepBuiltinsDirect` is set — it DELETES
+  // `githubListPullRequests` from the map. A step pinning that name then
+  // filtered to nothing (`tools_unavailable`), and a step that also pinned a
+  // first-party tool was worse: it ran with silently zero GitHub access.
+  // Injection only runs when the connector stores are wired, so these build
+  // the callee the way the KB-writes test above does.
+  function injectingExecutor(baseTools: Map<string, unknown>) {
+    return createCalleeExecutor({
+      provider: {} as never,
+      tools: baseTools as never,
+      memoryStore: memoryStore() as never,
+      capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+      connectorStore: {} as never,
+      mcpSettingsStore: {} as never,
+    })
+  }
+
+  it('keeps built-ins direct when the caller pins an allow-list', async () => {
+    yieldsText()
+    const tools = new Map<string, unknown>([
+      ['githubListPullRequests', plainTool('githubListPullRequests')],
+      ['listTasks', plainTool('listTasks')],
+    ])
+    await injectingExecutor(tools)({
+      ...baseParams,
+      callerChannelType: 'workflow',
+      allowedTools: ['githubListPullRequests', 'listTasks'],
+    })
+    expect(mockInjectMcp.mock.calls[0][0].keepBuiltinsDirect).toBe(true)
+    // …and the pinned built-in actually survives to the loop.
+    const passed = mockQueryLoop.mock.calls[0][0].tools as Map<string, unknown>
+    expect(passed.has('githubListPullRequests')).toBe(true)
+  })
+
+  it('leaves built-ins behind mcp_search on an unpinned consult (token win preserved)', async () => {
+    yieldsText()
+    await injectingExecutor(new Map([['searchThings', plainTool()]]))(baseParams)
+    expect(mockInjectMcp.mock.calls[0][0].keepBuiltinsDirect).toBe(false)
+  })
+
   it('persists the assistant turn on turn_complete', async () => {
     yields([
       { type: 'text_delta', text: 'done' },

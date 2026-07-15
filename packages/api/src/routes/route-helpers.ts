@@ -211,6 +211,27 @@ export function buildUnavailableCapabilitiesPrompt(capabilities: string[]): stri
   return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead). This list plus your tools is the complete integration surface: for a service in neither, sidanclaw has no integration to enable. Say so plainly and offer the nearest supported alternative. Never point the user to a Settings toggle or connector for a service that is not listed here.`
 }
 
+/**
+ * Build the browser-escalation system prompt section — injected ONLY when
+ * the acting browser tools are actually in the turn's tool map (dynamic
+ * injection carve-out of the tool-awareness rule; Layer 1 never names
+ * these). Two failure shapes it exists to prevent (2026-07-15 incident):
+ * the model stopping at "web search only found estimates" instead of
+ * opening the source site, and the model refusing to browse at all because
+ * the workspace has no browser profile.
+ */
+export function buildBrowserEscalationPrompt(tools: { has(name: string): boolean }): string {
+  if (!tools.has('browserNavigate')) return ''
+  const explore = tools.has('browserExplore')
+  return `\n\n# Live browsing
+
+This chat has a controlled browser: browserNavigate opens a page and returns its elements${explore ? ', and browserExplore drives a multi-step flow toward a goal (searching a fare, filtering listings, comparing options)' : ''}.
+
+- When web search returns estimates, ranges, or stale numbers but the user needs the EXACT or current figure (a price, availability, a listing, a schedule), do not stop at search results — open the authoritative site and read the real value. Escalate to the browser yourself; the user should never have to ask you to "use the computer".
+- Public sites need NO browser profile and no sign-in. Never refuse to browse because the workspace has no browser profile — profiles only add saved logins for signed-in tasks.
+- If a site blocks automation, asks for a login, or shows a verification challenge, follow the instructions in the tool result (usually: hand the user the live-view link) rather than retrying.`
+}
+
 // ── MCP injection (shared across channel routes) ──────────────
 
 /**

@@ -9,7 +9,13 @@
  *   GET    /mine                 — user's own skills
  *   GET    /workspace?workspaceId — governance-aware workspace skill list (Brain)
  *   POST   /                    — create a skill (workspace-aware when `workspaceId`
- *                                  in body; writes D4 default enablement rows)
+ *                                  in body; writes D4 default enablement rows;
+ *                                  accepts imported `supportFiles` + `importSource`)
+ *   POST   /import              — parse a skill file from GitHub / a public URL
+ *                                  into a draft (parse-only, no DB write)
+ *   GET    /import/github/instances — usable GitHub connectors (import picker)
+ *   GET    /import/github/repos     — repos reachable by an instance's PAT
+ *   GET    /import/github/contents  — one directory level of a repo
  *   PATCH  /:id                 — update a skill (D2: name/body edits carry the
  *                                  confirm-grade trust stamp; accepts `sensitivity`)
  *   DELETE /:id                 — delete a skill
@@ -52,6 +58,23 @@ import {
   type SkillDraftContext,
   type SkillDraftTemplate,
 } from '../skills/draft-generator.js'
+import {
+  importSkillFromGithub,
+  importSkillFromUrl,
+  SkillImportError,
+  IMPORT_MAX_SUPPORT_FILES,
+  IMPORT_MAX_SUPPORT_FILE_BYTES,
+  type GithubContentsReader,
+} from '../skills/import-service.js'
+import type { RawImportFetcher } from '../skills/import-source.js'
+import {
+  listWorkspaceGithubInstances,
+  resolveWorkspaceGithubPat,
+} from './knowledge.js'
+import { getFileContents, listAffiliatedRepos } from '../github/client.js'
+import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
+import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
+import type { WorkspaceSkillFilesStore } from '../db/workspace-skill-files-store.js'
 
 const SENSITIVITIES = new Set(['public', 'internal', 'confidential'])
 
@@ -105,6 +128,27 @@ type SkillRouteOptions = {
     workspaceId: string,
     plan: string,
   ) => Promise<{ status: 'ok' | 'downgraded' | 'blocked' }>
+  /**
+   * Skill import (skill-system.md → "Importing skills (GitHub / URL)").
+   * The connector stores back the GitHub browse endpoints + PAT resolution;
+   * absent → those endpoints answer 503 (URL import still works). The files
+   * store backs the create-route `supportFiles` extension.
+   */
+  connectorInstanceStore?: ConnectorInstanceStore
+  connectorGrantStore?: ConnectorGrantStore
+  workspaceSkillFilesStore?: WorkspaceSkillFilesStore
+  /** Test seam — defaults to the allowlisted raw fetcher. */
+  fetchRawImport?: RawImportFetcher
+  /** Test seam — defaults to the real GitHub client bound to the PAT. */
+  githubReaderFor?: (pat: string) => GithubContentsReader
+  /** Test seam — defaults to the real repo-listing GitHub call. */
+  listReposFor?: (pat: string) => Promise<Array<{
+    full_name: string
+    name: string
+    owner: { login: string }
+    private: boolean
+    description: string | null
+  }>>
 }
 
 /** One transcript entry. The endpoint is stateless — the client resends the
@@ -163,6 +207,14 @@ export function skillRoutes({
   fileStore,
   getWorkspacePlan = getWorkspacePlanDb,
   checkUsageBudget = allowAllBudget,
+  connectorInstanceStore,
+  connectorGrantStore,
+  workspaceSkillFilesStore,
+  fetchRawImport,
+  githubReaderFor = (pat) => ({
+    getFileContents: (owner, repo, path, ref) => getFileContents(pat, owner, repo, path, ref),
+  }),
+  listReposFor = (pat) => listAffiliatedRepos(pat),
 }: SkillRouteOptions): Router {
   const router = Router()
   // One model call per draft turn — keep a per-user lid on it (plan §10).
@@ -363,6 +415,7 @@ export function skillRoutes({
     const {
       name, description, whenToUse, content, category, requiresConnectors,
       workspaceId, enabledAssistantIds, sensitivity, extraction,
+      supportFiles, importSource,
     } = req.body as {
       name?: string
       description?: string
@@ -381,6 +434,11 @@ export function skillRoutes({
       /** Structural-synthesis Phase 2: the draft's output shape. Minted into a
        *  linked v2 blueprint when present (validated with extractionSpecSchema). */
       extraction?: unknown
+      /** Skill import (skill-system.md → "Importing skills"): folder support
+       *  files written to `workspace_skill_files` after the row insert. */
+      supportFiles?: Array<{ kind?: string; name?: string; content?: string; description?: string }>
+      /** Import provenance blob, stored verbatim on the row (mig 328). */
+      importSource?: Record<string, unknown>
     }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -408,6 +466,35 @@ export function skillRoutes({
       res.status(400).json({ error: 'sensitivity must be public, internal, or confidential' }); return
     }
 
+    // Skill-import extension: validate support files up front so a bad batch
+    // never leaves a half-written skill (`workspace_skill_files` rows are
+    // written after the insert; the caps mirror the import service's).
+    const SUPPORT_KINDS = new Set(['reference', 'template', 'script'])
+    let validSupportFiles: Array<{ kind: 'reference' | 'template' | 'script'; name: string; content: string; description?: string }> = []
+    if (supportFiles !== undefined) {
+      if (!Array.isArray(supportFiles) || supportFiles.length > IMPORT_MAX_SUPPORT_FILES) {
+        res.status(400).json({ error: `supportFiles must be an array of at most ${IMPORT_MAX_SUPPORT_FILES}` }); return
+      }
+      const seen = new Set<string>()
+      for (const f of supportFiles) {
+        if (!f || typeof f.kind !== 'string' || !SUPPORT_KINDS.has(f.kind)
+          || typeof f.name !== 'string' || !f.name.trim() || f.name.length > 200
+          || typeof f.content !== 'string' || f.content.length > IMPORT_MAX_SUPPORT_FILE_BYTES) {
+          res.status(400).json({ error: 'Invalid support file' }); return
+        }
+        const key = `${f.kind}:${f.name}`
+        if (seen.has(key)) {
+          res.status(400).json({ error: `Duplicate support file: ${key}` }); return
+        }
+        seen.add(key)
+      }
+      validSupportFiles = supportFiles as typeof validSupportFiles
+    }
+    if (importSource !== undefined
+      && (typeof importSource !== 'object' || importSource === null || Array.isArray(importSource))) {
+      res.status(400).json({ error: 'importSource must be an object' }); return
+    }
+
     const input = {
       slug,
       name: name.trim(),
@@ -417,6 +504,7 @@ export function skillRoutes({
       category: category ?? 'custom',
       requiresConnectors: requiresConnectors ?? [],
       sensitivity: sensitivity as 'public' | 'internal' | 'confidential' | undefined,
+      importSource: importSource ?? null,
     }
 
     try {
@@ -430,6 +518,27 @@ export function skillRoutes({
         if (!role) { res.status(404).json({ error: 'Not found' }); return }
 
         const skill = await workspaceSkillStore.create(userId, workspaceId, input)
+
+        // Imported support files (folder skills): write each through the
+        // pointer-backed files store so the {{kind:name}} appendix in the body
+        // resolves at useSkill time. Failure-isolated like the blueprint mint —
+        // a file write error never fails the skill save (the pointer renders
+        // its "missing" comment instead).
+        if (validSupportFiles.length > 0 && workspaceSkillFilesStore) {
+          for (const f of validSupportFiles) {
+            try {
+              await workspaceSkillFilesStore.upsert(userId, {
+                workspaceSkillId: skill.rowId,
+                kind: f.kind,
+                name: f.name,
+                content: f.content,
+                description: f.description ?? null,
+              })
+            } catch (err) {
+              console.error('[skills] support file write failed (skill kept):', err)
+            }
+          }
+        }
 
         // Structural-synthesis Phase 2: if the draft carried a structured output
         // shape, mint a v2 blueprint from it and link the skill, so the skill
@@ -481,6 +590,176 @@ export function skillRoutes({
       }
       console.error('[skills] create failed:', err)
       res.status(500).json({ error: 'Failed to create skill' })
+    }
+  })
+
+  // ── Skill import (GitHub / URL) ──────────────────────────────
+  //
+  // Parse-only: POST /import fetches + normalizes a skill file (or Agent
+  // Skills folder) into a draft the creator opens pre-filled; nothing is
+  // written until the user saves through POST /. The GitHub browse reads
+  // authorize through the same usable-set gate the KB source picker uses
+  // (`resolveWorkspaceGithubPat`). Spec: skill-system.md → "Importing
+  // skills (GitHub / URL)".
+
+  const importBodySchema = z.object({
+    workspaceId: z.string().trim().min(1),
+    source: z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('url'), url: z.string().trim().min(1).max(2000) }),
+      z.object({
+        kind: z.literal('github'),
+        connectorInstanceId: z.string().trim().min(1),
+        owner: z.string().trim().min(1).max(200),
+        repo: z.string().trim().min(1).max(200),
+        path: z.string().trim().min(1).max(500),
+        ref: z.string().trim().min(1).max(200).optional(),
+      }),
+    ]),
+  })
+
+  /** Membership gate shared by the four import endpoints. */
+  async function gateImportWorkspace(
+    userId: string,
+    workspaceId: unknown,
+    res: import('express').Response,
+  ): Promise<string | null> {
+    if (typeof workspaceId !== 'string' || !workspaceId.trim()) {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return null
+    }
+    if (!workspaceStore) {
+      res.status(503).json({ error: 'Workspace store not configured on the server.' })
+      return null
+    }
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) {
+      res.status(404).json({ error: 'Not found' })
+      return null
+    }
+    return workspaceId
+  }
+
+  router.post('/import', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const parsed = importBodySchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid import request' })
+      return
+    }
+    const workspaceId = await gateImportWorkspace(userId, parsed.data.workspaceId, res)
+    if (!workspaceId) return
+
+    try {
+      const source = parsed.data.source
+      if (source.kind === 'url') {
+        const result = await importSkillFromUrl(source.url, fetchRawImport)
+        res.json(result)
+        return
+      }
+      const resolved = await resolveWorkspaceGithubPat(
+        connectorInstanceStore, connectorGrantStore,
+        userId, workspaceId, source.connectorInstanceId, res,
+      )
+      if (!resolved) return
+      const result = await importSkillFromGithub(githubReaderFor(resolved.pat), {
+        owner: source.owner, repo: source.repo, path: source.path, ref: source.ref,
+      })
+      res.json(result)
+    } catch (err) {
+      if (err instanceof SkillImportError) {
+        res.status(err.status).json({ error: err.message })
+        return
+      }
+      console.error('[skills] import failed:', err)
+      res.status(500).json({ error: 'Failed to import the skill' })
+    }
+  })
+
+  router.get('/import/github/instances', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = await gateImportWorkspace(userId, req.query.workspaceId, res)
+    if (!workspaceId) return
+    try {
+      const instances = await listWorkspaceGithubInstances(
+        connectorInstanceStore, connectorGrantStore, userId, workspaceId,
+      )
+      if (instances.length === 0) {
+        res.status(409).json({ error: 'No usable GitHub connector in this workspace. Connect GitHub in Studio first.' })
+        return
+      }
+      res.json({
+        instances: instances.map((i) => ({ id: i.id, label: i.label, connectedEmail: i.connectedEmail })),
+      })
+    } catch (err) {
+      console.error('[skills] import instances failed:', err)
+      res.status(500).json({ error: 'Failed to list GitHub connectors' })
+    }
+  })
+
+  router.get('/import/github/repos', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = await gateImportWorkspace(userId, req.query.workspaceId, res)
+    if (!workspaceId) return
+    const resolved = await resolveWorkspaceGithubPat(
+      connectorInstanceStore, connectorGrantStore,
+      userId, workspaceId,
+      typeof req.query.connectorInstanceId === 'string' ? req.query.connectorInstanceId : undefined,
+      res,
+    )
+    if (!resolved) return
+    try {
+      const repos = await listReposFor(resolved.pat)
+      res.json({
+        repos: repos.map((r) => ({
+          fullName: r.full_name,
+          name: r.name,
+          owner: r.owner.login,
+          private: r.private,
+          description: r.description,
+        })),
+      })
+    } catch (err) {
+      console.error('[skills] import repos failed:', err)
+      res.status(502).json({ error: 'Failed to list repositories from GitHub' })
+    }
+  })
+
+  router.get('/import/github/contents', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = await gateImportWorkspace(userId, req.query.workspaceId, res)
+    if (!workspaceId) return
+    const owner = typeof req.query.owner === 'string' ? req.query.owner : ''
+    const repo = typeof req.query.repo === 'string' ? req.query.repo : ''
+    if (!owner || !repo) {
+      res.status(400).json({ error: 'owner and repo are required' })
+      return
+    }
+    const path = typeof req.query.path === 'string' ? req.query.path : ''
+    const ref = typeof req.query.ref === 'string' && req.query.ref ? req.query.ref : undefined
+    const resolved = await resolveWorkspaceGithubPat(
+      connectorInstanceStore, connectorGrantStore,
+      userId, workspaceId,
+      typeof req.query.connectorInstanceId === 'string' ? req.query.connectorInstanceId : undefined,
+      res,
+    )
+    if (!resolved) return
+    try {
+      const listing = await githubReaderFor(resolved.pat).getFileContents(owner, repo, path, ref)
+      const entries = (Array.isArray(listing) ? listing : [listing])
+        // The browser shows only what can be picked or descended into:
+        // directories and markdown files.
+        .filter((e) => e.type === 'dir' || (e.type === 'file' && /\.(md|mdc|markdown)$/i.test(e.name)))
+        .map((e) => ({ type: e.type, name: e.name, path: e.path, size: e.size }))
+        .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === 'dir' ? -1 : 1))
+      res.json({ entries })
+    } catch (err) {
+      console.error('[skills] import contents failed:', err)
+      res.status(502).json({ error: 'Failed to read the repository from GitHub' })
     }
   })
 

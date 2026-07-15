@@ -73,7 +73,7 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
   }
 
   return {
-    check(toolName: string, input: unknown): LoopAction {
+    check(toolName: string, input: unknown, opts?: { repeatTolerant?: boolean }): LoopAction {
       totalCalls++
 
       // Latched fail-streak fuse takes precedence — the turn is over for every
@@ -86,6 +86,11 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
         return 'hard_stop'
       }
 
+      // Repeat-tolerant tools (Tool.allowsRepeatCalls — polling/re-read tools
+      // whose input is empty by design) skip the identical-input thresholds:
+      // still bounded by the hard limit above and the failure fuses below.
+      if (opts?.repeatTolerant) return 'allow'
+
       const key = makeKey(toolName, input)
       const count = (callCounts.get(key) ?? 0) + 1
       callCounts.set(key, count)
@@ -96,7 +101,7 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
     },
 
     /** Read-only check — returns the action without incrementing counters. */
-    peek(toolName: string, input: unknown): LoopAction {
+    peek(toolName: string, input: unknown, opts?: { repeatTolerant?: boolean }): LoopAction {
       if (trippedTool !== null) {
         return 'hard_stop'
       }
@@ -104,6 +109,8 @@ export function createLoopDetector(opts?: { hardLimit?: number }) {
       if (totalCalls >= hardLimit) {
         return 'hard_stop'
       }
+
+      if (opts?.repeatTolerant) return 'allow'
 
       const key = makeKey(toolName, input)
       const count = callCounts.get(key) ?? 0

@@ -26,6 +26,22 @@ export function sessionEnv(sessionName: string): Record<string, string> {
   return { AGENT_BROWSER_SESSION_NAME: sessionName }
 }
 
+/**
+ * Chain several verbs into ONE sandbox exec — every E2B command is a network
+ * round trip, so navigate used to cost 2 and snapshot 3. Parts split on a
+ * sentinel echoed between commands; `&&` keeps the fail-fast exit code, so a
+ * failed verb still surfaces stderr through the caller's error mapping.
+ */
+export const PART_SEPARATOR = '__AB_PART__'
+
+export function chainCommands(...cmds: string[]): string {
+  return cmds.join(` && echo ${PART_SEPARATOR} && `)
+}
+
+export function splitCommandParts(stdout: string): string[] {
+  return stdout.split(new RegExp(`\\n?${PART_SEPARATOR}\\n?`))
+}
+
 export const cli = {
   open(url: string): string {
     return `${AGENT_BROWSER_BIN} open ${shellQuote(url)}`
@@ -52,14 +68,13 @@ export const cli = {
   press(key: string): string {
     return `${AGENT_BROWSER_BIN} press ${shellQuote(key)}`
   },
-  /** Coordinate click for the Take-Over input relay (element under point). */
-  clickAt(x: number, y: number): string {
-    const js = `document.elementFromPoint(${Math.round(x)}, ${Math.round(y)})?.click()`
-    return `${AGENT_BROWSER_BIN} eval ${shellQuote(js)}`
-  },
-  scrollBy(deltaY: number): string {
-    const js = `window.scrollBy(0, ${Math.round(deltaY)})`
-    return `${AGENT_BROWSER_BIN} eval ${shellQuote(js)}`
+  /**
+   * The daemon's Chromium CDP endpoint — the Take-Over input relay dispatches
+   * trusted events through it (takeover-input.ts), and browser-use attaches
+   * to it (bu-fallback). Validated in-sandbox 2026-07-13.
+   */
+  getCdpUrl(): string {
+    return `${AGENT_BROWSER_BIN} get cdp-url`
   },
   /** Dump cookies + web storage (Playwright storageState JSON) to a file. */
   stateSave(path: string): string {
