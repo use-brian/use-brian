@@ -629,6 +629,10 @@ const MAX_DOMAINS_DEFAULT = 50
 const DEDUP_MIN_TOTAL_DEFAULT = 10
 const DEDUP_MIN_GROUP_DEFAULT = 3
 const DEDUP_MAX_GROUP_DEFAULT = 30
+// Keyset batch size for the Deep score/prune scan. Bounds how many full
+// memory rows (detail text included) are resident at once; the scan's
+// per-row decisions have no cross-row dependency so any size is correct.
+const DEEP_SCAN_BATCH = 500
 /** Max summary length (chars) enforced on dedup output — matches REM for consistency. */
 const DEDUP_SUMMARY_MAX_CHARS = 100
 /** Max detail length (chars) enforced on dedup output. */
@@ -727,43 +731,59 @@ export async function runDeepConsolidation(
     }
   }
 
-  const memories = await store.listWithMetrics(assistantId, userId)
-
-  // ── 1 + 2. Score every memory, persist, optionally promote ──
-  const scored: Array<{ memory: MemoryWithMetrics; score: number }> = []
-  for (const memory of memories) {
-    const score = computeConsolidationScore({
-      recallCount: memory.recallCount,
-      usefulRecallCount: memory.usefulRecallCount,
-      uniqueQueries: memory.uniqueQueries,
-      recallDays: memory.recallDays,
-      ageDays: memory.ageDays,
-      tags: memory.tags,
-    })
-    const boost = score >= promoteThreshold
-    await store.writeConsolidationScore(memory.id, score, boost)
-    if (boost) promoted++
-    scored.push({ memory, score })
-  }
-
-  // ── 3. Prune low-scoring aged memories ──
-  // REM-output memories (LLM-generated, tagged `consolidation:rem`)
-  // use a shorter age gate (7 days) since they're system-generated and
-  // easily recreated. User-generated rows keep the full pruneAfterDays
-  // (default 30) to avoid premature deletion. Post-Phase-4: no
-  // identity-type guard needed — identity lives on entities now.
+  // ── 1 + 2 + 3. Score, persist, promote, prune — one batched scan ──
+  // A single unbounded listWithMetrics() used to materialize every row
+  // (full detail text included) in one array plus a same-size scored copy —
+  // the dominant heap spike of the consolidation tick on large brains.
+  // Keyset batches bound residency to DEEP_SCAN_BATCH rows; only survivors
+  // (needed by the dedup/SOUL/domain steps below) are retained. Scoring and
+  // the prune decision are per-row with no cross-row dependency, so folding
+  // the old step 3 into the scan yields identical outcomes.
+  //
+  // Prune age gates: REM-output memories (LLM-generated, tagged
+  // `consolidation:rem`) use a shorter gate (7 days) since they're
+  // system-generated and easily recreated. User-generated rows keep the
+  // full pruneAfterDays (default 30) to avoid premature deletion.
+  // Post-Phase-4: no identity-type guard needed — identity lives on
+  // entities now.
   const remPruneAgeDays = Math.min(7, pruneAfterDays)
-  for (const { memory, score } of scored) {
-    if (score >= pruneThreshold) continue
-    const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
-    if (memory.ageDays < minAge) continue
-    await store.deleteMemory(memory.id)
-    affected.push(memory.id)
-    pruned++
+  let scanned = 0
+  let liveScored: Array<{ memory: MemoryWithMetrics; score: number }> = []
+  let scanAfter: { createdAt: Date; id: string } | undefined
+  for (;;) {
+    const batch = await store.listWithMetrics(assistantId, userId, {
+      limit: DEEP_SCAN_BATCH,
+      after: scanAfter,
+    })
+    if (batch.length === 0) break
+    const lastRow = batch[batch.length - 1]
+    scanAfter = { createdAt: lastRow.createdAt, id: lastRow.id }
+    scanned += batch.length
+    for (const memory of batch) {
+      const score = computeConsolidationScore({
+        recallCount: memory.recallCount,
+        usefulRecallCount: memory.usefulRecallCount,
+        uniqueQueries: memory.uniqueQueries,
+        recallDays: memory.recallDays,
+        ageDays: memory.ageDays,
+        tags: memory.tags,
+      })
+      const boost = score >= promoteThreshold
+      await store.writeConsolidationScore(memory.id, score, boost)
+      if (boost) promoted++
+      if (score < pruneThreshold) {
+        const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
+        if (memory.ageDays >= minAge) {
+          await store.deleteMemory(memory.id)
+          affected.push(memory.id)
+          pruned++
+          continue
+        }
+      }
+      liveScored.push({ memory, score })
+    }
+    if (batch.length < DEEP_SCAN_BATCH) break
   }
-
-  // Remove pruned rows from the working set so later steps don't see them.
-  let liveScored = scored.filter(({ memory }) => !affected.includes(memory.id))
 
   // ── 4. LLM dedup sweep (semantic pass over survivors) ──
   // Jaccard in Light catches exact duplicates at $0; this pass catches
@@ -852,7 +872,7 @@ export async function runDeepConsolidation(
 
   // ── 7. Log + analytics ──
   const summary =
-    `Scored ${memories.length}, promoted ${promoted}, pruned ${pruned}` +
+    `Scored ${scanned}, promoted ${promoted}, pruned ${pruned}` +
     (merged ? `, merged ${merged}` : '') +
     (opPruned ? `, op-pruned ${opPruned}` : '') +
     (domainsSummarized ? `, summarised ${domainsSummarized} domains` : '')
@@ -1532,48 +1552,53 @@ export async function runTeamDeepConsolidation(
   const pruneThreshold = opts?.pruneScoreThreshold ?? PRUNE_THRESHOLD_DEFAULT
   const pruneAfterDays = opts?.pruneAfterDays ?? PRUNE_AGE_DEFAULT_DAYS
 
-  const memories = await store.listTeamWithMetrics(assistantId, workspaceId)
   const affected: string[] = []
   let pruned = 0
   let promoted = 0
+  let scanned = 0
 
-  // Score + promote
-  for (const memory of memories) {
-    const score = computeConsolidationScore({
-      recallCount: memory.recallCount,
-      usefulRecallCount: memory.usefulRecallCount,
-      uniqueQueries: memory.uniqueQueries,
-      recallDays: memory.recallDays,
-      ageDays: memory.ageDays,
-      tags: memory.tags,
-    })
-    const boost = score >= promoteThreshold
-    await store.writeConsolidationScore(memory.id, score, boost)
-    if (boost) promoted++
-  }
-
-  // Prune — REM-output rows (tagged `consolidation:rem`) get the
-  // shorter 7-day age gate; user-generated rows keep `pruneAfterDays`.
+  // Score + promote + prune in one keyset-batched scan (see the per-user
+  // Deep scan above for the memory rationale — this used to load the whole
+  // workspace set at once AND compute every score twice, once per loop).
+  // Prune: REM-output rows (tagged `consolidation:rem`) get the shorter
+  // 7-day age gate; user-generated rows keep `pruneAfterDays`.
   // Post-Phase-4: no identity-guard needed.
   const remPruneAgeDays = Math.min(7, pruneAfterDays)
-  for (const memory of memories) {
-    const score = computeConsolidationScore({
-      recallCount: memory.recallCount,
-      usefulRecallCount: memory.usefulRecallCount,
-      uniqueQueries: memory.uniqueQueries,
-      recallDays: memory.recallDays,
-      ageDays: memory.ageDays,
-      tags: memory.tags,
+  let scanAfter: { createdAt: Date; id: string } | undefined
+  for (;;) {
+    const batch = await store.listTeamWithMetrics(assistantId, workspaceId, {
+      limit: DEEP_SCAN_BATCH,
+      after: scanAfter,
     })
-    if (score >= pruneThreshold) continue
-    const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
-    if (memory.ageDays < minAge) continue
-    await store.deleteMemory(memory.id)
-    affected.push(memory.id)
-    pruned++
+    if (batch.length === 0) break
+    const lastRow = batch[batch.length - 1]
+    scanAfter = { createdAt: lastRow.createdAt, id: lastRow.id }
+    scanned += batch.length
+    for (const memory of batch) {
+      const score = computeConsolidationScore({
+        recallCount: memory.recallCount,
+        usefulRecallCount: memory.usefulRecallCount,
+        uniqueQueries: memory.uniqueQueries,
+        recallDays: memory.recallDays,
+        ageDays: memory.ageDays,
+        tags: memory.tags,
+      })
+      const boost = score >= promoteThreshold
+      await store.writeConsolidationScore(memory.id, score, boost)
+      if (boost) promoted++
+      if (score < pruneThreshold) {
+        const minAge = isRemOutput(memory) ? remPruneAgeDays : pruneAfterDays
+        if (memory.ageDays >= minAge) {
+          await store.deleteMemory(memory.id)
+          affected.push(memory.id)
+          pruned++
+        }
+      }
+    }
+    if (batch.length < DEEP_SCAN_BATCH) break
   }
 
-  const summary = `Scored ${memories.length}, promoted ${promoted}, pruned ${pruned} team memories`
+  const summary = `Scored ${scanned}, promoted ${promoted}, pruned ${pruned} team memories`
   await store.logWorkspaceConsolidation({ assistantId, workspaceId, phase: 'deep', summary, memoriesAffected: affected })
 
   opts?.onEvent?.({

@@ -127,8 +127,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
 
     // ── Deep consolidation surface ───────────────────────────
 
-    async listWithMetrics(assistantId, userId) {
-      const rows = await listMemoriesWithMetrics(assistantId, userId)
+    async listWithMetrics(assistantId, userId, page) {
+      const rows = await listMemoriesWithMetrics(assistantId, userId, page)
       return rows.map((r) => ({
         id: r.id,
         scope: r.scope,
@@ -414,8 +414,8 @@ export function createDbMemoryStore(deps: { entityLinks?: EntityLinksStore } = {
       return listWorkspaceMemoryGroups()
     },
 
-    async listTeamWithMetrics(assistantId, workspaceId) {
-      const rows = await listWorkspaceMemoriesWithMetrics(assistantId, workspaceId)
+    async listTeamWithMetrics(assistantId, workspaceId, page) {
+      const rows = await listWorkspaceMemoriesWithMetrics(assistantId, workspaceId, page)
       return rows.map((r) => ({
         id: r.id, scope: r.scope, summary: r.summary,
         detail: r.detail, tags: r.tags, confidence: r.confidence, sensitivity: r.sensitivity, workspaceId: undefined,

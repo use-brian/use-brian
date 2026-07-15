@@ -1139,15 +1139,46 @@ export type MemoryWithMetricsRow = {
   createdAt: Date
 }
 
+/** Keyset window for the metrics listings (see MemoryMetricsPage in core). */
+export type MemoryMetricsPageParams = {
+  limit: number
+  after?: { createdAt: Date; id: string }
+}
+
 /**
- * Read every memory for (assistant, user) with the scoring signals the
+ * Append the keyset-cursor predicate + stable ordering + LIMIT for a
+ * metrics listing. Mutates `params` (pushes the cursor/limit values) and
+ * returns the SQL tail. No `page` keeps the legacy full-scan shape but
+ * still gains the deterministic ordering.
+ */
+function metricsPageSql(params: unknown[], page?: MemoryMetricsPageParams): string {
+  let sql = ''
+  if (page?.after) {
+    params.push(page.after.createdAt, page.after.id)
+    sql += ` AND (created_at, id) > ($${params.length - 1}::timestamptz, $${params.length}::uuid)`
+  }
+  sql += ' ORDER BY created_at, id'
+  if (page) {
+    params.push(page.limit)
+    sql += ` LIMIT $${params.length}`
+  }
+  return sql
+}
+
+/**
+ * Read memories for (assistant, user) with the scoring signals the
  * Deep consolidation phase needs. `ageDays`, `uniqueQueries`, `recallDays`
- * are computed server-side so the caller stays clock-free.
+ * are computed server-side so the caller stays clock-free. `page` bounds
+ * the result to one keyset batch so consolidation never materializes an
+ * entire large brain in a single query result.
  */
 export async function listMemoriesWithMetrics(
   assistantId: string,
   userId: string,
+  page?: MemoryMetricsPageParams,
 ): Promise<MemoryWithMetricsRow[]> {
+  const params: unknown[] = [assistantId, userId]
+  const pageSql = metricsPageSql(params, page)
   const result = await query<MemoryWithMetricsRow>(
     `SELECT id,
             assistant_id as "assistantId",
@@ -1161,8 +1192,8 @@ export async function listMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL`,
-    [assistantId, userId],
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND user_id = $2 AND valid_to IS NULL${pageSql}`,
+    params,
   )
   return result.rows
 }
@@ -1887,7 +1918,10 @@ export async function listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: 
 export async function listWorkspaceMemoriesWithMetrics(
   assistantId: string,
   workspaceId: string,
+  page?: MemoryMetricsPageParams,
 ): Promise<MemoryWithMetricsRow[]> {
+  const params: unknown[] = [assistantId, workspaceId]
+  const pageSql = metricsPageSql(params, page)
   const result = await query<MemoryWithMetricsRow>(
     `SELECT id,
             assistant_id as "assistantId",
@@ -1901,8 +1935,8 @@ export async function listWorkspaceMemoriesWithMetrics(
             GREATEST(EXTRACT(EPOCH FROM (now() - created_at)) / 86400, 0)::int as "ageDays",
             created_at as "createdAt"
      FROM memories
-     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL`,
-    [assistantId, workspaceId],
+     WHERE ${systemAssistantScopeSql('assistant_id', 'workspace_id', 1)} AND workspace_id = $2 AND valid_to IS NULL${pageSql}`,
+    params,
   )
   return result.rows
 }

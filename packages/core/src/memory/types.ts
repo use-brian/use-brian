@@ -49,6 +49,17 @@ export type MemoryWithMetrics = MemoryRecord & {
 }
 
 /**
+ * Keyset batch window for the metrics listings. `after` is the exclusive
+ * cursor — the `(createdAt, id)` of the previous batch's last row. Keyset
+ * (not OFFSET) because the Deep scan deletes rows as it goes; a shifting
+ * OFFSET would silently skip the rows that slid into the gap.
+ */
+type MemoryMetricsPage = {
+  limit: number
+  after?: { createdAt: Date; id: string }
+}
+
+/**
  * SOUL synthesis input — post-Phase-4 (retire-memory-type plan).
  *
  * Identity is no longer a memory `type`; it lives on the user's self
@@ -203,12 +214,18 @@ export type MemoryStore = {
   // state with the same pg pool and RLS model.
 
   /**
-   * List every memory for (assistant, user) enriched with the scoring
+   * List memories for (assistant, user) enriched with the scoring
    * signals Deep phase needs: recall_count, unique query hashes, recall
    * days, age in days, created_at. The age-in-days field is computed
    * server-side against `now()` so consolidation logic stays clock-free.
+   *
+   * `page` bounds the result to a keyset batch (ordered by
+   * `(createdAt, id)` ascending) so consolidation scans never
+   * materialize an entire large brain in one array — the unbounded
+   * form loaded every row's full detail text on every 15-min tick.
+   * Omitting `page` returns everything (small/on-demand callers).
    */
-  listWithMetrics(assistantId: string, userId: string): Promise<MemoryWithMetrics[]>
+  listWithMetrics(assistantId: string, userId: string, page?: MemoryMetricsPage): Promise<MemoryWithMetrics[]>
 
   /**
    * Persist a computed consolidation score. When `boostConfidence` is true,
@@ -373,8 +390,9 @@ export type MemoryStore = {
   /** Enumerate (assistant_id, workspace_id) pairs with team memories. */
   listWorkspaceMemoryGroups(): Promise<Array<{ assistantId: string; workspaceId: string }>>
 
-  /** List team memories with scoring metrics for Deep consolidation. */
-  listTeamWithMetrics(assistantId: string, workspaceId: string): Promise<MemoryWithMetrics[]>
+  /** List team memories with scoring metrics for Deep consolidation.
+   *  `page` bounds the scan the same way as `listWithMetrics`. */
+  listTeamWithMetrics(assistantId: string, workspaceId: string, page?: MemoryMetricsPage): Promise<MemoryWithMetrics[]>
 
   /** Last consolidation run for a team phase. */
   getLastWorkspacePhaseAt(assistantId: string, workspaceId: string, phase: 'light' | 'rem' | 'deep' | 'reflection'): Promise<Date | null>

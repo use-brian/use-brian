@@ -42,6 +42,7 @@ import type {
 import {
   runReclassification,
   filterMemoriesForReclassification,
+  RECLASSIFICATION_DAILY_CAP,
   type MemoryForReclassification,
 } from './reclassifier.js'
 import type { BrainCandidateStore } from '../brain/candidates-types.js'
@@ -523,31 +524,48 @@ async function runPostRemReclassification(
   const enabled = await scope.isV2Enabled(workspaceId)
   if (!enabled) return
 
-  const rows = await store.listWithMetrics(assistantId, userId)
-  if (rows.length === 0) return
-
-  const memories: MemoryForReclassification[] = rows.map((m) => ({
-    id: m.id,
-    summary: m.summary,
-    detail: m.detail,
-    tags: m.tags,
-    scope: m.scope,
-    sensitivity: m.sensitivity,
-    workspaceId: m.workspaceId ?? workspaceId,
-    userId: m.userId,
-    assistantId: m.assistantId,
-    // The worker is acting on behalf of the workspace's resolved actor —
-    // for auto reclassification the audit row records the assistant +
-    // user pair the REM tick ran for. The reclassifier's snapshot uses
-    // these for `drop`/`task` undo support; the `attribute` accept path
-    // re-checks authorship via `promoteMemoryToEntity`'s own gate.
-    createdByUserId: userId,
-    createdByAssistantId: assistantId,
-    createdAt: m.createdAt,
-  }))
-
-  const filtered = filterMemoriesForReclassification(memories, new Map())
+  // Keyset-batched scan instead of one unbounded load: the reclassifier
+  // only ever consumes RECLASSIFICATION_DAILY_CAP rows per run, so loading
+  // the whole brain (full detail text) after EVERY REM tick was pure heap
+  // cost. The per-row filter distributes over batches, so accumulating
+  // filtered survivors until the cap is reached selects the same rows the
+  // full-scan-then-slice did (modulo the now-deterministic scan order).
+  const RECLASSIFY_SCAN_BATCH = 500
+  const filtered: MemoryForReclassification[] = []
+  let scanAfter: { createdAt: Date; id: string } | undefined
+  for (;;) {
+    const rows = await store.listWithMetrics(assistantId, userId, {
+      limit: RECLASSIFY_SCAN_BATCH,
+      after: scanAfter,
+    })
+    if (rows.length === 0) break
+    const lastRow = rows[rows.length - 1]
+    scanAfter = { createdAt: lastRow.createdAt, id: lastRow.id }
+    const memories: MemoryForReclassification[] = rows.map((m) => ({
+      id: m.id,
+      summary: m.summary,
+      detail: m.detail,
+      tags: m.tags,
+      scope: m.scope,
+      sensitivity: m.sensitivity,
+      workspaceId: m.workspaceId ?? workspaceId,
+      userId: m.userId,
+      assistantId: m.assistantId,
+      // The worker is acting on behalf of the workspace's resolved actor —
+      // for auto reclassification the audit row records the assistant +
+      // user pair the REM tick ran for. The reclassifier's snapshot uses
+      // these for `drop`/`task` undo support; the `attribute` accept path
+      // re-checks authorship via `promoteMemoryToEntity`'s own gate.
+      createdByUserId: userId,
+      createdByAssistantId: assistantId,
+      createdAt: m.createdAt,
+    }))
+    filtered.push(...filterMemoriesForReclassification(memories, new Map()))
+    if (filtered.length >= RECLASSIFICATION_DAILY_CAP) break
+    if (rows.length < RECLASSIFY_SCAN_BATCH) break
+  }
   if (filtered.length === 0) return
+  filtered.splice(RECLASSIFICATION_DAILY_CAP)
 
   // Synthetic access context for the entity list — the worker runs as
   // the (assistantId, userId) pair from the REM tick. Treat the
