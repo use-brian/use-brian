@@ -64,18 +64,33 @@ export function suggestPageSlug(title: string, taken?: ReadonlySet<string>): str
 
 const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/**
- * Hostnames a customer may never claim: our own product surfaces and hosts
- * a platform can't serve (localhost, IPs, single-label names).
- */
-const BLOCKED_HOST_SUFFIXES = ['sidan.ai', 'sidan.io', 'vercel.app', 'localhost'];
+/** `.suffix` entries match the suffix (and the bare apex); anything else is
+ *  an exact hostname. No product hostnames live in code — the deployment
+ *  passes its own (`PAGE_DOMAIN_BLOCKED_HOSTS` + derived origin hosts). */
+export function hostMatchesEntry(hostname: string, entry: string): boolean {
+  const e = entry.trim().toLowerCase();
+  if (!e) return false;
+  if (e.startsWith('.')) {
+    const apex = e.slice(1);
+    return hostname === apex || hostname.endsWith(e);
+  }
+  return hostname === e;
+}
 
 /**
  * Normalize user input ("https://Docs.Acme.com/path" → "docs.acme.com").
  * Returns null when the input is not a usable public hostname. IDN input is
  * punycoded via the WHATWG URL parser (browser- and Node-consistent).
+ *
+ * Only universally non-routable inputs are rejected here (localhost, IPs,
+ * single-label names, bad shapes). Which product hostnames a deployment
+ * refuses is CONFIG, not code: pass them via `opts.block` (exact hosts or
+ * `.suffix` entries — see `hostMatchesEntry`).
  */
-export function normalizeHostname(input: string): string | null {
+export function normalizeHostname(
+  input: string,
+  opts?: { block?: readonly string[] },
+): string | null {
   const trimmed = input.trim().toLowerCase();
   if (!trimmed) return null;
   let hostname: string;
@@ -90,8 +105,9 @@ export function normalizeHostname(input: string): string | null {
   if (!labels.every((label) => HOSTNAME_LABEL.test(label))) return null;
   if (labels.every((label) => /^\d+$/.test(label))) return null; // IPv4
   if (hostname.includes(':')) return null; // IPv6 / port slipped through
-  for (const suffix of BLOCKED_HOST_SUFFIXES) {
-    if (hostname === suffix || hostname.endsWith(`.${suffix}`)) return null;
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) return null;
+  for (const entry of opts?.block ?? []) {
+    if (hostMatchesEntry(hostname, entry)) return null;
   }
   return hostname;
 }

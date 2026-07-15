@@ -63,6 +63,16 @@ export type UnifiedApprovalRouteOptions = {
    * still offers Deny / Allow once.
    */
   browserSkillGrants?: import('@sidanclaw/core').BrowserSkillGrantStore | null
+  /**
+   * Email channel stranger-sender cards (`kind='email_sender'`, agentmail.md
+   * D4). Approve = allowlist the sender on the inbox's integration row
+   * (`allowlistSender`); reject = dismiss — the sender stays on the
+   * ingest-only path, it is NOT a blocklist. Absent → the kind keeps the
+   * 422 deep-link.
+   */
+  emailSenderDeps?: {
+    allowlistSender(channelIntegrationId: string, sender: string): Promise<void>
+  }
 }
 
 /** Where a non-workflow approval kind is actually resolved. */
@@ -80,6 +90,9 @@ const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
   // the 3-button card (Deny / Allow once / Allow always for this
   // block+profile). The block's runner polls the row.
   browser_skill_send: 'web',
+  // Stranger-sender email cards resolve on the web Approvals queue
+  // (approve = allowlist the sender; reject = dismiss, stays ingest-only).
+  email_sender: 'web',
 }
 
 export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
@@ -259,6 +272,32 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
         grantId = grant.id
       }
       res.json({ kind: 'browser_skill_send', status: updated.status, grantId })
+      return
+    }
+
+    // Email stranger-sender card (agentmail.md D4): approve = allowlist the
+    // sender on the inbox integration (allowlist-then-settle — a failed
+    // config write leaves the card pending and retryable); reject = dismiss
+    // (the sender stays ingest-only; rejection is NOT a blocklist).
+    if (approval.kind === 'email_sender' && opts.emailSenderDeps) {
+      if (decision === 'approved') {
+        const payload = approval.approvalPayload as {
+          channelIntegrationId?: string
+          sender?: string
+        }
+        if (!payload.channelIntegrationId || !payload.sender) {
+          res.status(422).json({ kind: 'email_sender', error: 'Card payload is missing its integration or sender' })
+          return
+        }
+        try {
+          await opts.emailSenderDeps.allowlistSender(payload.channelIntegrationId, payload.sender)
+        } catch (err) {
+          res.status(502).json({ kind: 'email_sender', error: (err as Error).message })
+          return
+        }
+      }
+      const updated = await opts.approvalsStore.respond(id, decision, userId, reason)
+      res.json({ kind: 'email_sender', status: updated?.status ?? decision })
       return
     }
 

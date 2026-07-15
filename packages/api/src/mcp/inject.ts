@@ -18,8 +18,9 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools } from '@sidanclaw/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi } from '@sidanclaw/core'
+import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools, createAgentmailTools } from '@sidanclaw/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi } from '@sidanclaw/core'
+import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -205,6 +206,11 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'fathomGetTranscript',
     'fathomGetSummary',
   ],
+  agentmail: [
+    'agentmailSendMessage',
+    'agentmailSearchThreads',
+    'agentmailCreateDraft',
+  ],
 }
 
 // ── Main injection ────────────────────────────────────────────
@@ -342,6 +348,15 @@ export async function injectMcpTools(params: {
    * See `docs/architecture/engine/introspection-tools.md`.
    */
   introspectionTools?: Tool[]
+  /**
+   * Assistant Email vendor seam (docs/architecture/integrations/agentmail.md).
+   * When set AND the workspace holds connected `agentmail` connector
+   * instances (one per inbox, decision D1), the three assistant-mailbox
+   * tools inject through the team-native overlay. Absent (no
+   * AGENTMAIL_API_KEY, OSS default) → the surface is dark and nothing is
+   * announced.
+   */
+  emailInboxProvider?: EmailInboxProvider | null
 }): Promise<McpInjectionResult> {
   const {
     userId, assistantId, tools, connectorStore, settingsStore, assistantConnectorStore,
@@ -350,7 +365,7 @@ export async function injectMcpTools(params: {
     connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore, assistantTeamId,
     connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain,
     keepBuiltinsDirect = false, engineHooks, actorIdentity, filesApi,
-    introspectionTools,
+    introspectionTools, emailInboxProvider,
   } = params
 
   const unavailable: string[] = []
@@ -781,6 +796,9 @@ export async function injectMcpTools(params: {
       for (const inst of teamNative) {
         if (!inst.connected) continue
         const p = inst.provider
+        // Assistant Email instances are one-per-inbox (decision D1) and inject
+        // as ONE tool set over ALL inboxes below — not first-instance-wins.
+        if (p === 'agentmail') continue
         if (overlaidByTeam.has(p)) continue    // first team-native per provider wins
         overlaidByTeam.add(p)
         // Health gate (migration 294): a team-native connector whose credentials
@@ -876,6 +894,41 @@ export async function injectMcpTools(params: {
 
       if (overlaidByTeam.size > 0) {
         console.debug(`[mcp-inject] team-native overlay: re-injected ${overlaidByTeam.size} provider(s) from team-scoped connector_instance rows`)
+      }
+
+      // ── Assistant Email (agentmail) — one tool set over ALL inboxes ──
+      // Instances are one-per-inbox (decision D1); the tools take an
+      // optional `fromInbox` instead of per-instance variant suffixes. Dark
+      // without the provider (no AGENTMAIL_API_KEY) — nothing is announced.
+      // Explicit param wins; otherwise the boot-bound global (the late-bound
+      // seam — see provider.ts).
+      const effectiveEmailProvider = emailInboxProvider ?? getGlobalEmailInboxProvider()
+      if (effectiveEmailProvider) {
+        const inboxInstances = teamNative
+          .filter((i) => i.provider === 'agentmail' && i.connected && i.healthStatus !== 'auth_failed')
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        const agentmailEnabled =
+          !assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'agentmail')
+        if (inboxInstances.length > 0 && agentmailEnabled) {
+          await injectAgentmailTools({
+            provider: effectiveEmailProvider,
+            inboxes: inboxInstances.map((i) => ({
+              address: (i.connectedEmail ?? i.label).toLowerCase(),
+            })),
+            settingsStore: workspaceToolPolicyStore
+              ? workspacePolicyAsSettingsStore(workspaceToolPolicyStore, assistantTeamId)
+              : settingsStore,
+            userId,
+            assistantId,
+            tools,
+            unavailable,
+            connectorActionAudit,
+          })
+        } else if (inboxInstances.length === 0) {
+          unavailable.push(
+            'Assistant Email (no assistant inbox provisioned in this workspace) — if the user wants the assistant to have its own email address, point them to Studio → Channels → Add channel → Email.',
+          )
+        }
       }
     } catch (err) {
       console.error('[mcp-inject] team-native overlay failed:', err)
@@ -2466,5 +2519,169 @@ async function injectFathomTools(
     console.debug(`[mcp-inject] Fathom: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra account(s))` : ''}`)
   } catch (err) {
     console.error('[mcp-inject] Fathom injection failed:', err)
+  }
+}
+
+// ── Assistant Email (agentmail) injection ─────────────────────
+//
+// The assistant's OWN mailbox tools (agentmail.md → "Connector tools").
+// One tool set covers every workspace inbox (decision D1): the tools take an
+// optional `fromInbox` and default to the workspace's first (oldest) inbox.
+// Sends and drafts reuse the Gmail governance chain — `ask` classification
+// (OFFICIAL_CONNECTOR_TOOLS), the connector_actions audit + payload
+// classifier preflight here, and the confidential-turn egress refusal inside
+// the core tool.
+
+async function injectAgentmailTools(params: {
+  provider: EmailInboxProvider
+  /** Workspace inboxes, oldest first — the first is the default sender. */
+  inboxes: Array<{ address: string }>
+  settingsStore: McpSettingsStore
+  userId: string
+  assistantId: string
+  tools: Map<string, Tool>
+  unavailable?: string[]
+  connectorActionAudit?: ConnectorActionAudit
+}): Promise<void> {
+  const { provider, inboxes, settingsStore, userId, assistantId, tools, unavailable, connectorActionAudit } = params
+
+  const auditedEgress = async <T>(
+    actionKind: 'send_email' | 'draft_email',
+    payload: Record<string, unknown>,
+    run: () => Promise<T>,
+    externalIdOf: (result: T) => string | null,
+  ): Promise<T> => {
+    let preflight: ConnectorActionPreflight | undefined
+    if (connectorActionAudit) {
+      preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload })
+      if (preflight.shouldDeny) {
+        try {
+          await connectorActionAudit.emit(
+            { userId, assistantId },
+            { connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'denied', payload, preflight },
+          )
+        } catch (auditErr) {
+          console.warn('[mcp-inject] agentmail classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
+        }
+        throw new Error(
+          `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
+        )
+      }
+    }
+    try {
+      const result = await run()
+      if (connectorActionAudit) {
+        try {
+          await connectorActionAudit.emit(
+            { userId, assistantId },
+            { connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'executed', externalId: externalIdOf(result), payload, preflight },
+          )
+        } catch (auditErr) {
+          console.warn('[mcp-inject] agentmail connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
+        }
+      }
+      return result
+    } catch (err) {
+      if (connectorActionAudit) {
+        try {
+          await connectorActionAudit.emit(
+            { userId, assistantId },
+            {
+              connectorId: 'agentmail', actionKind, audienceClearance: 'public', status: 'failed',
+              payload: { ...payload, error: err instanceof Error ? err.message : String(err) },
+              preflight,
+            },
+          )
+        } catch (auditErr) {
+          console.warn('[mcp-inject] agentmail connector_action audit emit failed (failure path, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
+        }
+      }
+      throw err
+    }
+  }
+
+  const api: AgentmailToolApi = {
+    async listInboxes() {
+      return inboxes.map((inbox, i) => ({ address: inbox.address, isDefault: i === 0 }))
+    },
+    async send(p) {
+      const payload = {
+        from: p.inboxAddress,
+        to: p.to,
+        cc: p.cc ?? [],
+        subject: p.subject,
+        has_body: Boolean(p.body),
+        body_length: p.body.length,
+        body: p.body,
+      }
+      return auditedEgress(
+        'send_email',
+        payload,
+        () =>
+          provider.sendMessage(p.inboxAddress, {
+            to: p.to,
+            cc: p.cc,
+            subject: p.subject,
+            text: p.body,
+          }),
+        (r) => r.messageId,
+      )
+    },
+    async searchThreads(p) {
+      const result = await provider.listThreads(p.inboxAddress, {
+        limit: p.limit,
+        senders: p.senders,
+        subject: p.subjectContains,
+      })
+      // Projection (connector-result rule): documented fields only, never
+      // raw vendor JSON.
+      return result.threads.map((t) => ({
+        threadId: t.threadId,
+        inbox: t.inboxId,
+        subject: t.subject,
+        preview: t.preview,
+        senders: t.senders,
+        timestamp: t.timestamp,
+        messageCount: t.messageCount,
+      }))
+    },
+    async createDraft(p) {
+      const payload = {
+        from: p.inboxAddress,
+        to: p.to,
+        cc: p.cc ?? [],
+        subject: p.subject,
+        has_body: Boolean(p.body),
+        body_length: p.body.length,
+        body: p.body,
+        send_at: p.sendAt ?? null,
+      }
+      const draft = await auditedEgress(
+        'draft_email',
+        payload,
+        () =>
+          provider.createDraft(p.inboxAddress, {
+            to: p.to,
+            cc: p.cc,
+            subject: p.subject,
+            text: p.body,
+            sendAt: p.sendAt,
+            inReplyTo: p.inReplyTo,
+          }),
+        (r) => r.draftId,
+      )
+      return { draftId: draft.draftId, sendAt: draft.sendAt }
+    },
+  }
+
+  try {
+    for (const tool of createAgentmailTools(api)) {
+      if (await applyPolicyOrSkip(tool, 'agentmail', settingsStore, assistantId, userId, unavailable) === 'include') {
+        tools.set(tool.name, tool)
+      }
+    }
+    console.debug(`[mcp-inject] Assistant Email: injected tools over ${inboxes.length} inbox(es)`)
+  } catch (err) {
+    console.error('[mcp-inject] Assistant Email injection failed:', err)
   }
 }

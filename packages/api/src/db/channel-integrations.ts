@@ -86,6 +86,20 @@ export type TwitterCredentials = {
   scope: string               // space-separated list of granted scopes
 }
 
+/**
+ * Assistant-inbox (AgentMail) credentials. `inbox_id` IS the inbox's email
+ * address. `api_key` is the inbox-scoped key minted at provisioning when the
+ * vendor returns one — absent, the provider falls back to the org/BYO key
+ * from env. `webhook_secret` is the per-webhook Svix signing secret returned
+ * at registration; verification tries it first, then the env-level secret.
+ * See docs/architecture/integrations/agentmail.md.
+ */
+export type EmailCredentials = {
+  inbox_id: string
+  api_key?: string
+  webhook_secret?: string
+}
+
 /** Credential maps for every BYO channel we support. */
 export type ChannelCredentials =
   | SlackCredentials
@@ -94,6 +108,7 @@ export type ChannelCredentials =
   | DiscordCredentials
   | ThreadsCredentials
   | TwitterCredentials
+  | EmailCredentials
 
 /**
  * Access control mode for who can interact with the bot.

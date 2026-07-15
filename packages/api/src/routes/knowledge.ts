@@ -106,8 +106,11 @@ type KnowledgeRouteOptions = {
  * shows exactly what the member is allowed to configure with; an un-exposed
  * personal connector (connected in another workspace) and above-clearance
  * shared connectors are hidden. Deduped by id.
+ *
+ * Exported for the skill-import picker (routes/skills.ts), which lists the
+ * same usable set.
  */
-async function listWorkspaceGithubInstances(
+export async function listWorkspaceGithubInstances(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
   connectorGrantStore: ConnectorGrantStore | undefined,
   userId: string,
@@ -170,8 +173,11 @@ async function githubFetchAllPages<T>(
  * member's own workspace-exposed personal instance, a legacy team-native
  * instance, and a teammate-granted personal instance (within clearance for
  * the shared kinds).
+ *
+ * Exported for the skill-import routes (routes/skills.ts), which authorize
+ * their GitHub reads through the same usable-set gate.
  */
-async function resolveWorkspaceGithubPat(
+export async function resolveWorkspaceGithubPat(
   connectorInstanceStore: ConnectorInstanceStore | undefined,
   connectorGrantStore: ConnectorGrantStore | undefined,
   userId: string,

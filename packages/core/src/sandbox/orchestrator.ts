@@ -43,6 +43,8 @@ export type SandboxTaskRecord = {
 
 export type SandboxTaskStore = {
   getActiveBySession(sessionId: string): Promise<SandboxTaskRecord | null>
+  /** Every running/paused task in the workspace — the discovery surface (§5). */
+  listActiveByWorkspace(workspaceId: string): Promise<SandboxTaskRecord[]>
   create(record: SandboxTaskRecord): Promise<void>
   update(taskId: string, patch: Partial<SandboxTaskRecord>): Promise<void>
   /** Tasks still running/paused whose last activity is older than the cutoff. */
@@ -69,6 +71,11 @@ export function createInMemorySandboxTaskStore(): SandboxTaskStore & {
       }
       return null
     },
+    async listActiveByWorkspace(workspaceId) {
+      return [...tasks.values()].filter(
+        (t) => t.workspaceId === workspaceId && (t.status === 'running' || t.status === 'paused'),
+      )
+    },
     async create(record) {
       tasks.set(record.taskId, record)
     },
@@ -89,6 +96,30 @@ const LOGIN_WALL_PATTERN = /\/(login|signin|sign-in|checkpoint|authwall|sessions
 
 export function looksLikeLoginWall(url: string): boolean {
   return LOGIN_WALL_PATTERN.test(url)
+}
+
+/**
+ * Heuristics for "this page is a human-verification challenge" (captcha /
+ * bot-check interstitial). Unlike the login-wall regex these read the whole
+ * snapshot — the major walls (Cloudflare "Just a moment", Google /sorry/,
+ * reCAPTCHA/hCaptcha widgets, PerimeterX press-and-hold, Amazon robot check)
+ * mostly serve the challenge at the ORIGINAL url, so a URL test alone can
+ * never catch them. Kept deliberately specific: a plain page that merely
+ * MENTIONS captchas must not trip it.
+ */
+const CAPTCHA_URL_PATTERN = /\/sorry\/|__cf_chl|\/cdn-cgi\/challenge-platform\/|captcha/i
+const CAPTCHA_TITLE_PATTERN =
+  /just a moment|attention required|verify you are human|are you a robot|robot check|unusual traffic|security check|please verify/i
+const CAPTCHA_NODE_PATTERN = /recaptcha|hcaptcha|verify you are human|i'?m not a robot|press & hold/i
+
+export function looksLikeCaptcha(page: {
+  url: string
+  title?: string
+  nodes?: Array<{ role: string; name: string }>
+}): boolean {
+  if (CAPTCHA_URL_PATTERN.test(page.url)) return true
+  if (page.title && CAPTCHA_TITLE_PATTERN.test(page.title)) return true
+  return (page.nodes ?? []).some((n) => CAPTCHA_NODE_PATTERN.test(n.name))
 }
 
 export function registrableSiteOf(url: string): string | null {
@@ -150,6 +181,8 @@ export type SandboxOrchestrator = {
     onNavigated(ctx: BrowserCallContext, url: string): Promise<void>
   }
   getActiveTask(sessionId: string): Promise<SandboxTaskRecord | null>
+  /** Workspace-wide discovery (§5): every live task, for the shell pill / list. */
+  listActiveTasks(workspaceId: string): Promise<SandboxTaskRecord[]>
   /** Pause during a Take-Over wait (RAM freed, cookies preserved — §4.8). */
   pauseForTakeover(sessionId: string): Promise<void>
   resumeAfterTakeover(sessionId: string): Promise<void>
@@ -310,6 +343,8 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
     binding: { resolve, onNavigated },
 
     getActiveTask: (sessionId) => deps.taskStore.getActiveBySession(sessionId),
+
+    listActiveTasks: (workspaceId) => deps.taskStore.listActiveByWorkspace(workspaceId),
 
     async pauseForTakeover(sessionId) {
       const task = await deps.taskStore.getActiveBySession(sessionId)

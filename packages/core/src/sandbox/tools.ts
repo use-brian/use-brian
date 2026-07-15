@@ -17,7 +17,7 @@ import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
-import { looksLikeLoginWall, registrableSiteOf } from './orchestrator.js'
+import { looksLikeCaptcha, looksLikeLoginWall, registrableSiteOf } from './orchestrator.js'
 import {
   describeProfileResolution,
   resolveProfileForCall,
@@ -65,9 +65,16 @@ export const SEND_LIKE_LABEL_PATTERN =
   /\b(send|submit|post|publish|share|buy|pay|purchase|order|confirm|delete|apply)\b/i
 
 // ── Fuse (P1.8) ────────────────────────────────────────────────
+//
+// EPISODE-scoped, not session-lifetime: the caps bound one continuous
+// stretch of browsing (a runaway model loop), and the counters reset after
+// an idle gap. Without the reset, a long-lived chat session (Telegram lives
+// for days) permanently bricks 15 minutes after its FIRST browser call —
+// the "stops mid-task and never browses again" incident shape.
 
 export const DEFAULT_FUSE_MAX_CALLS = 40
 export const DEFAULT_FUSE_MAX_WALL_MS = 15 * 60 * 1000
+const DEFAULT_FUSE_IDLE_RESET_MS = 5 * 60 * 1000
 
 // ── Options ────────────────────────────────────────────────────
 
@@ -118,7 +125,7 @@ export type CreateComputerToolsOptions = {
    * the live view resumes it when the user arrives).
    */
   onCloudLoginWall?: (context: ToolContext) => Promise<void>
-  fuse?: { maxCallsPerSession?: number; maxWallMsPerSession?: number }
+  fuse?: { maxCallsPerSession?: number; maxWallMsPerSession?: number; idleResetMs?: number }
   now?: () => number
 }
 
@@ -138,6 +145,10 @@ type SessionBrowseState = {
   lastTyped: string | null
   calls: number
   firstCallAt: number
+  /** Last gated browser call — the idle-gap clock for the episode reset. */
+  lastCallAt: number
+  /** Consecutive snapshots showing a human-verification challenge (§5). */
+  captchaHits: number
 }
 
 const MAX_TRACKED_SESSIONS = 500
@@ -172,6 +183,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   const cloudAvailable = opts.cloudAvailable ?? (() => false)
   const maxCalls = opts.fuse?.maxCallsPerSession ?? DEFAULT_FUSE_MAX_CALLS
   const maxWallMs = opts.fuse?.maxWallMsPerSession ?? DEFAULT_FUSE_MAX_WALL_MS
+  const idleResetMs = opts.fuse?.idleResetMs ?? DEFAULT_FUSE_IDLE_RESET_MS
 
   const sessions = new Map<string, SessionBrowseState>()
 
@@ -187,6 +199,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         lastTyped: null,
         calls: 0,
         firstCallAt: now(),
+        lastCallAt: now(),
+        captchaHits: 0,
       }
       sessions.set(context.sessionId, state)
       if (sessions.size > MAX_TRACKED_SESSIONS) {
@@ -248,17 +262,26 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     return null
   }
 
-  /** P1.8 safety fuse: hard per-session call + wall-clock caps. */
+  /**
+   * P1.8 safety fuse: hard call + wall-clock caps per EPISODE — one
+   * continuous stretch of browsing. An idle gap longer than `idleResetMs`
+   * starts a fresh episode, so a capped session recovers once the loop
+   * actually stops; without this, long-lived sessions brick permanently.
+   */
   function fuseGate(state: SessionBrowseState): ToolResult | null {
+    if (now() - state.lastCallAt > idleResetMs) {
+      state.calls = 0
+      state.firstCallAt = now()
+    }
     if (state.calls >= maxCalls) {
       return {
-        data: `ERROR: This session hit the browser-action safety cap (${maxCalls} calls). Summarize progress and ask the user before continuing.`,
+        data: `ERROR: This browsing stretch hit the safety cap (${maxCalls} browser actions). Summarize progress and what remains, and ask the user how to proceed — browsing unlocks after a few quiet minutes.`,
         isError: true,
       }
     }
     if (now() - state.firstCallAt > maxWallMs) {
       return {
-        data: `ERROR: This session's browser task hit the wall-clock safety cap (${Math.round(maxWallMs / 60000)} minutes). Summarize progress and ask the user before continuing.`,
+        data: `ERROR: This browsing stretch hit the wall-clock safety cap (${Math.round(maxWallMs / 60000)} minutes of continuous browser work). Summarize progress and what remains, and ask the user how to proceed — browsing unlocks after a few quiet minutes.`,
         isError: true,
       }
     }
@@ -329,6 +352,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     const fused = fuseGate(state)
     if (fused) return { error: fused }
     state.calls += 1
+    state.lastCallAt = now()
     return { state }
   }
 
@@ -357,12 +381,94 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     return `Page: ${snapshot.title || '(untitled)'}\nURL: ${snapshot.url}\n${lines.join('\n')}${truncated}`
   }
 
+  /**
+   * Captcha posture (§5): detect the challenge from the snapshot, allow ONE
+   * attempt at a simple verification (checkbox / press-and-hold), then hand
+   * the human the Take-Over live view instead of burning turns against a
+   * wall built to defeat exactly this. Consecutive sightings escalate; any
+   * captcha-free snapshot resets the count.
+   */
+  function captchaAdvice(context: ToolContext, state: SessionBrowseState, snapshot: BrowserSnapshot): string {
+    if (!looksLikeCaptcha(snapshot)) {
+      state.captchaHits = 0
+      return ''
+    }
+    state.captchaHits += 1
+    const link = state.backend === 'cloud' ? opts.takeoverLinkFor?.(context) : null
+    if (state.captchaHits === 1) {
+      return (
+        '\n\nNOTE: This page is showing a human-verification challenge (captcha). If a simple verification element is visible (an "I\'m not a robot" checkbox, a press-and-hold button), try it ONCE.' +
+        (link
+          ? ` If the challenge persists, do not keep retrying — send the user this live-browser link so they can solve it themselves, then wait for their go-ahead: ${link}`
+          : ' If the challenge persists, do not keep retrying — ask the user to complete it in the browser, then continue.')
+      )
+    }
+    // Second consecutive sighting: the attempt did not clear it. Pause the
+    // sandbox for the take-over wait (same economy as the login wall).
+    if (state.backend === 'cloud') {
+      void opts.onCloudLoginWall?.(context)?.catch(() => undefined)
+    }
+    return (
+      '\n\nSTOP: the human-verification challenge is still blocking after an attempt. Do not retry again' +
+      (link
+        ? ` — send the user this live-browser link to solve it and wait for their confirmation before continuing: ${link}`
+        : ' — ask the user to complete the verification in the browser, and wait for their confirmation before continuing.')
+    )
+  }
+
+  /**
+   * Advice for a freshly-taken snapshot: captcha first (§5 captcha posture),
+   * then LATE login walls — the navigate-time wall branch only sees the URL
+   * the navigation landed on, so a wall reached several clicks later
+   * (session expiry, a gated step in a flow) surfaces here instead. Same
+   * treatment: pause for the take-over wait + hand the user the live view.
+   * Matters most on channel surfaces (Telegram/Slack), which have no live
+   * chip and rely on the model relaying the link.
+   */
+  function pageAdvice(context: ToolContext, state: SessionBrowseState, snapshot: BrowserSnapshot): string {
+    const captcha = captchaAdvice(context, state, snapshot)
+    if (captcha) return captcha
+    if (state.backend === 'cloud' && looksLikeLoginWall(snapshot.url)) {
+      void opts.onCloudLoginWall?.(context)?.catch(() => undefined)
+      const link = opts.takeoverLinkFor?.(context)
+      return (
+        '\n\nNOTE: the page is now asking for a login.' +
+        (link
+          ? ` Ask the user to sign in through the live browser view: ${link} — after they sign in once, the session is saved and future tasks on this site will not ask again. Wait for them before retrying.`
+          : ' Ask the user to sign in via the live browser view, then retry.')
+      )
+    }
+    return ''
+  }
+
+  /**
+   * The round-trip saver: navigate/click take the follow-up snapshot INSIDE
+   * the same tool call — one model turn per browse step instead of two, and
+   * one fuse tick instead of two. Refreshes the send-gate's ref labels;
+   * failure degrades to the old "take browserSnapshot" instruction instead
+   * of failing the action that already succeeded.
+   */
+  async function inlineSnapshot(
+    context: ToolContext,
+    state: SessionBrowseState,
+    backend: BrowserBackendKind,
+  ): Promise<{ snapshot: BrowserSnapshot; rendered: string } | null> {
+    try {
+      const snapshot = await providerFor(backend).snapshot(callCtx(context, state))
+      state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
+      emit({ type: 'browser_action', op: 'snapshot', backend, host: hostOf(snapshot.url), ok: true }, context)
+      return { snapshot, rendered: renderSnapshot(snapshot) }
+    } catch {
+      return null
+    }
+  }
+
   // ── browserNavigate ──────────────────────────────────────────
 
   const browserNavigate = buildTool({
     name: 'browserNavigate',
     description:
-      'Open a URL in the controlled browser. Browsing runs as a browser profile (a saved login identity) when one is enabled for you — pass "profile" to pick one by name when several match. Always take browserSnapshot after navigating — refs from before a navigation are stale.',
+      'Open a URL in the controlled browser and get back the page\'s interactive elements as refs (@e1 button "Send") in the same call — no separate browserSnapshot needed after navigating. Public sites need NO browser profile; a profile (a saved login identity) is used automatically when one is enabled — pass "profile" to pick one by name when several match.',
     inputSchema: z.object({
       url: z.string().min(1).describe('Absolute http(s) URL to open'),
       profile: z
@@ -375,7 +481,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     isConcurrencySafe: false,
     requiresConfirmation: false,
     resolveConfirmation: policyAsk('browserNavigate'),
-    timeoutMs: 45_000,
+    timeoutMs: 90_000,
+    maxResultSizeChars: 24_000,
     async execute(input, context) {
       const gate = await gates('browserNavigate', context)
       if ('error' in gate) return gate.error
@@ -441,13 +548,21 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         // match, and "let me watch / take over" is a user ask the model must
         // be able to answer. Every cloud navigate carries the link.
         const liveLink = backend === 'cloud' ? opts.takeoverLinkFor?.(context) : null
+        const snap = await inlineSnapshot(context, gate.state, backend)
+        const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
         return {
           data:
-            `Opened ${res.url} (${backend} browser). Take browserSnapshot to see the page.` +
+            `Opened ${res.url} (${backend} browser).` +
             (liveLink
               ? ` The user can watch this browser live and take over (e.g. to sign in) at: ${liveLink} — share that link whenever they ask to watch, sign in, or take over.`
-              : ''),
-          meta: { backend, ...(liveLink ? { takeoverUrl: liveLink } : {}) },
+              : '') +
+            (snap ? `\n\n${snap.rendered}` : ' Take browserSnapshot to see the page.') +
+            advice,
+          meta: {
+            backend,
+            ...(liveLink ? { takeoverUrl: liveLink } : {}),
+            ...(snap ? { nodes: snap.snapshot.nodes.length } : {}),
+          },
         }
       } catch (err) {
         emit(
@@ -471,11 +586,15 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   const browserSnapshot = buildTool({
     name: 'browserSnapshot',
     description:
-      'List the interactive elements of the current browser page as refs (@e1 button "Send"). Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
+      'Re-list the interactive elements of the current browser page as refs (@e1 button "Send"). browserNavigate and browserClick already return a fresh snapshot — use this only when the page changed on its own (slow load, redirect, dynamic content). Refs are valid until the next navigation or snapshot — act on the latest snapshot only.',
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: false,
     requiresConfirmation: false,
+    // Polling by design: re-snapshotting a loading page is identical no-arg
+    // input every time — the loop detector's identical-input block would
+    // brick it at 5 with impossible "change the input" advice.
+    allowsRepeatCalls: true,
     resolveConfirmation: policyAsk('browserSnapshot'),
     timeoutMs: 45_000,
     maxResultSizeChars: 24_000,
@@ -487,7 +606,10 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
         const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state))
         gate.state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
         emit({ type: 'browser_action', op: 'snapshot', backend, host: hostOf(snapshot.url), ok: true }, context)
-        return { data: renderSnapshot(snapshot), meta: { backend, nodes: snapshot.nodes.length } }
+        return {
+          data: renderSnapshot(snapshot) + pageAdvice(context, gate.state, snapshot),
+          meta: { backend, nodes: snapshot.nodes.length },
+        }
       } catch (err) {
         emit(
           {
@@ -510,7 +632,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
   const browserClick = buildTool({
     name: 'browserClick',
     description:
-      'Click an element by its ref from the latest browserSnapshot. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
+      'Click an element by its ref from the latest snapshot, and get back a fresh snapshot of the page after the click. Set intent:"submit" when the click sends, posts, buys, deletes, or otherwise commits an outward action — such clicks require user approval before they run. Ordinary clicks (opening a thread, focusing a field) need no approval.',
     inputSchema: z.object({
       ref: z.string().min(1).describe('Element ref from the latest browserSnapshot, e.g. "@e12"'),
       intent: z
@@ -545,7 +667,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       lines.push('This looks like a send/submit action, so it runs only if you approve.')
       return lines
     },
-    timeoutMs: 45_000,
+    timeoutMs: 90_000,
+    maxResultSizeChars: 24_000,
     async execute(input, context) {
       const gate = await gates('browserClick', context)
       if ('error' in gate) return gate.error
@@ -553,9 +676,16 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         await providerFor(backend).click(callCtx(context, gate.state), input.ref)
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
+        const snap = await inlineSnapshot(context, gate.state, backend)
+        const advice = snap ? pageAdvice(context, gate.state, snap.snapshot) : ''
         return {
-          data: `Clicked ${input.ref}. The page may have changed — take browserSnapshot to see the result.`,
-          meta: { backend },
+          data:
+            `Clicked ${input.ref}.` +
+            (snap
+              ? ` Page after the click:\n\n${snap.rendered}`
+              : ' The page may have changed — take browserSnapshot to see the result.') +
+            advice,
+          meta: { backend, ...(snap ? { nodes: snap.snapshot.nodes.length } : {}) },
         }
       } catch (err) {
         emit(
@@ -624,6 +754,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     isReadOnly: true,
     isConcurrencySafe: false,
     requiresConfirmation: false,
+    allowsRepeatCalls: true,
     resolveConfirmation: policyAsk('browserCurrentUrl'),
     timeoutMs: 20_000,
     async execute(_input, context) {
@@ -755,7 +886,12 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           }
           const snapshot = await opts.cloud.snapshot(ctx)
           emit({ type: 'browser_action', op: 'readPage', backend: 'cloud', host: hostOf(snapshot.url), ok: true }, context)
-          return { data: renderReadPage(snapshot), meta: { backend: 'cloud', nodes: snapshot.nodes.length } }
+          // Same posture as the login wall: a headless worker cannot solve a
+          // challenge — the URL is the deliverable, never a retry loop.
+          const challenge = looksLikeCaptcha(snapshot)
+            ? '\n\nNOTE: this page is showing a human-verification challenge (captcha), which this reader cannot solve. Report the URL as the finding and move on — do not retry it.'
+            : ''
+          return { data: renderReadPage(snapshot) + challenge, meta: { backend: 'cloud', nodes: snapshot.nodes.length } }
         } catch (err) {
           emit(
             {
@@ -796,6 +932,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           lastTyped: null,
           calls: 0,
           firstCallAt: now(),
+          lastCallAt: now(),
+          captchaHits: 0,
         })
       }
     },

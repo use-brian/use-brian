@@ -13,6 +13,14 @@ export type {
   SkillFilePointerKind,
   SkillLifecycleState,
 } from './loader.js'
+export { parseImportedSkill, deriveWhenToUse, slugify } from './import-format.js'
+export type {
+  ImportDialect,
+  ImportWarning,
+  ImportWarningCode,
+  ImportedSkillDraft,
+  ParsedImport,
+} from './import-format.js'
 export { formatSkillListing } from './listing.js'
 export { createUseSkillTool } from './tool.js'
 export type { UseSkillToolParams } from './tool.js'

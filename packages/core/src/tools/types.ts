@@ -344,6 +344,17 @@ export type Tool<Input extends z.ZodType = z.ZodType> = {
    */
   allowPersistentApproval?: boolean
 
+  /**
+   * When true, repeated calls with IDENTICAL input are legitimate for this
+   * tool, and the loop detector's (name, input) nudge/block thresholds skip
+   * it — the per-turn hard limit and the failure fuses still apply. For
+   * polling / re-read tools whose input is empty by design (browserSnapshot,
+   * browserCurrentUrl): five identical no-arg calls is normal re-checking of
+   * a changing page, not a loop, and the block message's "change the input
+   * meaningfully" is impossible advice for a no-arg tool.
+   */
+  allowsRepeatCalls?: boolean
+
   // Optional
   abortSiblingsOnError?: boolean
   interruptBehavior?: 'cancel' | 'block'

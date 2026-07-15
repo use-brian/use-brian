@@ -46,6 +46,21 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
     expect(provider.sandboxes.size).toBe(2) // a different session = a different task
   })
 
+  it('lists a workspace\'s live tasks for discovery and drops completed ones (§5)', async () => {
+    const { orchestrator, browser } = build()
+    await browser.navigate(ctx('s1'), 'https://github.com/')
+    await browser.navigate(ctx('s2'), 'https://example.com/')
+
+    expect((await orchestrator.listActiveTasks('ws-1')).map((t) => t.sessionId).sort()).toEqual([
+      's1',
+      's2',
+    ])
+    expect(await orchestrator.listActiveTasks('ws-other')).toEqual([])
+
+    await orchestrator.completeTask('s1')
+    expect((await orchestrator.listActiveTasks('ws-1')).map((t) => t.sessionId)).toEqual(['s2'])
+  })
+
   it('binds the task to the browsing profile from the call context (R2-4)', async () => {
     const { orchestrator, browser } = build()
     await browser.navigate(ctx('s1', 'p9'), 'https://github.com/')

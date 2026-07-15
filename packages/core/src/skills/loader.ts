@@ -17,7 +17,10 @@ const BUILTIN_DIR = join(__dirname, 'builtin')
 
 // ── Frontmatter parser ────────────────────────────────────────
 
-const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
+// Exported for the import normalizer (import-format.ts), which needs to
+// split + read frontmatter for dialects that lack the name/description
+// fields parseSkillMarkdown requires.
+export const FRONTMATTER_RE = /^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/
 
 /**
  * Parse a skill markdown file into metadata + content.
@@ -75,7 +78,7 @@ export function parseSkillMarkdown(
 // Handles flat key-value pairs, simple arrays, and one level of nesting
 // (for metadata: blocks). Not a full YAML parser.
 
-function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
+export function parseYamlFrontmatter(yaml: string): Record<string, unknown> {
   const result: Record<string, unknown> = {}
   let currentKey = ''
   let currentArray: string[] | null = null

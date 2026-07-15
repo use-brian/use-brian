@@ -78,6 +78,7 @@ function makeStubApprovalsStore(approval: PendingApproval | null) {
     createQuestion: vi.fn(),
     createBrowserSkillSend: vi.fn(),
     createBrowserSkillAudit: vi.fn(),
+    createEmailSenderCard: vi.fn(),
     expireById: vi.fn(),
     recordAnswer: vi.fn(),
     listSkillApprovals: vi.fn(),

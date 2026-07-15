@@ -414,4 +414,12 @@ describe('[COMP:sandbox/skill-runner] Profile at call time (R2-10) + backends + 
     expect(String(profiles.data)).toContain('Personal IG')
     expect(String(profiles.data)).toContain('[usable]')
   })
+
+  it('an EMPTY profile list never reads as "browsing is blocked" (2026-07-15 refusal source)', async () => {
+    const { tools } = await build({ profiles: [] })
+    const profiles = await run(tools.listBrowserProfiles, {})
+    expect(profiles.isError ?? false).toBe(false)
+    expect(String(profiles.data)).toContain('does NOT block browsing')
+    expect(String(profiles.data)).toContain('browserNavigate')
+  })
 })

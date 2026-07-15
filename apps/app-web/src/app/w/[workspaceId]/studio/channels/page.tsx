@@ -89,6 +89,14 @@ import {
 } from "@/lib/api/channels";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
+  probeEmailInboxes,
+  createEmailInbox,
+  updateEmailInbox,
+  deleteEmailInbox,
+  type EmailInbox,
+  type EmailDomainSummary,
+} from "@/lib/api/email-inboxes";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -118,6 +126,7 @@ const PLACEHOLDER_SLACK_WEBHOOK_URL = `${DISPLAY_API_URL}/webhook/slack/REPLACE-
 const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   telegram: "✈",
   slack: "#",
+  email: "@",
 };
 
 // Official Discord mark, monochrome — `fill-current` inherits the chip's
@@ -223,6 +232,37 @@ export default function StudioChannelsPage() {
   // Master-detail selection — a rail row key (channel UUID or "official");
   // null / stale keys resolve to the first rail row.
   const [selected, setSelected] = useState<string | null>(null);
+  // Assistant email inboxes (agentmail.md). Null while probing; a 503 probe
+  // means no email provider is configured server-side — the email tab and
+  // inbox affordances then stay hidden (the dark contract).
+  const [emailInboxes, setEmailInboxes] = useState<EmailInbox[] | null>(null);
+  const [emailDomains, setEmailDomains] = useState<EmailDomainSummary[]>([]);
+  const [emailConfigured, setEmailConfigured] = useState(false);
+
+  const refreshEmailInboxes = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      const probe = await probeEmailInboxes(activeId);
+      if (probe.configured) {
+        setEmailConfigured(true);
+        setEmailInboxes(probe.inboxes);
+        setEmailDomains(probe.domains);
+      } else {
+        setEmailConfigured(false);
+        setEmailInboxes([]);
+        setEmailDomains([]);
+      }
+    } catch {
+      // Probe failure hides the surface — same posture as not configured.
+      setEmailConfigured(false);
+    }
+  }, [activeId]);
+
+  useEffect(() => {
+    setEmailInboxes(null);
+    setEmailConfigured(false);
+    void refreshEmailInboxes();
+  }, [refreshEmailInboxes]);
 
   useEffect(() => {
     if (!activeId) {
@@ -406,6 +446,9 @@ export default function StudioChannelsPage() {
           assistants={assistants}
           onCreated={onChannelCreated}
           onClose={() => setAddOpen(false)}
+          emailConfigured={emailConfigured}
+          emailDomains={emailDomains}
+          onEmailCreated={refreshEmailInboxes}
         />
       )}
 
@@ -466,6 +509,12 @@ export default function StudioChannelsPage() {
                 onUpdated={onChannelUpdated}
                 onRoutingChanged={() => refreshRouting(sel.channel.id)}
                 onDeleted={onChannelDeleted}
+                emailInbox={
+                  sel.channel.channelType === "email"
+                    ? (emailInboxes ?? []).find((i) => i.channelId === sel.channel.id) ?? null
+                    : null
+                }
+                onEmailChanged={refreshEmailInboxes}
               />
             )}
           </div>
@@ -489,6 +538,8 @@ function ChannelDetail({
   onUpdated,
   onRoutingChanged,
   onDeleted,
+  emailInbox = null,
+  onEmailChanged,
 }: {
   workspaceId: string;
   channel: Channel;
@@ -498,6 +549,8 @@ function ChannelDetail({
   onUpdated: (c: Channel) => void;
   onRoutingChanged: () => void;
   onDeleted: (channelId: string) => void;
+  emailInbox?: EmailInbox | null;
+  onEmailChanged?: () => void | Promise<void>;
 }) {
   const t = useT();
   const [saving, setSaving] = useState(false);
@@ -526,7 +579,13 @@ function ChannelDetail({
     setDeleting(true);
     setDeleteError(false);
     try {
-      await deleteChannel(workspaceId, channel.id);
+      if (channel.channelType === "email") {
+        // Email inboxes tear down through their own surface — it deletes the
+        // vendor inbox + connector instance before the channel row cascades.
+        await deleteEmailInbox({ workspaceId, channelId: channel.id });
+      } else {
+        await deleteChannel(workspaceId, channel.id);
+      }
       onDeleted(channel.id);
       // On success the panel unmounts via onDeleted — leave `deleting` true
       // so the button stays disabled during the brief unmount window.
@@ -728,6 +787,18 @@ function ChannelDetail({
           channels' config sections. */}
       {channel.channelType === "whatsapp" && (
         <WhatsappCardSection workspaceId={workspaceId} />
+      )}
+
+      {/* Assistant inbox — address + the sender allowlist (fail-closed gate:
+          only these senders, plus workspace members, converse with the
+          assistant; everyone else lands in the brain + an attention card). */}
+      {channel.channelType === "email" && (
+        <EmailInboxSection
+          workspaceId={workspaceId}
+          channel={channel}
+          inbox={emailInbox}
+          onChanged={onEmailChanged}
+        />
       )}
 
       <div className="flex flex-col gap-2 rounded-lg border border-border px-4 py-3">
@@ -1434,16 +1505,22 @@ function AddChannelForm({
   assistants,
   onCreated,
   onClose,
+  emailConfigured = false,
+  emailDomains = [],
+  onEmailCreated,
 }: {
   workspaceId: string;
   assistants: StudioAssistantSummary[];
   onCreated: (channel: Channel) => void | Promise<void>;
   onClose: () => void;
+  emailConfigured?: boolean;
+  emailDomains?: EmailDomainSummary[];
+  onEmailCreated?: () => void | Promise<void>;
 }) {
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "whatsapp"
+    "slack" | "telegram" | "discord" | "whatsapp" | "email"
   >("slack");
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
@@ -1471,6 +1548,7 @@ function AddChannelForm({
     | { kind: "slack"; webhookUrl: string }
     | { kind: "telegram"; botUsername: string }
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
+    | { kind: "email"; address: string }
   >(null);
   const [copied, setCopied] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
@@ -1479,6 +1557,12 @@ function AddChannelForm({
   const [signingSecret, setSigningSecret] = useState("");
   const [tgBotToken, setTgBotToken] = useState("");
   const [dcBotToken, setDcBotToken] = useState("");
+  const [emailUsername, setEmailUsername] = useState("");
+  const [emailDomainId, setEmailDomainId] = useState<string>("__default__");
+  const verifiedDomains = useMemo(
+    () => emailDomains.filter((d) => d.status === "verified"),
+    [emailDomains],
+  );
 
   // Slack app manifest customization (collapsed by default).
   const [manifestOpen, setManifestOpen] = useState(false);
@@ -1544,6 +1628,21 @@ function AddChannelForm({
         await onCreated(result.channel);
         setSuccess({ kind: "telegram", botUsername: result.botUsername });
         setTgBotToken("");
+      } else if (platform === "email") {
+        const result = await createEmailInbox({
+          workspaceId,
+          username: emailUsername.trim(),
+          domainId: emailDomainId === "__default__" ? null : emailDomainId,
+          assistantId: defaultAssistantId,
+        });
+        // The channel row lands with the POST — pull the list once so the
+        // rail + detail panel pick up the fresh inbox like other channels.
+        const chans = await listChannels(workspaceId);
+        const created = chans.find((c) => c.id === result.channelId);
+        if (created) await onCreated(created);
+        await onEmailCreated?.();
+        setSuccess({ kind: "email", address: result.address });
+        setEmailUsername("");
       } else {
         const result = await connectDiscordChannel(workspaceId, {
           botToken: dcBotToken,
@@ -1572,9 +1671,12 @@ function AddChannelForm({
       ? slackBotToken.startsWith("xoxb-") && signingSecret.length >= 16
       : platform === "telegram"
         ? tgBotToken.length > 0
-        : dcBotToken.length > 0);
+        : platform === "email"
+          ? /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(emailUsername.trim().toLowerCase()) &&
+            defaultAssistantId.length > 0
+          : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -1614,7 +1716,15 @@ function AddChannelForm({
       </div>
 
       <div className="flex gap-1 border-b border-border">
-        {(["slack", "telegram", "discord", "whatsapp"] as const).map((p) => (
+        {(
+          [
+            "slack",
+            "telegram",
+            "discord",
+            "whatsapp",
+            ...(emailConfigured ? ["email"] : []),
+          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email">
+        ).map((p) => (
           <button
             key={p}
             type="button"
@@ -1725,6 +1835,50 @@ function AddChannelForm({
             />
           </label>
         </div>
+      ) : platform === "email" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-xs text-muted-foreground">{add.emailHint}</p>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium">{add.emailUsernameLabel}</span>
+              <input
+                type="text"
+                value={emailUsername}
+                onChange={(e) => setEmailUsername(e.target.value)}
+                placeholder="ada"
+                disabled={submitting || !!success}
+                className={FIELD_INPUT}
+              />
+            </label>
+            <span className="pb-1.5 text-sm text-muted-foreground">@</span>
+            <label className="flex flex-col gap-1">
+              <span className="text-xs font-medium">{add.emailDomainLabel}</span>
+              <Select
+                value={emailDomainId}
+                onValueChange={(v) => {
+                  if (v) setEmailDomainId(v);
+                }}
+                items={{
+                  __default__: "agentmail.to",
+                  ...Object.fromEntries(verifiedDomains.map((d) => [d.id, d.domain])),
+                }}
+                disabled={submitting || !!success}
+              >
+                <SelectTrigger size="sm" className="text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">agentmail.to</SelectItem>
+                  {verifiedDomains.map((d) => (
+                    <SelectItem key={d.id} value={d.id}>
+                      {d.domain}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </label>
+          </div>
+        </div>
       ) : platform === "telegram" ? (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground">{add.telegramHint}</p>
@@ -1833,6 +1987,20 @@ function AddChannelForm({
               {add.done}
             </button>
           </div>
+        </div>
+      )}
+      {success?.kind === "email" && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex items-center justify-between gap-2">
+          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400 break-all">
+            {format(add.connectedEmail, { address: success.address })}
+          </p>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+          >
+            {add.done}
+          </button>
         </div>
       )}
       {success?.kind === "telegram" && (
@@ -2651,4 +2819,132 @@ function WhatsappCardSection({ workspaceId }: { workspaceId: string }) {
   }
 
   return <WhatsappRepliesSection workspaceId={workspaceId} />;
+}
+
+/**
+ * Assistant inbox management — the email channel's detail section: the
+ * address (copyable) and the sender allowlist. The gate is fail-closed:
+ * workspace members' emails always converse; these extra contacts join them;
+ * every other sender files into the brain and surfaces as an attention card
+ * with an "allowlist this sender" action (Approvals).
+ */
+function EmailInboxSection({
+  workspaceId,
+  channel,
+  inbox,
+  onChanged,
+}: {
+  workspaceId: string;
+  channel: Channel;
+  inbox: EmailInbox | null;
+  onChanged?: () => void | Promise<void>;
+}) {
+  const t = useT();
+  const em = t.studioPage.channels.email;
+  const address = inbox?.address ?? channel.displayName;
+  const allowlist = useMemo(() => inbox?.allowlist ?? [], [inbox]);
+  const [newContact, setNewContact] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  function copyAddress(): void {
+    void navigator.clipboard.writeText(address).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  async function saveAllowlist(next: string[]): Promise<void> {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateEmailInbox({ workspaceId, channelId: channel.id, allowlist: next });
+      await onChanged?.();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function addContact(): Promise<void> {
+    const entry = newContact.trim().toLowerCase();
+    if (!entry) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(entry)) {
+      setError(em.invalidAddress);
+      return;
+    }
+    setNewContact("");
+    await saveAllowlist([...new Set([...allowlist, entry])]);
+  }
+
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border px-4 py-3">
+      <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+        {em.title}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="text-sm bg-muted px-2 py-1 rounded font-mono break-all">
+          {address}
+        </code>
+        <button
+          type="button"
+          onClick={copyAddress}
+          className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+        >
+          {copied ? em.copied : em.copyAddress}
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium">{em.allowlistLabel}</span>
+        <p className="text-xs text-muted-foreground">{em.allowlistHint}</p>
+        {allowlist.length > 0 && (
+          <ul className="flex flex-wrap gap-1.5">
+            {allowlist.map((entry) => (
+              <li
+                key={entry}
+                className="flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs"
+              >
+                <span className="font-mono">{entry}</span>
+                <button
+                  type="button"
+                  aria-label={em.removeContact}
+                  disabled={saving}
+                  onClick={() => void saveAllowlist(allowlist.filter((a) => a !== entry))}
+                  className="text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={newContact}
+            onChange={(e) => setNewContact(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void addContact();
+            }}
+            placeholder="partner@example.com"
+            disabled={saving}
+            className="text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono disabled:opacity-50 min-w-[220px]"
+          />
+          <button
+            type="button"
+            onClick={() => void addContact()}
+            disabled={saving || newContact.trim().length === 0}
+            className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
+          >
+            {saving ? em.saving : em.addContact}
+          </button>
+        </div>
+        {error && <span className="text-xs text-destructive">{error}</span>}
+      </div>
+    </div>
+  );
 }

@@ -26,7 +26,7 @@ export type DefaultRuleTemplate = {
 // support and must not appear here. (Gmail stays a send/read connector but is
 // not an ingestion source — its poll producer + adapter were removed.) Do not
 // derive from OFFICIAL_CONNECTORS.
-export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
+export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp', 'email'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
 export type IngestSourceProvider = typeof INGEST_SOURCE_PROVIDERS[number]
 
 export const DEFAULT_INGEST_RULES: Readonly<
@@ -131,6 +131,24 @@ export const DEFAULT_INGEST_RULES: Readonly<
   // until then the engine returns `matched=false` → drop. See
   // adapters/whatsapp/default-rules.ts and the BYO-number plan §"The gate".
   whatsapp: [],
+  // Assistant inboxes (agentmail.md): mail from allowlisted senders (the
+  // conversational path) files realtime; everything else — strangers,
+  // newsletters/noreply, at-cap and rate-capped overflow — lands in a daily
+  // digest for Pipeline B to sift. `gate_match` reads the webhook route's
+  // sender-gate verdict off the event.
+  email: [
+    {
+      filter_type: 'gate_match',
+      filter_params: { values: ['allowlisted'] },
+      routing_mode: 'realtime',
+    },
+    {
+      filter_type: 'always',
+      filter_params: {},
+      routing_mode: 'scheduled',
+      routing_schedule: '0 9 * * 1-5',
+    },
+  ],
 }
 
 export function getDefaultRules(

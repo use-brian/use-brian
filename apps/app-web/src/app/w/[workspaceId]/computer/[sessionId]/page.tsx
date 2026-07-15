@@ -23,6 +23,7 @@ import { use as usePromise, useCallback, useEffect, useRef, useState } from "rea
 import { useRouter } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { LOCAL_ONLY_KEYS, mapClickToFrame } from "@/lib/computer-takeover";
 import {
   SearchableSelect,
   type SearchableSelectItem,
@@ -39,6 +40,7 @@ import {
 } from "@/lib/api/computer";
 
 const FRAME_INTERVAL_MS = 1_200;
+const WHEEL_FLUSH_MS = 160;
 
 export default function ComputerTakeoverPage(props: {
   params: Promise<{ workspaceId: string; sessionId: string }>;
@@ -115,10 +117,9 @@ export default function ComputerTakeoverPage(props: {
       const img = imgRef.current;
       const natural = naturalSize.current;
       if (!img || !natural) return;
-      const rect = img.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * natural.w;
-      const y = ((e.clientY - rect.top) / rect.height) * natural.h;
-      void sendComputerInput(sessionId, { kind: "click", x, y });
+      const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
+      if (!point) return; // letterbox bar — nothing under it in the frame
+      void sendComputerInput(sessionId, { kind: "click", x: point.x, y: point.y });
     },
     [sessionId],
   );
@@ -128,10 +129,34 @@ export default function ComputerTakeoverPage(props: {
       if (e.metaKey || e.ctrlKey) return; // browser shortcuts stay local
       e.preventDefault();
       const text = e.key;
-      if (!text) return;
+      if (!text || LOCAL_ONLY_KEYS.has(text)) return;
       void sendComputerInput(sessionId, { kind: "key", text });
     },
     [sessionId],
+  );
+
+  // Wheel forwarding, accumulated: one relayed scroll per flush window keeps
+  // a fling from turning into dozens of round-trips.
+  const wheelDelta = useRef(0);
+  const wheelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const forwardWheel = useCallback(
+    (e: React.WheelEvent<HTMLDivElement>) => {
+      wheelDelta.current += e.deltaY;
+      if (wheelTimer.current) return;
+      wheelTimer.current = setTimeout(() => {
+        const deltaY = Math.round(wheelDelta.current);
+        wheelDelta.current = 0;
+        wheelTimer.current = null;
+        if (deltaY !== 0) void sendComputerInput(sessionId, { kind: "scroll", deltaY });
+      }, WHEEL_FLUSH_MS);
+    },
+    [sessionId],
+  );
+  useEffect(
+    () => () => {
+      if (wheelTimer.current) clearTimeout(wheelTimer.current);
+    },
+    [],
   );
 
   // An identity-less task needs a profile to save into (409 profile_required)
@@ -219,6 +244,7 @@ export default function ComputerTakeoverPage(props: {
         aria-label={t.computer.liveViewTitle}
         tabIndex={0}
         onKeyDown={forwardKey}
+        onWheel={forwardWheel}
         className="relative flex-1 overflow-hidden rounded-lg border border-border bg-muted/30 outline-none focus:ring-2 focus:ring-ring"
       >
         {frameSrc ? (

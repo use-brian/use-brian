@@ -91,7 +91,8 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     })
 
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' })
-    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/'])
+    // Navigate carries its own follow-up snapshot (one model turn per step).
+    expect(local.calls).toEqual(['navigate:https://www.linkedin.com/messaging/', 'snapshot'])
     expect(cloud.calls).toEqual([])
   })
 
@@ -100,8 +101,18 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const cloud = fakeProvider('cloud')
     const tools = createComputerTools({ local, cloud, cloudAvailable: () => true })
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/'])
+    expect(cloud.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
     expect(local.calls).toEqual([])
+  })
+
+  it('navigate returns the page elements inline and caches labels for the send gate', async () => {
+    const tools = createComputerTools({ local: fakeProvider('local'), cloud: fakeProvider('cloud') })
+    const ctx = toolContext()
+    const res = await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' }, ctx)
+    expect(String(res.data)).toContain('@e2 button "Send"')
+    // The inline snapshot fed the send gate: a send-like label needs approval.
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e2' })).toBe(true)
+    expect(await tools.browserClick.resolveConfirmation!(ctx, { ref: '@e3' })).toBe(false)
   })
 
   it('the live toggle wins over the profile default for the session (R2-3)', async () => {
@@ -115,7 +126,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     })
     tools.setSessionBackendOverride('sess-1', 'local')
     await run(tools.browserNavigate, { url: 'https://news.ycombinator.com/' })
-    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/'])
+    expect(local.calls).toEqual(['navigate:https://news.ycombinator.com/', 'snapshot'])
     expect(cloud.calls).toEqual([])
     expect(tools.getSessionBackend('sess-1')).toBe('local')
   })
@@ -141,7 +152,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
 
     const named = await run(tools.browserNavigate, { url: 'https://www.instagram.com/', profile: 'Personal IG' })
     expect(named.isError ?? false).toBe(false)
-    expect(local.calls).toEqual(['navigate:https://www.instagram.com/'])
+    expect(local.calls).toEqual(['navigate:https://www.instagram.com/', 'snapshot'])
   })
 
   it('keeps follow-up ops on the backend the last navigation picked', async () => {
@@ -158,6 +169,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     await run(tools.browserType, { ref: '@e1', text: 'hello' })
     expect(local.calls).toEqual([
       'navigate:https://www.linkedin.com/messaging/',
+      'snapshot', // navigate's inline snapshot
       'snapshot',
       'type:@e1:hello',
     ])
@@ -188,9 +200,9 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     await run(tools.browserSnapshot, {})
     await run(tools.browserType, { ref: '@e1', text: 'hi there' })
     await run(tools.browserCurrentUrl, {})
-    expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'type', 'currentUrl'])
+    expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'snapshot', 'type', 'currentUrl'])
     expect(sent[0]).toMatchObject({ userId: 'user-1', args: { url: 'https://www.linkedin.com/messaging/' } })
-    expect(sent[2]).toMatchObject({ args: { ref: '@e1', text: 'hi there' } })
+    expect(sent[3]).toMatchObject({ args: { ref: '@e1', text: 'hi there' } })
   })
 
   it('surfaces the clear no-extension error through the tool result (P1.4)', async () => {
@@ -357,6 +369,128 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       expect(res.isError).toBe(true)
       expect(String(res.data)).toContain('wall-clock')
     })
+
+    it('the fuse is EPISODE-scoped: an idle gap resets both caps instead of bricking the session forever', async () => {
+      let t = 1_000_000
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud: fakeProvider('cloud'),
+        fuse: { maxCallsPerSession: 2, maxWallMsPerSession: 60_000, idleResetMs: 120_000 },
+        now: () => t,
+      })
+      const ctx = toolContext()
+      await run(tools.browserSnapshot, {}, ctx)
+      await run(tools.browserCurrentUrl, {}, ctx)
+      // Call cap hit — the stretch is fused.
+      const fused = await run(tools.browserSnapshot, {}, ctx)
+      expect(fused.isError).toBe(true)
+      // The user walks away; a later stretch browses again.
+      t += 121_000
+      const revived = await run(tools.browserSnapshot, {}, ctx)
+      expect(revived.isError ?? false).toBe(false)
+      // And the wall clock restarted with the new episode, not the old one.
+      t += 59_000
+      const withinWall = await run(tools.browserCurrentUrl, {}, ctx)
+      expect(withinWall.isError ?? false).toBe(false)
+    })
+  })
+
+  describe('captcha posture (§5): one attempt, then hand the human the live view', () => {
+    function captchaProvider(kind: 'local' | 'cloud'): BrowserProvider & { calls: string[] } {
+      const provider = fakeProvider(kind)
+      provider.snapshot = async () => {
+        provider.calls.push('snapshot')
+        return {
+          url: 'https://www.google.com/sorry/index',
+          title: 'Unusual traffic',
+          nodes: [{ ref: '@e1', role: 'checkbox', name: "I'm not a robot" }],
+        }
+      }
+      return provider
+    }
+
+    it('first sighting: advises ONE attempt and carries the take-over link', async () => {
+      const cloud = captchaProvider('cloud')
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+      })
+      const res = await run(tools.browserNavigate, { url: 'https://www.google.com/search?q=x' })
+      expect(String(res.data)).toContain('human-verification challenge')
+      expect(String(res.data)).toContain('ONCE')
+      expect(String(res.data)).toContain('https://app.test/w/ws-1/computer/sess-1')
+    })
+
+    it('second consecutive sighting: STOP + hand off, and the sandbox pauses for the take-over wait', async () => {
+      let paused = 0
+      const cloud = captchaProvider('cloud')
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+        onCloudLoginWall: async () => {
+          paused += 1
+        },
+      })
+      const ctx = toolContext()
+      await run(tools.browserNavigate, { url: 'https://www.google.com/search?q=x' }, ctx)
+      const second = await run(tools.browserSnapshot, {}, ctx)
+      expect(String(second.data)).toContain('STOP')
+      expect(String(second.data)).toContain('https://app.test/w/ws-1/computer/sess-1')
+      expect(paused).toBe(1)
+    })
+
+    it('a LATE login wall (several clicks after navigate) carries the take-over link and pauses', async () => {
+      let paused = 0
+      const cloud = fakeProvider('cloud')
+      cloud.snapshot = async () => {
+        cloud.calls.push('snapshot')
+        return {
+          url: 'https://www.linkedin.com/login?redirect=x',
+          title: 'Sign in',
+          nodes: [{ ref: '@e1', role: 'textbox', name: 'Email' }],
+        }
+      }
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+        onCloudLoginWall: async () => {
+          paused += 1
+        },
+      })
+      const ctx = toolContext()
+      const res = await run(tools.browserSnapshot, {}, ctx)
+      expect(String(res.data)).toContain('asking for a login')
+      expect(String(res.data)).toContain('https://app.test/w/ws-1/computer/sess-1')
+      expect(paused).toBe(1)
+    })
+
+    it('a captcha-free snapshot resets the counter', async () => {
+      const cloud = captchaProvider('cloud')
+      const clean = fakeProvider('cloud')
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/live',
+      })
+      const ctx = toolContext()
+      await run(tools.browserNavigate, { url: 'https://www.google.com/search?q=x' }, ctx)
+      // The challenge clears (user solved it / page moved on).
+      cloud.snapshot = clean.snapshot
+      const ok = await run(tools.browserSnapshot, {}, ctx)
+      expect(String(ok.data)).not.toContain('human-verification')
+      // A later challenge starts at "try once" again, not at "STOP".
+      cloud.snapshot = captchaProvider('cloud').snapshot
+      const again = await run(tools.browserSnapshot, {}, ctx)
+      expect(String(again.data)).toContain('ONCE')
+      expect(String(again.data)).not.toContain('STOP')
+    })
   })
 
   describe('L1/L2 policy hook', () => {
@@ -400,7 +534,8 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     await run(tools.browserNavigate, { url: 'https://www.linkedin.com/messaging/' }, ctx)
     await run(tools.browserSnapshot, {}, ctx)
     await run(tools.browserType, { ref: '@e1', text: 'SECRET DRAFT' }, ctx)
-    expect(events).toHaveLength(3)
+    // Navigate's inline snapshot audits too — auto never means invisible.
+    expect(events.map((e) => e.op)).toEqual(['navigate', 'snapshot', 'snapshot', 'type'])
     expect(events[0]).toMatchObject({ op: 'navigate', backend: 'local', host: 'www.linkedin.com', ok: true })
     // No event ever carries typed text or page content.
     expect(JSON.stringify(events)).not.toContain('SECRET DRAFT')

@@ -42,6 +42,7 @@ export type ApprovalKind =
   | 'staged_skill_update'
   | 'question'
   | 'browser_skill_send'
+  | 'email_sender'
 
 /**
  * Note on nullability of `workflowRunId`, `workflowStepRunId`, `toolName`,
@@ -139,6 +140,29 @@ export type CreateBrowserSkillAuditParams = {
   sessionId?: string | null
   grantId: string
   payload: Record<string, unknown>
+}
+
+/**
+ * Email channel (agentmail.md, D4) — the stranger-sender needs-you card.
+ * `payload.channelIntegrationId` is what the approve action mutates (the
+ * sender joins that integration's `config.allowedUserIds`).
+ */
+export type CreateEmailSenderCardParams = {
+  workspaceId: string
+  approverUserId: string
+  originatingAssistantId: string | null
+  payload: {
+    /** The assistant inbox the stranger wrote to. */
+    inboxAddress: string
+    /** channel_integrations.id — the allowlist the approve action edits. */
+    channelIntegrationId: string
+    /** Lowercased sender address. */
+    sender: string
+    senderName: string | null
+    subject: string | null
+    /** Short body preview (truncated route-side). */
+    preview: string | null
+  }
 }
 
 const COLS = `
@@ -346,6 +370,16 @@ export type PendingApprovalsStore = {
    * never invisible.
    */
   createBrowserSkillAudit(params: CreateBrowserSkillAuditParams): Promise<PendingApproval>
+
+  /**
+   * Email channel (agentmail.md, D4) — the "stranger mailed the assistant"
+   * needs-you card (`kind='email_sender'`). Created by the webhook route when
+   * a non-allowlisted sender's mail arrives (the mail itself files through
+   * ingest; the card carries the "allowlist this sender" action). Deduped:
+   * an existing pending card for the same inbox + sender is returned instead
+   * of inserting a duplicate. System-level write (webhook is pre-auth).
+   */
+  createEmailSenderCard(params: CreateEmailSenderCardParams): Promise<PendingApproval>
 
   /**
    * Expire ONE pending row (the block runner's send-wait deadline). The
@@ -673,6 +707,45 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
             originLabel: params.originLabel ?? null,
             originatingAssistantId: params.originatingAssistantId,
           }),
+          params.originatingAssistantId ?? null,
+        ],
+      )
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
+    },
+
+    async createEmailSenderCard(params) {
+      // Dedupe: one pending card per (workspace, inbox, sender). Repeat mail
+      // from the same stranger returns the existing card instead of stacking.
+      const existing = await query(
+        `SELECT ${COLS} FROM pending_approvals
+         WHERE workspace_id = $1
+           AND kind = 'email_sender'
+           AND status = 'pending'
+           AND approval_payload->>'sender' = $2
+           AND approval_payload->>'inboxAddress' = $3
+         LIMIT 1`,
+        [params.workspaceId, params.payload.sender, params.payload.inboxAddress],
+      )
+      if (existing.rows[0]) {
+        return rowToApproval(existing.rows[0] as Record<string, unknown>)
+      }
+      const result = await query(
+        `INSERT INTO pending_approvals (
+           workspace_id, kind, approver_user_id, tool_name, arguments,
+           approval_payload, delivery_channel_type, delivery_channel_id,
+           originating_assistant_id, workflow_run_id, workflow_step_run_id,
+           blocking_session_id, expires_at
+         )
+         VALUES ($1, 'email_sender', $2, 'emailSenderReview', $3, $4,
+                 'web', NULL, $5, NULL, NULL, NULL, NULL)
+         RETURNING ${COLS}`,
+        [
+          params.workspaceId,
+          params.approverUserId,
+          JSON.stringify({ sender: params.payload.sender }),
+          JSON.stringify({ kind: 'email_sender', ...params.payload }),
           params.originatingAssistantId ?? null,
         ],
       )

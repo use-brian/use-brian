@@ -21,6 +21,22 @@ describe('[COMP:engine/loop-detector] createLoopDetector', () => {
     expect(det.check('weather', { city: 'Tokyo' })).toBe('block')
   })
 
+  it('repeat-tolerant tools skip the identical-input thresholds (polling reads)', () => {
+    const det = createLoopDetector()
+    // 8 identical no-arg calls — a no-arg polling tool cannot "change the
+    // input meaningfully", so nudge/block must not fire for it.
+    for (let i = 0; i < 8; i++) {
+      expect(det.check('browserSnapshot', {}, { repeatTolerant: true })).toBe('allow')
+    }
+    expect(det.peek('browserSnapshot', {}, { repeatTolerant: true })).toBe('allow')
+  })
+
+  it('repeat-tolerant calls still count toward the absolute hard limit', () => {
+    const det = createLoopDetector({ hardLimit: 5 })
+    for (let i = 0; i < 4; i++) det.check('browserSnapshot', {}, { repeatTolerant: true })
+    expect(det.check('browserSnapshot', {}, { repeatTolerant: true })).toBe('hard_stop')
+  })
+
   it('does not escalate when inputs differ', () => {
     const det = createLoopDetector()
     // Same tool, different input = different key

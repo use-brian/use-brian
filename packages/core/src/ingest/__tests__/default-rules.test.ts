@@ -14,6 +14,7 @@ const SOURCES: readonly IngestSourceProvider[] = [
   'github',
   'calendar',
   'fathom',
+  'email',
 ]
 
 const UNIVERSAL_FILTERS = [
@@ -31,6 +32,7 @@ const SOURCE_SPECIFIC_FILTERS: Record<IngestSourceProvider, readonly string[]> =
   calendar: ['attendee_match', 'organizer_match', 'subject_contains', 'is_recurring'],
   fathom: ['meeting_subject_contains', 'attendee_match'],
   whatsapp: ['group_match', 'sender_match', 'is_dm'],
+  email: ['gate_match', 'subject_match', 'domain_match'],
 }
 
 const VALID_TEMPLATE_KEYS = [
@@ -153,6 +155,26 @@ describe('[COMP:brain/default-rules] Default ingest rule templates', () => {
       // a group, which appends a `group_match` rule. See
       // docs/architecture/channels/whatsapp.md §"The gate".
       expect(DEFAULT_INGEST_RULES.whatsapp).toEqual([])
+    })
+
+    it('Email (assistant inboxes)', () => {
+      // Allowlisted senders (the conversational path) file realtime;
+      // everything else — strangers, noreply, at-cap / rate-capped overflow
+      // — lands in the daily digest. `gate_match` reads the webhook route's
+      // sender-gate verdict. See docs/architecture/integrations/agentmail.md.
+      expect(DEFAULT_INGEST_RULES.email).toEqual([
+        {
+          filter_type: 'gate_match',
+          filter_params: { values: ['allowlisted'] },
+          routing_mode: 'realtime',
+        },
+        {
+          filter_type: 'always',
+          filter_params: {},
+          routing_mode: 'scheduled',
+          routing_schedule: '0 9 * * 1-5',
+        },
+      ])
     })
   })
 

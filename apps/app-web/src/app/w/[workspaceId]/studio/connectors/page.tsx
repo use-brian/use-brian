@@ -6,11 +6,12 @@
  * Ported from `apps/web/src/app/(app)/studio/connectors/page.tsx`
  * (app consolidation §9 #5), redesigned 2026-06-11 from a one-at-a-time
  * accordion into a master-detail: a rail grouping every connector by sharing
- * state (Shared with workspace / Personal / Available; the first two merge
- * into "Connected" in a solo workspace — `lib/connector-groups.ts`; plus an
- * always-on Built-in group for first-party workspace primitives like
- * Workspace Files, which carry no connect/disconnect state), with the
- * selected connector's management panel beside it. Every connector is
+ * state (in display order: Shared with workspace / Available in this
+ * workspace / Personal / Available — workspace-active groups first,
+ * `lib/connector-groups.ts`; plus an always-on Built-in group for
+ * first-party workspace primitives like Workspace Files, which carry no
+ * connect/disconnect state), with the selected connector's management panel
+ * beside it. Every connector is
  * personal; connecting one auto-exposes it to the active workspace (solo
  * included — exposure is what surfaces it on workspace config pickers), and
  * the detail panel's "Workspace access" card states the sharing status
@@ -1579,10 +1580,13 @@ function ConnectorsList() {
     exposedGrants,
     builtinIds: BUILTIN_PRIMITIVE_CONNECTOR_IDS,
   });
+  // Workspace-active groups render first (exposed + workspace-shared rows are
+  // what the workspace's assistants actually run on); Personal — connected to
+  // the member but not enabled in this workspace — sits below them.
   const railGroups = [
     { id: "shared", label: tc.groupShared, rows: grouped.shared },
-    { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
     { id: "workspace", label: tc.groupWorkspaceShared, rows: grouped.workspace },
+    { id: "personal", label: tc.groupPersonal, rows: grouped.personal },
     { id: "available", label: tc.groupAvailable, rows: grouped.available },
     { id: "builtin", label: tc.groupBuiltin, rows: grouped.builtin },
   ].filter((g) => g.rows.length > 0);

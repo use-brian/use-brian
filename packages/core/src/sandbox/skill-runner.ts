@@ -604,7 +604,7 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
   const listBrowserProfiles = buildTool({
     name: 'listBrowserProfiles',
     description:
-      'List this workspace\'s browser profiles (saved browsing identities) and which of them you can browse as. Pass a profile name to browserNavigate or runBrowserSkill when several match.',
+      'List this workspace\'s browser profiles (saved LOGIN identities for signed-in browsing) and which of them you can browse as. Pass a profile name to browserNavigate or runBrowserSkill when several match. Browsing public sites needs no profile at all — do not call this before an ordinary browse.',
     inputSchema: z.object({}),
     isReadOnly: true,
     isConcurrencySafe: true,
@@ -623,8 +623,11 @@ export function createSkillRunnerTools(opts: CreateSkillRunnerToolsOptions): {
       const clearance = await opts.profiles.assistantClearance(context)
       const profiles = await opts.profiles.store.list({ workspaceId: context.workspaceId })
       if (profiles.length === 0) {
+        // The 2026-07-15 refusal echoed this line verbatim — it must never
+        // read as "browsing is unavailable". Profiles only add saved logins.
         return {
-          data: 'No browser profiles exist in this workspace. Ask the user to create one under Settings > Browser profiles.',
+          data:
+            'No browser profiles exist in this workspace. That does NOT block browsing: public sites work without one (browserNavigate / browserExplore run identity-less) — proceed with the browse. A profile is only needed for signed-in tasks or running a saved browser skill; the user can create one under Settings > Browser profiles.',
         }
       }
       const lines: string[] = []

@@ -60,6 +60,7 @@ import {
   getSkillTemplate,
   listSkillCatalog,
   type SkillCatalogEntry,
+  type SkillImportSupportFile,
   type SkillDraft,
   type SkillSensitivity,
   type WorkspaceSkillSummary,
@@ -86,6 +87,21 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+/** A parsed import handed in by the Import dialog: the creator opens straight
+ *  in the doc stage pre-filled with the draft (the `pickTemplate` seam), and
+ *  Save carries the support files + provenance through `createSkill`. Spec:
+ *  skill-system.md → "Importing skills (GitHub / URL)" → "UI". */
+export type SkillImportPrefill = {
+  draft: {
+    name: string;
+    description: string;
+    whenToUse?: string;
+    content: string;
+  };
+  supportFiles: SkillImportSupportFile[];
+  importSource: Record<string, unknown>;
+};
+
 type Props = {
   workspaceId: string;
   /** Leave the creator without saving (back to the `<md` flat list). Omitted
@@ -93,17 +109,19 @@ type Props = {
   onBack?: () => void;
   /** Fired with the created projection; the parent routes to the editor. */
   onCreated: (skill: WorkspaceSkillSummary) => void;
+  /** Open pre-filled with an imported draft, straight in the doc stage. */
+  initialImport?: SkillImportPrefill;
 };
 
 type Stage = "intent" | "doc";
 
-export function SkillCreator({ workspaceId, onBack, onCreated }: Props) {
+export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: Props) {
   const t = useT();
   const skillsCopy = t.brainPage.skills;
   const copy = t.brainPage.skillCreator;
   const chatCopy = t.brainPage.skillChat;
 
-  const [stage, setStage] = useState<Stage>("intent");
+  const [stage, setStage] = useState<Stage>(initialImport ? "doc" : "intent");
 
   // Intent-stage inputs. `templateSlug` keeps travelling with every chat
   // turn (the endpoint is stateless), so it lives here, not in the chat.
@@ -118,11 +136,12 @@ export function SkillCreator({ workspaceId, onBack, onCreated }: Props) {
   const { isDragging, dropProps } = useFileDrop(intentAttachments.upload);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // The document (the doc stage's live draft).
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [whenToUse, setWhenToUse] = useState("");
-  const [content, setContent] = useState("");
+  // The document (the doc stage's live draft). An imported draft seeds it
+  // directly (the same fields pickTemplate sets), entering on the doc stage.
+  const [name, setName] = useState(initialImport?.draft.name ?? "");
+  const [description, setDescription] = useState(initialImport?.draft.description ?? "");
+  const [whenToUse, setWhenToUse] = useState(initialImport?.draft.whenToUse ?? "");
+  const [content, setContent] = useState(initialImport?.draft.content ?? "");
   const [sensitivity, setSensitivity] = useState<SkillSensitivity>("internal");
   /** The first chat turn the doc stage auto-sends (the intent path)... */
   const [firstMessage, setFirstMessage] = useState<string | null>(null);
@@ -266,6 +285,12 @@ export function SkillCreator({ workspaceId, onBack, onCreated }: Props) {
       workspaceId,
       sensitivity,
       enabledAssistantIds: "all",
+      // Imported drafts carry their folder support files + provenance through
+      // the save; hand-authored drafts send neither.
+      supportFiles: initialImport?.supportFiles.length
+        ? initialImport.supportFiles
+        : undefined,
+      importSource: initialImport?.importSource,
     });
     setSaving(false);
     if (!result.ok) {

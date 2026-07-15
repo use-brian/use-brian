@@ -64,6 +64,40 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     app = makeApp('user-1')
   })
 
+  it('lists the CALLER\'s live tasks for the workspace pill; teammates see an empty list', async () => {
+    const mine = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(mine.status).toBe(200)
+    expect(mine.body.tasks).toHaveLength(1)
+    expect(mine.body.tasks[0]).toMatchObject({ sessionId: 'sess-1', status: 'running' })
+
+    // A member who does not own the task cannot open its live view, so the
+    // list must not advertise it to them.
+    const teammate = makeApp('user-2')
+    const theirs = await request(teammate).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(theirs.status).toBe(200)
+    expect(theirs.body.tasks).toEqual([])
+
+    const missing = await request(app).get('/api/computer/tasks')
+    expect(missing.status).toBe(400)
+  })
+
+  it('hides the workspace task list from non-members', async () => {
+    const outsider = createTestApp(
+      '/api/computer',
+      computerRoutes({
+        orchestrator,
+        provider,
+        vault,
+        profileStore,
+        getWorkspaceRole: async () => null,
+        setSessionBackend: () => {},
+      }),
+      { userId: 'user-1' },
+    )
+    const res = await request(outsider).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(res.status).toBe(404)
+  })
+
   it('returns the active task (with its profile) for its owner and 404 for a session with none', async () => {
     const ok = await request(app).get('/api/computer/tasks/sess-1')
     expect(ok.status).toBe(200)

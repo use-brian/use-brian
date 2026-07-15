@@ -4,6 +4,7 @@
  * Wraps `authFetch` over the routes mounted at `/api/computer` in
  * `packages/api/src/boot.ts`:
  *
+ *   GET    /api/computer/tasks?workspaceId=            caller's live tasks (shell pill)
  *   GET    /api/computer/tasks/:sessionId              active task summary
  *   POST   /api/computer/tasks/:sessionId/resume       resume for Take-Over
  *   GET    /api/computer/tasks/:sessionId/frame        one screencast frame
@@ -74,6 +75,32 @@ export type BrowserProfile = {
   /** Standing block grants on this identity (R2-2) - revocable here. */
   grants: BrowserSkillGrantSummary[];
 };
+
+export type ComputerTaskSummary = {
+  taskId: string;
+  sessionId: string;
+  status: "running" | "paused";
+  profileId: string | null;
+  injectedSite: string | null;
+  createdAt: number;
+  lastActivityAt: number;
+};
+
+/**
+ * The caller's live browser tasks in a workspace — the discovery surface the
+ * shell pill polls. Empty array on any failure: discovery chrome must never
+ * take a surface down.
+ */
+export async function listActiveComputerTasks(
+  workspaceId: string,
+): Promise<ComputerTaskSummary[]> {
+  const res = await authFetch(
+    `${API_URL}/api/computer/tasks?workspaceId=${encodeURIComponent(workspaceId)}`,
+  ).catch(() => null);
+  if (!res?.ok) return [];
+  const body = (await res.json().catch(() => null)) as { tasks?: ComputerTaskSummary[] } | null;
+  return body?.tasks ?? [];
+}
 
 export async function getComputerTask(sessionId: string): Promise<ComputerTask | null> {
   const res = await authFetch(`${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}`);

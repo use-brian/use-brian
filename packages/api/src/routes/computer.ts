@@ -75,6 +75,43 @@ export function computerRoutes(deps: {
     return task
   }
 
+  // Workspace-wide discovery (§5): the caller's live tasks, so the app shell
+  // can surface "a browser is running" from anywhere — not just the one chat
+  // whose composer chip already knows. Scoped to the CALLER's tasks: the
+  // frame/input/resume routes are ownership-gated, so listing a teammate's
+  // task would advertise a live view the caller cannot open (cross-user
+  // watching is a governance call the clearance model doesn't make yet).
+  router.get('/tasks', async (req, res) => {
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return
+    }
+    if (!deps.orchestrator) {
+      res.json({ tasks: [] })
+      return
+    }
+    const role = await deps.getWorkspaceRole(req.userId as string, workspaceId)
+    if (!role) {
+      res.status(404).json({ error: 'Workspace not found' })
+      return
+    }
+    const tasks = await deps.orchestrator.listActiveTasks(workspaceId)
+    res.json({
+      tasks: tasks
+        .filter((task) => task.userId === (req.userId as string))
+        .map((task) => ({
+          taskId: task.taskId,
+          sessionId: task.sessionId,
+          status: task.status,
+          profileId: task.profileId,
+          injectedSite: task.injectedSite,
+          createdAt: task.createdAt,
+          lastActivityAt: task.lastActivityAt,
+        })),
+    })
+  })
+
   router.get('/tasks/:sessionId', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
     if (!task) {

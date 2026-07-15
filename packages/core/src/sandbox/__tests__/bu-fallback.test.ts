@@ -38,7 +38,7 @@ const DM_TRACE: BuTraceStep[] = [
   { step: 5, action: 'done', text: 'DM sent to Jane' },
 ]
 
-async function build(opts: { backend?: 'local' | 'cloud'; unattended?: boolean } = {}) {
+async function build(opts: { backend?: 'local' | 'cloud'; unattended?: boolean; noProfile?: boolean } = {}) {
   const provider = new StubSandboxProvider()
   const profileStore = createInMemoryBrowserProfileStore()
   const skillStore = createInMemoryBrowserSkillStore()
@@ -49,13 +49,15 @@ async function build(opts: { backend?: 'local' | 'cloud'; unattended?: boolean }
     vault,
     profileStore,
   })
-  await profileStore.create({
-    workspaceId: 'ws-1',
-    ownerUserId: 'user-1',
-    name: 'Personal IG',
-    defaultBackend: opts.backend ?? 'cloud',
-    enabledAssistantIds: ['asst-1'],
-  })
+  if (!opts.noProfile) {
+    await profileStore.create({
+      workspaceId: 'ws-1',
+      ownerUserId: 'user-1',
+      name: 'Personal IG',
+      defaultBackend: opts.backend ?? 'cloud',
+      enabledAssistantIds: ['asst-1'],
+    })
+  }
   const profiles = { store: profileStore, vault, assistantClearance: async () => 'confidential' as const }
   const { browserExplore } = createBuFallbackTool({
     provider,
@@ -133,6 +135,49 @@ describe('[COMP:sandbox/bu-fallback] Watched agentic fallback (R2-1/R2-7)', () =
     const task = await orchestrator.getActiveTask('sess-1')
     expect(task?.profileId).toBeTruthy()
     expect(provider.buGoals[0]).toContain('https://www.instagram.com/')
+  })
+
+  it('zero profiles → explores IDENTITY-LESS (R2-10): a public flow never needs a profile', async () => {
+    const { provider, orchestrator, browserExplore } = await build({ noProfile: true })
+    provider.scriptBrowserUse({ trace: [], output: 'JAL Class J upgrade is JPY 2,200' })
+    const result = await run(browserExplore, {
+      goal: 'find the exact Class J upgrade price',
+      url: 'https://www.jal.co.jp/',
+    })
+    expect(result.isError ?? false).toBe(false)
+    expect(String(result.data)).toContain('JPY 2,200')
+    const task = await orchestrator.getActiveTask('sess-1')
+    expect(task).toBeTruthy()
+    expect(task?.profileId).toBeNull()
+  })
+
+  it('profiles unconfigured (OSS posture) → still explores identity-less', async () => {
+    const provider = new StubSandboxProvider()
+    const skillStore = createInMemoryBrowserSkillStore()
+    const orchestrator = createSandboxOrchestrator({
+      provider,
+      taskStore: createInMemorySandboxTaskStore(),
+    })
+    const { browserExplore } = createBuFallbackTool({
+      provider,
+      binding: orchestrator.binding,
+      skills: skillStore,
+      profiles: null,
+    })
+    provider.scriptBrowserUse({ trace: [], output: 'looked around' })
+    const result = await run(browserExplore, { goal: 'browse', url: 'https://example.com/' })
+    expect(result.isError ?? false).toBe(false)
+  })
+
+  it('a named profile that does not exist still errors honestly (no silent identity swap)', async () => {
+    const { browserExplore } = await build({ noProfile: true })
+    const result = await run(browserExplore, {
+      goal: 'browse',
+      url: 'https://example.com/',
+      profile: 'Ghost',
+    })
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('Ghost')
   })
 })
 

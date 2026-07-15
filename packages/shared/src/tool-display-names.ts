@@ -93,6 +93,11 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   fathomGetTranscript: 'Read meeting transcript',
   fathomGetSummary: 'Read meeting summary',
 
+  // Assistant Email (AgentMail) — the assistant's own mailbox
+  agentmailSendMessage: 'Send email as the assistant',
+  agentmailSearchThreads: 'Search the assistant\'s mailbox',
+  agentmailCreateDraft: 'Draft email as the assistant',
+
   // Workspace files (Q3 / company-brain §10)
   fileWrite: 'Save workspace file',
   fileAppend: 'Append to workspace file',

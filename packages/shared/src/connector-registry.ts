@@ -113,6 +113,22 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['productivity', 'meetings'],
   },
   {
+    id: 'agentmail',
+    name: 'Assistant Email',
+    description:
+      'Give the assistant its own email address: receive mail into the brain, converse with allowlisted senders, and send or draft as the assistant.',
+    category: 'official',
+    // Hosted never shows a key prompt (the platform provisions inbox-scoped
+    // keys under the hood); the directory auth enum's closest fit is api_key,
+    // like gcs. Instances are minted by the inbox provisioning flow — one
+    // connector_instance per inbox (decision D1) — never by the generic
+    // directory-add path. See docs/architecture/integrations/agentmail.md.
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['email', 'channels', 'workspace'],
+  },
+  {
     id: 'files',
     name: 'Workspace Files',
     description: 'Read, write, and search files stored in your workspace. First-party storage; no external account required.',

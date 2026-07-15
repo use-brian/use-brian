@@ -440,8 +440,16 @@
   :focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--background), 0 0 0 4px color-mix(in srgb, var(--ring) 65%, transparent);
-    border-radius: inherit;
     transition: box-shadow 150ms ease;
+  }
+  /* Round the ring to the parent's shape for controls that don't carry their
+     own radius — EXCEPT input/textarea. Those are scroll containers, so
+     border-radius CLIPS their text: a focused zero-padding composer textarea
+     inside a `rounded-2xl` box inherited the 16px radius and cut the corner
+     off its first glyph (the comment composer's "Make…" → "∕lake…" bug).
+     Their ring (when not opted out) follows their own radius instead. */
+  :focus-visible:not(input, textarea) {
+    border-radius: inherit;
   }
 
   /* The doc editor is a page-sized `contenteditable`; Chromium matches

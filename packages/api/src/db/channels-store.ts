@@ -34,7 +34,7 @@ import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord'
+export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email'
 export type ChannelClearance = 'public' | 'internal' | 'confidential'
 export type ChannelCapability = 'chat' | 'broadcast' | 'ingest'
 export type ChannelStatus = 'active' | 'revoked' | 'invalid'
@@ -85,6 +85,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   telegram: ['chat', 'broadcast'],
   whatsapp: ['chat', 'broadcast', 'ingest'],
   discord: ['chat', 'broadcast'],
+  // Assistant inboxes converse (sender-gated) and ingest; there is no
+  // broadcast surface (docs/architecture/integrations/agentmail.md).
+  email: ['chat', 'ingest'],
 }
 
 /**
@@ -102,6 +105,7 @@ function modelAliasColumnFor(channelType: ChannelType): string | null {
     case 'whatsapp':
       return 'whatsapp_model_alias'
     case 'discord':
+    case 'email':
       return null
   }
 }

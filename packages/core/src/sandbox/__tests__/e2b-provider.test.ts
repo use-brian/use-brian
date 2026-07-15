@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { createE2bCloudProvider, SCRATCH_DIR } from '../providers/e2b/index.js'
-import { parseSnapshotOutput, cli } from '../providers/e2b/agent-browser-cli.js'
+import { parseSnapshotOutput, cli, PART_SEPARATOR } from '../providers/e2b/agent-browser-cli.js'
+import {
+  TAKEOVER_INPUT_HELPER_MJS,
+  TAKEOVER_INPUT_HELPER_PATH,
+} from '../providers/e2b/takeover-input.js'
 import type { E2bCommandResult, E2bRuntime, E2bSandboxHandle } from '../providers/e2b/runtime.js'
 
 /**
@@ -78,10 +82,17 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
 
   it('drives browsing through agent-browser verbs, never raw model bash (§4.11)', async () => {
     const { runtime, commands } = fakeRuntime((cmd) => {
-      if (cmd === cli.getUrl()) return { stdout: 'https://news.ycombinator.com/\n', stderr: '', exitCode: 0 }
-      if (cmd === cli.getTitle()) return { stdout: 'Hacker News\n', stderr: '', exitCode: 0 }
-      if (cmd === cli.snapshot()) {
-        return { stdout: '@e1 link "Front page"\n@e2 button "More"\n', stderr: '', exitCode: 0 }
+      // Multi-verb ops arrive CHAINED (one exec per op — the round-trip
+      // economy); the fake answers with sentinel-separated parts.
+      if (cmd.includes(cli.snapshot())) {
+        return {
+          stdout: `@e1 link "Front page"\n@e2 button "More"\n${PART_SEPARATOR}\nhttps://news.ycombinator.com/\n${PART_SEPARATOR}\nHacker News\n`,
+          stderr: '',
+          exitCode: 0,
+        }
+      }
+      if (cmd.includes(cli.getUrl())) {
+        return { stdout: `${PART_SEPARATOR}\nhttps://news.ycombinator.com/\n`, stderr: '', exitCode: 0 }
       }
       return undefined
     })
@@ -95,9 +106,14 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
     await browser.type('@e2', 'hello')
 
     const cmds = commands.map((c) => c.cmd)
-    expect(cmds).toContain(cli.open('https://news.ycombinator.com/'))
+    expect(cmds.some((c) => c.includes(cli.open('https://news.ycombinator.com/')))).toBe(true)
     expect(cmds).toContain(cli.click('@e1'))
     expect(cmds).toContain(cli.fill('@e2', 'hello'))
+    // One exec per op: navigate (open+get url) and snapshot (snap+url+title)
+    // each ran as a single chained command.
+    expect(cmds.filter((c) => c.includes('agent-browser')).length).toBe(4)
+    expect(snap.url).toBe('https://news.ycombinator.com/')
+    expect(snap.title).toBe('Hacker News')
     expect(snap.nodes).toEqual([
       { ref: '@e1', role: 'link', name: 'Front page' },
       { ref: '@e2', role: 'button', name: 'More' },
@@ -108,7 +124,9 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
 
   it('appends the dormant BYOP proxy flag to open only when a proxy is configured (§4.6)', async () => {
     const { runtime, commands } = fakeRuntime((cmd) =>
-      cmd === cli.getUrl() ? { stdout: 'https://x.test/', stderr: '', exitCode: 0 } : undefined,
+      cmd.includes(cli.getUrl())
+        ? { stdout: `${PART_SEPARATOR}\nhttps://x.test/`, stderr: '', exitCode: 0 }
+        : undefined,
     )
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({
@@ -118,6 +136,58 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
     })
     await provider.browser(sandboxId).navigate('https://x.test/')
     expect(commands.some((c) => c.cmd.includes("-p 'http://proxy.example:8080'"))).toBe(true)
+  })
+
+  it('take-over input dispatches TRUSTED events through the CDP helper, never DOM synthesis (§4.8)', async () => {
+    const { runtime, commands, files } = fakeRuntime((cmd) =>
+      cmd === cli.getCdpUrl() ? { stdout: 'http://127.0.0.1:9222\n', stderr: '', exitCode: 0 } : undefined,
+    )
+    const provider = createE2bCloudProvider(runtime)
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+    const takeover = provider.browser(sandboxId).takeover()
+
+    await takeover.input({ kind: 'click', x: 100, y: 200 })
+    await takeover.input({ kind: 'key', text: 'Enter' })
+    await takeover.input({ kind: 'scroll', deltaY: 120 })
+
+    // The helper landed in the sandbox once and speaks raw CDP input.
+    const helper = new TextDecoder().decode(files.get(TAKEOVER_INPUT_HELPER_PATH))
+    expect(helper).toBe(TAKEOVER_INPUT_HELPER_MJS)
+    expect(helper).toContain('Input.dispatchMouseEvent')
+    expect(helper).toContain('Input.insertText')
+    expect(helper).not.toContain('elementFromPoint')
+
+    // One endpoint resolve serves all three dispatches (cached per sandbox).
+    expect(commands.filter((c) => c.cmd === cli.getCdpUrl()).length).toBe(1)
+    const dispatches = commands.filter((c) => c.cmd.startsWith(`node ${TAKEOVER_INPUT_HELPER_PATH}`))
+    expect(dispatches.length).toBe(3)
+    expect(dispatches[0].cmd).toContain("'http://127.0.0.1:9222'")
+    expect(dispatches[0].cmd).toContain('"kind":"click"')
+    expect(dispatches[1].cmd).toContain('"text":"Enter"')
+    expect(dispatches[2].cmd).toContain('"deltaY":120')
+  })
+
+  it('take-over input surfaces dispatch failures and re-resolves the CDP endpoint after one', async () => {
+    let fail = true
+    const { runtime, commands } = fakeRuntime((cmd) => {
+      if (cmd === cli.getCdpUrl()) return { stdout: 'ws://127.0.0.1:9222/devtools/browser/x\n', stderr: '', exitCode: 0 }
+      if (cmd.startsWith('node ')) {
+        if (fail) {
+          fail = false
+          return { stdout: '', stderr: 'no page target', exitCode: 2 }
+        }
+        return { stdout: '', stderr: '', exitCode: 0 }
+      }
+      return undefined
+    })
+    const provider = createE2bCloudProvider(runtime)
+    const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
+    const takeover = provider.browser(sandboxId).takeover()
+
+    await expect(takeover.input({ kind: 'click', x: 1, y: 1 })).rejects.toThrow(/no page target/)
+    await takeover.input({ kind: 'click', x: 1, y: 1 }) // recovers
+    // The failure invalidated the cached endpoint — resolved twice in total.
+    expect(commands.filter((c) => c.cmd === cli.getCdpUrl()).length).toBe(2)
   })
 
   it('runPython always wraps in an unshared network namespace + isolated mode (§4.7)', async () => {
@@ -169,7 +239,9 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
 
   it('injects auth state via AGENT_BROWSER_STATE only after writing it, captures via state save', async () => {
     const { runtime, commands, files } = fakeRuntime((cmd) =>
-      cmd === cli.getUrl() ? { stdout: 'https://x.test/', stderr: '', exitCode: 0 } : undefined,
+      cmd.includes(cli.getUrl())
+        ? { stdout: `${PART_SEPARATOR}\nhttps://x.test/`, stderr: '', exitCode: 0 }
+        : undefined,
     )
     const provider = createE2bCloudProvider(runtime)
     const { sandboxId } = await provider.create({ workspaceId: 'w', taskId: 't' })
