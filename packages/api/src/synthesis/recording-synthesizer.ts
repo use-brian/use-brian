@@ -27,6 +27,8 @@ import {
   type WorkspaceDirectoryStore,
 } from '@sidanclaw/core'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
+import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
+import type { RetrievalActor } from '@sidanclaw/core'
 import {
   createRecordPageProjector,
   synthesizeFromSource,
@@ -87,6 +89,49 @@ function titleFor(slug: string, name?: string): string {
   return name ?? slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+/** Above this the full transcript is NOT injected (a >~10 h recording would
+ *  bloat the prompt) and synthesis falls back to the search-tool sweep. The
+ *  3 h recording ceiling is ~70k chars, so this only guards pathological input. */
+const MAX_INJECT_CHARS = 500_000
+
+function fmtStamp(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+  return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
+
+/**
+ * Read the recording's whole transcript as `[H:MM:SS] Speaker: text` lines, for
+ * injection into the synthesis prompt. Returns null when there are no segments,
+ * a read error, or the text exceeds `MAX_INJECT_CHARS` (caller falls back to the
+ * search-tool sweep). Pages the store in blocks so one query never loads a
+ * pathological recording whole.
+ */
+async function loadRecordingTranscript(recordingId: string, actor: RetrievalActor): Promise<string | undefined> {
+  const BLOCK = 500
+  const lines: string[] = []
+  let chars = 0
+  try {
+    for (let from = 0; ; from += BLOCK) {
+      const hits: RecordingSegmentHit[] = await readRecordingRange(actor, {
+        recordingId,
+        fromIndex: from,
+        toIndex: from + BLOCK - 1,
+      })
+      if (hits.length === 0) break
+      for (const h of hits) {
+        const line = `[${fmtStamp(h.start_ms)}] ${h.speaker ?? 'Speaker'}: ${h.segment_text}`
+        chars += line.length + 1
+        if (chars > MAX_INJECT_CHARS) return undefined // too big — fall back to the sweep
+        lines.push(line)
+      }
+      if (hits.length < BLOCK) break
+    }
+  } catch {
+    return undefined // read failed — fall back to the sweep
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined
+}
+
 /**
  * Build the structural-synthesis callback the recording ingestor invokes. Returns
  * `null` when the blueprint slug resolves to nothing (logged, non-fatal — the
@@ -135,19 +180,24 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
       return null
     }
 
+    const actor = {
+      workspaceId: args.workspaceId,
+      userId: args.userId,
+      assistantId: args.assistantId,
+      assistantKind: 'standard' as const,
+      clearance: clearanceOf(args.sensitivity),
+      compartments: null,
+    }
+
     // 2. The source-retrieval tool (searchRecording), pinned to this recording + actor.
-    const sourceTool = createSearchRecordingTool({
-      recordingId: args.recordingId,
-      actor: {
-        workspaceId: args.workspaceId,
-        userId: args.userId,
-        assistantId: args.assistantId,
-        assistantKind: 'standard',
-        clearance: clearanceOf(args.sensitivity),
-        compartments: null,
-      },
-      embedder: deps.embedder,
-    })
+    const sourceTool = createSearchRecordingTool({ recordingId: args.recordingId, actor, embedder: deps.embedder })
+
+    // 2b. Inject the COMPLETE transcript into the prompt (when it fits): a model
+    //     told to sweep it with a tool satisfices and drafts from the first
+    //     quarter (2026-07-15). Handing it the whole text removes the discretion.
+    //     Capped so a pathological >10 h recording can't blow the context; above
+    //     the cap we fall back to the tool sweep.
+    const fullText = await loadRecordingTranscript(args.recordingId, actor)
 
     // 3. Doc-write tools, pinned to the brief page at build time (patchPage targets
     //    `anchorPageId`). `renderPage` is excluded — it mints a NEW draft, which
@@ -189,6 +239,7 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         assistantId: args.assistantId,
         assistantKind: 'standard',
         sensitivity: args.sensitivity,
+        ...(fullText ? { fullText } : {}),
       },
       blueprint,
       {

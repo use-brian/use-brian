@@ -61,6 +61,17 @@ export type SynthesisSource = {
   assistantKind: AssistantKind
   /** Sensitivity inherited from the source Episode; stamped on the page + every write. */
   sensitivity: string
+  /**
+   * The complete source text, injected into the prompt so the model drafts from
+   * ALL of it rather than paging a search tool. For a `recording` this is the
+   * whole `[H:MM:SS] Speaker: text` transcript. Set only when it fits the inject
+   * budget (`recording-synthesizer` caps it); absent → fall back to the
+   * search-tool sweep. A model told to "read end to end with a tool" SATISFICES —
+   * it reads a few windows and drafts (2026-07-15: a 96-min meeting's brief
+   * covered only the first ~23 min despite the sweep instruction). Handing it
+   * the full text removes the discretion.
+   */
+  fullText?: string
 }
 
 export type SynthesisBlueprint = {
@@ -151,6 +162,12 @@ export type SynthesizeDeps = {
 
 /** Enough turns/tool-calls for a multi-section brief over a long transcript. */
 const SYNTHESIS_BUDGET_FALLBACK = { maxTurns: 30, maxToolCalls: 40, timeoutMs: 180_000 }
+// A recording sweep is the expensive source: reading an hour-plus transcript
+// end to end (the coverage discipline in `buildSystemPrompt`) costs one tool
+// call per window plus the drafting turns, and the 3-minute default wall clock
+// aborted mid-sweep — the brief then reflected only the opening minutes
+// (2026-07-13, a 96-min meeting). Sized for ~500 segments at 40/window.
+const RECORDING_SYNTHESIS_BUDGET = { maxTurns: 60, maxToolCalls: 80, timeoutMs: 900_000 }
 
 function titleFromSlug(slug: string): string {
   return slug.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
@@ -174,9 +191,32 @@ function buildSystemPrompt(
   // brain draft (or a "brain row" demand on web findings) is nonsense.
   let gatherLine: string
   let citeLine: string
-  if (source.kind === 'recording') {
-    gatherLine = `- Pull facts with \`${sourceToolName}\` (this recording only); never paste the whole transcript into the page.`
-    citeLine = `- Cite the moment for every claim (the segment \`start_ms\`).`
+  if (source.kind === 'recording' && source.fullText) {
+    // The COMPLETE transcript is in the prompt (see below) — no sweep needed,
+    // and no satisficing possible. A model told to "read end to end with a
+    // tool" reads a few windows and drafts (2026-07-15: a 96-min brief covered
+    // only the first ~23 min despite the sweep instruction). Handing it the
+    // whole text is what makes the brief cover the whole meeting.
+    gatherLine = [
+      `- The COMPLETE transcript of the recording is included above under "FULL TRANSCRIPT". Draft from ALL of it, start to finish.`,
+      `- Cover the WHOLE recording proportionally: the final third as thoroughly as the opening. Before you finish, confirm your brief reflects content from near the LAST timestamp in the transcript — a brief that stops partway through the recording is a failed brief. Never paste the whole transcript into the page.`,
+      `- Use \`${sourceToolName}\` only to re-check an exact quote or timestamp; you do not need it to discover content.`,
+    ].join('\n')
+    citeLine = [
+      `- Cite the moment for every claim as the transcript's \`[H:MM:SS]\` timestamp (copy it from the line you drew the claim from). Minutes and seconds are always 00-59 — a citation like \`[00:85]\` is impossible and means you invented it.`,
+      `- Never cite a moment not in the transcript; if a claim is not grounded in a line, leave it out.`,
+    ].join('\n')
+  } else if (source.kind === 'recording') {
+    // No injected transcript (too large, or read failed) — fall back to the
+    // search-tool sweep. Weaker: the model tends to stop paging early.
+    gatherLine = [
+      `- FIRST read the recording END TO END with \`${sourceToolName}\`, before drafting anything: page sequential windows (\`fromIndex\`/\`toIndex\`, e.g. 0-39, then 40-79, and so on) until a window comes back empty — that is how you learn the transcript's true length. Do NOT rely on \`query\` top-K search for coverage; use it only to re-find a specific moment afterwards.`,
+      `- Draft from the WHOLE conversation, in the order it happened. Cover the later parts of the recording as thoroughly as the opening — a brief that only reflects the first few minutes is a failed brief. Never paste the whole transcript into the page.`,
+    ].join('\n')
+    citeLine = [
+      `- Cite the moment for every claim, as a timestamp in \`[H:MM:SS]\` form converted from that segment's \`start_ms\` (e.g. \`start_ms: 2841000\` → \`[0:47:21]\`). Minutes and seconds are always 00-59 — a citation like \`[00:85]\` is impossible and means you invented it.`,
+      `- Never cite a moment you did not read; if you cannot ground a claim in a segment, leave it out.`,
+    ].join('\n')
   } else if (source.kind === 'brain') {
     gatherLine = `- Pull facts with \`${sourceToolName}\` — draft ONLY from what the brain returns; do not invent facts it does not hold.`
     citeLine = `- Ground every claim in a brain row \`${sourceToolName}\` returned; if the brain has nothing for a section, say so rather than guessing.`
@@ -185,11 +225,19 @@ function buildSystemPrompt(
     gatherLine = `- Read the gathered research with \`${sourceToolName}\` — draft ONLY from those findings; do not add facts they do not contain.`
     citeLine = `- Cite the source each claim came from (the URL / source named in the findings); if the findings do not cover a section, say so rather than guessing.`
   }
+  // When the full source text is injected, it leads the prompt so the model
+  // sees the whole thing before the instructions (and blueprint) that act on it.
+  const transcriptBlock =
+    source.kind === 'recording' && source.fullText
+      ? ['## FULL TRANSCRIPT', '', source.fullText, '', '---', '']
+      : []
+
   if (mode.recordPath) {
     // Record-first: the typed record is the deliverable; the page (when this
     // surface renders one) is projected FROM the record after the loop, so the
     // model never authors a page here.
     return [
+      ...transcriptBlock,
       blueprint.body,
       '',
       '---',
@@ -205,6 +253,7 @@ function buildSystemPrompt(
     ].join('\n')
   }
   return [
+    ...transcriptBlock,
     blueprint.body,
     '',
     '---',
@@ -354,7 +403,10 @@ export async function synthesizeFromSource(
   // 3. Bounded server-side loop. The blueprint recipe IS the system prompt
   //    (executed, not nudged); on the legacy path the page is pinned via
   //    context.docViewId.
-  const budget = resolveResearchBudget(deps.budget, SYNTHESIS_BUDGET_FALLBACK)
+  const budget = resolveResearchBudget(
+    deps.budget,
+    source.kind === 'recording' ? RECORDING_SYNTHESIS_BUDGET : SYNTHESIS_BUDGET_FALLBACK,
+  )
   const sessionId = randomUUID()
   const abort = new AbortController()
   const timer = setTimeout(() => abort.abort(), budget.timeoutMs)

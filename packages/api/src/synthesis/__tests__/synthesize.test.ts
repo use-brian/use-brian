@@ -129,6 +129,27 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
     expect(systemPrompt).toContain('searchRecording')
   })
 
+  it('without fullText, instructs the search-tool sweep', async () => {
+    const { deps } = build()
+    await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
+    const { systemPrompt } = queryLoopMock.mock.calls[0][0]
+    expect(systemPrompt).not.toContain('FULL TRANSCRIPT')
+    expect(systemPrompt).toContain('read the recording END TO END') // the sweep fallback
+  })
+
+  it('injects the full transcript and drops the sweep when source.fullText is set', async () => {
+    // A model told to sweep with a tool satisfices and briefs only the opening
+    // (2026-07-15). Injecting the whole transcript removes the discretion.
+    const { deps } = build()
+    const transcript = '[0:00:01] Speaker 1: opening line.\n[1:35:12] Speaker 2: the very last line.'
+    await synthesizeFromSource({ ...SOURCE, fullText: transcript }, BLUEPRINT, TARGET, deps)
+    const { systemPrompt } = queryLoopMock.mock.calls[0][0]
+    expect(systemPrompt).toContain('FULL TRANSCRIPT')
+    expect(systemPrompt).toContain('the very last line.') // the whole thing is in the prompt
+    expect(systemPrompt).toContain('Draft from ALL of it')
+    expect(systemPrompt).not.toContain('read the recording END TO END') // sweep instruction dropped
+  })
+
   it('assembles the tool map (source + doc + brain) and strips confirmation for the unattended run', async () => {
     const { deps } = build()
     await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
