@@ -53,6 +53,24 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
       }
     },
 
+    async statBlob(key) {
+      try {
+        // stat(), not readFile() — the point of statBlob is size WITHOUT
+        // pulling the object into memory.
+        const st = await fs.stat(blobPath(key))
+        let metadata = DEFAULT_META
+        try {
+          metadata = JSON.parse(await fs.readFile(metaPath(key), 'utf8')) as GcsObjectMetadata
+        } catch {
+          // Missing/corrupt sidecar — fall back to the default mime.
+        }
+        return { sizeBytes: st.size, mime: metadata.mime, updatedAt: st.mtime }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+        throw err
+      }
+    },
+
     async deleteBlob(key) {
       await fs.rm(blobPath(key), { force: true })
       await fs.rm(metaPath(key), { force: true })

@@ -9,6 +9,7 @@ function fakeGcs(tag: string): GcsFilesClient & { tag: string } {
     tag,
     async writeBlob() {}, async appendBlob() {}, async deleteBlob() {},
     async readBlob() { return null },
+    async statBlob() { return null },
     async signedReadUrl(k) { return `https://${tag}/${k}` },
     async signedWriteUrl(k) { return `https://${tag}/${k}` },
     writeStream() { return new Writable({ write(_c, _e, cb) { cb() } }) },

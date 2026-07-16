@@ -14,6 +14,10 @@ function fakeClient(overrides: Partial<GcsFilesClient> = {}): GcsFilesClient {
       const b = blobs.get(key)
       return b ? { bytes: b, mime: 'text/plain', metadata: { workspaceId: '', mime: 'text/plain' } } : null
     },
+    async statBlob(key) {
+      const b = blobs.get(key)
+      return b ? { sizeBytes: b.length, mime: 'text/plain', updatedAt: null } : null
+    },
     async deleteBlob(key) { blobs.delete(key) },
     async signedReadUrl(key) { return `https://x/${key}` },
     async signedWriteUrl(key) { return `https://x/${key}` },

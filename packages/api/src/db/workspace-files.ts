@@ -500,6 +500,27 @@ export async function listWorkspaceFilesIndexRanked(
   return result.rows.map(toIndexRow)
 }
 
+/**
+ * Marks a row whose bytes are NOT charged to the workspace quota.
+ *
+ * The only user today is recording media. A recording's audio gets a
+ * workspace_files row so it is visible to ERASURE (erasure.md: workspace_files
+ * is hard-delete + GCS object delete; without a row the bytes are structurally
+ * invisible and survive forever) and to the UI — but it is not a file the
+ * workspace "uploaded" in the quota sense. A 2-hour recording is 50-500 MB
+ * against a 1 GiB cap, so charging it would make the quota a
+ * 2-to-20-recordings limit and mean nothing else.
+ *
+ * Erasure visibility and quota accounting are separate concerns; this flag is
+ * what keeps them separate.
+ *
+ * It is deliberately NOT the `source` column: `source` is a TRUST signal with a
+ * controlled vocabulary (SOURCE_WEIGHTS, 0.85 default), so a novel value there
+ * would silently down-weight the row in search and conflate "how trustworthy is
+ * this provenance" with "what kind of artifact is this".
+ */
+export const QUOTA_EXEMPT_META_KEY = 'quota_exempt'
+
 export async function sumWorkspaceFilesSizeBytes(
   ctx: AccessContext,
 ): Promise<number> {
@@ -511,7 +532,8 @@ export async function sumWorkspaceFilesSizeBytes(
     ctx.userId,
     `SELECT COALESCE(SUM(size_bytes), 0)::bigint AS total
      FROM workspace_files
-     WHERE ${ap.sql} AND valid_to IS NULL`,
+     WHERE ${ap.sql} AND valid_to IS NULL
+       AND NOT COALESCE((metadata->>'${QUOTA_EXEMPT_META_KEY}')::boolean, false)`,
     [...ap.params],
   )
   const total = result.rows[0]?.total ?? 0

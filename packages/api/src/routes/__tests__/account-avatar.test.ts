@@ -59,6 +59,11 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
       if (!existing) throw new Error(`gcs fake: missing key ${key}`)
       blobs.set(key, Buffer.concat([existing, bytes]))
     },
+    async statBlob(key) {
+      const b = blobs.get(key)
+      if (!b) return null
+      return { sizeBytes: b.length, mime: mimes.get(key) ?? 'application/octet-stream', updatedAt: null }
+    },
     async readBlob(key) {
       const b = blobs.get(key)
       if (!b) return null

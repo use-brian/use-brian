@@ -33,6 +33,11 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
       const mime = mimes.get(key) ?? 'application/octet-stream'
       return { bytes: b, mime, metadata: { workspaceId: '', mime } }
     },
+    async statBlob(key) {
+      const b = blobs.get(key)
+      if (!b) return null
+      return { sizeBytes: b.length, mime: mimes.get(key) ?? 'application/octet-stream', updatedAt: null }
+    },
     async deleteBlob(key) {
       blobs.delete(key)
       mimes.delete(key)

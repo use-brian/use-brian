@@ -43,6 +43,13 @@ export type GcsBlob = {
   metadata: GcsObjectMetadata
 }
 
+/** Object metadata WITHOUT the bytes — see `statBlob`. */
+export type GcsBlobStat = {
+  sizeBytes: number
+  mime: string
+  updatedAt: Date | null
+}
+
 export type GcsFilesClient = {
   /**
    * Write a blob with workspace-scoped custom metadata. Overwrites any
@@ -60,6 +67,17 @@ export type GcsFilesClient = {
 
   /** Returns null if the object does not exist (404). */
   readBlob(key: string): Promise<GcsBlob | null>
+
+  /**
+   * Size + content type WITHOUT downloading the object. `readBlob` already
+   * fetches this metadata, but only after `file.download()` — unusable for a
+   * recording, where the object is hundreds of megabytes and the bytes are
+   * deliberately never brought into the process (the whole pipeline streams
+   * signed URLs through ffmpeg for exactly this reason).
+   *
+   * Returns null when the object does not exist.
+   */
+  statBlob(key: string): Promise<GcsBlobStat | null>
 
   /** Idempotent — silent no-op on 404. */
   deleteBlob(key: string): Promise<void>
@@ -169,6 +187,28 @@ export function createGcsFilesClient({ bucket: bucketName, projectId, credential
             createdByAssistantId: custom['created-by-assistant-id'],
             mime,
           },
+        }
+      } catch (err: unknown) {
+        if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 404) {
+          return null
+        }
+        throw err
+      }
+    },
+
+    async statBlob(key) {
+      try {
+        const [meta] = await bucket.file(key).getMetadata()
+        const custom = (meta.metadata ?? {}) as Record<string, string | undefined>
+        // GCS reports `size` as a string (it is an int64).
+        const size = typeof meta.size === 'string' ? Number(meta.size) : (meta.size ?? 0)
+        return {
+          sizeBytes: Number.isFinite(size) ? Number(size) : 0,
+          mime:
+            (typeof meta.contentType === 'string' && meta.contentType) ||
+            custom.mime ||
+            'application/octet-stream',
+          updatedAt: meta.updated ? new Date(meta.updated) : null,
         }
       } catch (err: unknown) {
         if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 404) {
