@@ -17,10 +17,13 @@ export {
   unionCompartments,
   subsetCompartments,
 } from './compartments.js'
-export { EvidenceAccumulator } from './evidence.js'
+export { EvidenceAccumulator, extractFigureClaims, extractFigureKeys } from './evidence.js'
 export type {
   EvidenceAccumulatorOptions,
   IdentifierKind,
   UnverifiedIdentifier,
+  ClaimKind,
+  FigureClaim,
+  FigureSource,
 } from './evidence.js'
 export type { AccessContext, AssistantKind } from './access-context.js'

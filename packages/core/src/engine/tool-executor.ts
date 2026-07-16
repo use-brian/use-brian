@@ -678,9 +678,14 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       // see (post-cap content) — identifiers observed here become fair game
       // for gated record writes later in the run. Errors are never fed, and
       // noteToolResult excludes input-echoed identifiers (a search result
-      // echoing its own query is not verification).
+      // echoing its own query is not verification). The source attribution
+      // feeds the grounding gate's claim ledger (which tool result backed
+      // each figure) — see docs/architecture/engine/grounding-gate.md.
       if (result.isError !== true) {
-        evidence?.noteToolResult(content, JSON.stringify(t.input))
+        evidence?.noteToolResult(content, JSON.stringify(t.input), {
+          toolUseId: t.id,
+          toolName: t.name,
+        })
       }
       // Inline images (e.g. an MCP tool returning sampled frames) become `image`
       // content blocks emitted right after the tool_result, so a multimodal

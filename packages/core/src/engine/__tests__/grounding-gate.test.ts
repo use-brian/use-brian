@@ -9,12 +9,16 @@ import type {
   Message,
 } from '../../providers/types.js'
 import { buildTool, type Tool } from '../../tools/types.js'
+import { EvidenceAccumulator } from '../../security/evidence.js'
 import { queryLoop, type QueryEvent } from '../query-loop.js'
 import {
   matchFreshFactsQuestion,
-  hasFigures,
-  groundingGateCheck,
+  evaluateClaims,
   buildGroundingNudge,
+  buildUnverifiedTrailer,
+  hasWebVerificationTool,
+  matchesDisputedFigure,
+  buildDisputeContextNote,
 } from '../grounding-gate.js'
 
 type SendCall = { messages: Message[] }
@@ -55,16 +59,6 @@ const textTurn = (text: string): StreamChunk[] => [
   { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 5, outputTokens: 3 } },
 ]
 
-const baseContext = {
-  userId: 'u',
-  assistantId: 'a',
-  sessionId: 's',
-  appId: 'test',
-  channelType: 'web',
-  channelId: 'c',
-  abortSignal: new AbortController().signal,
-}
-
 const webSearchStub: Tool = buildTool({
   name: 'webSearch',
   description: 'stub',
@@ -91,6 +85,7 @@ async function run(opts: {
   userMessage: string
   groundingGate?: { userMessage: string; draftDelivered?: boolean }
   tools?: Map<string, Tool>
+  evidence?: EvidenceAccumulator
 }): Promise<QueryEvent[]> {
   const events: QueryEvent[] = []
   for await (const e of queryLoop({
@@ -99,7 +94,16 @@ async function run(opts: {
     systemPrompt: 'sys',
     messages: [{ role: 'user', content: opts.userMessage }],
     tools: opts.tools ?? new Map([['webSearch', webSearchStub]]),
-    context: baseContext,
+    context: {
+      userId: 'u',
+      assistantId: 'a',
+      sessionId: 's',
+      appId: 'test',
+      channelType: 'web',
+      channelId: 'c',
+      abortSignal: new AbortController().signal,
+      evidence: opts.evidence,
+    },
     maxTurns: 10,
     groundingGate: opts.groundingGate,
   })) {
@@ -115,6 +119,9 @@ const INCIDENT_MESSAGE = 'cx sc credit card 而家個迎新係點'
 const INCIDENT_DRAFT =
   '依家(2026年7月)渣打國泰卡嘅迎新優惠:簽滿 HK$20,000 送 40,000 里,7月23號前申請。'
 
+const ledgerOf = (events: QueryEvent[]) =>
+  events.filter((e) => e.type === 'claim_ledger').flatMap((e) => e.claims)
+
 describe('[COMP:engine/grounding-gate] Fresh-facts heuristic', () => {
   it('matches the incident message (Cantonese freshness cue + volatile noun)', () => {
     expect(matchFreshFactsQuestion(INCIDENT_MESSAGE)).toBe('而家')
@@ -128,118 +135,201 @@ describe('[COMP:engine/grounding-gate] Fresh-facts heuristic', () => {
   })
 
   it('requires BOTH halves — one alone is everyday chat', () => {
-    // Freshness cue without a volatile noun.
     expect(matchFreshFactsQuestion('call me now please')).toBeNull()
     expect(matchFreshFactsQuestion('而家得閒傾兩句嗎')).toBeNull()
-    // Volatile noun without a freshness cue.
     expect(matchFreshFactsQuestion('the offer we discussed sounds good')).toBeNull()
     expect(matchFreshFactsQuestion('remind me about the deadline tomorrow')).toBeNull()
   })
-
-  it('documents the known v1 gap: short dispute follow-ups do not match', () => {
-    // The incident's second turn — re-asserted fabricated figures. No
-    // freshness cue, so v1 misses it (spec → "Known gaps").
-    expect(matchFreshFactsQuestion('唔係要 look 11萬咩')).toBeNull()
-  })
 })
 
-describe('[COMP:engine/grounding-gate] Figure detection', () => {
-  it('detects Arabic digits, full-width digits, and CJK numeral+unit compounds', () => {
-    expect(hasFigures('HK$20,000 送 40,000 里')).toBe(true)
-    expect(hasFigures('簽賬滿２０００蚊')).toBe(true)
-    expect(hasFigures('要簽夠十一萬先食盡')).toBe(true)
-    expect(hasFigures('大約五千蚊左右')).toBe(true)
+describe('[COMP:engine/grounding-gate] Claims evaluation', () => {
+  it('marks every claim unbacked when no evidence accumulator exists', () => {
+    const verdicts = evaluateClaims(INCIDENT_DRAFT, undefined)
+    expect(verdicts.length).toBeGreaterThanOrEqual(3) // HK$20,000, 40,000 里, 7月23號
+    expect(verdicts.every((v) => !v.backed)).toBe(true)
   })
 
-  it('does not count figure-less clarifying replies', () => {
-    expect(hasFigures('你想問邊張卡嘅迎新?等我幫你查下先。')).toBe(false)
-    expect(hasFigures('Let me check the latest offer for you.')).toBe(false)
-    // CJK numerals inside ordinary words (no magnitude/unit) are not figures.
-    expect(hasFigures('我哋一齊研究下')).toBe(false)
+  it('backs claims observed in a tool result, with source attribution', () => {
+    const ev = new EvidenceAccumulator()
+    ev.noteToolResult(
+      '渣打國泰標準卡迎新: 簽 HK$20,000 送 40,000 里, 截止 7月23日',
+      '{"query":"渣打國泰卡 迎新優惠"}',
+      { toolUseId: 'tool_1', toolName: 'webSearch' },
+    )
+    const verdicts = evaluateClaims(INCIDENT_DRAFT, ev)
+    expect(verdicts.every((v) => v.backed)).toBe(true)
+    expect(verdicts[0]!.source).toEqual({ toolUseId: 'tool_1', toolName: 'webSearch' })
   })
-})
 
-describe('[COMP:engine/grounding-gate] Gate check conditions', () => {
-  const boundTools = new Map([['webSearch', webSearchStub]])
+  it('backs figures the user themselves supplied (seeded material), across formats', () => {
+    const ev = new EvidenceAccumulator()
+    ev.note('唔係要 look 11萬咩') // user wrote 11萬
+    const verdicts = evaluateClaims('要簽夠十一萬先食盡個迎新', ev)
+    expect(verdicts).toHaveLength(1)
+    expect(verdicts[0]!.backed).toBe(true)
+    expect(verdicts[0]!.source).toBeNull() // seeded, not tool-backed
+  })
 
-  it('fires when all content conditions hold', () => {
-    const verdict = groundingGateCheck({
-      userMessage: INCIDENT_MESSAGE,
-      draftText: INCIDENT_DRAFT,
-      boundTools,
+  it('nudge copy names the exact values and never a tool name', () => {
+    const channel = buildGroundingNudge({
+      draftDelivered: false,
+      unbackedValues: ['40,000 里', '7月23號'],
     })
-    expect(verdict).toEqual({ fire: true, matchedCue: '而家' })
-  })
-
-  it('never fires without a web-verification tool bound', () => {
-    expect(
-      groundingGateCheck({
-        userMessage: INCIDENT_MESSAGE,
-        draftText: INCIDENT_DRAFT,
-        boundTools: new Map(),
-      }),
-    ).toEqual({ fire: false })
-  })
-
-  it('never fires on a figure-less draft', () => {
-    expect(
-      groundingGateCheck({
-        userMessage: INCIDENT_MESSAGE,
-        draftText: '你想問邊張卡?我幫你查下。',
-        boundTools,
-      }),
-    ).toEqual({ fire: false })
-  })
-
-  it('nudge copy branches on draftDelivered and never names a tool', () => {
-    const channel = buildGroundingNudge({ draftDelivered: false })
-    const web = buildGroundingNudge({ draftDelivered: true })
+    const web = buildGroundingNudge({ draftDelivered: true, unbackedValues: ['40,000 里'] })
+    expect(channel).toContain('40,000 里')
+    expect(channel).toContain('7月23號')
     expect(channel).toContain('NOT delivered')
     expect(web).toContain('already shown')
     for (const copy of [channel, web]) {
       expect(copy).not.toMatch(/webSearch|xSearch|urlReader/)
     }
   })
+
+  it('trailer names the unbacked values', () => {
+    expect(buildUnverifiedTrailer(['40,000 里'])).toContain('40,000 里')
+  })
+
+  it('hasWebVerificationTool checks the narrow web set', () => {
+    expect(hasWebVerificationTool(new Map([['webSearch', webSearchStub]]))).toBe(true)
+    expect(hasWebVerificationTool(new Map())).toBe(false)
+  })
+})
+
+describe('[COMP:engine/grounding-gate] Dispute pre-pass helpers', () => {
+  it("matches the incident's dispute turn — negation cue + figure", () => {
+    expect(matchesDisputedFigure('唔係要 look 11萬咩')).toBe(true)
+    expect(matchesDisputedFigure("isn't it HK$110,000?")).toBe(true)
+  })
+
+  it('requires both the cue and a figure', () => {
+    expect(matchesDisputedFigure('唔係啩')).toBe(false) // cue, no figure
+    expect(matchesDisputedFigure('要簽 11萬')).toBe(false) // figure, no cue
+    expect(matchesDisputedFigure('thanks, looks right')).toBe(false)
+  })
+
+  it('the context note names each claim with its provenance', () => {
+    const note = buildDisputeContextNote([
+      { claim: '40,000 里', status: 'unverified' },
+      { claim: 'HK$5,000', status: 'backed', backedByToolName: 'webSearch' },
+    ])
+    expect(note).toContain('40,000 里')
+    expect(note).toContain('UNVERIFIED')
+    expect(note).toContain('webSearch')
+    expect(note).toContain('Never re-assert')
+  })
 })
 
 describe('[COMP:engine/grounding-gate] Query-loop wiring', () => {
-  it('injects one verification nudge and ships the corrected turn', async () => {
+  it('injects one nudge naming the unbacked values, then ships the honest rewrite', async () => {
     const { provider, calls } = scriptedProvider([
       textTurn(INCIDENT_DRAFT),
-      textTurn('查證後:標準卡迎新為簽 HK$5,000 送 20,000 里 (來源: sc.com)。'),
+      textTurn('我而家未搵到經核實嘅迎新數字,唔想靠估 — 你想我用網上資料查證一次嗎?'),
     ])
     const events = await run({
       provider,
       userMessage: INCIDENT_MESSAGE,
       groundingGate: { userMessage: INCIDENT_MESSAGE, draftDelivered: false },
+      evidence: new EvidenceAccumulator(),
     })
-    // Gate forced a second model turn.
     expect(calls).toHaveLength(2)
-    // The injected nudge orders verification and forbids unverified figures.
     const nudge = lastUserText(calls[1].messages)
-    expect(nudge).toContain('verify')
+    expect(nudge).toContain('40,000 里')
     expect(nudge).toContain('not verified')
-    // Exactly one grounding_nudge event, carrying the matched cue.
     const nudgeEvents = events.filter((e) => e.type === 'grounding_nudge')
     expect(nudgeEvents).toHaveLength(1)
     expect(nudgeEvents[0]).toMatchObject({ matchedCue: '而家' })
-    // The loop still completes.
+    expect((nudgeEvents[0] as { unbackedCount: number }).unbackedCount).toBeGreaterThanOrEqual(3)
     expect(events.find((e) => e.type === 'turn_complete')).toBeDefined()
   })
 
-  it('fires at most once — a model that ignores the nudge ships its second attempt', async () => {
+  it('backed claims ship untouched, with a backed ledger', async () => {
+    const ev = new EvidenceAccumulator()
+    ev.noteToolResult(
+      '標準卡迎新: HK$5,000 簽賬送 20,000 里',
+      '{"query":"sc cathay welcome offer"}',
+      { toolUseId: 'tool_9', toolName: 'webSearch' },
+    )
     const { provider, calls } = scriptedProvider([
-      textTurn(INCIDENT_DRAFT),
-      textTurn(INCIDENT_DRAFT), // stubborn: same confabulated figures again
+      textTurn('而家標準卡迎新係簽 HK$5,000 送 20,000 里。'),
     ])
     const events = await run({
       provider,
       userMessage: INCIDENT_MESSAGE,
       groundingGate: { userMessage: INCIDENT_MESSAGE },
+      evidence: ev,
+    })
+    expect(calls).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
+    const ledger = ledgerOf(events)
+    expect(ledger.length).toBeGreaterThanOrEqual(2)
+    expect(ledger.every((c) => c.status === 'backed')).toBe(true)
+    expect(ledger[0]!.backedByToolName).toBe('webSearch')
+  })
+
+  it('a stubborn model gets the trailer annotation and an unverified ledger', async () => {
+    const { provider, calls } = scriptedProvider([
+      textTurn(INCIDENT_DRAFT),
+      textTurn(INCIDENT_DRAFT), // ignores the nudge, same confabulated figures
+    ])
+    const events = await run({
+      provider,
+      userMessage: INCIDENT_MESSAGE,
+      groundingGate: { userMessage: INCIDENT_MESSAGE },
+      evidence: new EvidenceAccumulator(),
     })
     expect(calls).toHaveLength(2)
     expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(1)
-    expect(events.find((e) => e.type === 'turn_complete')).toBeDefined()
+    // Trailer streamed as a delta AND baked into the final turn content.
+    const deltas = events
+      .filter((e): e is { type: 'text_delta'; text: string } => e.type === 'text_delta')
+      .map((e) => e.text)
+      .join('')
+    expect(deltas).toContain('⚠ Not verified against a source')
+    const complete = events.find((e) => e.type === 'turn_complete')!
+    const finalText = complete.response.content
+      .filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+      .map((b) => b.text)
+      .join('')
+    expect(finalText).toContain('⚠ Not verified against a source')
+    expect(ledgerOf(events).every((c) => c.status === 'unverified')).toBe(true)
+  })
+
+  it('generative (non-fresh-facts) turns are never nudged but still get a ledger', async () => {
+    const { provider, calls } = scriptedProvider([
+      textTurn('Proposed tiers: $29, $99 and $299 per month, or HK$2,000 yearly.'),
+    ])
+    const events = await run({
+      provider,
+      userMessage: 'please draft pricing tiers for our product',
+      groundingGate: { userMessage: 'please draft pricing tiers for our product' },
+      evidence: new EvidenceAccumulator(),
+    })
+    expect(calls).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
+    const deltas = events
+      .filter((e): e is { type: 'text_delta'; text: string } => e.type === 'text_delta')
+      .map((e) => e.text)
+      .join('')
+    expect(deltas).not.toContain('⚠ Not verified')
+    expect(ledgerOf(events).length).toBeGreaterThan(0)
+  })
+
+  it('no verification tool bound: annotates immediately instead of nudging', async () => {
+    const { provider, calls } = scriptedProvider([textTurn(INCIDENT_DRAFT)])
+    const events = await run({
+      provider,
+      userMessage: INCIDENT_MESSAGE,
+      groundingGate: { userMessage: INCIDENT_MESSAGE },
+      tools: new Map(),
+      evidence: new EvidenceAccumulator(),
+    })
+    expect(calls).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
+    const deltas = events
+      .filter((e): e is { type: 'text_delta'; text: string } => e.type === 'text_delta')
+      .map((e) => e.text)
+      .join('')
+    expect(deltas).toContain('⚠ Not verified against a source')
   })
 
   it('does nothing when the lane did not opt in (default behavior preserved)', async () => {
@@ -247,28 +337,19 @@ describe('[COMP:engine/grounding-gate] Query-loop wiring', () => {
     const events = await run({ provider, userMessage: INCIDENT_MESSAGE })
     expect(calls).toHaveLength(1)
     expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
+    expect(events.filter((e) => e.type === 'claim_ledger')).toHaveLength(0)
   })
 
-  it('does not fire on a non-fresh-facts message', async () => {
-    const { provider, calls } = scriptedProvider([textTurn('It adds up to 42.')])
-    const events = await run({
-      provider,
-      userMessage: 'what is 20 + 22?',
-      groundingGate: { userMessage: 'what is 20 + 22?' },
-    })
-    expect(calls).toHaveLength(1)
-    expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
-  })
-
-  it('does not fire when no verification tool is bound', async () => {
-    const { provider, calls } = scriptedProvider([textTurn(INCIDENT_DRAFT)])
+  it('figure-less replies (clarifying questions) never trip the gate', async () => {
+    const { provider, calls } = scriptedProvider([textTurn('你想問邊張卡嘅迎新?等我幫你查下先。')])
     const events = await run({
       provider,
       userMessage: INCIDENT_MESSAGE,
       groundingGate: { userMessage: INCIDENT_MESSAGE },
-      tools: new Map(),
+      evidence: new EvidenceAccumulator(),
     })
     expect(calls).toHaveLength(1)
     expect(events.filter((e) => e.type === 'grounding_nudge')).toHaveLength(0)
+    expect(events.filter((e) => e.type === 'claim_ledger')).toHaveLength(0)
   })
 })
