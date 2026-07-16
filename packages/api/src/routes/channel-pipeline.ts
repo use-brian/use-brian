@@ -23,6 +23,7 @@ import {
   classifyTopic, fetchEpisodicContext, filterToolsByCapabilities,
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
   buildWorkspaceFilesContext, AttachmentCollector,
+  EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
 } from '@sidanclaw/core'
 import type { FilesApi, OutboundAttachment } from '@sidanclaw/core'
 import type { OutgoingDocument } from '@sidanclaw/channels'
@@ -1251,7 +1252,45 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       console.error(`[${channelType}] pre-flight failed, continuing without:`, err)
     }
   }
-  const systemPromptWithPreflight = buildPreflightPrompt(fullSystemPrompt, preflightContext)
+  let systemPromptWithPreflight = buildPreflightPrompt(fullSystemPrompt, preflightContext)
+
+  // ── Dispute pre-pass (grounding-gate claim ledger) ──
+  // A dispute-shaped follow-up carrying a figure ("唔係要 look 11萬咩")
+  // loads the previous reply's claim provenance so the model re-verifies
+  // instead of re-asserting. One indexed read, only on the dispute shape.
+  // See docs/architecture/engine/grounding-gate.md → "Dispute pre-pass".
+  if (messageText && matchesDisputedFigure(messageText)) {
+    try {
+      const { getClaimsForLatestAssistantMessage } = await import('../db/claim-provenance-store.js')
+      const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
+      if (priorClaims.length > 0) {
+        systemPromptWithPreflight =
+          `${systemPromptWithPreflight}\n\n# Figure provenance (dispute check)\n\n${buildDisputeContextNote(priorClaims)}`
+      }
+    } catch (err) {
+      console.warn(`[${channelType}] dispute pre-pass failed, continuing without:`, err)
+    }
+  }
+
+  // ── Reply evidence (grounding gate) ──
+  // Figures observed in successful tool results this turn (fed by the tool
+  // executor) plus seeded material — the system prompt and the user's own
+  // message — form the evidence the gate diffs reply claims against. Prior
+  // ASSISTANT turns are deliberately not seeded: a confabulated figure from
+  // the previous reply must not launder itself into evidence for the next.
+  // Accumulate-only here (no gatedTools): the identifier write-gate stays a
+  // workflow-lane behavior.
+  const replyEvidence = new EvidenceAccumulator()
+  replyEvidence.note(systemPromptWithPreflight)
+  replyEvidence.note(messageText)
+
+  // Claim ledger stash — persisted after flushBufferedTurns (which creates
+  // the assistant message row) and BEFORE sendResponse, so the linkage
+  // exists before the user sees the reply.
+  let pendingClaimLedger: Extract<
+    import('@sidanclaw/core').QueryEvent,
+    { type: 'claim_ledger' }
+  >['claims'] | null = null
 
   // ── Query loop ──
   try {
@@ -1274,6 +1313,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         outboundAttachments: attachmentCollector,
         sensitivity: sensitivityAccumulator,
         compartmentAccumulator,
+        evidence: replyEvidence,
         // `clearance` is the read ceiling = min(member, assistant);
         // `assistantClearance` is the write ceiling (the assistant's tier).
         clearance,
@@ -1316,9 +1356,15 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             eventName: 'grounding_nudge_fired', channelType,
             metadata: {
               matched_cue: sanitizeAnalytics(event.matchedCue),
+              unbacked_count: event.unbackedCount,
               model: sanitizeAnalytics(model),
             },
           })
+          break
+        case 'claim_ledger':
+          // Stash — persisted in the turn_complete branch after
+          // flushBufferedTurns creates the assistant row, before send.
+          pendingClaimLedger = event.claims
           break
         case 'citation':
           // Grounding citations from web search / knowledge tools.
@@ -1405,6 +1451,28 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           }
 
           await flushBufferedTurns('turn_complete', resolvedAttachments)
+          // Persist the claim ledger BEFORE the send — the claim→evidence
+          // linkage exists before the user sees the reply. Best-effort: a
+          // ledger failure never blocks delivery. See
+          // docs/architecture/engine/grounding-gate.md → "Claim ledger".
+          if (pendingClaimLedger && lastFlushedAssistantRowId) {
+            try {
+              const { insertClaimProvenance } = await import('../db/claim-provenance-store.js')
+              await insertClaimProvenance(lastFlushedAssistantRowId, pendingClaimLedger)
+            } catch (err) {
+              console.warn(`[${channelType}] claim ledger persist failed:`, err)
+            }
+            analytics?.logEvent({
+              userId, assistantId: assistant.id, sessionId: session.id,
+              eventName: 'claim_ledger_recorded', channelType,
+              metadata: {
+                backed_count: pendingClaimLedger.filter((c) => c.status === 'backed').length,
+                unverified_count: pendingClaimLedger.filter((c) => c.status === 'unverified').length,
+                model: sanitizeAnalytics(model),
+              },
+            })
+            pendingClaimLedger = null
+          }
           // Strip the trailing <followup>[…]</followup> tag — messaging
           // channels (Telegram, Slack, WhatsApp) have no chip affordance,
           // so the raw tag would leak into the message body. Web parses
