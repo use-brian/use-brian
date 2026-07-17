@@ -31,7 +31,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/use-brian/brian",
+    "url": "https://github.com/use-brian/use-brian",
     "directory": "packages/sidanclaw-kb"
   },
   "devDependencies": {

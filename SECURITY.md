@@ -6,7 +6,7 @@
 
 Report privately via one of:
 
-- GitHub's [private vulnerability reporting](https://github.com/use-brian/brian/security/advisories/new) (preferred), or
+- GitHub's [private vulnerability reporting](https://github.com/use-brian/use-brian/security/advisories/new) (preferred), or
 - email **security@usebrian.ai** with the details and reproduction steps.
 
 We aim to acknowledge within **3 business days** and to provide a remediation

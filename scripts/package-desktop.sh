@@ -192,7 +192,7 @@ if [[ "$PUBLISH" == "1" ]]; then
   # Keep RELEASES_REPO in sync with electron-builder.yml's `publish` block.
   # The desktop source is open (apps/app-desktop in the public open-core repo),
   # so releases + the auto-update feed live on that same public repo.
-  RELEASES_REPO="use-brian/brian"
+  RELEASES_REPO="use-brian/use-brian"
   VERSION="$(node -p "require('$REPO_ROOT/apps/app-desktop/package.json').version")"
   TAG="v$VERSION"
   # A release without latest-mac.yml is INVISIBLE to auto-update on existing

@@ -25,7 +25,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELEASES_REPO="use-brian/brian"
+RELEASES_REPO="use-brian/use-brian"
 PKG_JSON="$REPO_ROOT/apps/app-desktop/package.json"
 EXE="$REPO_ROOT/apps/app-desktop/release/usebrian.exe"
 ALLOW_UNSIGNED=0

@@ -1106,7 +1106,7 @@ function startSessionKeepalive(): void {
 // Product updates ship through the remote web app on every load (thin shell);
 // this updates the SHELL BINARY itself. electron-updater reads the packaged
 // `app-update.yml` (electron-builder writes it from the `publish:` block),
-// resolves the latest `use-brian/brian` GitHub release, compares its
+// resolves the latest `use-brian/use-brian` GitHub release, compares its
 // `latest-mac.yml` / `latest.yml` feed against the running version, downloads
 // in the background, and installs on quit (`autoInstallOnAppQuit`) or on the
 // explicit "Restart to Update" click. Every decision (gate / state / labels /

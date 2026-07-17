@@ -46,7 +46,7 @@ To ingest content from any existing source (Notion, Confluence, Google Docs,
 markdown tree, pasted email, meeting transcript), invoke the kb-author skill
 in a Use Brian chat — the model is the universal adapter.
 
-Docs: https://github.com/use-brian/brian/tree/main/packages/sidanclaw-kb
+Docs: https://github.com/use-brian/use-brian/tree/main/packages/sidanclaw-kb
 `
 
 async function main() {

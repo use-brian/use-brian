@@ -87,7 +87,7 @@ nsis:
 # Where `electron-builder --publish always` uploads artifacts. The marketing CTA
 # links the "latest" GitHub Release asset, which must be public-readable for an
 # unauthenticated download. The desktop source is open (this app lives in the
-# public open-core repo `use-brian/brian`), so releases + the auto-update feed
+# public open-core repo `use-brian/use-brian`), so releases + the auto-update feed
 # publish to that same public repo. electron-builder uploads to a *draft* release
 # (assets land hidden); `scripts/package-desktop.sh --publish` then un-drafts it +
 # marks it latest so `releases/latest/download` resolves. Needs GH_TOKEN with
@@ -95,7 +95,7 @@ nsis:
 publish:
   provider: github
   owner: use-brian
-  repo: brian
+  repo: use-brian
 protocols:
   - name: Use Brian
     schemes:

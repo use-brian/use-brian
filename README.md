@@ -8,8 +8,8 @@
 
 **You make the calls. It does the rest.**
 
-[![CI](https://github.com/use-brian/brian/actions/workflows/ci.yml/badge.svg)](https://github.com/use-brian/brian/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/sidanclaw/sidanclaw)](https://github.com/use-brian/brian/stargazers)
+[![CI](https://github.com/use-brian/use-brian/actions/workflows/ci.yml/badge.svg)](https://github.com/use-brian/use-brian/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/sidanclaw/sidanclaw)](https://github.com/use-brian/use-brian/stargazers)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](./LICENSE)
 
 </div>
@@ -45,8 +45,8 @@ record. You stay on the decisions. It handles the rest.
 ([get one here](https://aistudio.google.com/apikey)).
 
 ```bash
-git clone https://github.com/use-brian/brian.git
-cd brian
+git clone https://github.com/use-brian/use-brian.git
+cd use-brian
 export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.sidanclaw/
 pnpm install
 pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; opens your browser
@@ -156,6 +156,6 @@ public issue.
 
 ## Star the repo
 
-If this resonates, [star it](https://github.com/use-brian/brian). It helps
+If this resonates, [star it](https://github.com/use-brian/use-brian). It helps
 more people find their own brain. Or star it because your current AI has the
 memory of a goldfish. Either way.
