@@ -29,6 +29,10 @@ import {
  * PRECISION inside one recording (what, who, and WHEN).
  */
 
+/** A real uuid: the schema validates `recordingId`, so 'rec-1' could never
+ *  reach execute() in production. */
+const REC_ID = '92e52d5a-ef0c-46d7-875e-fce8dc83ec6f'
+
 const CTX = {
   userId: 'u-1',
   assistantId: 'a-1',
@@ -56,20 +60,24 @@ describe('[COMP:recordings/recording-chat-tools] searchRecording', () => {
     const tool = createChatSearchRecordingTool()
     // Choosing the recording IS the job in chat. The synthesis-loop twin binds
     // recordingId in its closure precisely so it CANNOT pivot; that would be
-    // exactly wrong here.
-    expect(Object.keys(tool.inputSchema.shape)).toContain('recordingId')
+    // exactly wrong here. Assert the schema actually accepts it, rather than
+    // reaching into zod internals.
+    expect(tool.inputSchema.safeParse({ recordingId: REC_ID, query: 'x' }).success).toBe(true)
+    expect(tool.inputSchema.safeParse({ query: 'x' }).success).toBe(false)
+    // And it must be a real id — a non-uuid never reaches the store.
+    expect(tool.inputSchema.safeParse({ recordingId: 'rec-1', query: 'x' }).success).toBe(false)
 
-    await tool.execute({ recordingId: 'rec-1', query: 'pricing' }, CTX)
+    await tool.execute({ recordingId: REC_ID, query: 'pricing' }, CTX)
     expect(searchRecording).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: 'ws-1', userId: 'u-1' }),
-      expect.objectContaining({ recordingId: 'rec-1', query: 'pricing' }),
+      expect.objectContaining({ recordingId: REC_ID, query: 'pricing' }),
       undefined,
     )
   })
 
   it('rebuilds the actor from the ToolContext, so read ceilings hold per call', async () => {
     const tool = createChatSearchRecordingTool()
-    await tool.execute({ recordingId: 'rec-1', query: 'x' }, CTX)
+    await tool.execute({ recordingId: REC_ID, query: 'x' }, CTX)
     const [actor] = searchRecording.mock.calls[0]
     expect(actor).toMatchObject({
       workspaceId: 'ws-1',
@@ -81,17 +89,17 @@ describe('[COMP:recordings/recording-chat-tools] searchRecording', () => {
 
   it('refuses a session with no workspace rather than searching unscoped', async () => {
     const tool = createChatSearchRecordingTool()
-    const res = await tool.execute({ recordingId: 'rec-1', query: 'x' }, CTX_NO_WS)
+    const res = await tool.execute({ recordingId: REC_ID, query: 'x' }, CTX_NO_WS)
     expect(res.isError).toBe(true)
     expect(searchRecording).not.toHaveBeenCalled()
   })
 
   it('routes fromIndex to the range read (overview paging, not top-K)', async () => {
     const tool = createChatSearchRecordingTool()
-    await tool.execute({ recordingId: 'rec-1', query: '', fromIndex: 20 }, CTX)
+    await tool.execute({ recordingId: REC_ID, query: '', fromIndex: 20 }, CTX)
     expect(readRecordingRange).toHaveBeenCalledWith(
       expect.anything(),
-      { recordingId: 'rec-1', fromIndex: 20, toIndex: 29 }, // default 10-wide window
+      { recordingId: REC_ID, fromIndex: 20, toIndex: 29 }, // default 10-wide window
     )
     expect(searchRecording).not.toHaveBeenCalled()
   })
@@ -99,7 +107,7 @@ describe('[COMP:recordings/recording-chat-tools] searchRecording', () => {
   it('returns an error body instead of throwing into the loop', async () => {
     searchRecording.mockRejectedValue(new Error('db down'))
     const tool = createChatSearchRecordingTool()
-    const res = await tool.execute({ recordingId: 'rec-1', query: 'x' }, CTX)
+    const res = await tool.execute({ recordingId: REC_ID, query: 'x' }, CTX)
     expect(res.isError).toBe(true)
     expect(String(res.data)).toContain('db down')
   })
