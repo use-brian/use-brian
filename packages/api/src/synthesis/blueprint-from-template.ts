@@ -50,6 +50,15 @@ export function extractionToBlueprintBody(name: string, spec: ExtractionSpec): s
     })
     .join('\n\n')
 
+  // Per-kind capture guidance (optional): HOW to write each enabled kind —
+  // e.g. task: "break maintenance items into one task each". Rendered as
+  // bullets so the generic dedupe/sensitivity line stays kind-agnostic.
+  const perKind = spec.capture
+    .map((kind) => {
+      const instruction = spec.captureInstructions?.[kind]?.trim()
+      return instruction ? `- ${kind}: ${instruction}` : null
+    })
+    .filter((line): line is string => line !== null)
   const capture =
     spec.capture.length > 0
       ? [
@@ -57,6 +66,7 @@ export function extractionToBlueprintBody(name: string, spec: ExtractionSpec): s
           '## Capture',
           '',
           `Also write these brain records (search the brain first to dedupe): ${spec.capture.join(', ')}. Use the save tools and inherit the source's sensitivity.`,
+          ...(perKind.length > 0 ? ['', ...perKind] : []),
         ].join('\n')
       : ''
 

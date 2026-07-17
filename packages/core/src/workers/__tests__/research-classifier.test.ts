@@ -114,6 +114,28 @@ describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
     expect(provider.stream).not.toHaveBeenCalled()
   })
 
+  it('CJK-weights the length gate — a compact Cantonese ask reaches the classifier (2026-07-16 incident)', async () => {
+    // 26 raw chars, but 7 CJK chars carry a full current-offer question.
+    // Pre-fix this short-circuited and the turn ran on the cheap path with
+    // zero tool calls, shipping confabulated welcome-offer figures.
+    const provider = makeProvider('{"research":false}')
+    const result = await classifyResearchIntent({
+      provider,
+      message: 'cx sc credit card 而家個迎新係點',
+    })
+    expect(provider.stream).toHaveBeenCalledTimes(1)
+    expect(result.model).toBe('gemini-3.1-flash-lite')
+  })
+
+  it('still short-circuits genuinely short CJK small talk', async () => {
+    const provider = makeProvider('{"research":true}')
+    for (const message of ['而家得閒嗎?', 'こんにちは', '早晨']) {
+      const result = await classifyResearchIntent({ provider, message })
+      expect(result.research).toBe(false)
+    }
+    expect(provider.stream).not.toHaveBeenCalled()
+  })
+
   it('accepts the classifier operate_site verdict for phrasings the regex misses', async () => {
     const provider = makeProvider('{"research":false,"operate_site":true}')
     const result = await classifyResearchIntent({

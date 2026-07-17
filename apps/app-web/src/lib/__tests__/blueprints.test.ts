@@ -21,6 +21,8 @@ import {
   isBlueprint,
   recordingBlueprintToSlug,
   starterInstallInput,
+  seedRecordingBlueprint,
+  RECORDING_INSTALL_STARTER,
   templateExtractionFromBlocks,
   RECORDING_INGEST_ONLY,
   RECORDING_UNSET,
@@ -143,6 +145,38 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
 
       it("submits undefined (omit) for the UNSET placeholder — ingest-only when never chosen", () => {
         expect(recordingBlueprintToSlug(RECORDING_UNSET)).toBeUndefined();
+      });
+
+      // The starter sentinel names an intent ("install, then use"), not a row.
+      // A caller that forgets to install it first must degrade to ingest-only —
+      // submitting `__install_starter__` as a blueprint id would 404 the
+      // synthesis lookup after the user already paid the surcharge.
+      it("submits undefined (omit) for the starter sentinel — it is not a blueprint id", () => {
+        expect(recordingBlueprintToSlug(RECORDING_INSTALL_STARTER)).toBeUndefined();
+      });
+    });
+
+    describe("seedRecordingBlueprint (confirm-dialog picker seed)", () => {
+      it("an explicit surface pick wins over the workspace default", () => {
+        expect(seedRecordingBlueprint("tpl-picked", "tpl-default")).toBe("tpl-picked");
+      });
+
+      it("an explicit ingest-only pick is preserved (not overridden by the default)", () => {
+        expect(seedRecordingBlueprint(RECORDING_INGEST_ONLY, "tpl-default")).toBe(
+          RECORDING_INGEST_ONLY,
+        );
+      });
+
+      it("no surface pick falls to the workspace default (chat dock / landing)", () => {
+        expect(seedRecordingBlueprint(undefined, "tpl-default")).toBe("tpl-default");
+      });
+
+      it("an UNSET surface pick also falls to the workspace default", () => {
+        expect(seedRecordingBlueprint(RECORDING_UNSET, "tpl-default")).toBe("tpl-default");
+      });
+
+      it("no pick and no default leaves the picker UNSET (prompt a choice)", () => {
+        expect(seedRecordingBlueprint(undefined, null)).toBe(RECORDING_UNSET);
       });
     });
   });

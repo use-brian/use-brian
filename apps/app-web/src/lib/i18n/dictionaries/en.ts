@@ -1627,6 +1627,22 @@ export const en = {
         errKey: "That service account key is not valid. Paste the full JSON key.",
         errGeneric: "Could not connect that bucket. Check the key, bucket, and role, then try again.",
       },
+      s3: {
+        formHelp: "Connect an S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, Backblaze B2, and more). Your file bytes will be stored in this bucket, under your own keys.",
+        bucketPlaceholder: "Bucket name",
+        regionPlaceholder: "Region (e.g. us-east-1, auto for R2)",
+        endpointPlaceholder: "Endpoint URL (optional, for non-AWS stores)",
+        accessKeyPlaceholder: "Access key ID",
+        secretKeyPlaceholder: "Secret access key",
+        leastPriv: "Grant the credentials read/write/delete on this one bucket only. Never account-wide storage access.",
+        endpointNote: "Leave the endpoint blank for AWS S3. For MinIO, R2, or B2, paste the store's S3 endpoint URL.",
+        connectBtn: "Validate and connect",
+        validatingBtn: "Validating...",
+        errPermission: "Those credentials cannot access that bucket. Check the bucket name and the granted policy.",
+        errBucket: "Bucket not reachable. Check the bucket name, region, and endpoint.",
+        errKey: "Those keys are not valid. Check the access key ID and secret access key.",
+        errGeneric: "Could not connect that bucket. Check the keys, bucket, region, and endpoint, then try again.",
+      },
       gcalNotifyTitle: "Send email notifications",
       gcalNotifyDesc: "Notify attendees when events are created, updated, or deleted",
       gcalNotifyAll: "All",
@@ -2715,6 +2731,13 @@ export const en = {
       done: "Done",
       archived: "Archived",
     },
+    taskPriority: {
+      none: "None",
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      urgent: "Urgent",
+    },
     graphView: {
       empty: "No connected entities yet.",
       emptyHint:
@@ -2910,6 +2933,12 @@ export const en = {
       entityKindContact: "Contact",
       entityKindDeal: "Deal",
       entityKindTask: "Task",
+      captureKindMemory: "Memory",
+      captureHeading: "Capture",
+      captureHint:
+        "Beyond filling the sections, a fill can also write brain records from the source. Turn on what to capture, and optionally describe how (for example, how tasks should be broken down: maintenance items vs business follow-ups).",
+      captureInstructionPlaceholder:
+        "Optional: how to write these records (e.g. one task per action item, imperative title)",
       keyLabel: "Key",
       keyHint:
         "The stable address other workflows read this field by. Renaming the heading never changes it.",
@@ -3246,9 +3275,11 @@ export const en = {
       threadSuggestion3: "Is anything here outdated?",
       threadStop: "Stop",
       threadStopped: "Stopped.",
+      threadToolsSummary: "{count} steps",
       propertyLabels: {
         title: "Title",
         status: "Status",
+        priority: "Priority",
         due_at: "Due date",
         tags: "Tags",
         sensitivity: "Sensitivity",
@@ -3256,7 +3287,6 @@ export const en = {
         summary: "Summary",
         detail: "Detail",
         attributes: "Attributes",
-        saved: "Saved",
         assignee_id: "Assignee",
         created_by: "Created by",
         name: "Name",
@@ -3275,6 +3305,7 @@ export const en = {
         description: "Description",
       },
       memberUnknown: "Unknown member",
+      assigneeUnassigned: "Unassigned",
       memberRole: {
         owner: "Owner",
         admin: "Admin",
@@ -3286,6 +3317,16 @@ export const en = {
         error: "Couldn't load this file.",
         download: "Download file",
         tagsPlaceholder: "tag1, tag2",
+      },
+      fileReingest: {
+        action: "Re-ingest to brain",
+        confirmTitle: "Re-ingest this file?",
+        confirmBody:
+          "{name} was already ingested. Re-ingesting runs knowledge extraction again: it spends credits and may duplicate extracted memories.",
+        confirmAction: "Re-ingest",
+        queued: "Ingestion started. Extracted knowledge will appear shortly.",
+        inFlight: "An ingest for this file is already running.",
+        failed: "Could not start ingestion.",
       },
       authorUser: "you",
       authorAssistant: "{name}",
@@ -3439,7 +3480,7 @@ export const en = {
     why: "Why?",
     hideWhy: "Hide why",
     whyUnavailable: "Couldn't load context.",
-    whyNoMessages: "No source chat captured for this memory.",
+    whyNoMessages: "No source was recorded for this entry.",
     whyLeadIn: "Saved during a chat with {assistant}. Surrounding turns:",
     // ── Source origin clue (source descriptor) ──
     originChat: "Saved from a {channel} conversation.",

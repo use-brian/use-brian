@@ -29,6 +29,7 @@ import {
 } from "@/lib/api/views";
 import { useT } from "@/lib/i18n/client";
 import { DraftPruneButton } from "./draft-prune-button";
+import { PageIcon } from "./page-icon";
 
 type Props = {
   row: ViewListRow;
@@ -124,11 +125,13 @@ export function DocSidebarRow({
             isTemporary ? " doc-icon-temporary" : ""
           }`}
         >
-          {row.icon ? (
-            <span className="text-[15px] leading-none">{row.icon}</span>
-          ) : (
-            <Icon className="size-4 text-sidebar-foreground/55" />
-          )}
+          <PageIcon
+            icon={row.icon}
+            fallback={Icon}
+            emojiClassName="text-[15px] leading-none"
+            glyphClassName="size-4 text-sidebar-foreground/55"
+            imgClassName="size-4 rounded-[3px] object-cover"
+          />
         </span>
         {/* Title is the row's navigation target. The `after:inset-0`
             overlay stretches its hit area across the whole card (the

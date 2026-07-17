@@ -536,12 +536,19 @@ export type PersonPropertyValue = {
   roleLabel: string | null;
 };
 
+/** One pickable member in the editable person row. `id` is the
+ *  `workspace_members` row id the wire commits. */
+export type PersonPropertyOption = PersonPropertyValue & { id: string };
+
 /**
- * Read-only person row (e.g. a task's assignee): avatar + name in the value
- * cell, click opens a small member card (avatar, name, email, role). The
- * caller resolves the person and localises the role label; `unknownLabel`
- * renders when an id is set but the person can't be resolved (roster fetch
- * failed or a stale id).
+ * Person row (e.g. a task's assignee): avatar + name in the value cell.
+ * Read-only flavour (no `onCommit`): click opens a small member card
+ * (avatar, name, email, role). Editable flavour (`onCommit` + `options`):
+ * click opens the workspace-roster picker — selecting a member commits
+ * their member-row id, `clearLabel` commits null (unassign). The caller
+ * resolves the person and localises labels; `unknownLabel` renders when an
+ * id is set but the person can't be resolved (roster fetch failed or a
+ * stale id).
  */
 export function PersonProperty({
   icon,
@@ -549,6 +556,10 @@ export function PersonProperty({
   value,
   loading,
   unknownLabel,
+  options,
+  currentId,
+  clearLabel,
+  onCommit,
 }: {
   icon?: React.ReactNode;
   label: string;
@@ -558,24 +569,107 @@ export function PersonProperty({
   loading?: boolean;
   /** Set when an id exists but no person resolved. */
   unknownLabel?: string | null;
+  /** Pickable members — enables the editable flavour with `onCommit`. */
+  options?: PersonPropertyOption[];
+  /** The currently-committed member id (marks the active picker row). */
+  currentId?: string | null;
+  /** Picker row that commits null (e.g. "Unassigned"). */
+  clearLabel?: string;
+  onCommit?: CommitFn<string | null>;
 }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const face = value ? (
+    <>
+      <UserAvatar
+        name={value.name}
+        email={value.email ?? undefined}
+        avatarUrl={value.avatarUrl}
+        size={18}
+      />
+      <span className="truncate">{value.name}</span>
+    </>
+  ) : loading ? (
+    <span className="h-4 w-24 animate-pulse rounded bg-muted" aria-hidden />
+  ) : unknownLabel ? (
+    <span className="text-sm text-muted-foreground/60">{unknownLabel}</span>
+  ) : (
+    <EmptyValue />
+  );
+
+  if (onCommit && options) {
+    async function commit(nextId: string | null) {
+      setOpen(false);
+      if (nextId === (currentId ?? null)) return;
+      setBusy(true);
+      setError(null);
+      const result = await onCommit!(nextId);
+      setBusy(false);
+      if (!result.ok) {
+        setError(result.error ?? t.brainPage.detailDrawer.saveFailed);
+      }
+    }
+
+    return (
+      <PropertyRow icon={icon} label={label} error={error}>
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger
+            aria-label={format(t.brainPage.detailDrawer.editValue, { label })}
+            disabled={busy || loading}
+            className={cn(VALUE_BUTTON_CLASS, "gap-1.5", busy && "opacity-60")}
+          >
+            {face}
+          </PopoverTrigger>
+          <PopoverContent align="start" className="max-h-72 w-64 overflow-y-auto p-1">
+            {clearLabel && (
+              <button
+                type="button"
+                onClick={() => void commit(null)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
+                  !currentId && "bg-muted/60",
+                )}
+              >
+                <span className="text-muted-foreground">{clearLabel}</span>
+              </button>
+            )}
+            {options.map((o) => (
+              <button
+                key={o.id}
+                type="button"
+                onClick={() => void commit(o.id)}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors hover:bg-muted",
+                  currentId === o.id && "bg-muted/60",
+                )}
+              >
+                <UserAvatar
+                  name={o.name}
+                  email={o.email ?? undefined}
+                  avatarUrl={o.avatarUrl}
+                  size={20}
+                />
+                <span className="min-w-0 flex-1 truncate">{o.name}</span>
+                {o.roleLabel && (
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {o.roleLabel}
+                  </span>
+                )}
+              </button>
+            ))}
+          </PopoverContent>
+        </Popover>
+      </PropertyRow>
+    );
+  }
+
   if (!value) {
     return (
       <PropertyRow icon={icon} label={label}>
-        <div className="flex min-h-9 items-center py-1">
-          {loading ? (
-            <span
-              className="h-4 w-24 animate-pulse rounded bg-muted"
-              aria-hidden
-            />
-          ) : unknownLabel ? (
-            <span className="text-sm text-muted-foreground/60">
-              {unknownLabel}
-            </span>
-          ) : (
-            <EmptyValue />
-          )}
-        </div>
+        <div className="flex min-h-9 items-center py-1">{face}</div>
       </PropertyRow>
     );
   }
@@ -587,13 +681,7 @@ export function PersonProperty({
           aria-label={label}
           className={cn(VALUE_BUTTON_CLASS, "gap-1.5")}
         >
-          <UserAvatar
-            name={value.name}
-            email={value.email ?? undefined}
-            avatarUrl={value.avatarUrl}
-            size={18}
-          />
-          <span className="truncate">{value.name}</span>
+          {face}
         </PopoverTrigger>
         <PopoverContent align="start" className="w-64 p-3">
           <div className="flex items-center gap-3">
@@ -629,21 +717,37 @@ export function PersonProperty({
 
 // ── Page title ─────────────────────────────────────────────────────
 
+/** The page-icon slot rendered inline with the title (same row). Sized so
+ *  the icon centres on the title's first line. */
+function PageTitleIcon({ icon }: { icon: React.ReactNode }) {
+  return (
+    <span
+      className="mt-0.5 shrink-0 text-muted-foreground/40 [&_svg]:size-8 [&_svg]:stroke-[1.5]"
+      aria-hidden
+    >
+      {icon}
+    </span>
+  );
+}
+
 /**
  * The big Notion-page title. Editable flavour renders an auto-growing
  * textarea styled as the heading (Tailwind v4 `field-sizing-content`);
- * Enter commits, Escape reverts, blur commits.
+ * Enter commits, Escape reverts, blur commits. `icon` renders the page's
+ * kind icon on the same row, leading the title.
  */
 export function PageTitle({
   value,
   editable,
   onCommit,
   placeholder,
+  icon,
 }: {
   value: string;
   editable?: boolean;
   onCommit?: CommitFn<string>;
   placeholder?: string;
+  icon?: React.ReactNode;
 }) {
   const t = useT();
   const [draft, setDraft] = useState(value);
@@ -681,51 +785,57 @@ export function PageTitle({
 
   if (!editable || !onCommit) {
     return (
-      <h2 className="text-3xl font-bold leading-tight break-words">
-        {value}
-      </h2>
+      <div className="flex items-start gap-3">
+        {icon && <PageTitleIcon icon={icon} />}
+        <h2 className="min-w-0 text-3xl font-bold leading-tight break-words">
+          {value}
+        </h2>
+      </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-1">
-      <textarea
-        value={draft}
-        rows={1}
-        disabled={busy}
-        placeholder={placeholder ?? t.brainPage.detailDrawer.titlePlaceholder}
-        aria-label={t.brainPage.detailDrawer.editTitle}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={() => void commit()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            void commit();
-            (e.target as HTMLTextAreaElement).blur();
-          }
-          if (e.key === "Escape") {
-            e.stopPropagation();
-            setDraft(committedRef.current);
-            (e.target as HTMLTextAreaElement).blur();
-          }
-        }}
-        className={cn(
-          "w-full resize-none field-sizing-content bg-transparent",
-          "text-3xl font-bold leading-tight break-words",
-          // The background swap is the focus cue; suppress the global
-          // fluid :focus-visible ring (it would frame the whole title,
-          // the same reason the doc editor strips it).
-          "rounded-md -mx-1.5 px-1.5 py-0.5 outline-none focus-visible:shadow-none",
-          "hover:bg-muted/50 focus:bg-muted/50 transition-colors",
-          "placeholder:text-muted-foreground/50",
-          busy && "opacity-60",
+    <div className="flex items-start gap-3">
+      {icon && <PageTitleIcon icon={icon} />}
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <textarea
+          value={draft}
+          rows={1}
+          disabled={busy}
+          placeholder={placeholder ?? t.brainPage.detailDrawer.titlePlaceholder}
+          aria-label={t.brainPage.detailDrawer.editTitle}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void commit();
+              (e.target as HTMLTextAreaElement).blur();
+            }
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              setDraft(committedRef.current);
+              (e.target as HTMLTextAreaElement).blur();
+            }
+          }}
+          className={cn(
+            "w-full resize-none field-sizing-content bg-transparent",
+            "text-3xl font-bold leading-tight break-words",
+            // The background swap is the focus cue; suppress the global
+            // fluid :focus-visible ring (it would frame the whole title,
+            // the same reason the doc editor strips it).
+            "rounded-md -mx-1.5 px-1.5 py-0.5 outline-none focus-visible:shadow-none",
+            "hover:bg-muted/50 focus:bg-muted/50 transition-colors",
+            "placeholder:text-muted-foreground/50",
+            busy && "opacity-60",
+          )}
+        />
+        {error && (
+          <p className="text-xs text-red-500" role="alert">
+            {error}
+          </p>
         )}
-      />
-      {error && (
-        <p className="text-xs text-red-500" role="alert">
-          {error}
-        </p>
-      )}
+      </div>
     </div>
   );
 }

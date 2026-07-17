@@ -132,6 +132,9 @@ export function scribeTranscriber(opts: ScribeTranscriberOptions): RecordingTran
       form.append('diarize', 'true')
       form.append('timestamps_granularity', 'word')
       form.append('tag_audio_events', 'false')
+      // Workspace language preference; absent = Scribe auto-detect
+      // (transcription.md §"Language & script preferences").
+      if (req.language) form.append('language_code', req.language)
       const keyterms = (req.keyterms ?? [])
         .map((t) => t.trim())
         .filter((t) => t.length > 0 && t.length <= KEYTERM_MAX_CHARS)

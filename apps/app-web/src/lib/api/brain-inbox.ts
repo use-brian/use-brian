@@ -43,6 +43,9 @@ export type BrainInboxRow = {
   id: string;
   workspaceId: string;
   createdAt: string;
+  /** Last write to the row. Optional so the UI tolerates an API deploy
+   *  that predates the field — fall back to `createdAt` when absent. */
+  updatedAt?: string;
   createdByAssistantId: string | null;
   body: Record<string, unknown>;
 };
@@ -163,7 +166,7 @@ export async function verifyBrainRow(
  *  - memory: scope, sensitivity, summary, detail
  *  - entity: display_name, sensitivity
  *  - workspace_file: sensitivity, tags
- *  - task: title, status, due_at, tags */
+ *  - task: title, status, due_at, tags, assignee_id, priority */
 export type AdjustMemoryChanges = {
   scope?: "personal" | "workspace_shared" | "workspace";
   sensitivity?: "public" | "internal" | "confidential";
@@ -177,6 +180,10 @@ export type AdjustMemoryChanges = {
   status?: "todo" | "in_progress" | "blocked" | "done" | "archived";
   /** task adjust — ISO date string, or null to clear the due date. */
   due_at?: string | null;
+  /** task adjust — a workspace_members row id, or null to unassign. */
+  assignee_id?: string | null;
+  /** task adjust — the conventional `attributes.priority` key; null clears. */
+  priority?: "low" | "medium" | "high" | "urgent" | null;
   reason?: string;
 };
 
@@ -535,6 +542,6 @@ function projectMemoryRow(row: BrainInboxRow): UnverifiedMemory | null {
     originalSensitivity: (b.original_sensitivity as string | null) ?? null,
     originalSummary: (b.original_summary as string | null) ?? null,
     createdAt: row.createdAt,
-    updatedAt: row.createdAt,
+    updatedAt: row.updatedAt ?? row.createdAt,
   };
 }

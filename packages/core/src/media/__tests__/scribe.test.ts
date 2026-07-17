@@ -108,6 +108,8 @@ describe('[COMP:media/transcriber-scribe] scribeTranscriber', () => {
     expect(form.get('tag_audio_events')).toBe('false')
     // Trimmed, over-long dropped, order kept.
     expect(form.getAll('keyterms')).toEqual(['Sidan', 'DeltaDeFi'])
+    // No workspace language preference → auto-detect (no language_code field).
+    expect(form.get('language_code')).toBeNull()
     const file = form.get('file') as File
     expect(file.type).toBe('audio/aac')
     expect(file.name).toBe('memo.aac')
@@ -122,6 +124,25 @@ describe('[COMP:media/transcriber-scribe] scribeTranscriber', () => {
     ])
     expect(res.windows).toBe(1)
     expect(res.truncated).toBe(false)
+  })
+
+  it('forwards the workspace language preference as language_code', async () => {
+    const captured: { init?: RequestInit } = {}
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      captured.init = init
+      return mockResponse({ words: [word('喂', 0.0, 0.4)] })
+    })
+
+    const t = scribeTranscriber({ apiKey: 'xi-key', fetchFn: fetchFn as unknown as typeof fetch })
+    await t.transcribe({
+      buffer: Buffer.from('aac-bytes'),
+      mime: 'audio/aac',
+      durationMs: 1_000,
+      language: 'yue',
+    })
+
+    const form = captured.init?.body as FormData
+    expect(form.get('language_code')).toBe('yue')
   })
 
   it('reports flat-rate costUsd, adding the keyterms rate only when keyterms are sent', async () => {

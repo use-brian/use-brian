@@ -44,7 +44,7 @@ export interface SmtpTransport {
 }
 
 export type SmtpClient = {
-  sendMagicLink(to: string, link: string, locale?: MagicLinkLocale): Promise<void>
+  sendMagicLink(to: string, link: string, locale?: MagicLinkLocale, code?: string): Promise<void>
   /**
    * Send a workspace-invitation email. Rejects on transport failure; the
    * invitation row already exists, so callers fire-and-forget and log.
@@ -106,8 +106,8 @@ export function createSmtpClient(opts: {
   fromAddress: string
 }): SmtpClient {
   return {
-    async sendMagicLink(to, link, locale = 'en') {
-      const { subject, html, text } = renderMagicLinkEmail(link, locale)
+    async sendMagicLink(to, link, locale = 'en', code) {
+      const { subject, html, text } = renderMagicLinkEmail(link, locale, code)
       await opts.transport.sendMail({
         from: opts.fromAddress,
         to,

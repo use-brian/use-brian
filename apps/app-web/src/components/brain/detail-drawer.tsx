@@ -41,6 +41,7 @@ import Markdown from "react-markdown";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { reingestStoredFile } from "@/lib/api/ingest";
 import { originClue } from "./source-origin";
 import {
   type BrainRow,
@@ -70,7 +71,13 @@ import {
   addEntityAlias,
   removeEntityAlias,
 } from "@/lib/api/brain-inbox";
-import { goalForTask, confirmGoal, workGoal, type GoalRow } from "@/lib/api/goals";
+import {
+  goalForTask,
+  confirmGoal,
+  workGoal,
+  updateGoalOutcome,
+  type GoalRow,
+} from "@/lib/api/goals";
 import {
   type WorkspaceSkillSummary,
   confirmSkill,
@@ -98,9 +105,11 @@ import {
   CircleDashed,
   Clock,
   FileText,
+  Flag,
   Folder,
   FolderGit2,
   Handshake,
+  History,
   MessageSquare,
   MoreHorizontal,
   Package,
@@ -120,10 +129,12 @@ import {
   StaticProperty,
   TagsProperty,
   type CommitResult,
+  type PersonPropertyOption,
   type SelectPropertyOption,
 } from "@/components/brain/property-field";
 import {
   applyChangesToBody,
+  attributePriority,
   bodyTags,
   dateInputToIso,
   extraBodyFields,
@@ -226,6 +237,21 @@ const TASK_STATUS_DOT_CLASS: Record<string, string> = {
   archived: "bg-muted-foreground/30",
 };
 
+/** Priority tints for the task Priority row — urgency earns heat; "none"
+ *  stays neutral. Values live under `attributes.priority` (the frozen-v1
+ *  tasks schema has no typed column). */
+const TASK_PRIORITY_DOT_CLASS: Record<string, string> = {
+  none: "bg-muted-foreground/30",
+  low: "bg-sky-500",
+  medium: "bg-amber-500",
+  high: "bg-orange-500",
+  urgent: "bg-red-500",
+};
+
+/** Attribute keys that render as dedicated rows, kept out of the generic
+ *  attributes fold so they never show twice. */
+const TASK_DEDICATED_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set(["priority"]);
+
 const SENSITIVITY_DOT_CLASS: Record<string, string> = {
   public: "bg-emerald-500",
   internal: "bg-amber-500",
@@ -270,6 +296,8 @@ function propertyIcon(key: string): React.ReactNode {
   switch (key) {
     case "status":
       return <CircleDashed />;
+    case "priority":
+      return <Flag />;
     case "due_at":
     case "close_date":
       return <Calendar />;
@@ -281,10 +309,10 @@ function propertyIcon(key: string): React.ReactNode {
       return <Users />;
     case "assignee_id":
       return <UserRound />;
-    case "saved":
     case "created_at":
-    case "updated_at":
       return <Clock />;
+    case "updated_at":
+      return <History />;
     case "path":
     case "mime_type":
     case "name":
@@ -794,20 +822,25 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
             </p>
           )}
 
-          {/* Big page icon — the Notion page-icon slot, derived from kind. */}
-          {!loading && !notFound && (
-            <div
-              className="text-muted-foreground/40 [&_svg]:size-9 [&_svg]:stroke-[1.5] -mb-1"
-              aria-hidden
-            >
-              {pageKindIcon(headerKind)}
-            </div>
-          )}
-
+          {/* Page icon + title share one row (the icon leads the title);
+              interactive sections receive the icon via `pageIcon` and
+              render it inside their PageTitle. The title still renders
+              while loading / not-found (seeded from the list row); the
+              icon waits for the loaded kind. */}
           {!sectionOwnsTitle && (
-            <h2 className="text-3xl font-bold leading-tight break-words">
-              {headerName}
-            </h2>
+            <div className="flex items-start gap-3">
+              {!loading && !notFound && (
+                <span
+                  className="mt-0.5 shrink-0 text-muted-foreground/40 [&_svg]:size-8 [&_svg]:stroke-[1.5]"
+                  aria-hidden
+                >
+                  {pageKindIcon(headerKind)}
+                </span>
+              )}
+              <h2 className="min-w-0 text-3xl font-bold leading-tight break-words">
+                {headerName}
+              </h2>
+            </div>
           )}
 
           {loading && (
@@ -829,6 +862,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
               entity={entity}
               detail={primitive}
               changeTypeTick={changeTypeTick}
+              pageIcon={pageKindIcon(headerKind)}
               onUpdated={(next) => {
                 setPrimitive(next);
                 // Re-pull the read-only rollup (kind / attributes /
@@ -852,6 +886,7 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
               primitive={inboxPrim}
               detail={primitive}
               crmEntity={crmEntity}
+              pageIcon={pageKindIcon(headerKind)}
               onUpdated={(next) => {
                 setPrimitive(next);
                 // Keep the brain page (list row, facets, graph,
@@ -875,6 +910,8 @@ export function BrainDetailDrawer({ row, skill, workspaceId, onClose }: Props) {
                   ? primitive.body.detail
                   : null
               }
+              entryCreatedAt={primitive.createdAt}
+              entryUpdatedAt={primitive.updatedAt}
               focusTick={askFocusTick}
             />
           )}
@@ -1466,6 +1503,8 @@ type EntitySectionProps = {
   detail: BrainInboxRowDetail;
   /** Bumped by the drawer toolbar's "Change type" item — opens the panel. */
   changeTypeTick: number;
+  /** The kind icon rendered inline with the page title (same row). */
+  pageIcon?: React.ReactNode;
   onUpdated: (next: BrainInboxRowDetail) => void;
 };
 
@@ -1479,6 +1518,7 @@ function EntitySection({
   entity,
   detail,
   changeTypeTick,
+  pageIcon,
   onUpdated,
 }: EntitySectionProps) {
   const t = useT();
@@ -1564,6 +1604,7 @@ function EntitySection({
       <PageTitle
         value={initialName}
         editable
+        icon={pageIcon}
         onCommit={(next) => commitChanges({ display_name: next })}
       />
 
@@ -1606,7 +1647,7 @@ function EntitySection({
         />
         <EntityBody entity={entity} />
         <MoreProperties
-          count={(whyContext?.savedByAssistantName ? 1 : 0) + 1}
+          count={(whyContext?.savedByAssistantName ? 1 : 0) + 2}
         >
           {whyContext?.savedByAssistantName && (
             <StaticProperty
@@ -1616,9 +1657,14 @@ function EntitySection({
             />
           )}
           <StaticProperty
-            icon={propertyIcon("saved")}
-            label={propLabels.saved}
+            icon={propertyIcon("created_at")}
+            label={propLabels.created_at}
             value={new Date(detail.createdAt).toLocaleString()}
+          />
+          <StaticProperty
+            icon={propertyIcon("updated_at")}
+            label={propLabels.updated_at}
+            value={new Date(detail.updatedAt ?? detail.createdAt).toLocaleString()}
           />
         </MoreProperties>
       </div>
@@ -1655,6 +1701,8 @@ type PrimitiveSectionProps = {
    *  canonical entity this row specialises. Undefined while loading,
    *  null when not applicable (memory/task/file) or no linked entity. */
   crmEntity?: EntityRollup | null | undefined;
+  /** The kind icon rendered inline with the page title (same row). */
+  pageIcon?: React.ReactNode;
   onUpdated: (next: BrainInboxRowDetail) => void;
 };
 
@@ -1760,6 +1808,81 @@ function FileContentPreview({
  * markdown; clicking it (or the pencil next to the heading) swaps in a
  * textarea. Blur or Cmd/Ctrl+Enter commits; Escape cancels.
  */
+/**
+ * "Re-ingest to brain" on a stored file's drawer — the user-reachable recovery
+ * for "this file never made it into the brain" (file-artifacts.md
+ * §"Re-ingest"). The SERVER owns the double-ingestion guard: an
+ * already-ingested file answers requires_confirmation, which this section
+ * relays through `confirmDialog` (re-ingesting spends credits and can
+ * duplicate extracted memories) before re-sending with confirm: true. Inline
+ * status text, matching the drawer's local idiom (no toast system here).
+ */
+function FileReingestSection({
+  workspaceId,
+  fileId,
+  fileName,
+  labels,
+  cancelLabel,
+}: {
+  workspaceId: string;
+  fileId: string;
+  fileName: string;
+  labels: {
+    action: string;
+    confirmTitle: string;
+    confirmBody: string;
+    confirmAction: string;
+    queued: string;
+    inFlight: string;
+    failed: string;
+  };
+  cancelLabel: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<"queued" | "in_flight" | "failed" | null>(null);
+
+  async function handleReingest() {
+    setBusy(true);
+    setStatus(null);
+    try {
+      let outcome = await reingestStoredFile(workspaceId, fileId);
+      if (outcome.status === "requires_confirmation") {
+        const ok = await confirmDialog({
+          title: labels.confirmTitle,
+          description: format(labels.confirmBody, {
+            name: outcome.fileName || fileName,
+          }),
+          confirmLabel: labels.confirmAction,
+          cancelLabel,
+        });
+        if (!ok) return;
+        outcome = await reingestStoredFile(workspaceId, fileId, { confirm: true });
+      }
+      setStatus(outcome.status === "queued" ? "queued" : "in_flight");
+    } catch {
+      setStatus("failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <button
+        type="button"
+        disabled={busy}
+        onClick={handleReingest}
+        className="self-start text-xs px-3 py-1.5 rounded-md border border-border text-foreground hover:bg-accent disabled:opacity-50"
+      >
+        {labels.action}
+      </button>
+      {status === "queued" && <p className="text-xs text-emerald-600 dark:text-emerald-400">{labels.queued}</p>}
+      {status === "in_flight" && <p className="text-xs text-muted-foreground">{labels.inFlight}</p>}
+      {status === "failed" && <p className="text-xs text-red-500">{labels.failed}</p>}
+    </div>
+  );
+}
+
 function MemoryDetailBody({
   value,
   onCommit,
@@ -1881,6 +2004,7 @@ function PrimitiveSection({
   primitive,
   detail,
   crmEntity,
+  pageIcon,
   onUpdated,
 }: PrimitiveSectionProps) {
   const t = useT();
@@ -1895,6 +2019,11 @@ function PrimitiveSection({
   const [taskGoal, setTaskGoal] = useState<GoalRow | null>(null);
   const [goalBusy, setGoalBusy] = useState(false);
   const [goalError, setGoalError] = useState<string | null>(null);
+  // Inline goal-outcome edit (click the outcome text). Editing never
+  // confirms a draft; a completed goal renders read-only (the server
+  // refuses the edit anyway).
+  const [goalEditing, setGoalEditing] = useState(false);
+  const [goalDraft, setGoalDraft] = useState("");
   // Load this task's auto-drafted goal. Best-effort — the affordance stays
   // hidden if there's none (a sub-task, or a task edited so the host link moved).
   useEffect(() => {
@@ -1902,6 +2031,7 @@ function PrimitiveSection({
     let cancelled = false;
     setTaskGoal(null);
     setGoalError(null);
+    setGoalEditing(false);
     void goalForTask(workspaceId, detail.id).then((g) => {
       if (!cancelled) setTaskGoal(g);
     });
@@ -1935,6 +2065,21 @@ function PrimitiveSection({
     }
     if (r.goal) setTaskGoal(r.goal);
   }
+  async function handleCommitGoalOutcome() {
+    if (!taskGoal) return;
+    setGoalEditing(false);
+    const next = goalDraft.trim();
+    if (next.length === 0 || next === taskGoal.outcome) return;
+    setGoalBusy(true);
+    setGoalError(null);
+    const r = await updateGoalOutcome(taskGoal.id, next);
+    setGoalBusy(false);
+    if (!r.ok) {
+      setGoalError(r.error ?? t.brainPage.detailDrawer.saveFailed);
+      return;
+    }
+    if (r.goal) setTaskGoal(r.goal);
+  }
   const summary = String(detail.body.summary ?? "");
   const memoryDetail = (detail.body.detail as string | null) ?? null;
   // CRM rows store the user-facing label in `name`; everything else uses `display_name`.
@@ -1952,8 +2097,9 @@ function PrimitiveSection({
 
   // Task assignee — `assignee_id` is a `workspace_members` row id, resolved
   // to the member's name/avatar/role against the workspace roster (cached
-  // per workspace). Read-only: assignee is not in the adjust wire, same as
-  // task sensitivity.
+  // per workspace). Editable: the row is the roster picker and commits
+  // `assignee_id` through the adjust wire (null unassigns), so the roster
+  // loads for every task (the picker needs it even when unassigned).
   const taskAssigneeId =
     isTask && typeof detail.body.assignee_id === "string"
       ? detail.body.assignee_id
@@ -1961,7 +2107,7 @@ function PrimitiveSection({
   const [roster, setRoster] = useState<AssignableMember[] | null>(null);
   const [rosterLoading, setRosterLoading] = useState(false);
   useEffect(() => {
-    if (taskAssigneeId.length === 0) return;
+    if (!isTask) return;
     let cancelled = false;
     setRosterLoading(true);
     loadWorkspaceRoster(workspaceId)
@@ -1977,12 +2123,25 @@ function PrimitiveSection({
     return () => {
       cancelled = true;
     };
-  }, [taskAssigneeId, workspaceId]);
+  }, [isTask, workspaceId]);
   const assigneeMember =
     taskAssigneeId.length > 0 && roster
       ? resolveAssignee(roster, taskAssigneeId)
       : null;
   const memberRoleLabels = labels.memberRole as Record<string, string>;
+  const assigneeOptions: PersonPropertyOption[] = (roster ?? []).map((m) => ({
+    id: m.id,
+    name: memberDisplayName(m) ?? labels.memberUnknown,
+    email: m.email,
+    avatarUrl: m.avatarUrl,
+    roleLabel: memberRoleLabels[m.role] ?? null,
+  }));
+
+  // Task priority — the conventional `attributes.priority` key (the frozen-v1
+  // schema has no typed column). Rendered as its own select row; the generic
+  // attributes fold omits the key so it never shows twice.
+  const taskPriority = isTask ? attributePriority(detail.body.attributes) : "";
+  const taskPriorityLabels = t.brainPage.taskPriority as Record<string, string>;
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
   const [whyLoading, setWhyLoading] = useState(true);
@@ -2066,6 +2225,15 @@ function PrimitiveSection({
     label: taskStatusLabels[s] ?? s,
     dotClassName: TASK_STATUS_DOT_CLASS[s],
   }));
+  // "none" is a select-only sentinel — the wire clears with null (the
+  // attributes key is removed, never stored as "none").
+  const priorityOptions: SelectPropertyOption[] = (
+    ["none", "low", "medium", "high", "urgent"] as const
+  ).map((p) => ({
+    value: p,
+    label: taskPriorityLabels[p] ?? p,
+    dotClassName: TASK_PRIORITY_DOT_CLASS[p],
+  }));
   const sensitivityOptions: SelectPropertyOption[] = [
     {
       value: "public",
@@ -2089,7 +2257,11 @@ function PrimitiveSection({
     { value: "workspace", label: review.scopeWorkspace },
   ];
 
-  const attributeRows = isTask ? flattenAttributes(detail.body.attributes) : [];
+  // Priority renders as its own dedicated row above, so keep it out of the
+  // generic attributes fold.
+  const attributeRows = isTask
+    ? flattenAttributes(detail.body.attributes, TASK_DEDICATED_ATTRIBUTE_KEYS)
+    : [];
   const extraFields = extraBodyFields(primitive, detail.body);
   // CRM rows keep their substance (email / domain / stage …) visible; for
   // the other kinds the generic remainder is secondary and folds behind
@@ -2098,13 +2270,14 @@ function PrimitiveSection({
   const foldedExtras = isCrm ? [] : extraFields;
   const createdByName = whyContext?.savedByAssistantName ?? null;
   const foldedCount =
-    attributeRows.length + foldedExtras.length + (createdByName ? 1 : 0) + 1;
+    attributeRows.length + foldedExtras.length + (createdByName ? 1 : 0) + 2;
 
   return (
     <>
       <PageTitle
         value={pageTitleValue}
         editable={canRenameInline}
+        icon={pageIcon}
         onCommit={commitTitle}
       />
 
@@ -2123,33 +2296,51 @@ function PrimitiveSection({
                 })
               }
             />
+            <SelectProperty
+              icon={propertyIcon("priority")}
+              label={propLabels.priority}
+              value={taskPriority || "none"}
+              options={priorityOptions}
+              onCommit={(v) =>
+                commitChanges({
+                  priority:
+                    v === "none"
+                      ? null
+                      : (v as NonNullable<AdjustMemoryChanges["priority"]>),
+                })
+              }
+            />
             <DateProperty
               icon={propertyIcon("due_at")}
               label={propLabels.due_at}
               value={taskDueDate}
               onCommit={(v) => commitChanges({ due_at: dateInputToIso(v) })}
             />
-            {taskAssigneeId.length > 0 && (
-              <PersonProperty
-                icon={propertyIcon("assignee_id")}
-                label={propLabels.assignee_id}
-                loading={rosterLoading}
-                unknownLabel={labels.memberUnknown}
-                value={
-                  assigneeMember
-                    ? {
-                        name:
-                          memberDisplayName(assigneeMember) ??
-                          labels.memberUnknown,
-                        email: assigneeMember.email,
-                        avatarUrl: assigneeMember.avatarUrl,
-                        roleLabel:
-                          memberRoleLabels[assigneeMember.role] ?? null,
-                      }
-                    : null
-                }
-              />
-            )}
+            <PersonProperty
+              icon={propertyIcon("assignee_id")}
+              label={propLabels.assignee_id}
+              loading={rosterLoading}
+              unknownLabel={
+                taskAssigneeId.length > 0 ? labels.memberUnknown : null
+              }
+              options={assigneeOptions}
+              currentId={taskAssigneeId || null}
+              clearLabel={labels.assigneeUnassigned}
+              onCommit={(id) => commitChanges({ assignee_id: id })}
+              value={
+                assigneeMember
+                  ? {
+                      name:
+                        memberDisplayName(assigneeMember) ??
+                        labels.memberUnknown,
+                      email: assigneeMember.email,
+                      avatarUrl: assigneeMember.avatarUrl,
+                      roleLabel:
+                        memberRoleLabels[assigneeMember.role] ?? null,
+                    }
+                  : null
+              }
+            />
             <TagsProperty
               icon={propertyIcon("tags")}
               label={propLabels.tags}
@@ -2266,9 +2457,14 @@ function PrimitiveSection({
             />
           )}
           <StaticProperty
-            icon={propertyIcon("saved")}
-            label={propLabels.saved}
+            icon={propertyIcon("created_at")}
+            label={propLabels.created_at}
             value={new Date(detail.createdAt).toLocaleString()}
+          />
+          <StaticProperty
+            icon={propertyIcon("updated_at")}
+            label={propLabels.updated_at}
+            value={new Date(detail.updatedAt ?? detail.createdAt).toLocaleString()}
           />
         </MoreProperties>
       </div>
@@ -2278,7 +2474,45 @@ function PrimitiveSection({
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
             {labels.goalHeading}
           </div>
-          <p className="text-sm text-foreground">{taskGoal.outcome}</p>
+          {goalEditing ? (
+            <textarea
+              autoFocus
+              value={goalDraft}
+              rows={2}
+              disabled={goalBusy}
+              aria-label={format(labels.editValue, { label: labels.goalHeading })}
+              onChange={(e) => setGoalDraft(e.target.value)}
+              onBlur={() => void handleCommitGoalOutcome()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void handleCommitGoalOutcome();
+                }
+                if (e.key === "Escape") {
+                  // Cancel without letting the drawer's global Escape-close fire.
+                  e.stopPropagation();
+                  setGoalEditing(false);
+                }
+              }}
+              className="w-full resize-none field-sizing-content rounded-md bg-muted/50 px-1.5 py-1 -ml-1.5 text-sm outline-none ring-1 ring-ring/40"
+            />
+          ) : taskGoal.status === "done" ? (
+            <p className="text-sm text-foreground">{taskGoal.outcome}</p>
+          ) : (
+            <button
+              type="button"
+              disabled={goalBusy}
+              aria-label={format(labels.editValue, { label: labels.goalHeading })}
+              onClick={() => {
+                setGoalDraft(taskGoal.outcome);
+                setGoalError(null);
+                setGoalEditing(true);
+              }}
+              className="-ml-1.5 rounded-md px-1.5 py-1 text-left text-sm text-foreground transition-colors hover:bg-muted/70 disabled:opacity-60"
+            >
+              {taskGoal.outcome}
+            </button>
+          )}
           {!taskGoal.confirmedAt ? (
             <button
               type="button"
@@ -2323,6 +2557,13 @@ function PrimitiveSection({
             fileId={detail.id}
             mime={String(detail.body.mime_type ?? "")}
             name={String(detail.body.name ?? "file")}
+          />
+          <FileReingestSection
+            workspaceId={workspaceId}
+            fileId={detail.id}
+            fileName={String(detail.body.name ?? "file")}
+            labels={labels.fileReingest}
+            cancelLabel={review.cancel}
           />
         </section>
       )}

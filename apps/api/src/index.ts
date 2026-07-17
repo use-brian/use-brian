@@ -6,7 +6,7 @@
  * `getEnv()`. It reads the handful of values the open composition needs straight
  * from `process.env` (with local defaults), then calls `bootOpenApi()` with no
  * ports — every closed seam falls back to its safe default (allow-all credit
- * gate, no-op usage recorder, inert feed hooks, no-op episode ingest). The brain
+ * gate, no-op usage recorder, inert feed hooks). The brain
  * still dreams (consolidation runs on the local timer); billing and
  * feed-distribution are simply absent. Connectors and the BYO messaging
  * channels (Telegram / Slack / Discord-with-bridge) ARE part of the open

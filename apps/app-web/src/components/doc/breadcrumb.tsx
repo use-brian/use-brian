@@ -33,6 +33,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { derivePageIcon } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import type { Crumb } from "@/lib/sidebar-tree";
 import { useT } from "@/lib/i18n/client";
 import { TeamAvatar } from "@/components/team-avatar";
@@ -261,19 +262,22 @@ function RenamePopover({
   );
 }
 
-/** A crumb's leading icon: the emoji if set, else the type-derived glyph. */
+/** A crumb's leading icon: the emoji/image if set, else the derived glyph. */
 function CrumbIcon({ crumb }: { crumb: Crumb }) {
-  if (crumb.icon) {
-    return (
-      <span className="shrink-0 text-[15px] leading-none">{crumb.icon}</span>
-    );
-  }
   const Glyph = derivePageIcon({
     entity: crumb.entity,
     viewType: crumb.viewType,
     nameOrigin: crumb.nameOrigin,
   });
-  return <Glyph className="size-4 shrink-0 text-muted-foreground" aria-hidden />;
+  return (
+    <PageIcon
+      icon={crumb.icon}
+      fallback={Glyph}
+      emojiClassName="shrink-0 text-[15px] leading-none"
+      glyphClassName="size-4 shrink-0 text-muted-foreground"
+      imgClassName="size-4 shrink-0 rounded-[3px] object-cover"
+    />
+  );
 }
 
 function Separator({ t }: { t: ReturnType<typeof useT>["docPage"] }) {

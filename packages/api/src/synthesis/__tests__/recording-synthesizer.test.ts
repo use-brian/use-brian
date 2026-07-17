@@ -7,6 +7,7 @@ const loadBuiltinSkillsMock = vi.hoisted(() => vi.fn())
 const createDocToolsMock = vi.hoisted(() => vi.fn())
 const createCrmToolsMock = vi.hoisted(() => vi.fn())
 const createTaskToolsMock = vi.hoisted(() => vi.fn())
+const createMemoryToolsMock = vi.hoisted(() => vi.fn())
 
 vi.mock('../synthesize.js', async (orig) => ({
   ...(await orig<typeof import('../synthesize.js')>()),
@@ -18,6 +19,7 @@ vi.mock('@sidanclaw/core', async (orig) => ({
   createDocTools: createDocToolsMock,
   createCrmTools: createCrmToolsMock,
   createTaskTools: createTaskToolsMock,
+  createMemoryTools: createMemoryToolsMock,
 }))
 vi.mock('../../recordings/recording-search-tool.js', () => ({
   createSearchRecordingTool: vi.fn(() => ({ name: 'searchRecording' })),
@@ -64,6 +66,9 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     createDocToolsMock.mockReset().mockReturnValue({ renderPage: {}, patchPage: {}, getCurrentPage: {} })
     createCrmToolsMock.mockReset().mockReturnValue({ saveCompany: {}, saveContact: {}, saveDeal: {} })
     createTaskToolsMock.mockReset().mockReturnValue({ saveTask: {} })
+    createMemoryToolsMock
+      .mockReset()
+      .mockReturnValue({ saveMemory: {}, getMemory: {}, deleteMemory: {} })
   })
 
   it('resolves a workspace-authored blueprint and runs synthesis on the recording anchor', async () => {
@@ -95,6 +100,36 @@ describe('[COMP:api/recording-synthesizer] createRecordingSynthesizer', () => {
     const res = await createRecordingSynthesizer(deps())({ ...ARGS, blueprintSlug: 'nope' })
     expect(res).toBeNull()
     expect(synthesizeMock).not.toHaveBeenCalled()
+  })
+
+  it('binds saveMemory (extracted, episode-anchored) only when a memory store is wired', async () => {
+    const resolveWorkspaceBlueprint = vi.fn().mockResolvedValue({ body: 'WS BODY', title: 'T' })
+
+    // Without a memory store: the CRM + task set only — the prompt must not
+    // name a tool that is not bound (tool-awareness).
+    await createRecordingSynthesizer(deps({ resolveWorkspaceBlueprint }))(ARGS)
+    let engineDeps = synthesizeMock.mock.calls[0][3]
+    expect(Array.from(engineDeps.brainWriteTools.keys())).toEqual([
+      'saveCompany',
+      'saveContact',
+      'saveDeal',
+      'saveTask',
+    ])
+    expect(createMemoryToolsMock).not.toHaveBeenCalled()
+
+    // With one: saveMemory joins, built with extracted provenance anchored to
+    // the recording Episode (the same anchors the CRM/task writes carry).
+    synthesizeMock.mockClear()
+    await createRecordingSynthesizer(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      deps({ resolveWorkspaceBlueprint, memoryStore: { create: vi.fn() } as any }),
+    )(ARGS)
+    engineDeps = synthesizeMock.mock.calls[0][3]
+    expect(engineDeps.brainWriteTools.has('saveMemory')).toBe(true)
+    expect(createMemoryToolsMock).toHaveBeenCalledWith(expect.anything(), {
+      writeSource: 'extracted',
+      writeSourceEpisodeId: 'rec-1',
+    })
   })
 
   it('resolves a document blueprint from a page template with an extraction spec', async () => {

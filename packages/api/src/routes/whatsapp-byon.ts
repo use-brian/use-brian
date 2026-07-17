@@ -73,6 +73,13 @@ export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
       return
     }
     const input = parsed.data
+    // Hosted media intake is mounted as the later closed router. Let it own
+    // streamed references; otherwise this BYON router ACKs first and the bytes
+    // are uploaded successfully but never become a recording/document artifact.
+    if (input.mediaRef && opts.passUnknownToFallback) {
+      next()
+      return
+    }
     if (!input.text.trim() || input.text.trim() === '<media:sticker>') {
       res.json({ ok: true })
       return

@@ -27,8 +27,8 @@
 import type { Block } from '../views/blocks.js'
 import { markdownToBlocks, normalizeMarkdownBlocks } from './markdown.js'
 import {
-  BLUEPRINT_CAPTURE_KINDS,
-  type BlueprintCaptureKind,
+  ENTITY_REF_KINDS,
+  type EntityRefKind,
   type ExtractionField,
 } from './custom-template-types.js'
 
@@ -42,7 +42,7 @@ export type BlueprintEntityRefValue = {
   name: string
   /** Present when the reference resolved to a live brain entity. */
   entityId?: string
-  kind?: BlueprintCaptureKind
+  kind?: EntityRefKind
 }
 
 export type FieldValidation =
@@ -121,8 +121,8 @@ export function validateFieldValue(field: ExtractionField, raw: unknown): FieldV
           error: `"${field.key}" expects an entity name (or { name, entityId? })`,
         }
       }
-      if (kind && !(BLUEPRINT_CAPTURE_KINDS as readonly string[]).includes(kind)) {
-        return { ok: false, error: `"${field.key}" kind must be one of: ${BLUEPRINT_CAPTURE_KINDS.join(', ')}` }
+      if (kind && !(ENTITY_REF_KINDS as readonly string[]).includes(kind)) {
+        return { ok: false, error: `"${field.key}" kind must be one of: ${ENTITY_REF_KINDS.join(', ')}` }
       }
       if (kind && field.entityKind && kind !== field.entityKind) {
         return { ok: false, error: `"${field.key}" expects a ${field.entityKind}` }
@@ -130,7 +130,7 @@ export function validateFieldValue(field: ExtractionField, raw: unknown): FieldV
       const value: BlueprintEntityRefValue = {
         name,
         ...(entityId ? { entityId } : {}),
-        kind: (kind as BlueprintCaptureKind | undefined) ?? field.entityKind,
+        kind: (kind as EntityRefKind | undefined) ?? field.entityKind,
       }
       return { ok: true, value }
     }

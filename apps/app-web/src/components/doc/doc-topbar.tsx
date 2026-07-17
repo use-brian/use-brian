@@ -43,6 +43,7 @@ import {
   type ViewEntity,
   type ViewType,
 } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import { type PanelId } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
 
@@ -271,7 +272,17 @@ function TabIcon({ tab }: { tab: TabView }) {
   if (tab.panel === "goals") {
     return <Target className="size-4 text-violet-500" aria-hidden />;
   }
-  if (tab.icon) return <span aria-hidden>{tab.icon}</span>;
+  if (tab.icon) {
+    const Fallback = FileText;
+    return (
+      <PageIcon
+        icon={tab.icon}
+        fallback={Fallback}
+        glyphClassName="size-4 text-muted-foreground"
+        imgClassName="size-4 rounded-[3px] object-cover"
+      />
+    );
+  }
   // A pageless tab is the Suggested-for-you home → the AI sparkle (palette
   // primary), matching the sidebar entry.
   if (!tab.pageId) {

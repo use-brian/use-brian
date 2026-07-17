@@ -18,6 +18,19 @@
  * freezes in backgrounded tabs), and the thread auto-follows the stream
  * only while its bottom sentinel is visible (scrolling up detaches).
  *
+ * Tool activity stays compact: past `TOOL_CHIP_COLLAPSE_THRESHOLD` chips,
+ * finished tools fold into one expandable "{count} steps" summary chip
+ * (`partitionToolChips`) — while streaming only the currently-running
+ * tools render individually, so a deep-research turn never buries the
+ * answer under four rows of done-chips.
+ *
+ * The first message's preamble is primed with what the page already
+ * knows — the Source section's origin clue (fetched via the cheap
+ * `explain` endpoint, in parallel with session creation) and the row's
+ * created/updated timestamps — so the model answers "why was this
+ * saved?" from context instead of spelunking the workspace with a dozen
+ * read-only tool calls, and says plainly when no source was recorded.
+ *
  * The conversation is an ephemeral inspection session with the workspace's
  * primary assistant (read-only tool registry: the model can explain the
  * entry but cannot change it; every mutation stays on the page above).
@@ -32,7 +45,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, Loader2, Square } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, Loader2, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -44,9 +57,12 @@ import {
   type ToolUsed,
 } from "@sidanclaw/chat-ui";
 import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
+import { originClue } from "./source-origin";
 import {
   createInspectionSession,
+  explainBrainRow,
   type BrainPrimitive,
+  type ExplainContext,
   type InspectionSession,
 } from "@/lib/api/brain-inbox";
 
@@ -56,22 +72,83 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
  * Model-facing context block prefixed to the thread's first message.
  * Generalised from the old memory-only preamble: the thread covers every
  * entry kind (task / memory / file / CRM / entity).
+ *
+ * `context` primes the model with what the page already shows so it
+ * answers provenance questions from here instead of tool-hunting:
+ * `originLine` is the Source section's clue — a string when an origin
+ * resolved, `null` when the explain endpoint answered but no source was
+ * ever recorded (the model must say so rather than search), `undefined`
+ * when we couldn't fetch it (say nothing, let the model look).
  */
 export function buildEntryPreamble(
   summary: string,
   detail: string | null,
+  context?: {
+    createdAt?: string;
+    updatedAt?: string;
+    originLine?: string | null;
+  },
 ): string {
   const detailLine = detail ? `\nDetail: ${detail}` : "";
+  let known = "";
+  if (context?.createdAt) {
+    const updated =
+      context.updatedAt && context.updatedAt !== context.createdAt
+        ? ` · Last updated: ${context.updatedAt}`
+        : "";
+    known += `Created: ${context.createdAt}${updated}\n`;
+  }
+  if (context?.originLine) {
+    known += `Source (already shown on the page): ${context.originLine}\n`;
+  } else if (context && context.originLine === null) {
+    known +=
+      `Source: none recorded. The platform did not capture where this ` +
+      `entry came from (entries saved before source tracking shipped ` +
+      `carry no source). If the user asks where it came from, say that ` +
+      `plainly instead of searching for it.\n`;
+  }
   return (
     `[Entry review context]\n` +
     `The user is reviewing a brain entry on its detail page:\n` +
-    `Summary: ${summary}${detailLine}\n\n` +
+    `Summary: ${summary}${detailLine}\n` +
+    known +
+    `\n` +
     `Help the user understand this entry: why it exists, whether it is ` +
     `right, and what it connects to. You are read-only here; you cannot ` +
     `save, delete, or modify entries. The user edits directly on the page. ` +
-    `Be brief and concrete.\n\n` +
+    `Be brief and concrete. Lean on the context above before reaching ` +
+    `for tools; a couple of targeted lookups beats a broad sweep.\n\n` +
     `[User asks]\n`
   );
+}
+
+/** Fold ceiling for the tool-activity strip — past this many chips the
+ *  finished tools collapse into one "{count} steps" summary chip. */
+export const TOOL_CHIP_COLLAPSE_THRESHOLD = 3;
+
+/**
+ * Pure fold decision for the tool-activity strip. At or under the
+ * threshold every chip renders. Over it, finished tools fold into the
+ * summary chip: while streaming the currently-running tools stay visible
+ * next to it; once the turn settles everything folds. `expanded` reveals
+ * the full list (the summary chip is the toggle). `foldedCount` is the
+ * number of chips the summary chip stands for — stable across the
+ * expand/collapse toggle so the label doesn't jump.
+ */
+export function partitionToolChips(
+  tools: ToolUsed[],
+  opts: { streaming: boolean; expanded: boolean },
+): { visible: ToolUsed[]; foldedCount: number } {
+  if (tools.length <= TOOL_CHIP_COLLAPSE_THRESHOLD) {
+    return { visible: tools, foldedCount: 0 };
+  }
+  const running = opts.streaming
+    ? tools.filter((tool) => tool.status === "running")
+    : [];
+  return {
+    visible: opts.expanded ? tools : running,
+    foldedCount: tools.length - running.length,
+  };
 }
 
 /**
@@ -126,6 +203,10 @@ type Props = {
   rowId: string;
   entrySummary: string;
   entryDetail: string | null;
+  /** Row audit timestamps (ISO) — primed into the first message's
+   *  preamble so the model never tool-hunts for them. */
+  entryCreatedAt?: string;
+  entryUpdatedAt?: string;
   /** Bumped by the drawer toolbar's "Ask about this" item — scrolls the
    *  thread into view and focuses the composer. */
   focusTick: number;
@@ -137,12 +218,13 @@ export function EntryThread({
   rowId,
   entrySummary,
   entryDetail,
+  entryCreatedAt,
+  entryUpdatedAt,
   focusTick,
 }: Props) {
   const t = useT();
   const labels = t.brainPage.detailDrawer;
   const review = t.memoriesReview;
-  const narration = t.chat.toolNarration as Record<string, string>;
 
   const [turns, setTurns] = useState<ThreadTurn[]>([]);
   const [draft, setDraft] = useState("");
@@ -241,6 +323,19 @@ export function EntryThread({
     return result;
   }
 
+  // Explain context for the preamble — fetched once, in parallel with the
+  // session mint (both cheap; no LLM). `undefined` = never fetched,
+  // `null` = fetch failed (the preamble stays silent about provenance).
+  const explainRef = useRef<ExplainContext | null | undefined>(undefined);
+  async function fetchExplainOnce(): Promise<ExplainContext | null> {
+    if (explainRef.current !== undefined) return explainRef.current;
+    const ctx = await explainBrainRow(workspaceId, primitive, rowId).catch(
+      () => null,
+    );
+    explainRef.current = ctx;
+    return ctx;
+  }
+
   async function send(raw: string) {
     const text = raw.trim();
     if (busy || text.length === 0) return;
@@ -268,7 +363,10 @@ export function EntryThread({
     failedRef.current = null;
 
     try {
-      const session = await ensureSession();
+      const [session, explain] = await Promise.all([
+        ensureSession(),
+        isFirst ? fetchExplainOnce() : Promise.resolve(null),
+      ]);
       if (!session) {
         // Session creation failed — withdraw the optimistic pair so the
         // chips return, restore the draft, and let the error line explain.
@@ -278,7 +376,20 @@ export function EntryThread({
       }
 
       const messageBody = isFirst
-        ? buildEntryPreamble(entrySummary, entryDetail) + text
+        ? buildEntryPreamble(entrySummary, entryDetail, {
+            createdAt: entryCreatedAt,
+            updatedAt: entryUpdatedAt,
+            // Fetch failed → undefined (silence); fetched → the Source
+            // section's clue, or null when no origin was ever recorded.
+            originLine: explain
+              ? originClue(
+                  explain.origin,
+                  review,
+                  explain.savedAt,
+                  explain.savedByAssistantName,
+                )
+              : undefined,
+          }) + text
         : text;
 
       await startStream({
@@ -444,28 +555,7 @@ export function EntryThread({
                   </div>
 
                   {turn.tools.length > 0 && (
-                    <div className="flex flex-wrap gap-1">
-                      {turn.tools.map((tool) => (
-                        <span
-                          key={tool.id}
-                          className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground"
-                        >
-                          {tool.status === "running" ? (
-                            <Loader2
-                              className="size-3 animate-spin"
-                              aria-hidden
-                            />
-                          ) : (
-                            <Check
-                              className="size-3 text-emerald-500"
-                              aria-hidden
-                            />
-                          )}
-                          {narration[tool.name] ??
-                            format(narration.generic, { name: tool.name })}
-                        </span>
-                      ))}
-                    </div>
+                    <ToolActivity tools={turn.tools} streaming={streamingThis} />
                   )}
 
                   {awaitingText ? (
@@ -562,5 +652,63 @@ export function EntryThread({
           pinned; scrolling up detaches until the user returns. */}
       <div ref={bottomRef} aria-hidden />
     </section>
+  );
+}
+
+/**
+ * The turn's tool-activity strip. Under the fold threshold it renders the
+ * classic per-tool chips; over it, finished tools collapse into a single
+ * "{count} steps" summary chip that toggles the full list — while a turn
+ * streams, the currently-running tools stay visible beside the summary so
+ * live progress never disappears.
+ */
+function ToolActivity({
+  tools,
+  streaming,
+}: {
+  tools: ToolUsed[];
+  streaming: boolean;
+}) {
+  const t = useT();
+  const labels = t.brainPage.detailDrawer;
+  const narration = t.chat.toolNarration as Record<string, string>;
+  const [expanded, setExpanded] = useState(false);
+  const { visible, foldedCount } = partitionToolChips(tools, {
+    streaming,
+    expanded,
+  });
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {foldedCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Check className="size-3 text-emerald-500" aria-hidden />
+          {format(labels.threadToolsSummary, { count: foldedCount })}
+          <ChevronDown
+            className={cn("size-3 transition-transform", expanded && "rotate-180")}
+            aria-hidden
+          />
+        </button>
+      )}
+      {visible.map((tool) => (
+        <span
+          key={tool.id}
+          className="inline-flex items-center gap-1 rounded-full bg-muted/60 px-2 py-0.5 text-[11px] text-muted-foreground"
+        >
+          {tool.status === "running" ? (
+            <Loader2 className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <Check className="size-3 text-emerald-500" aria-hidden />
+          )}
+          {narration[tool.name] ??
+            format(narration.generic, { name: tool.name })}
+        </span>
+      ))}
+    </div>
   );
 }

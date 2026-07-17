@@ -2,6 +2,8 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import multer, { MulterError } from 'multer'
 import { z } from 'zod'
 import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } from '../db/users.js'
+import { getWorkspaceFileById } from '../db/workspace-files.js'
+import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
 import { parseFileContent, shouldInline, type FileStore } from '@sidanclaw/core'
 import { FileIngestError } from '../files/ingest-error.js'
@@ -341,6 +343,90 @@ export function fileRoutes(
     }
 
     res.json({ files: results })
+  })
+
+  /**
+   * POST /api/files/:fileId/ingest — deterministic (re-)ingestion of a file
+   * ALREADY stored in workspace_files (file-artifacts.md §"Re-ingest").
+   * Enqueues the same parse → chunk → Pipeline B routine the async worker runs
+   * for every boundary, so coverage, provenance, metering, and failure
+   * surfacing match a fresh ingest. Body: { workspaceId, confirm? }.
+   *
+   * Double-ingestion guard: a file that already produced an episode
+   * (source_episode_id set) answers 409 { requiresConfirmation: true, … }
+   * until the caller re-sends with confirm: true — re-ingesting spends model
+   * credits and can duplicate extracted memories, so it is never silent. An
+   * in-flight job answers 409 { error: 'ingest_in_flight' } (queue-level
+   * idempotency; nothing new was started).
+   */
+  router.post('/:fileId/ingest', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const body = (req.body ?? {}) as { workspaceId?: string; confirm?: boolean }
+    if (!body.workspaceId || typeof body.workspaceId !== 'string') {
+      res.status(400).json({ error: 'workspaceId is required' })
+      return
+    }
+
+    // Same gate + actor as POST /ingest: membership via the workspace primary
+    // (404 hides existence), which is also the assistant the episode binds to.
+    const assistant = await getWorkspacePrimaryAssistant(userId, body.workspaceId)
+    if (!assistant || !assistant.workspaceId) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+
+    const file = await getWorkspaceFileById(
+      {
+        workspaceId: assistant.workspaceId,
+        userId,
+        assistantId: assistant.id,
+        assistantKind: assistant.kind,
+        clearance: assistant.clearance,
+        compartments: assistant.compartments,
+      },
+      req.params.fileId,
+    )
+    if (!file) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (file.mime.startsWith('audio/') || file.mime.startsWith('video/')) {
+      res.status(400).json({
+        error: 'media_owned_by_recordings',
+        detail: 'Audio/video ingests through the recording pipeline, not file ingest.',
+      })
+      return
+    }
+
+    if (file.sourceEpisodeId && body.confirm !== true) {
+      res.status(409).json({
+        requiresConfirmation: true,
+        reason: 'already_ingested',
+        fileId: file.id,
+        fileName: file.name,
+        sizeBytes: file.sizeBytes,
+        detail:
+          'This file was already ingested. Re-ingesting runs knowledge extraction again (model cost) and may duplicate extracted memories. Re-send with confirm: true to proceed.',
+      })
+      return
+    }
+
+    const { enqueued, jobId } = await enqueueFileIngestJob({
+      fileId: file.id,
+      workspaceId: assistant.workspaceId,
+      actingUserId: userId,
+      assistantId: assistant.id,
+      sourceLabel: file.sourceEpisodeId ? 'reingest' : 'upload',
+    })
+    if (!enqueued) {
+      res.status(409).json({ error: 'ingest_in_flight', detail: 'An ingest for this file is already running.' })
+      return
+    }
+    res.status(202).json({ fileId: file.id, status: 'queued', jobId })
   })
 
   /**

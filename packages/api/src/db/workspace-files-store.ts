@@ -64,8 +64,8 @@ export function createDbWorkspaceFilesStore(): WorkspaceFilesStore {
     getHistory(ctx, id) {
       return getWorkspaceFileHistory(ctx, id)
     },
-    retractByStorageBucketSystem(workspaceId, bucket, reason) {
-      return retractWorkspaceFilesByStorageBucket(workspaceId, bucket, reason)
+    retractByStorageBucketSystem(workspaceId, bucket, scheme, reason) {
+      return retractWorkspaceFilesByStorageBucket(workspaceId, bucket, scheme, reason)
     },
   }
 }

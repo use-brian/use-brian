@@ -98,7 +98,7 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
 
   // ── GET /:workspaceId/:id ───────────────────────────────────────
 
-  it('302-redirects a signed HTTPS read URL (prod GCS path)', async () => {
+  it('302-redirects a signed HTTPS read URL (cloud-storage path)', async () => {
     const deps = makeDeps()
     vi.mocked(deps.store.getById).mockResolvedValue({ id: 'wf_1', mime: 'image/png' } as never)
     vi.mocked(deps.gcs.signedReadUrl).mockResolvedValue('https://signed.example/ws_1/wf_1?sig=abc')
@@ -109,6 +109,28 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
     expect(res.status).toBe(302)
     expect(res.headers.location).toBe('https://signed.example/ws_1/wf_1?sig=abc')
     expect(deps.gcs.readBlob).not.toHaveBeenCalled()
+  })
+
+  it('routes a signed read through the backend recorded in storageUri', async () => {
+    const s3 = {
+      signedReadUrl: vi.fn().mockResolvedValue('https://s3.example/ws_1/wf_1?sig=abc'),
+      readBlob: vi.fn(),
+    }
+    const resolver = { forUri: vi.fn().mockResolvedValue(s3) }
+    const deps = makeDeps({ resolver: resolver as never })
+    vi.mocked(deps.store.getById).mockResolvedValue({
+      id: 'wf_1',
+      mime: 'image/png',
+      storageUri: 's3://customer-bucket/ws_1/wf_1',
+    } as never)
+
+    const app = createTestApp('/api/doc-files', docFilesRoutes(deps), { userId: 'u_1' })
+    const res = await request(app).get('/api/doc-files/ws_1/wf_1')
+
+    expect(res.status).toBe(302)
+    expect(res.headers.location).toBe('https://s3.example/ws_1/wf_1?sig=abc')
+    expect(resolver.forUri).toHaveBeenCalledWith('ws_1', 's3://customer-bucket/ws_1/wf_1')
+    expect(deps.gcs.signedReadUrl).not.toHaveBeenCalled()
   })
 
   it('streams the bytes when the signed URL is a local file:// (dev fallback)', async () => {

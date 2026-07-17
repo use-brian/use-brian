@@ -205,6 +205,54 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm — clarity gate (�
   })
 })
 
+describe('[COMP:api/goals-route] POST /api/goals/:id/outcome — inline edit', () => {
+  it('401 when unauthenticated (never reads or writes the goal)', async () => {
+    const { app } = makeApp({ role: 'member' })
+    const res = await request(app).post('/api/goals/g1/outcome').send({ outcome: 'x' })
+    expect(res.status).toBe(401)
+    expect(mockGetGoalById).not.toHaveBeenCalled()
+    expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
+  })
+
+  it('404 when the goal is absent / the caller is not a member (RLS-scoped)', async () => {
+    mockGetGoalById.mockResolvedValue(null as never)
+    const { app } = makeApp({ userId: 'stranger', role: null })
+    const res = await request(app).post('/api/goals/g1/outcome').send({ outcome: 'x' })
+    expect(res.status).toBe(404)
+    expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
+  })
+
+  it('400 when outcome is missing or blank (never writes)', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+    const res = await request(app).post('/api/goals/g1/outcome').send({ outcome: '   ' })
+    expect(res.status).toBe(400)
+    expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
+  })
+
+  it('409 refuses to edit a completed goal (a verified success is immutable)', async () => {
+    mockGetGoalById.mockResolvedValue({ ...DRAFT_GOAL, status: 'done', confirmedAt: NOW } as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+    const res = await request(app).post('/api/goals/g1/outcome').send({ outcome: 'rewrite history' })
+    expect(res.status).toBe(409)
+    expect(mockUpdateGoalSystem).not.toHaveBeenCalled()
+  })
+
+  it('updates the outcome (trimmed) without confirming a draft', async () => {
+    mockGetGoalById.mockResolvedValue(DRAFT_GOAL as never)
+    mockUpdateGoalSystem.mockResolvedValue({ ...DRAFT_GOAL, outcome: 'Close the Acme deal' } as never)
+    const { app } = makeApp({ userId: 'u1', role: 'member' })
+
+    const res = await request(app).post('/api/goals/g1/outcome').send({ outcome: '  Close the Acme deal  ' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.goal.outcome).toBe('Close the Acme deal')
+    // The draft stays a draft — no `confirm` rides the write.
+    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { outcome: 'Close the Acme deal' })
+  })
+})
+
 describe('[COMP:api/goals-route] POST /api/goals/:id/abandon — discard', () => {
   it('401 when unauthenticated (never reads or writes the goal)', async () => {
     const { app } = makeApp({ role: 'member' })

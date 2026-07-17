@@ -60,3 +60,13 @@ export {
   QWEN_FILETRANS_USD_PER_AUDIO_HOUR,
   type QwenFiletransOptions,
 } from './qwen-filetrans.js'
+export {
+  convertChineseScript,
+  containsHan,
+  type ChineseScript,
+} from './chinese-script.js'
+export {
+  transcriptionPrefsSchema,
+  parseTranscriptionPrefs,
+  type WorkspaceTranscriptionPrefs,
+} from './transcription-prefs.js'

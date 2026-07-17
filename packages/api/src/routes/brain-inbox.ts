@@ -41,6 +41,12 @@ import {
 } from '../db/brain-inbox-store.js'
 import { createInspectionSession } from '../db/sessions.js'
 import {
+  updateMemory,
+  getMemoryByIdSystem,
+  markVerifiedDirect,
+} from '../db/memories.js'
+import { recordVerification } from '../db/memory-verifications-store.js'
+import {
   updateEntity,
   reclassifyEntityKind,
   promoteEntityToCrm,
@@ -100,6 +106,12 @@ const VALID_PRIMITIVES: BrainInboxPrimitive[] = [
 function isValidPrimitive(s: string): s is BrainInboxPrimitive {
   return (VALID_PRIMITIVES as string[]).includes(s)
 }
+
+/** Accepted values for the conventional `attributes.priority` key (the
+ *  frozen-v1 tasks schema has no typed priority column — tasks.md design
+ *  decision #1). Validated here at the REST boundary only; the store layer
+ *  keeps attributes free-form. */
+const TASK_PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const
 
 export function brainInboxRoutes({
   workspaceStore,
@@ -362,6 +374,7 @@ export function brainInboxRoutes({
         id: row.id,
         workspaceId: row.workspaceId,
         createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
         createdByAssistantId: row.createdByAssistantId,
         verifiedByUserId: row.verifiedByUserId,
         verifiedAt: row.verifiedAt,
@@ -522,10 +535,19 @@ export function brainInboxRoutes({
     const userId = (req as any).userId as string
 
     if (primitiveParam === 'memory') {
-      // Memory adjust — delegate to the existing per-assistant route by
-      // returning a 308 redirect. The existing route requires the
-      // assistantId; we look it up from the memory row.
-      const assistantLookup = await query<{ assistantId: string }>(
+      // Memory adjust. Assistant-scoped memories delegate to the LOCKED
+      // per-assistant route via a 308 redirect (it carries the membership
+      // gate + audit envelope). But workspace-shared / personal /
+      // programmatic (brain-key) memories have no owning assistant
+      // (assistant_id IS NULL): the per-assistant route can't gate them
+      // (it hard-requires before.assistantId === assistantId) and building
+      // `/api/assistants/${null}/...` sent the literal string "null" into a
+      // uuid membership query (500 + pool desync). Handle those inline here —
+      // this route is already workspace-scoped and `requireWorkspaceMember`
+      // above gated access. The mutation core mirrors the per-assistant
+      // adjust (memories.ts `/:memoryId/adjust`, LOCKED #2); keep them in
+      // sync. See docs/architecture/brain/corrections.md.
+      const assistantLookup = await query<{ assistantId: string | null }>(
         `SELECT assistant_id as "assistantId" FROM memories WHERE id = $1 AND valid_to IS NULL`,
         [rowId],
       )
@@ -533,11 +555,198 @@ export function brainInboxRoutes({
         res.status(404).json({ error: 'Memory not found' })
         return
       }
-      const assistantId = assistantLookup.rows[0].assistantId
-      res.redirect(
-        308,
-        `/api/assistants/${encodeURIComponent(assistantId)}/memories/${encodeURIComponent(rowId)}/adjust`,
-      )
+      const memoryAssistantId = assistantLookup.rows[0].assistantId
+      if (memoryAssistantId) {
+        res.redirect(
+          308,
+          `/api/assistants/${encodeURIComponent(memoryAssistantId)}/memories/${encodeURIComponent(rowId)}/adjust`,
+        )
+        return
+      }
+
+      // ── Null-assistant (workspace-shared / personal) memory adjust ──
+      const { scope, sensitivity, summary, detail, reason } = req.body as {
+        scope?: string
+        sensitivity?: string
+        summary?: string
+        detail?: string
+        reason?: string
+      }
+
+      // Validate up front (mirrors memories.ts adjust) so we never mint a
+      // partial audit trail before bailing on a downstream error.
+      let nextScope: 'shared' | 'workspace' | undefined
+      let nextWorkspaceId: string | null | undefined
+      let scopeUserValue: 'personal' | 'workspace_shared' | 'workspace' | undefined
+      if (scope !== undefined) {
+        if (scope === 'personal') {
+          nextScope = 'shared'
+          nextWorkspaceId = null
+          scopeUserValue = 'personal'
+        } else if (scope === 'workspace_shared') {
+          nextScope = 'shared'
+          scopeUserValue = 'workspace_shared'
+        } else if (scope === 'workspace') {
+          nextScope = 'workspace'
+          scopeUserValue = 'workspace'
+        } else {
+          res
+            .status(400)
+            .json({ error: 'scope must be personal, workspace_shared, or workspace' })
+          return
+        }
+      }
+
+      let nextSensitivity: 'public' | 'internal' | 'confidential' | undefined
+      if (sensitivity !== undefined) {
+        if (
+          sensitivity !== 'public' &&
+          sensitivity !== 'internal' &&
+          sensitivity !== 'confidential'
+        ) {
+          res
+            .status(400)
+            .json({ error: 'sensitivity must be public, internal, or confidential' })
+          return
+        }
+        nextSensitivity = sensitivity
+      }
+
+      let nextSummary: string | undefined
+      if (summary !== undefined) {
+        if (typeof summary !== 'string' || summary.trim().length === 0) {
+          res.status(400).json({ error: 'summary must be a non-empty string' })
+          return
+        }
+        if (summary.length > 500) {
+          res.status(400).json({ error: 'summary must be 500 characters or less' })
+          return
+        }
+        nextSummary = summary.trim()
+      }
+
+      let nextDetail: string | undefined
+      if (detail !== undefined) {
+        if (typeof detail !== 'string') {
+          res.status(400).json({ error: 'detail must be a string' })
+          return
+        }
+        nextDetail = detail
+      }
+
+      if (
+        nextScope === undefined &&
+        nextSensitivity === undefined &&
+        nextSummary === undefined &&
+        nextDetail === undefined
+      ) {
+        res.status(400).json({
+          error:
+            'At least one field (scope, sensitivity, summary, detail) is required',
+        })
+        return
+      }
+
+      try {
+        const before = await getMemoryByIdSystem(rowId)
+        // Authz: the memory must live in the workspace the caller is a
+        // member of (gated above). Replaces the per-assistant route's
+        // `before.assistantId === assistantId` membership check.
+        if (!before || before.workspaceId !== workspaceId) {
+          res.status(404).json({ error: 'Memory not found' })
+          return
+        }
+
+        // Default workspaceId for workspace/workspace_shared scope to the
+        // memory's own workspace; explicit personal scope clears it.
+        const computedWorkspaceId =
+          nextWorkspaceId === null
+            ? null
+            : nextScope !== undefined
+              ? before.workspaceId
+              : undefined
+
+        const updated = await updateMemory(rowId, {
+          scope: nextScope,
+          workspaceId: computedWorkspaceId,
+          sensitivity: nextSensitivity,
+          summary: nextSummary,
+          detail: nextDetail,
+        })
+        if (!updated) {
+          res.status(404).json({ error: 'Memory not found' })
+          return
+        }
+
+        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
+        const writes: Promise<unknown>[] = []
+        if (nextScope !== undefined) {
+          const modelScope =
+            before.scope === 'workspace'
+              ? 'workspace'
+              : before.workspaceId
+                ? 'workspace_shared'
+                : 'personal'
+          if (modelScope !== scopeUserValue) {
+            writes.push(
+              recordVerification({
+                memoryId: rowId,
+                workspaceId: updated.workspaceId ?? before.workspaceId,
+                verifiedBy: userId,
+                action: 'adjust_scope',
+                modelValue: modelScope,
+                userValue: scopeUserValue,
+                reason: reasonText,
+              }),
+            )
+          }
+        }
+        if (nextSensitivity !== undefined && nextSensitivity !== before.sensitivity) {
+          writes.push(
+            recordVerification({
+              memoryId: rowId,
+              workspaceId: updated.workspaceId ?? before.workspaceId,
+              verifiedBy: userId,
+              action: 'adjust_sensitivity',
+              modelValue: before.sensitivity,
+              userValue: nextSensitivity,
+              reason: reasonText,
+            }),
+          )
+        }
+        if (
+          (nextSummary !== undefined && nextSummary !== before.summary) ||
+          (nextDetail !== undefined && nextDetail !== before.detail)
+        ) {
+          writes.push(
+            recordVerification({
+              memoryId: rowId,
+              workspaceId: updated.workspaceId ?? before.workspaceId,
+              verifiedBy: userId,
+              action: 'edit_summary',
+              modelValue: { summary: before.summary, detail: before.detail },
+              userValue: {
+                summary: nextSummary ?? before.summary,
+                detail: nextDetail ?? before.detail,
+              },
+              reason: reasonText,
+            }),
+          )
+        }
+        await Promise.all(writes)
+
+        const stamped = await markVerifiedDirect(updated.id, userId)
+        void notifyBrainInboxChange(
+          updated.workspaceId ?? before.workspaceId,
+          'memory',
+          updated.id,
+          'update',
+        )
+        res.json({ memory: stamped ?? updated })
+      } catch (err) {
+        console.error('[brain-inbox] workspace memory adjust failed:', err)
+        res.status(500).json({ error: 'Failed to adjust memory' })
+      }
       return
     }
 
@@ -906,15 +1115,21 @@ export function brainInboxRoutes({
     }
 
     if (primitiveParam === 'task') {
-      // Task adjust — v1 supports the doc-like editable fields surfaced in
-      // the Brain detail panel: title, status, due date, and tags. Each
+      // Task adjust — the editable fields surfaced in the Brain detail
+      // panel: title, status, due date, tags, assignee, and priority.
+      // `assignee_id` must be a workspace_members row id in THIS workspace
+      // (null clears). `priority` is the conventional `attributes.priority`
+      // key (the frozen-v1 schema has no typed column — tasks.md decision
+      // #1), merged into the row's attributes (null removes the key). Each
       // edit supersedes the row (a new bi-temporal id), so the preserved
       // old row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags } = req.body as {
+      const { title, status, due_at, tags, assignee_id, priority } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
         tags?: unknown
+        assignee_id?: unknown
+        priority?: unknown
       }
 
       const fields: TaskUpdateFields = {}
@@ -966,9 +1181,33 @@ export function brainInboxRoutes({
         fields.tags = (tags as string[]).map((s) => s.trim()).filter(Boolean)
       }
 
-      if (Object.keys(fields).length === 0) {
+      if (assignee_id !== undefined) {
+        // null clears; a string is validated against workspace_members below
+        // (after the ownership pre-check) so a cross-workspace member id can
+        // never land on a task.
+        if (assignee_id !== null && (typeof assignee_id !== 'string' || assignee_id.length === 0)) {
+          res.status(400).json({ error: 'assignee_id must be a workspace member id or null' })
+          return
+        }
+        fields.assigneeId = assignee_id as string | null
+      }
+
+      // Tracked outside `fields` — it merges into the row's current
+      // attributes, which we only have after the pre-check SELECT.
+      let priorityChange: string | null | undefined
+      if (priority !== undefined) {
+        if (priority !== null && !TASK_PRIORITIES.includes(priority as (typeof TASK_PRIORITIES)[number])) {
+          res.status(400).json({
+            error: `priority must be one of ${TASK_PRIORITIES.join(', ')}, or null to clear`,
+          })
+          return
+        }
+        priorityChange = priority as string | null
+      }
+
+      if (Object.keys(fields).length === 0 && priorityChange === undefined) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, priority) is required',
         })
         return
       }
@@ -976,9 +1215,11 @@ export function brainInboxRoutes({
       try {
         // Workspace-ownership check — requireWorkspaceMember already gated
         // membership; this confirms the row lives in *this* workspace and
-        // distinguishes 404 (gone) from 403 (cross-workspace).
-        const before = await query<{ workspaceId: string }>(
-          `SELECT workspace_id as "workspaceId" FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+        // distinguishes 404 (gone) from 403 (cross-workspace). Also carries
+        // the live attributes so a priority change merges instead of
+        // clobbering sibling keys (attributes is overwrite-on-update).
+        const before = await query<{ workspaceId: string; attributes: unknown }>(
+          `SELECT workspace_id as "workspaceId", attributes FROM tasks WHERE id = $1 AND valid_to IS NULL`,
           [rowId],
         )
         if (before.rows.length === 0) {
@@ -988,6 +1229,28 @@ export function brainInboxRoutes({
         if (before.rows[0].workspaceId !== workspaceId) {
           res.status(403).json({ error: 'Task belongs to a different workspace' })
           return
+        }
+
+        if (typeof fields.assigneeId === 'string') {
+          const member = await query(
+            `SELECT id FROM workspace_members WHERE id = $1 AND workspace_id = $2`,
+            [fields.assigneeId, workspaceId],
+          )
+          if (member.rows.length === 0) {
+            res.status(400).json({ error: 'assignee_id is not a member of this workspace' })
+            return
+          }
+        }
+
+        if (priorityChange !== undefined) {
+          const raw = before.rows[0].attributes
+          const attrs: Record<string, unknown> =
+            raw && typeof raw === 'object' && !Array.isArray(raw)
+              ? { ...(raw as Record<string, unknown>) }
+              : {}
+          if (priorityChange === null) delete attrs.priority
+          else attrs.priority = priorityChange
+          fields.attributes = attrs
         }
 
         const updated = await updateTask(userId, rowId, fields)

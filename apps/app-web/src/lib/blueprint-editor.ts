@@ -19,10 +19,12 @@
 import type {
   BlueprintCaptureKind,
   CustomPageTemplateSummary,
+  EntityRefKind,
   ExtractionField,
   ExtractionFieldType,
   ExtractionSpec,
 } from "@sidanclaw/doc-model";
+import { BLUEPRINT_CAPTURE_KINDS } from "@sidanclaw/doc-model";
 import { fieldKeyFromHeading } from "@sidanclaw/doc-model";
 import type { CustomTemplateUpdateInput } from "@/lib/api/views";
 
@@ -45,7 +47,7 @@ export type DraftField = {
   /** Enum-only; kept across type switches so flipping back is lossless. */
   options: string[];
   /** entityRef-only; "" = not chosen yet. */
-  entityKind: BlueprintCaptureKind | "";
+  entityKind: EntityRefKind | "";
   required: boolean;
   outputType: "prose" | "list" | "table";
 };
@@ -54,6 +56,11 @@ export type BlueprintDraft = {
   name: string;
   description: string;
   fields: DraftField[];
+  /** Enabled capture kinds, kept in canonical BLUEPRINT_CAPTURE_KINDS order. */
+  capture: BlueprintCaptureKind[];
+  /** Per-kind capture guidance. Entries survive toggling a kind off (lossless
+   *  editing); disabled kinds are dropped at the wire by `draftToExtraction`. */
+  captureInstructions: Partial<Record<BlueprintCaptureKind, string>>;
 };
 
 /** Validation issue codes — the page maps these to dictionary strings. */
@@ -101,7 +108,32 @@ export function draftFromTemplate(
     name: template.name,
     description: template.description ?? "",
     fields: (template.extraction?.fields ?? []).map((f) => fieldFromSpec(f, genId)),
+    capture: template.extraction?.capture ?? [],
+    captureInstructions: { ...(template.extraction?.captureInstructions ?? {}) },
   };
+}
+
+/** Toggle a capture kind on/off, keeping canonical enum order. The kind's
+ *  instruction text is intentionally KEPT when toggling off, so re-enabling
+ *  is lossless; the wire mapping drops instructions of disabled kinds. */
+export function toggleCaptureKind(
+  draft: BlueprintDraft,
+  kind: BlueprintCaptureKind,
+): BlueprintDraft {
+  const enabled = draft.capture.includes(kind);
+  const capture = enabled
+    ? draft.capture.filter((k) => k !== kind)
+    : BLUEPRINT_CAPTURE_KINDS.filter((k) => k === kind || draft.capture.includes(k));
+  return { ...draft, capture };
+}
+
+/** Set (or clear) the per-kind capture instruction text. */
+export function setCaptureInstruction(
+  draft: BlueprintDraft,
+  kind: BlueprintCaptureKind,
+  text: string,
+): BlueprintDraft {
+  return { ...draft, captureInstructions: { ...draft.captureInstructions, [kind]: text } };
 }
 
 /** A blank field appended by "Add field" — markdown, key derives from the
@@ -179,14 +211,15 @@ export function validateDraft(draft: BlueprintDraft): DraftIssue[] {
   return issues;
 }
 
-/** The wire spec a valid draft persists. `capture` is not edited by the
- *  detail page (v1), so the caller passes the template's current value
- *  through. Type-irrelevant state (options on a non-enum, kind on a
- *  non-entityRef) is dropped at this boundary. */
-export function draftToExtraction(
-  draft: BlueprintDraft,
-  capture: BlueprintCaptureKind[],
-): ExtractionSpec {
+/** The wire spec a valid draft persists. Type-irrelevant state (options on a
+ *  non-enum, kind on a non-entityRef) is dropped at this boundary, as are
+ *  capture instructions for kinds that are not enabled or are blank. */
+export function draftToExtraction(draft: BlueprintDraft): ExtractionSpec {
+  const captureInstructions = Object.fromEntries(
+    draft.capture
+      .map((kind) => [kind, draft.captureInstructions[kind]?.trim() ?? ""] as const)
+      .filter(([, text]) => text.length > 0),
+  );
   return {
     fields: draft.fields.map((f) => ({
       key: f.key,
@@ -200,7 +233,8 @@ export function draftToExtraction(
       required: f.required,
       ...(f.type === "markdown" ? { outputType: f.outputType } : {}),
     })),
-    capture,
+    capture: draft.capture,
+    ...(Object.keys(captureInstructions).length > 0 ? { captureInstructions } : {}),
   };
 }
 
@@ -218,10 +252,7 @@ export function buildTemplatePatch(
   if (draft.description.trim() !== savedDescription.trim()) {
     patch.description = draft.description.trim() || null;
   }
-  const nextExtraction = draftToExtraction(
-    draft,
-    template.extraction?.capture ?? [],
-  );
+  const nextExtraction = draftToExtraction(draft);
   if (JSON.stringify(nextExtraction) !== JSON.stringify(template.extraction)) {
     patch.extraction = nextExtraction;
   }

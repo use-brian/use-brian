@@ -65,11 +65,33 @@ export type GcsCredentialKey = {
   [k: string]: unknown
 }
 
+/**
+ * A customer S3 access-key pair, kept together as one object (the sibling of
+ * `GcsCredentialKey`). Only `accessKeyId` is meaningfully identifying;
+ * `secretAccessKey` is the signing secret and is never logged. The whole
+ * object is handed straight to the S3 client and never destructured elsewhere.
+ */
+export type S3AccessKey = {
+  accessKeyId: string
+  secretAccessKey: string
+  [k: string]: unknown
+}
+
 export type ConnectorCredentials =
   | { type: 'oauth'; client_id: string; client_secret: string }
   | { type: 'bearer'; token: string }
   | { type: 'custom_header'; header: string; value: string }
   | { type: 'gcs'; serviceAccountKey: GcsCredentialKey; bucket: string; projectId?: string }
+  | {
+      type: 's3'
+      accessKey: S3AccessKey
+      bucket: string
+      region?: string
+      /** Custom endpoint URL for non-AWS S3-compatible stores (MinIO, R2, B2). Omit for AWS. */
+      endpoint?: string
+      /** Path-style addressing (bucket in the URL path). Defaults on for custom endpoints. */
+      forcePathStyle?: boolean
+    }
   | { type: 'none' }
 
 /** Normalize a decrypted credentials blob into the typed union. */
@@ -97,6 +119,26 @@ export function normalizeStoredCredentials(raw: unknown): ConnectorCredentials |
           serviceAccountKey: key as GcsCredentialKey,
           bucket,
           ...(typeof obj.projectId === 'string' ? { projectId: obj.projectId } : {}),
+        }
+      }
+      return null
+    }
+    case 's3': {
+      const key = obj.accessKey
+      const bucket = obj.bucket
+      if (
+        key && typeof key === 'object' &&
+        typeof (key as Record<string, unknown>).accessKeyId === 'string' &&
+        typeof (key as Record<string, unknown>).secretAccessKey === 'string' &&
+        typeof bucket === 'string'
+      ) {
+        return {
+          type: 's3',
+          accessKey: key as S3AccessKey,
+          bucket,
+          ...(typeof obj.region === 'string' ? { region: obj.region } : {}),
+          ...(typeof obj.endpoint === 'string' ? { endpoint: obj.endpoint } : {}),
+          ...(typeof obj.forcePathStyle === 'boolean' ? { forcePathStyle: obj.forcePathStyle } : {}),
         }
       }
       return null

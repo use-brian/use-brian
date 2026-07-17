@@ -26,6 +26,7 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { isImageIcon } from "@sidanclaw/shared/page-icon";
 import { useT } from "@/lib/i18n/client";
 
 export type EmojiPickerProps = {
@@ -205,7 +206,7 @@ export function PageIconButton({
             className,
           )}
         >
-          {icon ? (
+          {icon && !isImageIcon(icon) ? (
             <span className="text-[15px] leading-none">{icon}</span>
           ) : (
             <Fallback className="size-4 text-sidebar-foreground/55" />

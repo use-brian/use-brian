@@ -195,7 +195,15 @@ function buildSystemPrompt(
   source: SynthesisSource,
   sourceToolName: string,
   mode: { recordPath: boolean; renderPage: boolean },
+  brainToolNames: string[],
 ): string {
+  // Name only the brain-write tools ACTUALLY bound this run (the tool-awareness
+  // rule: a prompt naming an unbound tool sends the model hunting for it).
+  // saveMemory joins the list only when the synthesizer wired a memory store.
+  const saveToolsLine =
+    brainToolNames.length > 0
+      ? `- Write durable records with the save tools (${brainToolNames.map((n) => `\`${n}\``).join(', ')}) and inherit sensitivity \`${source.sensitivity}\` on every write.`
+      : null
   // Three sources, three gather + citation disciplines. The PROVENANCE handle
   // differs per kind, so the "where to cite" instruction tracks the source: a
   // recording cites `start_ms`, the brain cites the row it returned, a research
@@ -259,7 +267,7 @@ function buildSystemPrompt(
         ? `- A readable page is generated from your saved fields automatically afterwards — do not try to author a page.`
         : `- No page is rendered for this run; the saved fields ARE the output.`,
       gatherLine,
-      `- Write durable records with the save tools (company / contacts / deal / tasks) and inherit sensitivity \`${source.sensitivity}\` on every write.`,
+      ...(saveToolsLine ? [saveToolsLine] : []),
       citeLine,
       `- Do not ask the user questions — this runs unattended. When the fields are saved and the records are written, reply with a one-line receipt and stop.`,
     ].join('\n')
@@ -273,7 +281,7 @@ function buildSystemPrompt(
     `A brief page has already been created for you and is currently empty. Author it IN PLACE:`,
     `- Call \`getCurrentPage\` to see it, then \`patchPage\` to add the sections your instructions describe. Do NOT call \`renderPage\` — that mints a duplicate page.`,
     gatherLine,
-    `- Write durable records with the save tools (company / contacts / deal / tasks) and inherit sensitivity \`${source.sensitivity}\` on every write.`,
+    ...(saveToolsLine ? [saveToolsLine] : []),
     citeLine,
     `- Do not ask the user questions — this runs unattended. When the page is authored and the records are written, reply with a one-line receipt and stop.`,
   ].join('\n')
@@ -437,10 +445,13 @@ export async function synthesizeFromSource(
     for await (const event of queryLoop({
       provider: deps.provider,
       model: deps.model,
-      systemPrompt: buildSystemPrompt(blueprint, source, deps.sourceTool.name, {
-        recordPath,
-        renderPage,
-      }),
+      systemPrompt: buildSystemPrompt(
+        blueprint,
+        source,
+        deps.sourceTool.name,
+        { recordPath, renderPage },
+        Array.from(deps.brainWriteTools.keys()),
+      ),
       messages: [
         { role: 'user', content: kickoff(source, deps.sourceTool.name, recordPath) },
       ] as Message[],

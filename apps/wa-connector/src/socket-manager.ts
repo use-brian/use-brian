@@ -360,7 +360,10 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': connectorSecret },
       body: JSON.stringify({ channelId, mime: mediaInfo.mimeType, fileName: mediaInfo.fileName ?? null }),
     })
-    if (!res.ok) throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}`)
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 300)
+      throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`)
+    }
     const { gcsKey, uploadUrl, storageUri } = (await res.json()) as { gcsKey: string; uploadUrl: string; storageUri?: string }
 
     const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable

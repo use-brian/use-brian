@@ -196,7 +196,7 @@ function isPrivateIP(ip: string): boolean {
  * Sync URL shape validation (protocol + hostname presence + literal-IP block).
  * Used as a cheap pre-check. DNS-aware validation happens in validateUrlAsync.
  */
-function validateUrl(raw: string): URL | null {
+export function validateUrl(raw: string): URL | null {
   let parsed: URL
   try {
     parsed = new URL(raw)
@@ -225,7 +225,7 @@ function validateUrl(raw: string): URL | null {
  * an internal one. Phase 2 v2 will pin the validated IP via an undici Agent
  * custom `connect.lookup`. See SSRF defenses header comment.
  */
-async function validateUrlAsync(raw: string): Promise<URL | null> {
+export async function validateUrlAsync(raw: string): Promise<URL | null> {
   const parsed = validateUrl(raw)
   if (!parsed) return null
 
@@ -252,7 +252,7 @@ async function validateUrlAsync(raw: string): Promise<URL | null> {
  * Stops at the first hit, so caller patterns should be ordered by
  * specificity / preference.
  */
-function firstMatch(html: string, patterns: RegExp[]): string | undefined {
+export function firstMatch(html: string, patterns: RegExp[]): string | undefined {
   for (const re of patterns) {
     const m = re.exec(html)
     if (m && m[1]) {
@@ -283,7 +283,7 @@ function decodeEntities(s: string): string {
  * `[^>]*?` between attributes tolerates other attributes interleaved
  * (e.g. `<meta property="og:title" content="…" data-foo="bar">`).
  */
-function metaPatterns(propName: string, attr: 'property' | 'name'): RegExp[] {
+export function metaPatterns(propName: string, attr: 'property' | 'name'): RegExp[] {
   const p = propName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return [
     new RegExp(
@@ -297,7 +297,7 @@ function metaPatterns(propName: string, attr: 'property' | 'name'): RegExp[] {
   ]
 }
 
-function linkRelPatterns(rels: string[]): RegExp[] {
+export function linkRelPatterns(rels: string[]): RegExp[] {
   const out: RegExp[] = []
   for (const rel of rels) {
     const r = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -312,7 +312,7 @@ function linkRelPatterns(rels: string[]): RegExp[] {
 const TITLE_PATTERN = /<title[^>]*>([^<]*)<\/title>/i
 
 /** Resolve a possibly-relative URL against the page's base URL. */
-function resolveUrl(value: string | undefined, base: URL): string | undefined {
+export function resolveUrl(value: string | undefined, base: URL): string | undefined {
   if (!value) return undefined
   try {
     return new URL(value, base).toString()

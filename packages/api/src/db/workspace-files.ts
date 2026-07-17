@@ -379,6 +379,7 @@ export async function deleteWorkspaceFile(
 export async function retractWorkspaceFilesByStorageBucket(
   workspaceId: string,
   bucket: string,
+  scheme: 'gs' | 's3',
   reason: string,
 ): Promise<number> {
   // System-level (no RLS) — invoked by the BYO storage staleness sweep when a
@@ -394,7 +395,7 @@ export async function retractWorkspaceFilesByStorageBucket(
         AND storage_uri ^@ $2
         AND valid_to IS NULL
         AND retracted_at IS NULL`,
-    [workspaceId, `gs://${bucket}/`, reason],
+    [workspaceId, `${scheme}://${bucket}/`, reason],
   )
   // Propagate the retraction to derived file_segments so the retrieval
   // predicates (retracted_at IS NULL + bi-temporal window) stop surfacing
@@ -409,7 +410,7 @@ export async function retractWorkspaceFilesByStorageBucket(
           AND wf.storage_uri ^@ $2
           AND wf.retracted_reason = $3
           AND fs.retracted_at IS NULL`,
-      [workspaceId, `gs://${bucket}/`, reason],
+      [workspaceId, `${scheme}://${bucket}/`, reason],
     )
   }
   return result.rowCount ?? 0

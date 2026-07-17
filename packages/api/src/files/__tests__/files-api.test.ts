@@ -159,10 +159,10 @@ function makeFakeStore(): WorkspaceFilesStore & { rows: Map<string, WorkspaceFil
     },
     async supersede() { return null },
     async getHistory() { return [] },
-    async retractByStorageBucketSystem(workspaceId, bucket, _reason) {
+    async retractByStorageBucketSystem(workspaceId, bucket, scheme, _reason) {
       let n = 0
       for (const r of rows.values()) {
-        if (r.workspaceId === workspaceId && r.storageUri.startsWith(`gs://${bucket}/`) && !r.retractedAt) {
+        if (r.workspaceId === workspaceId && r.storageUri.startsWith(`${scheme}://${bucket}/`) && !r.retractedAt) {
           r.retractedAt = new Date()
           r.validTo = new Date()
           n++

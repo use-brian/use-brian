@@ -57,6 +57,9 @@ export type BrainInboxRow = {
   id: string
   workspaceId: string
   createdAt: Date
+  /** Last write to the row — verify stamps, adjusts, and status flips all
+   *  bump `updated_at`; equals `createdAt` for a never-touched row. */
+  updatedAt: Date
   createdByAssistantId: string | null
   /** Primitive-specific payload — TypeScript-side discriminated by `primitive`. */
   body: Record<string, unknown>
@@ -253,6 +256,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'summary', summary,
@@ -283,6 +287,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'display_name', display_name,
@@ -312,6 +317,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              NULL::uuid AS created_by_assistant_id,
              jsonb_build_object(
                'edge_type', edge_type,
@@ -345,6 +351,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'title', title,
@@ -371,6 +378,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'entity_id', id,
@@ -398,6 +406,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'entity_id', id,
@@ -423,6 +432,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'entity_id', id,
@@ -448,6 +458,7 @@ export async function listBrainInbox(params: {
              id,
              workspace_id,
              created_at,
+             updated_at,
              created_by_assistant_id,
              jsonb_build_object(
                'name', name,
@@ -479,6 +490,7 @@ export async function listBrainInbox(params: {
     )
     SELECT primitive, id, workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            body
     FROM inbox
@@ -492,6 +504,7 @@ export async function listBrainInbox(params: {
     id: string
     workspaceId: string
     createdAt: Date
+    updatedAt: Date
     createdByAssistantId: string | null
     body: Record<string, unknown>
   }>(sql, values)
@@ -501,6 +514,7 @@ export async function listBrainInbox(params: {
     id: r.id,
     workspaceId: r.workspaceId,
     createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
     createdByAssistantId: r.createdByAssistantId,
     body: r.body,
   }))
@@ -545,6 +559,7 @@ export async function getBrainInboxRow(
     id: string
     workspaceId: string
     createdAt: Date
+    updatedAt: Date
     createdByAssistantId: string | null
     verifiedByUserId: string | null
     verifiedAt: Date | null
@@ -563,6 +578,7 @@ export async function getBrainInboxRow(
     id: row.id,
     workspaceId: row.workspaceId,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
     createdByAssistantId: row.createdByAssistantId,
     verifiedByUserId: row.verifiedByUserId,
     verifiedAt: row.verifiedAt,
@@ -581,6 +597,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'memory'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -597,6 +614,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'entity'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -612,6 +630,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'entity_link'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            NULL::uuid AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -630,6 +649,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'task'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -646,6 +666,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'contact'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -663,6 +684,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'company'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -679,6 +701,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'deal'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",
@@ -695,6 +718,7 @@ const SINGLE_ROW_SELECT: Record<BrainInboxPrimitive, string> = {
     SELECT 'workspace_file'::text AS primitive, id,
            workspace_id AS "workspaceId",
            created_at AS "createdAt",
+           updated_at AS "updatedAt",
            created_by_assistant_id AS "createdByAssistantId",
            verified_by_user_id AS "verifiedByUserId",
            verified_at AS "verifiedAt",

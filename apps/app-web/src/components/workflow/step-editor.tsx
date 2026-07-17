@@ -74,6 +74,7 @@ import {
   quietFieldCls,
 } from "@/components/brain/skill-document";
 import { cn } from "@/lib/utils";
+import { isImageIcon } from "@sidanclaw/shared/page-icon";
 
 const MODEL_ALIASES: WorkflowModelAlias[] = ["standard", "pro", "max"];
 
@@ -993,7 +994,7 @@ function PageAnchorField({
   );
   const pageItems: SearchableSelectItem[] = sortedPages.map((p) => ({
     value: p.id,
-    label: p.icon ? `${p.icon} ${p.name}` : p.name,
+    label: p.icon && !isImageIcon(p.icon) ? `${p.icon} ${p.name}` : p.name,
     hint: p.state === "draft" ? b.pageAnchorDraftBadge : undefined,
   }));
 

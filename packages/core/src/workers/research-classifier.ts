@@ -46,6 +46,24 @@ Otherwise: {"research":false}`
 const MIN_MESSAGE_LENGTH = 40
 const CLASSIFIER_MODEL = 'gemini-3.1-flash-lite'
 
+// ── CJK-aware effective length ─────────────────────────────────────
+//
+// A CJK character carries roughly a word of content (~4 chars of English),
+// so a raw `message.length` bar is CJK-hostile: the 2026-07-16 incident
+// message "cx sc credit card 而家個迎新係點" is 26 raw chars — a complete
+// current-offer question that never reached the classifier and got a
+// confabulated zero-tool answer. Weight each CJK char as 4 so substantive
+// Cantonese/Chinese/Japanese asks clear the same bar English ones do.
+// Same bug class as the windowed CJK-aware extraction bound (2026-07-15
+// Cantonese transcription incident).
+const CJK_CHAR =
+  /[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]/g
+
+function effectiveLength(message: string): number {
+  const cjkCount = (message.match(CJK_CHAR) ?? []).length
+  return message.length + cjkCount * 3
+}
+
 export type ResearchClassifyOptions = {
   provider: LLMProvider
   message: string
@@ -132,8 +150,10 @@ export async function classifyResearchIntent(
     return { research: false, operateSite: true, reason: 'operate_site_fast_path', usage: null, model: null }
   }
 
-  // Short messages never warrant research — short-circuit before the LLM call.
-  if (message.length <= minMessageLength) {
+  // Short messages never warrant research — short-circuit before the LLM
+  // call. Length is CJK-weighted (see `effectiveLength`) so a compact
+  // Cantonese/Chinese ask is not mistaken for a greeting.
+  if (effectiveLength(message) <= minMessageLength) {
     return { research: false, operateSite: false, reason: null, usage: null, model: null }
   }
 

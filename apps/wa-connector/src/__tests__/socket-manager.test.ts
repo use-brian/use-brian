@@ -543,6 +543,34 @@ describe('[COMP:wa-connector/media-routing] inbound media relay routing', () => 
     vi.unstubAllGlobals()
   })
 
+  it('includes the API response body when upload URL minting fails', async () => {
+    const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (String(url).endsWith('/internal/whatsapp/media-upload-url')) {
+        return {
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          text: async () => '{"error":"channel not resolvable"}',
+        }
+      }
+      return { ok: true }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await connected()
+
+    await emitMedia({ videoMessage: { mimetype: 'video/mp4', fileLength: 9_000_000 } })
+
+    expect(vi.mocked(downloadMediaMessage)).not.toHaveBeenCalled()
+    expect(error).toHaveBeenCalledWith(
+      expect.stringContaining('Media stream-to-GCS failed'),
+      expect.objectContaining({ message: expect.stringContaining('{"error":"channel not resolvable"}') }),
+    )
+    error.mockRestore()
+    vi.unstubAllGlobals()
+  })
+
   it('keeps a sub-cap voice note (ptt) inline as mediaBase64', async () => {
     const { downloadMediaMessage } = await import('@whiskeysockets/baileys')
     vi.mocked(downloadMediaMessage).mockResolvedValue(Buffer.from('voice-bytes') as never)

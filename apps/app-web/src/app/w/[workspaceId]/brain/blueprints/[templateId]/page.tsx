@@ -47,9 +47,14 @@ import { useBrainSurface } from "@/contexts/brain-surface-context";
 import type {
   BlueprintCaptureKind,
   CustomPageTemplate,
+  EntityRefKind,
   ExtractionFieldType,
 } from "@sidanclaw/doc-model";
-import { EXTRACTION_FIELD_TYPES, BLUEPRINT_CAPTURE_KINDS } from "@sidanclaw/doc-model";
+import {
+  EXTRACTION_FIELD_TYPES,
+  BLUEPRINT_CAPTURE_KINDS,
+  ENTITY_REF_KINDS,
+} from "@sidanclaw/doc-model";
 import {
   deleteCustomPageTemplate,
   getCustomPageTemplate,
@@ -65,6 +70,8 @@ import {
   draftFromTemplate,
   moveField,
   newDraftField,
+  setCaptureInstruction,
+  toggleCaptureKind,
   validateDraft,
   type BlueprintDraft,
   type DraftField,
@@ -224,6 +231,15 @@ function BlueprintEditor({
   const patch = buildTemplatePatch(template, draft);
   const dirty = Object.keys(patch).length > 0;
   const issues = useMemo(() => validateDraft(draft), [draft]);
+
+  // Capture-kind display labels (entityRef labels + the capture-only memory).
+  const captureItems: Record<BlueprintCaptureKind, string> = {
+    company: copy.entityKindCompany,
+    contact: copy.entityKindContact,
+    deal: copy.entityKindDeal,
+    task: copy.entityKindTask,
+    memory: copy.captureKindMemory,
+  };
 
   const setField = (uid: string, next: DraftField) => {
     setDraft((d) => ({
@@ -399,6 +415,35 @@ function BlueprintEditor({
             </Button>
           </div>
 
+          {/* Capture — which brain records a fill also writes, with optional
+              per-kind guidance (how tasks break down, what a memory should
+              hold). Default ingestion (Pipeline B) is untouched; this only
+              adds blueprint-directed writes. */}
+          <div className="mt-8 flex items-center gap-3">
+            <div className="h-px flex-1 bg-border/60" aria-hidden />
+            <span className="text-[10px] uppercase tracking-wide text-muted-foreground/50">
+              {copy.captureHeading}
+            </span>
+          </div>
+          <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+            {copy.captureHint}
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            {BLUEPRINT_CAPTURE_KINDS.map((kind) => (
+              <CaptureRow
+                key={kind}
+                label={captureItems[kind]}
+                enabled={draft.capture.includes(kind)}
+                instruction={draft.captureInstructions[kind] ?? ""}
+                placeholder={copy.captureInstructionPlaceholder}
+                onToggle={() => setDraft((d) => toggleCaptureKind(d, kind))}
+                onInstruction={(text) =>
+                  setDraft((d) => setCaptureInstruction(d, kind, text))
+                }
+              />
+            ))}
+          </div>
+
           <RecordsSection workspaceId={workspaceId} blueprintId={template.id} />
 
           <PageActionsSection workspaceId={workspaceId} blueprintId={template.id} />
@@ -508,7 +553,7 @@ function FieldCard({
     enum: copy.typeEnum,
     entityRef: copy.typeEntityRef,
   };
-  const kindItems: Record<BlueprintCaptureKind, string> = {
+  const kindItems: Record<EntityRefKind, string> = {
     company: copy.entityKindCompany,
     contact: copy.entityKindContact,
     deal: copy.entityKindDeal,
@@ -647,7 +692,7 @@ function FieldCard({
           <Select
             value={field.entityKind || undefined}
             onValueChange={(v) => {
-              if (v) onChange({ ...field, entityKind: v as BlueprintCaptureKind });
+              if (v) onChange({ ...field, entityKind: v as EntityRefKind });
             }}
             items={kindItems}
           >
@@ -655,7 +700,7 @@ function FieldCard({
               <SelectValue placeholder={copy.entityKindPlaceholder} />
             </SelectTrigger>
             <SelectContent alignItemWithTrigger={false}>
-              {BLUEPRINT_CAPTURE_KINDS.map((kind) => (
+              {ENTITY_REF_KINDS.map((kind) => (
                 <SelectItem key={kind} value={kind}>
                   {kindItems[kind]}
                 </SelectItem>
@@ -703,6 +748,54 @@ function FieldCard({
               {msg}
             </p>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Capture row — one brain-record kind a fill may also write ──────────
+
+/** Toggle + optional per-kind guidance. The instruction textarea only renders
+ *  while the kind is enabled; its text survives toggling (lossless draft). */
+function CaptureRow({
+  label,
+  enabled,
+  instruction,
+  placeholder,
+  onToggle,
+  onInstruction,
+}: {
+  label: string;
+  enabled: boolean;
+  instruction: string;
+  placeholder: string;
+  onToggle: () => void;
+  onInstruction: (text: string) => void;
+}) {
+  const instructionRef = useRef<HTMLTextAreaElement>(null);
+  useAutosize(instructionRef, instruction);
+  return (
+    <div className="rounded-lg bg-muted/40 px-4 py-3 transition-colors focus-within:bg-muted/60">
+      <label className="flex cursor-pointer items-center justify-between gap-2">
+        <span className="text-sm text-foreground">{label}</span>
+        <Switch checked={enabled} onCheckedChange={onToggle} aria-label={label} />
+      </label>
+      {enabled && (
+        <div className={cn(fieldUnderlineCls, "mt-2")}>
+          <textarea
+            ref={instructionRef}
+            value={instruction}
+            rows={1}
+            maxLength={2000}
+            placeholder={placeholder}
+            aria-label={`${label}: ${placeholder}`}
+            onChange={(e) => onInstruction(e.target.value)}
+            className={cn(
+              "w-full resize-none overflow-hidden border-0 bg-transparent p-0 text-sm leading-relaxed text-foreground placeholder:text-muted-foreground/50",
+              quietFieldCls,
+            )}
+          />
         </div>
       )}
     </div>
@@ -1084,6 +1177,7 @@ function AboutCard({
     contact: copy.entityKindContact,
     deal: copy.entityKindDeal,
     task: copy.entityKindTask,
+    memory: copy.captureKindMemory,
   };
   const capture = template.extraction?.capture ?? [];
 

@@ -26,6 +26,7 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import { MessageSquare, X } from "lucide-react";
+import { isImageIcon } from "@sidanclaw/shared/page-icon";
 import {
   fetchPublicPageFor,
   publicStreamUrlFor,
@@ -429,14 +430,14 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
                   href={crumbHref(c.pageId, i)}
                   className="flex min-w-0 items-center gap-1 rounded px-1 py-0.5 hover:bg-muted"
                 >
-                  {c.icon ? <span className="text-base leading-none">{c.icon}</span> : null}
+                  {c.icon && !isImageIcon(c.icon) ? <span className="text-base leading-none">{c.icon}</span> : null}
                   <span className="truncate font-medium">{c.title}</span>
                 </a>
               </span>
             ))
           ) : (
             <span className="flex min-w-0 items-center gap-1.5 px-1">
-              {page.icon ? <span className="text-base leading-none">{page.icon}</span> : null}
+              {page.icon && !isImageIcon(page.icon) ? <span className="text-base leading-none">{page.icon}</span> : null}
               <span className="truncate font-medium">{page.title}</span>
             </span>
           )}
@@ -473,7 +474,7 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
           >
             <header className="mb-8">
               <div className="flex items-center gap-3">
-                {page.icon ? <span className="text-3xl leading-none">{page.icon}</span> : null}
+                {page.icon && !isImageIcon(page.icon) ? <span className="text-3xl leading-none">{page.icon}</span> : null}
                 <h1 className="text-3xl font-bold tracking-tight">{page.title}</h1>
               </div>
             </header>

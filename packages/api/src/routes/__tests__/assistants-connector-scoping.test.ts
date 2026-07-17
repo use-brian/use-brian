@@ -77,6 +77,21 @@ describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connector
     expect(connectors[0].scope).toBe('team-native')
   })
 
+  it('does not expose internal WhatsApp channel instances as tool connectors', async () => {
+    queueMembershipAndTeam('admin', 'ws-shared')
+    connectorInstanceStore.listByWorkspaceSystem.mockResolvedValueOnce([
+      { provider: 'whatsapp', label: 'WhatsApp', url: null, custom: false, connected: true },
+      { provider: 'github', label: 'Team Github', url: null, custom: false, connected: true },
+    ])
+
+    const res = await request(makeApp('u-admin')).get('/api/assistants/a-1/connectors')
+
+    expect(res.status).toBe(200)
+    const ids = (res.body.connectors as Array<{ id: string }>).map((c) => c.id)
+    expect(ids).toContain('github')
+    expect(ids).not.toContain('whatsapp')
+  })
+
   it('suppresses personal connectors for a SOLO workspace too — exposure is the boundary (2026-07-14)', async () => {
     queueMembershipAndTeam('owner', 'ws-personal')
     connectorStore.list.mockResolvedValueOnce([

@@ -31,6 +31,7 @@ import {
   recordCompleteness,
   validateFieldValue,
   BLUEPRINT_CAPTURE_KINDS,
+  ENTITY_REF_KINDS,
   EXTRACTION_FIELD_TYPES,
   type BlueprintRecordFields,
   type CustomPageTemplateSummary,
@@ -304,7 +305,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
     description:
       'Define a NEW blueprint — a reusable typed output contract for this workspace. ' +
       'Pass a name and the fields (heading + instruction + type; mark handoff-critical ones required). ' +
-      `Types: ${EXTRACTION_FIELD_TYPES.join(', ')}. Enum fields need options; entityRef fields need entityKind (${BLUEPRINT_CAPTURE_KINDS.join(', ')}). ` +
+      `Types: ${EXTRACTION_FIELD_TYPES.join(', ')}. Enum fields need options; entityRef fields need entityKind (${ENTITY_REF_KINDS.join(', ')}). ` +
       'The blueprint appears in Brain → Blueprints (with an editable page skeleton) and can then be filled from a recording, the brain, research, or saved directly with saveBlueprintRecord. ' +
       'Use when the user wants a repeatable output shape — not for one-off notes.',
     inputSchema: z.object({
@@ -324,7 +325,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
             instruction: z.string().min(1).max(2000).describe('How to fill this field from a source.'),
             type: z.enum(EXTRACTION_FIELD_TYPES).optional().describe('Default markdown.'),
             options: z.array(z.string().min(1).max(120)).min(2).max(24).optional(),
-            entityKind: z.enum(BLUEPRINT_CAPTURE_KINDS).optional(),
+            entityKind: z.enum(ENTITY_REF_KINDS).optional(),
             required: z.boolean().optional(),
           }),
         )
@@ -333,7 +334,13 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
       capture: z
         .array(z.enum(BLUEPRINT_CAPTURE_KINDS))
         .optional()
-        .describe('Brain entities a fill should also capture.'),
+        .describe('Brain primitives a fill should also capture (company, contact, deal, task, memory).'),
+      captureInstructions: z
+        .record(z.string(), z.string().max(2000))
+        .optional()
+        .describe(
+          'Optional per-kind guidance keyed by a capture kind — HOW to write that kind from the source (e.g. {"task": "one task per maintenance item, imperative title"}). Only kinds listed in `capture` are used.',
+        ),
     }),
     requiresConfirmation: true,
     async execute(input, context) {
@@ -350,6 +357,7 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
           type: f.type ?? 'markdown',
         })),
         capture: input.capture ?? [],
+        ...(input.captureInstructions ? { captureInstructions: input.captureInstructions } : {}),
       }
       const parsed = extractionSpecSchema.safeParse(rawSpec)
       if (!parsed.success) {

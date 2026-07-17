@@ -113,6 +113,20 @@ export async function markRecordingJobFailed(
   return { retrying: attempts < RECORDING_JOB_MAX_ATTEMPTS }
 }
 
+/**
+ * True when a processing run already COMPLETED for this recording — the
+ * re-process confirmation gate (an already-processed recording never silently
+ * re-runs; see transcription.md §"Re-processing"). Pending/processing jobs
+ * don't count: those are guarded by the active-job unique index instead.
+ */
+export async function hasCompletedRecordingJob(recordingId: string): Promise<boolean> {
+  const { rows } = await query<{ ok: number }>(
+    `SELECT 1 AS ok FROM recording_jobs WHERE recording_id = $1 AND status = 'done' LIMIT 1`,
+    [recordingId],
+  )
+  return rows.length > 0
+}
+
 /** Read a job's current status (for the `/process` status-poll endpoint). */
 export async function getRecordingJob(id: string): Promise<RecordingJob | null> {
   const { rows } = await query<RecordingJob>(

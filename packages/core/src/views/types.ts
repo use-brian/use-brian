@@ -731,4 +731,24 @@ export type SavedViewStore = {
    * page owner). Returns `true` if a row was updated.
    */
   markBrainIngestedSystem(id: string, contentHash: string): Promise<boolean>
+
+  // ── Page event source (content-edit updated events) ─────────────────
+
+  /**
+   * Read the fields a `page`-source `updated` event needs WITHOUT a userId —
+   * for the content-edit trigger (doc-sync persists a Yjs snapshot system-side,
+   * then signals the API `/internal/page-event` endpoint, which has no member
+   * context). Returns `null` if the row is gone.
+   *
+   * Block-content edits don't flow through the metadata `update` method (they
+   * live in the collaborative Y.Doc / `documents` table), so the store can't
+   * emit their `updated` event from a write path. This read backs the
+   * out-of-band emit: `workspaceId` + `parentId` (`nest_parent_id`) + `title`
+   * (`name`) are exactly the `PageLifecycleEvent` fields the dispatcher needs.
+   */
+  getPageEventContextSystem(id: string): Promise<{
+    workspaceId: string
+    parentId: string | null
+    title: string | null
+  } | null>
 }

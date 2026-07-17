@@ -47,6 +47,21 @@ describe('[COMP:api/whatsapp-byon-route] internal routing', () => {
     expect(response.body).toEqual({ official: true })
   })
 
+  it('passes a streamed media reference to the hosted media-ingest fallback', async () => {
+    const handle = vi.fn(async () => {})
+    const response = await request(appFor(true, { handle }, true))
+      .post('/internal/whatsapp/inbound')
+      .set('X-Connector-Secret', 'secret')
+      .send({
+        ...payload,
+        text: '<media:video>',
+        mediaRef: { gcsKey: 'ws/channel-media/video', mimeType: 'video/mp4' },
+      })
+    expect(response.status).toBe(418)
+    expect(response.body).toEqual({ official: true })
+    expect(handle).not.toHaveBeenCalled()
+  })
+
   it('acks and drops an unknown channel in OSS', async () => {
     const response = await request(appFor(false, null))
       .post('/internal/whatsapp/inbound')

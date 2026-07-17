@@ -65,3 +65,56 @@ export async function ingestFiles(
   const data = (await res.json()) as { files: IngestFileResult[] };
   return data.files;
 }
+
+/** Outcome of a stored-file (re-)ingest request. */
+export type ReingestOutcome =
+  | { status: "queued"; jobId: string | null }
+  | {
+      status: "requires_confirmation";
+      fileName: string;
+      sizeBytes: number;
+      detail: string;
+    }
+  | { status: "in_flight" };
+
+/**
+ * Deterministic (re-)ingestion of a file ALREADY stored in workspace_files —
+ * POST /api/files/:fileId/ingest. The server enforces the double-ingestion
+ * guard: an already-ingested file answers `requires_confirmation` until the
+ * request is re-sent with `confirm: true` (the caller must show the user a
+ * confirmation first; re-ingesting spends model credits and can duplicate
+ * extracted memories). Spec: docs/architecture/brain/file-artifacts.md ->
+ * "Re-ingest".
+ */
+export async function reingestStoredFile(
+  workspaceId: string,
+  fileId: string,
+  opts: { confirm?: boolean } = {},
+): Promise<ReingestOutcome> {
+  const res = await authFetch(`${API_URL}/api/files/${encodeURIComponent(fileId)}/ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, ...(opts.confirm ? { confirm: true } : {}) }),
+  });
+  const data = (await res.json().catch(() => null)) as
+    | {
+        jobId?: string | null;
+        requiresConfirmation?: boolean;
+        fileName?: string;
+        sizeBytes?: number;
+        detail?: string;
+        error?: string;
+      }
+    | null;
+  if (res.status === 202) return { status: "queued", jobId: data?.jobId ?? null };
+  if (res.status === 409 && data?.requiresConfirmation) {
+    return {
+      status: "requires_confirmation",
+      fileName: data.fileName ?? "",
+      sizeBytes: data.sizeBytes ?? 0,
+      detail: data.detail ?? "",
+    };
+  }
+  if (res.status === 409 && data?.error === "ingest_in_flight") return { status: "in_flight" };
+  throw new Error(data?.error ?? `Ingest failed (HTTP ${res.status})`);
+}

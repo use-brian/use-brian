@@ -98,6 +98,15 @@ export function buildBlueprintPickerItems(
 export const RECORDING_INGEST_ONLY = "__ingest_only__";
 /** Sentinel for "not yet chosen" — the placeholder state when no default is set. */
 export const RECORDING_UNSET = "";
+/**
+ * Sentinel for "install the meeting starter, then use it". Offered ONLY when
+ * the workspace has no blueprints to pick: without it the picker's only option
+ * is ingest-only, so the recording lands with no brief page — no citations, no
+ * player, the very gap the starter exists to close. It is NOT a blueprint id;
+ * `recordingBlueprintToSlug` rejects it so a caller that forgets to install
+ * first submits nothing rather than a bogus id.
+ */
+export const RECORDING_INSTALL_STARTER = "__install_starter__";
 
 /**
  * The picker's initial selection given the workspace default. A non-null
@@ -112,15 +121,41 @@ export function initialRecordingBlueprint(
 }
 
 /**
+ * The confirm-dialog picker's seed: the surface's explicit pick when it made
+ * one (the Studio upload button's inline picker — including an explicit
+ * "ingest only"), else the workspace-default ladder. The pre-flight confirm
+ * shows the blueprint picker on EVERY recording surface (chat dock, new-page
+ * landing, Studio) per the pre-flight-confirm invariant — a surface that made
+ * no choice seeds from the workspace default, and the user can still change
+ * it in the dialog. See docs/architecture/engine/preflight-confirmation.md.
+ */
+export function seedRecordingBlueprint(
+  explicit: string | undefined,
+  workspaceDefault: string | null,
+): string {
+  if (explicit !== undefined && explicit !== RECORDING_UNSET) return explicit;
+  return initialRecordingBlueprint(workspaceDefault);
+}
+
+/**
  * Map a picker selection to the `blueprintSlug` submitted to `/process`. A real
- * blueprint id submits verbatim; both the explicit `RECORDING_INGEST_ONLY` pick
- * and the `RECORDING_UNSET` placeholder submit `undefined` (Pipeline B only —
- * omit the slug).
+ * blueprint id submits verbatim; the explicit `RECORDING_INGEST_ONLY` pick, the
+ * `RECORDING_UNSET` placeholder, and an uninstalled `RECORDING_INSTALL_STARTER`
+ * all submit `undefined` (Pipeline B only — omit the slug).
+ *
+ * `RECORDING_INSTALL_STARTER` maps to `undefined` because it is a sentinel, not
+ * an id: the caller must install the starter and submit the REAL id it gets
+ * back. Mapping it to undefined means a caller that skips that step degrades to
+ * ingest-only instead of submitting `__install_starter__` as a blueprint id.
  */
 export function recordingBlueprintToSlug(
   selection: string,
 ): string | undefined {
-  if (selection === RECORDING_INGEST_ONLY || selection === RECORDING_UNSET) {
+  if (
+    selection === RECORDING_INGEST_ONLY ||
+    selection === RECORDING_UNSET ||
+    selection === RECORDING_INSTALL_STARTER
+  ) {
     return undefined;
   }
   return selection;

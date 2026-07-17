@@ -34,6 +34,13 @@ export type RecordingTranscribeRequest = {
   /** Workspace entity names to bias recognition toward (proper nouns). */
   keyterms?: string[]
   /**
+   * ISO 639 language hint from the workspace transcription preference
+   * (`workspaces.transcription_prefs.languageCode`). Providers that accept a
+   * language field forward it (Scribe → `language_code`); others ignore it.
+   * Absent = provider auto-detect.
+   */
+  language?: string
+  /**
    * Lazy silence-split chunks of the audio (the worker binds the ffmpeg
    * implementation — core never execs). Only the gemini provider consumes
    * this, and only past its chunking threshold; providers with server-side

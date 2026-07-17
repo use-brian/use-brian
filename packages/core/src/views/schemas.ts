@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod'
+import { IMAGE_ICON_RE } from '@sidanclaw/shared'
 import { TASK_STATUSES } from '../tasks/types.js'
 import { DEAL_STAGES } from '../crm/types.js'
 import { WORKFLOW_RUN_STATUSES } from '../workflow/types.js'
@@ -185,11 +186,23 @@ export const savedViewCreateInputSchema = z.object({
   binding: bindingConfigSchema,
 })
 
+/**
+ * A page icon value: an emoji grapheme (≤16 chars) OR an image token
+ * `img:<workspaceId>/<fileId>` (a workspace-files image minted by the
+ * `fetchSiteIcon` doc tool — see `@sidanclaw/shared` `page-icon.ts` and
+ * doc.md → "Image icons"). One definition, reused by the REST update
+ * schema and the `patchPage` `setIcon` op.
+ */
+export const pageIconValueSchema = z.union([
+  z.string().max(16),
+  z.string().regex(IMAGE_ICON_RE),
+])
+
 export const savedViewUpdateInputSchema = z.object({
   name: z.string().min(1).max(256).optional(),
   description: z.string().max(2000).nullable().optional(),
-  /** Per-page emoji icon — an emoji grapheme (≤16 chars), or `null` to clear. */
-  icon: z.string().max(16).nullable().optional(),
+  /** Per-page icon — emoji grapheme or `img:` token, `null` to clear. */
+  icon: pageIconValueSchema.nullable().optional(),
   /** Notion-style per-page width toggle (migration 220). */
   fullWidth: z.boolean().optional(),
   /** Page-level clearance (migration 212). The route rejects a value above

@@ -50,4 +50,36 @@ describe('[COMP:api/blueprint-from-template] extractionToBlueprintBody', () => {
     const body = extractionToBlueprintBody('B', { fields: SPEC.fields, capture: [] })
     expect(body).not.toContain('## Capture')
   })
+
+  it('renders per-kind capture instructions as bullets under the capture section', () => {
+    const spec = extractionSpecSchema.parse({
+      fields: SPEC.fields,
+      capture: ['task', 'memory'],
+      captureInstructions: {
+        task: 'One task per maintenance item, imperative title.',
+        memory: '  Save one memory per stated client preference.  ',
+      },
+    })
+    const body = extractionToBlueprintBody('B', spec)
+    expect(body).toContain('task, memory')
+    expect(body).toContain('- task: One task per maintenance item, imperative title.')
+    // Instruction text is trimmed at render time.
+    expect(body).toContain('- memory: Save one memory per stated client preference.')
+  })
+
+  it('ignores instructions for kinds that are not in the capture list', () => {
+    const spec = extractionSpecSchema.parse({
+      fields: SPEC.fields,
+      capture: ['company'],
+      captureInstructions: { task: 'Never rendered.' },
+    })
+    const body = extractionToBlueprintBody('B', spec)
+    expect(body).toContain('## Capture')
+    expect(body).not.toContain('Never rendered.')
+  })
+
+  it('accepts memory as a capture kind (the blueprint-directed memory arm)', () => {
+    const spec = extractionSpecSchema.parse({ fields: SPEC.fields, capture: ['memory'] })
+    expect(spec.capture).toEqual(['memory'])
+  })
 })

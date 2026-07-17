@@ -123,6 +123,24 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     expect(tools.has('queryEntities')).toBe(true)
   })
 
+  it('injects fetchSiteIcon only when a FilesApi is wired', async () => {
+    // Without filesApi (baseOpts): absent — the model must never see a tool
+    // whose storage half can't run (tool-awareness rule).
+    const bare = new Map<string, Tool>()
+    await injectDocTools({ ...baseOpts, tools: bare })
+    expect(bare.has('fetchSiteIcon')).toBe(false)
+
+    // With filesApi: present, and the count reports it.
+    const wired = new Map<string, Tool>()
+    const result = await injectDocTools({
+      ...baseOpts,
+      tools: wired,
+      filesApi: noopStore<import('@sidanclaw/core').FilesApi>(),
+    })
+    expect(wired.has('fetchSiteIcon')).toBe(true)
+    expect(result.injectedCount).toBe(23)
+  })
+
   it('removes the global renderView tool from the doc surface', async () => {
     // Mimic boot: `renderView` is a global tool registered once in
     // `apps/api/src/index.ts` and lands in the per-turn tool map for every

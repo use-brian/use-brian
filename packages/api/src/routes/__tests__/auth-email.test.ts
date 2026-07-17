@@ -35,21 +35,25 @@ vi.mock('../../db/users.js', () => ({
 
 function makeStore(overrides?: Partial<MagicLinkStore>): MagicLinkStore {
   return {
-    create: async () => ({ token: 'fresh-token', expiresAt: new Date(Date.now() + 900_000) }),
+    create: async () => ({ token: 'fresh-token', code: '123456', expiresAt: new Date(Date.now() + 900_000) }),
     consumeByToken: async () => null,
+    consumeByCode: async () => ({ status: 'invalid' }),
     countRecentForEmail: async () => 0,
     countRecentForIp: async () => 0,
     ...overrides,
   }
 }
 
-function makeSmtp(): { client: SmtpClient; sent: Array<{ to: string; link: string; locale?: string }> } {
-  const sent: Array<{ to: string; link: string; locale?: string }> = []
+function makeSmtp(): {
+  client: SmtpClient
+  sent: Array<{ to: string; link: string; locale?: string; code?: string }>
+} {
+  const sent: Array<{ to: string; link: string; locale?: string; code?: string }> = []
   return {
     sent,
     client: {
-      async sendMagicLink(to, link, locale) {
-        sent.push({ to, link, locale })
+      async sendMagicLink(to, link, locale, code) {
+        sent.push({ to, link, locale, code })
       },
       async sendWorkspaceInvitation() {
         // Not exercised by the magic-link auth tests.
@@ -101,7 +105,11 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     await new Promise((r) => setTimeout(r, 10))
     expect(smtp.sent).toHaveLength(1)
     expect(smtp.sent[0].to).toBe('a@b.com')
-    expect(smtp.sent[0].link).toContain('https://sidan.ai/api/auth/email/verify?token=')
+    // The link lands on the confirm page (no consume-on-GET), carries the
+    // locale, and the OTP is passed alongside for the email body.
+    expect(smtp.sent[0].link).toContain('https://sidan.ai/login/verify?token=')
+    expect(smtp.sent[0].link).toContain('&lang=en')
+    expect(smtp.sent[0].code).toBe('123456')
   })
 
   it('returns 200 even for an invalid email (no enumeration)', async () => {
@@ -152,7 +160,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -171,7 +179,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -190,7 +198,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -209,7 +217,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -227,7 +235,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -248,7 +256,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     const store = makeStore({
       create: async (input) => {
         calls.push(input)
-        return { token: 't', expiresAt: new Date() }
+        return { token: 't', code: '123456', expiresAt: new Date() }
       },
     })
     const smtp = makeSmtp()
@@ -298,7 +306,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
 
     await new Promise((r) => setTimeout(r, 10))
     expect(smtp.sent).toHaveLength(1)
-    expect(smtp.sent[0].link).toContain('/api/auth/email/verify?token=')
+    expect(smtp.sent[0].link).toContain('/login/verify?token=')
     expect(smtp.sent[0].link).toContain('&addAccount=1')
   })
 
@@ -463,5 +471,82 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
       .send({ token: 'good-token' })
 
     expect(res.body.nextPath).toBe('/brain/foo')
+  })
+})
+
+describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () => {
+  it('returns 503 when not configured', async () => {
+    const app = makeApp(undefined)
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'a@b.com', code: '123456' })
+    expect(res.status).toBe(503)
+  })
+
+  it('returns 400 on a malformed code or email (never reaches the store)', async () => {
+    const consumeByCode = vi.fn(async () => ({ status: 'invalid' as const }))
+    const store = makeStore({ consumeByCode })
+    const smtp = makeSmtp()
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+
+    const badCode = await request(app).post('/auth/email/verify-code').send({ email: 'a@b.com', code: '12ab56' })
+    expect(badCode.status).toBe(400)
+    const shortCode = await request(app).post('/auth/email/verify-code').send({ email: 'a@b.com', code: '123' })
+    expect(shortCode.status).toBe(400)
+    const badEmail = await request(app).post('/auth/email/verify-code').send({ email: 'nope', code: '123456' })
+    expect(badEmail.status).toBe(400)
+
+    expect(consumeByCode).not.toHaveBeenCalled()
+  })
+
+  it('returns 429 too_many_attempts when the store reports the lockout', async () => {
+    const store = makeStore({ consumeByCode: async () => ({ status: 'locked' }) })
+    const smtp = makeSmtp()
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'a@b.com', code: '123456' })
+
+    expect(res.status).toBe(429)
+    expect(res.body.error).toBe('too_many_attempts')
+  })
+
+  it('returns 401 expired_or_used for a wrong / expired / unknown code', async () => {
+    const store = makeStore({ consumeByCode: async () => ({ status: 'invalid' }) })
+    const smtp = makeSmtp()
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'a@b.com', code: '000000' })
+
+    expect(res.status).toBe(401)
+    expect(res.body.error).toBe('expired_or_used')
+  })
+
+  it('mints the JWT pair on a valid code, resolving the email to a user', async () => {
+    const store = makeStore({
+      consumeByCode: async () => ({ status: 'ok', email: 'new@example.com', nextPath: '/brain', locale: 'en' }),
+    })
+    findUserByEmailMock.mockResolvedValueOnce(null)
+    findOrCreateUserMock.mockResolvedValueOnce({
+      user: { id: 'u_code', email: 'new@example.com', name: null, avatarUrl: null },
+      isNew: true,
+    })
+
+    const smtp = makeSmtp()
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+
+    const res = await request(app)
+      .post('/auth/email/verify-code')
+      .send({ email: 'new@example.com', code: '123456' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.isNew).toBe(true)
+    expect(res.body.user.email).toBe('new@example.com')
+    expect(res.body.accessToken).toBeTruthy()
+    expect(res.body.refreshToken).toBeTruthy()
+    expect(res.body.nextPath).toBe('/brain')
   })
 })

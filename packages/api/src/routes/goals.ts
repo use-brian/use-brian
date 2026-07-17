@@ -10,6 +10,8 @@
  *                           the acceptance contract (doneWhen / budget / policy /
  *                           means) + the verified completion claim
  *   POST /:id/confirm     — arm a DRAFT goal (autopilot); optional `outcome` edit
+ *   POST /:id/outcome     — edit the goal's outcome text (draft or armed); a
+ *                           completed goal is refused (409)
  *   POST /:id/work        — spin up the acting loop: set the means (a chosen
  *                           workflow, or the default completion workflow) + kick off
  *   POST /:id/abandon     — discard a goal (drafts / active goals the user no
@@ -167,6 +169,36 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       }
     }
     const goal = await updateGoalSystem(req.params.id, { confirm: true, outcome })
+    res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
+  })
+
+  // POST /:id/outcome — edit the goal's outcome text (the Brain task panel's
+  // inline goal edit). Works on a draft or an armed goal; editing never
+  // confirms — a draft stays a draft, and the clarity gate (§12) still runs
+  // on the new text at confirm time. A completed goal is refused (409):
+  // rewriting a verified success would falsify the record.
+  router.post('/:id/outcome', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const existing = await getGoalById(userId, req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    if (existing.status === 'done') {
+      res.status(409).json({ error: 'A completed goal cannot be edited' })
+      return
+    }
+    const body = (req.body ?? {}) as { outcome?: unknown }
+    const outcome = typeof body.outcome === 'string' ? body.outcome.trim() : ''
+    if (outcome.length === 0) {
+      res.status(400).json({ error: 'outcome must be a non-empty string' })
+      return
+    }
+    const goal = await updateGoalSystem(req.params.id, { outcome })
     res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 

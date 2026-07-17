@@ -1,10 +1,8 @@
 /**
  * File-ingest PORT — the function-type contract for the direct file ingestor.
  *
- * The impl (`files/ingest-file.ts::createFileIngestor`) is closed (it drives the
- * Pipeline B ingest, a closed moat surface). The open `routes/files.ts` references
- * the `FileIngestor` injected-dependency TYPE, so the contract lives here, open;
- * the closed impl imports + re-exports it. See oss-local-brain-wedge.md §12.5.
+ * The implementation lives beside this contract in `files/ingest-file.ts` and
+ * drives the open Pipeline B ingestor built by boot.
  */
 
 import type { FileSensitivity, Sensitivity } from '@sidanclaw/core'

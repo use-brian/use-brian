@@ -28,6 +28,7 @@ import {
   type ViewEntity,
   type ViewType,
 } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import { useT } from "@/lib/i18n/client";
 
 type BlockChildPageProps = {
@@ -123,13 +124,15 @@ export function BlockChildPage({
       onClick={() => onNavigate(block.childPageId)}
       className="group/childpage flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-foreground/90 hover:bg-accent hover:text-foreground"
     >
-      {emoji ? (
-        <span className="flex size-5 shrink-0 items-center justify-center text-[1.05rem] leading-none">
-          {emoji}
-        </span>
-      ) : (
-        <Icon className="size-5 shrink-0 text-muted-foreground" />
-      )}
+      <span className="flex size-5 shrink-0 items-center justify-center">
+        <PageIcon
+          icon={emoji}
+          fallback={Icon}
+          emojiClassName="text-[1.05rem] leading-none"
+          glyphClassName="size-5 shrink-0 text-muted-foreground"
+          imgClassName="size-5 rounded-[3px] object-cover"
+        />
+      </span>
       <span className="min-w-0 flex-1 truncate text-base font-medium underline-offset-2 group-hover/childpage:underline">
         {title}
       </span>

@@ -5,6 +5,14 @@ import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationReque
 import { createAccumulator } from '../providers/accumulator.js'
 import { createToolExecutor } from './tool-executor.js'
 import { createLoopDetector, DEFAULT_HARD_LIMIT } from './loop-detector.js'
+import {
+  evaluateClaims,
+  matchFreshFactsQuestion,
+  buildGroundingNudge,
+  buildUnverifiedTrailer,
+  hasWebVerificationTool,
+  type GroundingGateOptions,
+} from './grounding-gate.js'
 import { compactConversation } from '../compaction/compact.js'
 import { isContextOverflowError } from '../providers/context-budget.js'
 
@@ -127,6 +135,37 @@ export type QueryEvent =
    * docs/architecture/integrations/search-and-fetch.md.
    */
   | { type: 'citation'; sources: Array<{ url: string; title: string }> }
+  /**
+   * The grounding gate fired: the turn's figure-bearing draft carries
+   * claims backed by no evidence this run — a verification nudge naming
+   * the exact values was injected and a corrected turn follows. Final-only
+   * channels (Telegram / Slack / WhatsApp) MUST reset their accumulated
+   * outbound text buffer on this event so the unverified draft is never
+   * delivered; all consumers should log it as the `grounding_nudge_fired`
+   * analytics event (`matchedCue` → `matched_cue`).
+   * See docs/architecture/engine/grounding-gate.md.
+   */
+  | { type: 'grounding_nudge'; matchedCue: string; unbackedCount: number }
+  /**
+   * The claim ledger for a figure-bearing final turn: every figure claim
+   * in the shipped reply with its evidence linkage (which tool result
+   * backed it, or `unverified`). Yielded once, right before
+   * `turn_complete`. Lanes persist it to `claim_provenance` keyed by the
+   * assistant message row — before the channel send, so the linkage exists
+   * before the user sees the reply. Best-effort consumers may ignore it.
+   * See docs/architecture/engine/grounding-gate.md → "Claim ledger".
+   */
+  | {
+      type: 'claim_ledger'
+      claims: Array<{
+        claim: string
+        canonical: string
+        kind: 'amount' | 'percent' | 'date'
+        status: 'backed' | 'unverified'
+        backedByToolUseId?: string
+        backedByToolName?: string
+      }>
+    }
   | { type: 'turn_complete'; response: AssistantResponse; totalUsage: TokenUsage }
   | { type: 'status'; message: string }
   | { type: 'error'; error: Error }
@@ -183,6 +222,18 @@ export type QueryLoopOptions = {
   }
   /** Max plan continuation nudges per attempt (tier-scaled). Default 3. */
   planNudgeCap?: number
+  /**
+   * Fresh-facts grounding gate (interactive lanes only). When set, a
+   * tool-less turn about to ship a figure-bearing answer to a fresh-facts
+   * shaped question (current prices, offers, rates, deadlines) with ZERO
+   * tool calls this invocation gets one synthetic verification nudge
+   * instead of ending — the 2026-07-16 confabulated-welcome-offer guard.
+   * Runs after the plan gate, fires at most once per invocation, and yields
+   * a `grounding_nudge` event so final-only channels can retract the draft
+   * from their outbound buffer. See
+   * `docs/architecture/engine/grounding-gate.md`.
+   */
+  groundingGate?: GroundingGateOptions
   /** Compact model for reactive compaction on context overflow errors. */
   compactModel?: string
   /** Resolver for tools that require user confirmation. If not provided, confirmation is skipped. */
@@ -441,6 +492,10 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
   // single resumable-handoff turn so the loop can't re-nudge after it.
   let planNudges = 0
   let planHandoffDone = false
+
+  // Grounding gate state — fires at most once per invocation. A model that
+  // ignores the nudge ships its second attempt as-is rather than looping.
+  let groundingNudged = false
 
   // Shared across turns: tools denied or timed-out are blocked for the rest
   // of this queryLoop call (one user message) but reset on the next message.
@@ -1228,6 +1283,80 @@ export async function* queryLoop(options: QueryLoopOptions): AsyncGenerator<Quer
               statelessHistory.push(...nextMessages)
             }
             continue
+          }
+        }
+      }
+
+      // ── Grounding gate (claims must be backed by evidence) ──────
+      // Figure claims in the draft reply are diffed against the run's
+      // EvidenceAccumulator figure index (2026-07-16 welcome-offer
+      // incident: two consecutive no-tool turns shipped invented promo
+      // figures). Enforcement (nudge naming the exact unbacked values,
+      // then a trailer annotation) fires only on fresh-facts-shaped turns
+      // — generative "draft me pricing" replies must not be policed. The
+      // claim ledger is emitted for EVERY figure-bearing final turn so the
+      // claim→evidence linkage persists before delivery.
+      // See docs/architecture/engine/grounding-gate.md.
+      if (options.groundingGate) {
+        const textBlocks = response.content
+          .filter((b): b is ContentBlock & { type: 'text'; text: string } =>
+            b.type === 'text' && 'text' in b && typeof (b as { text?: unknown }).text === 'string')
+        const draftText = textBlocks.map((b) => b.text).join('\n')
+        const claims = evaluateClaims(draftText, context.evidence)
+        if (claims.length > 0) {
+          const unbacked = claims.filter((c) => !c.backed)
+          const matchedCue = unbacked.length > 0
+            ? matchFreshFactsQuestion(options.groundingGate.userMessage)
+            : null
+          if (unbacked.length > 0 && matchedCue) {
+            if (!groundingNudged && turn + 1 < maxTurns && hasWebVerificationTool(options.tools)) {
+              groundingNudged = true
+              suppressText = false
+              yield { type: 'grounding_nudge', matchedCue, unbackedCount: unbacked.length }
+              nextMessages = [{
+                role: 'user',
+                content: buildGroundingNudge({
+                  draftDelivered: options.groundingGate.draftDelivered ?? false,
+                  unbackedValues: unbacked.map((u) => u.claim),
+                }),
+              }]
+              if (options.stateless) {
+                statelessHistory.push({ role: 'assistant', content: response.content })
+                statelessHistory.push(...nextMessages)
+              }
+              continue
+            }
+            // Post-nudge backstop (or no verification tool bound to nudge
+            // toward): annotate what stayed unbacked. The trailer mutates
+            // the final text block IN PLACE — assistant_turn consumers
+            // buffered these same block objects at Phase 3b, so the
+            // persisted turn matches what ships (the leak-sanitiser
+            // finalised-content-rewrite precedent) — and streams as a
+            // text_delta so both delivery paths (web deltas, channel
+            // accumulation) carry it.
+            const trailer = buildUnverifiedTrailer(unbacked.map((u) => u.claim))
+            const lastText = textBlocks[textBlocks.length - 1]
+            if (lastText) {
+              lastText.text += trailer
+            } else {
+              response.content.push({ type: 'text', text: trailer })
+            }
+            if (!suppressText) {
+              yield { type: 'text_delta', text: trailer }
+            }
+          }
+          yield {
+            type: 'claim_ledger',
+            claims: claims.map((c) => ({
+              claim: c.claim,
+              canonical: c.canonical,
+              kind: c.kind,
+              status: c.backed ? 'backed' as const : 'unverified' as const,
+              ...(c.source ? {
+                backedByToolUseId: c.source.toolUseId,
+                backedByToolName: c.source.toolName,
+              } : {}),
+            })),
           }
         }
       }

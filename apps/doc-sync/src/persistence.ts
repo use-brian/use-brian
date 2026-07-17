@@ -118,6 +118,58 @@ export async function maybeEnqueueBrainIngest(params: {
   }
 }
 
+/**
+ * Content-edit page-event signal (the `page` workflow-trigger source). A
+ * block-content edit lives in the collaborative Y.Doc, not the saved-views
+ * store's metadata `update` method, so it has no path to `publishPageLifecycle`
+ * inside the API process. On a debounced settle doc-sync fires this best-effort,
+ * FIRE-AND-FORGET POST to the API's `/internal/page-event`, which resolves the
+ * page's workspace / parent / title and dispatches an `updated` event to the
+ * workspace's `event`-trigger workflows.
+ *
+ * Reuses the SAME `DOC_SYNC_SECRET` + `x-doc-sync-secret` header as the
+ * brain-ingest signal. `isSystem` marks an AI-`patchPage`-authored settle (vs a
+ * human edit) so a workflow that edits a page it watches doesn't self-loop.
+ * Swallows every error — a failed dispatch never breaks the snapshot write. Off
+ * (a no-op) unless both the API URL and the shared secret are configured.
+ */
+export async function notifyPageUpdated(params: {
+  pageId: string
+  isSystem: boolean
+  config: {
+    apiBaseUrl: string
+    syncSecret: string
+    doFetch?: typeof fetch
+  }
+}): Promise<'dispatched' | 'error'> {
+  const { pageId, isSystem, config } = params
+  const doFetch = config.doFetch ?? fetch
+  try {
+    const res = await doFetch(
+      `${config.apiBaseUrl.replace(/\/+$/, '')}/internal/page-event`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-doc-sync-secret': config.syncSecret,
+        },
+        body: JSON.stringify({ pageId, action: 'updated', isSystem }),
+      },
+    )
+    console.log(
+      `[doc-sync] page-event dispatched for ${pageId} (isSystem=${isSystem}) → POST /internal/page-event ${res.status}`,
+    )
+    return 'dispatched'
+  } catch (err) {
+    console.error(
+      `[doc-sync] page-event dispatch failed for ${pageId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    )
+    return 'error'
+  }
+}
+
 export async function loadPageUpdate(params: {
   pageId: string
   query: SysQuery

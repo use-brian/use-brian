@@ -22,15 +22,24 @@ beforeEach(() => {
 })
 
 describe('[COMP:api/magic-link-store] create', () => {
-  it('inserts the hash, never the raw token', async () => {
+  it('inserts the hash, never the raw token or raw code', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
 
-    const { token } = await store.create({ email: 'a@b.com' })
+    const { token, code } = await store.create({ email: 'a@b.com' })
 
     const params = mockQuery.mock.calls[0][1] as unknown[]
     expect(params[0]).toBe(hash(token))
-    // The raw token must not appear in any SQL parameter
+    // Neither the raw token nor the raw code may appear in any SQL parameter
     expect(params).not.toContain(token)
+    expect(params).not.toContain(code)
+    // code_hash ($8) is sha256("<email>:<code>") — salted per-email
+    expect(params[7]).toBe(createHash('sha256').update(`a@b.com:${code}`).digest('hex'))
+  })
+
+  it('returns a zero-padded 6-digit numeric code', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    const { code } = await store.create({ email: 'a@b.com' })
+    expect(code).toMatch(/^\d{6}$/)
   })
 
   it('lowercases the email', async () => {
@@ -147,6 +156,72 @@ describe('[COMP:api/magic-link-store] consumeByToken', () => {
     const result = await store.consumeByToken('valid-token')
 
     expect(result).toEqual({ email: 'a@b.com', nextPath: '/brain', locale: 'zh' })
+  })
+})
+
+describe('[COMP:api/magic-link-store] consumeByCode', () => {
+  it('returns invalid (short-circuit, one query) when the email has no active code', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ maxAttempts: null, n: '0' }], rowCount: 1 } as never)
+
+    const result = await store.consumeByCode('a@b.com', '123456')
+
+    expect(result).toEqual({ status: 'invalid' })
+    expect(mockQuery).toHaveBeenCalledTimes(1) // never reaches the consume/increment
+  })
+
+  it('returns locked once the attempt cap is hit, without checking the code', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ maxAttempts: 5, n: '1' }], rowCount: 1 } as never)
+
+    const result = await store.consumeByCode('a@b.com', '123456')
+
+    expect(result).toEqual({ status: 'locked' })
+    expect(mockQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('atomically consumes the matching code and returns ok', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ maxAttempts: 0, n: '1' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({
+        rows: [{ email: 'a@b.com', nextPath: '/brain', locale: 'zh' }],
+        rowCount: 1,
+      } as never)
+
+    const result = await store.consumeByCode('a@b.com', '123456')
+
+    expect(result).toEqual({ status: 'ok', email: 'a@b.com', nextPath: '/brain', locale: 'zh' })
+    // The consume UPDATE is atomic + scoped to the (email, code_hash) pair
+    const sql = mockQuery.mock.calls[1][0] as string
+    expect(sql).toContain('UPDATE magic_link_tokens')
+    expect(sql).toContain('SET used_at = NOW()')
+    expect(sql).toContain('used_at IS NULL')
+    expect(sql).toContain('expires_at > NOW()')
+  })
+
+  it('passes the salted sha256 code hash, never the raw code', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ maxAttempts: 0, n: '1' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+    await store.consumeByCode('A@B.com', '123456')
+
+    const consumeParams = mockQuery.mock.calls[1][1] as unknown[]
+    expect(consumeParams[0]).toBe('a@b.com')
+    expect(consumeParams[1]).toBe(createHash('sha256').update('a@b.com:123456').digest('hex'))
+    expect(consumeParams).not.toContain('123456')
+  })
+
+  it('burns an attempt across the active codes on a wrong guess, then returns invalid', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ maxAttempts: 1, n: '2' }], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never) // no code matched
+      .mockResolvedValueOnce({ rows: [], rowCount: 2 } as never) // increment
+
+    const result = await store.consumeByCode('a@b.com', '000000')
+
+    expect(result).toEqual({ status: 'invalid' })
+    const incSql = mockQuery.mock.calls[2][0] as string
+    expect(incSql).toContain('code_attempts = code_attempts + 1')
   })
 })
 

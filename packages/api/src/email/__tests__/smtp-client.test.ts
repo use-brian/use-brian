@@ -57,6 +57,16 @@ describe('[COMP:api/smtp-client] sendMagicLink', () => {
     expect(calls[0].text).toContain(link)
   })
 
+  it('threads the OTP code into the rendered email', async () => {
+    const { transport, calls } = makeFakeTransport()
+    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+
+    await client.sendMagicLink('a@b.com', 'https://sidan.ai/login/verify?token=x', 'en', '482917')
+
+    expect(calls[0].html).toContain('482917')
+    expect(calls[0].text).toContain('482917')
+  })
+
   it('propagates transport errors', async () => {
     const transport: SmtpTransport = {
       sendMail: vi.fn().mockRejectedValueOnce(new Error('SMTP 535: auth failed')),
@@ -136,5 +146,23 @@ describe('[COMP:api/smtp-client] renderMagicLinkEmail', () => {
   it('plain-text body contains the raw link (no escaping)', () => {
     const { text } = renderMagicLinkEmail('https://x?a=b&c=d', 'en')
     expect(text).toContain('https://x?a=b&c=d')
+  })
+
+  it('renders the 6-digit passcode block in html and text when a code is given', () => {
+    const { html, text } = renderMagicLinkEmail('https://x', 'en', '482917')
+    expect(html).toContain('482917')
+    expect(text).toContain('482917')
+  })
+
+  it('omits the passcode block when no code is given (backward compatible)', () => {
+    const { html } = renderMagicLinkEmail('https://x', 'en')
+    // The label only appears when a code is rendered.
+    expect(html).not.toContain('Or enter this code')
+  })
+
+  it('ignores a non-numeric code (only digit codes are ever rendered)', () => {
+    const { html } = renderMagicLinkEmail('https://x', 'en', 'abc<script>')
+    expect(html).not.toContain('abc')
+    expect(html).not.toContain('<script>')
   })
 })

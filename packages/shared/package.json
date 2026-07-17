@@ -29,6 +29,10 @@
     "./page-slugs": {
       "types": "./dist/page-slugs.d.ts",
       "default": "./dist/page-slugs.js"
+    },
+    "./page-icon": {
+      "types": "./dist/page-icon.d.ts",
+      "default": "./dist/page-icon.js"
     }
   },
   "scripts": {

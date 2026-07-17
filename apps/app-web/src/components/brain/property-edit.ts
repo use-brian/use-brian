@@ -116,6 +116,19 @@ export function applyChangesToBody(
   if (changes.status !== undefined) next.status = changes.status;
   if (changes.due_at !== undefined) next.due_at = changes.due_at;
   if (changes.tags !== undefined) next.tags = changes.tags;
+  if (changes.assignee_id !== undefined) next.assignee_id = changes.assignee_id;
+  if (changes.priority !== undefined) {
+    // Mirrors the server: priority lives under the free-form `attributes`
+    // object (merge, never clobber siblings); null removes the key.
+    const raw = body.attributes;
+    const attrs: Record<string, unknown> =
+      raw && typeof raw === "object" && !Array.isArray(raw)
+        ? { ...(raw as Record<string, unknown>) }
+        : {};
+    if (changes.priority === null) delete attrs.priority;
+    else attrs.priority = changes.priority;
+    next.attributes = attrs;
+  }
   if (changes.summary !== undefined) next.summary = changes.summary;
   if (changes.detail !== undefined) next.detail = changes.detail;
   if (changes.scope !== undefined) next.scope = changes.scope;
@@ -152,12 +165,24 @@ export function extraBodyFields(
 
 /** Flatten a free-form `attributes` JSON object into displayable rows.
  *  Non-object payloads produce no rows (the generic list already skips
- *  the key for primitives that mark it dedicated). */
-export function flattenAttributes(v: unknown): Array<[string, string]> {
+ *  the key for primitives that mark it dedicated). `omit` drops keys that
+ *  already render as dedicated rows (the task Priority row). */
+export function flattenAttributes(
+  v: unknown,
+  omit?: ReadonlySet<string>,
+): Array<[string, string]> {
   if (!v || typeof v !== "object" || Array.isArray(v)) return [];
   return Object.entries(v as Record<string, unknown>)
-    .filter(([, value]) => value != null && value !== "")
+    .filter(([key, value]) => value != null && value !== "" && !(omit?.has(key) ?? false))
     .map(([key, value]) => [key, formatValue(value)] as [string, string]);
+}
+
+/** Read the conventional `attributes.priority` key off an untyped body
+ *  attributes value. Empty string when unset or malformed. */
+export function attributePriority(v: unknown): string {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return "";
+  const p = (v as Record<string, unknown>).priority;
+  return typeof p === "string" ? p : "";
 }
 
 export function formatValue(v: unknown): string {

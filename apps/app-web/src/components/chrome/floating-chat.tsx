@@ -86,6 +86,7 @@ import {
   type AssistantIdentity,
   type WorkspaceAssistantSummary,
 } from "@/lib/api/views";
+import { PageIcon } from "@/components/doc/page-icon";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import {
   Popover,
@@ -511,9 +512,10 @@ export function FloatingChat({
   // Attached video is too large for the cache upload (Cloud Run's 32 MiB edge
   // cap / the 20 MB multer limit) and the model can't consume it inline, so
   // hand it to the recordings pipeline instead: direct-to-GCS upload → server
-  // cost estimate → transcribe + file to the brain. Brain-only ingest (no
-  // blueprint) here — `run` shows its own cost confirm, which is all the
-  // preflight invariant needs when there's no synthesized page.
+  // cost estimate → transcribe + file to the brain. `run` shows the full
+  // pre-flight confirm — cost AND the blueprint picker (seeded from the
+  // workspace default; no selection is passed here) — so a chat-dropped
+  // recording can fill a blueprint exactly like a Studio upload.
   // See docs/architecture/media/transcription.md.
   const activeAssistantId = selectedAssistantId || assistantId;
   const rec = useRecordingUpload(workspaceId, activeAssistantId);
@@ -3038,13 +3040,13 @@ function ChatTargetIndicator({
   return (
     <div className="flex min-w-0 items-center gap-1.5 px-1 pb-1.5 text-[11px] text-muted-foreground">
       <span className="shrink-0">{dict.editing}</span>
-      {page.icon ? (
-        <span aria-hidden className="shrink-0 text-[12px] leading-none">
-          {page.icon}
-        </span>
-      ) : (
-        <FallbackGlyph className="size-3 shrink-0 opacity-70" aria-hidden />
-      )}
+      <PageIcon
+        icon={page.icon}
+        fallback={FallbackGlyph}
+        emojiClassName="shrink-0 text-[12px] leading-none"
+        glyphClassName="size-3 shrink-0 opacity-70"
+        imgClassName="size-3 shrink-0 rounded-[2px] object-cover"
+      />
       <span className="truncate font-medium text-foreground">
         {page.name.trim() || dict.untitled}
       </span>

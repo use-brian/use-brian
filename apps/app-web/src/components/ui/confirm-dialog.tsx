@@ -25,6 +25,13 @@ export type ConfirmOptions = {
   confirmLabel?: string;
   cancelLabel?: string;
   variant?: "default" | "destructive";
+  /**
+   * Optional extra content rendered between the description and the action
+   * row — an input the user sets before confirming (e.g. the recording
+   * flow's blueprint picker, per the pre-flight-confirm invariant). The
+   * caller owns the node's state; the dialog only hosts it.
+   */
+  content?: React.ReactNode;
 };
 
 type Pending = ConfirmOptions & { resolve: (value: boolean) => void };
@@ -97,6 +104,7 @@ export function ConfirmDialogProvider() {
           >
             {active?.description}
           </AlertDialog.Description>
+          {active?.content ? <div className="mt-4">{active.content}</div> : null}
           <div className="mt-6 flex justify-end gap-2">
             <Button
               variant="outline"

@@ -25,6 +25,8 @@ type TemplateStrings = {
   tagline: string
   smallPrint: string
   ignoreLine: string
+  /** Label above the 6-digit passcode block, e.g. "Or enter this code:". */
+  codeLabel: string
 }
 
 // Hard-coded production icon URL so the brand mark resolves even when an
@@ -44,6 +46,7 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     tagline: 'Your team\'s shared brain',
     smallPrint: 'If the button does not work, copy and paste this URL into your browser:',
     ignoreLine: 'Didn’t request this? You can safely ignore this email — nothing will change.',
+    codeLabel: 'Or enter this code on the sign-in screen:',
   },
   ja: {
     subject: 'sidanclaw サインインリンク',
@@ -54,6 +57,7 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     tagline: 'チーム共有ブレイン',
     smallPrint: 'ボタンが使えない場合は、以下の URL をブラウザに貼り付けてください：',
     ignoreLine: 'このリクエストに覚えがない場合、このメールはそのまま無視して構いません。アカウントには何の変更もありません。',
+    codeLabel: 'または、サインイン画面でこのコードを入力してください：',
   },
   zh: {
     subject: '您的 sidanclaw 登入連結',
@@ -64,6 +68,7 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     tagline: '你的團隊共享大腦',
     smallPrint: '若按鈕無法運作，請將下方網址複製至瀏覽器：',
     ignoreLine: '若這封信並非由你提出，請安心忽略，你的帳號不會受到任何影響。',
+    codeLabel: '或在登入畫面輸入此驗證碼：',
   },
 }
 
@@ -88,9 +93,25 @@ function escapeHtml(s: string): string {
 export function renderMagicLinkEmail(
   link: string,
   locale: MagicLinkLocale = 'en',
+  /** 6-digit OTP; when present, rendered as a copy-a-code alternative to the link. */
+  code?: string,
 ): MagicLinkContent {
   const t = TEMPLATES[locale]
   const safeLink = escapeHtml(link)
+  // Only render digits — never interpolate an unexpected value into the email.
+  const safeCode = code && /^\d{4,8}$/.test(code) ? code : ''
+
+  // The passcode block: a large, letter-spaced code the user can type on any
+  // device (the prefetch-proof sign-in path). Rendered only when a code is
+  // supplied so the template stays backward-compatible.
+  const codeBlockHtml = safeCode
+    ? `<tr>
+          <td style="padding:4px 32px 8px;">
+            <p style="margin:0 0 10px;font-size:13px;color:#6b7080;line-height:1.5;">${escapeHtml(t.codeLabel)}</p>
+            <div style="display:inline-block;padding:12px 20px;border-radius:12px;background:#f4f5fa;border:1px solid #e7e7ee;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:26px;font-weight:700;letter-spacing:8px;color:#0b1020;">${safeCode}</div>
+          </td>
+        </tr>`
+    : ''
 
   const html = `<!doctype html>
 <html lang="${locale}">
@@ -127,6 +148,7 @@ export function renderMagicLinkEmail(
             </table>
           </td>
         </tr>
+        ${codeBlockHtml}
         <tr>
           <td style="padding:28px 32px 8px;">
             <p style="margin:0 0 8px;font-size:13px;color:#6b7080;line-height:1.5;">${escapeHtml(t.smallPrint)}</p>
@@ -165,6 +187,7 @@ export function renderMagicLinkEmail(
     t.body,
     '',
     link,
+    ...(safeCode ? ['', `${t.codeLabel} ${safeCode}`] : []),
     '',
     t.ignoreLine,
   ].join('\n')

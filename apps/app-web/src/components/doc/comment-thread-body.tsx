@@ -600,6 +600,43 @@ export function CommentThreadBody({
                 }),
               );
             }
+          } else if (ev.event === "doc_title_update") {
+            // The assistant committed a title/icon change (`setTitle`/`setIcon`
+            // via patchPage, or the post-turn auto-title). Bridge it to the
+            // shell exactly like floating-chat does — `doc:title-updated` →
+            // `applyAutoTitle` updates `activeView` (page header + active tab)
+            // and reloads the sidebar. Without this, an icon/title set from a
+            // comment thread lands in `saved_views` but every surface stays
+            // stale until a full remount.
+            const d = ev.data as {
+              pageId?: string;
+              title?: string;
+              icon?: string | null;
+              nameOrigin?: string;
+              overwrite?: boolean;
+            };
+            const pageIdOf = typeof d.pageId === "string" ? d.pageId : "";
+            const title = typeof d.title === "string" ? d.title : "";
+            const icon = typeof d.icon === "string" ? d.icon : null;
+            const nameOrigin =
+              d.nameOrigin === "user" ||
+              d.nameOrigin === "auto" ||
+              d.nameOrigin === "placeholder"
+                ? d.nameOrigin
+                : undefined;
+            if (pageIdOf && title && typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("doc:title-updated", {
+                  detail: {
+                    pageId: pageIdOf,
+                    title,
+                    icon,
+                    nameOrigin,
+                    overwrite: d.overwrite === true,
+                  },
+                }),
+              );
+            }
           }
         }
       }

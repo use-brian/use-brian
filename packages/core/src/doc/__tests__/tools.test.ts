@@ -113,6 +113,7 @@ function fakeSavedViewStore(): SavedViewStore {
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),
     getBrainSyncStateSystem: vi.fn().mockResolvedValue(null),
     markBrainIngestedSystem: vi.fn().mockResolvedValue(true),
+    getPageEventContextSystem: vi.fn().mockResolvedValue(null),
   }
 }
 

@@ -10,6 +10,13 @@ vi.mock('../../db/users.js', () => ({
   // Upload resolves the file's workspace from the session's assistant (audit
   // #3 clearance scoping). Default undefined → workspace falls back to null.
   findAssistantById: vi.fn(),
+  getWorkspacePrimaryAssistant: vi.fn(),
+}))
+vi.mock('../../db/workspace-files.js', () => ({
+  getWorkspaceFileById: vi.fn(),
+}))
+vi.mock('../../db/file-ingest-jobs-store.js', () => ({
+  enqueueFileIngestJob: vi.fn(),
 }))
 vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
@@ -25,8 +32,10 @@ vi.mock('@sidanclaw/core', async () => {
 })
 
 import { fileRoutes } from '../files.js'
-import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById } from '../../db/users.js'
+import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById, getWorkspacePrimaryAssistant } from '../../db/users.js'
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
+import { getWorkspaceFileById } from '../../db/workspace-files.js'
+import { enqueueFileIngestJob } from '../../db/file-ingest-jobs-store.js'
 import { parseFileContent, shouldInline } from '@sidanclaw/core'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
@@ -395,5 +404,91 @@ describe('[COMP:api/files-upload-promotion] /upload silent artifact promotion', 
       .attach('files', Buffer.from('X'.repeat(90000)), { filename: 'big.md', contentType: 'text/markdown' })
     expect(res.status).toBe(200)
     expect(promoter).not.toHaveBeenCalled()
+  })
+})
+
+// ── Existing-file re-ingest (file-artifacts.md §"Re-ingest") ─────────────────
+//
+// The user-reachable recovery for "this stored file never made it into the
+// brain" (2026-07-16). Deterministic: enqueues the same worker routine an
+// upload uses. The double-ingestion guard is the invariant under test: an
+// already-ingested file (source_episode_id set) answers 409
+// requiresConfirmation until confirm: true.
+
+describe('[COMP:api/files-reingest] POST /:fileId/ingest', () => {
+  const fileStore = { store: vi.fn(), get: vi.fn(), listBySession: vi.fn() }
+  const mockGetPrimary = vi.mocked(getWorkspacePrimaryAssistant)
+  const mockGetFile = vi.mocked(getWorkspaceFileById)
+  const mockEnqueue = vi.mocked(enqueueFileIngestJob)
+
+  const ASSISTANT = {
+    id: 'a-1', kind: 'primary', workspaceId: 'ws-1',
+    clearance: 'internal', compartments: [],
+  }
+  const FILE = {
+    id: 'f-1', name: 'notes.md', mime: 'text/markdown',
+    sizeBytes: 4096, sourceEpisodeId: null as string | null,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGetPrimary.mockResolvedValue(ASSISTANT as never)
+    mockGetFile.mockResolvedValue(FILE as never)
+    mockEnqueue.mockResolvedValue({ enqueued: true, jobId: 'job-1' })
+  })
+
+  function app(userId: string | null = 'u-1') {
+    return createTestApp('/api/files', fileRoutes(fileStore as never), userId ? { userId } : undefined)
+  }
+
+  it('enqueues a never-ingested file without confirmation (202)', async () => {
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(202)
+    expect(res.body).toMatchObject({ fileId: 'f-1', status: 'queued', jobId: 'job-1' })
+    expect(mockEnqueue).toHaveBeenCalledWith(
+      expect.objectContaining({ fileId: 'f-1', workspaceId: 'ws-1', actingUserId: 'u-1', assistantId: 'a-1', sourceLabel: 'upload' }),
+    )
+  })
+
+  it('GUARD: an already-ingested file requires confirmation (409, nothing enqueued)', async () => {
+    mockGetFile.mockResolvedValue({ ...FILE, sourceEpisodeId: 'ep-9' } as never)
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ requiresConfirmation: true, reason: 'already_ingested', fileName: 'notes.md' })
+    expect(mockEnqueue).not.toHaveBeenCalled()
+  })
+
+  it('GUARD: confirm: true re-ingests an already-ingested file, labelled reingest', async () => {
+    mockGetFile.mockResolvedValue({ ...FILE, sourceEpisodeId: 'ep-9' } as never)
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1', confirm: true })
+    expect(res.status).toBe(202)
+    expect(mockEnqueue).toHaveBeenCalledWith(expect.objectContaining({ sourceLabel: 'reingest' }))
+  })
+
+  it('an in-flight job answers 409 ingest_in_flight (queue idempotency surfaced)', async () => {
+    mockEnqueue.mockResolvedValue({ enqueued: false, jobId: null })
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('ingest_in_flight')
+  })
+
+  it('audio/video is refused — recordings own media (400)', async () => {
+    mockGetFile.mockResolvedValue({ ...FILE, mime: 'video/mp4' } as never)
+    const res = await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('media_owned_by_recordings')
+    expect(mockEnqueue).not.toHaveBeenCalled()
+  })
+
+  it('404 for a non-member (existence hidden) and for an invisible file; 401 unauthenticated; 400 without workspaceId', async () => {
+    mockGetPrimary.mockResolvedValue(null as never)
+    expect((await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(404)
+
+    mockGetPrimary.mockResolvedValue(ASSISTANT as never)
+    mockGetFile.mockResolvedValue(null as never)
+    expect((await request(app()).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(404)
+
+    expect((await request(app(null)).post('/api/files/f-1/ingest').send({ workspaceId: 'ws-1' })).status).toBe(401)
+    expect((await request(app()).post('/api/files/f-1/ingest').send({})).status).toBe(400)
   })
 })

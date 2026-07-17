@@ -24,6 +24,7 @@
     "jszip": "^3.10.1",
     "linkedom": "^0.18.0",
     "mammoth": "^1.12.0",
+    "opencc-js": "^1.4.1",
     "pptxgenjs": "^4.0.1",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",

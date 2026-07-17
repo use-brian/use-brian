@@ -80,6 +80,7 @@ import {
   liftedPageSchema,
   opsSchema,
 } from './page-schemas.js'
+import { pageIconValueSchema } from '../views/schemas.js'
 import { applyOps } from './ops.js'
 import { normalizeMarkdownBlocks, normalizeMarkdownOps, markdownToBlocks } from './markdown.js'
 import { pageToMarkdown } from './to-markdown.js'
@@ -362,16 +363,14 @@ const pageIdSchema = z.string().min(1).max(128)
 const blockIdSchema = z.string().min(1).max(128)
 
 /**
- * Page emoji icon — one emoji grapheme (≤16 chars, matching the REST
- * `PATCH /saved-views/:id` contract). The page's leading glyph above the
- * title; omit to leave the derived document glyph in place.
+ * Page icon — one emoji grapheme (≤16 chars, matching the REST
+ * `PATCH /saved-views/:id` contract) or an `img:<workspaceId>/<fileId>`
+ * image token from the `fetchSiteIcon` tool. The page's leading glyph above
+ * the title; omit to leave the derived document glyph in place.
  */
-const iconInputSchema = z
-  .string()
-  .max(16)
-  .describe(
-    'Single emoji for the page icon (the glyph shown above the title), e.g. "🌋". Set the emoji HERE — do NOT prefix it onto the title text. Omit to keep the default document glyph.',
-  )
+const iconInputSchema = pageIconValueSchema.describe(
+  'The page icon (the glyph shown above the title): a single emoji, e.g. "🌋", or an "img:..." token returned by the fetchSiteIcon tool. Set the icon HERE — do NOT prefix an emoji onto the title text. Omit to keep the default document glyph.',
+)
 
 const renderPageInputSchema = z.object({
   page: liftedPageSchema.describe(
@@ -676,7 +675,7 @@ export function createPatchPageTool(deps: DocToolDeps): Tool {
       '  - `delete` — remove a block (`{ op: "delete", blockId }`).\n' +
       '  - `move` — reorder a block to a new anchor (`{ op: "move", blockId, after: ... }`).\n' +
       '  - `setTitle` — rename the page (`{ op: "setTitle", title: "..." }`).\n' +
-      '  - `setIcon` — set or clear the page emoji icon, the glyph shown above the title (`{ op: "setIcon", icon: "🌋" }`, or `{ op: "setIcon", icon: null }` to clear). Use this to give a page an icon — never prefix an emoji onto the title text.\n' +
+      '  - `setIcon` — set or clear the page icon, the glyph shown above the title (`{ op: "setIcon", icon: "🌋" }`, an image token from the fetchSiteIcon tool `{ op: "setIcon", icon: "img:..." }`, or `{ op: "setIcon", icon: null }` to clear). Use this to give a page an icon — never prefix an emoji onto the title text.\n' +
       '\n' +
       'Concurrency: pass `expectedVersion` from the last outline you saw. If the page changed since, the patch is rejected — refetch via the outline and retry.\n' +
       '\n' +

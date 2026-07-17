@@ -71,6 +71,16 @@ export function wrapContextBudget(): StreamWrapper {
  * retry stalled the same way, and the turn died with no reply). Omitting
  * `firstChunkTimeoutMs` keeps the single-window behaviour.
  *
+ * `message_start` does NOT count as the first chunk. Every adapter yields a
+ * synthetic `message_start` before the first network byte (gemini.ts
+ * `convertStreamChunks` yields it before consuming the SSE stream;
+ * anthropic.ts before the SDK call), so counting it collapsed the prefill
+ * window to the inter-chunk window on every call and the 2026-06-10 spiral
+ * recurred (prod 2026-07-16, session b3697792 — turn-1 post-tool-result
+ * prefill on a ~300k-token prompt aborted at exactly send+30.0s, the retry
+ * died the same way, and the Telegram user got "Something went wrong").
+ * The window flips only on the first chunk of any other type.
+ *
  * The error message keeps the `Stream idle for <n>ms` prefix in both phases —
  * `isTransientStreamError` (query-loop.ts) matches on it.
  */
@@ -105,7 +115,7 @@ export function wrapIdleTimeout(timeoutMs: number, firstChunkTimeoutMs?: number)
         if (timer) clearTimeout(timer)
 
         if (result.done) break
-        sawFirstChunk = true
+        if (result.value.type !== 'message_start') sawFirstChunk = true
         yield result.value
       }
     } finally {

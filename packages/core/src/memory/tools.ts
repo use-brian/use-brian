@@ -123,6 +123,16 @@ export type MemoryToolOptions = {
    * continuity".
    */
   injectedTags?: string[]
+  /**
+   * Provenance stamped on every memory this tool CREATES (mirrors the CRM /
+   * task tools' `writeSource`). The synthesis engine builds saveMemory with
+   * `'extracted'` + the source Episode id so blueprint-directed memories carry
+   * the same review anchors as extraction writes (they surface in the brain
+   * inbox via its `source IN ('model','extracted')` filter). Absent → the chat
+   * default `'model'`, no episode anchor. Create-only, never applied on update.
+   */
+  writeSource?: 'model' | 'extracted'
+  writeSourceEpisodeId?: string | null
 }
 
 /**
@@ -406,9 +416,9 @@ export function createMemoryTools(
       }
 
       // Create new. WU-2.2 stamps universal-column authorship from the
-      // session context. `sourceEpisodeId` is left undefined — Pipeline B
-      // (WS-3) is the writer that supplies an episode anchor; chat-driven
-      // saveMemory has no episode.
+      // session context. `sourceEpisodeId` comes from `writeSourceEpisodeId`
+      // (the synthesis engine anchors extracted memories to the source
+      // Episode, same as Pipeline B); chat-driven saveMemory has no episode.
       const memory = await store.create({
         assistantId: context.assistantId,
         userId: context.userId,
@@ -416,7 +426,8 @@ export function createMemoryTools(
         tags: effectiveTags,
         summary: input.summary,
         detail: input.detail,
-        source: 'model',
+        source: opts?.writeSource ?? 'model',
+        ...(opts?.writeSourceEpisodeId ? { sourceEpisodeId: opts.writeSourceEpisodeId } : {}),
         sourceSessionId: context.sessionId,
         workspaceId: effectiveScope === 'team' ? context.workspaceId! : undefined,
         sensitivity: stampedSensitivity,

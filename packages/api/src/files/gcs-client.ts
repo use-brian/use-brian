@@ -333,19 +333,33 @@ export function buildStorageKey(workspaceId: string, fileId: string): string {
   return `${workspaceId}/${fileId}`
 }
 
-/** `gs://bucket/<workspace_id>/<file_id>` URI for the workspace_files.storage_uri column. */
-export function buildStorageUri(bucket: string, workspaceId: string, fileId: string): string {
-  return `gs://${bucket}/${buildStorageKey(workspaceId, fileId)}`
+/**
+ * Storage-backend URI scheme recorded in `workspace_files.storage_uri`. `gs`
+ * for GCS buckets (the default), `s3` for S3-compatible buckets. The scheme is
+ * cosmetic for routing (`parseStorageBucket` matches by bucket name), but keeps
+ * each file's origin backend legible.
+ */
+export type StorageUriScheme = 'gs' | 's3'
+
+/** `<scheme>://bucket/<workspace_id>/<file_id>` URI for the workspace_files.storage_uri column. */
+export function buildStorageUri(
+  bucket: string,
+  workspaceId: string,
+  fileId: string,
+  scheme: StorageUriScheme = 'gs',
+): string {
+  return `${scheme}://${bucket}/${buildStorageKey(workspaceId, fileId)}`
 }
 
 /**
- * Extract the bucket name from a `gs://<bucket>/<key>` storage URI. Used to
- * route reads of an existing file to whichever bucket it actually lives in
- * (a workspace that switched to BYO storage still has older files in the app
- * default bucket — each file's own `storage_uri` is authoritative).
+ * Extract the bucket name from a `gs://<bucket>/<key>` or `s3://<bucket>/<key>`
+ * storage URI. Used to route reads of an existing file to whichever bucket it
+ * actually lives in (a workspace that switched to BYO storage still has older
+ * files in the app default bucket — each file's own `storage_uri` is
+ * authoritative). Scheme-agnostic: routing is by bucket name, not backend.
  */
 export function parseStorageBucket(storageUri: string): string {
-  const m = /^gs:\/\/([^/]+)\//.exec(storageUri)
+  const m = /^(?:gs|s3):\/\/([^/]+)\//.exec(storageUri)
   if (!m) throw new Error(`gcs: cannot parse bucket from storage_uri: ${storageUri}`)
   return m[1]
 }

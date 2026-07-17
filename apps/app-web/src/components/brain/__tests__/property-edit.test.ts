@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyChangesToBody,
+  attributePriority,
   bodyTags,
   dateInputToIso,
   extraBodyFields,
@@ -97,6 +98,43 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
     expect(entity.name).toBe("Acme");
   });
 
+  it("patches assignee_id and merges priority into attributes (null removes the key)", () => {
+    const body = { assignee_id: null, attributes: { order: 3 } };
+    const next = applyChangesToBody(
+      body,
+      { assignee_id: "wm-1", priority: "high" },
+      "task",
+    );
+    expect(next.assignee_id).toBe("wm-1");
+    expect(next.attributes).toEqual({ order: 3, priority: "high" });
+    // Original body (and its attributes object) untouched.
+    expect(body.attributes).toEqual({ order: 3 });
+
+    const cleared = applyChangesToBody(
+      { assignee_id: "wm-1", attributes: { order: 3, priority: "high" } },
+      { assignee_id: null, priority: null },
+      "task",
+    );
+    expect(cleared.assignee_id).toBeNull();
+    expect(cleared.attributes).toEqual({ order: 3 });
+
+    // A malformed attributes value is replaced, never crashed on.
+    const fromGarbage = applyChangesToBody(
+      { attributes: "junk" },
+      { priority: "low" },
+      "task",
+    );
+    expect(fromGarbage.attributes).toEqual({ priority: "low" });
+  });
+
+  it("reads the conventional attributes.priority key, empty when unset or malformed", () => {
+    expect(attributePriority({ priority: "urgent" })).toBe("urgent");
+    expect(attributePriority({ order: 3 })).toBe("");
+    expect(attributePriority({ priority: 2 })).toBe("");
+    expect(attributePriority(null)).toBe("");
+    expect(attributePriority(["priority"])).toBe("");
+  });
+
   it("never copies the audit reason into the body", () => {
     const next = applyChangesToBody({}, { sensitivity: "public", reason: "why" }, "memory");
     expect(next.sensitivity).toBe("public");
@@ -180,6 +218,12 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
     expect(flattenAttributes(["a"])).toEqual([]);
     expect(flattenAttributes("x")).toEqual([]);
     expect(flattenAttributes(null)).toEqual([]);
+  });
+
+  it("omits attribute keys that render as dedicated rows (the Priority row)", () => {
+    expect(
+      flattenAttributes({ priority: "high", order: 3 }, new Set(["priority"])),
+    ).toEqual([["order", "3"]]);
   });
 
   it("formats values for display (dates localized, arrays joined, empties blank)", () => {

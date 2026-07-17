@@ -25,6 +25,11 @@
  *     injected ONLY when the client passes `activeThemeId` (the user's applied
  *     custom theme) + a provider, so "make my theme warmer" works from chat.
  *     See `docs/architecture/features/doc-custom-themes.md`.
+ *   - 1 CONDITIONAL icon tool (`./site-icon-tool.ts`): `fetchSiteIcon` —
+ *     injected only when a `FilesApi` is wired; fetches a site's real
+ *     logo/favicon (SSRF-guarded) and stores it as an `img:` page-icon token
+ *     for `patchPage setIcon`. See `docs/architecture/features/doc.md` →
+ *     "Image icons".
  *
  * Stores: instantiated lazily via the DB-backed factories (Agent P1C —
  * `db/doc-page-store.ts`, `db/doc-entity-store.ts`,
@@ -64,6 +69,7 @@ import type {
   DocToolEvent,
   DocToolEventContext,
   DocPageStore,
+  FilesApi,
   FileStore,
   CommentThreadStore,
   CrmStore,
@@ -90,6 +96,7 @@ import { createDbDocPageStore } from '../db/doc-page-store.js'
 import { createDbDocThemesStore, type DocThemeStore } from '../db/doc-themes-store.js'
 import { createDbCommentThreadStore } from '../db/comment-thread-store.js'
 import { createRefineActiveThemeTool } from './theme-tools.js'
+import { createFetchSiteIconTool } from './site-icon-tool.js'
 import { createDbCrmStore } from '../db/crm-store.js'
 import { createDbSavedViewStore } from '../db/saved-views-store.js'
 import { publishPageLifecycle } from '../page-event-fanout.js'
@@ -174,6 +181,13 @@ export type InjectDocToolsOptions = {
    * tool isn't injected (tool-awareness rule). RLS-scoped to the caller.
    */
   ingestPage?: (args: { userId: string; pageId: string }) => Promise<void>
+  /**
+   * Workspace files API — backs the `fetchSiteIcon` tool (fetch a site's
+   * real logo → store as a workspace file → `img:` page-icon token). When
+   * absent (misconfigured deploy with no file storage) the tool isn't
+   * injected (tool-awareness rule), mirroring `ingestPage`.
+   */
+  filesApi?: FilesApi
   /**
    * Optional live-doc gateway. When omitted, resolved from
    * `DOC_SYNC_URL`/`DOC_SYNC_SECRET` env; when those are absent the
@@ -421,6 +435,19 @@ export async function injectDocTools(
       createIngestPageTool({
         ingestPage: options.ingestPage,
         anchorPageId: options.pageId ?? null,
+      }),
+    )
+  }
+
+  // `fetchSiteIcon` (site logo → stored image → `img:` page-icon token for
+  // `patchPage setIcon`) — injected only when a `FilesApi` is wired, so the
+  // model never sees a tool whose storage half can't run (tool-awareness
+  // rule). See docs/architecture/features/doc.md → "Image icons".
+  if (options.filesApi) {
+    allTools.push(
+      createFetchSiteIconTool({
+        filesApi: options.filesApi,
+        workspaceId,
       }),
     )
   }

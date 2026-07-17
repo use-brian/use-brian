@@ -199,4 +199,45 @@ describe('[COMP:providers/wrappers] wrapIdleTimeout — first-chunk vs inter-chu
     expect(String(err)).toMatch(/Stream idle for 30ms/)
     expect(String(err)).not.toMatch(/no first chunk/)
   })
+
+  /** Real adapter shape: synthetic message_start yielded before the first
+   *  network byte, then a prefill-length wait before the first content chunk
+   *  (gemini.ts convertStreamChunks / anthropic.ts both do this). */
+  function adapterShapedStream(prefillMs: number, laterGaps: number[] = []) {
+    return async function* (_req: ProviderRequest): AsyncIterable<StreamChunk> {
+      yield { type: 'message_start', model: 'fake' }
+      await sleep(prefillMs)
+      yield { type: 'text_delta', text: 'x' }
+      for (const d of laterGaps) {
+        await sleep(d)
+        yield { type: 'text_delta', text: 'x' }
+      }
+    }
+  }
+
+  it('keeps the prefill window armed through the synthetic message_start (prod 2026-07-16)', async () => {
+    // Prefill (120ms) exceeds the 40ms inter-chunk window but sits inside the
+    // 400ms prefill window. Before the fix, the eager message_start flipped
+    // sawFirstChunk and this aborted at 40ms — the 2026-07-16 Telegram stall.
+    const fn = wrapIdleTimeout(40, 400)(adapterShapedStream(120, [5]))
+    const out = await drain(fn)
+    expect(out).toHaveLength(3)
+  })
+
+  it('aborts a prefill overrun after message_start with the first-chunk tag', async () => {
+    const fn = wrapIdleTimeout(20, 60)(adapterShapedStream(500))
+    await expect(drain(fn)).rejects.toThrow(/Stream idle for 60ms \(no first chunk/)
+  })
+
+  it('still enforces the inter-chunk window after the first content chunk', async () => {
+    const fn = wrapIdleTimeout(30, 1000)(adapterShapedStream(5, [400]))
+    let err: unknown
+    try {
+      await drain(fn)
+    } catch (e) {
+      err = e
+    }
+    expect(String(err)).toMatch(/Stream idle for 30ms/)
+    expect(String(err)).not.toMatch(/no first chunk/)
+  })
 })

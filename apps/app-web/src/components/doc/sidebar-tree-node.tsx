@@ -41,6 +41,7 @@ import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { ChevronRight, MoreHorizontal, Plus } from "lucide-react";
 import { daysUntilPrune, derivePageIcon } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import type { TreeNode } from "@/lib/sidebar-tree";
 import { useT } from "@/lib/i18n/client";
 import { DraftPruneButton } from "./draft-prune-button";
@@ -226,11 +227,13 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
                   isTemporary ? "doc-icon-temporary" : "",
                 ].join(" ")}
               >
-                {row.icon ? (
-                  <span className="text-[15px] leading-none">{row.icon}</span>
-                ) : (
-                  <Icon className="size-4 text-sidebar-foreground/55" />
-                )}
+                <PageIcon
+                  icon={row.icon}
+                  fallback={Icon}
+                  emojiClassName="text-[15px] leading-none"
+                  glyphClassName="size-4 text-sidebar-foreground/55"
+                  imgClassName="size-4 rounded-[3px] object-cover"
+                />
               </span>
             </span>
             {/* Disclosure chevron — fades in on hover, stays while expanded. */}

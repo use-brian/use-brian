@@ -49,6 +49,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { isImageIcon } from "@sidanclaw/shared/page-icon";
 
 type Props = {
   workspaceId: string | null;
@@ -615,7 +616,7 @@ function PagePicker({
   // it `SelectValue` falls back to the raw id.
   const items = options.map((o) => ({
     value: o.id,
-    label: `${o.icon ? `${o.icon} ` : ""}${o.label}`,
+    label: `${o.icon && !isImageIcon(o.icon) ? `${o.icon} ` : ""}${o.label}`,
   }));
   return (
     <div className="flex flex-col gap-1">
@@ -633,7 +634,7 @@ function PagePicker({
         <SelectContent>
           {options.map((o) => (
             <SelectItem key={o.id} value={o.id}>
-              {o.icon ? `${o.icon} ` : ""}
+              {o.icon && !isImageIcon(o.icon) ? `${o.icon} ` : ""}
               {o.label}
             </SelectItem>
           ))}

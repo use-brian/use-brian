@@ -18,6 +18,8 @@ import {
   draftToExtraction,
   moveField,
   newDraftField,
+  setCaptureInstruction,
+  toggleCaptureKind,
   validateDraft,
   type BlueprintDraft,
 } from "../blueprint-editor";
@@ -93,6 +95,8 @@ describe("[COMP:web/blueprint-detail] blueprint editor draft logic", () => {
     const bad: BlueprintDraft = {
       name: " ",
       description: "",
+      capture: [],
+      captureInstructions: {},
       fields: [
         { ...base.fields[0], heading: "", instruction: "" },
         { ...base.fields[1], key: "store-link" },
@@ -109,9 +113,9 @@ describe("[COMP:web/blueprint-detail] blueprint editor draft logic", () => {
     expect(codes).toContain("options-required");
     expect(codes).toContain("entity-kind-required");
 
-    expect(validateDraft({ name: "x", description: "", fields: [] })).toEqual([
-      { code: "fields-required" },
-    ]);
+    expect(
+      validateDraft({ name: "x", description: "", fields: [], capture: [], captureInstructions: {} }),
+    ).toEqual([{ code: "fields-required" }]);
   });
 
   it("draftToExtraction drops type-irrelevant state and keeps capture", () => {
@@ -119,7 +123,7 @@ describe("[COMP:web/blueprint-detail] blueprint editor draft logic", () => {
     // Stale enum options + entity kind linger in the draft after a type switch;
     // they must not leak into a string field's wire shape.
     draft.fields[0] = { ...draft.fields[0], options: ["a", "b"], entityKind: "company" };
-    const spec = draftToExtraction(draft, ["company"]);
+    const spec = draftToExtraction(draft);
     expect(spec.fields[0]).toEqual({
       key: "store-link",
       heading: "Store link",
@@ -129,6 +133,42 @@ describe("[COMP:web/blueprint-detail] blueprint editor draft logic", () => {
     });
     expect(spec.fields[1].outputType).toBe("prose");
     expect(spec.capture).toEqual(["company"]);
+  });
+
+  it("toggleCaptureKind keeps canonical order and preserves instruction text", () => {
+    let draft = draftFromTemplate(template(), ids());
+    expect(draft.capture).toEqual(["company"]);
+    draft = toggleCaptureKind(draft, "memory");
+    draft = toggleCaptureKind(draft, "task");
+    // Canonical BLUEPRINT_CAPTURE_KINDS order, not click order.
+    expect(draft.capture).toEqual(["company", "task", "memory"]);
+    draft = setCaptureInstruction(draft, "task", "One task per maintenance item");
+    draft = toggleCaptureKind(draft, "task");
+    expect(draft.capture).toEqual(["company", "memory"]);
+    // The text survives the off-toggle (lossless editing)…
+    expect(draft.captureInstructions.task).toBe("One task per maintenance item");
+    // …but a disabled kind's instruction never reaches the wire.
+    expect(draftToExtraction(draft).captureInstructions).toBeUndefined();
+  });
+
+  it("draftToExtraction carries instructions only for enabled kinds with text", () => {
+    let draft = draftFromTemplate(template(), ids());
+    draft = toggleCaptureKind(draft, "task");
+    draft = setCaptureInstruction(draft, "task", "  Break business follow-ups into one task each  ");
+    draft = setCaptureInstruction(draft, "company", "   ");
+    const spec = draftToExtraction(draft);
+    expect(spec.capture).toEqual(["company", "task"]);
+    expect(spec.captureInstructions).toEqual({
+      task: "Break business follow-ups into one task each",
+    });
+  });
+
+  it("capture edits make the template patch dirty", () => {
+    const draft = draftFromTemplate(template(), ids());
+    expect(buildTemplatePatch(template(), draft)).toEqual({});
+    const withMemory = toggleCaptureKind(draft, "memory");
+    const patch = buildTemplatePatch(template(), withMemory);
+    expect(patch.extraction?.capture).toEqual(["company", "memory"]);
   });
 
   it("buildTemplatePatch is empty when clean and carries only the changed keys", () => {

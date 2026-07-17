@@ -144,7 +144,7 @@ type GoalActionResult = {
 
 async function goalAction(
   goalId: string,
-  action: "confirm" | "work" | "abandon",
+  action: "confirm" | "work" | "abandon" | "outcome",
   body: unknown,
 ): Promise<GoalActionResult> {
   const res = await authFetch(`${API_URL}/api/goals/${encodeURIComponent(goalId)}/${action}`, {
@@ -171,6 +171,12 @@ async function goalAction(
 /** Confirm (arm) a draft goal, optionally refining its outcome. */
 export function confirmGoal(goalId: string, outcome?: string): Promise<GoalActionResult> {
   return goalAction(goalId, "confirm", { outcome });
+}
+
+/** Edit a goal's outcome text (draft or armed). Never confirms a draft; a
+ *  completed goal is refused server-side (409). */
+export function updateGoalOutcome(goalId: string, outcome: string): Promise<GoalActionResult> {
+  return goalAction(goalId, "outcome", { outcome });
 }
 
 /** Spin up the assistant to work the task to done (sets the means + kicks off the loop). */

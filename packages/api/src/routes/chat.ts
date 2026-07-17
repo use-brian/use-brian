@@ -3,7 +3,8 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, up
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
-import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent } from '@sidanclaw/core'
+import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote } from '@sidanclaw/core'
+import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
@@ -2657,6 +2658,23 @@ export function chatRoutes(options: WebChatOptions): Router {
         ? [splitPrompt.turnContext]
         : []
 
+      // ── Dispute pre-pass (grounding-gate claim ledger) ──
+      // A dispute-shaped message carrying a figure ("唔係要 look 11萬咩")
+      // loads the previous reply's claim provenance so the model re-verifies
+      // instead of re-asserting. One indexed read, only on the dispute
+      // shape; rides the turn-context envelope so the cached prompt prefix
+      // stays byte-stable. See grounding-gate.md → "Dispute pre-pass".
+      if (typeof message === 'string' && message && matchesDisputedFigure(message)) {
+        try {
+          const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
+          if (priorClaims.length > 0) {
+            turnContextParts.push(buildDisputeContextNote(priorClaims))
+          }
+        } catch (err) {
+          console.warn('[chat] dispute pre-pass failed, continuing without:', err)
+        }
+      }
+
       // Uploaded-file save policy. The model previously fell back to a text
       // `saveMemory` when asked to save an attachment — and claimed success.
       // Make the contract explicit: persist the file itself, never substitute
@@ -3142,6 +3160,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             // `ingestPage` tool is injected so "add this page to the brain"
             // works on request. Absent (no Pipeline B) → tool not injected.
             ingestPage: options.ingestPage,
+            // Workspace files API — backs `fetchSiteIcon` (site logo →
+            // stored image → `img:` page-icon token). Absent → not injected.
+            filesApi: options.filesApi,
             pageId:
               typeof requestedDocViewId === 'string' && requestedDocViewId
                 ? requestedDocViewId
@@ -3943,6 +3964,13 @@ export function chatRoutes(options: WebChatOptions): Router {
       const pendingAssistantTurns: PendingTurn[] = []
       let lastAssistantMessageId: string | null = null
       let flushed = false
+      // Grounding-gate claim ledger — stashed from the claim_ledger event,
+      // persisted once the final assistant message id is known. See
+      // docs/architecture/engine/grounding-gate.md → "Claim ledger".
+      let pendingClaimLedger: Extract<
+        import('@sidanclaw/core').QueryEvent,
+        { type: 'claim_ledger' }
+      >['claims'] | null = null
 
       /**
        * Atomic flush: walk buffered turns in order, synthesise missing
@@ -4070,6 +4098,28 @@ export function chatRoutes(options: WebChatOptions): Router {
         // streamed the model output to the client). See
         // `docs/architecture/context-engine/memory-system.md` →
         // "Recall-outcome tagging".
+        // Claim ledger — the claim→evidence linkage of the shipped reply,
+        // keyed by the final assistant message row. Best-effort: a ledger
+        // failure never blocks the reply (already streamed anyway). The
+        // aggregate counts go to analytics — that's the long-horizon trend
+        // store; the rows themselves are superseded on the next reply.
+        if (pendingClaimLedger && lastAssistantMessageId) {
+          try {
+            await insertClaimProvenance(lastAssistantMessageId, pendingClaimLedger)
+          } catch (err) {
+            console.warn('[chat] claim ledger persist failed:', err)
+          }
+          options.analytics?.logEvent({
+            userId: user.id, assistantId: assistant.id, sessionId: session.id,
+            eventName: 'claim_ledger_recorded', channelType: 'web',
+            metadata: {
+              backed_count: pendingClaimLedger.filter((c) => c.status === 'backed').length,
+              unverified_count: pendingClaimLedger.filter((c) => c.status === 'unverified').length,
+              model: sanitize(model),
+            },
+          })
+          pendingClaimLedger = null
+        }
         if (recallBuffer && lastAssistantMessageId) {
           try {
             await recallBuffer.flush(lastAssistantMessageId)
@@ -4102,6 +4152,18 @@ export function chatRoutes(options: WebChatOptions): Router {
         // shapes) — fall back to in-prompt placement for this turn only.
         systemPromptWithPreflight = `${systemPromptWithPreflight}\n\n${turnContext}`
       }
+
+      // ── Reply evidence (grounding gate) ──
+      // Figures observed in successful tool results this turn (fed by the
+      // tool executor) plus seeded material — the system prompt and the
+      // user's own message — form the evidence the gate diffs reply claims
+      // against. Prior ASSISTANT turns are deliberately not seeded (a
+      // confabulated figure must not launder itself into next-turn
+      // evidence). Accumulate-only: no gatedTools, so the identifier
+      // write-gate stays a workflow-lane behavior.
+      const replyEvidence = new EvidenceAccumulator()
+      replyEvidence.note(systemPromptWithPreflight)
+      if (typeof message === 'string') replyEvidence.note(message)
 
       const confirmationResolver = createConfirmationResolver()
       activeResolvers.set(session.id, confirmationResolver)
@@ -4160,6 +4222,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // the same instance the queryLoop populates.
             sensitivity: sensitivityAccumulator,
             compartmentAccumulator,
+            evidence: replyEvidence,
             outboundAttachments: outboundAttachmentCollector,
             // Research turns ingest public-web findings: model-driven saves
             // (saveMemory / addKnowledgeEntry / saveContact|Company|Deal)
@@ -4314,6 +4377,16 @@ export function chatRoutes(options: WebChatOptions): Router {
               }
             : undefined,
           planNudgeCap: planNudgeCap({ model, researchMode }),
+          // Fresh-facts grounding gate — a figure-bearing answer about
+          // current facts (prices, offers, rates, deadlines) produced with
+          // zero tool calls gets one forced-verification nudge. Skipped in
+          // coordinator/research mode, whose protocol already forces
+          // evidence. `draftDelivered: true` — the web SSE already streamed
+          // the draft, so the nudge copy tells the model to correct it
+          // explicitly. See docs/architecture/engine/grounding-gate.md.
+          ...(!coordinatorMode && !researchMode && typeof message === 'string' && message.trim()
+            ? { groundingGate: { userMessage: message, draftDelivered: true } }
+            : {}),
           ...(researchMode ? {
             workerDrainPrompt: createResearchWorkerDrainPrompt(),
           } : {}),
@@ -4372,6 +4445,27 @@ export function chatRoutes(options: WebChatOptions): Router {
             // dropped from the persisted turn — tell the client to retract
             // the phantom timeline entry. See query-loop.ts strip branch.
             sendEvent('tool_dropped', { id: event.id })
+          }
+          if (event.type === 'grounding_nudge') {
+            // The grounding gate fired: the figure-bearing draft carried
+            // unbacked claims and is being rewritten from tool results. The
+            // draft already streamed over SSE (no retraction on web); the
+            // corrected turn arrives as a visible continuation. Telemetry
+            // only — see docs/architecture/engine/grounding-gate.md.
+            options.analytics?.logEvent({
+              userId: user.id, assistantId: assistant.id, sessionId: session.id,
+              eventName: 'grounding_nudge_fired', channelType: 'web',
+              metadata: {
+                matched_cue: sanitize(event.matchedCue),
+                unbacked_count: event.unbackedCount,
+                model: sanitize(model),
+              },
+            })
+          }
+          if (event.type === 'claim_ledger') {
+            // Stash — persisted once the final assistant message row exists
+            // (next to the recall-buffer flush below).
+            pendingClaimLedger = event.claims
           }
           if (event.type === 'tool_result') {
             for (const block of event.results) {

@@ -20,6 +20,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import { EmojiPicker } from "@/components/ui/emoji-picker";
+import { PageIcon } from "@/components/doc/page-icon";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 
@@ -112,21 +113,19 @@ export function PageTitle({
       disabled={!canEdit}
       className="flex size-12 items-center justify-center rounded-lg hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:hover:bg-transparent"
     >
-      {icon ? (
-        <span
-          className={cn("text-[40px] leading-none", hint && "animate-draft-hint")}
-        >
-          {icon}
-        </span>
-      ) : (
-        <Fallback
-          className={cn(
-            "size-9 text-muted-foreground/55",
-            hint && "animate-draft-hint",
-          )}
-          aria-hidden
-        />
-      )}
+      <PageIcon
+        icon={icon}
+        fallback={Fallback}
+        emojiClassName={cn("text-[40px] leading-none", hint && "animate-draft-hint")}
+        glyphClassName={cn(
+          "size-9 text-muted-foreground/55",
+          hint && "animate-draft-hint",
+        )}
+        imgClassName={cn(
+          "size-10 rounded-md object-cover",
+          hint && "animate-draft-hint",
+        )}
+      />
     </button>
   );
 

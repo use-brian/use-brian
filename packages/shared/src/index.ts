@@ -16,6 +16,7 @@ export * from './delivery-sanitize.js'
 export * from './app-types.js'
 export * from './mini-apps.js'
 export * from './emoji-reactions.js'
+export * from './page-icon.js'
 export * from './doc-theme/index.js'
 
 /**

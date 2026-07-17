@@ -149,6 +149,179 @@ function looksLikeCandidateUrl(raw: string): boolean {
   return COMMON_TLDS.has(tld)
 }
 
+// ── Figures (grounding gate v2) ────────────────────────────────
+//
+// Canonicalized numeric / date evidence for the reply-boundary claims
+// check (docs/architecture/engine/grounding-gate.md). Same asymmetry as
+// identifiers: the evidence side collects every number-ish token
+// generously; the claim side (`extractFigureClaims`) only flags
+// confidently-figure-shaped values (currency, number+unit, CJK magnitude
+// compounds, thousands-separated numbers, percentages, explicit dates) so
+// prose like "the offer has 3 parts" can never be flagged.
+
+export type ClaimKind = 'amount' | 'percent' | 'date'
+
+export type FigureClaim = {
+  kind: ClaimKind
+  /** The value as it appeared (normalized width) — for nudge/trailer copy. */
+  claim: string
+  /** Canonical key, e.g. `n:40000`, `p:4.5`, `d:7-23`. */
+  canonical: string
+}
+
+/** Which tool result backed a figure — `null` means seeded caller/user material. */
+export type FigureSource = { toolUseId: string; toolName: string }
+
+const FULLWIDTH_CHARS = /[０-９，．％]/g
+const FULLWIDTH_MAP: Record<string, string> = {
+  '，': ',', '．': '.', '％': '%',
+}
+
+function toHalfWidth(text: string): string {
+  return text.replace(FULLWIDTH_CHARS, (ch) =>
+    FULLWIDTH_MAP[ch] ?? String.fromCharCode(ch.charCodeAt(0) - 0xfee0))
+}
+
+const CJK_DIGITS: Record<string, number> = {
+  零: 0, 一: 1, 二: 2, 兩: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9,
+}
+const CJK_SMALL_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000 }
+const CJK_BIG_UNITS: Record<string, number> = { 萬: 1e4, 万: 1e4, 億: 1e8, 亿: 1e8 }
+
+/** Parse a pure CJK numeral run (十一萬, 四萬五千). Null on anything else. */
+function cjkNumeralValue(run: string): number | null {
+  let total = 0
+  let section = 0
+  let digit = 0
+  for (const ch of run) {
+    if (ch in CJK_DIGITS) {
+      digit = CJK_DIGITS[ch]!
+    } else if (ch in CJK_SMALL_UNITS) {
+      section += (digit || 1) * CJK_SMALL_UNITS[ch]!
+      digit = 0
+    } else if (ch in CJK_BIG_UNITS) {
+      section += digit
+      total += (section || 1) * CJK_BIG_UNITS[ch]!
+      section = 0
+      digit = 0
+    } else {
+      return null
+    }
+  }
+  const value = total + section + digit
+  return Number.isFinite(value) && value > 0 ? value : null
+}
+
+function numberKey(value: number): string {
+  return `n:${value}`
+}
+
+/** Arabic numbers, optionally thousands-separated / decimal. */
+const ARABIC_NUMBER_RE = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g
+/** Arabic value + CJK magnitude (4萬, 36.4萬). */
+const MIXED_MAGNITUDE_RE = /(\d+(?:\.\d+)?)\s*([萬万億亿])/g
+/** Pure CJK numeral run of 2+ chars (skips a lone 一 in prose). */
+const CJK_NUMERAL_RUN_RE = /[零一二兩两三四五六七八九十百千萬万億亿]{2,}/g
+const PERCENT_RE = /(\d+(?:\.\d+)?)\s*%/g
+/** Explicit dates: 7月23日 / 2026年7月23日, ISO 2026-07-23, "July 23". */
+const CJK_DATE_RE = /(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*[日號号]/g
+const ISO_DATE_RE = /(?:\d{4})-(\d{1,2})-(\d{1,2})\b/g
+const MONTH_NAME_DATE_RE =
+  /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/gi
+const MONTH_INDEX: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+}
+
+function dateKey(month: number, day: number): string | null {
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null
+  return `d:${month}-${day}`
+}
+
+/**
+ * Evidence-side extraction — generous: every number-ish token, expanded
+ * magnitudes, percentages, and explicit dates, as canonical keys.
+ */
+export function extractFigureKeys(rawText: string): Set<string> {
+  const keys = new Set<string>()
+  const text = toHalfWidth(rawText)
+  for (const m of text.match(ARABIC_NUMBER_RE) ?? []) {
+    const value = Number(m.replace(/,/g, ''))
+    if (Number.isFinite(value)) keys.add(numberKey(value))
+  }
+  for (const m of text.matchAll(MIXED_MAGNITUDE_RE)) {
+    const value = Number(m[1]) * CJK_BIG_UNITS[m[2]!]!
+    if (Number.isFinite(value)) keys.add(numberKey(value))
+  }
+  for (const m of text.match(CJK_NUMERAL_RUN_RE) ?? []) {
+    const value = cjkNumeralValue(m)
+    if (value !== null) keys.add(numberKey(value))
+  }
+  for (const m of text.matchAll(PERCENT_RE)) keys.add(`p:${Number(m[1])}`)
+  for (const m of text.matchAll(CJK_DATE_RE)) {
+    const key = dateKey(Number(m[2]), Number(m[3]))
+    if (key) keys.add(key)
+  }
+  for (const m of text.matchAll(ISO_DATE_RE)) {
+    const key = dateKey(Number(m[1]), Number(m[2]))
+    if (key) keys.add(key)
+  }
+  for (const m of text.matchAll(MONTH_NAME_DATE_RE)) {
+    const key = dateKey(MONTH_INDEX[m[1]!.toLowerCase()]!, Number(m[2]))
+    if (key) keys.add(key)
+  }
+  return keys
+}
+
+/** Currency-marked amounts, either side of the number. */
+const CURRENCY_PREFIX_RE = /(?:HK\$|NT\$|US\$|R?MB|\$|¥|€|£)\s?(\d[\d,]*(?:\.\d+)?)/g
+const CURRENCY_SUFFIX_RE =
+  /(\d[\d,]*(?:\.\d+)?)\s?(?:蚊|港幣|港元|美元|人民幣|人民币|日圓|日元|dollars?|HKD|USD|RMB|CNY|JPY|元|円)/g
+/** Number + volatile unit (miles, points, 里數…). */
+const UNIT_AMOUNT_RE =
+  /(\d[\d,]*(?:\.\d+)?)\s?(?:里數|里数|里|miles?|points?|pts|積分|积分|credits?)/g
+/** Thousands-separated numbers are figure claims even without a unit. */
+const SEPARATED_NUMBER_RE = /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g
+/** CJK-magnitude amounts: 4萬 / 36.4萬 / 十一萬 / 四萬五千. */
+const CJK_AMOUNT_RE =
+  /\d+(?:\.\d+)?\s*[萬万億亿]|[一二兩两三四五六七八九十百千]+[萬万億亿][零一二兩两三四五六七八九十百千]*/g
+
+/**
+ * Claim-side extraction — conservative: only confidently-figure-shaped
+ * values are claims. Bare unseparated integers never are. Deduplicated by
+ * canonical key.
+ */
+export function extractFigureClaims(rawText: string): FigureClaim[] {
+  const text = toHalfWidth(rawText)
+  const out: FigureClaim[] = []
+  const seen = new Set<string>()
+  const push = (kind: ClaimKind, claim: string, canonical: string | null) => {
+    if (!canonical || seen.has(canonical)) return
+    seen.add(canonical)
+    out.push({ kind, claim: claim.trim(), canonical })
+  }
+  const amountFromArabic = (raw: string): string | null => {
+    const value = Number(raw.replace(/,/g, ''))
+    return Number.isFinite(value) ? numberKey(value) : null
+  }
+  for (const m of text.matchAll(CURRENCY_PREFIX_RE)) push('amount', m[0], amountFromArabic(m[1]!))
+  for (const m of text.matchAll(CURRENCY_SUFFIX_RE)) push('amount', m[0], amountFromArabic(m[1]!))
+  for (const m of text.matchAll(UNIT_AMOUNT_RE)) push('amount', m[0], amountFromArabic(m[1]!))
+  for (const m of text.match(CJK_AMOUNT_RE) ?? []) {
+    const mixed = /^(\d+(?:\.\d+)?)\s*([萬万億亿])$/.exec(m)
+    const value = mixed ? Number(mixed[1]) * CJK_BIG_UNITS[mixed[2]!]! : cjkNumeralValue(m)
+    push('amount', m, value !== null && Number.isFinite(value) ? numberKey(value) : null)
+  }
+  for (const m of text.match(SEPARATED_NUMBER_RE) ?? []) push('amount', m, amountFromArabic(m))
+  for (const m of text.matchAll(PERCENT_RE)) push('percent', m[0], `p:${Number(m[1])}`)
+  for (const m of text.matchAll(CJK_DATE_RE)) push('date', m[0], dateKey(Number(m[2]), Number(m[3])))
+  for (const m of text.matchAll(ISO_DATE_RE)) push('date', m[0], dateKey(Number(m[1]), Number(m[2])))
+  for (const m of text.matchAll(MONTH_NAME_DATE_RE)) {
+    push('date', m[0], dateKey(MONTH_INDEX[m[1]!.toLowerCase()]!, Number(m[2])))
+  }
+  return out
+}
+
 // ── Accumulator ────────────────────────────────────────────────
 
 type IdentifierSets = {
@@ -218,6 +391,12 @@ export type EvidenceAccumulatorOptions = {
 export class EvidenceAccumulator {
   #evidence: IdentifierSets = emptySets()
   #gatedTools: Set<string>
+  /**
+   * Canonical figure key → the tool result that first observed it, or
+   * `null` when it came from seeded caller/user material. First-seen wins
+   * so a figure keeps its original provenance.
+   */
+  #figures = new Map<string, FigureSource | null>()
 
   constructor(options?: EvidenceAccumulatorOptions) {
     this.#gatedTools = new Set(options?.gatedTools ?? [])
@@ -237,6 +416,9 @@ export class EvidenceAccumulator {
     for (const u of found.urlsNoQuery) this.#evidence.urlsNoQuery.add(u)
     for (const h of found.handles) this.#evidence.handles.add(h)
     for (const p of found.phones) this.#evidence.phones.add(p)
+    for (const k of extractFigureKeys(text)) {
+      if (!this.#figures.has(k)) this.#figures.set(k, null)
+    }
   }
 
   /**
@@ -245,8 +427,17 @@ export class EvidenceAccumulator {
    * back (search-query echo, fetched-URL echo), and echoing is not
    * verification. Callers must not feed error results at all: an error can
    * only echo the input or describe the failure.
+   *
+   * `source` attributes figures observed in this result for the claim
+   * ledger (grounding gate v2). Figures follow the same echo exclusion:
+   * searching for an invented figure cannot verify it — the honest
+   * verification path is to search the topic, not the number.
    */
-  noteToolResult(contentText: string | null | undefined, inputText: string): void {
+  noteToolResult(
+    contentText: string | null | undefined,
+    inputText: string,
+    source?: FigureSource,
+  ): void {
     if (!contentText) return
     const found = extractAll(contentText)
     const echoed = extractAll(inputText)
@@ -256,6 +447,22 @@ export class EvidenceAccumulator {
       if (!echoed.urlsNoQuery.has(u)) this.#evidence.urlsNoQuery.add(u)
     for (const h of found.handles) if (!echoed.handles.has(h)) this.#evidence.handles.add(h)
     for (const p of found.phones) if (!echoed.phones.has(p)) this.#evidence.phones.add(p)
+    const echoedFigures = extractFigureKeys(inputText)
+    for (const k of extractFigureKeys(contentText)) {
+      if (echoedFigures.has(k)) continue
+      if (!this.#figures.has(k)) this.#figures.set(k, source ?? null)
+    }
+  }
+
+  /** Was this canonical figure observed this run (tool result or seed)? */
+  hasFigure(canonical: string): boolean {
+    return this.#figures.has(canonical)
+  }
+
+  /** Which tool result backed the figure — `null` = seeded material,
+   *  `undefined` = never observed. */
+  figureSource(canonical: string): FigureSource | null | undefined {
+    return this.#figures.get(canonical)
   }
 
   #hasEmail(candidate: string): boolean {

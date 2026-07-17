@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import * as Y from 'yjs'
-import { loadPageUpdate, storePageSnapshot, type SysQuery } from '../persistence.js'
+import {
+  loadPageUpdate,
+  notifyPageUpdated,
+  storePageSnapshot,
+  type SysQuery,
+} from '../persistence.js'
 import { pageToYDoc, snapshotFromUpdate } from '@sidanclaw/doc-model'
 
 describe('[COMP:doc-sync/persistence] loadPageUpdate', () => {
@@ -86,5 +91,45 @@ describe('[COMP:doc-sync/persistence] storePageSnapshot', () => {
     expect(id1).toBe(id2) // stable across persists
     // ...because the id was written into the doc, not fabricated per read.
     expect((frag.get(0) as Y.XmlElement).getAttribute('blockId')).toBe(id1)
+  })
+})
+
+describe('[COMP:doc-sync/persistence] notifyPageUpdated', () => {
+  it('POSTs an `updated` page-event with the secret header and isSystem flag', async () => {
+    const calls: { url: string; init: RequestInit }[] = []
+    const doFetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return { status: 202 } as Response
+    }) as unknown as typeof fetch
+
+    const out = await notifyPageUpdated({
+      pageId: 'p1',
+      isSystem: true,
+      config: { apiBaseUrl: 'http://api:8080/', syncSecret: 'shhh', doFetch },
+    })
+
+    expect(out).toBe('dispatched')
+    expect(calls).toHaveLength(1)
+    // Trailing slash on the base is trimmed before joining the path.
+    expect(calls[0].url).toBe('http://api:8080/internal/page-event')
+    const headers = calls[0].init.headers as Record<string, string>
+    expect(headers['x-doc-sync-secret']).toBe('shhh')
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      pageId: 'p1',
+      action: 'updated',
+      isSystem: true,
+    })
+  })
+
+  it('swallows a fetch error so a page write is never affected', async () => {
+    const doFetch = (async () => {
+      throw new Error('network down')
+    }) as unknown as typeof fetch
+    const out = await notifyPageUpdated({
+      pageId: 'p1',
+      isSystem: false,
+      config: { apiBaseUrl: 'http://api', syncSecret: 's', doFetch },
+    })
+    expect(out).toBe('error')
   })
 })

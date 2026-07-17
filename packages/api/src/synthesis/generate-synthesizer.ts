@@ -19,6 +19,7 @@
 
 import {
   createCrmTools,
+  createMemoryTools,
   createDocTools,
   createTaskTools,
   loadBuiltinSkills,
@@ -26,6 +27,7 @@ import {
   type DocPageStore,
   type Embedder,
   type LLMProvider,
+  type MemoryStore,
   type SavedViewStore,
   type Sensitivity,
   type TaskStore,
@@ -53,6 +55,8 @@ export type GenerateSynthesizerDeps = {
   docPageStore: DocPageStore
   crmStore: CrmStore
   taskStore: TaskStore
+  /** Enables the `saveMemory` brain-write tool (capture: ['memory']). Optional so partial deploys degrade to CRM + task tools. */
+  memoryStore?: MemoryStore
   workflowRunStore: WorkflowRunStore
   workspaceDirectory: WorkspaceDirectoryStore
   embedder?: Pick<Embedder, 'embed'>
@@ -218,6 +222,14 @@ export function createGenerateSynthesizer(deps: GenerateSynthesizerDeps): Genera
       ['saveDeal', crm.saveDeal],
       ['saveTask', tasks.saveTask],
     ])
+    // Blueprint-directed memories (capture: ['memory']). No provenance Episode
+    // exists for a brain draft / research gather, so the write carries
+    // source='extracted' with no episode anchor (it still lands in the brain
+    // inbox via its source filter).
+    if (deps.memoryStore) {
+      const memory = createMemoryTools(deps.memoryStore, { writeSource: 'extracted' })
+      brainWriteTools.set('saveMemory', memory.saveMemory)
+    }
 
     // 4. Run. Page-first + idempotent on the (workspace, blueprint, subject)
     //    anchor — the same key a MAINTAIN schedule reuses to keep ONE page current.

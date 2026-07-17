@@ -99,6 +99,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import type { Teamspace } from "@/lib/api/teamspaces";
 import {
   buildTree,
@@ -1401,11 +1402,13 @@ function FlatRow({
       ].join(" ")}
     >
       <span className="flex size-5 shrink-0 items-center justify-center">
-        {row.icon ? (
-          <span className="text-[15px] leading-none">{row.icon}</span>
-        ) : (
-          <Icon className="size-4 text-sidebar-foreground/55" />
-        )}
+        <PageIcon
+          icon={row.icon}
+          fallback={Icon}
+          emojiClassName="text-[15px] leading-none"
+          glyphClassName="size-4 text-sidebar-foreground/55"
+          imgClassName="size-4 rounded-[3px] object-cover"
+        />
       </span>
       <button
         type="button"

@@ -11,8 +11,11 @@
  * the workspace has a default recording blueprint set, the picker PRE-SELECTS it
  * (auto-apply). When none is set, the picker shows no silent default — a
  * placeholder prompts an explicit choice (a blueprint, or the "ingest only"
- * item). Whatever is selected is submitted verbatim: a blueprint id authors a
- * brief page; "ingest only" omits the slug (Pipeline B only). See
+ * item). The inline pick SEEDS the pre-flight confirm dialog's picker (the
+ * raw selection is handed to `run`, not the mapped slug) — the dialog is where
+ * the choice is confirmed alongside the cost, per the pre-flight-confirm
+ * invariant, and the user can still change it there. See
+ * docs/architecture/engine/preflight-confirmation.md,
  * docs/architecture/brain/structural-synthesis.md §D3 and
  * structural-synthesis.md -> "One SearchableSelect picker appears in three places".
  */
@@ -25,9 +28,7 @@ import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
 import {
   buildBlueprintPickerItems,
-  hasNoBlueprints,
   initialRecordingBlueprint,
-  recordingBlueprintToSlug,
   RECORDING_INGEST_ONLY,
   RECORDING_UNSET,
 } from "@/lib/blueprints";
@@ -107,13 +108,11 @@ export function RecordingUploadButton({
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) {
-            // Offer the starter only when the picker had nothing to offer:
-            // an explicit "ingest only" pick is a real choice, not a gap.
-            void run(
-              f,
-              recordingBlueprintToSlug(blueprint),
-              blueprint === RECORDING_UNSET && hasNoBlueprints(workspaceBlueprints),
-            );
+            // Raw picker selection (id / ingest-only / unset) — seeds the
+            // confirm dialog's picker; the in-dialog choice is what submits.
+            // The starter offer lives in the dialog too (it owns the roster),
+            // so this surface no longer decides whether to make it.
+            void run(f, blueprint);
           }
           e.target.value = "";
         }}

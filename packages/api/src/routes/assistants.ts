@@ -648,6 +648,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         const teamNative = await options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
         for (const inst of teamNative) {
           const entry = registry.find((e) => e.id === inst.provider)
+          // WhatsApp channel infrastructure owns connector_instance rows for
+          // credentials and attribution, but it exposes no assistant tools.
+          if (inst.provider === 'whatsapp') continue
           byKey.set(inst.provider, {
             id: inst.provider,
             name: inst.label,
@@ -667,6 +670,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         for (const g of grants) {
           if (byKey.has(g.instance.provider)) continue   // team-native wins
           const entry = registry.find((e) => e.id === g.instance.provider)
+          if (g.instance.provider === 'whatsapp') continue
           byKey.set(g.instance.provider, {
             id: g.instance.provider,
             name: g.instance.label,

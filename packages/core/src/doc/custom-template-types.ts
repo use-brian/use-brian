@@ -33,8 +33,20 @@ export const PAGE_TEMPLATE_CATEGORIES = [
 
 export const pageTemplateCategorySchema = z.enum(PAGE_TEMPLATE_CATEGORIES)
 
-/** Brain primitives a blueprint can declare it captures from a source. */
-export const BLUEPRINT_CAPTURE_KINDS = ['company', 'contact', 'deal', 'task'] as const
+/**
+ * Entity kinds an `entityRef` FIELD can point at (rows a record value can
+ * reference). Distinct from the capture declaration below: a memory is
+ * capturable but not referenceable, so it must never appear here.
+ */
+export const ENTITY_REF_KINDS = ['company', 'contact', 'deal', 'task'] as const
+export type EntityRefKind = (typeof ENTITY_REF_KINDS)[number]
+
+/**
+ * Brain primitives a blueprint can declare it captures from a source —
+ * `ENTITY_REF_KINDS` plus `memory` (blueprint-directed memories via the
+ * synthesis `saveMemory` binding; see structural-synthesis.md → "Capture").
+ */
+export const BLUEPRINT_CAPTURE_KINDS = ['company', 'contact', 'deal', 'task', 'memory'] as const
 export type BlueprintCaptureKind = (typeof BLUEPRINT_CAPTURE_KINDS)[number]
 
 /**
@@ -80,7 +92,7 @@ export const extractionFieldSchema = z
     instruction: z.string().min(1).max(2000),
     type: z.enum(EXTRACTION_FIELD_TYPES).default('markdown'),
     options: z.array(z.string().min(1).max(120)).min(2).max(24).optional(),
-    entityKind: z.enum(BLUEPRINT_CAPTURE_KINDS).optional(),
+    entityKind: z.enum(ENTITY_REF_KINDS).optional(),
     required: z.boolean().default(false),
     outputType: z.enum(['prose', 'list', 'table']).optional(),
   })
@@ -133,7 +145,7 @@ function liftExtractionSpecInput(raw: unknown): unknown {
       required: false,
     }
   })
-  return { fields, capture: obj.capture }
+  return { fields, capture: obj.capture, captureInstructions: obj.captureInstructions }
 }
 
 /**
@@ -151,6 +163,14 @@ export const extractionSpecSchema = z.preprocess(
     .object({
       fields: z.array(extractionFieldSchema).min(1).max(30),
       capture: z.array(z.enum(BLUEPRINT_CAPTURE_KINDS)).default([]),
+      /**
+       * Optional per-kind guidance for the capture declaration — HOW to write
+       * the enabled kind from this blueprint's sources (e.g. task: "break
+       * maintenance items into one task each, titled imperatively"). Keys are
+       * capture kinds; unknown keys are tolerated and ignored by renderers.
+       * Rendered as bullets under the recipe's "## Capture" section.
+       */
+      captureInstructions: z.record(z.string(), z.string().max(2000)).optional(),
     })
     .superRefine((spec, ctx) => {
       const seen = new Set<string>()
@@ -282,6 +302,7 @@ export function withFreshBlockIds(blocks: Block[], genId: () => string): Block[]
 export function blocksToExtractionSpec(
   blocks: Block[],
   capture: BlueprintCaptureKind[] = [],
+  captureInstructions?: Partial<Record<BlueprintCaptureKind, string>>,
 ): ExtractionSpec | null {
   const fields: ExtractionField[] = []
   const taken = new Set<string>()
@@ -309,7 +330,15 @@ export function blocksToExtractionSpec(
       })
     }
   }
-  return fields.length > 0 ? { fields, capture } : null
+  if (fields.length === 0) return null
+  const instructions = Object.fromEntries(
+    Object.entries(captureInstructions ?? {}).filter(([, v]) => typeof v === 'string' && v.trim()),
+  )
+  return {
+    fields,
+    capture,
+    ...(Object.keys(instructions).length > 0 ? { captureInstructions: instructions } : {}),
+  }
 }
 
 /**

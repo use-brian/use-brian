@@ -19,7 +19,7 @@
 
 import { z } from 'zod'
 import { blockSchema, pageSchema } from '../views/blocks.js'
-import { bindingConfigSchema } from '../views/schemas.js'
+import { bindingConfigSchema, pageIconValueSchema } from '../views/schemas.js'
 import { liftListItemText } from './markdown.js'
 import type { Block, Op, Outline, OutlineEntry, Page } from './page-types.js'
 
@@ -155,10 +155,11 @@ const setTitleOpSchema = z.object({
 
 const setIconOpSchema = z.object({
   op: z.literal('setIcon'),
-  // An emoji grapheme (≤16 chars — matches the REST `PATCH /saved-views/:id`
-  // contract in `views/schemas.ts`), or `null` to clear back to the derived
-  // glyph.
-  icon: z.string().max(16).nullable(),
+  // An emoji grapheme (≤16 chars) OR an `img:<workspaceId>/<fileId>` image
+  // token from the `fetchSiteIcon` tool — matches the REST
+  // `PATCH /saved-views/:id` contract (`pageIconValueSchema` in
+  // `views/schemas.ts`) — or `null` to clear back to the derived glyph.
+  icon: pageIconValueSchema.nullable(),
 })
 
 export const opSchema: z.ZodType<Op> = z.discriminatedUnion('op', [

@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import { ChatComposer } from "@sidanclaw/chat-ui";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
+import { PageIcon } from "./page-icon";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
 import { ComposerControls } from "@/components/doc/composer-controls";
 import {
@@ -135,10 +136,11 @@ export function EmptyPageLanding({
   // chat dock), so the landing only holds the armed flag.
   const [researchMode, setResearchMode] = useState(false);
   // Attached video routes to the recordings pipeline (direct-to-GCS upload →
-  // cost confirm → transcribe + file to the brain) exactly like the chat dock
-  // — a video can't ride the cache upload (20 MB cap, no video/ mime) and the
-  // model can't consume it inline anyway. Brain-only ingest (no blueprint);
-  // `run` shows its own cost confirm. See
+  // pre-flight confirm → transcribe + file to the brain) exactly like the chat
+  // dock — a video can't ride the cache upload (20 MB cap, no video/ mime) and
+  // the model can't consume it inline anyway. `run` shows the full pre-flight
+  // confirm: cost AND the blueprint picker (seeded from the workspace default;
+  // no selection is passed here). See
   // docs/architecture/media/transcription.md → "Chat-attached video".
   const rec = useRecordingUpload(workspaceId, assistantId ?? "");
   // File attachments staged on the landing. `fileId`s are session-agnostic on
@@ -432,13 +434,13 @@ function RecentCard({
       )}
     >
       <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted/60 text-base ring-1 ring-border/60">
-        {row.icon ? (
-          <span aria-hidden className="leading-none">
-            {row.icon}
-          </span>
-        ) : (
-          <Glyph className="size-4 text-muted-foreground" aria-hidden />
-        )}
+        <PageIcon
+          icon={row.icon}
+          fallback={Glyph}
+          emojiClassName="leading-none"
+          glyphClassName="size-4 text-muted-foreground"
+          imgClassName="size-5 rounded-[4px] object-cover"
+        />
       </span>
       <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
         {name}

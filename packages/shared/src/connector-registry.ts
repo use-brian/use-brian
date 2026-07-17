@@ -164,6 +164,21 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     // the generic directory-add path would mint a junk user-scoped row).
     single_instance: true,
   },
+  {
+    id: 's3',
+    name: 'S3-Compatible Storage',
+    description: 'Store your workspace file bytes in your own S3-compatible bucket (AWS S3, MinIO, Cloudflare R2, Backblaze B2, and more), under your own keys. Your files, your bucket, revocable by you.',
+    category: 'official',
+    // Access-key/secret-key paste — same api_key shape as gcs (a pasted secret
+    // credential). The connect UI is a dedicated form (bucket, region,
+    // endpoint, access key, secret key), not the generic PAT input.
+    // See docs/plans/byo-s3-storage.md.
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['storage', 's3', 'workspace'],
+    single_instance: true,
+  },
 ]
 
 // ── Built-in workspace primitives ─────────────────────────────
@@ -184,8 +199,8 @@ export const BUILTIN_PRIMITIVE_CONNECTOR_IDS: ReadonlySet<string> = new Set(
 
 // ── Single-instance connectors ────────────────────────────────
 //
-// Officials marked `single_instance` bind a resource, not an account (gcs —
-// one storage bucket per workspace), so the connector surfaces suppress
+// Officials marked `single_instance` bind a resource, not an account (gcs/s3
+// storage — one bucket per workspace), so the connector surfaces suppress
 // "Add another" for them and the multi-account runtime skips them. Derived
 // from the registry — never hardcode a slug list for this (the "all
 // built-ins" drift anti-pattern).

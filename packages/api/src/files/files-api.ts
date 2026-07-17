@@ -29,7 +29,7 @@ import type {
   WorkspaceFilesStore,
 } from '@sidanclaw/core'
 import type { GcsFilesClient } from './gcs-client.js'
-import { buildStorageKey, buildStorageUri } from './gcs-client.js'
+import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 
 /**
@@ -46,6 +46,12 @@ export type ResolvedFilesClient = {
   gcs: GcsFilesClient
   /** Bucket name for `storage_uri` composition on writes. */
   bucket: string
+  /**
+   * URI scheme for `storage_uri` composition on writes: `gs` for GCS buckets
+   * (default), `s3` for S3-compatible buckets. Cosmetic for routing (reads
+   * match by bucket name) but keeps each file's origin backend legible.
+   */
+  uriScheme?: StorageUriScheme
   /**
    * True when this workspace writes to its OWN (BYO) bucket. Lifts the
    * platform soft quota (their bucket, their bill). Default resolver: false.
@@ -245,7 +251,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
       return err({ kind: 'conflict', path })
     }
 
-    const { gcs, bucket, byo } = await resolver.forWorkspace(ctx.workspaceId)
+    const { gcs, bucket, byo, uriScheme } = await resolver.forWorkspace(ctx.workspaceId)
 
     // Soft quota guards bytes that sit in OUR bucket on OUR bill. When a
     // workspace writes to its own BYO bucket, the cap does not apply.
@@ -263,7 +269,7 @@ export function createFilesApi(deps: CreateFilesApiDeps): FilesApi {
 
     const fileId = randomUUID()
     const storageKey = buildStorageKey(ctx.workspaceId, fileId)
-    const storageUri = buildStorageUri(bucket, ctx.workspaceId, fileId)
+    const storageUri = buildStorageUri(bucket, ctx.workspaceId, fileId, uriScheme)
 
     await gcs.writeBlob(storageKey, bytes, {
       workspaceId: ctx.workspaceId,

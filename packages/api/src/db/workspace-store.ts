@@ -22,8 +22,8 @@
  */
 
 import type { PoolClient } from 'pg'
-import { minSensitivity } from '@sidanclaw/core'
-import type { Sensitivity } from '@sidanclaw/core'
+import { minSensitivity, parseTranscriptionPrefs } from '@sidanclaw/core'
+import type { Sensitivity, WorkspaceTranscriptionPrefs } from '@sidanclaw/core'
 import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './teamspace-store.js'
 import { query, queryWithRLS, getPool } from './client.js'
 import type { ConnectorGrantStore } from './connector-grant-store.js'
@@ -610,6 +610,95 @@ export async function getWorkspaceDefaultRecordingBlueprint(
     console.error('[workspace-store] default recording blueprint lookup failed, defaulting to none:', err)
     return null
   }
+}
+
+// ── Workspace transcription preferences (migration 332) ────────
+
+/**
+ * System-level lookup of a workspace's transcription preference (migration
+ * 332). Null-safe by design: this backs the recording pipeline's
+ * `fetchTranscriptionPrefs` dep, and a preference lookup must never block a
+ * recording — any failure (or malformed JSONB) degrades to `{}`, i.e.
+ * provider-default behavior. See docs/architecture/media/transcription.md
+ * §"Language & script preferences".
+ */
+export async function getWorkspaceTranscriptionPrefs(
+  workspaceId: string | null | undefined,
+): Promise<WorkspaceTranscriptionPrefs> {
+  if (!workspaceId) return {}
+  try {
+    const row = await query<{ transcription_prefs: unknown }>(
+      `SELECT transcription_prefs FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    return parseTranscriptionPrefs(row.rows[0]?.transcription_prefs)
+  } catch (err) {
+    console.error('[workspace-store] transcription prefs lookup failed, using defaults:', err)
+    return {}
+  }
+}
+
+export type SetTranscriptionPrefsResult =
+  | { ok: true; prefs: WorkspaceTranscriptionPrefs }
+  | { ok: false; reason: 'not_admin' | 'not_found'; message: string }
+
+/**
+ * Merge a change into a workspace's transcription preference. Admin/owner-gated
+ * HERE: the `workspaces` table carries no RLS, so the setter is the enforcement
+ * point (the same bar as the `PATCH /:workspaceId` settings route). A `null`
+ * value clears that key back to provider default. Returns a discriminated
+ * result so the assistant tool can tell a plain member why the change did not
+ * apply, instead of a bare throw.
+ */
+export async function setWorkspaceTranscriptionPrefs(
+  userId: string,
+  workspaceId: string,
+  patch: {
+    languageCode?: string | null
+    chineseScript?: 'traditional' | 'simplified' | null
+  },
+): Promise<SetTranscriptionPrefsResult> {
+  const membership = await query<{ role: string }>(
+    `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
+    [workspaceId, userId],
+  )
+  const role = membership.rows[0]?.role
+  if (role !== 'owner' && role !== 'admin') {
+    return {
+      ok: false,
+      reason: 'not_admin',
+      message: 'Only a workspace owner or admin can change transcription preferences.',
+    }
+  }
+
+  const currentRow = await query<{ transcription_prefs: unknown }>(
+    `SELECT transcription_prefs FROM workspaces WHERE id = $1`,
+    [workspaceId],
+  )
+  if (currentRow.rows.length === 0) {
+    return { ok: false, reason: 'not_found', message: 'Workspace not found.' }
+  }
+
+  const merged: Record<string, unknown> = {
+    ...parseTranscriptionPrefs(currentRow.rows[0].transcription_prefs),
+  }
+  if (patch.languageCode !== undefined) {
+    if (patch.languageCode === null) delete merged.languageCode
+    else merged.languageCode = patch.languageCode
+  }
+  if (patch.chineseScript !== undefined) {
+    if (patch.chineseScript === null) delete merged.chineseScript
+    else merged.chineseScript = patch.chineseScript
+  }
+  // Boundary validation — the tool schema already constrains inputs, but the
+  // stored value is what the recording pipeline trusts, so validate here too.
+  const next = parseTranscriptionPrefs(merged)
+
+  await query(
+    `UPDATE workspaces SET transcription_prefs = $2::jsonb, updated_at = now() WHERE id = $1`,
+    [workspaceId, JSON.stringify(next)],
+  )
+  return { ok: true, prefs: next }
 }
 
 /**

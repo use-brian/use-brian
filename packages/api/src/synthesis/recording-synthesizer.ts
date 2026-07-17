@@ -11,12 +11,14 @@
 import {
   createCrmTools,
   createDocTools,
+  createMemoryTools,
   createTaskTools,
   loadBuiltinSkills,
   type CrmStore,
   type DocPageStore,
   type Embedder,
   type LLMProvider,
+  type MemoryStore,
   type SavedViewStore,
   type Sensitivity,
   type TaskStore,
@@ -46,6 +48,12 @@ export type RecordingSynthesizerDeps = {
   docPageStore: DocPageStore
   crmStore: CrmStore
   taskStore: TaskStore
+  /**
+   * Enables the `saveMemory` brain-write tool (blueprint-directed memories,
+   * `capture: ['memory']`). Optional so partial deploys / minimal builds
+   * degrade to the CRM + task tool set instead of failing.
+   */
+  memoryStore?: MemoryStore
   workflowRunStore: WorkflowRunStore
   workspaceDirectory: WorkspaceDirectoryStore
   embedder?: Pick<Embedder, 'embed'>
@@ -266,6 +274,16 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
       ['saveDeal', crm.saveDeal],
       ['saveTask', tasks.saveTask],
     ])
+    // Blueprint-directed memories (capture: ['memory']) — same extracted
+    // provenance + episode back-edge as the CRM/task writes, so they surface
+    // in the brain inbox for review. Only the write tool is bound.
+    if (deps.memoryStore) {
+      const memory = createMemoryTools(deps.memoryStore, {
+        writeSource: 'extracted',
+        writeSourceEpisodeId: args.recordingId,
+      })
+      brainWriteTools.set('saveMemory', memory.saveMemory)
+    }
 
     // 4. Run. Page-first + idempotent on the recording's stable anchor key.
     return synthesizeFromSource(

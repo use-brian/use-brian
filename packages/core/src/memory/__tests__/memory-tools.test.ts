@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { createMemoryTools, type MemoryToolEvent } from '../tools.js'
 import { jsonSchemaFromZod } from '../../engine/query-loop.js'
 import type { MemoryStore } from '../types.js'
@@ -153,6 +153,31 @@ describe('[COMP:memory/tools] saveMemory', () => {
     expect(result.isError).toBeFalsy()
     expect(store.rows).toHaveLength(1)
     expect(store.rows[0].summary).toBe('Likes ramen')
+  })
+
+  it('stamps writeSource + episode anchor on create (synthesis provenance), defaulting to model', async () => {
+    // Chat default: source 'model', no episode anchor.
+    const chatStore = makeFakeStore()
+    const chatCreate = vi.spyOn(chatStore, 'create')
+    await createMemoryTools(chatStore).saveMemory.execute({ summary: 'Likes ramen' }, ctx)
+    expect(chatCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'model' }),
+    )
+    expect(chatCreate.mock.calls[0][0].sourceEpisodeId).toBeUndefined()
+
+    // Synthesis binding: extracted + anchored to the source Episode, so the
+    // memory lands in the brain inbox with the same anchors as CRM/task writes.
+    const synthStore = makeFakeStore()
+    const synthCreate = vi.spyOn(synthStore, 'create')
+    const { saveMemory } = createMemoryTools(synthStore, {
+      writeSource: 'extracted',
+      writeSourceEpisodeId: 'ep-99',
+    })
+    const result = await saveMemory.execute({ summary: 'Prefers weekly email updates' }, ctx)
+    expect(result.isError).toBeFalsy()
+    expect(synthCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'extracted', sourceEpisodeId: 'ep-99' }),
+    )
   })
 
   it('routes people/companies/deals to their own primitive, not a bundled memory', () => {

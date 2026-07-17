@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { Router, type Response } from 'express'
 import { createTokens, verifyRefreshToken } from '../auth/jwt.js'
 import { requireAuth } from '../auth/middleware.js'
 import { verifyTgLinkToken } from '../auth/tg-link-token.js'
@@ -8,7 +8,7 @@ import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { ApiKeyStore } from '../db/api-key-store.js'
 import type { ShadowClaimStore } from '../db/shadow-claim-store.js'
-import type { MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
+import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
 import { createHash } from 'node:crypto'
@@ -282,7 +282,7 @@ export function authRoutes(
         return
       }
 
-      const { token } = await magicLinkStore.create({
+      const { token, code } = await magicLinkStore.create({
         email: emailRaw,
         nextPath,
         locale,
@@ -290,20 +290,26 @@ export function authRoutes(
         userAgent,
       })
 
-      // The verify URL is on the web app, not the API — Next.js handles
-      // the GET (clickable link), sets cookies, and bounces to /chat
-      // (or `nextPath`). The API never receives the token directly from
-      // the user's browser; only the web layer does. `addAccount=1` rides
-      // along so the verify route stashes the current session instead of
-      // replacing it when the link is opened in the same browser.
+      // The verify URL is on the web app, not the API — Next.js renders a
+      // **confirm page** at `/login/verify` (a bare GET that does NOT consume
+      // the token, so email link-scanners / prefetchers can't burn it), and
+      // the "Sign in" button POSTs to `/api/auth/email/verify` to consume it.
+      // The API never receives the token directly from the user's browser;
+      // only the web layer does. `addAccount=1` rides along so the confirm POST
+      // stashes the current session instead of replacing it when the link is
+      // opened in the same browser. `lang` carries the locale so the confirm
+      // page renders correctly on a device with no locale cookie (cross-device
+      // copy-paste). See docs/architecture/platform/auth.md → "Email
+      // magic-link flow".
       const link =
-        `${appUrl.replace(/\/$/, '')}/api/auth/email/verify?token=${encodeURIComponent(token)}` +
+        `${appUrl.replace(/\/$/, '')}/login/verify?token=${encodeURIComponent(token)}&lang=${locale}` +
         (addAccount ? '&addAccount=1' : '')
 
       // Fire-and-forget: we don't block the response on SMTP. If sending
       // fails, the user simply doesn't get the email — but the response
-      // is still 200 to keep the timing shape stable.
-      smtpClient.sendMagicLink(emailRaw, link, locale)
+      // is still 200 to keep the timing shape stable. The `code` is the OTP
+      // the user can type on any device instead of opening the link.
+      smtpClient.sendMagicLink(emailRaw, link, locale, code)
         .catch((err) => {
           console.error('[auth/email] SMTP send failed:', err)
         })
@@ -350,36 +356,64 @@ export function authRoutes(
       return
     }
 
-    // Timezone capture — same shape as the Google OAuth route. Header
-    // takes precedence (validated by attachClientTimezone middleware);
-    // body field is the fallback when the OAuth callback runs server-
-    // side without a browser context.
-    const headerTz = req.clientTimezone
-    const rawBodyTz = typeof bodyTimezone === 'string' ? bodyTimezone.trim() : ''
-    const captureTz = headerTz
-      ? headerTz
-      : rawBodyTz && rawBodyTz.length > 0 && rawBodyTz.length < 80 && isValidTimezone(rawBodyTz)
-        ? rawBodyTz
-        : undefined
+    await respondWithEmailSession(
+      res,
+      jwtSecret,
+      consumed,
+      resolveCaptureTz(req.clientTimezone, bodyTimezone),
+    )
+  })
 
-    try {
-      const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz)
-      const tokens = createTokens(user.id, jwtSecret)
-      res.json({
-        user: {
-          id: user.id,
-          email: user.email,
-          name: user.name,
-          avatarUrl: user.avatarUrl,
-        },
-        isNew,
-        nextPath: consumed.nextPath,
-        ...tokens,
-      })
-    } catch (err) {
-      console.error('[auth/email] verify error:', err)
-      res.status(500).json({ error: 'Authentication failed' })
+  /**
+   * Exchange an emailed 6-digit passcode for the standard JWT pair — the OTP
+   * sign-in path a user can complete on any device by typing the code, without
+   * opening the link. Same account-resolution + JWT mint as `/email/verify`.
+   *
+   * Consume is atomic (`consumeByCode`); brute force of the code space is bounded
+   * by the store's per-email attempt lockout (`locked` → 429) on top of
+   * request-link's 3-codes/email/hour cap. A wrong / expired / unknown code is a
+   * generic 401 `expired_or_used` — indistinguishable from a code for an email
+   * that never requested one, so this endpoint doesn't leak which emails exist.
+   * Unlike the link path there is no `addAccount` here: a code is typed on the
+   * target device, which is the normal cross-device sign-in, never same-browser
+   * account stashing. See docs/architecture/platform/auth.md → "Email
+   * magic-link flow".
+   */
+  router.post('/email/verify-code', async (req, res) => {
+    if (!emailAuth || !emailAuth.magicLinkStore) {
+      res.status(503).json({ error: 'email_signin_unavailable' })
+      return
     }
+    const { magicLinkStore } = emailAuth
+
+    const { email, code, timezone: bodyTimezone } = req.body as {
+      email?: unknown
+      code?: unknown
+      timezone?: unknown
+    }
+    const emailRaw = typeof email === 'string' ? email.trim().toLowerCase() : ''
+    const codeRaw = typeof code === 'string' ? code.trim() : ''
+    if (!isValidEmail(emailRaw) || !/^\d{6}$/.test(codeRaw)) {
+      res.status(400).json({ error: 'invalid_code' })
+      return
+    }
+
+    const result = await magicLinkStore.consumeByCode(emailRaw, codeRaw)
+    if (result.status === 'locked') {
+      res.status(429).json({ error: 'too_many_attempts' })
+      return
+    }
+    if (result.status !== 'ok') {
+      res.status(401).json({ error: 'expired_or_used' })
+      return
+    }
+
+    await respondWithEmailSession(
+      res,
+      jwtSecret,
+      result,
+      resolveCaptureTz(req.clientTimezone, bodyTimezone),
+    )
   })
 
   /**
@@ -850,6 +884,52 @@ function extractClientIp(req: { headers: Record<string, unknown>; socket?: { rem
   }
   const remote = req.socket?.remoteAddress
   return remote && remote.length < 64 ? remote : undefined
+}
+
+/**
+ * Timezone capture — same shape as the Google OAuth route. The validated
+ * `X-Client-Timezone` header (attachClientTimezone middleware) takes
+ * precedence; the request body field is the fallback when a caller runs
+ * server-side without a browser context.
+ */
+function resolveCaptureTz(headerTz: string | undefined, bodyTimezone: unknown): string | undefined {
+  if (headerTz) return headerTz
+  const rawBodyTz = typeof bodyTimezone === 'string' ? bodyTimezone.trim() : ''
+  return rawBodyTz && rawBodyTz.length > 0 && rawBodyTz.length < 80 && isValidTimezone(rawBodyTz)
+    ? rawBodyTz
+    : undefined
+}
+
+/**
+ * Resolve the email → user, mint the JWT pair, and write the standard sign-in
+ * response. Shared by the link (`/email/verify`) and passcode
+ * (`/email/verify-code`) paths so both produce byte-identical response bodies
+ * and can't drift.
+ */
+async function respondWithEmailSession(
+  res: Response,
+  jwtSecret: string,
+  consumed: MagicLinkConsumed,
+  captureTz: string | undefined,
+): Promise<void> {
+  try {
+    const { user, isNew } = await findOrCreateEmailUser(consumed.email, captureTz)
+    const tokens = createTokens(user.id, jwtSecret)
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
+      },
+      isNew,
+      nextPath: consumed.nextPath,
+      ...tokens,
+    })
+  } catch (err) {
+    console.error('[auth/email] session mint error:', err)
+    res.status(500).json({ error: 'Authentication failed' })
+  }
 }
 
 /**

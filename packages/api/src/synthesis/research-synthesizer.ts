@@ -21,12 +21,14 @@
 
 import {
   createCrmTools,
+  createMemoryTools,
   createDocTools,
   createTaskTools,
   loadBuiltinSkills,
   type CrmStore,
   type DocPageStore,
   type LLMProvider,
+  type MemoryStore,
   type SavedViewStore,
   type Sensitivity,
   type TaskStore,
@@ -50,6 +52,8 @@ export type ResearchSynthesizerDeps = {
   docPageStore: DocPageStore
   crmStore: CrmStore
   taskStore: TaskStore
+  /** Enables the `saveMemory` brain-write tool (capture: ['memory']). Optional so partial deploys degrade to CRM + task tools. */
+  memoryStore?: MemoryStore
   workflowRunStore: WorkflowRunStore
   workspaceDirectory: WorkspaceDirectoryStore
   computeCostUsd?: (model: string, usage: TokenUsage) => number
@@ -177,6 +181,14 @@ export function createResearchSynthesizer(deps: ResearchSynthesizerDeps): Resear
       ['saveDeal', crm.saveDeal],
       ['saveTask', tasks.saveTask],
     ])
+    // Blueprint-directed memories (capture: ['memory']). No provenance Episode
+    // exists for a brain draft / research gather, so the write carries
+    // source='extracted' with no episode anchor (it still lands in the brain
+    // inbox via its source filter).
+    if (deps.memoryStore) {
+      const memory = createMemoryTools(deps.memoryStore, { writeSource: 'extracted' })
+      brainWriteTools.set('saveMemory', memory.saveMemory)
+    }
 
     // 4. Run. The target is the EXISTING anchored page (page-first already
     //    happened upstream — the executor resolved/created the anchor). The
