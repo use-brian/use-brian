@@ -250,7 +250,16 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
     // Brain Reviews, back-edged to the recording's Episode (recordingId IS
     // the episode id — `routes/recordings.ts` returns `recordingId: episode.id`).
     const crm = createCrmTools(deps.crmStore, { writeSource: 'extracted', writeSourceEpisodeId: args.recordingId })
-    const tasks = createTaskTools(deps.taskStore, { writeSource: 'extracted', writeSourceEpisodeId: args.recordingId })
+    // `saveTask` is widened HERE ONLY (migration 334): a task's moment is
+    // per-task, so it must be a model input, and this is the one surface where
+    // that input means anything. Chat / callee / workflow `saveTask` stays
+    // byte-identical. The index makes the moment validated the same way the
+    // record's citations are.
+    const tasks = createTaskTools(deps.taskStore, {
+      writeSource: 'extracted',
+      writeSourceEpisodeId: args.recordingId,
+      ...(citationIndex ? { citeSourceMoment: { index: citationIndex } } : {}),
+    })
     const brainWriteTools = new Map<string, Tool>([
       ['saveCompany', crm.saveCompany],
       ['saveContact', crm.saveContact],

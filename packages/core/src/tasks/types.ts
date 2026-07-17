@@ -127,6 +127,13 @@ export type TaskStore = {
     sourceSessionId?: string | null
     /** Extraction provenance anchor — the Episode this task derives from (Pipeline B / synthesis). */
     sourceEpisodeId?: string | null
+    /**
+     * Offset into `sourceEpisodeId`'s recording where this task was committed
+     * to (migration 334) — what turns an action item into a pointer into the
+     * audio rather than a detached string. Set only by a recording fill, whose
+     * `saveTask` is widened to ask for it; null everywhere else.
+     */
+    sourceStartMs?: number | null
     /** The assistant that mediated the write (chat/workflow saveTask). */
     createdByAssistantId?: string | null
     /**

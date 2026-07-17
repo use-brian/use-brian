@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { extractCitations, formatStamp, type CitationIndex } from '@sidanclaw/shared'
 import type { AccessContext } from '../security/access-context.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'
@@ -70,6 +71,28 @@ export type TaskToolOptions = {
    * instead (`context.sessionId`, stamped unconditionally by saveTask).
    */
   writeSourceEpisodeId?: string | null
+  /**
+   * WIDEN `saveTask` to ask which moment of the source recording the task was
+   * committed at (migration 334) — Fathom's lesson: an action item is a pointer
+   * INTO the recording, not a detached string.
+   *
+   * Per-surface on purpose. The moment is per-TASK ("ship the pricing doc" at
+   * 47:21, the next item at 1:12:04), so unlike `writeSourceEpisodeId` it
+   * cannot be pinned at construction — the model must supply it, which means an
+   * input field. `saveTask` is otherwise ONE object shared by chat, the callee
+   * executor, and workflows, and a recording-shaped field on all of them would
+   * advertise a moment that does not exist to a user saying "remind me to call
+   * the bank" — an invitation to invent one. So only the recording
+   * synthesizer's own tool map passes this; every other surface's `saveTask` is
+   * byte-identical to before. (Precedent: `searchRecording` ships pinned for
+   * synthesis and unpinned for brain-MCP — same tool, constructed per surface.)
+   *
+   * Carries the fill's `CitationIndex` rather than a bare flag so the moment is
+   * validated the SAME way a record field's citations are — one rule, one
+   * implementation (`extractCitations`), no second opinion about what counts as
+   * a real moment.
+   */
+  citeSourceMoment?: { index: CitationIndex }
 }
 
 const STATUS_VALUES = [...TASK_STATUSES] as [TaskRecordStatus, ...TaskRecordStatus[]]
@@ -196,10 +219,34 @@ export function createTaskTools(
       attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
       depends_on: z.array(idShape).max(50).optional().describe('Task ids this task depends on. Each becomes a task→task `depends_on` graph edge — the daily turn topologically reasons over the dependency graph (A depends_on B means "do B before A"). Same-workspace ids only. v1 limitation: append-only — emits new edges but does not remove existing ones. To restructure a dependency graph, soft-delete (`status: archived`) and re-create.'),
       links: explicitLinksField,
+      // Present ONLY on a recording fill's tool map — see `citeSourceMoment`.
+      // Spread so every other surface's schema is untouched, not merely
+      // "optional there": a field the model cannot use should not be a field
+      // the model can see.
+      ...(opts?.citeSourceMoment
+        ? {
+            source_moment: z
+              .string()
+              .optional()
+              .describe(
+                'The moment in the recording this task was committed to, copied from the transcript line as `[H:MM:SS]` (e.g. "[0:47:21]"). Copy it — do not calculate it. Omit it if the transcript does not show the commitment being made; never guess a moment.',
+              ),
+          }
+        : {}),
     }),
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
+
+      // Resolve the cited moment through the SAME validator the record's
+      // citations use: an impossible stamp (`[00:85]`) or one past the end of
+      // the transcript yields nothing, and a task is not worth failing over a
+      // bad pointer — drop it and keep the task, exactly as an invented
+      // citation on a record field is dropped while the prose survives.
+      const moment =
+        opts?.citeSourceMoment && typeof input.source_moment === 'string'
+          ? (extractCitations(input.source_moment, opts.citeSourceMoment.index)[0] ?? null)
+          : null
 
       try {
         const task = await store.create({
@@ -223,6 +270,7 @@ export function createTaskTools(
           // SYNTHETIC context.sessionId (randomUUID, no sessions row) — a
           // real session is only stamped for interactive/workflow chat.
           sourceEpisodeId: opts?.writeSourceEpisodeId ?? null,
+          sourceStartMs: moment?.startMs ?? null,
           sourceSessionId:
             opts?.writeSourceEpisodeId || opts?.writeSource === 'extracted' || context.channelType === 'programmatic'
               ? null
@@ -244,7 +292,10 @@ export function createTaskTools(
           source: 'user',
           links: input.links,
         })
-        return { data: `Created task [${task.id}]: ${task.title}${formatLinksSummary(linksSummary)}` }
+        // Echo the moment back when one was kept, so a model that cited a
+        // moment the transcript does not contain sees it was dropped.
+        const momentNote = moment ? ` @ ${formatStamp(moment.startMs)}` : ''
+        return { data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}` }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('parent_id must reference a task in the same workspace')) {

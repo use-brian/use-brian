@@ -173,6 +173,13 @@ export async function createTask(
      * writes leave it NULL. (Column existed since mig 128; unwritten pre-316.)
      */
     sourceEpisodeId?: string | null
+    /**
+     * Offset into `sourceEpisodeId`'s recording where this task was committed
+     * to (mig 334) — set only by a recording fill, whose `saveTask` is widened
+     * to ask for it and which validates it against the transcript first. A
+     * column, not `attributes`: `updateTask` overwrites that object wholesale.
+     */
+    sourceStartMs?: number | null
     /** The assistant that mediated the write (chat/workflow saveTask). */
     createdByAssistantId?: string | null
     /** Task ids this task depends on — each becomes a task→task
@@ -197,8 +204,8 @@ export async function createTask(
   assertAuthorshipPresent('createTask', userId)
   const result = await queryWithRLS<TaskRow>(
     userId,
-    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source, source_session_id, source_episode_id, created_by_assistant_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+    `INSERT INTO tasks (workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes, created_by_user_id, compartments, source, source_session_id, source_episode_id, created_by_assistant_id, source_start_ms)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -216,6 +223,7 @@ export async function createTask(
       params.sourceSessionId ?? null,
       params.sourceEpisodeId ?? null,
       params.createdByAssistantId ?? null,
+      params.sourceStartMs ?? null,
     ],
   )
   const task = toRecord(result.rows[0])

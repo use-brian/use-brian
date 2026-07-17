@@ -1,8 +1,16 @@
 import { describe, it, expect } from 'vitest'
+import { buildCitationIndex } from '@sidanclaw/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 
-type FakeRow = TaskRecord
+// The real store persists provenance (source*, mig 316/334) but does NOT
+// project it back on reads — `TaskRecord` is deliberately a compact,
+// model-facing shape. The fake keeps it so a test can assert what `create` was
+// actually asked to write.
+type FakeRow = TaskRecord & {
+  sourceEpisodeId?: string | null
+  sourceStartMs?: number | null
+}
 
 function makeFakeStore(): TaskStore & {
   rows: FakeRow[]
@@ -42,6 +50,8 @@ function makeFakeStore(): TaskStore & {
         parentId: params.parentId ?? null,
         externalRef: params.externalRef ?? {},
         attributes: params.attributes ?? {},
+        sourceEpisodeId: params.sourceEpisodeId ?? null,
+        sourceStartMs: params.sourceStartMs ?? null,
         createdAt: now,
         updatedAt: now,
       }
@@ -114,6 +124,96 @@ const ctxNoWorkspace = { ...ctx, workspaceId: null }
 
 const UUID_A = '11111111-1111-1111-1111-111111111111'
 const UUID_B = '22222222-2222-2222-2222-222222222222'
+
+// ── The source moment (migration 334) ────────────────────────────────────
+//
+// `saveTask` is ONE object shared by chat, the callee executor, and workflows.
+// The recording fill widens it with a `source_moment` input; the whole design
+// rests on that widening being invisible everywhere else.
+
+describe('[COMP:tasks/tools] saveTask source moment', () => {
+  const INDEX = buildCitationIndex(
+    [
+      { segmentIndex: 0, startMs: 0, endMs: 30_000, speaker: 'Ken' },
+      { segmentIndex: 38, startMs: 2_800_000, endMs: 2_900_000, speaker: 'Priya' },
+    ],
+    2_900_000,
+  )
+
+  it('does not expose source_moment on a surface that has no recording', () => {
+    // The load-bearing assertion: a user in chat saying "remind me to call the
+    // bank" must not be shown a field for a moment in a recording that does not
+    // exist — an irrelevant optional field is an invitation to invent a value.
+    // Asserted through the schema's observable behaviour (an unknown key is
+    // stripped) rather than its internals, which is what the model actually
+    // experiences as the contract.
+    const { saveTask } = createTaskTools(makeFakeStore())
+    const parsed = saveTask.inputSchema.safeParse({ title: 'Call the bank', source_moment: '[0:47:21]' })
+    expect(parsed.success).toBe(true)
+    expect(parsed.success && 'source_moment' in parsed.data).toBe(false)
+  })
+
+  it('exposes source_moment only when the fill passes a citation index', () => {
+    const { saveTask } = createTaskTools(makeFakeStore(), { citeSourceMoment: { index: INDEX } })
+    const parsed = saveTask.inputSchema.safeParse({ title: 'Ship it', source_moment: '[0:47:21]' })
+    expect(parsed.success && 'source_moment' in parsed.data).toBe(true)
+  })
+
+  it('stamps the cited moment onto the task', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store, {
+      writeSource: 'extracted',
+      writeSourceEpisodeId: 'rec-1',
+      citeSourceMoment: { index: INDEX },
+    })
+    const res = await saveTask.execute(
+      { title: 'Ship the pricing doc', source_moment: '[0:47:21]' } as never,
+      ctx,
+    )
+    expect(store.rows[0]).toMatchObject({ sourceEpisodeId: 'rec-1', sourceStartMs: 2_841_000 })
+    // Echoed back so a model whose moment was dropped can see it.
+    expect(res.data).toContain('0:47:21')
+  })
+
+  it('keeps the task but drops a moment past the end of the transcript', async () => {
+    // The transcript ends at 2,900,000ms. A task is not worth failing over a
+    // bad pointer — the same posture as an invented citation on a record field,
+    // where the prose survives and only the pointer is refused.
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store, { citeSourceMoment: { index: INDEX } })
+    const res = await saveTask.execute(
+      { title: 'Follow up', source_moment: '[2:00:00]' } as never,
+      ctx,
+    )
+    expect(res.isError).toBeFalsy()
+    expect(store.rows).toHaveLength(1)
+    expect(store.rows[0].sourceStartMs).toBeNull()
+  })
+
+  it('drops an impossible stamp the same way the record citations do', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store, { citeSourceMoment: { index: INDEX } })
+    await saveTask.execute({ title: 'X', source_moment: '[00:85]' } as never, ctx)
+    expect(store.rows[0].sourceStartMs).toBeNull()
+  })
+
+  it('leaves the moment null when the model omits it', async () => {
+    // "Omit it if the transcript does not show the commitment being made" —
+    // an uncited action item is still a real action item.
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store, { citeSourceMoment: { index: INDEX } })
+    await saveTask.execute({ title: 'Unstamped' } as never, ctx)
+    expect(store.rows[0].sourceStartMs).toBeNull()
+  })
+
+  it('never stamps a moment on a surface without the widening', async () => {
+    const store = makeFakeStore()
+    const { saveTask } = createTaskTools(store)
+    // Even if a value smuggles through, the un-widened tool must ignore it.
+    await saveTask.execute({ title: 'Chat task', source_moment: '[0:47:21]' } as never, ctx)
+    expect(store.rows[0].sourceStartMs ?? null).toBeNull()
+  })
+})
 
 describe('[COMP:tasks/tools] saveTask', () => {
   it('creates a new task with defaults', async () => {
