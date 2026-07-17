@@ -667,7 +667,16 @@ function CollabEditorInner({
           ...(recordingPlayer.recordingId
             ? {
                 timecodes: {
-                  onSeek: recordingPlayer.seekTo,
+                  // Clicking a citation does BOTH: move the playhead, and pop
+                  // the transcript at that line. Seeking alone was the whole
+                  // affordance before, and it is nearly invisible — the audio
+                  // jumps somewhere off-screen, and a reader who wants the
+                  // context around the claim (or whose audio will not play at
+                  // all) gets nothing to read.
+                  onSeek: (ms: number) => {
+                    recordingPlayer.seekTo(ms);
+                    recordingPlayer.showTranscriptAt(ms);
+                  },
                   hrefBase: `/w/${ws.workspaceId}/recordings/${recordingPlayer.recordingId}`,
                 },
               }
@@ -689,7 +698,15 @@ function CollabEditorInner({
         }),
       ],
     },
-    [doc, provider, editingExtensions, commentExtension],
+    // `recordingPlayer.recordingId` is load-bearing here: the timecode
+    // decoration is chosen when the extension list is BUILT, and the id is null
+    // on first render (it comes from the page's `anchorKey`, which arrives with
+    // the async page fetch). Without it in the deps the editor is created
+    // timecode-less and never rebuilt, so a brief's `[H:MM:SS]` citations stay
+    // plain text forever — the feature was silently dead on arrival. It flips
+    // null → id exactly once per page, so this costs one rebuild, and the Yjs
+    // doc owns the content so nothing is lost across it.
+    [doc, provider, editingExtensions, commentExtension, recordingPlayer.recordingId],
   );
 
   // Seed a template into a fresh, empty draft (the landing's "Start from a

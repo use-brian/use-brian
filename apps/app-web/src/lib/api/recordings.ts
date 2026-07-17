@@ -220,3 +220,41 @@ export async function getRecordingTranscript(
     toIndex: number;
   };
 }
+
+/** Task lifecycle status, mirroring the brain's `kind:'tasks'` rows. */
+type RecordingTaskStatus =
+  | "todo"
+  | "in_progress"
+  | "blocked"
+  | "done"
+  | "archived";
+
+/**
+ * An action item captured from a recording. `sourceStartMs` is the moment it
+ * was committed to (migration 334) - the rail turns it into a seek link.
+ * `assigneeId` is a `workspace_members` row id, not a user id, so the caller
+ * resolves it against the roster.
+ */
+export type RecordingTask = {
+  id: string;
+  title: string;
+  status: RecordingTaskStatus;
+  assigneeId: string | null;
+  sourceStartMs: number | null;
+  /**
+   * False until a human confirms the model heard this right. Synthesis writes
+   * every captured task unverified, and the brain inbox excludes extracted
+   * rows, so this rail is the only place they are ever reviewed.
+   */
+  verified: boolean;
+};
+
+/** The action items captured from one recording, oldest moment first. */
+export async function listRecordingTasks(
+  recordingId: string,
+): Promise<RecordingTask[]> {
+  const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/tasks`);
+  if (!res.ok) throw await asError(res, "Could not load the action items");
+  const body = (await res.json()) as { tasks: RecordingTask[] };
+  return body.tasks;
+}

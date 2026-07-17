@@ -1,4 +1,4 @@
--- 332_transcript_segments_trgm.sql  (OPEN table -> sidanclaw/packages/api/migrations/)
+-- 336_transcript_segments_trgm.sql  (OPEN table -> sidanclaw/packages/api/migrations/)
 --
 -- Make the transcript keyword arm indexed, so `transcript_segment` can join
 -- KNOWN_SCOPES without turning every unscoped searchBrain into a sequential scan
@@ -32,7 +32,7 @@
 --
 -- NOTE — no `recording_ref` column. An earlier design added
 -- `recording_ref UUID REFERENCES recordings(id)` alongside the existing
--- `recording_id`. That is redundant: migration 331 made `recordings.id` the
+-- `recording_id`. That is redundant: migration 335 made `recordings.id` the
 -- anchor Episode's id, so `transcript_segments.recording_id` ALREADY resolves to
 -- a recording. Two columns holding the same UUID is the drift bug 331 exists to
 -- prevent.

@@ -1,4 +1,4 @@
--- 333_blueprint_record_citations.sql
+-- 337_blueprint_record_citations.sql
 --
 -- Typed CITATIONS for blueprint record fields -- the queryable half of the
 -- provenance a synthesized brief already carries as prose.

@@ -16,7 +16,7 @@ import {
 import { query, queryWithRLS } from '../client.js'
 
 /**
- * The recordings row store (migration 331). SQL is asserted at the shape level:
+ * The recordings row store (migration 335). SQL is asserted at the shape level:
  * which pool the call takes (RLS vs owner), and that the WHERE/SET clauses carry
  * the filters/patches — the DDL itself is exercised against a live PG by the
  * migration, not here.

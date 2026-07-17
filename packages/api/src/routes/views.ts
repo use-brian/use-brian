@@ -314,6 +314,15 @@ function viewMetadata(view: SavedView) {
     // once via POST /views/:id/commit-created. Re-read on reload so a
     // refreshed-but-uncommitted draft re-arms instead of going stale.
     createdEventPending: view.createdEventPending ?? false,
+    // Stable cross-run identity (`saved_views.anchor_key`). The doc client
+    // needs it to know a page was SYNTHESIZED FROM something: a recording
+    // brief's key is `recording-synthesis:<recordingId>`, and that string is
+    // the page's only link back to the recording it was written from. Without
+    // it the recording chrome cannot mount and the page's `[H:MM:SS]`
+    // citations have nothing to seek — the store has always projected it, this
+    // whitelist just never forwarded it. See recordings.md → "The brief page
+    // IS the recording surface".
+    anchorKey: view.anchorKey ?? null,
     page: view.page,
     createdAt: view.createdAt.toISOString(),
     updatedAt: view.updatedAt.toISOString(),

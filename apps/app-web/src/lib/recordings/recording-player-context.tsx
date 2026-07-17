@@ -45,6 +45,22 @@ export type RecordingPlayerApi = {
   isLoading: boolean;
   /** Set when the media URL could not be minted; the bar renders the reason. */
   error: string | null;
+  /**
+   * The moment a citation asked to SHOW, or null. Distinct from `currentMs`:
+   * seeking moves the playhead, but a reader clicking `[0:47:21]` in the brief
+   * usually wants to *read around* that line, not just hear it — the audio may
+   * even be unplayable while the transcript is perfectly readable. The chrome
+   * watches this and pops the transcript card scrolled to the line.
+   *
+   * A monotonic `nonce` rides along so clicking the SAME citation twice
+   * re-opens the card: the ms alone would be an unchanged value and the effect
+   * would not re-fire.
+   */
+  transcriptFocus: { ms: number; nonce: number } | null;
+  /** Ask the chrome to show the transcript at `ms`. */
+  showTranscriptAt: (ms: number) => void;
+  /** Dismiss the transcript card. */
+  clearTranscriptFocus: () => void;
 };
 
 const NOOP: RecordingPlayerApi = {
@@ -56,6 +72,9 @@ const NOOP: RecordingPlayerApi = {
   togglePlay: () => {},
   isLoading: false,
   error: null,
+  transcriptFocus: null,
+  showTranscriptAt: () => {},
+  clearTranscriptFocus: () => {},
 };
 
 const Ctx = createContext<RecordingPlayerApi>(NOOP);
@@ -142,6 +161,19 @@ export function RecordingPlayerProvider({
     else el.pause();
   }, []);
 
+  const [transcriptFocus, setTranscriptFocus] = useState<
+    { ms: number; nonce: number } | null
+  >(null);
+  // The nonce makes a repeat click on the same citation re-open the card — the
+  // ms alone would be an unchanged value and the consumer's effect would not
+  // re-fire. A ref, not state: bumping it must not itself trigger a render.
+  const focusNonce = useRef(0);
+  const showTranscriptAt = useCallback((ms: number) => {
+    focusNonce.current += 1;
+    setTranscriptFocus({ ms, nonce: focusNonce.current });
+  }, []);
+  const clearTranscriptFocus = useCallback(() => setTranscriptFocus(null), []);
+
   const api = useMemo<RecordingPlayerApi>(
     () => ({
       recordingId,
@@ -154,8 +186,24 @@ export function RecordingPlayerProvider({
       togglePlay,
       isLoading: recordingId != null && url == null && error == null,
       error,
+      transcriptFocus,
+      showTranscriptAt,
+      clearTranscriptFocus,
     }),
-    [recordingId, seekTo, currentMs, mediaDurationMs, knownDurationMs, isPlaying, togglePlay, url, error],
+    [
+      recordingId,
+      seekTo,
+      currentMs,
+      mediaDurationMs,
+      knownDurationMs,
+      isPlaying,
+      togglePlay,
+      url,
+      error,
+      transcriptFocus,
+      showTranscriptAt,
+      clearTranscriptFocus,
+    ],
   );
 
   return (

@@ -2014,6 +2014,41 @@ html[data-vt-back="true"]::view-transition-new(root) {
   background: color-mix(in srgb, currentColor 7%, transparent);
 }
 
+/* Recording citations — the model's literal `[H:MM:SS]` prose, turned into a
+   seek affordance by timecode-decoration.ts on a recording brief.
+
+   It renders a real `<a class="doc-timecode">`, but Tailwind's preflight resets
+   `color`/`text-decoration` to inherit, so without these rules the citation is
+   indistinguishable from the surrounding prose — the seek link was invisible
+   and nobody clicked it. Styled as a small pill rather than a plain underline:
+   `[0:47:21]` is a discrete object you jump from, not a word in the sentence.
+
+   Inert pages never get the class (the decoration only paints when a
+   `recordingId` is present), so this cannot leak onto ordinary docs.
+   See docs/architecture/media/recordings.md → "Citations". */
+.doc-timecode {
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0 3px;
+  font-variant-numeric: tabular-nums;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 9%, transparent);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  text-decoration: none;
+  transition:
+    background 80ms ease,
+    color 80ms ease;
+}
+.doc-timecode:hover {
+  background: color-mix(in srgb, var(--primary) 18%, transparent);
+  text-decoration: underline;
+}
+.doc-timecode:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
 /* Doc comments (chat-as-threads) — highlight + gutter badge.
    Painted by comment-decorations.ts. `.doc-comment-mark` is the static
    fallback for the read-only/copy-paste path; the live highlight is the

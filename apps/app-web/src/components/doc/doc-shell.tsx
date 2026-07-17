@@ -87,6 +87,7 @@ import { PageHeader } from "./page-header";
 import { PageTitle } from "./page-title";
 import { CollabPageEditor } from "./collab-page-editor";
 import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { RecordingChrome } from "@/components/recordings/recording-chrome";
 import { recordingIdFromAnchorKey } from "@/lib/recordings/anchor";
 import { commentGutterWidth } from "./comment-rail";
 import { useCollabProvider } from "@/lib/collab/use-collab-provider";
@@ -1397,6 +1398,19 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                     // page's `[H:MM:SS]` text stays plain prose.
                     recordingId={recordingIdFromAnchorKey(pageView?.anchorKey)}
                   >
+                  {/* The recording surface: player + transcript + action items,
+                      as CHROME above the doc (never blocks — a block is content
+                      the user can delete, orphaning the page's citations). Only
+                      on a recording-anchored page; every other page renders the
+                      editor alone. See recordings.md → "The brief page IS the
+                      recording surface". */}
+                  {recordingIdFromAnchorKey(pageView?.anchorKey) && workspaceId ? (
+                    <RecordingChrome
+                      recordingId={recordingIdFromAnchorKey(pageView?.anchorKey) as string}
+                      workspaceId={workspaceId}
+                      title={pageView?.name ?? ""}
+                    />
+                  ) : null}
                   <CollabPageEditor
                     collab={collab}
                     canEdit

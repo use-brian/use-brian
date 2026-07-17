@@ -1323,7 +1323,7 @@ async function searchEntityInstancesScope(
  * window-capped at TRANSCRIPT_SEGMENT_ARM_CAP rows per recording so a
  * 1000-segment meeting cannot monopolize the candidate fetch.
  *
- * The ILIKE is indexed as of migration 332 (`gin_trgm_ops` on segment_text).
+ * The ILIKE is indexed as of migration 336 (`gin_trgm_ops` on segment_text).
  * That is load-bearing HERE specifically: unlike `searchRecording`, this arm has
  * no `recording_id` gate to ride, so the same predicate that was safe when
  * always scoped would otherwise scan every transcript in the workspace.

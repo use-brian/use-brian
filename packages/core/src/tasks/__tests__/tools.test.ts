@@ -125,7 +125,7 @@ const ctxNoWorkspace = { ...ctx, workspaceId: null }
 const UUID_A = '11111111-1111-1111-1111-111111111111'
 const UUID_B = '22222222-2222-2222-2222-222222222222'
 
-// ── The source moment (migration 334) ────────────────────────────────────
+// ── The source moment (migration 338) ────────────────────────────────────
 //
 // `saveTask` is ONE object shared by chat, the callee executor, and workflows.
 // The recording fill widens it with a `source_moment` input; the whole design

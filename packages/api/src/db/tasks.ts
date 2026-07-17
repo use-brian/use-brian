@@ -175,7 +175,7 @@ export async function createTask(
     sourceEpisodeId?: string | null
     /**
      * Offset into `sourceEpisodeId`'s recording where this task was committed
-     * to (mig 334) — set only by a recording fill, whose `saveTask` is widened
+     * to (mig 338) — set only by a recording fill, whose `saveTask` is widened
      * to ask for it and which validates it against the transcript first. A
      * column, not `attributes`: `updateTask` overwrites that object wholesale.
      */
@@ -367,6 +367,8 @@ type OldTaskRow = {
   source_episode_id: string | null
   source_session_id: string | null
   created_by_assistant_id: string | null
+  /** Migration 334 — carried through supersession, see the INSERT below. */
+  source_start_ms: number | null
 }
 
 /**
@@ -500,7 +502,7 @@ export async function updateTask(
       const oldRes = await client.query<OldTaskRow>(
         `SELECT workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
                 sensitivity, user_id, assistant_id, source, source_episode_id,
-                source_session_id, created_by_assistant_id
+                source_session_id, created_by_assistant_id, source_start_ms
          FROM tasks WHERE id = $1 AND valid_to IS NULL`,
         [liveId],
       )
@@ -523,13 +525,13 @@ export async function updateTask(
         `INSERT INTO tasks (
            workspace_id, title, status, assignee_id, due, tags, parent_id, external_ref, attributes,
            sensitivity, user_id, assistant_id, source, source_episode_id,
-           source_session_id, created_by_assistant_id,
+           source_session_id, created_by_assistant_id, source_start_ms,
            created_by_user_id, valid_from, valid_to, superseded_by
          )
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb,
                  $10, $11, $12, $13, $14,
-                 $15, $16,
-                 $17, now(), NULL, NULL)
+                 $15, $16, $17,
+                 $18, now(), NULL, NULL)
          RETURNING ${FULL_SELECT}`,
         [
           old.workspace_id,
@@ -551,6 +553,16 @@ export async function updateTask(
           // (matches updateMemory). created_by_user_id re-stamps the editor.
           old.source_session_id,
           old.created_by_assistant_id,
+          // The moment in the recording (migration 338) is provenance too, and
+          // it MUST be carried: omitting it defaults the new version to NULL,
+          // so any ordinary edit — a status tick, a due date — silently strips
+          // the task's pointer into the audio while leaving
+          // `source_episode_id` intact. The task then claims to come from a
+          // recording but no longer knows where in it, and the brief's
+          // "@ 47:21" seek link dies. This is the same wholesale-overwrite trap
+          // that put the moment in a column instead of `attributes` in the
+          // first place; the column only helps if the supersede carries it.
+          old.source_start_ms,
           userId,
         ],
       )
@@ -695,4 +707,67 @@ export async function getTaskHistory(ctx: AccessContext, id: string): Promise<Ta
     [...ap.params, id],
   )
   return result.rows.map(toRecord)
+}
+
+/**
+ * A task as the RECORDING SURFACE renders it: the title, whether it is done,
+ * who owns it, and the moment in the recording it was committed to.
+ *
+ * A separate shape from `TaskRecord` on purpose. `TaskRecord` is the
+ * MODEL-facing row — deliberately compact, carrying no provenance at all (not
+ * `sourceEpisodeId`, not `sourceStartMs`), because every field on it is
+ * context the model pays for on every `listTasks`. The brief page needs
+ * exactly the provenance the model does not, so it gets its own projection
+ * rather than widening the model's row for a UI concern.
+ *
+ * `assigneeId` is a `workspace_members` row id (NOT a user id) — the web
+ * client resolves it against the workspace roster, same as the Brain list.
+ * See docs/architecture/features/tasks.md → "Source moment".
+ */
+export type RecordingTaskRow = {
+  id: string
+  title: string
+  status: TaskRecordStatus
+  assigneeId: string | null
+  /** Milliseconds into the recording, or null when the model cited no moment. */
+  sourceStartMs: number | null
+  /**
+   * False while nobody has confirmed the model actually heard this.
+   *
+   * Every task synthesis captures is written `source='extracted'` and
+   * UNVERIFIED, and the brain inbox deliberately excludes extracted rows (one
+   * transcript naming 30 people would flood it overnight) — so until this
+   * surface existed, an extracted task landed in the brain with no review
+   * anywhere. The rail is the per-recording "extraction queue" the inbox store
+   * names as the intended follow-up: one meeting is high signal-to-noise in a
+   * way the whole overnight firehose is not.
+   */
+  verified: boolean
+}
+
+/**
+ * Every task captured from one recording, oldest moment first — the order they
+ * were said, which is the order the brief's action-items list reads in.
+ *
+ * Tasks with no cited moment sort last rather than being dropped: a real
+ * commitment the model failed to timestamp is still a commitment, and hiding it
+ * would make the rail quietly lie about what the meeting agreed to.
+ */
+export async function listTasksBySourceEpisode(
+  ctx: AccessContext,
+  episodeId: string,
+): Promise<RecordingTaskRow[]> {
+  const ap = buildAccessPredicate(ctx, { startIdx: 1 })
+  const result = await queryGated<RecordingTaskRow>(
+    ctx,
+    `SELECT id, title, status,
+            assignee_id as "assigneeId",
+            source_start_ms as "sourceStartMs",
+            (verified_by_user_id IS NOT NULL) as "verified"
+     FROM tasks
+     WHERE ${ap.sql} AND valid_to IS NULL AND source_episode_id = $${ap.nextIdx}
+     ORDER BY source_start_ms ASC NULLS LAST, created_at ASC`,
+    [...ap.params, episodeId],
+  )
+  return result.rows
 }

@@ -1,10 +1,10 @@
--- 334_tasks_source_start_ms.sql
+-- 338_tasks_source_start_ms.sql
 --
 -- The moment a task was committed to -- Fathom's actual lesson, cashed in: an
 -- action item is a POINTER INTO THE RECORDING, not a detached string.
 --
 -- `tasks.source_episode_id` already answers "which recording did this come
--- from" (migration 331 made `recordings.id` the anchor Episode id, so it
+-- from" (migration 335 made `recordings.id` the anchor Episode id, so it
 -- resolves to a recording directly). This answers "WHERE in it": a task
 -- extracted from a meeting brief renders "47:21" and deep-links to
 -- `/w/<ws>/recordings/<id>#t=2841`, the same target the brief's `[0:47:21]`

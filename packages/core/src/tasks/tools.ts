@@ -73,7 +73,7 @@ export type TaskToolOptions = {
   writeSourceEpisodeId?: string | null
   /**
    * WIDEN `saveTask` to ask which moment of the source recording the task was
-   * committed at (migration 334) — Fathom's lesson: an action item is a pointer
+   * committed at (migration 338) — Fathom's lesson: an action item is a pointer
    * INTO the recording, not a detached string.
    *
    * Per-surface on purpose. The moment is per-TASK ("ship the pricing doc" at

@@ -5202,6 +5202,17 @@ export const en = {
     detailStatusProcessing: "Transcribing...",
     detailStatusFailed: "Transcription failed",
     detailSeekHint: "Click any line to jump to that moment",
+    transcriptFollow: "Follow playback",
+    chromeOpenRecording: "Open recording",
+    actionItemsTitle: "Action items",
+    actionItemsLoading: "Loading action items...",
+    actionItemsError: "We could not load the action items.",
+    actionItemsEmpty: "No action items were captured from this recording.",
+    actionItemsSeek: "Jump to",
+    actionItemsUnconfirmed: "Not confirmed",
+    actionItemsConfirm: "Confirm",
+    actionItemsDismiss: "Dismiss",
+    citationCardClose: "Close",
   },
   // Workspace recording brief default (migration 291) — the settings subsection
   // that sets the blueprint every recording auto-uses when none is picked.

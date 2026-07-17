@@ -33,7 +33,7 @@ import { queryWithRLS } from './client.js'
 export type BlueprintRecordSourceKind = 'recording' | 'brain' | 'research' | 'chat' | 'workflow'
 
 /**
- * Citations per field key (migration 333) — a SIDECAR to `fields`, never nested
+ * Citations per field key (migration 337) — a SIDECAR to `fields`, never nested
  * inside it: `fields` is a pure key → value map and its readers (the page
  * projection, `getBlueprintRecord`, `send_page`'s recordField, `{{lastRun.*}}`)
  * all stringify whatever they find there.
@@ -49,7 +49,7 @@ export type BlueprintRecord = {
   subject: string
   anchorKey: string
   fields: BlueprintRecordFields
-  /** Per-field citations (migration 333). `{}` for fills with no cited source. */
+  /** Per-field citations (migration 337). `{}` for fills with no cited source. */
   fieldCitations: BlueprintRecordCitations
   status: BlueprintRecordStatus
   missing: string[]

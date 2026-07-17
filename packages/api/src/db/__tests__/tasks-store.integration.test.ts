@@ -138,6 +138,44 @@ describeIf('[COMP:api/tasks-store] tasks store + RLS (integration)', () => {
       expect(result).toBeNull()
     })
 
+    /**
+     * Regression (2026-07-17): the supersede INSERT rebuilds the row from an
+     * explicit column list, and `source_start_ms` (migration 338) was missing
+     * from it — so ANY edit (a status tick from the action-items rail, a due
+     * date) silently reset the moment to NULL. The task kept
+     * `source_episode_id`, so it still claimed to come from a recording while
+     * no longer knowing where in it, and the brief's "@ 47:21" seek link died.
+     *
+     * Asserted against the COLUMN, not the returned record: `TaskRecord` is the
+     * model-facing shape and deliberately carries no provenance, so a
+     * record-level assertion cannot see this field at all — which is exactly
+     * why the bug survived the existing round-trip test.
+     */
+    it('update carries source_start_ms through supersession', async () => {
+      const client = await pool!.connect()
+      try {
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO tasks (workspace_id, title, status, created_by_user_id, source, source_start_ms)
+           VALUES ($1, 'Benchmark the index', 'todo', $2, 'extracted', 38000)
+           RETURNING id`,
+          [workspaceId, userId],
+        )
+        const taskId = created.rows[0].id
+
+        const updated = await store.update(userId, taskId, { status: 'done' })
+        expect(updated).not.toBeNull()
+
+        const live = await client.query<{ source_start_ms: number | null }>(
+          `SELECT source_start_ms FROM tasks
+           WHERE id = $1 AND valid_to IS NULL`,
+          [updated!.id],
+        )
+        expect(live.rows[0]?.source_start_ms).toBe(38000)
+      } finally {
+        client.release()
+      }
+    })
+
     it('sub-task creation preserves parent_id', async () => {
       const parent = await store.create({ userId, workspaceId, title: 'Parent' })
       const child = await store.create({

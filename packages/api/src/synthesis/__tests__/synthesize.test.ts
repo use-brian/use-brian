@@ -319,7 +319,7 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
     })
   })
 
-  // ── Typed citations (migration 333) ───────────────────────────────────
+  // ── Typed citations (migration 337) ───────────────────────────────────
   //
   // The model cites `[H:MM:SS]` in the field's prose; the write path resolves
   // each moment against the transcript and persists it as a typed pointer

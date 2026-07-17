@@ -1,5 +1,5 @@
 /**
- * `recordings-store.ts` — the recording as a first-class row (migration 331).
+ * `recordings-store.ts` — the recording as a first-class row (migration 335).
  *
  * A recording USED to be an `episodes` row with everything in a JSONB
  * `source_ref`. It still HAS that anchor Episode — facts point at episodes, so a
