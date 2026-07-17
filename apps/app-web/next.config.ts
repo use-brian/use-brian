@@ -1,20 +1,26 @@
 import type { NextConfig } from "next";
 import dotenv from "dotenv";
-import { resolve } from "node:path";
+import { realpathSync } from "node:fs";
+import { createRequire } from "node:module";
+import { resolve, sep } from "node:path";
 
 // Load .env from monorepo root
 dotenv.config({ path: resolve(import.meta.dirname, "..", "..", ".env") });
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+const nextPackagePath = realpathSync(
+  createRequire(import.meta.url).resolve("next/package.json"),
+);
+const workspaceRoot = nextPackagePath.slice(
+  0,
+  nextPackagePath.indexOf(`${sep}node_modules${sep}`),
+);
 
 const nextConfig: NextConfig = {
-  // Pin the turbopack workspace root to the OSS submodule root. Without
-  // this, Next's lockfile inference in the platform checkout picks the
-  // PLATFORM root (two pnpm workspaces up) and dev watches both giant
-  // trees — Watchpack dies with EMFILE and every route 404s. The OSS root
-  // covers all workspace packages app-web imports (packages/shared etc.).
+  // app-web runs both standalone and absorbed into the platform workspace.
+  // Follow the physical pnpm store so Turbopack can resolve Next in either.
   turbopack: {
-    root: resolve(import.meta.dirname, "..", ".."),
+    root: workspaceRoot,
   },
   env: {
     NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
