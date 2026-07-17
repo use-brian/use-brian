@@ -35,7 +35,7 @@
  * [COMP:app-web/views-shell]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   docEntryPath,
@@ -108,6 +108,7 @@ import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
 import { ApprovalsPanel } from "./panels/approvals-panel";
 import { AutopilotPanel } from "./panels/autopilot-panel";
+import { RecordingsPanel } from "./panels/recordings-panel";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
 import { isAuthRedirectInFlight } from "@/lib/auth-fetch";
@@ -1119,6 +1120,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     const panelLabel: Record<PanelId, string> = {
       approvals: t.topbarPanelApprovals,
       goals: t.topbarPanelAutopilot,
+      recordings: t.topbarPanelRecordings,
     };
     return tabsState.tabs.map((tab) => {
       const entry = tabPageId(tab);
@@ -1151,7 +1153,14 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
         nameOrigin: meta?.nameOrigin,
       };
     });
-  }, [tabsState, allRows, activeView, t.topbarPanelApprovals, t.topbarPanelAutopilot]);
+  }, [
+    tabsState,
+    allRows,
+    activeView,
+    t.topbarPanelApprovals,
+    t.topbarPanelAutopilot,
+    t.topbarPanelRecordings,
+  ]);
 
   return (
     <div
@@ -1197,13 +1206,28 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
             {topError}
           </div>
         )}
-        {/* Panel tab (Approvals / Autopilot) — takes precedence over the
-            Suggested home (a panel URL has no `[pageId]`, so `urlViewId` is
-            null and the home branch would otherwise match). The panel owns its
-            own header + scrolling; we give it a filled flex column to sit in. */}
+        {/* Panel tab (Approvals / Autopilot / Recordings) — takes precedence
+            over the Suggested home (a panel URL has no `[pageId]`, so
+            `urlViewId` is null and the home branch would otherwise match). The
+            panel owns its own header + scrolling; we give it a filled flex
+            column to sit in.
+
+            A keyed record, not a ternary: this was `panel === "approvals" ? A :
+            Autopilot`, which silently renders Autopilot for ANY panel that is
+            not approvals — a third panel would have looked wired up and shown
+            the wrong board. `Record<PanelId, …>` makes the next one a compile
+            error instead. */}
         {urlPanel ? (
           <div className="flex min-h-0 flex-1 flex-col">
-            {urlPanel === "approvals" ? <ApprovalsPanel /> : <AutopilotPanel />}
+            {
+              (
+                {
+                  approvals: <ApprovalsPanel />,
+                  goals: <AutopilotPanel />,
+                  recordings: <RecordingsPanel />,
+                } satisfies Record<PanelId, ReactNode>
+              )[urlPanel]
+            }
           </div>
         ) : null}
         {!urlPanel && !urlViewId && !activeError && (

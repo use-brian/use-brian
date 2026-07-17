@@ -102,6 +102,11 @@ export function pageIdFromInAppHref(
  *                       (home-dock Autopilot card / Brain task panel), no
  *                       sidebar slot, same pattern as `'approvals'`
  *   - `'approvals'`     `/approvals`
+ *   - `'recordings'`    `/recordings/<recordingId>` — the single-artifact
+ *                       detail route a `[H:MM:SS]` citation deep-links into.
+ *                       The recordings BOARD is a doc-shell panel, not this;
+ *                       classified so the detail route is not an unclassified
+ *                       hole in the sidebar's highlight logic.
  *   - `'knowledge-base'``/knowledge-base/...`
  *   - `'inbox'`         the legacy `/inbox` route (now a flyout; the route
  *                       redirects to `/p`, but the segment is still classified)
@@ -115,6 +120,7 @@ export type WorkspaceSurface =
   | "feed"
   | "goals"
   | "approvals"
+  | "recordings"
   | "knowledge-base"
   | "inbox";
 
@@ -129,6 +135,7 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "feed",
   "goals",
   "approvals",
+  "recordings",
   "knowledge-base",
   "inbox",
 ]);
@@ -162,8 +169,15 @@ export function surfaceFromPathname(
 
 /** The doc-shell panel surfaces that open as tabs under `/p` (not their own
  *  route). `goals` is the Autopilot board — the id matches the legacy route
- *  segment + the `WorkspaceSurface` name so nothing else has to special-case it. */
-export const PANEL_IDS = ["approvals", "goals"] as const;
+ *  segment + the `WorkspaceSurface` name so nothing else has to special-case it.
+ *
+ *  `recordings` is the recordings board. Note the asymmetry with the others: it
+ *  has a sibling ROUTE at `/w/<wid>/recordings/<id>` and that is deliberate, not
+ *  an inconsistency. A panel is a BOARD (a list you scan, with no identity of
+ *  its own); a recording is a single artifact other pages link INTO by id and
+ *  that a `[H:MM:SS]` citation deep-links to with `#t=`. The board is the panel;
+ *  the artifact keeps its URL. */
+export const PANEL_IDS = ["approvals", "goals", "recordings"] as const;
 export type PanelId = (typeof PANEL_IDS)[number];
 
 const PANEL_ID_SET: ReadonlySet<string> = new Set(PANEL_IDS);

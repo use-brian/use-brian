@@ -15,6 +15,7 @@ import {
   blockIdFromHash,
   isCaptureRequest,
   isPanelId,
+  PANEL_IDS,
   pageIdFromInAppHref,
   pageIdFromPathname,
   panelFromSearch,
@@ -164,6 +165,10 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
     expect(surfaceFromPathname("/w/w1/feed/inbox")).toBe("feed");
     expect(surfaceFromPathname("/w/w1/feed/threads/insights")).toBe("feed");
     expect(surfaceFromPathname("/w/w1/approvals")).toBe("approvals");
+    // The single-recording detail route a `[H:MM:SS]` citation deep-links into.
+    // The recordings BOARD is a panel under `/p`, so it classifies as "p".
+    expect(surfaceFromPathname("/w/w1/recordings/rec-1")).toBe("recordings");
+    expect(surfaceFromPathname("/w/w1/p?panel=recordings")).toBe("p");
     expect(surfaceFromPathname("/w/w1/knowledge-base")).toBe("knowledge-base");
     expect(surfaceFromPathname("/w/w1/knowledge-base/gaps")).toBe(
       "knowledge-base",
@@ -195,6 +200,7 @@ describe("[COMP:app-web/page-url] panel tabs", () => {
   it("isPanelId accepts the known panels only", () => {
     expect(isPanelId("approvals")).toBe(true);
     expect(isPanelId("goals")).toBe(true);
+    expect(isPanelId("recordings")).toBe(true);
     expect(isPanelId("brain")).toBe(false);
     expect(isPanelId("")).toBe(false);
     expect(isPanelId(null)).toBe(false);
@@ -216,8 +222,21 @@ describe("[COMP:app-web/page-url] panel tabs", () => {
   it("panelTabEntry / panelFromTabEntry round-trip the prefixed form", () => {
     expect(panelTabEntry("approvals")).toBe("panel:approvals");
     expect(panelTabEntry("goals")).toBe("panel:goals");
+    expect(panelTabEntry("recordings")).toBe("panel:recordings");
     expect(panelFromTabEntry("panel:approvals")).toBe("approvals");
     expect(panelFromTabEntry("panel:goals")).toBe("goals");
+    expect(panelFromTabEntry("panel:recordings")).toBe("recordings");
+  });
+
+  it("every panel round-trips through its URL and its tab entry", () => {
+    // The two encodings must agree for EVERY panel, not just the ones a test
+    // remembered to name — a panel that only half round-trips opens as a tab
+    // and then resolves to nothing on reload.
+    for (const panel of PANEL_IDS) {
+      expect(panelFromTabEntry(panelTabEntry(panel))).toBe(panel);
+      expect(panelFromSearch(`?panel=${panel}`)).toBe(panel);
+      expect(docEntryPath("w1", panelTabEntry(panel))).toBe(`/w/w1/p?panel=${panel}`);
+    }
   });
 
   it("panelFromTabEntry returns null for a page-id entry or unknown panel", () => {

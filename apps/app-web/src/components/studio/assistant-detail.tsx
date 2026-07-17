@@ -396,7 +396,20 @@ function BrainTab({ assistantId, workspaceId }: { assistantId: string; workspace
 
       {workspaceId ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 p-3">
-          <p className="text-sm text-muted-foreground">{t.recordings.uploadHint}</p>
+          <div className="min-w-0">
+            <p className="text-sm text-muted-foreground">{t.recordings.uploadHint}</p>
+            {/* The board's entry point. Upload is the only place a user thinks
+                about recordings, so "where did mine go?" is answered here
+                rather than from a nav row the panel deliberately has no slot
+                for. Panels open under the doc shell (`/p?panel=…`), so the tab
+                strip and chat dock persist around it. */}
+            <Link
+              href={`/w/${workspaceId}/p?panel=recordings`}
+              className="mt-1 inline-block text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+            >
+              {t.recordings.viewAllLink}
+            </Link>
+          </div>
           <RecordingUploadButton workspaceId={workspaceId} assistantId={assistantId} />
         </div>
       ) : null}

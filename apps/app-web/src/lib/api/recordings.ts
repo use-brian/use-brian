@@ -125,8 +125,8 @@ export async function processRecording(
 // could be uploaded and transcribed but never listed, and the audio was never
 // handed back to the browser at all — a player had no possible `src`.
 
-type RecordingKind = "memo" | "meeting";
-type RecordingStatus =
+export type RecordingKind = "memo" | "meeting";
+export type RecordingStatus =
   | "awaiting_upload"
   | "queued"
   | "processing"
@@ -157,6 +157,28 @@ export type TranscriptSegment = {
   speaker: string | null;
   segment_text: string;
 };
+
+/**
+ * The workspace's recordings, newest first — the panel's read.
+ *
+ * Server-filtered rather than fetch-all-and-filter-in-React: `status` and `q`
+ * ride the store's indexed predicates, and a workspace with hundreds of
+ * hour-long meetings should not ship them all to the browser to hide most.
+ */
+export async function listRecordings(
+  workspaceId: string,
+  filters: { kind?: RecordingKind; status?: RecordingStatus; q?: string; limit?: number } = {},
+): Promise<RecordingSummary[]> {
+  const params = new URLSearchParams({ workspaceId });
+  if (filters.kind) params.set("kind", filters.kind);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.q?.trim()) params.set("q", filters.q.trim());
+  if (filters.limit) params.set("limit", String(filters.limit));
+  const res = await authFetch(`${API_URL}/api/recordings?${params.toString()}`);
+  if (!res.ok) throw await asError(res, "Could not load recordings");
+  const body = (await res.json()) as { recordings: RecordingSummary[] };
+  return body.recordings;
+}
 
 export async function getRecording(recordingId: string): Promise<RecordingSummary> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}`);
