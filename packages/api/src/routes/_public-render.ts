@@ -22,7 +22,7 @@ import {
   type ViewPayload,
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getChildPageLabelsSystem, type ChildPageLabel } from '../db/saved-views-store.js'
 
 export type PublicRenderDeps = {

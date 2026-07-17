@@ -2,9 +2,9 @@
 name: marketing-daily-check
 description: Daily marketing close-loop — read this period's `platform_engagement_digest`, compare to the workspace's `commitment:goal_marketing_*` goals, diagnose what worked / what didn't, and propose adjustments for the next period as a new plan memory. Use via a daily scheduled workflow, or when the operator asks "how did this week's posts do?", "what should we change?", "are we on track?".
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: marketing
   applies_to_app_type: distribution
   when_to_use: A daily (or weekly) scheduled turn for any workspace publishing through the feed app (Threads / X). Also valid as an ad-hoc operator query. Skip when no `platform_engagement_digest` Episodes have landed yet (the producer hasn't run, or there are no published posts to digest).

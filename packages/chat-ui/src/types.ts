@@ -70,7 +70,7 @@ export type ReplyTo = {
  * re-emits are idempotent.
  *
  * `payload` is typed as `unknown` because chat-ui has no dependency on
- * @sidanclaw/views-renderer (where the typed schema lives) — the
+ * @use-brian/views-renderer (where the typed schema lives) — the
  * apps/web consumer validates at the renderer boundary on mount.
  */
 type ViewPayloadAttachment = {

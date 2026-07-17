@@ -109,14 +109,14 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 1
 fi
 
-DMG="$REPO_ROOT/apps/app-desktop/release/sidanclaw.dmg"
-ZIP="$REPO_ROOT/apps/app-desktop/release/sidanclaw.zip"
+DMG="$REPO_ROOT/apps/app-desktop/release/usebrian.dmg"
+ZIP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip"
 # The electron-updater feed: existing installs resolve the latest release, read
 # latest-mac.yml, and download the zip (the blockmap enables differential
 # downloads). electron-builder emits both alongside the artifacts because
 # electron-builder.yml carries a `publish:` block.
 FEED_YML="$REPO_ROOT/apps/app-desktop/release/latest-mac.yml"
-ZIP_BLOCKMAP="$REPO_ROOT/apps/app-desktop/release/sidanclaw.zip.blockmap"
+ZIP_BLOCKMAP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip.blockmap"
 PKG_JSON="$REPO_ROOT/apps/app-desktop/package.json"
 
 # Apply the version change BEFORE the build so the new version is baked into the
@@ -153,9 +153,9 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   }
 else
   echo "==> Building app-desktop (tsc + asset copy)"
-  pnpm --filter @sidanclaw/app-desktop run build
+  pnpm --filter @use-brian/app-desktop run build
   echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
-  pnpm --filter @sidanclaw/app-desktop exec electron-builder --mac
+  pnpm --filter @use-brian/app-desktop exec electron-builder --mac
 fi
 
 # electron-builder signs + notarizes + staples the .app (it submits the .zip),
@@ -192,7 +192,7 @@ if [[ "$PUBLISH" == "1" ]]; then
   # Keep RELEASES_REPO in sync with electron-builder.yml's `publish` block.
   # The desktop source is open (apps/app-desktop in the public open-core repo),
   # so releases + the auto-update feed live on that same public repo.
-  RELEASES_REPO="sidanclaw/sidanclaw"
+  RELEASES_REPO="use-brian/use-brian"
   VERSION="$(node -p "require('$REPO_ROOT/apps/app-desktop/package.json').version")"
   TAG="v$VERSION"
   # A release without latest-mac.yml is INVISIBLE to auto-update on existing
@@ -217,10 +217,10 @@ if [[ "$PUBLISH" == "1" ]]; then
     gh release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --prerelease=false --latest
   else
     gh release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
-      --title "$TAG" --notes "sidanclaw desktop $TAG" --latest
+      --title "$TAG" --notes "Use Brian desktop $TAG" --latest
   fi
   echo "==> Published: https://github.com/$RELEASES_REPO/releases/tag/$TAG"
-  echo "    Download:  https://github.com/$RELEASES_REPO/releases/latest/download/sidanclaw.dmg"
+  echo "    Download:  https://github.com/$RELEASES_REPO/releases/latest/download/usebrian.dmg"
 fi
 
 echo

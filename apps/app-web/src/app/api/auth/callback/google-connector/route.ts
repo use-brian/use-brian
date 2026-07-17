@@ -26,7 +26,7 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
  * to `/teams`.
  *
  * INFRA (degraded): requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` and a
- * `app.sidan.ai/...` redirect_uri allowlisted in the Google OAuth client.
+ * `app.usebrian.ai/...` redirect_uri allowlisted in the Google OAuth client.
  * Doc-web does not set the connector `NEXT_PUBLIC_GOOGLE_CLIENT_ID` env yet,
  * so the connect button can't reach this callback until that lands.
  */

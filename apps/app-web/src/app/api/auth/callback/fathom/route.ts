@@ -26,7 +26,7 @@ const FATHOM_API_BASE = "https://api.fathom.ai/external/v1";
  * parses the intent + workspace id and redirects to the workspace-scoped route.
  *
  * INFRA (degraded): requires `NEXT_PUBLIC_FATHOM_CLIENT_ID` /
- * `FATHOM_CLIENT_SECRET` and a `app.sidan.ai/...` redirect_uri allowlisted
+ * `FATHOM_CLIENT_SECRET` and a `app.usebrian.ai/...` redirect_uri allowlisted
  * with Fathom. Doc-web does not set these yet, so the connect button can't
  * reach this callback until that lands.
  *

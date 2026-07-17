@@ -41,6 +41,12 @@ import {
 } from '../db/brain-inbox-store.js'
 import { createInspectionSession } from '../db/sessions.js'
 import {
+  updateMemory,
+  getMemoryByIdSystem,
+  markVerifiedDirect,
+} from '../db/memories.js'
+import { recordVerification } from '../db/memory-verifications-store.js'
+import {
   updateEntity,
   reclassifyEntityKind,
   promoteEntityToCrm,
@@ -48,10 +54,10 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
-import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@sidanclaw/core'
+import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@use-brian/core'
 import { updateWorkspaceFileMeta } from '../db/workspace-files.js'
 import { updateTask } from '../db/tasks.js'
-import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
+import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
@@ -64,7 +70,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §B3 Brain inbox / web UI
    */
-  entityKindClassifier?: import('@sidanclaw/core').Classifier<import('@sidanclaw/core').EntityKind>
+  entityKindClassifier?: import('@use-brian/core').Classifier<import('@use-brian/core').EntityKind>
   /**
    * Pending-classifications store — when provided, exposes
    * `GET /:workspaceId/pending-classifications` (list unresolved) and
@@ -74,7 +80,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §Pending-reclassification queue
    */
-  pendingClassificationStore?: import('@sidanclaw/core').PendingClassificationStore
+  pendingClassificationStore?: import('@use-brian/core').PendingClassificationStore
   /**
    * Files API — when provided, exposes `GET
    * /:workspaceId/workspace_file/:rowId/content` so the brain detail
@@ -529,10 +535,19 @@ export function brainInboxRoutes({
     const userId = (req as any).userId as string
 
     if (primitiveParam === 'memory') {
-      // Memory adjust — delegate to the existing per-assistant route by
-      // returning a 308 redirect. The existing route requires the
-      // assistantId; we look it up from the memory row.
-      const assistantLookup = await query<{ assistantId: string }>(
+      // Memory adjust. Assistant-scoped memories delegate to the LOCKED
+      // per-assistant route via a 308 redirect (it carries the membership
+      // gate + audit envelope). But workspace-shared / personal /
+      // programmatic (brain-key) memories have no owning assistant
+      // (assistant_id IS NULL): the per-assistant route can't gate them
+      // (it hard-requires before.assistantId === assistantId) and building
+      // `/api/assistants/${null}/...` sent the literal string "null" into a
+      // uuid membership query (500 + pool desync). Handle those inline here —
+      // this route is already workspace-scoped and `requireWorkspaceMember`
+      // above gated access. The mutation core mirrors the per-assistant
+      // adjust (memories.ts `/:memoryId/adjust`, LOCKED #2); keep them in
+      // sync. See docs/architecture/brain/corrections.md.
+      const assistantLookup = await query<{ assistantId: string | null }>(
         `SELECT assistant_id as "assistantId" FROM memories WHERE id = $1 AND valid_to IS NULL`,
         [rowId],
       )
@@ -540,11 +555,198 @@ export function brainInboxRoutes({
         res.status(404).json({ error: 'Memory not found' })
         return
       }
-      const assistantId = assistantLookup.rows[0].assistantId
-      res.redirect(
-        308,
-        `/api/assistants/${encodeURIComponent(assistantId)}/memories/${encodeURIComponent(rowId)}/adjust`,
-      )
+      const memoryAssistantId = assistantLookup.rows[0].assistantId
+      if (memoryAssistantId) {
+        res.redirect(
+          308,
+          `/api/assistants/${encodeURIComponent(memoryAssistantId)}/memories/${encodeURIComponent(rowId)}/adjust`,
+        )
+        return
+      }
+
+      // ── Null-assistant (workspace-shared / personal) memory adjust ──
+      const { scope, sensitivity, summary, detail, reason } = req.body as {
+        scope?: string
+        sensitivity?: string
+        summary?: string
+        detail?: string
+        reason?: string
+      }
+
+      // Validate up front (mirrors memories.ts adjust) so we never mint a
+      // partial audit trail before bailing on a downstream error.
+      let nextScope: 'shared' | 'workspace' | undefined
+      let nextWorkspaceId: string | null | undefined
+      let scopeUserValue: 'personal' | 'workspace_shared' | 'workspace' | undefined
+      if (scope !== undefined) {
+        if (scope === 'personal') {
+          nextScope = 'shared'
+          nextWorkspaceId = null
+          scopeUserValue = 'personal'
+        } else if (scope === 'workspace_shared') {
+          nextScope = 'shared'
+          scopeUserValue = 'workspace_shared'
+        } else if (scope === 'workspace') {
+          nextScope = 'workspace'
+          scopeUserValue = 'workspace'
+        } else {
+          res
+            .status(400)
+            .json({ error: 'scope must be personal, workspace_shared, or workspace' })
+          return
+        }
+      }
+
+      let nextSensitivity: 'public' | 'internal' | 'confidential' | undefined
+      if (sensitivity !== undefined) {
+        if (
+          sensitivity !== 'public' &&
+          sensitivity !== 'internal' &&
+          sensitivity !== 'confidential'
+        ) {
+          res
+            .status(400)
+            .json({ error: 'sensitivity must be public, internal, or confidential' })
+          return
+        }
+        nextSensitivity = sensitivity
+      }
+
+      let nextSummary: string | undefined
+      if (summary !== undefined) {
+        if (typeof summary !== 'string' || summary.trim().length === 0) {
+          res.status(400).json({ error: 'summary must be a non-empty string' })
+          return
+        }
+        if (summary.length > 500) {
+          res.status(400).json({ error: 'summary must be 500 characters or less' })
+          return
+        }
+        nextSummary = summary.trim()
+      }
+
+      let nextDetail: string | undefined
+      if (detail !== undefined) {
+        if (typeof detail !== 'string') {
+          res.status(400).json({ error: 'detail must be a string' })
+          return
+        }
+        nextDetail = detail
+      }
+
+      if (
+        nextScope === undefined &&
+        nextSensitivity === undefined &&
+        nextSummary === undefined &&
+        nextDetail === undefined
+      ) {
+        res.status(400).json({
+          error:
+            'At least one field (scope, sensitivity, summary, detail) is required',
+        })
+        return
+      }
+
+      try {
+        const before = await getMemoryByIdSystem(rowId)
+        // Authz: the memory must live in the workspace the caller is a
+        // member of (gated above). Replaces the per-assistant route's
+        // `before.assistantId === assistantId` membership check.
+        if (!before || before.workspaceId !== workspaceId) {
+          res.status(404).json({ error: 'Memory not found' })
+          return
+        }
+
+        // Default workspaceId for workspace/workspace_shared scope to the
+        // memory's own workspace; explicit personal scope clears it.
+        const computedWorkspaceId =
+          nextWorkspaceId === null
+            ? null
+            : nextScope !== undefined
+              ? before.workspaceId
+              : undefined
+
+        const updated = await updateMemory(rowId, {
+          scope: nextScope,
+          workspaceId: computedWorkspaceId,
+          sensitivity: nextSensitivity,
+          summary: nextSummary,
+          detail: nextDetail,
+        })
+        if (!updated) {
+          res.status(404).json({ error: 'Memory not found' })
+          return
+        }
+
+        const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
+        const writes: Promise<unknown>[] = []
+        if (nextScope !== undefined) {
+          const modelScope =
+            before.scope === 'workspace'
+              ? 'workspace'
+              : before.workspaceId
+                ? 'workspace_shared'
+                : 'personal'
+          if (modelScope !== scopeUserValue) {
+            writes.push(
+              recordVerification({
+                memoryId: rowId,
+                workspaceId: updated.workspaceId ?? before.workspaceId,
+                verifiedBy: userId,
+                action: 'adjust_scope',
+                modelValue: modelScope,
+                userValue: scopeUserValue,
+                reason: reasonText,
+              }),
+            )
+          }
+        }
+        if (nextSensitivity !== undefined && nextSensitivity !== before.sensitivity) {
+          writes.push(
+            recordVerification({
+              memoryId: rowId,
+              workspaceId: updated.workspaceId ?? before.workspaceId,
+              verifiedBy: userId,
+              action: 'adjust_sensitivity',
+              modelValue: before.sensitivity,
+              userValue: nextSensitivity,
+              reason: reasonText,
+            }),
+          )
+        }
+        if (
+          (nextSummary !== undefined && nextSummary !== before.summary) ||
+          (nextDetail !== undefined && nextDetail !== before.detail)
+        ) {
+          writes.push(
+            recordVerification({
+              memoryId: rowId,
+              workspaceId: updated.workspaceId ?? before.workspaceId,
+              verifiedBy: userId,
+              action: 'edit_summary',
+              modelValue: { summary: before.summary, detail: before.detail },
+              userValue: {
+                summary: nextSummary ?? before.summary,
+                detail: nextDetail ?? before.detail,
+              },
+              reason: reasonText,
+            }),
+          )
+        }
+        await Promise.all(writes)
+
+        const stamped = await markVerifiedDirect(updated.id, userId)
+        void notifyBrainInboxChange(
+          updated.workspaceId ?? before.workspaceId,
+          'memory',
+          updated.id,
+          'update',
+        )
+        res.json({ memory: stamped ?? updated })
+      } catch (err) {
+        console.error('[brain-inbox] workspace memory adjust failed:', err)
+        res.status(500).json({ error: 'Failed to adjust memory' })
+      }
       return
     }
 

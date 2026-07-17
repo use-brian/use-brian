@@ -5,9 +5,9 @@
  * Two refresh paths:
  *   - Production: redirect the browser to
  *     `${primary}/api/auth/refresh-and-return?next=<current url>` and
- *     let sidan.ai do the cookie write. We never call our own
+ *     let usebrian.ai do the cookie write. We never call our own
  *     `/api/auth/refresh` in this mode — sub-apps don't write to the
- *     shared `.sidan.ai` scope.
+ *     shared `.usebrian.ai` scope.
  *   - Dev: call our local `/api/auth/refresh` route, which writes
  *     host-only cookies. Localhost can't share cookies across origins
  *     anyway, so a local refresh is the only thing that works.
@@ -36,19 +36,19 @@ export function getAccessToken(): string | null {
  * Choose the freshest `access_token` from a raw Cookie string — the one whose
  * JWT `exp` is furthest in the future.
  *
- * A browser that signed in before the May-2026 `.sidan.ai` cookie migration can
+ * A browser that signed in before the May-2026 `.usebrian.ai` cookie migration can
  * carry two `access_token` cookies (a host-only twin + the domain-scoped one).
  * The old read picked the LAST occurrence, leaning on RFC 6265 §5.4 ordering
  * ("oldest first"). But cookie order isn't reliable across browsers or once a
  * twin is re-set, and reading a stale twin makes every `authFetch` 401 → forces
  * the sub-app's full-page refresh redirect → and since the server keeps
- * re-issuing the live `.sidan.ai` token while the client keeps reading the dead
+ * re-issuing the live `.usebrian.ai` token while the client keeps reading the dead
  * twin, the page just self-refreshes forever and never builds anything.
  * Selecting by `exp` is order-independent: a live token always beats an expired
  * twin. Ties (nothing decodes) fall back to the last occurrence, preserving the
  * old behavior. Pure + exported for tests — the app-web vitest env has no
  * `document`. See docs/architecture/platform/auth.md → "Duplicate cookies after
- * the .sidan.ai migration".
+ * the .usebrian.ai migration".
  */
 export function selectFreshestAccessToken(cookie: string): string | null {
   const re = /(?:^|;\s*)access_token=([^;]*)/g;
@@ -76,8 +76,8 @@ function clearUserCookie() {
 let inflightRefresh: Promise<RefreshOutcome> | null = null;
 
 // Flipped the instant we trigger a full-page auth redirect (token refresh or
-// login bounce). Sub-apps can't refresh `.sidan.ai` cookies in place — they
-// navigate the whole browser to sidan.ai and back — so a caller that mutated
+// login bounce). Sub-apps can't refresh `.usebrian.ai` cookies in place — they
+// navigate the whole browser to usebrian.ai and back — so a caller that mutated
 // state before the redirecting `authFetch` (e.g. the doc build's
 // `createDraft`) sees its call reject while the page is unloading and must NOT
 // treat that as a terminal failure. Surfaces read this to keep stashed intent
@@ -97,7 +97,7 @@ export function isAuthRedirectInFlight(): boolean {
  *
  * In production this redirects the browser to
  * `${primary}/api/auth/refresh-and-return?next=<current url>` — the primary
- * writes the rotated `.sidan.ai` cookies and the browser comes back with a
+ * writes the rotated `.usebrian.ai` cookies and the browser comes back with a
  * fresh token (outcome `redirecting`, since the navigation happens before any
  * subsequent code runs). **Offline, that full-page bounce must not fire:** it
  * would fail, and in the desktop shell the shell intercepts it and misreads the
@@ -111,7 +111,7 @@ async function tryRefreshToken(): Promise<RefreshOutcome> {
   if (inflightRefresh) return inflightRefresh;
   inflightRefresh = (async (): Promise<RefreshOutcome> => {
     // Bundled desktop app: refresh against the API directly via the shell
-    // bridge (no `.sidan.ai` cookie redirect). Dormant on web + thin shell.
+    // bridge (no `.usebrian.ai` cookie redirect). Dormant on web + thin shell.
     if (isDesktopAuth()) return desktopAuthSource.refresh();
     const primary = primaryAuthUrl();
     if (primary && typeof window !== "undefined") {
@@ -213,11 +213,11 @@ function withAuthHeader(
 /**
  * Where do we send the browser when there is no valid session? In
  * production the only authority that can mint cookies is the primary
- * (sidan.ai), so we redirect there with `next=<current url>` so the
+ * (usebrian.ai), so we redirect there with `next=<current url>` so the
  * user lands back on this sub-app after sign-in. In dev there is no
  * primary, so we fall back to the local `/login` page.
  *
- * `tryRefreshToken` already triggers a sidan.ai redirect when there is
+ * `tryRefreshToken` already triggers a usebrian.ai redirect when there is
  * a refresh token in production; this helper handles the no-cookie
  * case, and the no-refresh-after-401 case.
  */
@@ -283,8 +283,8 @@ export async function authFetch(
  * webhook (or promo redemption) has changed the plan but the cookie
  * still holds the stale value. Mirror of `apps/web`'s `refreshUserCookie`.
  *
- * Sub-app caveat: only the primary (`sidan.ai`) writes the shared
- * `.sidan.ai` auth cookies, and a silent in-place refresh must not
+ * Sub-app caveat: only the primary (`usebrian.ai`) writes the shared
+ * `.usebrian.ai` auth cookies, and a silent in-place refresh must not
  * navigate the browser away (callers continue rendering afterwards). So:
  *
  *   - Dev: POST the local `/api/auth/refresh` route, which rotates the
@@ -299,7 +299,7 @@ export async function authFetch(
  * critical path.
  */
 export async function refreshUserCookie(): Promise<void> {
-  // Production sub-apps can't refresh `.sidan.ai` cookies in place.
+  // Production sub-apps can't refresh `.usebrian.ai` cookies in place.
   if (primaryAuthUrl()) return;
   try {
     const res = await fetch(`${APP_URL}/api/auth/refresh`, {

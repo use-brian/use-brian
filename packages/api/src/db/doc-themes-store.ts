@@ -20,7 +20,7 @@ import {
   MAX_CUSTOM_THEMES_PER_WORKSPACE,
   type CustomThemePayload,
   type ThemeSeed,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 import { queryWithRLS } from './client.js'
 
 /** Thrown by `create` when the workspace already holds the max custom themes. */

@@ -40,7 +40,7 @@ import {
   type SavedViewStore,
   type WorkflowRunStore,
   type WorkflowStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 import type { PageActionsStore } from '../db/page-actions-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'

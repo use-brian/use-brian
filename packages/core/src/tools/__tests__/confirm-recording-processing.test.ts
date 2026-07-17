@@ -9,7 +9,7 @@ const ctx: ToolContext = {
   userId: 'u-1',
   assistantId: 'a-1',
   sessionId: 's-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'slack',
   channelId: 'C123',
   workspaceId: 'ws-1',

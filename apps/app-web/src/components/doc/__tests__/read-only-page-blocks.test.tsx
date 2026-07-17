@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 import { renderToString } from "react-dom/server";
 import { ReadOnlyPageBlocks, commentAnchorsByBlock } from "../read-only-page-blocks";
 import type { PublicBlock, PublicComment, PublicSource } from "@/lib/api/public-share";
-import type { ViewPayload } from "@sidanclaw/views-renderer";
+import type { ViewPayload } from "@use-brian/views-renderer";
 
 const cell = (text: string) => ({
   type: "doc",

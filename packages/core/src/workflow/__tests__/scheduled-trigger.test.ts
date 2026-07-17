@@ -105,7 +105,7 @@ function makeContext(over: Partial<ToolContext> = {}): ToolContext {
     userId: USER_ID,
     assistantId: PRIMARY_ASSISTANT_ID,
     sessionId: 'sess',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'web',
     channelId: 'web',
     workspaceId: WORKSPACE_ID,

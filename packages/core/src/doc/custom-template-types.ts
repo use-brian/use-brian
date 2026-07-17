@@ -10,7 +10,7 @@
  * before insertion.
  *
  * Kept DB-free and browser-safe on purpose: this leaf is re-exported (types)
- * through `@sidanclaw/doc-model`, so the gallery / editor can consume it
+ * through `@use-brian/doc-model`, so the gallery / editor can consume it
  * client-side. The persistence lives in `packages/api/src/db/page-templates-store.ts`,
  * the routes in `packages/api/src/routes/views.ts`.
  *
@@ -278,7 +278,7 @@ export type CustomTemplateUpdateInput = z.infer<typeof customTemplateUpdateInput
  * (or each other, if inserted twice). This is the stored-blocks analog of the
  * `genId` threading `instantiatePageTemplate` does for Markdown templates.
  *
- * (`healBlockIds` in `@sidanclaw/doc-model` operates on a `Y.XmlFragment`, not
+ * (`healBlockIds` in `@use-brian/doc-model` operates on a `Y.XmlFragment`, not
  * a plain block array, so it is not the right seam here.)
  */
 export function withFreshBlockIds(blocks: Block[], genId: () => string): Block[] {

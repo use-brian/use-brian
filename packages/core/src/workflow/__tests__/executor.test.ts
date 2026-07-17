@@ -407,7 +407,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
         delivered.push({ channelId: p.channelId, text: p.text })
         return { status: 'delivered' as const, channelType: p.channelType, channelId: p.channelId }
       },
-      getAuthFailedConnectors: async () => [{ provider: 'github', label: 'sidanclaw' }],
+      getAuthFailedConnectors: async () => [{ provider: 'github', label: 'Use Brian' }],
     }
     const definition: WorkflowDefinition = {
       startStepId: 's1',
@@ -428,7 +428,7 @@ describe('[COMP:workflow/executor] advanceWorkflowRun', () => {
 
     const updated = stores.runs.get(run.id)
     expect(
-      updated?.outcome?.blockers.some((b) => b.includes('sidanclaw') && b.includes('github')),
+      updated?.outcome?.blockers.some((b) => b.includes('Use Brian') && b.includes('github')),
     ).toBe(true)
     // A reconnect notification reached the deliver channel (distinct from the
     // step's own output delivery, which has no "reconnect" text).

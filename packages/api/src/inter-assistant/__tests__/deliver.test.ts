@@ -5,14 +5,14 @@ vi.mock('../../db/sessions.js', () => ({
   addSessionMessage: vi.fn(),
 }))
 
-vi.mock('@sidanclaw/channels', () => ({
+vi.mock('@use-brian/channels', () => ({
   createSlackAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
 }))
 
 import { deliverToChannel } from '../deliver.js'
 import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
-import { createTelegramAdapter } from '@sidanclaw/channels'
+import { createTelegramAdapter } from '@use-brian/channels'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
 const mockAddSessionMessage = vi.mocked(addSessionMessage)

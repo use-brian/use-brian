@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
-import { FRAGMENT_FIELD } from "@sidanclaw/doc-model";
+import { FRAGMENT_FIELD } from "@use-brian/doc-model";
 import { isYFragmentEmpty } from "../doc-empty";
 
 /**

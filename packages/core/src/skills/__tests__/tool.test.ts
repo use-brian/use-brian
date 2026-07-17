@@ -32,7 +32,7 @@ const ctx = {
   assistantId: 'a-1',
   userId: 'u-1',
   sessionId: 's-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c-1',
   workspaceId: 'w-1',

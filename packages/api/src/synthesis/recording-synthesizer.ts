@@ -27,10 +27,10 @@ import {
   type UsageStore,
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
 import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 import {
   createRecordPageProjector,
   synthesizeFromSource,

@@ -29,8 +29,9 @@ import type {
   FilesApi,
   FilesContext,
   WorkspaceFilesStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { GcsFilesClient } from '../files/gcs-client.js'
+import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey } from '../files/gcs-client.js'
 import { isAllowedMime } from './files.js'
 
@@ -61,6 +62,8 @@ export type DocFilesDeps = {
   filesApi: FilesApi
   store: WorkspaceFilesStore
   gcs: GcsFilesClient
+  /** Routes reads to the backend recorded in each workspace_files row. */
+  resolver?: FilesClientResolver
   membership: DocFilesMembership
 }
 
@@ -101,7 +104,7 @@ function buildAccessContext(
 }
 
 export function docFilesRoutes(deps: DocFilesDeps): Router {
-  const { filesApi, store, gcs, membership } = deps
+  const { filesApi, store, gcs, resolver, membership } = deps
   const router = Router({ mergeParams: true })
 
   // ── POST /:workspaceId/upload ───────────────────────────────────
@@ -189,7 +192,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
   })
 
   // ── GET /:workspaceId/:id ───────────────────────────────────────
-  // Resolve the row under workspace RLS, mint a short-lived signed GCS read
+  // Resolve the row under workspace RLS, mint a short-lived signed object read
   // URL, and 302-redirect to it. The signed URL is NEVER logged or returned
   // in a body — only as the redirect Location header.
   router.get('/:workspaceId/:id', async (req, res) => {
@@ -215,9 +218,10 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
       }
 
       const key = buildStorageKey(workspaceId, id)
-      const url = await gcs.signedReadUrl(key)
-      // Prod (GCS) returns a signed HTTPS URL → redirect so the browser fetches
-      // the bytes straight from GCS (no API egress, CDN-friendly), and the
+      const blobClient = resolver ? await resolver.forUri(workspaceId, row.storageUri) : gcs
+      const url = await blobClient.signedReadUrl(key)
+      // Cloud backends return a signed HTTPS URL → redirect so the browser fetches
+      // the bytes straight from object storage (no API egress, CDN-friendly), and the
       // signed URL never lands in a body/log. The local-disk dev client returns
       // a `file://` URL a browser can't navigate to — stream the bytes through
       // the API instead so `<img src>` works in local dev.
@@ -225,7 +229,7 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
         res.redirect(302, url)
         return
       }
-      const blob = await gcs.readBlob(key)
+      const blob = await blobClient.readBlob(key)
       if (!blob) {
         res.status(404).json({ error: 'File not found' })
         return

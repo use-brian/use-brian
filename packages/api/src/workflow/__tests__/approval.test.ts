@@ -13,8 +13,8 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { advanceWorkflowRun, type ExecutorDeps } from '@sidanclaw/core'
-import { buildTool, type Tool } from '@sidanclaw/core'
+import { advanceWorkflowRun, type ExecutorDeps } from '@use-brian/core'
+import { buildTool, type Tool } from '@use-brian/core'
 import type {
   WorkflowDefinition,
   WorkflowRecord,
@@ -22,8 +22,8 @@ import type {
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
-} from '@sidanclaw/core'
-import type { ConsultRequest, ConsultResponse, ConsultTransport } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { ConsultRequest, ConsultResponse, ConsultTransport } from '@use-brian/core'
 import {
   makeRequestApproval,
   resumeFromApproval,

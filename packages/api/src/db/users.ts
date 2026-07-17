@@ -1,5 +1,5 @@
 import { query, getPool } from './client.js'
-import { generateHandle } from '@sidanclaw/core'
+import { generateHandle } from '@use-brian/core'
 
 export type User = {
   id: string
@@ -761,7 +761,7 @@ export async function listAccessibleAssistants(
 /**
  * Find an assistant by its ID (no RLS — used by webhook routes before the
  * user is known, e.g. Slack BYO where the assistant_id comes from the URL
- * and the Slack user hasn't been mapped to a sidanclaw user yet).
+ * and the Slack user hasn't been mapped to a Use Brian user yet).
  */
 export type AssistantKind = 'standard' | 'app' | 'primary' | 'primary'
 

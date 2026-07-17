@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import {
   blankBlueprintBlocks,
   blueprintSectionCount,

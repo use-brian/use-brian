@@ -154,7 +154,7 @@ describe("[COMP:app-web/empty-states] copy + structure", () => {
   it("EmptySearchResults shows the search-empty copy + Cmd-K CTA", () => {
     const html = wrap(<EmptySearchResults onOpenCommandK={() => {}} />);
     expect(html).toMatch(/No matches/);
-    expect(html).toMatch(/Ask sidanclaw/);
+    expect(html).toMatch(/Ask Use Brian/);
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createRunRegistry } from '../run-registry.js'
-import type { AssistantRunState } from '@sidanclaw/doc-model'
+import type { AssistantRunState } from '@use-brian/doc-model'
 
 const actor = { id: 'u1', name: 'Alice', color: '#34D3FF' }
 

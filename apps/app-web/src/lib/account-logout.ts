@@ -14,7 +14,7 @@
  *     the *web* session instead. Checked FIRST.
  *   - **Production web** — a top-level redirect to
  *     `${primary}/api/auth/logout?scope=active&next=<origin>/`, since only the
- *     primary may write the shared `.sidan.ai` cookies. It lands back on the app
+ *     primary may write the shared `.usebrian.ai` cookies. It lands back on the app
  *     root as the switched-into account (or `/login` if it was the last one).
  *   - **Dev** — there is no primary and (single-account) no saved store, so a
  *     plain same-origin `POST /api/auth/logout` full-clear → `/login` is exactly

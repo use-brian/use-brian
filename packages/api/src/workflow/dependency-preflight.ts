@@ -23,8 +23,8 @@
  * [COMP:workflow/dependency-preflight]
  */
 
-import { createSlackApi } from '@sidanclaw/channels'
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
+import { createSlackApi } from '@use-brian/channels'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'

@@ -11,7 +11,7 @@ import {
   LOCAL_MINT_COOLDOWN_MS,
 } from "../window-policy.js";
 
-const CANVAS_ORIGIN = "https://app.sidan.ai";
+const CANVAS_ORIGIN = "https://app.usebrian.ai";
 
 /** A Google connector-connect OAuth URL (Drive/Gmail/Calendar) — redirect_uri at the connector callback. */
 function connectorOAuthUrl(redirectOrigin = CANVAS_ORIGIN): string {
@@ -27,8 +27,8 @@ function connectorOAuthUrl(redirectOrigin = CANVAS_ORIGIN): string {
 
 describe("[COMP:app-desktop/window-policy] classifyNavigation", () => {
   it("keeps the canvas origin in-window (any path)", () => {
-    expect(classifyNavigation("https://app.sidan.ai/w/x/p/y", CANVAS_ORIGIN)).toBe("internal");
-    expect(classifyNavigation("https://app.sidan.ai/?capture=1", CANVAS_ORIGIN)).toBe("internal");
+    expect(classifyNavigation("https://app.usebrian.ai/w/x/p/y", CANVAS_ORIGIN)).toBe("internal");
+    expect(classifyNavigation("https://app.usebrian.ai/?capture=1", CANVAS_ORIGIN)).toBe("internal");
   });
 
   it("sends every other origin to the system browser (incl. OAuth, now external)", () => {
@@ -37,7 +37,7 @@ describe("[COMP:app-desktop/window-policy] classifyNavigation", () => {
       "external",
     );
     // A different scheme on the same host is a different origin.
-    expect(classifyNavigation("http://app.sidan.ai/", CANVAS_ORIGIN)).toBe("external");
+    expect(classifyNavigation("http://app.usebrian.ai/", CANVAS_ORIGIN)).toBe("external");
   });
 
   it("fails safe (external) on an unparseable URL", () => {
@@ -48,9 +48,9 @@ describe("[COMP:app-desktop/window-policy] classifyNavigation", () => {
 
 describe("[COMP:app-desktop/window-policy] isLoginNavigation", () => {
   it("flags any app's /login page (canvas or the auth primary)", () => {
-    expect(isLoginNavigation("https://app.sidan.ai/login")).toBe(true);
-    expect(isLoginNavigation("https://app.sidan.ai/login?next=/w/x")).toBe(true);
-    expect(isLoginNavigation("https://sidan.ai/login?next=https://app.sidan.ai/w/x")).toBe(true);
+    expect(isLoginNavigation("https://app.usebrian.ai/login")).toBe(true);
+    expect(isLoginNavigation("https://app.usebrian.ai/login?next=/w/x")).toBe(true);
+    expect(isLoginNavigation("https://usebrian.ai/login?next=https://app.usebrian.ai/w/x")).toBe(true);
   });
 
   it("flags a hop to an OAuth provider", () => {
@@ -65,10 +65,10 @@ describe("[COMP:app-desktop/window-policy] isLoginNavigation", () => {
   });
 
   it("does not flag normal canvas pages", () => {
-    expect(isLoginNavigation("https://app.sidan.ai/w/x/p/y")).toBe(false);
-    expect(isLoginNavigation("https://app.sidan.ai/")).toBe(false);
+    expect(isLoginNavigation("https://app.usebrian.ai/w/x/p/y")).toBe(false);
+    expect(isLoginNavigation("https://app.usebrian.ai/")).toBe(false);
     // A page whose path merely contains "login" elsewhere is not a login page.
-    expect(isLoginNavigation("https://app.sidan.ai/w/x/p/about-login")).toBe(false);
+    expect(isLoginNavigation("https://app.usebrian.ai/w/x/p/about-login")).toBe(false);
   });
 
   it("returns false on an unparseable URL", () => {
@@ -86,7 +86,7 @@ describe("[COMP:app-desktop/window-policy] isConnectorOAuth", () => {
   it("does not flag a login OAuth hop (no redirect_uri, or a non-connector callback)", () => {
     expect(isConnectorOAuth("https://accounts.google.com/o/oauth2/v2/auth?x=1")).toBe(false);
     const loginCallback = new URLSearchParams({
-      redirect_uri: "https://app.sidan.ai/api/auth/callback/google",
+      redirect_uri: "https://app.usebrian.ai/api/auth/callback/google",
     });
     expect(isConnectorOAuth(`https://accounts.google.com/o/oauth2/v2/auth?${loginCallback}`)).toBe(
       false,
@@ -95,7 +95,7 @@ describe("[COMP:app-desktop/window-policy] isConnectorOAuth", () => {
 
   it("does not flag a non-provider host even with a connector-looking redirect_uri", () => {
     const sp = new URLSearchParams({
-      redirect_uri: "https://app.sidan.ai/api/auth/callback/google-connector",
+      redirect_uri: "https://app.usebrian.ai/api/auth/callback/google-connector",
     });
     expect(isConnectorOAuth(`https://evil.example/o/oauth2/v2/auth?${sp}`)).toBe(false);
   });
@@ -110,33 +110,33 @@ describe("[COMP:app-desktop/window-policy] isConnectorOAuth", () => {
 
 describe("[COMP:app-desktop/window-policy] parseRefreshBounce", () => {
   it("returns the in-app next URL from a primary refresh bounce", () => {
-    const next = "https://app.sidan.ai/w/x/p/y?tab=1";
-    const bounce = `https://sidan.ai/api/auth/refresh-and-return?next=${encodeURIComponent(next)}`;
+    const next = "https://app.usebrian.ai/w/x/p/y?tab=1";
+    const bounce = `https://usebrian.ai/api/auth/refresh-and-return?next=${encodeURIComponent(next)}`;
     expect(parseRefreshBounce(bounce, CANVAS_ORIGIN)).toBe(next);
   });
 
   it("falls back to the app root for an off-origin, malformed, or absent next", () => {
     const offOrigin =
-      "https://sidan.ai/api/auth/refresh-and-return?next=" +
+      "https://usebrian.ai/api/auth/refresh-and-return?next=" +
       encodeURIComponent("https://evil.example/steal");
     expect(parseRefreshBounce(offOrigin, CANVAS_ORIGIN)).toBe(CANVAS_ORIGIN);
     expect(
-      parseRefreshBounce("https://sidan.ai/api/auth/refresh-and-return?next=not%20a%20url", CANVAS_ORIGIN),
+      parseRefreshBounce("https://usebrian.ai/api/auth/refresh-and-return?next=not%20a%20url", CANVAS_ORIGIN),
     ).toBe(CANVAS_ORIGIN);
-    expect(parseRefreshBounce("https://sidan.ai/api/auth/refresh-and-return", CANVAS_ORIGIN)).toBe(
+    expect(parseRefreshBounce("https://usebrian.ai/api/auth/refresh-and-return", CANVAS_ORIGIN)).toBe(
       CANVAS_ORIGIN,
     );
   });
 
   it("ignores everything that is not a refresh bounce", () => {
-    expect(parseRefreshBounce("https://app.sidan.ai/w/x/p/y", CANVAS_ORIGIN)).toBeNull();
-    expect(parseRefreshBounce("https://sidan.ai/api/auth/logout?next=x", CANVAS_ORIGIN)).toBeNull();
+    expect(parseRefreshBounce("https://app.usebrian.ai/w/x/p/y", CANVAS_ORIGIN)).toBeNull();
+    expect(parseRefreshBounce("https://usebrian.ai/api/auth/logout?next=x", CANVAS_ORIGIN)).toBeNull();
     expect(parseRefreshBounce("not a url", CANVAS_ORIGIN)).toBeNull();
   });
 });
 
 describe("[COMP:app-desktop/window-policy] decideLoadFailureAction", () => {
-  const REMOTE = "https://app.sidan.ai/w/x/p/y";
+  const REMOTE = "https://app.usebrian.ai/w/x/p/y";
 
   it("signs in only when there is NO session", () => {
     expect(
@@ -181,8 +181,8 @@ describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)
   const local = { auth: "local-session" as const, appOrigin: LOCAL_ORIGIN };
 
   it("cloud target: every login navigation starts the PKCE flow (today's behavior)", () => {
-    expect(decideLoginAction("https://app.sidan.ai/login", cloud)).toBe("pkce");
-    expect(decideLoginAction("https://sidan.ai/login?next=/w/x", cloud)).toBe("pkce");
+    expect(decideLoginAction("https://app.usebrian.ai/login", cloud)).toBe("pkce");
+    expect(decideLoginAction("https://usebrian.ai/login?next=/w/x", cloud)).toBe("pkce");
     expect(decideLoginAction("https://accounts.google.com/o/oauth2/v2/auth?x=1", cloud)).toBe(
       "pkce",
     );
@@ -196,7 +196,7 @@ describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)
   });
 
   it("local target: NEVER starts PKCE — off-origin logins and OAuth hops fall through", () => {
-    expect(decideLoginAction("https://sidan.ai/login", local)).toBe("none");
+    expect(decideLoginAction("https://usebrian.ai/login", local)).toBe("none");
     expect(decideLoginAction("https://accounts.google.com/o/oauth2/v2/auth?x=1", local)).toBe(
       "none",
     );
@@ -208,7 +208,7 @@ describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)
   });
 
   it("a non-login navigation is none for either target", () => {
-    expect(decideLoginAction("https://app.sidan.ai/w/x/p/y", cloud)).toBe("none");
+    expect(decideLoginAction("https://app.usebrian.ai/w/x/p/y", cloud)).toBe("none");
     expect(decideLoginAction("http://localhost:3003/w/x", local)).toBe("none");
     expect(decideLoginAction("not a url", local)).toBe("none");
   });
@@ -274,7 +274,7 @@ describe("[COMP:app-desktop/window-policy] decideLoadFailureAction (local target
       decideLoadFailureAction({
         errorCode: -106,
         isMainFrame: true,
-        failedUrl: "https://app.sidan.ai/w/x",
+        failedUrl: "https://app.usebrian.ai/w/x",
         hasSession: true,
         target: "cloud",
       }),

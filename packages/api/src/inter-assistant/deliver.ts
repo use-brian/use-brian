@@ -8,8 +8,8 @@
 
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
-import { createSlackAdapter, createTelegramAdapter, createWhatsAppAdapter } from '@sidanclaw/channels'
-import { sanitizeDeliveryText } from '@sidanclaw/shared'
+import { createSlackAdapter, createTelegramAdapter, createWhatsAppAdapter } from '@use-brian/channels'
+import { sanitizeDeliveryText } from '@use-brian/shared'
 
 export type DeliveryParams = {
   assistantId: string
@@ -23,7 +23,7 @@ export type DeliveryParams = {
   channelId?: string
   integrationStore?: ChannelIntegrationStore
   /**
-   * Official shared sidanclaw bot token. Used for Telegram delivery when
+   * Official shared Use Brian bot token. Used for Telegram delivery when
    * the assistant has no BYO `channel_integrations` row.
    */
   defaultTelegramBotToken?: string

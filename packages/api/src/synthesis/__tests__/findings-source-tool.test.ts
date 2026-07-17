@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createFindingsSourceTool } from '../findings-source-tool.js'
-import type { ToolContext } from '@sidanclaw/core'
+import type { ToolContext } from '@use-brian/core'
 
 // The synthesis loop's synthetic context is irrelevant to this tool — the
 // findings are bound in the closure, not read from anywhere.

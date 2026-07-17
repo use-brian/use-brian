@@ -19,8 +19,8 @@ import { resolve } from 'node:path'
 dotenv.config({ path: resolve(import.meta.dirname, '..', '..', '..', '.env') })
 
 import pg from 'pg'
-import type { Page } from '@sidanclaw/core/dist/views/blocks.js'
-import { snapshotFromUpdate, canonicalizePage } from '@sidanclaw/doc-model'
+import type { Page } from '@use-brian/core/dist/views/blocks.js'
+import { snapshotFromUpdate, canonicalizePage } from '@use-brian/doc-model'
 import { convertPageToDocRow, runSelfTest } from '../src/db/doc-migration.js'
 
 const args = process.argv.slice(2)

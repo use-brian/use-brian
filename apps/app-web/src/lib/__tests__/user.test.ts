@@ -39,7 +39,7 @@ describe("[COMP:app-web/user] active-account cookie selection", () => {
   });
 
   it("picks the user matching the freshest access_token sub, NOT the positional last", () => {
-    // The regression: after a cross-origin switch the live `.sidan.ai` cookie
+    // The regression: after a cross-origin switch the live `.usebrian.ai` cookie
     // (delta, just switched TO) can sort FIRST while the stale host-only twin
     // (gmail) sorts LAST. The old positional read returned gmail and pinned the
     // switcher to the account the user just left. We must return delta.

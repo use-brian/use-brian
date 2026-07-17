@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useState } from "react";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 import { useT, format } from "@/lib/i18n/client";
 
 // The claw bitmap — the landing page's `MONSTER.small`. '#' = body cell,

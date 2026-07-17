@@ -37,8 +37,8 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { loadBuiltinSkills, createRateLimiter, shouldInline, extractionSpecSchema, extractionSpecToBlocks } from '@sidanclaw/core'
-import type { SkillContent, LLMProvider, FileStore, ContentBlock } from '@sidanclaw/core'
+import { loadBuiltinSkills, createRateLimiter, shouldInline, extractionSpecSchema, extractionSpecToBlocks } from '@use-brian/core'
+import type { SkillContent, LLMProvider, FileStore, ContentBlock } from '@use-brian/core'
 import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skill-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import { getWorkspacePlan as getWorkspacePlanDb, type WorkspaceStore } from '../db/workspace-store.js'

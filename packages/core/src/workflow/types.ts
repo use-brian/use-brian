@@ -5,7 +5,7 @@
  * wait, branch). See docs/architecture/features/workflow.md for the spec and
  * `schemas.ts` for the runtime Zod source-of-truth.
  *
- * Stores follow the same boundary as the rest of `@sidanclaw/core`: the core
+ * Stores follow the same boundary as the rest of `@use-brian/core`: the core
  * declares the interface; concrete `pg`-backed implementations live in
  * `packages/api/src/db/workflow-store.ts`.
  *

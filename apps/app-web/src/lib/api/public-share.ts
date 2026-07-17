@@ -11,7 +11,7 @@
  */
 
 import type { Metadata } from "next";
-import type { ViewPayload } from "@sidanclaw/views-renderer";
+import type { ViewPayload } from "@use-brian/views-renderer";
 
 // Client base: intentionally "" in dev (next.config sets NEXT_PUBLIC_API_URL
 // to "" there) so browser requests stay relative and the Next.js `/api/*`

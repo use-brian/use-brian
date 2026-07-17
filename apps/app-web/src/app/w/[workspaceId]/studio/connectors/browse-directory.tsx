@@ -8,7 +8,7 @@
  *   - Every user-facing string flows through `useT()` (`t.browseDirectory`),
  *     where the apps/web original was hard-coded English.
  *   - Uses app-web's mirrored `OFFICIAL_OAUTH_SCOPES` + `ConnectorIcon`
- *     instead of `@sidanclaw/shared` (app-web does not depend on shared).
+ *     instead of `@use-brian/shared` (app-web does not depend on shared).
  *
  * INFRA NOTE (connector OAuth env): the OAuth "Connect" path builds the Google
  * authorize URL client-side from `NEXT_PUBLIC_GOOGLE_CLIENT_ID`, which must
@@ -25,7 +25,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
-import { OFFICIAL_OAUTH_SCOPES } from "@sidanclaw/shared/builtin-connectors";
+import { OFFICIAL_OAUTH_SCOPES } from "@use-brian/shared/builtin-connectors";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import {
@@ -431,12 +431,12 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
                         <p className="text-[11px] text-muted-foreground/60 mt-3">
                           {t.browseDirectory.browseAllPrefix}{" "}
                           <a
-                            href="https://github.com/sidanclaw/sidanclaw-tools"
+                            href="https://github.com/use-brian/brian-tools"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="text-primary hover:underline"
                           >
-                            github.com/sidanclaw/sidanclaw-tools
+                            github.com/use-brian/brian-tools
                           </a>
                         </p>
                       }

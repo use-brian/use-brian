@@ -38,8 +38,8 @@
  * See `docs/architecture/engine/query-loop.md` → "Recovery message".
  */
 
-import type { ContentBlock, LLMProvider, TokenUsage } from '@sidanclaw/core'
-import { collectStream } from '@sidanclaw/core'
+import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/core'
+import { collectStream } from '@use-brian/core'
 
 /** The minimum buffered-turn shape this helper consumes. */
 export type RecoveryPendingTurn = {

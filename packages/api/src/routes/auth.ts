@@ -36,7 +36,7 @@ export type NotifyTelegramLinked = (
 export type EmailAuthDeps = {
   magicLinkStore?: MagicLinkStore
   smtpClient?: SmtpClient
-  /** Used to build the verify URL embedded in the email — e.g. `https://sidan.ai`. */
+  /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
   appUrl: string
 }
 
@@ -552,9 +552,9 @@ export function authRoutes(
   //
   // The Electron shell completes Google OAuth in the system browser, then the
   // browser-side `/desktop/auth` bridge mints a single-use code here (for the
-  // already-authenticated user) and 302s to `sidanclaw://auth?code=…`. The app
+  // already-authenticated user) and 302s to `usebrian://auth?code=…`. The app
   // exchanges that code for the JWT pair over TLS. A PKCE verifier binds the
-  // code to the app instance so a local app that hijacks the `sidanclaw://`
+  // code to the app instance so a local app that hijacks the `usebrian://`
   // scheme can't redeem a stolen code (it lacks the verifier). RFC 8252 + 7636.
   // See docs/architecture/platform/auth.md → "Desktop app sign-in (PKCE handoff)".
   const B64URL_RE = /^[A-Za-z0-9_-]+$/
@@ -828,9 +828,13 @@ const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onbo
 
 // Sidan-owned hosts an absolute `nextPath` may target. Lets a magic-link
 // sign-in carry a cross-app return (e.g. the desktop bridge at
-// `https://app.sidan.ai/desktop/auth?…`) the same way the Google OAuth
+// `https://app.usebrian.ai/desktop/auth?…`) the same way the Google OAuth
 // callback does. Mirrors the web `ALLOWED_RETURN_HOSTS` allowlists; keep in sync.
 const ALLOWED_NEXT_HOSTS = new Set<string>([
+  'usebrian.ai',
+  'feed.usebrian.ai',
+  'app.usebrian.ai',
+  // Legacy domain, kept through the rebrand transition; drop once sidan.ai retires.
   'sidan.ai',
   'feed.sidan.ai',
   'app.sidan.ai',

@@ -1,7 +1,7 @@
 /**
- * Public types for @sidanclaw/views-renderer.
+ * Public types for @use-brian/views-renderer.
  *
- * The A2UI v0.8 envelope types are owned by @sidanclaw/core (so server
+ * The A2UI v0.8 envelope types are owned by @use-brian/core (so server
  * bindings + renderer share one contract). This file re-exports them and
  * adds renderer-host-facing types like `OnActionHandler`.
  */
@@ -45,7 +45,7 @@ export type {
   PieChartWidget,
   DiagramWidget,
   ViewPayload,
-} from '@sidanclaw/core/dist/views/a2ui.js'
+} from '@use-brian/core/dist/views/a2ui.js'
 
 /**
  * Host-supplied action callback. Fired by Button widgets, Table row

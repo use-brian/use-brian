@@ -24,7 +24,7 @@ import {
   type AssistantRunState,
   type AssistantRunStep,
   type AssistantRunChannel,
-} from '@sidanclaw/doc-model'
+} from '@use-brian/doc-model'
 
 /** Broadcast the current run state for a page (or `null` to clear → idle). */
 type RunPublisher = (pageId: string, state: AssistantRunState | null) => void

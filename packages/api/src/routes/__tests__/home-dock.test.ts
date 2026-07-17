@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
-import type { HomeSignals } from '@sidanclaw/core'
+import type { HomeSignals } from '@use-brian/core'
 import { homeDockRoutes, type HomeDockRoutesDeps } from '../home-dock.js'
 
 const SIGNALS: HomeSignals = {

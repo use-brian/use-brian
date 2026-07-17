@@ -127,7 +127,7 @@ import {
   type Message,
   type PendingConfirmation,
   type ToolUsed,
-} from "@sidanclaw/chat-ui";
+} from "@use-brian/chat-ui";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import {
@@ -181,7 +181,7 @@ import {
   type ResolvedConfirmationCounts,
 } from "@/lib/confirmation-collapse";
 import { useIsOffline } from "@/lib/offline/use-offline-sync";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 import { cn } from "@/lib/utils";
 import {
   imageFilesFromClipboard,
@@ -311,7 +311,7 @@ type MessageWithViews = Message & {
 
 /**
  * `ToolUsed` extended with optional per-op build-log lines for `patchPage`.
- * Doc-web local only — not pushed to `@sidanclaw/chat-ui` because these
+ * Doc-web local only — not pushed to `@use-brian/chat-ui` because these
  * per-op labels are doc-surface-specific.
  */
 export type ToolUsedWithOps = ToolUsed & {
@@ -2962,7 +2962,7 @@ function mapSessionRows(
 /**
  * Remove any `<followup>[...]</followup>` chip tag from assistant text.
  * Doc is an `app` surface with no chip affordance, so the tag must never
- * render. Mirrors `stripFollowUps` in `@sidanclaw/shared` (kept inline to
+ * render. Mirrors `stripFollowUps` in `@use-brian/shared` (kept inline to
  * avoid pulling the shared barrel into the browser bundle — the same reason
  * `apps/web` inlines its own copy). Also drops a trailing malformed opener so
  * a half-streamed tag can't survive.

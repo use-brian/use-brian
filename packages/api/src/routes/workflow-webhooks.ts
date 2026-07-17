@@ -37,7 +37,7 @@ import {
   type ExecutorDeps,
   type WorkflowRunStore,
   type WorkflowStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 export type WorkflowWebhookRouteOptions = {
   workflowStore: WorkflowStore

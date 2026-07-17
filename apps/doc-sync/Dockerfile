@@ -30,7 +30,7 @@ COPY apps/doc-sync/src ./apps/doc-sync/src
 # pnpm topological build, not turbo: emulated (`--platform linux/amd64` on
 # arm64 / QEMU) turbo aborts on EINTR creating its `.turbo` log dir. `<pkg>...`
 # = package + dependency closure, built deps-first (same as turbo's `^build`).
-RUN pnpm --filter "@sidanclaw/doc-sync..." run build
+RUN pnpm --filter "@use-brian/doc-sync..." run build
 
 # ── Stage 3: Production image ─────────────────────────────────
 FROM node:22-slim AS runner

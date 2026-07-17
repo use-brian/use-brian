@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import type { Tool } from '@sidanclaw/core'
+import type { Tool } from '@use-brian/core'
 import {
   classifyConnectorAuthError,
   wrapToolsWithHealthProbe,
@@ -96,9 +96,9 @@ describe('[COMP:integrations/connector-health] createHealthReporter', () => {
 
 describe('[COMP:integrations/connector-health] connectorReconnectNotice', () => {
   it('names the provider + label and instructs the user to reconnect', () => {
-    const notice = connectorReconnectNotice('github', 'sidanclaw')
+    const notice = connectorReconnectNotice('github', 'Use Brian')
     expect(notice).toContain('GitHub')
-    expect(notice).toContain('sidanclaw')
+    expect(notice).toContain('Use Brian')
     expect(notice.toLowerCase()).toContain('reconnect')
   })
 })

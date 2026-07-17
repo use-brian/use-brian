@@ -85,7 +85,7 @@ export function buildMemoryContext(params: {
   teamPurpose?: string | null
   /**
    * Display name the user assigned to this assistant. When set and not the
-   * default ("My Assistant"), overrides the Layer 1 "You are sidanclaw"
+   * default ("My Assistant"), overrides the Layer 1 "You are Use Brian"
    * self-reference — the model introduces itself as this name instead.
    */
   assistantName?: string | null
@@ -115,11 +115,11 @@ export function buildMemoryContext(params: {
 }): string {
   const sections: string[] = []
 
-  // Assistant display name — overrides Layer 1's default "sidanclaw" self-reference.
+  // Assistant display name — overrides Layer 1's default "Use Brian" self-reference.
   const displayName = params.assistantName?.trim()
   if (displayName && displayName !== 'My Assistant') {
     sections.push(
-      `## Your Name\nThe user has named you "${displayName}". When the user asks who you are or what your name is, answer as "${displayName}". You remain sidanclaw under the hood — same memory, same capabilities — but "${displayName}" is how you present yourself.`,
+      `## Your Name\nThe user has named you "${displayName}". When the user asks who you are or what your name is, answer as "${displayName}". You remain Use Brian under the hood — same memory, same capabilities — but "${displayName}" is how you present yourself.`,
     )
   }
 

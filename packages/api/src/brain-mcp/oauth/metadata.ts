@@ -19,9 +19,9 @@
 import { Router, type Request, type Response } from 'express'
 
 export type MetadataOptions = {
-  /** Public API origin, e.g. `https://api.sidan.ai`. */
+  /** Public API origin, e.g. `https://api.usebrian.ai`. */
   apiUrl: string
-  /** Public marketing/docs origin, e.g. `https://sidan.ai` (env.APP_URL). */
+  /** Public marketing/docs origin, e.g. `https://usebrian.ai` (env.APP_URL). */
   webUrl: string
 }
 

@@ -290,7 +290,7 @@ export type WorkspaceFilesStore = {
 
   /**
    * System-level (no RLS) soft-retraction of every current row whose bytes
-   * live in `bucket` (`storage_uri` prefix `gs://<bucket>/`). Used by the
+   * live in `bucket` under `scheme`. Used by the
    * bring-your-own-storage staleness sweep when a disconnected binding's
    * bucket goes stale and its key is wiped — the bytes are unreadable, so the
    * index rows are retracted to stop surfacing dead references. Returns the
@@ -299,6 +299,7 @@ export type WorkspaceFilesStore = {
   retractByStorageBucketSystem(
     workspaceId: string,
     bucket: string,
+    scheme: 'gs' | 's3',
     reason: string,
   ): Promise<number>
 }

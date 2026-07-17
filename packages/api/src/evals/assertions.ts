@@ -5,7 +5,7 @@
  * [COMP:evals/capability-probes]
  */
 
-import { WorkflowTriggerSchema } from '@sidanclaw/core'
+import { WorkflowTriggerSchema } from '@use-brian/core'
 
 import type { HardCheckResult, Probe, Transcript } from './types.js'
 

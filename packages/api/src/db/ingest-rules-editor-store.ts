@@ -25,8 +25,8 @@ import type {
   RoutingMode,
   RuleEpisodeSensitivity,
   UpdateIngestRuleInput,
-} from '@sidanclaw/core'
-import { INGEST_SOURCE_PROVIDERS } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { INGEST_SOURCE_PROVIDERS } from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 
 const PUBLIC_COLS = `

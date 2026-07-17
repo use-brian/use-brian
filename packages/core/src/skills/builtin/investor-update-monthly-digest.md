@@ -2,9 +2,9 @@
 name: investor-update-monthly-digest
 description: Monthly investor-update producer — condense the workspace's last month of company activity into a master digest, then personalize per-investor against `target_investor` edges, save each as a `workspace_files` draft tagged `draft` + `investor:<id>`. Operator reviews drafts and approves sends; on approval `gmailSendMessage` (only when Gmail is connected) sends each (with the connector-action audit shipped 2026-05-21). Use via a monthly scheduled workflow, or when the operator says "draft the investor update", "what should we tell investors this month?".
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: investor-relations
   applies_to_app_type: any
   when_to_use: A monthly scheduled turn (or ad-hoc operator request) for any workspace with `target_investor` edges configured. Skip when no `target_investor` edges exist — propose adding investors first, don't fabricate a recipient list.

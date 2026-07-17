@@ -78,14 +78,14 @@ describe("[COMP:app-desktop/desktop-auth] pending-verifier persistence", () => {
 
 describe("[COMP:app-desktop/desktop-auth] buildDesktopAuthStartUrl", () => {
   it("points at the canvas bridge with the encoded challenge", () => {
-    expect(buildDesktopAuthStartUrl("https://app.sidan.ai", "abc-123")).toBe(
-      "https://app.sidan.ai/desktop/auth?challenge=abc-123",
+    expect(buildDesktopAuthStartUrl("https://app.usebrian.ai", "abc-123")).toBe(
+      "https://app.usebrian.ai/desktop/auth?challenge=abc-123",
     );
   });
 
   it("threads the loopback redirect + state when given", () => {
     const out = new URL(
-      buildDesktopAuthStartUrl("https://app.sidan.ai", "abc-123", {
+      buildDesktopAuthStartUrl("https://app.usebrian.ai", "abc-123", {
         redirectUri: "http://127.0.0.1:54321/cb",
         state: "nonce-xyz",
       }),
@@ -98,10 +98,10 @@ describe("[COMP:app-desktop/desktop-auth] buildDesktopAuthStartUrl", () => {
 
   it("sets addAccount=1 for an add-account sign-in, and omits it otherwise", () => {
     const add = new URL(
-      buildDesktopAuthStartUrl("https://app.sidan.ai", "abc-123", { addAccount: true }),
+      buildDesktopAuthStartUrl("https://app.usebrian.ai", "abc-123", { addAccount: true }),
     );
     expect(add.searchParams.get("addAccount")).toBe("1");
-    const plain = new URL(buildDesktopAuthStartUrl("https://app.sidan.ai", "abc-123"));
+    const plain = new URL(buildDesktopAuthStartUrl("https://app.usebrian.ai", "abc-123"));
     expect(plain.searchParams.has("addAccount")).toBe(false);
   });
 });
@@ -154,8 +154,8 @@ describe("[COMP:app-desktop/desktop-auth] loopback redirect", () => {
 
 describe("[COMP:app-desktop/desktop-auth] buildSignedInPageUrl", () => {
   it("points at the canvas /desktop/signed-in page on success", () => {
-    expect(buildSignedInPageUrl("https://app.sidan.ai")).toBe(
-      "https://app.sidan.ai/desktop/signed-in",
+    expect(buildSignedInPageUrl("https://app.usebrian.ai")).toBe(
+      "https://app.usebrian.ai/desktop/signed-in",
     );
   });
 
@@ -168,31 +168,31 @@ describe("[COMP:app-desktop/desktop-auth] buildSignedInPageUrl", () => {
 
 describe("[COMP:app-desktop/desktop-auth] parseAuthCallback", () => {
   it("extracts a code", () => {
-    expect(parseAuthCallback("sidanclaw://auth?code=xyz", "sidanclaw")).toEqual({
+    expect(parseAuthCallback("usebrian://auth?code=xyz", "usebrian")).toEqual({
       kind: "code",
       code: "xyz",
     });
   });
 
   it("extracts an error", () => {
-    expect(parseAuthCallback("sidanclaw://auth?error=mint_failed", "sidanclaw")).toEqual({
+    expect(parseAuthCallback("usebrian://auth?error=mint_failed", "usebrian")).toEqual({
       kind: "error",
       error: "mint_failed",
     });
   });
 
   it("reports no_code when neither is present", () => {
-    expect(parseAuthCallback("sidanclaw://auth", "sidanclaw")).toEqual({
+    expect(parseAuthCallback("usebrian://auth", "usebrian")).toEqual({
       kind: "error",
       error: "no_code",
     });
   });
 
   it("returns null for non-auth links and other schemes (so deep-link routing wins)", () => {
-    expect(parseAuthCallback("sidanclaw://open?path=/w/x", "sidanclaw")).toBeNull();
-    expect(parseAuthCallback("sidanclaw://capture", "sidanclaw")).toBeNull();
-    expect(parseAuthCallback("https://app.sidan.ai/x", "sidanclaw")).toBeNull();
-    expect(parseAuthCallback("not a url", "sidanclaw")).toBeNull();
+    expect(parseAuthCallback("usebrian://open?path=/w/x", "usebrian")).toBeNull();
+    expect(parseAuthCallback("usebrian://capture", "usebrian")).toBeNull();
+    expect(parseAuthCallback("https://app.usebrian.ai/x", "usebrian")).toBeNull();
+    expect(parseAuthCallback("not a url", "usebrian")).toBeNull();
   });
 });
 
@@ -211,16 +211,16 @@ describe("[COMP:app-desktop/desktop-auth] exchangeCode", () => {
       status: 200,
       json: async () => session,
     });
-    const result = await exchangeCode("https://api.sidan.ai", "code1", "verifier1", fetchImpl);
+    const result = await exchangeCode("https://api.usebrian.ai", "code1", "verifier1", fetchImpl);
     expect(result).toEqual(session);
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe("https://api.sidan.ai/auth/desktop/exchange");
+    expect(url).toBe("https://api.usebrian.ai/auth/desktop/exchange");
     expect(JSON.parse(init.body)).toEqual({ code: "code1", verifier: "verifier1" });
   });
 
   it("throws on a non-OK response", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 400, json: async () => ({}) });
-    await expect(exchangeCode("https://api.sidan.ai", "c", "v", fetchImpl)).rejects.toThrow(/400/);
+    await expect(exchangeCode("https://api.usebrian.ai", "c", "v", fetchImpl)).rejects.toThrow(/400/);
   });
 });
 
@@ -254,25 +254,25 @@ describe("[COMP:app-desktop/desktop-auth] refreshSession", () => {
 
   it("POSTs the refresh token and returns the rotated session", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => session });
-    const result = await refreshSession("https://api.sidan.ai", "rt1", fetchImpl);
+    const result = await refreshSession("https://api.usebrian.ai", "rt1", fetchImpl);
     expect(result).toEqual(session);
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe("https://api.sidan.ai/auth/refresh");
+    expect(url).toBe("https://api.usebrian.ai/auth/refresh");
     expect(JSON.parse(init.body)).toEqual({ refreshToken: "rt1" });
   });
 
   it("returns null on a definitive rejection (dead refresh token)", async () => {
     for (const status of [400, 401]) {
       const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status, json: async () => ({}) });
-      expect(await refreshSession("https://api.sidan.ai", "rt1", fetchImpl)).toBeNull();
+      expect(await refreshSession("https://api.usebrian.ai", "rt1", fetchImpl)).toBeNull();
     }
   });
 
   it("throws on a transient failure (5xx / network) so callers retry", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
-    await expect(refreshSession("https://api.sidan.ai", "rt1", fetchImpl)).rejects.toThrow(/503/);
+    await expect(refreshSession("https://api.usebrian.ai", "rt1", fetchImpl)).rejects.toThrow(/503/);
     const fetchDown = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-    await expect(refreshSession("https://api.sidan.ai", "rt1", fetchDown)).rejects.toThrow(/ECONNREFUSED/);
+    await expect(refreshSession("https://api.usebrian.ai", "rt1", fetchDown)).rejects.toThrow(/ECONNREFUSED/);
   });
 });
 
@@ -286,7 +286,7 @@ describe("[COMP:app-desktop/desktop-auth] buildSessionCookies", () => {
   };
 
   it("mirrors the web's three cookies with the right flags + expiries", () => {
-    const cookies = buildSessionCookies("https://app.sidan.ai", session, 1000);
+    const cookies = buildSessionCookies("https://app.usebrian.ai", session, 1000);
     const byName = Object.fromEntries(cookies.map((c) => [c.name, c]));
 
     expect(byName.access_token).toMatchObject({

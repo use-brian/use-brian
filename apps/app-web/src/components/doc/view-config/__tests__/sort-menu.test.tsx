@@ -19,7 +19,7 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import { SortMenu, type Sort } from "../sort-menu";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 
 const dict = en as unknown as Dictionary;
 

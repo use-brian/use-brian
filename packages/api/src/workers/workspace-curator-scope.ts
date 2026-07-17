@@ -32,7 +32,7 @@
 import { query } from '../db/client.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type { SkillCuratorDigestStore } from '../db/skill-curator-digest-store.js'
-import type { WorkspaceCuratorScope } from '@sidanclaw/core'
+import type { WorkspaceCuratorScope } from '@use-brian/core'
 
 export type WorkspaceCuratorScopeDeps = {
   /** Canonical read surface — supplies `listCuratorEligible`. */

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import {
   buildDecorations,
   findStaleCommentMarkRanges,

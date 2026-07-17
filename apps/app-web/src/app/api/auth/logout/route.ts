@@ -4,8 +4,8 @@
 // (the `refresh_token` is httpOnly, so browser JS can't delete it) and
 // returns 200 so the client can navigate to /login.
 //
-// In PRODUCTION this sub-app must NOT write the shared `.sidan.ai` auth
-// cookies — the design rule is "sidan.ai → sub-app, not the other way
+// In PRODUCTION this sub-app must NOT write the shared `.usebrian.ai` auth
+// cookies — the design rule is "usebrian.ai → sub-app, not the other way
 // round". There the client redirects the browser to
 // `${primary}/api/auth/logout?next=…` (the primary clears the domain-scoped
 // cookies and bounces back), so this route is never the one that clears

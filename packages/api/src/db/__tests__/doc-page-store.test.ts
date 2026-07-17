@@ -14,7 +14,7 @@ vi.mock('../client.js', () => ({
 
 import { createDbDocPageStore } from '../doc-page-store.js'
 import { queryWithRLS } from '../client.js'
-import type { Page, UndoEntry } from '@sidanclaw/core'
+import type { Page, UndoEntry } from '@use-brian/core'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
 

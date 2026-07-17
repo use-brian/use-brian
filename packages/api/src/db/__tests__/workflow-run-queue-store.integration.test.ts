@@ -13,7 +13,7 @@ import {
  * per-workflow serialization + per-workspace cap + lease reclaim, the
  * exhausted/stale reapers, and the storm-guard count/pause pair.
  *
- * Requires the local `sidanclaw` PostgreSQL database with migration 302
+ * Requires the local `Use Brian` PostgreSQL database with migration 302
  * applied. Skips silently when the DB isn't reachable — matches
  * aggregate-store.integration.test.ts.
  *
@@ -28,7 +28,7 @@ import {
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

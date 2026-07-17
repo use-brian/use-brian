@@ -645,7 +645,7 @@ describe('[COMP:api/memories-route] Memory routes', () => {
     it('grants access via workspace_members when user is not a direct assistant member', async () => {
       // Team-owned `kind=app` assistants don't carry per-member rows in
       // assistant_members; access flows through workspace_members. This was the
-      // bug behind feed.sidan.ai's "Failed to fetch" — the Voice page hit
+      // bug behind feed.usebrian.ai's "Failed to fetch" — the Voice page hit
       // the team route, which 403'd because the team admin had no
       // assistant_members row for the team's distribution assistant.
       // After WU-4.2b the route also calls `resolveViewerCtx` to fetch

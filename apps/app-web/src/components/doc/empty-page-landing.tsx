@@ -48,7 +48,7 @@ import {
   PencilLine,
   Sparkles,
 } from "lucide-react";
-import { ChatComposer } from "@sidanclaw/chat-ui";
+import { ChatComposer } from "@use-brian/chat-ui";
 import { derivePageIcon, type ViewListRow } from "@/lib/api/views";
 import { PageIcon } from "./page-icon";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
@@ -269,7 +269,7 @@ export function EmptyPageLanding({
             // prompt isn't flanked by controls drifting in its vertical centre.
             rowClassName="flex"
             // ChatComposer auto-grows this textarea to fit content (see
-            // @sidanclaw/chat-ui) — the host only sets the cap, never its own
+            // @use-brian/chat-ui) — the host only sets the cap, never its own
             // resize logic. `max-h-[240px]` (~10 lines) keeps a longer "what do
             // you want to see?" prompt fully visible before the box starts
             // scrolling (`overflow-y-auto`); the old 160px clipped multi-line

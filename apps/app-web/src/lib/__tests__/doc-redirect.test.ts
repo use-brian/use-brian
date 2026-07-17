@@ -29,59 +29,59 @@ function locationOf(res: Response): string {
 describe("[COMP:app-web/url-refactor] computeDocRedirect", () => {
   it("301-redirects /w/<wid>/doc?viewId=<vid> to /w/<wid>/p/<vid>", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc?viewId=vid"),
+      makeReq("https://app.usebrian.ai/w/wid/doc?viewId=vid"),
     );
     expect(res).not.toBeNull();
     expect(res!.status).toBe(301);
-    expect(locationOf(res!)).toBe("https://app.sidan.ai/w/wid/p/vid");
+    expect(locationOf(res!)).toBe("https://app.usebrian.ai/w/wid/p/vid");
   });
 
   it("handles a trailing slash on the legacy path", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc/?viewId=vid"),
+      makeReq("https://app.usebrian.ai/w/wid/doc/?viewId=vid"),
     );
     expect(res).not.toBeNull();
     expect(res!.status).toBe(301);
     // Target path is the canonical slashless form.
-    expect(locationOf(res!)).toBe("https://app.sidan.ai/w/wid/p/vid");
+    expect(locationOf(res!)).toBe("https://app.usebrian.ai/w/wid/p/vid");
   });
 
   it("preserves the URL hash on redirect", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc?viewId=vid#section"),
+      makeReq("https://app.usebrian.ai/w/wid/doc?viewId=vid#section"),
     );
     expect(res).not.toBeNull();
     expect(locationOf(res!)).toBe(
-      "https://app.sidan.ai/w/wid/p/vid#section",
+      "https://app.usebrian.ai/w/wid/p/vid#section",
     );
   });
 
   it("preserves extra query params (only viewId is consumed)", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc?viewId=vid&theme=dark"),
+      makeReq("https://app.usebrian.ai/w/wid/doc?viewId=vid&theme=dark"),
     );
     expect(res).not.toBeNull();
     expect(locationOf(res!)).toBe(
-      "https://app.sidan.ai/w/wid/p/vid?theme=dark",
+      "https://app.usebrian.ai/w/wid/p/vid?theme=dark",
     );
   });
 
   it("302-redirects /w/<wid>/doc with no viewId to the /p index", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc"),
+      makeReq("https://app.usebrian.ai/w/wid/doc"),
     );
     expect(res).not.toBeNull();
     expect(res!.status).toBe(302);
-    expect(locationOf(res!)).toBe("https://app.sidan.ai/w/wid/p");
+    expect(locationOf(res!)).toBe("https://app.usebrian.ai/w/wid/p");
   });
 
   it("302s the no-viewId case even with a trailing slash", () => {
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/doc/"),
+      makeReq("https://app.usebrian.ai/w/wid/doc/"),
     );
     expect(res).not.toBeNull();
     expect(res!.status).toBe(302);
-    expect(locationOf(res!)).toBe("https://app.sidan.ai/w/wid/p");
+    expect(locationOf(res!)).toBe("https://app.usebrian.ai/w/wid/p");
   });
 
   it("returns null for paths outside the doc surface", () => {
@@ -89,7 +89,7 @@ describe("[COMP:app-web/url-refactor] computeDocRedirect", () => {
     // that prefix (e.g. /w/wid/settings) must pass through unchanged
     // even if they happen to carry a `viewId` query for some reason.
     const res = computeDocRedirect(
-      makeReq("https://app.sidan.ai/w/wid/settings?viewId=vid"),
+      makeReq("https://app.usebrian.ai/w/wid/settings?viewId=vid"),
     );
     expect(res).toBeNull();
   });

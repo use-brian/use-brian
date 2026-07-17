@@ -9,7 +9,7 @@ import {
 
 describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', () => {
   it('LAYER_1_SYSTEM_PROMPT carries the base assistant identity and shipping rules', () => {
-    expect(LAYER_1_SYSTEM_PROMPT).toContain('sidanclaw')
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Use Brian')
     expect(LAYER_1_SYSTEM_PROMPT).toContain('How you use tools')
     expect(LAYER_1_SYSTEM_PROMPT).toContain('Two search attempts with no useful results = stop searching')
   })

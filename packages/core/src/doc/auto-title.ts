@@ -9,7 +9,7 @@
  *     {@link AUTO_TITLE_AI_MIN_CHARS} (the AI's "first edit" is deliberate, so
  *     the floor is just "has meaningful content").
  *
- * Both extract the page body to plaintext (`@sidanclaw/doc-model`
+ * Both extract the page body to plaintext (`@use-brian/doc-model`
  * `pageToPlaintext`), call {@link generatePageTitle} here, and commit through
  * the one guarded `SavedViewStore.setAutoTitle` (placeholder → auto). This
  * module owns only the model call + sanitisation so the contract matches the

@@ -7,7 +7,7 @@
  * Mounted at `/api/v1`. Authenticated via API keys minted from the
  * assistant's settings page. Each consumer (the third-party service
  * holding the API key) passes their own opaque `externalUserId`;
- * sidanclaw maps that to a Tier 1 (with email) or Tier 2 (without
+ * Use Brian maps that to a Tier 1 (with email) or Tier 2 (without
  * email) shadow user.
  *
  * v1 shape:
@@ -30,7 +30,7 @@ import {
   sanitize as sanitizeAnalytics,
   stripUnsignedToolUses,
   modelToCompactionTier,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type {
   LLMProvider,
   Tool,
@@ -45,7 +45,7 @@ import type {
   SessionStateStore,
   McpSettingsStore,
   GDriveFilesStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { applyMcpInjection, buildUnavailableCapabilitiesPrompt } from './route-helpers.js'
@@ -68,8 +68,8 @@ import {
   getSessionMessages,
   truncateMessagesFrom,
 } from '../db/sessions.js'
-import type { ContentBlock, EngineHooks } from '@sidanclaw/core'
-import { sanitizeDeliveryText } from '@sidanclaw/shared'
+import type { ContentBlock, EngineHooks } from '@use-brian/core'
+import { sanitizeDeliveryText } from '@use-brian/shared'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { resolveModel } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
@@ -119,7 +119,7 @@ export type PublicApiRouteOptions = {
   /** Workspace-files byte layer — `gmailSendMessage` attachments (forwarded
    *  via `applyMcpInjection`; the confirmation-strip below still drops the
    *  send tool on this surface, so this is parity plumbing). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /**
    * Per-assistant connector WRITE grants — `assertActionAllowed` in the
    * Gmail/GCal write callbacks fires only when this store is present (the
@@ -423,7 +423,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             res,
             429,
             'budget_exhausted',
-            "This workspace has no active sidanclaw plan. The workspace owner can pick a plan at sidan.ai/plans, or self-host the open-source version.",
+            "This workspace has no active Use Brian plan. The workspace owner can pick a plan at usebrian.ai/plans, or self-host the open-source version.",
           )
         }
       }
@@ -516,7 +516,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           compartments: readCompartments,
         }
         const [soul, identityMemories, memoryIndex] = await Promise.all([
-          options.memoryStore.getSoul(assistant.id, user.id, 'sidanclaw'),
+          options.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
           options.memoryStore.getIdentity(viewerCtx),
           options.memoryStore.getIndex(viewerCtx),
         ])
@@ -622,7 +622,7 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
             userId: user.id,
             assistantId: assistant.id,
             sessionId: session.id,
-            appId: 'sidanclaw',
+            appId: 'Use Brian',
             channelType: 'api',
             channelId,
             // Read ceiling = min(member, assistant); write ceiling stays the
@@ -835,12 +835,12 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
   // ── POST /claim-shadow ──────────────────────────────────────────
   // Partner-mediated shadow account claim. Exchanges a one-time
   // claim_token (minted by the consent page in apps/web) for an
-  // atomic merge of the shadow into the consenting sidanclaw user.
+  // atomic merge of the shadow into the consenting Use Brian user.
   //
   // Both halves of consent are checked here:
   //   1. The Bearer API key proves the partner owns the shadow's
   //      identity namespace (token's partner_key_id must match).
-  //   2. The claim_token proves the sidanclaw user authorized the
+  //   2. The claim_token proves the Use Brian user authorized the
   //      merge (single-use, 5min TTL, bound to the triple at mint).
   //
   // See docs/architecture/features/shadow-claim.md.

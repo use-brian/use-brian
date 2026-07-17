@@ -62,11 +62,11 @@ interface Fixture {
 ## Populating from real data
 
 ```bash
-pnpm --filter @sidanclaw/api exec tsx scripts/dump-classifier-fixtures.ts \
+pnpm --filter @use-brian/api exec tsx scripts/dump-classifier-fixtures.ts \
   --workspace=<workspace-id> --limit=20 \
   > packages/core/src/ingest/__tests__/fixtures/classifier-golden-set.json
 ```
 
 Then hand-edit each entry's `expected` block to encode the correct
 classification. Run the suite with `GEMINI_API_KEY=<key> pnpm test --filter
-@sidanclaw/core --run pipeline-b.golden-set.test.ts` to verify.
+@use-brian/core --run pipeline-b.golden-set.test.ts` to verify.

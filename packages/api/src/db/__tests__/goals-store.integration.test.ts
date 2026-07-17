@@ -7,11 +7,11 @@ import {
   type RollupDeps,
   type RollupGoalDeps,
   type DoneWhenResolvers,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 /**
  * Integration test for the goals store + the task host adapter (rollup
- * end-to-end). Requires a local PostgreSQL `sidanclaw` with migration
+ * end-to-end). Requires a local PostgreSQL `Use Brian` with migration
  * `285_goals.sql` applied. Skips silently when the DB / table is unavailable.
  *
  * [COMP:goals/store] [COMP:goals/host-task]
@@ -20,7 +20,7 @@ import {
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -599,13 +599,13 @@ describeIf('[COMP:goals/verifier] verify-termination wiring (integration)', () =
   let goals: GoalsMod
   let writeback: typeof import('../../goals/writeback.js')
   let goalStoreMod: typeof import('../goals-store.js')
-  let core: typeof import('@sidanclaw/core')
+  let core: typeof import('@use-brian/core')
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
     goals = await import('../goals.js')
     writeback = await import('../../goals/writeback.js')
     goalStoreMod = await import('../goals-store.js')
-    core = await import('@sidanclaw/core')
+    core = await import('@use-brian/core')
   })
 
   it('a {kind:verify} goal: round-trips the store; verifiedDone flips false→true only once the marker is stamped, and the evaluator follows', async () => {

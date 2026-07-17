@@ -11,7 +11,7 @@
  * prompt actually produces good titles. We hit a real model here and inspect
  * the output by hand.
  *
- * Run: GEMINI_API_KEY=... pnpm --filter @sidanclaw/core tsx scripts/eval-auto-title.ts
+ * Run: GEMINI_API_KEY=... pnpm --filter @use-brian/core tsx scripts/eval-auto-title.ts
  */
 
 import { createGeminiProvider } from '../src/providers/gemini.js'

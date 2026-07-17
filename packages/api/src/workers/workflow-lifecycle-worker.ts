@@ -3,7 +3,7 @@
  *
  * Walks every workflow through the retirement ladder (mig 308):
  * `active → stale → archived → deleted` (one-offs only), with the policy
- * itself living in @sidanclaw/core (`decideLifecycle` — pure, table-tested)
+ * itself living in @use-brian/core (`decideLifecycle` — pure, table-tested)
  * and this worker owning orchestration: apply transitions, emit audit
  * events, and run the per-workspace DIGEST pass that offers retiring
  * workflows to the skill system as `staged_skill_creation` candidates.
@@ -29,7 +29,7 @@ import {
   type WorkflowLifecycleState,
   type WorkflowRecord,
   type WorkflowStep,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { DigestWorkflowSummary, WorkflowDigestLLM } from './workflow-digest-llm.js'
 
 /** Tick cadence: twice a day. Staleness is day-granular; this is plenty. */

@@ -6,9 +6,9 @@ export const zh: Dictionary = {
     back: "返回",
   },
   login: {
-    title: "登入 sidanclaw",
+    title: "登入 Use Brian",
     description:
-      "整合任務、CRM、知識與工作流程的企業大腦，使用您原本登入 sidanclaw 的帳號即可進入。",
+      "整合任務、CRM、知識與工作流程的企業大腦，使用您原本登入 Use Brian 的帳號即可進入。",
     continueWithGoogle: "使用 Google 繼續",
     devLogin: "以本機開發帳號登入",
     errorDevLogin: "本機開發登入失敗，API 伺服器是否已啟動？",
@@ -33,9 +33,9 @@ export const zh: Dictionary = {
   },
   desktopSignedIn: {
     title: "已登入",
-    body: "您可以關閉此分頁，回到 Sidanclaw。",
+    body: "您可以關閉此分頁，回到 Use Brian。",
     errorTitle: "登入未完成",
-    errorBody: "請回到 Sidanclaw 重新登入。",
+    errorBody: "請回到 Use Brian 重新登入。",
   },
   workspace: {
         brain: {
@@ -81,7 +81,7 @@ export const zh: Dictionary = {
   },
   planGate: {
     title: "這個工作空間需要方案",
-    body: "sidanclaw Cloud 採用付費方案。在方案生效之前，這個工作空間的對話、管道與自動化將暫停。",
+    body: "Use Brian Cloud 採用付費方案。在方案生效之前，這個工作空間的對話、管道與自動化將暫停。",
     dataNote: "你儲存的所有內容都會完整保留，並可隨時匯出。",
     startTrial: "開始 30 天免費試用",
     choosePlan: "選擇方案",
@@ -117,7 +117,7 @@ export const zh: Dictionary = {
     },
   },
   chat: {
-    placeholder: "向 sidanclaw 索取檢視…",
+    placeholder: "向 Use Brian 索取檢視…",
     send: "傳送",
     expand: "開啟對話",
     collapse: "關閉",
@@ -131,8 +131,8 @@ export const zh: Dictionary = {
       "回覆尚未完成，連線就中斷了。先前所做的頁面變更皆已儲存，再傳送一則訊息即可繼續。",
     switchAssistant: "切換助理",
     switchAssistantTitle: "對話對象",
-    emptyTitle: "向 sidanclaw 提問",
-    emptyDesc: "描述您想看的內容（表格、看板、清單），sidanclaw 會為您起草一個檢視。",
+    emptyTitle: "向 Use Brian 提問",
+    emptyDesc: "描述您想看的內容（表格、看板、清單），Use Brian 會為您起草一個檢視。",
     retry: "重試",
     retrying: "重試中…",
     copy: "複製",
@@ -337,11 +337,11 @@ export const zh: Dictionary = {
     },
   },
   sharedPage: {
-    footer: "透過 sidanclaw 分享",
+    footer: "透過 Use Brian 分享",
     unavailable: "此分享頁面已無法存取。",
     siteNotFoundTitle: "找不到頁面",
     siteNotFoundBody: "此頁面不存在，或已停止發佈。",
-    poweredByCta: "免費試用 sidanclaw",
+    poweredByCta: "免費試用 Use Brian",
     commentsHeading: "留言",
     commentDrawerTitle: "留言",
     commentDrawerClose: "關閉",
@@ -521,7 +521,7 @@ export const zh: Dictionary = {
     // 預設檢視的著陸頁（未開啟頁面時的中央區）
     landing: {
       title: "想看什麼？",
-      subtitle: "描述想要的檢視、頁面或問題，sidanclaw 會為你建立草稿。",
+      subtitle: "描述想要的檢視、頁面或問題，Use Brian 會為你建立草稿。",
       placeholder: "例如：依階段排列的進行中交易看板",
       send: "建立",
       startBlank: "從空白頁面開始",
@@ -532,7 +532,7 @@ export const zh: Dictionary = {
         "為我總結銷售管道",
       ],
       recentsTitle: "最近開啟的頁面",
-      building: "sidanclaw 正在草擬這個頁面…",
+      building: "Use Brian 正在草擬這個頁面…",
       buildingHint: "即時建立中，無須開啟對話。",
       buildingThinking: "思考中…",
       buildingReasoning: "思考過程",
@@ -598,7 +598,7 @@ export const zh: Dictionary = {
     setupChecklist: {
       ariaLabel: "設定你的工作區",
       title: "開始設定",
-      subtitle: "幾個簡單步驟，讓 sidanclaw 更貼近你。",
+      subtitle: "幾個簡單步驟，讓 Use Brian 更貼近你。",
       dismissAriaLabel: "關閉設定清單",
       connectTitle: "連接工具",
       connectDesc: "把你日常使用的應用程式串接起來。",
@@ -1177,7 +1177,7 @@ export const zh: Dictionary = {
       draftsDesc: "透過對話建立的草稿會顯示於此。未儲存的草稿將於 30 天後自動清除。",
       searchTitle: "找不到符合項目",
       searchDesc: "搜尋條件沒有對應的頁面。請改用其他關鍵字，或交由對話協助查找。",
-      searchCta: "詢問 sidanclaw",
+      searchCta: "詢問 Use Brian",
     },
     // Phase 4 — 錯誤狀態
     errors: {
@@ -1286,7 +1286,7 @@ export const zh: Dictionary = {
     },
     privacy: {
       analyticsTitle: "分析",
-      analyticsDesc: "提供匿名的使用分析，協助我們改進 sidanclaw。",
+      analyticsDesc: "提供匿名的使用分析，協助我們改進 Use Brian。",
       dataTitle: "你的資料",
       deleteMemoriesTitle: "刪除所有記憶",
       deleteMemoriesDesc: "永久移除你所有助理的每一筆記憶。此操作無法復原。",
@@ -1434,6 +1434,22 @@ export const zh: Dictionary = {
         errKey: "該服務帳戶金鑰無效。請貼上完整的 JSON 金鑰。",
         errGeneric: "無法連接該儲存桶。請檢查金鑰、儲存桶與角色後再試一次。",
       },
+      s3: {
+        formHelp: "連接 S3 相容儲存桶（AWS S3、MinIO、Cloudflare R2、Backblaze B2 等）。你的檔案位元組會以你自己的金鑰存放在這個儲存桶中。",
+        bucketPlaceholder: "儲存桶名稱",
+        regionPlaceholder: "區域（例如 us-east-1，R2 請填 auto）",
+        endpointPlaceholder: "端點 URL（選填，供非 AWS 儲存服務使用）",
+        accessKeyPlaceholder: "存取金鑰 ID",
+        secretKeyPlaceholder: "私密存取金鑰",
+        leastPriv: "僅針對這一個儲存桶授予認證的讀取／寫入／刪除權限，切勿授予整個帳戶的存取權。",
+        endpointNote: "使用 AWS S3 時請將端點留空。使用 MinIO、R2 或 B2 時，請貼上該儲存服務的 S3 端點 URL。",
+        connectBtn: "驗證並連接",
+        validatingBtn: "驗證中...",
+        errPermission: "該認證無法存取該儲存桶。請檢查儲存桶名稱與所授予的政策。",
+        errBucket: "無法連線至儲存桶。請檢查儲存桶名稱、區域與端點。",
+        errKey: "該金鑰無效。請檢查存取金鑰 ID 與私密存取金鑰。",
+        errGeneric: "無法連接該儲存桶。請檢查金鑰、儲存桶、區域與端點後再試一次。",
+      },
       gcalNotifyTitle: "傳送電子郵件通知",
       gcalNotifyDesc: "在活動建立、更新或刪除時通知與會者",
       gcalNotifyAll: "全部",
@@ -1570,7 +1586,7 @@ export const zh: Dictionary = {
       preflightErrDuplicate: "此標頭名稱已被使用。",
       actorIdentityTitle: "傳送登入使用者身分",
       actorIdentityDesc: "在每次請求時將登入使用者的身分（網頁為電子郵件、WhatsApp 為電話號碼、Telegram 為帳號代稱、Slack 為使用者 ID）傳送給此伺服器，使其可代表該使用者進行操作。預設為關閉。",
-      actorIdentityNoAuthWarning: "此連接器尚未設定驗證，伺服器無法確認身分是否來自 sidanclaw。在用於登入之前，請先於上方設定 Bearer 權杖或自訂標頭。",
+      actorIdentityNoAuthWarning: "此連接器尚未設定驗證，伺服器無法確認身分是否來自 Use Brian。在用於登入之前，請先於上方設定 Bearer 權杖或自訂標頭。",
       mediaTokenTitle: "允許擷取此使用者的媒體",
       mediaTokenDesc: "讓此伺服器可擷取登入使用者最近在頻道傳送的語音訊息或影片以進行處理。每次請求都會附帶僅限此使用者、短時效的權杖，因此伺服器無法存取其他使用者的媒體。預設為關閉。",
       // ── 工作空間擁有的連接器：移轉 + 依權限管理 ──

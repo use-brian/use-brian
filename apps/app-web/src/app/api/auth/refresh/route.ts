@@ -16,8 +16,8 @@ const API_URL = process.env.API_URL ?? "http://localhost:4000";
  * to the backend /auth/refresh, and rotates all auth cookies on the response.
  * Cloned from apps/web/src/app/api/auth/refresh/route.ts.
  *
- * **Dev-only in production.** The design rule "sidan.ai → sub-app, not
- * the other way round" means only sidan.ai writes `.sidan.ai` cookies.
+ * **Dev-only in production.** The design rule "usebrian.ai → sub-app, not
+ * the other way round" means only usebrian.ai writes `.usebrian.ai` cookies.
  * In prod the proxy + `authFetch` redirect the browser to
  * `${primary}/api/auth/refresh-and-return` before they ever call this
  * route, so this code is dead in prod. The guard below is defense in
@@ -40,7 +40,7 @@ export async function POST(request: Request) {
   // `parseLastCookie` picks the most-recently-set refresh_token so a
   // pre-migration host-only twin can't shadow the post-migration
   // domain-scoped one. See `docs/architecture/platform/auth.md` →
-  // "Duplicate cookies after the .sidan.ai migration".
+  // "Duplicate cookies after the .usebrian.ai migration".
   const cookieHeader = request.headers.get("cookie") ?? "";
   const refreshToken = parseLastCookie(cookieHeader, "refresh_token");
 

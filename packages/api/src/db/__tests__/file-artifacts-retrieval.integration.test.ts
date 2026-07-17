@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 import { chunkFileText } from '../file-segments-store.js'
 
 /**
@@ -11,7 +11,7 @@ import { chunkFileText } from '../file-segments-store.js'
  * targets the store. Component tags: [COMP:retrieval/file-segments],
  * [COMP:brain/file-segments-store].
  *
- * Requires a local `sidanclaw` DB with migration 297 applied. Skips silently
+ * Requires a local `Use Brian` DB with migration 297 applied. Skips silently
  * when the DB is unavailable or the table is missing (mirrors the
  * transcript-segments retrieval integration skip pattern).
  *
@@ -28,7 +28,7 @@ import { chunkFileText } from '../file-segments-store.js'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

@@ -13,8 +13,8 @@
  * runs with system_bypass.
  */
 
-import type { Message } from '@sidanclaw/core'
-import type { WorkerRunsStore } from '@sidanclaw/core'
+import type { Message } from '@use-brian/core'
+import type { WorkerRunsStore } from '@use-brian/core'
 import { query } from './client.js'
 
 export function createDbWorkerRunsStore(): WorkerRunsStore {

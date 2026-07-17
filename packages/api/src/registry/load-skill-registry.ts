@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
-import { parseSkillMarkdown } from '@sidanclaw/core'
-import type { SkillContent } from '@sidanclaw/core'
+import { parseSkillMarkdown } from '@use-brian/core'
+import type { SkillContent } from '@use-brian/core'
 
 const TOOLS_DIR = resolve(
   import.meta.dirname, '..', '..', '..', '..', 'sidanclaw-tools',

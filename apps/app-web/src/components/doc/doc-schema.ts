@@ -2,7 +2,7 @@
 
 /**
  * The browser editor's Tiptap extension list. Built from the SHARED schema in
- * `@sidanclaw/doc-model` (so the editor and the Yjs server agree byte-for-byte)
+ * `@use-brian/doc-model` (so the editor and the Yjs server agree byte-for-byte)
  * with React node-views layered onto the custom nodes via `.extend()` — which
  * adds rendering only, leaving the schema identical so collaboration stays in
  * sync.
@@ -18,7 +18,7 @@
  * [COMP:app-web/doc-schema]
  */
 
-import { docExtensions } from "@sidanclaw/doc-model";
+import { docExtensions } from "@use-brian/doc-model";
 import { ReactNodeViewRenderer } from "@tiptap/react";
 import type { AnyExtension } from "@tiptap/core";
 import { NodeRange } from "@tiptap/extension-node-range";

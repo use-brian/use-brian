@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { routeProgress, isInternalNavigation } from "../route-progress";
 
-const ORIGIN = "https://app.sidan.ai";
+const ORIGIN = "https://app.usebrian.ai";
 const HOME = `${ORIGIN}/w/team-1/p`;
 
 describe("[COMP:app-web/route-progress] routeProgress store", () => {
@@ -100,7 +100,7 @@ describe("[COMP:app-web/route-progress] isInternalNavigation classifier", () => 
 
   it("ignores mailto:/tel: protocols", () => {
     expect(
-      isInternalNavigation({ ...base, href: "mailto:hi@sidan.ai" }),
+      isInternalNavigation({ ...base, href: "mailto:hi@usebrian.ai" }),
     ).toBe(false);
   });
 

@@ -19,7 +19,7 @@
  * docs/architecture/platform/sensitivity.md.
  */
 
-import type { AccessContext, Sensitivity } from '@sidanclaw/core'
+import type { AccessContext, Sensitivity } from '@use-brian/core'
 import { query } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────

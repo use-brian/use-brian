@@ -19,14 +19,14 @@
  */
 
 import { Router } from 'express'
-import { matchInducedSkill, type ExistingSkillForMatch } from '@sidanclaw/core'
+import { matchInducedSkill, type ExistingSkillForMatch } from '@use-brian/core'
 import { query } from '../db/client.js'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type { WorkspaceSkillFilesStore } from '../db/workspace-skill-files-store.js'
 import type { WorkspaceSkillEnablementStore } from '../db/workspace-skill-enablement-store.js'
-import type { EntityLinksStore } from '@sidanclaw/core'
+import type { EntityLinksStore } from '@use-brian/core'
 
 export type SkillApprovalRouteOptions = {
   approvalsStore: PendingApprovalsStore

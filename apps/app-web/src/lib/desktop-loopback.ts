@@ -16,7 +16,7 @@
  * Validate the shell's loopback redirect param. Returns the bare `origin + /cb`
  * (callers append their own query) only for an `http://` URL on a loopback host
  * with a port and the `/cb` path; `null` for anything else, so callers fall back
- * to the `sidanclaw://auth` scheme.
+ * to the `usebrian://auth` scheme.
  */
 export function loopbackRedirectBase(raw: string | null | undefined): string | null {
   if (!raw) return null;

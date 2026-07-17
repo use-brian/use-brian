@@ -5,7 +5,7 @@ import pg from 'pg'
  * Integration test for WU-2.2 — memory supersession-on-write,
  * bi-temporal reads, and the D.7 getMemoryHistory chain walker.
  *
- * Requires a local `sidanclaw` PostgreSQL database with migration 128
+ * Requires a local `Use Brian` PostgreSQL database with migration 128
  * applied (the universal column set on memories). Skips silently when
  * the DB is unavailable or the migration hasn't landed.
  */
@@ -13,7 +13,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -232,7 +232,7 @@ describeIf('[COMP:memory/bi-temporal-reads] reads filter valid_to IS NULL', () =
     }
   })
 
-  function ctx(): import('@sidanclaw/core').AccessContext {
+  function ctx(): import('@use-brian/core').AccessContext {
     return { workspaceId, userId, assistantId, assistantKind: 'standard', clearance: 'confidential' }
   }
 

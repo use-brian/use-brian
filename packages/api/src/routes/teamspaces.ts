@@ -28,7 +28,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { canRead, type Sensitivity } from '@sidanclaw/core'
+import { canRead, type Sensitivity } from '@use-brian/core'
 import type { TeamspaceStore, Teamspace } from '../db/teamspace-store.js'
 import { ensureDefaultTeamspaceSystem, joinDefaultTeamspacesSystem } from '../db/teamspace-store.js'
 import {

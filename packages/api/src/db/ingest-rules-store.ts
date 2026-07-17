@@ -16,7 +16,7 @@
  * source" + "Ingestion control plane".
  */
 
-import { getDefaultRules, type IngestSourceProvider } from '@sidanclaw/core'
+import { getDefaultRules, type IngestSourceProvider } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 
 // 'reply' (migration 283) is a WhatsApp BotHandler trigger mode — evaluated by

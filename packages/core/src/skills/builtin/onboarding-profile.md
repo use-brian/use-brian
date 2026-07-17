@@ -2,9 +2,9 @@
 name: onboarding-profile
 description: Cold-start interview that builds the user's own profile in the brain from a couple of quick questions, then reflects the saved profile back.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: productivity
   applies_to_app_type: any
   when_to_use: The user wants the brain to know them — "help me build a profile of myself", "tell the brain about me", "set up my profile", or the cold-start "Tell me about you" card. Run the short interview, write the self profile, reflect it back. If a profile already exists, offer to update it instead of starting over.

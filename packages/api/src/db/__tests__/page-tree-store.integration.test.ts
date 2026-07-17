@@ -4,18 +4,18 @@
  * Integration test for the doc page-tree mutations on
  * `saved_views` (migration 210: `nest_parent_id` + `position`).
  *
- * Requires a local `sidanclaw` PostgreSQL database with migration 210
+ * Requires a local `Use Brian` PostgreSQL database with migration 210
  * applied. Skips silently otherwise (probe selects the new columns).
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import pg from 'pg'
-import type { SavedViewStore } from '@sidanclaw/core'
+import type { SavedViewStore } from '@use-brian/core'
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

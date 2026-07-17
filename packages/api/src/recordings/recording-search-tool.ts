@@ -13,7 +13,7 @@
 // in-process tool".
 
 import { z } from 'zod'
-import { buildTool, type Embedder, type RetrievalActor, type Tool } from '@sidanclaw/core'
+import { buildTool, type Embedder, type RetrievalActor, type Tool } from '@use-brian/core'
 import {
   searchRecording as searchRecordingFn,
   readRecordingRange,

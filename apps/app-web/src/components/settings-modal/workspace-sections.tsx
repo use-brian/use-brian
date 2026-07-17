@@ -34,7 +34,7 @@ import {
 } from "@/lib/api/workspaces";
 import { listCustomPageTemplates } from "@/lib/api/views";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { getUserInfo } from "@/lib/user";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { canDeleteWorkspace } from "@/lib/workspace-permissions";

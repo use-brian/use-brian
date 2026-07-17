@@ -80,8 +80,8 @@ import type {
   WorkflowRunStore,
   WorkspaceDirectoryStore,
   WorkspaceMemberInfo,
-} from '@sidanclaw/core'
-import type { CustomThemePayload } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import type { CustomThemePayload } from '@use-brian/shared'
 import {
   createDocEntityTools,
   createDocTools,
@@ -90,7 +90,7 @@ import {
   createGetCommentThreadTool,
   createIngestPageTool,
   listBuiltInEntityTypes,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { createDbDocEntityStore } from '../db/doc-entity-store.js'
 import { createDbDocPageStore } from '../db/doc-page-store.js'
 import { createDbDocThemesStore, type DocThemeStore } from '../db/doc-themes-store.js'

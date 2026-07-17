@@ -26,7 +26,7 @@ describe("[COMP:app-web/auth-logout] logout route", () => {
   });
 
   // The load-bearing invariant: a sub-app must NOT write the shared
-  // `.sidan.ai` cookies. With a primary configured (prod), the route
+  // `.usebrian.ai` cookies. With a primary configured (prod), the route
   // refuses (410) and writes no Set-Cookie — the client bounces to the
   // primary's logout instead.
   it("prod: returns 410 and writes no cookies", async () => {

@@ -16,7 +16,7 @@ import {
   sweepStaleWorkerRuns,
   WORKER_RUNS_RETENTION_DAYS,
 } from '../worker-runs-cleanup.js'
-import type { WorkerRunsStore } from '@sidanclaw/core'
+import type { WorkerRunsStore } from '@use-brian/core'
 
 function makeStore(): WorkerRunsStore & {
   spy: ReturnType<typeof vi.fn>

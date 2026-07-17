@@ -43,7 +43,7 @@ const ctx = {
   userId: 'u',
   assistantId: 'a',
   sessionId: 's',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'assistant-call',
   channelId: 'c',
   workspaceId: 'ws',

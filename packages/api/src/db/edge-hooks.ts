@@ -1,4 +1,4 @@
-import type { EdgeType, EntityLinksStore, EntitySource, LinkKind } from '@sidanclaw/core'
+import type { EdgeType, EntityLinksStore, EntitySource, LinkKind } from '@use-brian/core'
 
 /**
  * Edge-write hooks for primitive save-sites (company-brain WU-1.7).

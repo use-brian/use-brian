@@ -22,13 +22,13 @@ import {
   fitMessagesToBudget, resolveInputTokenLimit, MODEL_CONTEXT_FIT_RATIO,
   isContextOverflowError,
   sanitize as sanitizeAnalytics,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type {
   Message, LLMProvider, MemoryStore, AnalyticsLogger,
   CompactionTier, CompactionProfile, ChannelClass, EpisodeSection,
   EpisodicStore, EpisodicMemoryRecord, UsageStore,
   SessionStateStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   setCompactSummaryAndBoundary, toStampedMessages, findSessionById,
 } from '../db/sessions.js'

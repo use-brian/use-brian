@@ -70,7 +70,7 @@ export type BlockRunResult = {
  * the send handshake.
  */
 export function buildRunnerShimSource(opts: { sendTimeoutSeconds: number }): string {
-  return `"""sidanclaw governed browser runner (R2-9).
+  return `"""Use Brian governed browser runner (R2-9).
 
 Blocks drive THESE verbs only. The terminal verb (submit) never fires without
 a host-side gate decision: grant / approval / rehearsal-stub.

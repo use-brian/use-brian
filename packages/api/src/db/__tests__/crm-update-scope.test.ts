@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AccessContext, EntityRecord } from '@sidanclaw/core'
+import type { AccessContext, EntityRecord } from '@use-brian/core'
 
 vi.mock('../client.js', () => ({
   query: vi.fn(async () => ({ rows: [], rowCount: 0 })),

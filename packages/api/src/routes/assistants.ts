@@ -21,10 +21,10 @@ import type { ConnectorStore } from '../db/connector-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
-import type { McpSettingsStore, JobStore, CapabilityStore } from '@sidanclaw/core'
-import { APP_LEVEL_ASSISTANT_ID, BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_CONNECTORS, type ConnectorEntry } from '@sidanclaw/shared'
-import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@sidanclaw/core'
-import type { SkillContent } from '@sidanclaw/core'
+import type { McpSettingsStore, JobStore, CapabilityStore } from '@use-brian/core'
+import { APP_LEVEL_ASSISTANT_ID, BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTOR_TOOLS, OFFICIAL_CONNECTORS, type ConnectorEntry } from '@use-brian/shared'
+import { classifyTool, defaultPolicy, loadBuiltinSkills } from '@use-brian/core'
+import type { SkillContent } from '@use-brian/core'
 import type { SkillStore } from '../db/skill-store.js'
 
 type AssistantParams = { assistantId: string }
@@ -459,7 +459,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   type PrimitiveCapability = (typeof PRIMITIVE_CAPABILITIES)[number]
   // Admin-gated named capabilities toggleable on this surface. `configure`
   // unlocks Tier-2 control-plane write tools for agents acting as this
-  // assistant (CONFIGURE_CAPABILITY in @sidanclaw/core).
+  // assistant (CONFIGURE_CAPABILITY in @use-brian/core).
   const ADMIN_CAPABILITIES = ['configure'] as const
   const TOGGLEABLE_CAPABILITIES = [...PRIMITIVE_CAPABILITIES, ...ADMIN_CAPABILITIES]
 
@@ -648,6 +648,9 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         const teamNative = await options.connectorInstanceStore.listByWorkspaceSystem(assistantTeamId)
         for (const inst of teamNative) {
           const entry = registry.find((e) => e.id === inst.provider)
+          // WhatsApp channel infrastructure owns connector_instance rows for
+          // credentials and attribution, but it exposes no assistant tools.
+          if (inst.provider === 'whatsapp') continue
           byKey.set(inst.provider, {
             id: inst.provider,
             name: inst.label,
@@ -667,6 +670,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         for (const g of grants) {
           if (byKey.has(g.instance.provider)) continue   // team-native wins
           const entry = registry.find((e) => e.id === g.instance.provider)
+          if (g.instance.provider === 'whatsapp') continue
           byKey.set(g.instance.provider, {
             id: g.instance.provider,
             name: g.instance.label,
@@ -1038,7 +1042,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (updates.timezone) {
       const existing = await options.jobStore.get(jobId)
       if (existing) {
-        const { computeNextRun } = await import('@sidanclaw/core')
+        const { computeNextRun } = await import('@use-brian/core')
         updates.nextRunAt = computeNextRun(existing.schedule, updates.timezone)
       }
     }

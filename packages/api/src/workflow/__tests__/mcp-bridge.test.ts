@@ -15,7 +15,7 @@ vi.mock('../../mcp/inject.js', () => ({ injectMcpTools: vi.fn() }))
 
 import { buildWorkflowToolRegistry, type WorkflowToolRegistryDeps } from '../mcp-bridge.js'
 import { injectMcpTools, type McpInjectionResult } from '../../mcp/inject.js'
-import type { Tool } from '@sidanclaw/core'
+import type { Tool } from '@use-brian/core'
 
 const mockInject = vi.mocked(injectMcpTools)
 

@@ -6,9 +6,9 @@ export const ja: Dictionary = {
     back: "戻る",
   },
   login: {
-    title: "sidanclaw にサインイン",
+    title: "Use Brian にサインイン",
     description:
-      "タスク・CRM・ナレッジ・ワークフローを束ねるあなたのカンパニーブレイン。sidanclaw と同じアカウントでサインインしてください。",
+      "タスク・CRM・ナレッジ・ワークフローを束ねるあなたのカンパニーブレイン。Use Brian と同じアカウントでサインインしてください。",
     continueWithGoogle: "Google で続行",
     devLogin: "ローカル開発用アカウントでサインイン",
     errorDevLogin:
@@ -34,9 +34,9 @@ export const ja: Dictionary = {
   },
   desktopSignedIn: {
     title: "サインインが完了しました",
-    body: "このタブを閉じて Sidanclaw に戻ってください。",
+    body: "このタブを閉じて Use Brian に戻ってください。",
     errorTitle: "サインインが完了しませんでした",
-    errorBody: "Sidanclaw に戻り、もう一度サインインをお試しください。",
+    errorBody: "Use Brian に戻り、もう一度サインインをお試しください。",
   },
   workspace: {
         brain: {
@@ -81,7 +81,7 @@ export const ja: Dictionary = {
   },
   planGate: {
     title: "このワークスペースにはプランが必要です",
-    body: "sidanclaw Cloud は有料プランで動作します。プランが有効になるまで、このワークスペースのチャット・チャネル・自動化は一時停止されます。",
+    body: "Use Brian Cloud は有料プランで動作します。プランが有効になるまで、このワークスペースのチャット・チャネル・自動化は一時停止されます。",
     dataNote: "保存したデータはすべてそのまま保持され、エクスポートも可能です。",
     startTrial: "30 日間の無料トライアルを開始",
     choosePlan: "プランを選ぶ",
@@ -133,8 +133,8 @@ export const ja: Dictionary = {
       "返信の途中で接続が切れました。これまでのページの変更は保存済みです。続けるにはもう一度メッセージを送ってください。",
     switchAssistant: "アシスタントを切り替え",
     switchAssistantTitle: "話す相手",
-    emptyTitle: "sidanclaw に依頼",
-    emptyDesc: "表・ボード・一覧など、見たいものを伝えると sidanclaw がビューを下書きします。",
+    emptyTitle: "Use Brian に依頼",
+    emptyDesc: "表・ボード・一覧など、見たいものを伝えると Use Brian がビューを下書きします。",
     retry: "再試行",
     retrying: "再試行中…",
     copy: "コピー",
@@ -342,11 +342,11 @@ export const ja: Dictionary = {
     },
   },
   sharedPage: {
-    footer: "sidanclaw で共有",
+    footer: "Use Brian で共有",
     unavailable: "この共有ページは利用できなくなりました。",
     siteNotFoundTitle: "ページが見つかりません",
     siteNotFoundBody: "このページは存在しないか、公開が終了しています。",
-    poweredByCta: "sidanclaw を無料で試す",
+    poweredByCta: "Use Brian を無料で試す",
     commentsHeading: "コメント",
     commentDrawerTitle: "コメント",
     commentDrawerClose: "閉じる",
@@ -532,7 +532,7 @@ export const ja: Dictionary = {
     landing: {
       title: "何を見たいですか？",
       subtitle:
-        "見たいビュー・ページ・質問を入力すると、sidanclaw が下書きを作成します。",
+        "見たいビュー・ページ・質問を入力すると、Use Brian が下書きを作成します。",
       placeholder: "例：進行中の商談をステージ別に並べたボード",
       send: "作成",
       startBlank: "白紙のページから始める",
@@ -543,7 +543,7 @@ export const ja: Dictionary = {
         "パイプラインを要約して",
       ],
       recentsTitle: "最近開いたページ",
-      building: "sidanclaw がこのページを作成しています…",
+      building: "Use Brian がこのページを作成しています…",
       buildingHint: "その場で作成中です。チャットを開く必要はありません。",
       buildingThinking: "考え中…",
       buildingReasoning: "思考過程",
@@ -610,7 +610,7 @@ export const ja: Dictionary = {
     setupChecklist: {
       ariaLabel: "ワークスペースをセットアップ",
       title: "セットアップを始める",
-      subtitle: "数ステップで sidanclaw をあなた仕様に。",
+      subtitle: "数ステップで Use Brian をあなた仕様に。",
       dismissAriaLabel: "セットアップリストを閉じる",
       connectTitle: "ツールを連携",
       connectDesc: "普段の業務で使うアプリをつなげましょう。",
@@ -1190,7 +1190,7 @@ export const ja: Dictionary = {
       draftsDesc: "チャットで作成した下書きはここに表示されます。保存しなければ30日後に自動削除されます。",
       searchTitle: "一致するものがありません",
       searchDesc: "検索条件に一致するページがありません。別のキーワードで試すか、チャットに尋ねてください。",
-      searchCta: "sidanclaw に依頼",
+      searchCta: "Use Brian に依頼",
     },
     // Phase 4 — エラー表示
     errors: {
@@ -1299,7 +1299,7 @@ export const ja: Dictionary = {
     },
     privacy: {
       analyticsTitle: "アナリティクス",
-      analyticsDesc: "匿名化された利用状況で sidanclaw の改善にご協力ください。",
+      analyticsDesc: "匿名化された利用状況で Use Brian の改善にご協力ください。",
       dataTitle: "あなたのデータ",
       deleteMemoriesTitle: "すべての記憶を削除",
       deleteMemoriesDesc: "すべてのアシスタントの記憶を完全に削除します。この操作は取り消せません。",
@@ -1447,6 +1447,22 @@ export const ja: Dictionary = {
         errKey: "そのサービスアカウントキーは無効です。完全な JSON キーを貼り付けてください。",
         errGeneric: "そのバケットに接続できませんでした。キー、バケット、ロールを確認して、もう一度お試しください。",
       },
+      s3: {
+        formHelp: "S3 互換バケット（AWS S3、MinIO、Cloudflare R2、Backblaze B2 など）を接続します。ファイルのバイトは、あなた自身のキーでこのバケットに保存されます。",
+        bucketPlaceholder: "バケット名",
+        regionPlaceholder: "リージョン（例: us-east-1、R2 は auto）",
+        endpointPlaceholder: "エンドポイント URL（任意、AWS 以外のストア向け）",
+        accessKeyPlaceholder: "アクセスキー ID",
+        secretKeyPlaceholder: "シークレットアクセスキー",
+        leastPriv: "このバケットのみに対して、認証情報に読み取り・書き込み・削除の権限を付与してください。アカウント全体のアクセス権は付与しないでください。",
+        endpointNote: "AWS S3 の場合はエンドポイントを空欄にしてください。MinIO、R2、B2 の場合はストアの S3 エンドポイント URL を貼り付けてください。",
+        connectBtn: "検証して接続",
+        validatingBtn: "検証中...",
+        errPermission: "その認証情報ではバケットにアクセスできません。バケット名と付与したポリシーを確認してください。",
+        errBucket: "バケットに到達できません。バケット名、リージョン、エンドポイントを確認してください。",
+        errKey: "そのキーは無効です。アクセスキー ID とシークレットアクセスキーを確認してください。",
+        errGeneric: "そのバケットに接続できませんでした。キー、バケット、リージョン、エンドポイントを確認して、もう一度お試しください。",
+      },
       gcalNotifyTitle: "メール通知を送信",
       gcalNotifyDesc: "予定の作成・更新・削除時に出席者へ通知します",
       gcalNotifyAll: "すべて",
@@ -1582,7 +1598,7 @@ export const ja: Dictionary = {
       preflightErrDuplicate: "このヘッダー名は既に使用されています。",
       actorIdentityTitle: "サインイン中のユーザー情報を送信",
       actorIdentityDesc: "サインイン中のユーザーの識別情報（Web ではメール、WhatsApp では電話番号、Telegram ではハンドル、Slack ではユーザー ID）を毎回のリクエストでこのサーバーに送信し、本人に代わって処理できるようにします。既定ではオフです。",
-      actorIdentityNoAuthWarning: "このコネクターには認証が設定されていないため、サーバーは識別情報が sidanclaw から送信されたものか検証できません。サインインに利用する前に、上でベアラートークンまたはカスタムヘッダーを設定してください。",
+      actorIdentityNoAuthWarning: "このコネクターには認証が設定されていないため、サーバーは識別情報が Use Brian から送信されたものか検証できません。サインインに利用する前に、上でベアラートークンまたはカスタムヘッダーを設定してください。",
       mediaTokenTitle: "このユーザーのメディア取得を許可",
       mediaTokenDesc: "サインイン中のユーザーが最近チャネルで送信した音声メモや動画を、このサーバーが取得して処理できるようにします。各リクエストにはこのユーザーだけに限定された短時間有効なトークンが付与されるため、サーバーが他のユーザーのメディアにアクセスすることはできません。既定ではオフです。",
       // ── ワークスペース所有のコネクター: 移管 + 権限ゲート管理 ──

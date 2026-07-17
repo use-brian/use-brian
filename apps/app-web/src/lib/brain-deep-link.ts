@@ -73,7 +73,7 @@ export function parseBrainDeepLink(
 
 /**
  * Build the canonical link to a brain row. `origin` is the app origin (e.g.
- * `https://app.sidan.ai`); pass "" for a relative in-app href.
+ * `https://app.usebrian.ai`); pass "" for a relative in-app href.
  *
  * The `kind` param is omitted for a task so the common case stays short and
  * pasteable — `parseBrainDeepLink` defaults it back.

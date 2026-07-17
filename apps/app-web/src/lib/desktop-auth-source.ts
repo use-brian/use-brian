@@ -1,7 +1,7 @@
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
  *
- * The web app authenticates via `.sidan.ai` cookies (`auth-fetch.ts`). A
+ * The web app authenticates via `.usebrian.ai` cookies (`auth-fetch.ts`). A
  * *bundled* desktop app (see `docs/plans/doc-desktop-bundled-offline.md`)
  * loads from a `file://` / `app://` origin, where doc-domain cookies don't
  * apply — so it authenticates with a Bearer token held by the Electron shell
@@ -91,8 +91,8 @@ export function isDesktopAuth(): boolean {
  * can skip the browser/primary-auth path entirely.
  *
  * This MUST take precedence over `buildPrimaryAuthUrl(...)`: in Electron the
- * primary (`sidan.ai`) is an external origin, so the nav policy opens its
- * `/api/auth/logout` in the SYSTEM browser — clearing the `.sidan.ai` cookies of
+ * primary (`usebrian.ai`) is an external origin, so the nav policy opens its
+ * `/api/auth/logout` in the SYSTEM browser — clearing the `.usebrian.ai` cookies of
  * the user's *web* session while the desktop app's separate cookie jar stays
  * signed in. Bridge-routed logout is the only way to sign the desktop app out.
  *
@@ -151,7 +151,7 @@ export interface AuthSource {
 
 /**
  * The desktop source. Reads tokens from the bridge; refreshes by calling the
- * API's `/auth/refresh` directly (no same-origin Next route, no `.sidan.ai`
+ * API's `/auth/refresh` directly (no same-origin Next route, no `.usebrian.ai`
  * cookie redirect); "login" opens the system-browser PKCE flow via the shell.
  */
 export const desktopAuthSource: AuthSource = {

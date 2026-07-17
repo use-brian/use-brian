@@ -10,7 +10,7 @@
  * placeholder` paints a `::before` pseudo-element via the `is-empty` class +
  * `data-placeholder` attr — see `globals.css`). It contributes no nodes or
  * marks, so it never touches the byte-for-byte Yjs schema parity the shared
- * `@sidanclaw/doc-model` schema guards — which is exactly why it lives here
+ * `@use-brian/doc-model` schema guards — which is exactly why it lives here
  * and not in the shared package.
  *
  * `placeholderTextFor` is exported for unit testing (app-web's vitest is

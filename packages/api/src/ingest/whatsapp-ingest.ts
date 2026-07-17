@@ -58,7 +58,7 @@ import {
   type SourceKind,
   type TaskStore,
   type WhatsappGroupWindow,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { appendBatchEvent } from '../db/pending-ingest-batches-store.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRuleRow, IngestRulesStore } from '../db/ingest-rules-store.js'

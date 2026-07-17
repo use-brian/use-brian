@@ -36,8 +36,8 @@ import {
   createWorkspaceTools,
   createWorkflowTools,
   type Tool,
-} from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS } from '@sidanclaw/shared/connector-registry'
+} from '@use-brian/core'
+import { OFFICIAL_CONNECTORS } from '@use-brian/shared/connector-registry'
 
 import { buildUnavailableCapabilitiesPrompt } from '../routes/route-helpers.js'
 

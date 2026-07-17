@@ -2,8 +2,8 @@ import type {
   ActiveGrantRow,
   CapabilityGrant,
   CapabilityStore,
-} from '@sidanclaw/core'
-import { DuplicateGrantError } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { DuplicateGrantError } from '@use-brian/core'
 import { query } from './client.js'
 
 type GrantRow = {

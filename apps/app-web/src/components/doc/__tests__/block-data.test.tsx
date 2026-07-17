@@ -26,7 +26,7 @@ import {
   translateCommit,
   applyOverrides,
 } from "../block-data";
-import type { A2UIWidget, TableWidget } from "@sidanclaw/views-renderer";
+import type { A2UIWidget, TableWidget } from "@use-brian/views-renderer";
 
 const EMPTY = new Set<string>();
 

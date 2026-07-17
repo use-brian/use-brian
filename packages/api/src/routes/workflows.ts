@@ -39,7 +39,7 @@ import {
   type WorkflowRunStore,
   type WorkflowStore,
   type WorkflowTrigger,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { z } from 'zod'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { ValidateDeliveryTarget, PreflightConnectorTool } from '../workflow/dependency-preflight.js'
@@ -332,7 +332,7 @@ async function dependencyIssues(
 }
 
 // Non-blocking authoring advisories (`stepAdvisories`) moved to
-// `@sidanclaw/core` (packages/core/src/workflow/advisories.ts) so the
+// `@use-brian/core` (packages/core/src/workflow/advisories.ts) so the
 // chat-authoring path (`proposeWorkflow`) emits the SAME advisories as this
 // REST path — chat-authored researchMode steps used to ship unwarned.
 // See docs/architecture/features/workflow.md → "Non-blocking advisories".
@@ -345,7 +345,7 @@ function mintWebhookCredentials(): { slug: string; secret: string } {
   }
 }
 
-function serializeWorkflow(w: import('@sidanclaw/core').WorkflowRecord) {
+function serializeWorkflow(w: import('@use-brian/core').WorkflowRecord) {
   return {
     id: w.id,
     workspaceId: w.workspaceId,
@@ -370,7 +370,7 @@ function serializeWorkflow(w: import('@sidanclaw/core').WorkflowRecord) {
   }
 }
 
-function serializeSummary(w: import('@sidanclaw/core').WorkflowRecord) {
+function serializeSummary(w: import('@use-brian/core').WorkflowRecord) {
   return {
     id: w.id,
     workspaceId: w.workspaceId,

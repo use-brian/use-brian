@@ -477,7 +477,7 @@ export type MemoryStore = {
    * without coordination (single-instance assumption).
    *
    * **Implementation note.** The DB-backed implementation in
-   * `@sidanclaw/api` is row-based (`worker_locks` table) — acquire/
+   * `@use-brian/api` is row-based (`worker_locks` table) — acquire/
    * heartbeat/release each check out a pool connection for a single
    * statement and return it. The lock itself is the row, not a
    * connection-tied resource. The previous `pg_try_advisory_lock`

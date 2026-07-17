@@ -17,7 +17,7 @@ const ctx = {
   assistantId: 'a1',
   userId: 'u1',
   sessionId: 's1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c_1',
   abortSignal: new AbortController().signal,
@@ -40,7 +40,7 @@ const writeToolServer: McpServerConfig = {
 }
 
 describe('[COMP:mcp/connector] wrapMcpTools', () => {
-  it('wraps each MCP tool as a sidanclaw Tool with namespaced name', () => {
+  it('wraps each MCP tool as a Use Brian Tool with namespaced name', () => {
     const wrapped = wrapMcpTools({
       server: readToolServer,
       settingsStore: makeFakeSettingsStore(),

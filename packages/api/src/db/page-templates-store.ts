@@ -3,7 +3,7 @@
  *
  * Workspace-shared, user-authored doc-page templates. A row is a reusable page
  * skeleton: name + icon + category + a `blocks` snapshot. The built-in catalog
- * (`PAGE_TEMPLATES` in `@sidanclaw/core`) is code; this store is the custom
+ * (`PAGE_TEMPLATES` in `@use-brian/core`) is code; this store is the custom
  * half, merged with the catalog by the gallery + the brain-MCP template tools.
  *
  * RLS via the `workspace_page_templates_workspace_member` policy — every
@@ -19,8 +19,8 @@ import type {
   CustomPageTemplateSummary,
   ExtractionSpec,
   PageTemplateCategory,
-} from '@sidanclaw/core'
-import { normalizeExtractionSpec } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { normalizeExtractionSpec } from '@use-brian/core'
 
 import { queryWithRLS } from './client.js'
 

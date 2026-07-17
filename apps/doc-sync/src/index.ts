@@ -8,7 +8,7 @@
  * all peers (human tabs + the server-side AI client), and persists a debounced
  * snapshot. See docs/architecture/features/doc.md → "Real-time collaboration".
  *
- * Reuses `@sidanclaw/api` (auth + DB pool) and `@sidanclaw/doc-model` (the
+ * Reuses `@use-brian/api` (auth + DB pool) and `@use-brian/doc-model` (the
  * shared schema + encode). The testable logic lives in `auth-hook.ts`,
  * `clearance-gate.ts`, `persistence.ts`; this file is the wiring.
  */
@@ -19,7 +19,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { WebSocketServer } from 'ws'
 import { Hocuspocus } from '@hocuspocus/server'
 import * as Y from 'yjs'
-import { getPool, query, queryWithRLS } from '@sidanclaw/api/db/client.js'
+import { getPool, query, queryWithRLS } from '@use-brian/api/db/client.js'
 import {
   applyOpsToYDoc,
   FRAGMENT_FIELD,
@@ -29,12 +29,13 @@ import {
   deriveRunBlockId,
   type DocOp,
   type AssistantRunChannel,
-} from '@sidanclaw/doc-model'
+} from '@use-brian/doc-model'
 import { resolveAuth } from './auth-hook.js'
 import { assertPageAccess, isReadOnlyRole, type RlsQuery } from './clearance-gate.js'
 import {
   loadPageUpdate,
   maybeEnqueueBrainIngest,
+  notifyPageUpdated,
   storePageSnapshot,
   type SysQuery,
 } from './persistence.js'
@@ -60,6 +61,19 @@ const API_INTERNAL_URL = process.env.API_INTERNAL_URL
 // packages/api/src/doc/internal-ingest-route.ts (the API re-gates, but a local
 // gate avoids a POST on every 2s debounce).
 const BRAIN_INGEST_COOLDOWN_MS = 5 * 60 * 1000
+
+// Self-loop guard input for the content-edit page-event trigger. The debounced
+// `onStoreDocument` settle can't tell a human WebSocket edit from an AI
+// `patchPage` apply — both mutate the same live doc — so we record every page an
+// `/internal/apply` (the trusted, secret-gated AI write path) touched here, and
+// the next settle drains it: a drained pageId means the window included a system
+// write, so the emitted `updated` event is marked `isSystem` (→ `isBot`), which
+// a default `fromBots: false` subscription drops. A window mixing a human + an
+// AI edit is conservatively marked system (favours breaking a workflow's
+// write→trigger→write self-loop over firing on the human edit; the next
+// purely-human settle fires normally). Single-instance service (min=max=1), so
+// this in-memory set is authoritative.
+const pagesWithSystemWriteSinceStore = new Set<string>()
 
 if (!JWT_SECRET) {
   console.error('[doc-sync] JWT_SECRET is required. Refusing to start.')
@@ -143,18 +157,30 @@ const hocuspocus = new Hocuspocus({
   },
 
   async onStoreDocument(data) {
+    const pageId = data.documentName
     const { page } = await storePageSnapshot({
-      pageId: data.documentName,
+      pageId,
       ydoc: data.document as unknown as Y.Doc,
       query: sysQuery,
     })
-    // Auto-on-save brain-ingest enqueue (canvas-brain-distillation.md
-    // deviation). Best-effort, fire-and-forget, gated by the per-page toggle +
-    // dedup + cooldown inside the helper — never blocks / breaks this store.
-    // Off unless BOTH the API URL and the shared secret are configured.
+    // Drain the self-loop flag for this settle window BEFORE any early return, so
+    // a system write is never left pending to mis-mark a later human edit.
+    const wroteBySystem = pagesWithSystemWriteSinceStore.delete(pageId)
     if (API_INTERNAL_URL && DOC_SYNC_SECRET) {
+      // Content-edit page-event trigger (workflow `page` source). Best-effort,
+      // fire-and-forget: a body edit fires an `updated` event so a workflow
+      // watching this page runs. Fires on every content settle — the API-side
+      // dispatcher is a cheap no-op for pages nobody subscribes to.
+      void notifyPageUpdated({
+        pageId,
+        isSystem: wroteBySystem,
+        config: { apiBaseUrl: API_INTERNAL_URL, syncSecret: DOC_SYNC_SECRET },
+      })
+      // Auto-on-save brain-ingest enqueue (canvas-brain-distillation.md
+      // deviation). Best-effort, fire-and-forget, gated by the per-page toggle +
+      // dedup + cooldown inside the helper — never blocks / breaks this store.
       void maybeEnqueueBrainIngest({
-        pageId: data.documentName,
+        pageId,
         page,
         query: sysQuery,
         config: {
@@ -207,7 +233,7 @@ runSweepTimer.unref()
  *
  * NOTE (web-QA): the live broadcast + persistence of an AI apply needs a
  * running service + a connected browser to verify end-to-end; the op→doc
- * transform itself is unit-tested in `@sidanclaw/doc-model` (`apply-ops`).
+ * transform itself is unit-tested in `@use-brian/doc-model` (`apply-ops`).
  */
 async function handleInternalApply(
   req: IncomingMessage,
@@ -259,6 +285,16 @@ async function handleInternalApply(
       result = applyOpsToYDoc(yDoc, ops)
       snapshot = yDocToSnapshot(yDoc)
     })
+    // Mark this page as system-written for the next debounced settle, so the
+    // content-edit page-event it fires is `isSystem` (the workflow self-loop
+    // guard). `/internal/apply` is the ONLY AI/service write path into a doc;
+    // human edits arrive over the gated WebSocket bridge, never here. Only mark
+    // when at least one op actually applied: a fully-skipped apply changes the
+    // doc nothing, so Hocuspocus schedules no settle to drain the flag — leaving
+    // it to mis-mark a later human edit as system.
+    if (result.skipped.length < ops.length) {
+      pagesWithSystemWriteSinceStore.add(pageId)
+    }
     // Heartbeat the page's assistant run with a coarse, client-localized step
     // derived from the ops that just landed — perfectly in sync with the blocks
     // appearing in the doc. No-ops if no run is open for this page (e.g. a

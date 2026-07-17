@@ -19,7 +19,7 @@ import type {
   GoalHostType,
   HostAdapter,
   HostStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import { updateTask } from '../db/tasks.js'
 

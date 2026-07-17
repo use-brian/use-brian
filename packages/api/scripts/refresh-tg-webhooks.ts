@@ -23,7 +23,7 @@
  *     --secret=CHANNEL_CREDENTIAL_KEY --project=internal-process-490404) \
  *   WEBHOOK_BASE_URL=https://sidanclaw-api-1011357498898.asia-east1.run.app \
  *   DATABASE_URL="$LOCAL_URL" \
- *     pnpm --filter @sidanclaw/api tsx scripts/refresh-tg-webhooks.ts
+ *     pnpm --filter @use-brian/api tsx scripts/refresh-tg-webhooks.ts
  *
  * Idempotent — running twice just re-POSTs the same setWebhook call.
  */
@@ -38,7 +38,7 @@ import {
   decryptCredentials,
   type TelegramCredentials,
 } from '../src/db/channel-integrations.js'
-import { createTelegramApi } from '@sidanclaw/channels'
+import { createTelegramApi } from '@use-brian/channels'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL

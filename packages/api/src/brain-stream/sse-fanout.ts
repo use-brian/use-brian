@@ -27,9 +27,9 @@ export const BRAIN_CHANNEL = 'brain_events'
  * The PGLite socket server does not propagate LISTEN/NOTIFY, so in single-
  * process mode the writer dispatches straight into local subscribers (same
  * process) via `dispatchBrainChangeLocal`, and the LISTEN connection is skipped.
- * The launcher sets SIDANCLAW_SINGLE_PROCESS=1. See oss-local-brain-wedge §12.4/§12.7.
+ * The launcher sets USEBRIAN_SINGLE_PROCESS=1. See oss-local-brain-wedge §12.4/§12.7.
  */
-const SINGLE_PROCESS = process.env.SIDANCLAW_SINGLE_PROCESS === '1'
+const SINGLE_PROCESS = process.env.USEBRIAN_SINGLE_PROCESS === '1'
 
 export function isSingleProcessBrainStream(): boolean {
   return SINGLE_PROCESS

@@ -94,7 +94,7 @@ const ctxAutonomous: ToolContext = {
   userId: 'u1',
   assistantId: 'a1',
   sessionId: 's1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'workflow',
   channelId: 'c1',
   workspaceId: 'ws-1',

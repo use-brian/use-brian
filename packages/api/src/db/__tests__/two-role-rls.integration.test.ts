@@ -14,7 +14,7 @@ import { describe, it, expect, afterAll } from 'vitest'
  * `app.system_bypass=''` pool-poison class no longer exists — enforcement is the
  * role, not a connection GUC.
  *
- * Requires the local `sidanclaw` DB (DATABASE_URL) AND the `app_user` role wired
+ * Requires the local `Use Brian` DB (DATABASE_URL) AND the `app_user` role wired
  * via DATABASE_URL_APP. Skips silently when either is missing (without the app
  * role, `queryWithRLS` falls back to the owner and isolation is meaningless).
  *

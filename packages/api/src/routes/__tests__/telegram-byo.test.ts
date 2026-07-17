@@ -33,8 +33,8 @@ const setWebhookCalls: Array<{ url: string; secret: string }> = []
 // Use the real Telegram adapter so parseIncoming runs the real topic-encoding
 // logic (we want to assert the route's behaviour on real parse output), but
 // stub out the network-touching bits.
-vi.mock('@sidanclaw/channels', async () => {
-  const actual = await vi.importActual<typeof import('@sidanclaw/channels')>('@sidanclaw/channels')
+vi.mock('@use-brian/channels', async () => {
+  const actual = await vi.importActual<typeof import('@use-brian/channels')>('@use-brian/channels')
   return {
     ...actual,
     verifyTelegramWebhook: vi.fn(() => true),
@@ -547,7 +547,7 @@ describe('[COMP:api/telegram-byo-route] media-group buffering', () => {
     // interleaves them (start_a, start_b, end_a, end_b); a serial
     // `for await` loop would give (start_a, end_a, start_b, end_b).
     const timeline: string[] = []
-    const channels = await import('@sidanclaw/channels')
+    const channels = await import('@use-brian/channels')
     const adapterFactory = channels.createTelegramAdapter
     const originalCreate = adapterFactory
     ;(channels as unknown as { createTelegramAdapter: typeof adapterFactory }).createTelegramAdapter =
@@ -868,7 +868,7 @@ describe('[COMP:api/telegram-byo-route] group add-protection', () => {
     }
   }
 
-  it('leaves the group when the adder has no linked sidanclaw account', async () => {
+  it('leaves the group when the adder has no linked Use Brian account', async () => {
     const linkedAccountStore = makeLinkedAccountStore(null)
 
     const app = createTestApp(

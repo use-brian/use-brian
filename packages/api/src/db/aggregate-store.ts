@@ -6,7 +6,7 @@ import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS } from './client.js'
 

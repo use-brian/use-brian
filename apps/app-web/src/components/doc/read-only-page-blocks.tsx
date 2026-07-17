@@ -22,8 +22,8 @@
 
 import { Fragment, useEffect, useState, type ReactNode } from "react";
 import { FileText } from "lucide-react";
-import { renderWidget } from "@sidanclaw/views-renderer";
-import type { A2UIWidget, ViewPayload } from "@sidanclaw/views-renderer";
+import { renderWidget } from "@use-brian/views-renderer";
+import type { A2UIWidget, ViewPayload } from "@use-brian/views-renderer";
 import type { PublicBlock, PublicComment } from "@/lib/api/public-share";
 import { publicMediaUrlFor, type PublicSource } from "@/lib/api/public-share";
 
@@ -182,7 +182,7 @@ function RichText({ value }: { value: unknown }) {
 // shows: clamp depths so a child is at most one level under its parent, fold the
 // flat run into a tree, then render — grouping consecutive same-kind siblings at
 // each level so numbers sequence and markers cycle (1→a→i, disc→circle→square)
-// via the `.doc-public-body` CSS. Mirrors `@sidanclaw/doc-model` `blocksToPMDoc`.
+// via the `.doc-public-body` CSS. Mirrors `@use-brian/doc-model` `blocksToPMDoc`.
 
 type ListNode = { block: PublicBlock; children: ListNode[] };
 

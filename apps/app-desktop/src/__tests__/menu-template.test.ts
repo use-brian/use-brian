@@ -16,7 +16,7 @@ const handlers: MenuTemplateHandlers = {
 
 /** Default options; spread + override per test. */
 function opts(over: Partial<MenuTemplateOptions> = {}): MenuTemplateOptions {
-  return { isMac: true, isDev: false, appName: "sidanclaw", update: null, ...over };
+  return { isMac: true, isDev: false, appName: "Use Brian", update: null, ...over };
 }
 
 /** Collect every `role` string in a template tree (top level + one submenu deep). */
@@ -41,7 +41,7 @@ const MAC_ONLY_ROLES = ["hide", "hideOthers", "unhide", "about", "zoom", "front"
 describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
   it("macOS: first menu is the app name and carries the macOS-only roles", () => {
     const t = buildMenuTemplate(opts(), handlers);
-    expect(t[0].label).toBe("sidanclaw");
+    expect(t[0].label).toBe("Use Brian");
     const r = roles(t);
     expect(r).toContain("hide");
     expect(r).toContain("about");
@@ -135,7 +135,7 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
 });
 
 describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.3)", () => {
-  const CLOUD = { kind: "cloud" as const, label: "sidanclaw Cloud" };
+  const CLOUD = { kind: "cloud" as const, label: "Use Brian Cloud" };
   const LOCAL = { kind: "local" as const, label: "Local Brain (localhost:3003)" };
 
   it("omits every target item when no target is passed (pre-dual-target menu)", () => {
@@ -149,7 +149,7 @@ describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.
   it("cloud target: shows the disabled indicator, the switch-to-local item, and keeps Sign In/Out", () => {
     for (const isMac of [true, false]) {
       const items = allItems(buildMenuTemplate(opts({ isMac, target: CLOUD }), handlers));
-      const indicator = items.find((i) => i.label === "Target: sidanclaw Cloud");
+      const indicator = items.find((i) => i.label === "Target: Use Brian Cloud");
       expect(indicator?.enabled).toBe(false);
       expect(items.find((i) => i.label === "Switch to Local Brain…")).toBeDefined();
       expect(items.find((i) => i.label === "Sign In")).toBeDefined();
@@ -164,7 +164,7 @@ describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.
       expect(items.find((i) => i.label === "Sign Out")).toBeUndefined();
       const indicator = items.find((i) => i.label === "Target: Local Brain (localhost:3003)");
       expect(indicator?.enabled).toBe(false);
-      expect(items.find((i) => i.label === "Switch to sidanclaw Cloud")).toBeDefined();
+      expect(items.find((i) => i.label === "Switch to Use Brian Cloud")).toBeDefined();
     }
   });
 

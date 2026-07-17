@@ -3,9 +3,9 @@ import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, up
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
-import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote } from '@sidanclaw/core'
+import { queryLoop, buildMemoryContext, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
-import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@sidanclaw/core'
+import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { gateSessionRead } from './sessions.js'
 import { renderArtifactManifest } from '../files/artifact-manifest.js'
@@ -25,15 +25,15 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 // WebChatOptions so the chat route depends on no platform-specific code. The
 // composition root passes the real impls; the open build uses the inline
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
-import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@sidanclaw/core'
+import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
 import { resolveModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@sidanclaw/shared'
+import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
 import { createDocRunClient } from '../doc/run-presence-client.js'
-import type { AssistantRunChannel } from '@sidanclaw/doc-model'
+import type { AssistantRunChannel } from '@use-brian/doc-model'
 import {
   FREE_RESEARCH_QUOTA,
   getConnectorUserId,
@@ -48,7 +48,7 @@ import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
 import { detectAndResolveNags } from '../scheduling/nag-resolver.js'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
-import type { JobStore } from '@sidanclaw/core'
+import type { JobStore } from '@use-brian/core'
 import type { PendingApprovalsStore, ApprovalKind } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
 
@@ -222,7 +222,7 @@ type WebChatOptions = {
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
   /** Shared workspace tool policy (migration 312) — governs team-owned connector tool allow/ask/block. */
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   /**
    * Phase 3 of askQuestion suspend-resume — persisted worker_runs store.
    * When set together with `workerManager`, each turn calls
@@ -231,15 +231,15 @@ type WebChatOptions = {
    * same store. Optional; absent in worker / scheduled-job / smoke contexts.
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
-  workerRunsStore?: import('@sidanclaw/core').WorkerRunsStore
-  knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
+  workerRunsStore?: import('@use-brian/core').WorkerRunsStore
+  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
   /**
    * KB repo write-back port (assistant direct edits). Chat is an
    * interactive, confirmation-capable surface, so this route passes
    * `allowKnowledgeWrites: true` to `applyMcpInjection`.
    */
-  knowledgeRepoWriter?: import('@sidanclaw/core').KnowledgeRepoWriter
-  gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
+  knowledgeRepoWriter?: import('@use-brian/core').KnowledgeRepoWriter
+  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   skillStore?: import('../db/skill-store.js').SkillStore
   /**
    * CL-8 workspace-scoped skill counters. Optional today — when set
@@ -257,7 +257,7 @@ type WebChatOptions = {
   workspaceSkillEnablementStore?: import('../db/workspace-skill-enablement-store.js').WorkspaceSkillEnablementStore
   /** Backs load-time `{{kind:name}}` pointer expansion in `useSkill`. */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
-  communitySkills?: import('@sidanclaw/core').SkillContent[]
+  communitySkills?: import('@use-brian/core').SkillContent[]
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   deferredConfirmationStore?: DeferredConfirmationStore
   /**
@@ -325,11 +325,11 @@ type WebChatOptions = {
    *  capability + `assistant.workspaceId` is bound, the `# Workspace Files`
    *  L1 block is injected. Optional so smoke tests / dev runs without GCS
    *  still work. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Workspace-files byte layer — forwarded via `applyMcpInjection` so
    *  `gmailSendMessage` can attach workspace files as real MIME parts
    *  (`docs/architecture/integrations/gmail.md` → "Attachments"). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /**
    * Company-brain read surface (WS-5). When set, the 6 retrieval tools
    * (`getEntity`, `search`, `recentEpisodes`, `provenance`, `markUseful`,
@@ -346,7 +346,7 @@ type WebChatOptions = {
    * this" affordance). Built at boot from `createInspectionTools` over
    * a DB-backed inspection store. See docs/architecture/brain/corrections.md.
    */
-  inspectionTools?: Record<string, import('@sidanclaw/core').Tool>
+  inspectionTools?: Record<string, import('@use-brian/core').Tool>
   /** Generate mode as a chat tool (fill a blueprint from the brain). Built at
    *  boot with generateSynthesize + pageTemplateStore; workspace-scoped. */
   generateBlueprintTool?: Tool
@@ -379,8 +379,8 @@ type WebChatOptions = {
    * the surface that wires these: it also injects the retrieval tools the
    * model uses to discover the `entityId`.
    */
-  entitiesStore?: import('@sidanclaw/core').EntityStore
-  entityLinksStore?: import('@sidanclaw/core').EntityLinksStore
+  entitiesStore?: import('@use-brian/core').EntityStore
+  entityLinksStore?: import('@use-brian/core').EntityLinksStore
   /**
    * Self-healing reclassifier candidate store (Q5 of the brain-
    * ingestion-classification design thread). When set together with
@@ -390,7 +390,7 @@ type WebChatOptions = {
    * a `mentioned` edge + audit row. Optional; absent disables the
    * hook (the explicit `healMemories` chat tool still works).
    */
-  brainCandidateStore?: import('@sidanclaw/core').BrainCandidateStore
+  brainCandidateStore?: import('@use-brian/core').BrainCandidateStore
   /**
    * Company-brain ingest (WU-3.6). When set, the chat compaction
    * checkpoint hands the just-compacted conversation window to this
@@ -463,7 +463,7 @@ function extractPlainText(content: Message['content']): string {
     .join('')
 }
 
-// `sanitizeTitle` now lives in `@sidanclaw/core` (`doc/auto-title.ts`) so
+// `sanitizeTitle` now lives in `@use-brian/core` (`doc/auto-title.ts`) so
 // the session generator here and the doc page generator share one cleanup
 // contract. Re-exported for the existing `[COMP:api/chat-route] sanitizeTitle`
 // unit tests; imported above for internal use by `generateTitle`.
@@ -1562,7 +1562,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           assistantKind: assistant.kind,
         })
       ) {
-        const { classifyResearchIntent } = await import('@sidanclaw/core')
+        const { classifyResearchIntent } = await import('@use-brian/core')
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
@@ -2285,7 +2285,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         compartments: readCompartments,
       }
       const [soul, identityMemories, rankedIndex, preferredChannel, selfEntityId] = await Promise.all([
-        options.memoryStore.getSoul(assistant.id, user.id, 'sidanclaw'),
+        options.memoryStore.getSoul(assistant.id, user.id, 'Use Brian'),
         options.memoryStore.getIdentity(viewerCtx),
         options.memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
         getPreferredChannel(assistant.id, user.id),
@@ -2721,7 +2721,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const [{ createDbDocPageStore }, { buildOutline, renderActivePageOutline }] =
             await Promise.all([
               import('../db/doc-page-store.js'),
-              import('@sidanclaw/core'),
+              import('@use-brian/core'),
             ])
           const current = await createDbDocPageStore().getVersionedPage(
             user.id,
@@ -2806,7 +2806,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         try {
           const [{ createDbCommentThreadStore }, { formatThreadDiscovery }] = await Promise.all([
             import('../db/comment-thread-store.js'),
-            import('@sidanclaw/core'),
+            import('@use-brian/core'),
           ])
           const summaries = await createDbCommentThreadStore().listThreadSummariesForPage(
             user.id,
@@ -3390,7 +3390,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // toggle), so stacking the global addendum here would give it
       // contradictory worker instructions.
       if (researchMode && !docCtx) {
-        const { RESEARCH_MODE_ADDENDUM } = await import('@sidanclaw/core')
+        const { RESEARCH_MODE_ADDENDUM } = await import('@use-brian/core')
         fullSystemPrompt += `\n\n${RESEARCH_MODE_ADDENDUM}`
       }
 
@@ -3555,7 +3555,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // browse (see the operateSiteIntent block above). researchMode
           // being true here means the explicit toggle: splitter is moot.
           if (!researchMode && !operateSiteIntent) {
-            const { classifySplit } = await import('@sidanclaw/core')
+            const { classifySplit } = await import('@use-brian/core')
             const splitResult = await classifySplit({ provider: options.provider, message })
               .catch(() => ({ tasks: null, usage: null, model: null }))
             // Attribute splitter tokens as overhead. Recorded regardless of
@@ -3695,7 +3695,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 userId: user.id,
                 assistantId: assistant.id,
                 sessionId: session.id,
-                appId: 'sidanclaw',
+                appId: 'Use Brian',
                 channelType: session.channelType,
                 channelId: session.channelId,
                 abortSignal: new AbortController().signal,
@@ -3705,7 +3705,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               onEvent: (() => {
                 const seenWorkers = new Set<string>()
                 const seenCitationUrls = new Set<string>()
-                return (event: import('@sidanclaw/core').QueryEvent, workerId: string, description?: string) => {
+                return (event: import('@use-brian/core').QueryEvent, workerId: string, description?: string) => {
                   if (!seenWorkers.has(workerId)) {
                     seenWorkers.add(workerId)
                     sendEvent('worker_start', { workerId, description })
@@ -3968,7 +3968,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // persisted once the final assistant message id is known. See
       // docs/architecture/engine/grounding-gate.md → "Claim ledger".
       let pendingClaimLedger: Extract<
-        import('@sidanclaw/core').QueryEvent,
+        import('@use-brian/core').QueryEvent,
         { type: 'claim_ledger' }
       >['claims'] | null = null
 
@@ -4182,7 +4182,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             userId: user.id,
             assistantId: assistant.id,
             sessionId: session.id,
-            appId: 'sidanclaw',
+            appId: 'Use Brian',
             channelType: session.channelType,
             channelId: session.channelId,
             workspaceId: assistant.workspaceId ?? undefined,
@@ -5306,7 +5306,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               userId: user.id,
               assistantId: assistant.id,
               sessionId: session.id,
-              appId: 'sidanclaw',
+              appId: 'Use Brian',
               channelType: session.channelType,
               channelId: session.channelId,
               workspaceId: assistant.workspaceId ?? undefined,

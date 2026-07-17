@@ -4,9 +4,9 @@
  * Authenticates as a primary Workspace user using an app password (2FA must
  * be enabled on that user; the password is provisioned at
  * https://myaccount.google.com/apppasswords). The `From:` header is the
- * aliased address (e.g. `auth@sidan.ai`) — Gmail honors it because the
+ * aliased address (e.g. `auth@usebrian.ai`) — Gmail honors it because the
  * alias is registered as a "Send mail as" identity on the authenticating
- * user. Deliverability depends on SPF/DKIM/DMARC for `sidan.ai` being set
+ * user. Deliverability depends on SPF/DKIM/DMARC for `usebrian.ai` being set
  * up in Workspace admin.
  *
  * See docs/architecture/platform/auth.md → "Email magic-link flow".
@@ -127,9 +127,9 @@ export function createSmtpClient(opts: {
       })
       await opts.transport.sendMail({
         // Display name carries the workspace so the inbox row reads
-        // "sidanclaw - <workspace>" instead of the bare alias local-part.
+        // "Use Brian - <workspace>" instead of the bare alias local-part.
         from: {
-          name: `sidanclaw - ${inviteOpts.workspaceName}`,
+          name: `Use Brian - ${inviteOpts.workspaceName}`,
           address: opts.fromAddress,
         },
         to,

@@ -13,7 +13,7 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { viewsRoutes } from '../views.js'
-import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@sidanclaw/core'
+import type { CrmStore, SavedView, SavedViewStore, SoftDeleteRepository, TaskStore, WorkflowRunStore } from '@use-brian/core'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 
 const WORKSPACE_ID = '00000000-0000-0000-0000-000000000010'
@@ -39,6 +39,7 @@ function fakeSavedViewStore(): Mocked<SavedViewStore> {
     pruneExpiredDraftsSystem: vi.fn(),
     getBrainSyncStateSystem: vi.fn(),
     markBrainIngestedSystem: vi.fn(),
+    getPageEventContextSystem: vi.fn(),
   }
 }
 

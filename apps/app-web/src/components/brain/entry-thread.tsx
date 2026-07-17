@@ -9,7 +9,7 @@
  * composer whose send button morphs into Stop while a turn streams.
  *
  * Transport is the product chat plumbing (`useMessageStream` from
- * @sidanclaw/chat-ui): named SSE events, aborts, and the full taxonomy —
+ * @use-brian/chat-ui): named SSE events, aborts, and the full taxonomy —
  * `text_delta` grows the answer, `reasoning` feeds the live thinking line
  * (never the answer body), `tool_start`/`tool_input`/`tool_result`/
  * `tool_dropped` drive the activity chips (labels from
@@ -55,7 +55,7 @@ import {
   ChatMarkdown,
   useMessageStream,
   type ToolUsed,
-} from "@sidanclaw/chat-ui";
+} from "@use-brian/chat-ui";
 import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import { originClue } from "./source-origin";
 import {

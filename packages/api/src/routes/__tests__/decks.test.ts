@@ -1,7 +1,7 @@
 import express from 'express'
 import type { Server } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { FilesApi } from '@sidanclaw/core'
+import type { FilesApi } from '@use-brian/core'
 import type { DeckStore } from '../../db/deck-store.js'
 
 // Membership is the visibility boundary — mock the workspace-store lookups

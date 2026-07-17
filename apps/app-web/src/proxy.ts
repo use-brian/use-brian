@@ -30,18 +30,18 @@ type RefreshResult = {
  * Branches:
  *  1. Fresh access_token → let the request through (no cookie writes).
  *  2. No access_token, no refresh_token → bounce to login. In
- *     production this means redirecting to `sidan.ai/login?next=...`
- *     because only the primary writes the shared `.sidan.ai` cookies.
+ *     production this means redirecting to `usebrian.ai/login?next=...`
+ *     because only the primary writes the shared `.usebrian.ai` cookies.
  *     In dev (no `primaryAuthUrl()`) we fall back to the local
  *     `/login` page.
  *  3. Access expired (1h) but refresh still valid (30d) → in
- *     production, bounce to `sidan.ai/api/auth/refresh-and-return?
+ *     production, bounce to `usebrian.ai/api/auth/refresh-and-return?
  *     next=...` so the primary writes the rotated cookies and the
  *     browser comes back here with a fresh access token. In dev we
  *     refresh locally and set host-only cookies the same as before.
  *
- * Per the design rule "sidan.ai → sub-app, not the other way round",
- * `feed-web` never writes `.sidan.ai`-scoped cookies in production.
+ * Per the design rule "usebrian.ai → sub-app, not the other way round",
+ * `feed-web` never writes `.usebrian.ai`-scoped cookies in production.
  * The local refresh path is preserved only for the dev case where
  * cookies can't be shared across `localhost:300X` origins anyway.
  */
@@ -85,7 +85,7 @@ export async function proxy(request: NextRequest) {
   // `NextRequest.cookies.get(name)` returns the first value for `name`,
   // which on browsers carrying pre-migration host-only twins is the
   // *legacy* one — see `docs/architecture/platform/auth.md` → "Duplicate
-  // cookies after the .sidan.ai migration". Parse the raw Cookie header
+  // cookies after the .usebrian.ai migration". Parse the raw Cookie header
   // ourselves so we can pick the most-recently-set values.
   const cookieHeader = request.headers.get("cookie") ?? "";
   const hasAccess = parseLastCookie(cookieHeader, "access_token");
@@ -108,7 +108,7 @@ export async function proxy(request: NextRequest) {
   }
 
   // Access expired but refresh still around. In production, defer to
-  // the primary so it rotates and writes the `.sidan.ai` cookies; in
+  // the primary so it rotates and writes the `.usebrian.ai` cookies; in
   // dev refresh locally.
   if (primary) {
     const refreshUrl = new URL("/api/auth/refresh-and-return", primary);

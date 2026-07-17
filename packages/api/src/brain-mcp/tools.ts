@@ -63,7 +63,7 @@ import {
   withFreshBlockIds,
   PAGE_TEMPLATE_CATEGORIES,
   pageTemplateCategorySchema,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type {
   BindingConfig,
   Block,
@@ -78,7 +78,7 @@ import type {
   Tool,
   ToolContext,
   Embedder,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import { searchRecording as searchRecordingFn, readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import { searchFileSegments as searchFileSegmentsFn, readFileSegmentRange, type FileSegmentHit } from '../db/retrieval-store.js'
@@ -389,7 +389,7 @@ function capPageMarkdown(md: string): string {
  *                    `savedViewStore.remove` (RLS `DELETE`; the `saved_views`
  *                    FK cascade drops nested child pages per migration 210).
  *   - `listPageTemplates` (read) + `createPageFromTemplate` (write) → the
- *                    shared Notion-style template catalog (`@sidanclaw/core`
+ *                    shared Notion-style template catalog (`@use-brian/core`
  *                    `listPageTemplates` / `instantiatePageTemplate`). The
  *                    create path reuses the same `createDraft` seam as
  *                    `createPage`, seeding the page with the template's blocks
@@ -794,7 +794,7 @@ function buildDocPageTools(
   // ── listPageTemplates ─────────────────────────────────────────
   //
   // A read tool surfacing the shared Notion-style template catalog
-  // (`@sidanclaw/core` `listPageTemplates`) — the same registry the editor
+  // (`@use-brian/core` `listPageTemplates`) — the same registry the editor
   // slash menu reads. Catalog-only (no bodies), so the agent can pick a
   // `templateId` to pass to `createPageFromTemplate`. Workspace-independent
   // (the catalog is a code constant), but it still resolves the principal so a

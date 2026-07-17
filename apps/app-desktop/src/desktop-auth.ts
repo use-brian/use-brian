@@ -10,7 +10,7 @@
  * The code returns to the app over a **loopback redirect** (RFC 8252 §7.3): the
  * shell starts an ephemeral `http://127.0.0.1:<port>/cb` server, passes that URL
  * to the bridge, and the browser 302s the code straight back to it. This works
- * in an unpackaged `dist/main.js` dev run, which the `sidanclaw://auth` custom
+ * in an unpackaged `dist/main.js` dev run, which the `usebrian://auth` custom
  * scheme cannot (macOS only routes a custom scheme to a packaged `.app` whose
  * Info.plist declares it). The custom scheme is kept as a fallback for older
  * builds and remains the transport for non-auth deep links.
@@ -50,7 +50,7 @@ export function generatePkcePair(): PkcePair {
 // ── Pending-verifier persistence ───────────────────────────────
 //
 // The PKCE verifier must survive across processes: on macOS the
-// `sidanclaw://auth` callback often arrives in a different (cold-started or
+// `usebrian://auth` callback often arrives in a different (cold-started or
 // relaunched) process than the one that started sign-in, so an in-memory-only
 // verifier is lost. `main.ts` writes it to a small file in `userData` on
 // `startSignIn` and reads it back in `completeSignIn`. These two helpers are the
@@ -78,7 +78,7 @@ export function serializePendingVerifier(
  * Parse a persisted verifier blob, returning the verifier (and its add-account
  * intent) only if it is well-formed and not older than `maxAgeMs`. Returns
  * `null` otherwise (bad JSON, wrong shape, stale, or a clock that ran
- * backwards). The `addAccount` flag survives the cross-process `sidanclaw://auth`
+ * backwards). The `addAccount` flag survives the cross-process `usebrian://auth`
  * fallback so the handling process still knows to stash rather than replace.
  */
 export function parsePendingVerifier(
@@ -106,7 +106,7 @@ export function parsePendingVerifier(
  *
  * When `opts.redirectUri` is given (the loopback `http://127.0.0.1:<port>/cb`
  * the shell is listening on), the bridge 302s the code back there instead of to
- * the `sidanclaw://auth` scheme — see the module header. `opts.state` is an
+ * the `usebrian://auth` scheme — see the module header. `opts.state` is an
  * unguessable nonce the bridge echoes back so the loopback server can reject a
  * callback that isn't from this sign-in attempt.
  */
@@ -152,7 +152,7 @@ export type AuthCallback =
   | { kind: "error"; error: string };
 
 /**
- * Parse a `sidanclaw://auth?code=…` (or `?error=…`) callback. Returns `null`
+ * Parse a `usebrian://auth?code=…` (or `?error=…`) callback. Returns `null`
  * for anything that is not an auth callback on our scheme, so `main.ts` can
  * fall through to `resolveDeepLink` for navigation deep links.
  */

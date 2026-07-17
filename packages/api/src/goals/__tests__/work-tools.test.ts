@@ -16,7 +16,7 @@ vi.mock('../../db/goals.js', () => ({
 
 import { createGoalWorkTools, type GoalWorkToolsDeps } from '../work-tools.js'
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem } from '../../db/goals.js'
-import type { EventSubscription, GoalVerifier } from '@sidanclaw/core'
+import type { EventSubscription, GoalVerifier } from '@use-brian/core'
 
 const mockGet = vi.mocked(getGoalByIdSystem)
 const mockStamp = vi.mocked(stampGoalCompletionSystem)

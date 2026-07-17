@@ -1,9 +1,9 @@
 # Build the UNSIGNED Windows desktop installer on a real Windows runner, so we can
 # ship a Windows beta WITHOUT owning a Windows machine (Wine cross-builds on macOS
-# are flaky). Produces apps/app-desktop/release/sidanclaw.exe and uploads it as a
+# are flaky). Produces apps/app-desktop/release/usebrian.exe and uploads it as a
 # build artifact. Download it, then publish from anywhere with:
 #
-#   ./scripts/publish-windows.sh --allow-unsigned --exe <downloaded>/sidanclaw.exe
+#   ./scripts/publish-windows.sh --allow-unsigned --exe <downloaded>/usebrian.exe
 #
 # UNSIGNED, so it needs NO secrets — SmartScreen will warn users, which is fine for
 # a click-through beta. Signing (Azure Trusted Signing) is wired later for public
@@ -67,7 +67,7 @@ jobs:
       # carries the update feed) but skips the upload - publishing stays the deliberate
       # publish-windows.sh step.
       - name: Build Windows installer (unsigned, x64)
-        run: pnpm --filter @sidanclaw/app-desktop package:win
+        run: pnpm --filter @use-brian/app-desktop package:win
 
       # The artifact carries the installer PLUS the electron-updater feed files
       # (latest.yml + the blockmap, emitted next to the exe because the publish
@@ -78,10 +78,10 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sidanclaw-windows-unsigned
+          name: usebrian-windows-unsigned
           path: |
-            apps/app-desktop/release/sidanclaw.exe
+            apps/app-desktop/release/usebrian.exe
             apps/app-desktop/release/latest.yml
-            apps/app-desktop/release/sidanclaw.exe.blockmap
+            apps/app-desktop/release/usebrian.exe.blockmap
           if-no-files-found: error
           retention-days: 14

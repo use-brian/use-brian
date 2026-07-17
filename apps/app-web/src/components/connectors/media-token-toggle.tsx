@@ -5,7 +5,7 @@
  * media (their most recent channel-media recording). Writes
  * `config.sendMediaToken`. Default off.
  *
- * When on, sidanclaw emits a short-lived, user-scoped capability token
+ * When on, Use Brian emits a short-lived, user-scoped capability token
  * (`X-Sidanclaw-Media-Token`) to this connector on each turn; the connector
  * echoes it back to the internal media-fetch endpoint, which derives the user
  * from the signed token. No shared secret is handed to the connector, and the

@@ -8,7 +8,7 @@ vi.mock('../../db/retrieval-store.js', () => ({
 }))
 
 import { createBrainSourceTool } from '../brain-source-tool.js'
-import type { RetrievalActor, ToolContext } from '@sidanclaw/core'
+import type { RetrievalActor, ToolContext } from '@use-brian/core'
 
 const ACTOR: RetrievalActor = {
   workspaceId: 'ws-1',

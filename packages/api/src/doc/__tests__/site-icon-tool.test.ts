@@ -9,8 +9,8 @@
  */
 
 import { describe, expect, it, vi } from 'vitest'
-import type { FilesApi } from '@sidanclaw/core'
-import { isImageIcon } from '@sidanclaw/shared'
+import type { FilesApi } from '@use-brian/core'
+import { isImageIcon } from '@use-brian/shared'
 import { createFetchSiteIconTool as createReal } from '../site-icon-tool.js'
 import type { FetchSiteIconDeps } from '../site-icon-tool.js'
 import type { BytesFetchFn } from '../site-icon.js'

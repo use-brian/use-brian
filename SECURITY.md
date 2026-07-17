@@ -6,8 +6,8 @@
 
 Report privately via one of:
 
-- GitHub's [private vulnerability reporting](https://github.com/sidanclaw/sidanclaw/security/advisories/new) (preferred), or
-- email **security@sidan.ai** with the details and reproduction steps.
+- GitHub's [private vulnerability reporting](https://github.com/use-brian/use-brian/security/advisories/new) (preferred), or
+- email **security@usebrian.ai** with the details and reproduction steps.
 
 We aim to acknowledge within **3 business days** and to provide a remediation
 timeline after triage. Please give us a reasonable window to ship a fix before
@@ -16,7 +16,7 @@ remain anonymous.
 
 ## Scope
 
-This repository is the **open core** (`sidanclaw`): the single-player local
+This repository is the **open core** (`Use Brian`): the single-player local
 brain (engine, brain/dreaming, canvas, and frontend), run locally on a model key.
 The hosted multi-tenant platform is a separate, closed codebase; vulnerabilities
 specific to the hosted service should still be reported through the channels

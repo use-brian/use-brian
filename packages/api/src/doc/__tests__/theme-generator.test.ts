@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import type { LLMProvider, StreamChunk } from '@sidanclaw/core'
-import { CORE_TOKENS } from '@sidanclaw/shared'
+import type { LLMProvider, StreamChunk } from '@use-brian/core'
+import { CORE_TOKENS } from '@use-brian/shared'
 
 import {
   generateCustomTheme,

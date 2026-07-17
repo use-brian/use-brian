@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { LLMProvider, StreamChunk, ToolContext } from '@sidanclaw/core'
+import type { LLMProvider, StreamChunk, ToolContext } from '@use-brian/core'
 
 import { createRefineActiveThemeTool } from '../theme-tools.js'
 import type { DocThemeStore, StoredDocTheme } from '../../db/doc-themes-store.js'

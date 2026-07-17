@@ -237,7 +237,7 @@ export function stripAttachmentMarkup(text: string): string {
  * markers are removed but the inner reply prose is kept; a half-streamed opener
  * is dropped too. The server now strips this before persist (so new replies are
  * clean); this mirror also scrubs pre-fix rows already in `session_messages`.
- * Mirrors `stripCommentThreadReplyTag` in `@sidanclaw/shared` (kept inline to
+ * Mirrors `stripCommentThreadReplyTag` in `@use-brian/shared` (kept inline to
  * avoid pulling the shared barrel into the browser bundle — the same reason
  * `stripFollowUps` is inlined in `floating-chat.tsx`).
  */

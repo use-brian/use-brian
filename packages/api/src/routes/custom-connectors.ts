@@ -2,7 +2,7 @@
  * Custom MCP connector CRUD — the `/custom` slice of `/api/connectors`.
  *
  * This is the OPEN home of the custom-connector feature. It used to live only
- * in the closed `@sidanclaw/api-platform` connectors route; it now lives here so
+ * in the closed `@use-brian/api-platform` connectors route; it now lives here so
  * BOTH editions share one implementation. The open `connectorRoutes` mounts it,
  * and the closed route imports and mounts the SAME factory instead of carrying a
  * duplicate (the import boundary allows closed→open, never open→closed).
@@ -29,7 +29,7 @@
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { CONNECTOR_AUTH_TYPES } from '@sidanclaw/shared'
+import { CONNECTOR_AUTH_TYPES } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import { buildConnectorAuthHeaders, isValidHeaderName } from '../mcp/auth-headers.js'
 
@@ -275,7 +275,7 @@ export function customConnectorRoutes({ connectorStore }: CustomConnectorRouteOp
       const { discoverMcpServer } = await import('../mcp/client.js')
 
       const PROBE_TIMEOUT = 10_000
-      const TIMEOUT_MARKER = 'sidanclaw:probe-timeout'
+      const TIMEOUT_MARKER = 'Use Brian:probe-timeout'
       try {
         const server = await Promise.race([
           discoverMcpServer(connector.url, connector.name, headers),

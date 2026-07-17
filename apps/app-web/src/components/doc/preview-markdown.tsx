@@ -25,7 +25,7 @@
  */
 
 import * as React from "react";
-import { ChatMarkdown, type ChatMarkdownProps } from "@sidanclaw/chat-ui";
+import { ChatMarkdown, type ChatMarkdownProps } from "@use-brian/chat-ui";
 
 const passthrough = ({ children }: { children?: React.ReactNode }) => <>{children}</>;
 

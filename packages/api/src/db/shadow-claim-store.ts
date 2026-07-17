@@ -44,7 +44,7 @@ export type ShadowClaimStore = {
    * Mint a fresh token bound to the (realUser, shadow, partnerKey) triple.
    * Returns the plaintext token + its expiry. Caller must have already
    * validated that:
-   *   - realUserId is the authenticated sidanclaw user
+   *   - realUserId is the authenticated Use Brian user
    *   - shadowUserId.auth_provider_id === 'api:<partnerKeyId>:<externalUserId>'
    *   - shadowUserId.auth_provider === 'channel'
    *   - shadowUserId !== realUserId

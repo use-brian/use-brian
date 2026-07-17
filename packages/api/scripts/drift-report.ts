@@ -3,7 +3,7 @@
  * checkout. Used to capture the Wave 1 audit deliverable in the PR
  * description and the admin-ui-revamp build-order note.
  *
- * Usage: pnpm --filter @sidanclaw/api exec tsx scripts/drift-report.ts
+ * Usage: pnpm --filter @use-brian/api exec tsx scripts/drift-report.ts
  *
  * The migration drift section needs a populated `_migrations` table to
  * be interesting — without DB access it falls back to filesystem-only

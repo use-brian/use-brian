@@ -8,7 +8,7 @@
  */
 
 import { z } from 'zod'
-import { IMAGE_ICON_RE } from '@sidanclaw/shared'
+import { IMAGE_ICON_RE } from '@use-brian/shared'
 import { TASK_STATUSES } from '../tasks/types.js'
 import { DEAL_STAGES } from '../crm/types.js'
 import { WORKFLOW_RUN_STATUSES } from '../workflow/types.js'
@@ -189,7 +189,7 @@ export const savedViewCreateInputSchema = z.object({
 /**
  * A page icon value: an emoji grapheme (≤16 chars) OR an image token
  * `img:<workspaceId>/<fileId>` (a workspace-files image minted by the
- * `fetchSiteIcon` doc tool — see `@sidanclaw/shared` `page-icon.ts` and
+ * `fetchSiteIcon` doc tool — see `@use-brian/shared` `page-icon.ts` and
  * doc.md → "Image icons"). One definition, reused by the REST update
  * schema and the `patchPage` `setIcon` op.
  */

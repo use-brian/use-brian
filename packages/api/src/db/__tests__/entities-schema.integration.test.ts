@@ -5,14 +5,14 @@ import pg from 'pg'
  * Schema-application test for migration 125 (entities). Verifies the
  * table exists with the expected column shape, the CHECK constraints
  * fire, the indexes are present, and pgvector is installed. Requires
- * a local PostgreSQL `sidanclaw` database with migrations applied;
+ * a local PostgreSQL `Use Brian` database with migrations applied;
  * skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

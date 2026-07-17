@@ -10,7 +10,7 @@ const baseCtx = {
   assistantId: 'a1',
   userId: 'u1',
   sessionId: 's1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c_1',
   abortSignal: new AbortController().signal,

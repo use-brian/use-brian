@@ -120,7 +120,7 @@ const CTX_STUB: never = {
   userId: 'u',
   assistantId: 'a',
   sessionId: 's',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'system',
   channelId: 'c',
   workspaceId: 'ws-1',

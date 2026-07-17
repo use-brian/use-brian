@@ -10,7 +10,7 @@
  * UI's own Delete button), and it used to leave the relationship row
  * stuck in the review queue pointing at a dead endpoint.
  *
- * Skips when the local `sidanclaw` DB (or the brain tables) isn't
+ * Skips when the local `Use Brian` DB (or the brain tables) isn't
  * available, matching the other `.integration.test.ts` suites here.
  *
  * Spec: docs/architecture/brain/corrections.md → "Dangling-edge
@@ -23,7 +23,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

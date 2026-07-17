@@ -8,7 +8,7 @@
  *
  * Unlike WhatsApp, this connector is **inbound-only**: Discord's REST API is
  * plain HTTPS reachable from sidanclaw-api directly, so outbound sends do NOT
- * go through here — the API calls Discord REST itself via the `@sidanclaw/channels`
+ * go through here — the API calls Discord REST itself via the `@use-brian/channels`
  * Discord adapter. This service exists solely to turn the receive-side WebSocket
  * into HTTP POSTs the request-driven API can consume.
  *
@@ -20,7 +20,7 @@
  */
 
 import { WebSocket } from 'ws'
-import { createDiscordAdapter, createDedupBuffer, type IncomingMessage } from '@sidanclaw/channels'
+import { createDiscordAdapter, createDedupBuffer, type IncomingMessage } from '@use-brian/channels'
 import {
   DISCORD_GATEWAY_URL,
   GatewayOp,

@@ -2,9 +2,9 @@
 name: doc-architect
 description: Structural doc shaper — turn loose notes or workflow output into a rich, well-organized canvas page using the right blocks (table / data / callout / toggle / chart) and sub-pages, instead of dumping a markdown wall. Use when the user wants raw content laid out cleanly, or a workflow step lands a pile of text that needs a real container. Reshapes the container only; never rewrites the substance.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: productivity
   when_to_use: The user hands you loose notes, a transcript, a dump, or a long workflow output and wants it laid out as a real document — "make this a proper doc", "clean up this page", "structure these notes", "organize this into a doc". Skip when the input is already well-structured, when the user is asking you to write or edit the content itself (this skill never changes substance), or when a short chat reply is the right answer instead of a page.
   tags: official

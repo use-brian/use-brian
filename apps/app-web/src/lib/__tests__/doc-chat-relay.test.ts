@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, afterEach } from "vitest";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 import { docChatRelay } from "../doc-chat-relay";
 
 // Minimal stand-in — the relay treats the value as an opaque payload; only

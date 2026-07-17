@@ -1,10 +1,10 @@
 /**
- * @sidanclaw/doc-model — the single source of truth for a doc page's
+ * @use-brian/doc-model — the single source of truth for a doc page's
  * collaborative document shape (Tiptap/ProseMirror schema + block↔node
  * mapping + Y.Doc encode/decode). Shared by the browser editor, the Yjs sync
  * server, the server-side AI client, and the block→Y.Doc migration.
  *
- * Its only `@sidanclaw/core` *runtime* dependency is the fs-free
+ * Its only `@use-brian/core` *runtime* dependency is the fs-free
  * `markdownToBlocks` leaf (`dist/doc/markdown.js` — pure regex, no
  * `skills/loader`/`fs`); everything else imports core as types only, via the
  * deep `dist` path. This keeps the browser bundle free of `skills/loader`'s
@@ -39,7 +39,7 @@ export {
 // paste handler (`apps/app-web` `markdown-paste.ts`, journey E of
 // docs/architecture/features/doc-conversion.md) can convert Markdown → blocks
 // without pulling the core barrel.
-export { markdownToBlocks } from '@sidanclaw/core/dist/doc/markdown.js'
+export { markdownToBlocks } from '@use-brian/core/dist/doc/markdown.js'
 
 // Page templates — re-exported from core's `dist/doc/templates.js` leaf, which
 // imports only the fs-free `markdown.js` + `blocks.js` leaves (no barrel, no
@@ -59,7 +59,7 @@ export {
   getPageTemplate,
   pageTemplateIds,
   instantiatePageTemplate,
-} from '@sidanclaw/core/dist/doc/templates.js'
+} from '@use-brian/core/dist/doc/templates.js'
 
 // Custom (user-authored, workspace-shared) page templates — re-exported from
 // core's fs-free `dist/doc/custom-template-types.js` leaf (imports only `zod`
@@ -92,7 +92,7 @@ export {
   // "Save as template" path calls this so a WYSIWYG blueprint persists as a
   // blueprint (extraction != null) instead of a plain skeleton.
   blocksToExtractionSpec,
-} from '@sidanclaw/core/dist/doc/custom-template-types.js'
+} from '@use-brian/core/dist/doc/custom-template-types.js'
 
 // Blueprint record helpers — the typed output contract's pure half (field
 // validation, completeness, page projection). Same fs-free leaf discipline.
@@ -104,7 +104,7 @@ export {
   recordCompleteness,
   formatFieldValueText,
   blueprintRecordToBlocks,
-} from '@sidanclaw/core/dist/doc/blueprint-record.js'
+} from '@use-brian/core/dist/doc/blueprint-record.js'
 
 export {
   pageToYDoc,

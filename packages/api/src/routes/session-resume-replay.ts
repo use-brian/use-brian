@@ -34,7 +34,7 @@ import {
   type ToolContext,
   type Message,
   type AnalyticsLogger,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   findSessionById,
   getSessionMessages,
@@ -66,8 +66,8 @@ export type SessionResumeReplayDeps = {
    *
    * See docs/architecture/engine/askquestion-suspend-resume.md.
    */
-  workerManager?: import('@sidanclaw/core').WorkerManager
-  workerRunsStore?: import('@sidanclaw/core').WorkerRunsStore
+  workerManager?: import('@use-brian/core').WorkerManager
+  workerRunsStore?: import('@use-brian/core').WorkerRunsStore
 }
 
 type AssistantRow = NonNullable<Awaited<ReturnType<typeof findAssistantById>>>
@@ -78,7 +78,7 @@ function buildContext(session: Session, assistant: AssistantRow): ToolContext {
     userId: session.userId,
     assistantId: assistant.id,
     sessionId: session.id,
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: session.channelType,
     channelId: session.channelId,
     workspaceId: assistant.workspaceId ?? undefined,

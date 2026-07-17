@@ -39,7 +39,7 @@
  * Component tag: [COMP:connectors/usable-resolver].
  */
 
-import { canRead, type Sensitivity } from '@sidanclaw/core'
+import { canRead, type Sensitivity } from '@use-brian/core'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import {

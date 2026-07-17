@@ -6,7 +6,7 @@
  *
  * The backend already merges the assistant's layout artifact over live signals
  * (mergeHomeDock) and drops dead cards, so the frontend renders `ResolvedDock`
- * directly. The wire type mirrors `ResolvedDock` in `@sidanclaw/core`
+ * directly. The wire type mirrors `ResolvedDock` in `@use-brian/core`
  * (app-web deliberately does not depend on core — same reason the views SDK is
  * duplicated). See docs/architecture/features/home-dock.md.
  */

@@ -16,8 +16,8 @@
  * [COMP:web/blueprints-library]
  */
 
-import type { CustomPageTemplateSummary, ExtractionSpec } from "@sidanclaw/doc-model";
-import { blocksToExtractionSpec } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary, ExtractionSpec } from "@use-brian/doc-model";
+import { blocksToExtractionSpec } from "@use-brian/doc-model";
 import type { Block } from "@/lib/api/views";
 import { newBlockId } from "@/lib/api/views";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";

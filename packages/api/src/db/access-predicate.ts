@@ -22,12 +22,12 @@
  * reused here.
  */
 
-import type { AccessContext } from '@sidanclaw/core'
+import type { AccessContext } from '@use-brian/core'
 
 /**
- * `AccessContext` is defined in `@sidanclaw/core` so it can flow through
+ * `AccessContext` is defined in `@use-brian/core` so it can flow through
  * store interfaces (`MemoryStore`, `EntityStore`, etc.) without the core
- * package taking a dependency on `@sidanclaw/api`. We re-export it here
+ * package taking a dependency on `@use-brian/api`. We re-export it here
  * for ergonomic imports inside the API package.
  */
 export type { AccessContext }

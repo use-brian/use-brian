@@ -3,9 +3,9 @@
  * apps/web/src/lib/auth-cookies.ts so the OAuth callback and refresh
  * routes set consistent cookies.
  *
- * In production we default to `.sidan.ai` so cookies are shared across
- * sibling subdomains — a user signed in on sidan.ai is automatically
- * authenticated on feed.sidan.ai (and vice-versa). Set `COOKIE_DOMAIN`
+ * In production we default to `.usebrian.ai` so cookies are shared across
+ * sibling subdomains — a user signed in on usebrian.ai is automatically
+ * authenticated on feed.usebrian.ai (and vice-versa). Set `COOKIE_DOMAIN`
  * to override (e.g. for a staging deployment on a different apex).
  * Always unset in dev so cookies stay host-only on `localhost` —
  * browsers reject `Domain=localhost` and would silently drop them.
@@ -13,7 +13,7 @@
 
 const isSecure = process.env.NODE_ENV === "production";
 const COOKIE_DOMAIN =
-  process.env.COOKIE_DOMAIN || (isSecure ? ".sidan.ai" : undefined);
+  process.env.COOKIE_DOMAIN || (isSecure ? ".usebrian.ai" : undefined);
 
 export function accessTokenCookie(value: string) {
   return {
@@ -85,7 +85,7 @@ export function applyClearedCookies(response: { headers: Headers }) {
 
 /**
  * Append clears for the legacy host-only twins only — leaves the
- * domain-scoped (`.sidan.ai`) cookies in place. Use this on login /
+ * domain-scoped (`.usebrian.ai`) cookies in place. Use this on login /
  * successful refresh so browsers carrying pre-migration host-only
  * cookies shed them on the next round-trip. Mirrors
  * `apps/web/src/lib/auth-cookies.ts → appendLegacyHostOnlyClears()`.
@@ -108,7 +108,7 @@ export function appendLegacyHostOnlyClears(response: { headers: Headers }) {
  * Pick the LAST value for a cookie name from a raw Cookie header.
  * Mirrors `apps/web/src/lib/auth-cookies.ts → parseLastCookie()`. See
  * `docs/architecture/platform/auth.md` → "Duplicate cookies after the
- * .sidan.ai migration" for why the last (not first) match is correct.
+ * .usebrian.ai migration" for why the last (not first) match is correct.
  */
 export function parseLastCookie(header: string, name: string): string | null {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

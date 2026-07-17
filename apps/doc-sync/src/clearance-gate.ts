@@ -27,7 +27,7 @@
  * [COMP:doc-sync/clearance-gate]
  */
 
-import { canRead, type Sensitivity } from '@sidanclaw/core/dist/security/sensitivity.js'
+import { canRead, type Sensitivity } from '@use-brian/core/dist/security/sensitivity.js'
 
 export class PageAccessDenied extends Error {
   constructor(public readonly reason: string) {

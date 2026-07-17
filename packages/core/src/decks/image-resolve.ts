@@ -1,6 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { imageSize } from 'image-size';
-import type { DeckSpec } from '@sidanclaw/shared/decks';
+import type { DeckSpec } from '@use-brian/shared/decks';
 import type { ResolvedDeckImage, ResolvedImages } from './pptx-writer.js';
 
 const ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif']);

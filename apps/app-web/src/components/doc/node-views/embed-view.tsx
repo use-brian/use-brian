@@ -29,7 +29,7 @@ import type {
   A2UIWidget,
   TableWidget,
   ViewPayload,
-} from "@sidanclaw/views-renderer";
+} from "@use-brian/views-renderer";
 import {
   renderBinding,
   type Block,

@@ -847,7 +847,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
   function teamGithub(healthStatus: 'ok' | 'auth_failed') {
     return {
       id: 'ci-ws', scope: 'workspace', userId: null, workspaceId: 'ws-1',
-      provider: 'github', label: 'sidanclaw', connectedEmail: null, url: null,
+      provider: 'github', label: 'Use Brian', connectedEmail: null, url: null,
       custom: false, config: {}, sensitivity: 'internal', connected: true,
       ingestionEnabled: false, credentialsType: 'oauth', healthStatus,
       lastError: null, lastCheckedAt: null, createdBy: null,

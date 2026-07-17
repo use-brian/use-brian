@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Workspace-invitation email template — i18n subject + HTML + plain-text.
  *
@@ -33,7 +34,7 @@ type WorkspaceInviteContent = {
 // unreachable host (e.g. localhost). Mirrors `magic-link-template.ts` so the
 // invitation and sign-in emails share one visual identity.
 const BRAND_ICON_URL = 'https://sidan.ai/icon.png'
-const BRAND_WORDMARK = 'sidanclaw'
+const BRAND_WORDMARK = 'Use Brian'
 
 const escapeHtml = (s: string): string =>
   s.replace(/[&<>"']/g, (c) => {
@@ -70,14 +71,14 @@ const COPY: Record<
   en: {
     subject: (inviter, workspace) =>
       inviter
-        ? `${inviter} invited you to ${workspace} on sidanclaw`
-        : `You're invited to ${workspace} on sidanclaw`,
+        ? `${inviter} invited you to ${workspace} on Use Brian`
+        : `You're invited to ${workspace} on Use Brian`,
     preheader: (workspace) => `Accept to join ${workspace}. This invite expires in 14 days.`,
     heading: (workspace) => `Join ${workspace}`,
     lead: (inviter, workspace) =>
       inviter
-        ? `${inviter} invited you to collaborate in ${workspace}, a shared brain on sidanclaw.`
-        : `You've been invited to collaborate in ${workspace}, a shared brain on sidanclaw.`,
+        ? `${inviter} invited you to collaborate in ${workspace}, a shared brain on Use Brian.`
+        : `You've been invited to collaborate in ${workspace}, a shared brain on Use Brian.`,
     roleLine: (role) => `You'll join as ${role === 'admin' ? 'an admin' : 'a member'}.`,
     roleMember: 'member',
     roleAdmin: 'admin',
@@ -91,14 +92,14 @@ const COPY: Record<
   ja: {
     subject: (inviter, workspace) =>
       inviter
-        ? `${inviter} さんが「${workspace}」（sidanclaw）に招待しています`
-        : `「${workspace}」（sidanclaw）に招待されました`,
+        ? `${inviter} さんが「${workspace}」（Use Brian）に招待しています`
+        : `「${workspace}」（Use Brian）に招待されました`,
     preheader: (workspace) => `承認して「${workspace}」に参加しましょう。この招待は14日間有効です。`,
     heading: (workspace) => `「${workspace}」に参加`,
     lead: (inviter, workspace) =>
       inviter
-        ? `${inviter} さんが、sidanclaw の共有頭脳「${workspace}」への参加を招待しています。`
-        : `sidanclaw の共有頭脳「${workspace}」への参加に招待されました。`,
+        ? `${inviter} さんが、Use Brian の共有頭脳「${workspace}」への参加を招待しています。`
+        : `Use Brian の共有頭脳「${workspace}」への参加に招待されました。`,
     roleLine: (role) => `${role === 'admin' ? '管理者' : 'メンバー'}として参加します。`,
     roleMember: 'メンバー',
     roleAdmin: '管理者',
@@ -112,14 +113,14 @@ const COPY: Record<
   zh: {
     subject: (inviter, workspace) =>
       inviter
-        ? `${inviter} 邀請您加入 sidanclaw 的「${workspace}」`
-        : `您受邀加入 sidanclaw 的「${workspace}」`,
+        ? `${inviter} 邀請您加入 Use Brian 的「${workspace}」`
+        : `您受邀加入 Use Brian 的「${workspace}」`,
     preheader: (workspace) => `接受邀請即可加入「${workspace}」，此邀請將於 14 天後失效。`,
     heading: (workspace) => `加入「${workspace}」`,
     lead: (inviter, workspace) =>
       inviter
-        ? `${inviter} 邀請您一同協作於 sidanclaw 的共享大腦「${workspace}」。`
-        : `您受邀一同協作於 sidanclaw 的共享大腦「${workspace}」。`,
+        ? `${inviter} 邀請您一同協作於 Use Brian 的共享大腦「${workspace}」。`
+        : `您受邀一同協作於 Use Brian 的共享大腦「${workspace}」。`,
     roleLine: (role) => `您將以${role === 'admin' ? '管理員' : '成員'}身分加入。`,
     roleMember: '成員',
     roleAdmin: '管理員',

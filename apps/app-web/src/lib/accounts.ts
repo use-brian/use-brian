@@ -2,8 +2,8 @@
  * Client-side reader for the multi-account directory cookie (`accounts_dir`).
  * Cloned from `apps/web/src/lib/accounts.ts`.
  *
- * In **production** the primary (sidan.ai) writes `accounts_dir` scoped to
- * `.sidan.ai`, so it rides along to `app.sidan.ai` and this reader sees
+ * In **production** the primary (usebrian.ai) writes `accounts_dir` scoped to
+ * `.usebrian.ai`, so it rides along to `app.usebrian.ai` and this reader sees
  * every account signed in on the browser. The companion httpOnly
  * `accounts_store` is intentionally NOT read here (or needed): app-web is a
  * sub-app and may not write the shared cookies, so switching is delegated to
@@ -16,7 +16,7 @@
  * which is the pre-existing single-account behaviour.
  *
  * Like `lib/user.ts`, reads the LAST `accounts_dir=` value in
- * `document.cookie` (the `.sidan.ai` migration can leave a host-only twin
+ * `document.cookie` (the `.usebrian.ai` migration can leave a host-only twin
  * before the domain-scoped one; per RFC 6265 §5.4 the most-recently-set value
  * is last) and caches at module scope so the switcher doesn't flash an empty
  * list between client navigations.

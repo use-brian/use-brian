@@ -52,7 +52,7 @@
  * The commands are plain ProseMirror `Command`s (no Tiptap-chain wrapping) so
  * they unit-test against a constructed `EditorState`, and run against the live
  * doc through `editor.view.dispatch`. They mutate the shared
- * `@sidanclaw/doc-model` nodes only structurally (move/append children, flip
+ * `@use-brian/doc-model` nodes only structurally (move/append children, flip
  * the existing `open` attr) — no schema change, so the Yjs contract is
  * untouched.
  */

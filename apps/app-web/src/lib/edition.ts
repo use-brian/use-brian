@@ -9,13 +9,13 @@
  *
  * The flag DEFAULTS to the full hosted edition when unset, so a hosted deploy
  * never has to opt in and existing hosted users are unaffected. Only the local
- * OSS launcher (`scripts/launch.mjs`) sets `NEXT_PUBLIC_SIDANCLAW_EDITION=oss`
+ * OSS launcher (`scripts/launch.mjs`) sets `NEXT_PUBLIC_USEBRIAN_EDITION=oss`
  * to switch app-web into single-player mode.
  */
 type SidanclawEdition = "oss" | "hosted";
 
 function sidanclawEdition(): SidanclawEdition {
-  return process.env.NEXT_PUBLIC_SIDANCLAW_EDITION === "oss" ? "oss" : "hosted";
+  return process.env.NEXT_PUBLIC_USEBRIAN_EDITION === "oss" ? "oss" : "hosted";
 }
 
 /** True in the open single-player edition (no billing, no teammates). */
@@ -34,4 +34,4 @@ export function isHostedEdition(): boolean {
  * local dev origin in the OSS launcher) so the upgrade link always points at
  * the real hosted product.
  */
-export const HOSTED_UPGRADE_URL = "https://sidan.ai/plans";
+export const HOSTED_UPGRADE_URL = "https://usebrian.ai/plans";

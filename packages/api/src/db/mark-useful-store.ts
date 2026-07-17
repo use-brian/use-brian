@@ -5,7 +5,7 @@ import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 
 /**

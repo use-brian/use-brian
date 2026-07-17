@@ -103,7 +103,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     const { app, listByWorkspace } = makeApp('u1')
     const WS = '11111111-1111-1111-1111-111111111111'
     listByWorkspace.mockResolvedValue([
-      instance({ provider: 'github', label: 'sidanclaw', connected: true, healthStatus: 'auth_failed', lastError: '401 Bad credentials' }),
+      instance({ provider: 'github', label: 'Use Brian', connected: true, healthStatus: 'auth_failed', lastError: '401 Bad credentials' }),
       instance({ provider: 'slack', label: 'DeltaDeFi', connected: true, healthStatus: 'ok' }),
     ])
     const res = await request(app).get(`/api/connectors/workspace/${WS}`)
@@ -111,7 +111,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(listByWorkspace).toHaveBeenCalledWith('u1', WS)
     const gh = res.body.connectors.find((c: { provider: string }) => c.provider === 'github')
     expect(gh.healthStatus).toBe('auth_failed')
-    expect(gh.label).toBe('sidanclaw')
+    expect(gh.label).toBe('Use Brian')
   })
 
   it('[COMP:integrations/connector-health] GET /workspace/:id rejects a non-uuid workspace id', async () => {

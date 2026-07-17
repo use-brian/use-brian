@@ -18,7 +18,7 @@
  * without sending `end`, the sync service's sweeper drops the stale run so the
  * page doesn't show "working" forever.
  *
- * This package is intentionally `@sidanclaw/core`-runtime-free (types only), so
+ * This package is intentionally `@use-brian/core`-runtime-free (types only), so
  * the contract + the pure `deriveRunStep` helper bundle into the browser
  * without dragging server deps. The helper is unit-tested in isolation.
  *

@@ -224,7 +224,7 @@ const ctx = {
   userId: 'u1',
   workspaceId: 'w1',
   sessionId: 's1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'telegram',
   channelId: 'chat_123',
   preferredChannel: undefined,

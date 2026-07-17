@@ -47,10 +47,10 @@ const CHANNEL = 'session_event'
  * `dispatchToLocal` BEFORE the cross-instance NOTIFY, so a lone process needs
  * neither the dedicated `LISTEN` connection nor the `pg_notify` round-trips —
  * both would only hold/contend the single PGLite connection for fan-out that
- * has no second instance to reach. The launcher sets SIDANCLAW_SINGLE_PROCESS=1.
+ * has no second instance to reach. The launcher sets USEBRIAN_SINGLE_PROCESS=1.
  * See the open-core split (repo CLAUDE.md; plan in git history) §12.4/§12.7.
  */
-const SINGLE_PROCESS = process.env.SIDANCLAW_SINGLE_PROCESS === '1'
+const SINGLE_PROCESS = process.env.USEBRIAN_SINGLE_PROCESS === '1'
 
 /** Soft cap on NOTIFY payload size in bytes — Postgres hard limit is 8000. */
 const NOTIFY_PAYLOAD_BUDGET = 6_500

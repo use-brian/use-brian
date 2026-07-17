@@ -50,16 +50,16 @@ describe('[COMP:api/sessions-route] findOrCreateSession', () => {
     // (defaults to 'owner'), workspace_id the 8th (defaults to null), and
     // effective_clearance (migration 224) the 9th (defaults to null).
     // The ON CONFLICT key is still the 5-tuple.
-    expect(params).toEqual(['a_1', 'u_1', 'telegram', 'chat_123', 'sidanclaw', null, 'owner', null, null])
+    expect(params).toEqual(['a_1', 'u_1', 'telegram', 'chat_123', 'Use Brian', null, 'owner', null, null])
   })
 
-  it('defaults appId to sidanclaw when not provided', async () => {
+  it('defaults appId to Use Brian when not provided', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 's_1' }], rowCount: 1 } as never)
     await findOrCreateSession({
       assistantId: 'a_1', userId: 'u_1',
       channelType: 'web', channelId: 'uuid-web',
     })
-    expect(mockQuery.mock.calls[0][1]![4]).toBe('sidanclaw')
+    expect(mockQuery.mock.calls[0][1]![4]).toBe('Use Brian')
   })
 
   it('honors a custom appId when provided', async () => {

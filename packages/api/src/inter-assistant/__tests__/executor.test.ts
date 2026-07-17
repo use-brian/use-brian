@@ -20,8 +20,8 @@ const mockRunPreflight = vi.fn()
 // Override queryLoop + runPreflight; everything else (buildPreflightPrompt,
 // prompt/memory-context builders, MODEL_MAP) runs for real so the system-prompt
 // injection + model resolution are exercised end to end.
-vi.mock('@sidanclaw/core', async (io) => ({
-  ...(await io<typeof import('@sidanclaw/core')>()),
+vi.mock('@use-brian/core', async (io) => ({
+  ...(await io<typeof import('@use-brian/core')>()),
   queryLoop: (...a: unknown[]) => mockQueryLoop(...a),
   runPreflight: (...a: unknown[]) => mockRunPreflight(...a),
 }))
@@ -65,7 +65,7 @@ vi.mock('../../doc/inject.js', () => ({
 }))
 
 import { createCalleeExecutor } from '../executor.js'
-// Real (unmocked) core factories — the '@sidanclaw/core' mock above spreads the
+// Real (unmocked) core factories — the '@use-brian/core' mock above spreads the
 // actual module, so everything but queryLoop/runPreflight resolves for real.
 // Used by the goal-path browser-surface describes at the bottom of this file.
 import {
@@ -84,7 +84,7 @@ import {
   createInMemoryBlockApprovals,
   extractEffectContract,
   RESULT_PATH,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { findAssistantById, findUserById } from '../../db/users.js'
 import { findOrCreateSession, addSessionMessage } from '../../db/sessions.js'
 import { billingPartyForAssistant } from '../../billing-party.js'
@@ -1751,7 +1751,7 @@ describe('[COMP:sandbox/browser-tools] browser surface on the goal path (workflo
     userId: 'owner-1',
     assistantId: 'callee-1',
     sessionId: 'sess-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'assistant-call',
     channelId: 'caller-1',
     workspaceId: 'ws-1',

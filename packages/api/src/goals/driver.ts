@@ -1,6 +1,6 @@
 /**
  * Goal driver — the acting loop (R1). The api wiring of the already-built
- * `processGoalIteration` core (`@sidanclaw/core`), modelled on Claude Code's
+ * `processGoalIteration` core (`@use-brian/core`), modelled on Claude Code's
  * long-running-agent harness (Anthropic, "Effective harnesses for long-running
  * agents"): a **stateless tick** that rehydrates its loop state from a durable
  * handoff each time, runs **one bounded iteration**, self-verifies a
@@ -44,7 +44,7 @@ import {
   type EventSubscription,
   type GoalRecord,
   type GoalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildGoalResolvers, finishGoal, type GoalDeliver } from './writeback.js'
 
 /** The loop state carried across the re-arm chain (the durable handoff). */

@@ -6,7 +6,7 @@
  *
  * Ported from apps/web's workspace-switcher create panel
  * (`apps/web/src/components/chrome/workspace-switcher.tsx`). app-web
- * used to bounce out to `sidan.ai/settings` to create a workspace; this
+ * used to bounce out to `usebrian.ai/settings` to create a workspace; this
  * keeps creation in-app. The per-plan creation gate still lives in the
  * backend (`POST /api/workspaces` → 403 `plan_required` for a user who
  * owns no paid workspace and already has one non-personal workspace);

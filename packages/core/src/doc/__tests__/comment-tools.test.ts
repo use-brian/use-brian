@@ -16,7 +16,7 @@ function ctx(over: { workspaceId?: string | null } = {}) {
     userId: USER,
     assistantId: ASSIST,
     sessionId: 'sess-page',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'web',
     channelId: 'c-1',
     workspaceId: over.workspaceId === undefined ? WS : over.workspaceId,

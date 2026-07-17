@@ -19,7 +19,7 @@ import type {
   EntityLinkCreateParams,
   EntityLinkRecord,
   EntityLinksStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 import {
   emitCrmRelationEdge,

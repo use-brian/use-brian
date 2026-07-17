@@ -35,7 +35,7 @@ app.use((req, res, next) => {
 })
 
 const manager = createGatewayManager({
-  apiUrl: env.SIDANCLAW_API_URL,
+  apiUrl: env.USEBRIAN_API_URL,
   connectorSecret: env.DISCORD_CONNECTOR_SECRET,
 })
 

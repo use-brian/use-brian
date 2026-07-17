@@ -6,8 +6,8 @@
 
 import { findOrCreateUser, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
-import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@sidanclaw/core'
-import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@sidanclaw/core'
+import { loadBuiltinSkills, formatSkillListing, createUseSkillTool, expandSkillPointers, parseFileContent, shouldInline } from '@use-brian/core'
+import type { Tool, UsageStore, BudgetStatus, ContentBlock, FileStore, McpSettingsStore, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, SkillContent, EngineHooks, FilesApi } from '@use-brian/core'
 import type { ActorIdentity } from '../mcp/auth-headers.js'
 // NOTE: the real DB-backed credit gate (`checkCreditBudget`, closed billing/)
 // is NOT imported here — that would couple this OPEN helper to closed code.
@@ -208,7 +208,7 @@ export function isValidDateString(date: string): boolean {
  */
 export function buildUnavailableCapabilitiesPrompt(capabilities: string[]): string {
   if (capabilities.length === 0) return ''
-  return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead). This list plus your tools is the complete integration surface: for a service in neither, sidanclaw has no integration to enable. Say so plainly and offer the nearest supported alternative. Never point the user to a Settings toggle or connector for a service that is not listed here.`
+  return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead). This list plus your tools is the complete integration surface: for a service in neither, Use Brian has no integration to enable. Say so plainly and offer the nearest supported alternative. Never point the user to a Settings toggle or connector for a service that is not listed here.`
 }
 
 /**
@@ -443,7 +443,7 @@ type InjectSkillsOptions = {
   tools: Map<string, Tool>
   connectorStore?: ConnectorStore
   unavailableCapabilities: string[]
-  communitySkills?: import('@sidanclaw/core').SkillContent[]
+  communitySkills?: import('@use-brian/core').SkillContent[]
   channel: string
   /**
    * Assistant kind + app_type. Used to filter built-in skills with an
@@ -486,7 +486,7 @@ type InjectSkillsOptions = {
    */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   workspaceId?: string
-  invocationBuffer?: import('@sidanclaw/core').SkillInvocationBuffer
+  invocationBuffer?: import('@use-brian/core').SkillInvocationBuffer
   /**
    * Optional slug allow-list. When non-empty, only skills whose `id`/slug is
    * in this set are offered — the governance gates still apply on top. Used by
@@ -727,7 +727,7 @@ export async function injectSkills(opts: InjectSkillsOptions): Promise<InjectSki
     let promptFragment = ''
     const listing = formatSkillListing(availableSkills)
     if (listing) {
-      promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what sidanclaw (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
+      promptFragment = `\n\n# Available Skills\nUse the useSkill tool to activate a skill when relevant.\nBefore answering what Use Brian (or you) can do, or how a feature works, activate the most relevant skill FIRST and answer only from it.\n${listing}`
     }
 
     if (availableSkills.length > 0) {

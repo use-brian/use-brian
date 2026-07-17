@@ -32,7 +32,7 @@ import {
   isValidPageSlug,
   normalizeHostname,
   suggestPageSlug,
-} from '@sidanclaw/shared/page-slugs'
+} from '@use-brian/shared/page-slugs'
 import type { PageDomainStore } from '../db/page-domain-store.js'
 import type { DomainProvisioner } from '../domains/provisioner.js'
 import {
@@ -81,7 +81,7 @@ import {
   customTemplateCreateInputSchema,
   customTemplateUpdateInputSchema,
   extractionSpecToBlocks,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
@@ -1510,7 +1510,7 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
 
   // ── Format conversion: import (.docx/.md → page/brain) + export ──────
   // Spec: docs/architecture/features/doc-conversion.md. The converters are the
-  // pure hub in `@sidanclaw/core`; these routes are the I/O wrapper.
+  // pure hub in `@use-brian/core`; these routes are the I/O wrapper.
 
   const importUpload = multer({
     storage: multer.memoryStorage(),

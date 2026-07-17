@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { handleConnectCommand } from '../_connect-command.js'
 
-const APP_URL = 'https://sidan.ai'
+const APP_URL = 'https://usebrian.ai'
 
 describe('[COMP:api/connect-command] handleConnectCommand', () => {
   it('returns handled=false for unrelated text so the caller falls through', () => {

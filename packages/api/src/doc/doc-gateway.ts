@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * `DocGateway` implementation — the API-side bridge that lets the
  * server-side AI page tools write to the *live* collaborative Y.Doc.
@@ -5,7 +6,7 @@
  * The AI's `patchPage` ops are POSTed to `apps/doc-sync`'s secret-gated
  * `/internal/apply` endpoint; the sync service opens a direct connection to
  * the authoritative in-memory doc, applies the ops via
- * `@sidanclaw/doc-model` `applyOpsToYDoc`, broadcasts the update to every
+ * `@use-brian/doc-model` `applyOpsToYDoc`, broadcasts the update to every
  * connected human tab, and persists the debounced snapshot. This is what
  * keeps the AI and human writers on ONE document instead of the AI writing
  * a frozen `saved_views.page` the editor never reads.
@@ -19,7 +20,7 @@
  * [COMP:api/doc-model-gateway]
  */
 
-import type { DocGateway, Page } from '@sidanclaw/core'
+import type { DocGateway, Page } from '@use-brian/core'
 
 export type DocGatewayOptions = {
   /** ws(s):// sync URL; the internal HTTP endpoint is the http(s) twin. */

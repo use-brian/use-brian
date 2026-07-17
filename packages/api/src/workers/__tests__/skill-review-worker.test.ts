@@ -19,7 +19,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { reviewSession, selectCandidateSessions, type SkillReviewLLM } from '../skill-review-worker.js'
 import { query } from '../../db/client.js'
-import { createSkillManageTool } from '@sidanclaw/core'
+import { createSkillManageTool } from '@use-brian/core'
 
 // We mock the `query` import so the worker's analytics + session-touch DB
 // calls don't hit a real DB. Vitest's auto-mock keeps the API simple.
@@ -27,11 +27,11 @@ vi.mock('../../db/client.js', () => ({
   query: vi.fn(async () => ({ rows: [{ count: '0' }], rowCount: 0 })),
 }))
 
-// `createSkillManageTool` from @sidanclaw/core is the action dispatch path.
+// `createSkillManageTool` from @use-brian/core is the action dispatch path.
 // We mock the entire core module so the worker's lazy import returns a
 // tool whose execute method delegates to our fakes.
-vi.mock('@sidanclaw/core', async (importOriginal) => {
-  const orig = await importOriginal<typeof import('@sidanclaw/core')>()
+vi.mock('@use-brian/core', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('@use-brian/core')>()
   return {
     ...orig,
     createSkillManageTool: vi.fn(() => ({
@@ -168,7 +168,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -191,7 +191,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -220,7 +220,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -249,7 +249,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -275,7 +275,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -297,7 +297,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -331,7 +331,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -365,7 +365,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -413,7 +413,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,
@@ -455,7 +455,7 @@ describe('[COMP:workers/skill-review-worker] reviewSession', () => {
       workspaceSkillStore,
       fileStore,
       approvalsStore,
-      analyticsStore: analytics as unknown as import('@sidanclaw/core').AnalyticsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
       reviewLLM: llm,
       leaseHolderId: 'lease-1',
       leaseMinutes: 5,

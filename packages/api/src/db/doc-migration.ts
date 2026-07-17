@@ -15,8 +15,8 @@ import {
   pageToYDocUpdate,
   snapshotFromUpdate,
   canonicalizePage,
-} from '@sidanclaw/doc-model'
-import type { Page } from '@sidanclaw/core/dist/views/blocks.js'
+} from '@use-brian/doc-model'
+import type { Page } from '@use-brian/core/dist/views/blocks.js'
 
 export type ConvertResult = {
   /** Encoded Y.Doc initial state for `documents.ydoc`. */

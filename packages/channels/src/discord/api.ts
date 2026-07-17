@@ -25,7 +25,7 @@ const DEFAULT_RETRY_DELAY_MS = 1000
 const MAX_RETRY_DELAY_MS = 10_000
 
 // Discord asks bots to send a User-Agent of the form `DiscordBot ($url, $version)`.
-const USER_AGENT = 'DiscordBot (https://sidan.ai, 1.0)'
+const USER_AGENT = 'DiscordBot (https://usebrian.ai, 1.0)'
 
 type DiscordErrorBody = {
   message?: string

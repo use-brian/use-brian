@@ -28,7 +28,7 @@ import type {
   Tool,
   WorkflowRunStore,
   WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 // ── Minimal store stubs ─────────────────────────────────────────────
 //
@@ -135,7 +135,7 @@ describe('[COMP:api/doc-inject] injectDocTools', () => {
     const result = await injectDocTools({
       ...baseOpts,
       tools: wired,
-      filesApi: noopStore<import('@sidanclaw/core').FilesApi>(),
+      filesApi: noopStore<import('@use-brian/core').FilesApi>(),
     })
     expect(wired.has('fetchSiteIcon')).toBe(true)
     expect(result.injectedCount).toBe(23)

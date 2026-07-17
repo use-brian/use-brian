@@ -2,9 +2,9 @@
 name: import-voice-from-x
 description: Import the connected X handle's recent originals and propose voice rules for the brand assistant. Use when the operator says "learn my voice from X", "import voice", "set up voice from my X account", or during onboarding of a new distribution app on X. Only valid for kind='app' assistants connected to X via OAuth.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: productivity
   applies_to_app_type: distribution
   when_to_use: When the operator wants to seed (or refresh) the brand voice from the connected X account's recent originals. Skip when the assistant isn't a kind='app' distribution assistant on X, or when the operator has fewer than ~20 original posts.
@@ -71,7 +71,7 @@ For each rule you'll propose, prepare:
   - "Sentences average 12–18 words; one-word punchlines are characteristic"
   - "Open with a number or a question; almost never declarative"
   - "Emoji are forbidden except 👋 in greetings"
-  - "Hashtags are reserved for `#sidanclaw` only"
+  - "Hashtags are reserved for `#Use Brian` only"
 - A **detail** field with rationale + 2–3 short evidence excerpts (drawn verbatim from the sample so the operator can verify):
   - "Observed across 14 of 187 originals: 'no fluff, just the answer' (id ABC), 'spare me the preamble' (id DEF), 'short version' (id GHI)."
 - A **confidence** value (0.0–1.0). Calibrate honestly — 0.9 means you'd bet the next 50 posts on it; 0.6 means it's a tendency, not a rule.

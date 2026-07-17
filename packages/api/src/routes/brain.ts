@@ -32,7 +32,7 @@ import type {
   RetrievalStore,
   SearchResultRow,
   Sensitivity,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspace-store.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'

@@ -39,7 +39,7 @@ const ctx: ToolContext = {
   userId: 'user-1',
   assistantId: ASSISTANT_ID,
   sessionId: 'sess-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'brain_inspection',
   channelId: 'inbox-1',
   workspaceId: WORKSPACE_ID,

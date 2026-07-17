@@ -4,7 +4,7 @@ import {
   CommunityRegistrySchema,
   OFFICIAL_CONNECTORS,
   type ConnectorEntry,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 
 const TOOLS_DIR = resolve(
   import.meta.dirname, '..', '..', '..', '..', 'sidanclaw-tools',

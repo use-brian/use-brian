@@ -15,7 +15,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries/en";
-import { ChatMarkdown } from "@sidanclaw/chat-ui";
+import { ChatMarkdown } from "@use-brian/chat-ui";
 import {
   ChatCodeBlock,
   chatMarkdownCodeComponents,

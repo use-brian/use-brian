@@ -7,13 +7,13 @@
  * fallback rather than throwing. `put` upserts on the `workspace_id` primary
  * key. Both run under the caller's RLS context (`queryWithRLS`).
  *
- * Implements `HomeDockStore` from `@sidanclaw/core`. See
+ * Implements `HomeDockStore` from `@use-brian/core`. See
  * docs/architecture/features/home-dock.md.
  *
  * [COMP:api/home-dock-store]
  */
 
-import { homeDockLayoutSchema, type HomeDockStore } from '@sidanclaw/core'
+import { homeDockLayoutSchema, type HomeDockStore } from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 
 export function createDbHomeDockStore(): HomeDockStore {

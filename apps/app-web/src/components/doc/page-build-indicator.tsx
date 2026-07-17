@@ -30,7 +30,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, Sparkles, X } from "lucide-react";
-import type { ToolUsed } from "@sidanclaw/chat-ui";
+import type { ToolUsed } from "@use-brian/chat-ui";
 import type { ToolUsedWithOps } from "@/components/chrome/floating-chat";
 import {
   subscribeBuildActivity,

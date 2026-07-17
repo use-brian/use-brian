@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   listPageTemplates,
   type CustomPageTemplateSummary,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 
 import { filterTemplates, filterCustomTemplates } from "../template-gallery";
 

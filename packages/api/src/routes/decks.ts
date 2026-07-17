@@ -10,8 +10,8 @@
  * Spec: docs/architecture/features/deck-generation.md. [COMP:api/decks-route]
  */
 import { Router } from 'express'
-import type { FilesApi } from '@sidanclaw/core'
-import { DECK_PPTX_MIME } from '@sidanclaw/core'
+import type { FilesApi } from '@use-brian/core'
+import { DECK_PPTX_MIME } from '@use-brian/core'
 import type { DeckStore } from '../db/deck-store.js'
 import {
   effectiveReadClearance,

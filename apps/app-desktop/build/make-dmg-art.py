@@ -45,7 +45,7 @@ REG_CANDS = [(SFR, 0, "Regular"), (ART,)]
 
 def _ink(font):
     im = Image.new("L", (380, 96), 0)
-    ImageDraw.Draw(im).text((4, 4), "Sidanclaw", font=font, fill=255)
+    ImageDraw.Draw(im).text((4, 4), "Use Brian", font=font, fill=255)
     return int(np.asarray(im).astype(bool).sum())
 
 
@@ -124,7 +124,7 @@ def build_bg(scale):
         gd.line([(0, y), (w, y)], fill=(*CYAN, 5), width=1)
     img.alpha_composite(grid)
 
-    # Legibility plates behind the two Finder-drawn icon labels ("sidanclaw" /
+    # Legibility plates behind the two Finder-drawn icon labels ("Use Brian" /
     # "Applications"). Finder owns the label color — it follows the *viewer's*
     # Light/Dark appearance, so a DMG can't force white — but each plate's
     # luminance is tuned so BOTH near-black (Light mode) and white (Dark mode)
@@ -135,7 +135,7 @@ def build_bg(scale):
     lf = pick_font(REG_CANDS, 13 * scale)
     plate = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     pd = ImageDraw.Draw(plate)
-    for cxu, label in ((175, "sidanclaw"), (485, "Applications")):
+    for cxu, label in ((175, "Use Brian"), (485, "Applications")):
         tw = pd.textlength(label, font=lf)
         pw, ph = tw + 30 * scale, 25 * scale
         px, py = cxu * scale, 320 * scale
@@ -168,7 +168,7 @@ def build_bg(scale):
     draw_cells(d, (*CYAN, 255))
 
     wf = pick_font(BOLD_CANDS, 42 * scale)
-    text, tracking = "sidanclaw", 2 * scale
+    text, tracking = "Use Brian", 2 * scale
     widths = [d.textlength(ch, font=wf) for ch in text]
     tw = sum(widths) + tracking * (len(text) - 1)
     mark_h = int(42 * scale * 1.16)
@@ -186,7 +186,7 @@ def build_bg(scale):
     d.text((w / 2, 104 * scale), "Drag the app into your Applications folder",
            font=tf, fill=MUTE, anchor="mm")
     ff = pick_font(REG_CANDS, 11 * scale)
-    d.text((w - 16 * scale, h - 14 * scale), "sidan.ai", font=ff, fill=FOOT, anchor="rm")
+    d.text((w - 16 * scale, h - 14 * scale), "usebrian.ai", font=ff, fill=FOOT, anchor="rm")
     return img.convert("RGB")
 
 
@@ -215,7 +215,7 @@ def build_preview():
         cd.ellipse([x - 6 * s, y - 6 * s, x + 6 * s, y + 6 * s], fill=col)
     tbf = pick_font(SEMI_CANDS, 14 * s)
     mark = Image.open(os.path.join(ROOT, "icon.png")).resize((20 * s, 20 * s), Image.LANCZOS)
-    title = "Install sidanclaw"
+    title = "Install Use Brian"
     tw = cd.textbbox((0, 0), title, font=tbf)[2]
     gx = (w - (mark.width + 8 * s + tw)) // 2
     canvas.alpha_composite(mark, (gx, bar // 2 - mark.height // 2))
@@ -233,7 +233,7 @@ def build_preview():
 
     app = Image.open(os.path.join(ROOT, "icon.png"))
     apps = Image.open(apps_path).convert("RGBA") if os.path.exists(apps_path) else app
-    place(app, 175, "sidanclaw")
+    place(app, 175, "Use Brian")
     place(apps, 485, "Applications")
     canvas.save("/tmp/dmg_preview.png")
     print("/tmp/dmg_preview.png")

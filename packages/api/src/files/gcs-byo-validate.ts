@@ -68,7 +68,7 @@ export async function validateGcsByoBinding(
     return { ok: false, code: code === 'unknown' ? 'invalid_key' : code, message }
   }
 
-  const probe = Buffer.from('sidanclaw byo storage healthcheck')
+  const probe = Buffer.from('Use Brian byo storage healthcheck')
   try {
     await client.writeBlob(BYO_HEALTHCHECK_KEY, probe, { workspaceId: 'healthcheck', mime: 'text/plain' })
     const read = await client.readBlob(BYO_HEALTHCHECK_KEY)

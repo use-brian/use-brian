@@ -98,7 +98,7 @@ import {
   withFreshBlockIds,
   yDocToSnapshot,
   type CustomPageTemplateSummary,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import { EmptyPageLanding } from "./empty-page-landing";
 import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
@@ -948,7 +948,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     setTopError(null);
     // Stash the intent so it survives the mandatory auth-refresh full-page
     // redirect: `createDraft` below is an `authFetch` POST, and in production a
-    // 401 bounces the whole browser to sidan.ai and back, reloading this page
+    // 401 bounces the whole browser to usebrian.ai and back, reloading this page
     // and dropping `trimmed` (React state). The resume effect replays it on
     // return. A replay (`fromResume`) never re-stashes, so a still-broken
     // session can't loop. See docs/architecture/platform/auth.md → "A sub-app

@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { AccessContext } from '@sidanclaw/core'
+import type { AccessContext } from '@use-brian/core'
 
 const rlsQueries: { userId: string; text: string; values?: unknown[] }[] = []
 let rlsRows: Record<string, unknown>[] = []

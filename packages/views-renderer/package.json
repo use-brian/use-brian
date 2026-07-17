@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/views-renderer",
+  "name": "@use-brian/views-renderer",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@sidanclaw/core": "workspace:*",
+    "@use-brian/core": "workspace:*",
     "@tanstack/react-table": "^8.21",
     "@dnd-kit/core": "^6.3",
     "@dnd-kit/sortable": "^10.0",

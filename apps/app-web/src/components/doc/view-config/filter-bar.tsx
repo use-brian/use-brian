@@ -36,7 +36,7 @@ import {
 } from "react";
 import { Filter as FilterIcon, X as XIcon } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 
 /**
  * Local mirror of `PropertyKind` — the renderer's `types.ts` defines

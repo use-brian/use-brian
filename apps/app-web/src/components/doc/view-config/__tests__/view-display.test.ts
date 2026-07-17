@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 import type { ViewDisplay } from "@/lib/api/views";
 import {
   DEFAULT_FROZEN_COUNT,

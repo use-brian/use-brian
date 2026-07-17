@@ -22,8 +22,8 @@ vi.mock('../../db/sessions.js', () => ({
   findOrCreateSession: vi.fn(),
   findSessionById: vi.fn(),
 }))
-vi.mock('@sidanclaw/core', async () => {
-  const actual = await vi.importActual<typeof import('@sidanclaw/core')>('@sidanclaw/core')
+vi.mock('@use-brian/core', async () => {
+  const actual = await vi.importActual<typeof import('@use-brian/core')>('@use-brian/core')
   return {
     ...actual,
     parseFileContent: vi.fn(),
@@ -36,7 +36,7 @@ import { findOrCreateUser, getDefaultAssistant, findUserById, findAssistantById,
 import { findOrCreateSession, findSessionById } from '../../db/sessions.js'
 import { getWorkspaceFileById } from '../../db/workspace-files.js'
 import { enqueueFileIngestJob } from '../../db/file-ingest-jobs-store.js'
-import { parseFileContent, shouldInline } from '@sidanclaw/core'
+import { parseFileContent, shouldInline } from '@use-brian/core'
 
 const mockFindOrCreateUser = vi.mocked(findOrCreateUser)
 const mockGetDefaultAssistant = vi.mocked(getDefaultAssistant)

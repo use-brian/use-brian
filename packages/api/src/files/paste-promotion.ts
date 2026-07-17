@@ -13,7 +13,7 @@
 // re-routing it should fire only when it clearly cannot live in context.
 // CJK-aware (estimateStringTokens). No opt-outs in v1 (documented limitation).
 
-import { estimateStringTokens } from '@sidanclaw/core'
+import { estimateStringTokens } from '@use-brian/core'
 import type { ArtifactPromoter } from './artifact-promote.js'
 import { renderArtifactManifest } from './artifact-manifest.js'
 

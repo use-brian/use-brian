@@ -2,9 +2,9 @@
 name: onboarding-company
 description: Cold-start flow that adds the user's company to the brain from the web — confirm the company first (a cheap standard turn), research it, show the findings with sources, then write a company entity, key people, and sourced facts on the user's OK.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: research
   applies_to_app_type: any
   when_to_use: The user wants the brain to know their company, seeded from the web — "research my company", "add my company to the brain", or the cold-start "Research your company" card. Confirm which company first in a standard turn, then research it, show the findings, and write a company entity + key people + sourced facts on assent.

@@ -9,9 +9,9 @@
  * supplied by the consuming app.
  *
  * Why a callback rather than a direct `queryLoop` call: this module lives in
- * `@sidanclaw/core` which has no `pg` / DB / store-construction surface. The
+ * `@use-brian/core` which has no `pg` / DB / store-construction surface. The
  * actual execution wires DB-backed stores, MCP injection, etc., which is the
- * `@sidanclaw/api` layer's job. The callback boundary keeps the core free of
+ * `@use-brian/api` layer's job. The callback boundary keeps the core free of
  * those dependencies.
  *
  * [COMP:a2a/transport-in-process]

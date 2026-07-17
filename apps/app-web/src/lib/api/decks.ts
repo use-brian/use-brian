@@ -3,7 +3,7 @@
  * Writes happen through chat (the deck tools), never from the UI.
  * Spec: docs/architecture/features/deck-generation.md.
  */
-import type { DeckSpec, DeckStyle } from "@sidanclaw/shared/decks";
+import type { DeckSpec, DeckStyle } from "@use-brian/shared/decks";
 import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";

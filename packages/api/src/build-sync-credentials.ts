@@ -4,7 +4,7 @@
  * The knowledge sync worker (and the KB edit-proposal routes) need the GitHub
  * PAT a synced source operates through, resolved by `(workspaceId,
  * connectorInstanceId)`. The hosted tier kept this resolver closed
- * (`@sidanclaw/api-platform`), so the open standalone build historically fell
+ * (`@use-brian/api-platform`), so the open standalone build historically fell
  * back to a stub that always threw `GitHub knowledge sync is not configured in
  * this build` — the worker ticked but every GitHub source failed.
  *
@@ -26,7 +26,7 @@
  * See docs/architecture/features/knowledge-base.md → "Team credential scoping".
  */
 
-import type { SyncCredentials } from '@sidanclaw/core'
+import type { SyncCredentials } from '@use-brian/core'
 import type { createConnectorInstanceStore } from './db/connector-instance-store.js'
 import type { createConnectorGrantStore } from './db/connector-grant-store.js'
 

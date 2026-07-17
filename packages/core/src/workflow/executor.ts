@@ -37,7 +37,7 @@ import type {
 import { evaluateBoolean, JsonLogicEvalError } from './condition.js'
 import { interpolateString, interpolateValue, type InterpolationScope } from './interpolation.js'
 import type { ResearchDepthConfig } from '../engine/research-depth.js'
-import { sanitizeDeliveryText } from '@sidanclaw/shared'
+import { sanitizeDeliveryText } from '@use-brian/shared'
 
 /**
  * Build a `ResearchDepthConfig` from a step's per-step run-time settings
@@ -1143,7 +1143,7 @@ async function dispatchToolCall(
         userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
         assistantId: ctx.primaryAssistantId,
         sessionId: `workflow_run_${ctx.run.id}`,
-        appId: 'sidanclaw',
+        appId: 'Use Brian',
         channelType: 'workflow',
         channelId: ctx.run.id,
         workspaceId: ctx.run.workspaceId,
@@ -1184,7 +1184,7 @@ async function dispatchToolCall(
     userId: ctx.run.triggeredBy ?? ctx.workflow.createdBy,
     assistantId: ctx.primaryAssistantId,
     sessionId: `workflow_run_${ctx.run.id}`,
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'workflow',
     channelId: ctx.run.id,
     workspaceId: ctx.run.workspaceId,

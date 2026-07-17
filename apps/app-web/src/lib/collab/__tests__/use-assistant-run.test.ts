@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { deriveAssistantRun } from "../use-assistant-run";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 
 const run = (over: Partial<AssistantRunState> = {}): AssistantRunState => ({
   pageId: "p",

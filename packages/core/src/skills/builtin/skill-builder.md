@@ -2,9 +2,9 @@
 name: skill-builder
 description: Draft a high-quality workspace skill from a user's description of what they want, grounded in what the brain already knows about the team. Used by the Brain's skill creator and available in chat when a user asks to create a skill.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: productivity
   applies_to_app_type: any
   when_to_use: The user wants to create or draft a skill — "make me a skill that...", "turn this process into a skill", "teach the assistants how we do X". Gather what's genuinely missing (one round of questions at most), then draft the full skill for human review. Never save a skill without the user seeing the draft.

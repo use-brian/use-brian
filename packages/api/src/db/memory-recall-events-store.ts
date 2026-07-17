@@ -23,7 +23,7 @@
  */
 
 import { query } from './client.js'
-import type { MemoryRecallSink } from '@sidanclaw/core'
+import type { MemoryRecallSink } from '@use-brian/core'
 
 export type MemoryRecallKind = 'index_inject' | 'tool_call' | 'consolidation'
 

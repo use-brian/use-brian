@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { EventSubscription, GoalRecord, GoalStore } from '@sidanclaw/core'
+import type { EventSubscription, GoalRecord, GoalStore } from '@use-brian/core'
 import {
   createGoalDriver,
   DEFAULT_GOAL_BUDGET,

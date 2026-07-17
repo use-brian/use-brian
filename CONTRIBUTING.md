@@ -1,10 +1,10 @@
-# Contributing to sidanclaw
+# Contributing to Use Brian
 
 Thanks for your interest in contributing. A few things to know up front.
 
 ## License and the CLA
 
-sidanclaw is licensed under **AGPLv3** (see [`LICENSE`](./LICENSE)). To keep the
+Use Brian is licensed under **AGPLv3** (see [`LICENSE`](./LICENSE)). To keep the
 project sustainable we also offer a **commercial license** for organizations
 that cannot accept AGPL's network-copyleft. That dual-license is only possible
 if every contribution is covered by a **Contributor License Agreement (CLA)**.

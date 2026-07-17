@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import pg from 'pg'
-import type { AccessContext, RetrievalActor } from '@sidanclaw/core'
+import type { AccessContext, RetrievalActor } from '@use-brian/core'
 
 /**
  * [COMP:brain/compartment-enforcement] — compartment axis end-to-end read-gate proof.
@@ -30,14 +30,14 @@ import type { AccessContext, RetrievalActor } from '@sidanclaw/core'
  * all; a confidential research row stays hidden from a public-clearance viewer
  * via the SENSITIVITY gate independent of compartments; untagged rows are open.
  *
- * Requires a local `sidanclaw` PostgreSQL with migration 243 applied. Skips
+ * Requires a local `Use Brian` PostgreSQL with migration 243 applied. Skips
  * silently otherwise (the canConnect probe checks the compartment columns).
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

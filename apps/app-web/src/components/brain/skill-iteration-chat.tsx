@@ -39,7 +39,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowUp, Paperclip, Sparkles } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
-import { ChatMarkdown } from "@sidanclaw/chat-ui";
+import { ChatMarkdown } from "@use-brian/chat-ui";
 import { chatMarkdownCodeComponents } from "@/components/chrome/chat-code-block";
 import {
   draftSkillTurn,

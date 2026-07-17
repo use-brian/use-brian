@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { shouldTriggerAiOnSpace } from "../ai-space-trigger";

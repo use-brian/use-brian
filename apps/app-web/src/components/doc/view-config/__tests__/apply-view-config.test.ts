@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { A2UIColumn, TableWidget } from "@sidanclaw/views-renderer";
+import type { A2UIColumn, TableWidget } from "@use-brian/views-renderer";
 import { applyViewConfig } from "../apply-view-config";
 import { defaultViewToolbarValue, type ViewToolbarValue } from "../view-toolbar";
 

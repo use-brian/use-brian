@@ -31,6 +31,7 @@ describe('[COMP:api/doc-model-gateway] DocGateway', () => {
       expect(gw).toBeDefined()
       await gw!.applyOps({ userId: 'u1', pageId: 'p1', ops: OPS })
       const [url] = fetchImpl.mock.calls[0] as unknown as [string]
+      // REBRAND-CUTOVER: flips to doc-sync.usebrian.ai with the doc-gateway default
       expect(url).toBe('https://doc-sync.sidan.ai/internal/apply')
     } finally {
       vi.unstubAllEnvs()

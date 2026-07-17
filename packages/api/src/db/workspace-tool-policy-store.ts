@@ -16,7 +16,7 @@
  * Component tag: [COMP:api/workspace-tool-policy-store].
  */
 
-import type { McpSettingsStore, McpToolSetting, ToolClassification } from '@sidanclaw/core'
+import type { McpSettingsStore, McpToolSetting, ToolClassification } from '@use-brian/core'
 import { query } from './client.js'
 
 export type WorkspaceToolPolicy = {

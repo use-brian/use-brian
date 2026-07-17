@@ -13,7 +13,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { A2UIColumn, A2UIRow, GalleryWidget } from '@sidanclaw/core'
+import type { A2UIColumn, A2UIRow, GalleryWidget } from '@use-brian/core'
 import type { FileRef } from '../types.js'
 import { renderWidget } from '../render.js'
 import { Gallery, GRID_CLASSES } from '../widgets/Gallery.js'

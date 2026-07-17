@@ -2,7 +2,7 @@
  * Fixture test for the using-sidanclaw built-in skill.
  * Component tag: [COMP:engine/using-sidanclaw-skill].
  *
- * The skill is the consult-first grounding for "can sidanclaw do X?"
+ * The skill is the consult-first grounding for "can Use Brian do X?"
  * questions (2026-07-07 capability-hallucination fix). This asserts the
  * load-bearing pieces survive edits: the activation trigger, the
  * validate-don't-assert protocol (proposeWorkflow as the oracle), the

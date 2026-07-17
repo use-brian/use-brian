@@ -16,31 +16,31 @@ function makeFakeTransport() {
 describe('[COMP:api/smtp-client] sendMagicLink', () => {
   it('sends from the configured From: address', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
 
-    await client.sendMagicLink('a@b.com', 'https://sidan.ai/api/auth/email/verify?token=x')
+    await client.sendMagicLink('a@b.com', 'https://usebrian.ai/api/auth/email/verify?token=x')
 
     expect(calls).toHaveLength(1)
-    expect(calls[0].from).toBe('auth@sidan.ai')
+    expect(calls[0].from).toBe('auth@usebrian.ai')
     expect(calls[0].to).toBe('a@b.com')
   })
 
   it('defaults to English when no locale is given', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
 
-    await client.sendMagicLink('a@b.com', 'https://sidan.ai/x')
+    await client.sendMagicLink('a@b.com', 'https://usebrian.ai/x')
 
-    expect(calls[0].subject).toBe(renderMagicLinkEmail('https://sidan.ai/x', 'en').subject)
+    expect(calls[0].subject).toBe(renderMagicLinkEmail('https://usebrian.ai/x', 'en').subject)
   })
 
   it('renders the localized subject and body when locale is set', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
 
-    await client.sendMagicLink('a@b.com', 'https://sidan.ai/x', 'ja')
+    await client.sendMagicLink('a@b.com', 'https://usebrian.ai/x', 'ja')
 
-    const ja = renderMagicLinkEmail('https://sidan.ai/x', 'ja')
+    const ja = renderMagicLinkEmail('https://usebrian.ai/x', 'ja')
     expect(calls[0].subject).toBe(ja.subject)
     expect(calls[0].html).toBe(ja.html)
     expect(calls[0].text).toBe(ja.text)
@@ -48,8 +48,8 @@ describe('[COMP:api/smtp-client] sendMagicLink', () => {
 
   it('embeds the verify link in both html and text bodies', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
-    const link = 'https://sidan.ai/api/auth/email/verify?token=abc123'
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
+    const link = 'https://usebrian.ai/api/auth/email/verify?token=abc123'
 
     await client.sendMagicLink('a@b.com', link)
 
@@ -59,9 +59,9 @@ describe('[COMP:api/smtp-client] sendMagicLink', () => {
 
   it('threads the OTP code into the rendered email', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
 
-    await client.sendMagicLink('a@b.com', 'https://sidan.ai/login/verify?token=x', 'en', '482917')
+    await client.sendMagicLink('a@b.com', 'https://usebrian.ai/login/verify?token=x', 'en', '482917')
 
     expect(calls[0].html).toContain('482917')
     expect(calls[0].text).toContain('482917')
@@ -71,40 +71,40 @@ describe('[COMP:api/smtp-client] sendMagicLink', () => {
     const transport: SmtpTransport = {
       sendMail: vi.fn().mockRejectedValueOnce(new Error('SMTP 535: auth failed')),
     }
-    const client = createSmtpClient({ transport, fromAddress: 'auth@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'auth@usebrian.ai' })
 
     await expect(
-      client.sendMagicLink('a@b.com', 'https://sidan.ai/x'),
+      client.sendMagicLink('a@b.com', 'https://usebrian.ai/x'),
     ).rejects.toThrow('SMTP 535: auth failed')
   })
 })
 
 describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
   const inviteOpts = {
-    link: 'https://sidan.ai/invite?token=abc',
+    link: 'https://usebrian.ai/invite?token=abc',
     workspaceName: 'AI Trading',
     inviterName: 'Hinson Wong',
     role: 'member' as const,
     message: null,
   }
 
-  it('sends from "sidanclaw - <workspace>" on the configured address', async () => {
+  it('sends from "Use Brian - <workspace>" on the configured address', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'contact@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'contact@usebrian.ai' })
 
     await client.sendWorkspaceInvitation('a@b.com', inviteOpts)
 
     expect(calls).toHaveLength(1)
     expect(calls[0].from).toEqual({
-      name: 'sidanclaw - AI Trading',
-      address: 'contact@sidan.ai',
+      name: 'Use Brian - AI Trading',
+      address: 'contact@usebrian.ai',
     })
     expect(calls[0].to).toBe('a@b.com')
   })
 
   it('renders the localized invitation subject and body', async () => {
     const { transport, calls } = makeFakeTransport()
-    const client = createSmtpClient({ transport, fromAddress: 'contact@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'contact@usebrian.ai' })
 
     await client.sendWorkspaceInvitation('a@b.com', { ...inviteOpts, locale: 'ja' })
 
@@ -118,7 +118,7 @@ describe('[COMP:api/smtp-client] sendWorkspaceInvitation', () => {
     const transport: SmtpTransport = {
       sendMail: vi.fn().mockRejectedValueOnce(new Error('SMTP 535: auth failed')),
     }
-    const client = createSmtpClient({ transport, fromAddress: 'contact@sidan.ai' })
+    const client = createSmtpClient({ transport, fromAddress: 'contact@usebrian.ai' })
 
     await expect(
       client.sendWorkspaceInvitation('a@b.com', inviteOpts),

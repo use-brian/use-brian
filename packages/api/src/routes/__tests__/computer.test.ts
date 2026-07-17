@@ -9,7 +9,7 @@ import {
   createInMemorySandboxTaskStore,
   createInMemorySessionVault,
   createSandboxOrchestrator,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 

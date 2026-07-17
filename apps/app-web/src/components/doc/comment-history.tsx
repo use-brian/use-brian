@@ -23,7 +23,7 @@
 
 import * as React from "react";
 import { History as HistoryIcon, ChevronLeft } from "lucide-react";
-import { ChatMarkdown } from "@sidanclaw/chat-ui";
+import { ChatMarkdown } from "@use-brian/chat-ui";
 import { useT } from "@/lib/i18n/client";
 import { listPageThreads, type CommentThread } from "@/lib/api/comments";
 import {

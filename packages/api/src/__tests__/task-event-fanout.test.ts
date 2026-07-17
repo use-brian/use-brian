@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import type { DispatchEvent, TaskLifecycleEvent, WorkflowEventDispatcher } from '@sidanclaw/core'
+import type { DispatchEvent, TaskLifecycleEvent, WorkflowEventDispatcher } from '@use-brian/core'
 import { setTaskEventDispatcher, publishTaskLifecycle } from '../task-event-fanout.js'
 
 const EVENT: TaskLifecycleEvent = {

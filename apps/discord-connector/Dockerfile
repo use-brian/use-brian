@@ -6,7 +6,7 @@ RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 WORKDIR /app
 
 # Workspace config + the package.json/tsconfig of every package in the build
-# graph (discord-connector → @sidanclaw/channels).
+# graph (discord-connector → @use-brian/channels).
 COPY pnpm-workspace.yaml pnpm-lock.yaml package.json turbo.json tsconfig.base.json ./
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY apps/discord-connector/package.json apps/discord-connector/tsconfig.json ./apps/discord-connector/
@@ -21,9 +21,9 @@ COPY apps/discord-connector/src ./apps/discord-connector/src
 
 # pnpm topological build, not turbo: emulated (`--platform linux/amd64` on
 # arm64 / QEMU) turbo aborts on EINTR creating its `.turbo` log dir. `<pkg>...`
-# = package + dependency closure, built deps-first (builds @sidanclaw/shared
-# then @sidanclaw/channels first) — same ordering as turbo's `^build`.
-RUN pnpm --filter "@sidanclaw/discord-connector..." run build
+# = package + dependency closure, built deps-first (builds @use-brian/shared
+# then @use-brian/channels first) — same ordering as turbo's `^build`.
+RUN pnpm --filter "@use-brian/discord-connector..." run build
 
 # ── Stage 3: Production image ─────────────────────────────────
 FROM node:22-slim AS runner

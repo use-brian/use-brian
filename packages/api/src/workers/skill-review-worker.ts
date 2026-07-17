@@ -48,7 +48,7 @@
  */
 
 import { query } from '../db/client.js'
-import { sanitize, type AnalyticsStore } from '@sidanclaw/core'
+import { sanitize, type AnalyticsStore } from '@use-brian/core'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type {
   WorkspaceSkillFilesStore,
@@ -754,7 +754,7 @@ async function applyAction(
   //
   // We import the tool factory lazily inside the function so the worker
   // module doesn't pull in zod at boot before it's needed.
-  const { createSkillManageTool } = await import('@sidanclaw/core')
+  const { createSkillManageTool } = await import('@use-brian/core')
   const tool = createSkillManageTool({
     workspaceId: deps.workspaceId,
     originatingAssistantId: deps.originatingAssistantId,
@@ -772,7 +772,7 @@ async function applyAction(
     userId: deps.systemActorUserId,
     assistantId: deps.originatingAssistantId,
     sessionId: 'background_review',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'system',
     channelId: 'background-review-worker',
     workspaceId: deps.workspaceId,

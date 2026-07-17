@@ -83,7 +83,7 @@ export class BrowserBackendError extends Error {
 
 /** The P1.4 contract: a missing extension is a clear instruction, never a hang. */
 export const NO_EXTENSION_MESSAGE =
-  'No sidanclaw browser extension is connected. Ask the user to open Chrome with the sidanclaw extension installed and enabled (and signed in), then retry.'
+  'No Use Brian browser extension is connected. Ask the user to open Chrome with the Use Brian extension installed and enabled (and signed in), then retry.'
 
 // ── BrowserProvider seam (§4.15) ───────────────────────────────
 
@@ -244,7 +244,7 @@ export type BrowserUseRunResult = {
 }
 
 /**
- * The file-bridge's provider half: byte movement between sidanclaw and the
+ * The file-bridge's provider half: byte movement between Use Brian and the
  * sandbox's ephemeral scratch. Workspace scoping lives ABOVE this seam (the
  * tools resolve files through `FilesApi` with the ToolContext's workspace) —
  * the provider only ever sees bytes and scratch paths.

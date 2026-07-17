@@ -1,7 +1,7 @@
 import type {
   SessionStateSource,
   SessionStateStatus,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from './client.js'
 
 export type SessionStateRow = {

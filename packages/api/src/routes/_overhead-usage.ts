@@ -10,8 +10,8 @@
  * recording error never breaks the main turn.
  */
 
-import type { UsageStore, TokenUsage } from '@sidanclaw/core'
-import { calculateCost, isOverheadSource } from '@sidanclaw/core'
+import type { UsageStore, TokenUsage } from '@use-brian/core'
+import { calculateCost, isOverheadSource } from '@use-brian/core'
 
 export type RecordOverheadUsageParams = {
   usageStore: UsageStore | undefined

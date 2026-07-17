@@ -36,7 +36,7 @@
  */
 
 import { Router } from 'express'
-import type { SavedViewStore } from '@sidanclaw/core'
+import type { SavedViewStore } from '@use-brian/core'
 
 /**
  * Cooldown between auto-ingests of the same page. A debounced Yjs save fires

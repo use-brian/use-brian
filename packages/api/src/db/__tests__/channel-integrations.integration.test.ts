@@ -11,7 +11,7 @@
  * no test executed the query against the live schema. This suite closes
  * that gap.
  *
- * Requires a local `sidanclaw` PostgreSQL database with migration 158
+ * Requires a local `Use Brian` PostgreSQL database with migration 158
  * applied. Skips silently when unavailable so unit-test runs on machines
  * without Postgres still pass.
  */
@@ -23,7 +23,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

@@ -24,7 +24,7 @@
  */
 
 import type { Request } from 'express'
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 import { verifySecret } from '../db/api-key-store.js'
 import {
   parseBrainAuthToken,

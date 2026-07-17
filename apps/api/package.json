@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/api-open",
+  "name": "@use-brian/api-open",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -14,7 +14,7 @@
     "@electric-sql/pglite": "^0.5.3",
     "@electric-sql/pglite-pgvector": "^0.0.4",
     "@electric-sql/pglite-socket": "^0.2.4",
-    "@sidanclaw/api": "workspace:*",
+    "@use-brian/api": "workspace:*",
     "dotenv": "^16"
   },
   "devDependencies": {

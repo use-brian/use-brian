@@ -13,8 +13,8 @@ import type {
   EntitySupersedePatch,
   EntityUpdateFields,
   GetEntityOpts,
-} from '@sidanclaw/core'
-import type { Sensitivity } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'

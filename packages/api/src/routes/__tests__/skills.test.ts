@@ -14,8 +14,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
-vi.mock('@sidanclaw/core', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@sidanclaw/core')>()
+vi.mock('@use-brian/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@use-brian/core')>()
   return {
     loadBuiltinSkills: vi.fn(() => [
       { id: 'builtin-1', name: 'Built In', description: 'b', category: 'general', source: 'builtin' },

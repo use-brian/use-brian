@@ -5,7 +5,7 @@
  * `page-renderer` once wired into the shell). One `useEditor` bound to a Yjs
  * doc via `Collaboration` + `CollaborationCursor`, so every keystroke and the
  * AI's edits merge live with no clobbering. The 18 block kinds are the shared
- * `@sidanclaw/doc-model` schema; data/chart/media/etc. render through React
+ * `@use-brian/doc-model` schema; data/chart/media/etc. render through React
  * node-views.
  *
  * Editing affordances layered on the live editor:
@@ -54,7 +54,7 @@ import {
   instantiatePageTemplate,
   withFreshBlockIds,
   type CustomPageTemplateSummary,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import type { CollabHandle } from "@/lib/collab/use-collab-provider";
 import { colorForUserId } from "@/lib/collab/cursor-color";
 import { useT } from "@/lib/i18n/client";

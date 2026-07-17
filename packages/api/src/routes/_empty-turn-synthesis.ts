@@ -38,8 +38,8 @@
  * banner.
  */
 
-import type { ContentBlock, LLMProvider, TokenUsage } from '@sidanclaw/core'
-import { collectStream } from '@sidanclaw/core'
+import type { ContentBlock, LLMProvider, TokenUsage } from '@use-brian/core'
+import { collectStream } from '@use-brian/core'
 
 export type EmptyTurnSynthesisInputTurn = {
   content: ContentBlock[]

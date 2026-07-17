@@ -26,7 +26,7 @@ export type DesktopAuthStore = {
   /**
    * Mint a fresh code for an authenticated user, bound to a PKCE challenge.
    * Inserts only the hash; returns the raw code so the bridge can put it in the
-   * `sidanclaw://auth?code=…` redirect. Once create() returns, the raw value
+   * `usebrian://auth?code=…` redirect. Once create() returns, the raw value
    * lives only in that redirect.
    */
   create(input: {

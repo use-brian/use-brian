@@ -2,7 +2,7 @@
  * Desktop target model — which brain the shell fronts.
  *
  * Phase 2 of docs/plans/consumer-local-experience.md (§2.1): the downloaded
- * shell fronts ONE target at a time — sidanclaw Cloud or a local / self-hosted
+ * shell fronts ONE target at a time — Use Brian Cloud or a local / self-hosted
  * brain. A target is a triple `{ appUrl (uiSource), apiUrl, auth }`, resolved
  * with the precedence env override (dev) > persisted userData record > cloud
  * default. Switching targets persists the record and relaunches the shell, so
@@ -29,8 +29,8 @@ export type TargetKind = "cloud" | "local";
 export type TargetAuth = "pkce" | "local-session";
 
 /** The cloud target endpoints — the single source `config.ts` defaults to. */
-export const CLOUD_APP_URL = "https://app.sidan.ai";
-export const CLOUD_API_URL = "https://api.sidan.ai";
+export const CLOUD_APP_URL = "https://app.usebrian.ai";
+export const CLOUD_API_URL = "https://api.usebrian.ai";
 
 /** Where a launcher-run local brain serves the app (its API pairs at :4000). */
 export const DEFAULT_LOCAL_APP_URL = "http://localhost:3003";
@@ -141,7 +141,7 @@ export function cloudTarget(): ResolvedTarget {
     appUrl: CLOUD_APP_URL,
     apiUrl: CLOUD_API_URL,
     auth: "pkce" as const,
-    label: "sidanclaw Cloud",
+    label: "Use Brian Cloud",
   });
 }
 

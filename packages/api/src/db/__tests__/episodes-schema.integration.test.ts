@@ -8,14 +8,14 @@ import pg from 'pg'
  * immutable"), the CHECK constraints fire, the indexes are present,
  * and the deferred FKs from migrations 125 / 126 (`entities` and
  * `entity_links` `source_episode_id` columns) are now in place.
- * Requires a local PostgreSQL `sidanclaw` database with migrations
+ * Requires a local PostgreSQL `Use Brian` database with migrations
  * applied; skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

@@ -36,7 +36,7 @@ import type {
   WorkflowStore,
   WorkflowTrigger,
   WorkflowTriggerKind,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 
@@ -1150,7 +1150,7 @@ export function decodeRunCursor(cursor: string): { startedAt: Date; id: string }
 // ── Event run queue (mig 302) ───────────────────────────────────────────
 //
 // Event dispatch enqueues `pending` runs; the run-queue worker
-// (`@sidanclaw/core` → workflow/run-queue.ts) drains them through these
+// (`@use-brian/core` → workflow/run-queue.ts) drains them through these
 // system-level methods. Spec: docs/architecture/features/workflow.md →
 // "Event run queue — enqueue, drain, storm guard".
 // [COMP:workflow/run-queue]
@@ -1321,7 +1321,7 @@ export async function pauseWorkflowSystem(
 // ── workflow lifecycle sweep (mig 308) ──────────────────────────────────
 // System-level reads/writes for the lifecycle sweep worker
 // (packages/api/src/workers/workflow-lifecycle-worker.ts). The worker has
-// no acting user; the policy lives in @sidanclaw/core `decideLifecycle`.
+// no acting user; the policy lives in @use-brian/core `decideLifecycle`.
 // [COMP:workflow/lifecycle]
 
 type LifecycleSweepRow = {

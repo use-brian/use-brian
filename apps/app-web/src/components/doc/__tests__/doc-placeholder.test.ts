@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { placeholderTextFor, emptyToggleSummaryRanges } from "../doc-placeholder";
 

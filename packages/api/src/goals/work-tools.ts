@@ -16,7 +16,7 @@
  * [COMP:goals/work-tools]
  */
 import { z } from 'zod'
-import { buildTool, EventSubscriptionSchema, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@sidanclaw/core'
+import { buildTool, EventSubscriptionSchema, type GoalClarityAssessor, type GoalRecord, type GoalVerifier, type Tool } from '@use-brian/core'
 import { getGoalByIdSystem, setGoalAwaitingEventSystem, stampGoalCompletionSystem, updateGoalSystem } from '../db/goals.js'
 
 export type GoalWorkToolsDeps = {

@@ -6,8 +6,8 @@ import type {
   EntityLinksStore,
   EntitySource,
   LinkKind,
-} from '@sidanclaw/core'
-import type { Sensitivity } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS } from './client.js'
 
@@ -15,7 +15,7 @@ import { queryWithRLS } from './client.js'
  * `entity_links` store. Schema spec:
  *   docs/plans/company-brain/data-model.md §Entity Links (lines 152-234).
  *
- * Edge vocabulary is defined in `@sidanclaw/core` (`EDGE_TYPES`); writes
+ * Edge vocabulary is defined in `@use-brian/core` (`EDGE_TYPES`); writes
  * pass the value through, the DB CHECK / enum (when added by migration
  * 126) enforces the locked vocabulary at the persistence boundary.
  *

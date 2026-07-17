@@ -26,7 +26,7 @@ import {
   validateDiscordCredentials,
   createTelegramApi,
   createSlackApi,
-} from '@sidanclaw/channels'
+} from '@use-brian/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'

@@ -13,7 +13,7 @@ import express from 'express'
 import request from 'supertest'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type Tool } from '@sidanclaw/core'
+import { buildTool, type Tool } from '@use-brian/core'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn().mockResolvedValue({ rows: [] }),

@@ -37,7 +37,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronRight, ExternalLink, RotateCcw } from "lucide-react";
-import type { ToolUsed } from "@sidanclaw/chat-ui";
+import type { ToolUsed } from "@use-brian/chat-ui";
 import type { BuildEvent } from "@/lib/build-events";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";

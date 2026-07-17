@@ -1,6 +1,6 @@
 /**
  * Leave-group endpoint. The API calls this when the official bot is added to a
- * group whose adder cannot be resolved to a sidanclaw account — the bot leaves
+ * group whose adder cannot be resolved to a Use Brian account — the bot leaves
  * rather than ingest a group it cannot attribute.
  *
  * See docs/architecture/channels/whatsapp.md -> "Official bot - group ingest".

@@ -1,5 +1,5 @@
 /**
- * bootOpenApi — the OPEN composition root for the sidanclaw HTTP API.
+ * bootOpenApi — the OPEN composition root for the Use Brian HTTP API.
  *
  * This module builds the entire OPEN slice of the API service: the express
  * app + middleware, the LLM provider stack, every open DB store, the open tool
@@ -7,17 +7,17 @@
  * open background workers. It imports ZERO closed code — every closed seam is
  * an OPTIONAL injected PORT with a safe default (allow-all credit gate, no-op
  * usage recorder, inert feed hooks, no-op episode ingestors, …). The closed
- * platform entry (`apps/api/src/index.ts`, `@sidanclaw/api-server`) calls this
+ * platform entry (`apps/api/src/index.ts`, `@use-brian/api-server`) calls this
  * with the real impls + a `mountExtraRoutes` hook that mounts the 33 closed
  * routes onto the same app against the SAME store instances exposed on
  * `BootContext`. A standalone open entry (`sidanclaw/apps/api`,
- * `@sidanclaw/api-open`) calls it with no ports → all safe defaults.
+ * `@use-brian/api-open`) calls it with no ports → all safe defaults.
  *
  * See the open-core split (repo CLAUDE.md; plan in git history) §10 (ports & adapters DI), §12.5
  * (the open/closed manifest), and /tmp/squash/apps-split-plan.md for the full
  * inventory of open vs closed mounts.
  *
- * INVARIANT: never import `@sidanclaw/api-platform/*` or `@sidanclaw/shared-server`
+ * INVARIANT: never import `@use-brian/api-platform/*` or `@use-brian/shared-server`
  * from this file. The classification rule is mechanical — those two specifiers
  * are the only "closed" import surfaces. Config + secrets arrive through the
  * `env` option, not `getEnv()`.
@@ -29,7 +29,7 @@ import { randomUUID } from 'node:crypto'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
-import { createTelegramApi } from '@sidanclaw/channels'
+import { createTelegramApi } from '@use-brian/channels'
 import {
   createGeminiProvider, createAnthropicProvider, wrapProvider, wrapFallback,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
@@ -122,11 +122,11 @@ import {
   type SandboxTaskStore,
   type Sensitivity,
   type SessionVault,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 
-// ── OPEN package imports (@sidanclaw/api) ──────────────────────────
+// ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
@@ -261,9 +261,10 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
-import { createFilesApi, createSingletonFilesClientResolver } from './files/files-api.js'
+import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import { createArtifactPromoter } from './files/artifact-promote.js'
+import { createFileIngestor } from './files/ingest-file.js'
 import { createFileIngestWorker } from './files/file-ingest-worker.js'
 import { enqueueFileIngestJob, claimNextFileIngestJob, markFileIngestJobDone, markFileIngestJobFailed } from './db/file-ingest-jobs-store.js'
 import { createCachedByoFilesResolver, type WorkspaceStorageBinding } from './files/byo-files-resolver.js'
@@ -312,6 +313,7 @@ import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentma
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
 import { internalIngestRoutes } from './doc/internal-ingest-route.js'
+import { internalPageEventRoutes } from './doc/internal-page-event-route.js'
 import { createDbDocPageSourceStore } from './db/doc-page-source-store.js'
 import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
@@ -350,7 +352,7 @@ import {
   reclassifyEntityKind as reclassifyEntityKindFn,
   promoteEntityToCrm as promoteEntityToCrmFn,
 } from './db/entities-store.js'
-import { createClassifierSelfHealWorker } from '@sidanclaw/core'
+import { createClassifierSelfHealWorker } from '@use-brian/core'
 import { supersedeMemoriesByTags } from './db/memories.js'
 import { composeRetrievalStore, createDbRetrievalStore } from './db/retrieval-store.js'
 import { createDbProvenanceStore } from './db/provenance-store.js'
@@ -623,18 +625,6 @@ export interface OpenApiPorts {
       ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>
     >
   }) => SyncCredentials
-
-  // ── Direct file ingest — open default: unset (no /api/files/ingest) ──
-  /**
-   * Builds the closed FileIngestor over boot's FilesApi + the platform's brain
-   * ingestor (boot passes the one it built via `buildEpisodeIngestors`).
-   * Open default: unset → fileRoutes mounts without an ingest seam.
-   */
-  buildFileIngestor?: (deps: {
-    filesApi: ReturnType<typeof createFilesApi>
-    brainEpisodeIngestor: BrainEpisodeIngestor
-    distill: (input: { buffer: Buffer; mime: string }) => Promise<string>
-  }) => unknown
 
   // ── Closed first-party tool factories — open default: omitted ──
   /** Capability-gated triage/sentiment/analytics-query tools (platform-only). */
@@ -1186,7 +1176,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (isOssEdition()) {
       app.use(
         '/auth',
-        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.SIDANCLAW_OWNER_NAME }),
+        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.USEBRIAN_OWNER_NAME }),
       )
       console.log('[local-session] oss local-owner session enabled at /auth/local-session.')
     }
@@ -1536,6 +1526,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // lazy references in the callee executor + workflow tool registry are
   // TDZ-safe: pre-assignment access reads `null` and degrades honestly.
   let filesApi: ReturnType<typeof createFilesApi> | null = null
+  let filesResolver: FilesClientResolver | null = null
   let deckStore: ReturnType<typeof createDeckStore> | null = null
 
   const calleeExecutor = createCalleeExecutor({
@@ -1599,7 +1590,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
   const assistantModesStore = createAssistantModesStore()
 
-  const { createInProcessTransport } = await import('@sidanclaw/core')
+  const { createInProcessTransport } = await import('@use-brian/core')
   const consultTransport = createInProcessTransport({
     getConnectionModeId: (caller, callee) => connectionStore.getConnectionModeId(caller, callee),
     getMode: (modeId) => assistantModesStore.get(modeId),
@@ -2526,19 +2517,38 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesBlobClient,
       env.GCS_FILES_BUCKET ?? 'local-dev',
     )
-    const lookupGcsBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
+    const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
       // (credential type 'none'), so a disconnected workspace returns null here
       // and falls back to the app default bucket for both reads and writes —
-      // its BYO files go dormant until a reconnect re-supplies the key.
-      const inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
-      if (!inst) return null
-      const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
-      if (!creds || creds.type !== 'gcs') return null
-      return { credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+      // its BYO files go dormant until a reconnect re-supplies the key. GCS
+      // takes precedence when a workspace somehow has both bindings connected.
+      const gcsInst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'gcs')
+      if (gcsInst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(gcsInst.id)
+        if (creds && creds.type === 'gcs') {
+          return { kind: 'gcs', credentials: creds.serviceAccountKey, bucket: creds.bucket, projectId: creds.projectId }
+        }
+      }
+      const s3Inst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 's3')
+      if (s3Inst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(s3Inst.id)
+        if (creds && creds.type === 's3') {
+          return {
+            kind: 's3',
+            credentials: creds.accessKey,
+            bucket: creds.bucket,
+            region: creds.region,
+            endpoint: creds.endpoint,
+            forcePathStyle: creds.forcePathStyle,
+          }
+        }
+      }
+      return null
     }
+    filesResolver = createCachedByoFilesResolver({ lookup: lookupStorageBinding, fallback: defaultFilesResolver })
     filesApi = createFilesApi({
-      resolver: createCachedByoFilesResolver({ lookup: lookupGcsBinding, fallback: defaultFilesResolver }),
+      resolver: filesResolver,
       store: workspaceFilesStore,
       auditStore: workspaceAuditStore,
     })
@@ -2625,7 +2635,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // every public mount registered after it (the Mini App outage class;
     // graded by invariants/route-mount-order). See
     // docs/architecture/features/deck-generation.md.
-    // previewUrl targets the AUTHENTICATED app origin (app.sidan.ai) — the
+    // previewUrl targets the AUTHENTICATED app origin (app.usebrian.ai) — the
     // /w/… deck route lives in app-web, and the marketing site does NOT
     // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
     // paths). Same fallback chain as the computer-use take-over link below.
@@ -2633,12 +2643,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     for (const tool of createDeckTools({ filesApi, deckStore, appOrigin: env.AUTHED_APP_URL ?? env.APP_URL })) {
       allTools.set(tool.name, tool)
     }
-    // Direct ingest seam — closed (FileIngestor builds Pipeline B). Injected as a
-    // port; open default leaves it null (no /api/files/ingest ingest).
-    if (ports.buildFileIngestor && brainEpisodeIngestor) {
-      fileIngestor = ports.buildFileIngestor({
+    // Direct file ingest is open: store the original bytes, derive text, then
+    // run the same boot-built Pipeline B ingestor used by brain MCP and docs.
+    if (brainEpisodeIngestor) {
+      fileIngestor = createFileIngestor({
         filesApi,
-        brainEpisodeIngestor,
+        ingest: brainEpisodeIngestor,
         distill: async ({ buffer, mime }) =>
           (await distillFileToText({ buffer, mime }, { apiKey: env.GEMINI_API_KEY })).text,
       })
@@ -3204,6 +3214,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       filesApi,
       store: workspaceFilesStore,
       gcs: filesBlobClient,
+      resolver: filesResolver ?? undefined,
       membership: getWorkspaceMembershipWithClearanceSystem,
     }))
   }
@@ -3221,13 +3232,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Built-in connector lifecycle (list / store-credentials / disconnect /
   // rename / delete). OSS-only: the hosted edition mounts its own richer closed
   // `/api/connectors` route, so mounting this open one there would shadow it.
-  // Gated on the same `SIDANCLAW_EDITION` flag the launcher sets for the open
+  // Gated on the same `USEBRIAN_EDITION` flag the launcher sets for the open
   // single-player edition. See routes/connectors.ts.
-  if (process.env.SIDANCLAW_EDITION === 'oss') {
+  if (process.env.USEBRIAN_EDITION === 'oss') {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
       gcsByo: {
+        requireWorkspaceAdmin: async (userId, workspaceId) => {
+          const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+          return m?.role === 'owner' || m?.role === 'admin'
+        },
+      },
+      s3Byo: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
           const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
           return m?.role === 'owner' || m?.role === 'admin'
@@ -3290,7 +3307,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
         return
       }
-      const { isAppType, defaultClearanceForAppType } = await import('@sidanclaw/shared')
+      const { isAppType, defaultClearanceForAppType } = await import('@use-brian/shared')
       if (appType !== undefined && appType !== null && !isAppType(appType)) {
         res.status(400).json({
           error: `Unknown app type: ${String(appType)}. Supported: distribution.`,
@@ -3655,6 +3672,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
   }
 
+  // Internal content-edit page-event endpoint — doc-sync POSTs here on a
+  // debounced Yjs settle so a *block-content* edit (which never flows through
+  // the saved-views store's metadata `update`) still fires a `page`-source
+  // `updated` workflow. Shared-secret gated (DOC_SYNC_SECRET); no Pipeline B
+  // dependency, so mounted UNCONDITIONALLY — both editions get content-edit
+  // triggers. Feeds the same late-bound `publishPageLifecycle` seam the store's
+  // metadata writes use. NB: NO requireAuth (shared-secret header, not a JWT).
+  app.use('/', internalPageEventRoutes({
+    savedViewStore,
+    publish: publishPageLifecycle,
+  }))
+
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
   app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({ docThemesStore, workspaceStore, provider }))
@@ -3730,7 +3759,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Shared workflow event-trigger dispatcher (the `page` / connector / channel
   // event source) + its binding to the saved-views store's page-write path.
   // This lives in bootOpenApi — not the closed app boot — so BOTH editions get
-  // it: the OSS standalone entry (`@sidanclaw/api-open`) and the closed platform
+  // it: the OSS standalone entry (`@use-brian/api-open`) and the closed platform
   // app. The closed app reuses this instance off the BootContext for its Slack
   // webhook + connector-poll producers (`createApiIngestWorkflowTrigger`); it no
   // longer constructs or binds its own. `setPageEventDispatcher` wires the
@@ -4806,7 +4835,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   async function start(): Promise<{ server: http.Server; port: number }> {
     return new Promise((resolve) => {
       server = app.listen(port, () => {
-        console.log(`sidanclaw api running on port ${port}`)
+        console.log(`Use Brian api running on port ${port}`)
         console.log(`Tools loaded: ${allTools.size}`)
         resolve({ server: server!, port })
       })

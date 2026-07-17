@@ -2,8 +2,8 @@ import type {
   MemoryForPromotion,
   EntitySnapshotForPromotion,
   MemoryToEntityPromotionPorts,
-} from '@sidanclaw/core'
-import type { Sensitivity } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { Sensitivity } from '@use-brian/core'
 import { query } from './client.js'
 import { supersedeEntity as dbSupersedeEntity } from './entities-store.js'
 

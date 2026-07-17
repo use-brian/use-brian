@@ -1,6 +1,6 @@
 /**
  * Goal-seeker structural rollup runner — the api wiring of the non-acting
- * `rollupHost` core (`@sidanclaw/core`). It builds the `RollupDeps` from the
+ * `rollupHost` core (`@use-brian/core`). It builds the `RollupDeps` from the
  * goal store + host adapters + a completion-delivery port, and exposes a single
  * `onTaskTerminal` callback that the task store fires when a sub-task closes.
  *
@@ -35,7 +35,7 @@ import {
   type GoalStore,
   type RollupDeps,
   type RollupOutcome,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildGoalResolvers, finishGoal } from './writeback.js'
 
 export type GoalRollupDeps = {

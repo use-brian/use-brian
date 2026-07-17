@@ -18,7 +18,7 @@ vi.mock('../client.js', () => ({
 
 import { createDbMarkUsefulStore } from '../mark-useful-store.js'
 import { queryWithRLS } from '../client.js'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 const mockQuery = vi.mocked(queryWithRLS)
 const store = createDbMarkUsefulStore()

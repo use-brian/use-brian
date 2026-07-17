@@ -5,7 +5,7 @@ import {
   canonicalizeBlock,
   pageToPlaintext,
 } from '../block-mapping.js'
-import type { Block } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block } from '@use-brian/core/dist/views/blocks.js'
 import { ALL_KINDS } from './fixtures.js'
 
 const cell = (text: string) => ({

@@ -2,7 +2,7 @@
  * MCP server connector.
  *
  * Connects to external MCP servers, discovers tools, and wraps them
- * as sidanclaw Tool instances with policy enforcement.
+ * as Use Brian Tool instances with policy enforcement.
  */
 
 import { z } from 'zod'
@@ -20,7 +20,7 @@ function sanitizeToolName(raw: string): string {
 /**
  * Connect to an MCP server and return wrapped tools.
  *
- * Each MCP tool becomes a sidanclaw Tool with:
+ * Each MCP tool becomes a Use Brian Tool with:
  * - Auto-classification (read/write/destructive)
  * - Policy enforcement (allow/ask/block from user settings or defaults)
  * - Usage tracking

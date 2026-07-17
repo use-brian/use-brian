@@ -19,7 +19,7 @@
 
 import * as React from "react";
 import { ArrowUp, Paperclip, Check, X } from "lucide-react";
-import { parseSSEStream, createSSEBuffer, ChatMarkdown } from "@sidanclaw/chat-ui";
+import { parseSSEStream, createSSEBuffer, ChatMarkdown } from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";

@@ -32,9 +32,9 @@ function resolveSyncUrl(): string {
     return process.env.NEXT_PUBLIC_DOC_SYNC_URL;
   if (
     typeof window !== "undefined" &&
-    window.location.hostname === "app.sidan.ai"
+    window.location.hostname === "app.usebrian.ai"
   )
-    return "wss://doc-sync.sidan.ai";
+    return "wss://doc-sync.usebrian.ai";
   return "ws://localhost:8080";
 }
 

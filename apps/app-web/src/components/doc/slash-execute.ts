@@ -36,7 +36,7 @@ function blockId(): string {
 /**
  * The minimal, schema-valid JSON for a freshly-inserted embed block. Each
  * kind gets the empty/awaiting-input shape its `blockSchema` member requires
- * (`@sidanclaw/core` `views/blocks.ts`) so the stub round-trips through the
+ * (`@use-brian/core` `views/blocks.ts`) so the stub round-trips through the
  * Yjs snapshot without tripping validation: media URL kinds carry `url: ''`,
  * file/image carry `ref: null`, and data/chart stay binding-less until chat
  * (or the view-config UI) supplies one — the node-view renders each as a

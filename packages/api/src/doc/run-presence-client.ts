@@ -19,7 +19,7 @@
  * [COMP:api/doc-run-client]
  */
 
-import type { AssistantRunChannel, AssistantRunStep } from '@sidanclaw/doc-model'
+import type { AssistantRunChannel, AssistantRunStep } from '@use-brian/doc-model'
 import {
   resolveDocSyncHttp,
   type DocGatewayOptions,

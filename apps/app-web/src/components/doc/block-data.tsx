@@ -2,7 +2,7 @@
 
 /**
  * Renders a `data` block — wraps the existing <ViewRenderer /> from
- * @sidanclaw/views-renderer. The resolved A2UI widget is supplied by the
+ * @use-brian/views-renderer. The resolved A2UI widget is supplied by the
  * caller, so the host owns payload fetching.
  *
  * **Shared interaction surface — do NOT delete with the legacy renderer.**
@@ -44,7 +44,7 @@
 
 import { useMemo, useState } from "react";
 import { useT, format } from "@/lib/i18n/client";
-import { renderWidget } from "@sidanclaw/views-renderer";
+import { renderWidget } from "@use-brian/views-renderer";
 import type {
   A2UIRow,
   A2UIRowValue,
@@ -53,7 +53,7 @@ import type {
   ColumnMenuLabels,
   OnActionHandler,
   TableWidget,
-} from "@sidanclaw/views-renderer";
+} from "@use-brian/views-renderer";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import {

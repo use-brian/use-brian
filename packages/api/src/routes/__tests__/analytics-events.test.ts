@@ -9,7 +9,7 @@ import { describe, it, expect, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import { analyticsRoutes } from '../analytics.js'
-import type { AnalyticsStore } from '@sidanclaw/core'
+import type { AnalyticsStore } from '@use-brian/core'
 
 function makeApp(userId?: string) {
   const record = vi.fn().mockResolvedValue(undefined)

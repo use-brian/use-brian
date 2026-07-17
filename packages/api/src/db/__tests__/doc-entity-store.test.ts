@@ -50,7 +50,7 @@ import type {
   DocEntityInstance,
   DocEntityType,
   PropertyDef,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
 

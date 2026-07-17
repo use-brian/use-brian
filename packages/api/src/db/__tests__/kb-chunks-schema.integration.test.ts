@@ -6,13 +6,13 @@ import pg from 'pg'
  * column set (kind-specific + universal), the visibility CHECK, NOT
  * NULL enforcement on the load-bearing columns, the chunk_text
  * non-empty CHECK, and the index set. Skips silently when the local
- * `sidanclaw` database is unavailable.
+ * `Use Brian` database is unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

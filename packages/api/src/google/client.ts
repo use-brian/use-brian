@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { GmailOutgoingAttachment } from '@sidanclaw/core'
+import type { GmailOutgoingAttachment } from '@use-brian/core'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'

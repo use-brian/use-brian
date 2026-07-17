@@ -18,7 +18,7 @@
  * [COMP:api/whatsapp-connector-instance]
  */
 
-import { DEFAULT_INGEST_RULES } from '@sidanclaw/core'
+import { DEFAULT_INGEST_RULES } from '@use-brian/core'
 import { query, queryWithRLS } from '../db/client.js'
 
 export type EnsureWhatsappCiInput = {

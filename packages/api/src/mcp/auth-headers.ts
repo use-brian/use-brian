@@ -157,7 +157,7 @@ export function preflightHeadersToRecord(
       typeof (row as { value?: unknown }).value === 'string'
     ) {
       const { name, value } = row as { name: string; value: string }
-      // Reserve the sidanclaw namespace: a user-config header may never set an
+      // Reserve the Use Brian namespace: a user-config header may never set an
       // `X-Sidanclaw-*` value, or it could forge the actor identity a connector
       // trusts for auth. (Validation of the charset still happens at merge.)
       if (name.length > 0 && !name.toLowerCase().startsWith(RESERVED_HEADER_PREFIX)) {
@@ -181,7 +181,7 @@ export type ActorIdentity = {
   id?: string | null
   /** The user's email, when known (also sent on channel turns). */
   email?: string | null
-  /** Stable sidanclaw user UUID — the key that never changes across channels. */
+  /** Stable Use Brian user UUID — the key that never changes across channels. */
   userId: string
   /**
    * Opaque, short-lived media capability token (minted by the closed platform,
@@ -199,7 +199,7 @@ export type ActorIdentity = {
  * preflight headers) and the user-config path can't set the namespace, so the
  * model and the user are both unable to influence them — the value is a
  * sidanclaw-backend assertion. Trustworthy when the connector authenticates the
- * connection (the connection auth proves it's sidanclaw; the header says which
+ * connection (the connection auth proves it's Use Brian; the header says which
  * user). Empty/missing fields are simply omitted.
  */
 export function actorIdentityHeaders(actor: ActorIdentity): Record<string, string> {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
-import type { Message } from '@sidanclaw/core'
+import type { Message } from '@use-brian/core'
 
 describe('[COMP:api/chat-route] sanitizeTitle', () => {
   it('strips bold markdown', () => {

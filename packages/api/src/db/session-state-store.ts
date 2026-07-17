@@ -1,4 +1,4 @@
-import type { SessionStateRecord, SessionStateStore } from '@sidanclaw/core'
+import type { SessionStateRecord, SessionStateStore } from '@use-brian/core'
 import {
   upsertSessionState,
   resolveSessionState,

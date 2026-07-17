@@ -5,7 +5,7 @@ import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } 
 import { getWorkspaceFileById } from '../db/workspace-files.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
-import { parseFileContent, shouldInline, type FileStore } from '@sidanclaw/core'
+import { parseFileContent, shouldInline, type FileStore } from '@use-brian/core'
 import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'

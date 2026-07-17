@@ -45,8 +45,8 @@ describe("[COMP:app-web/brain-deep-link] Brain row deep links", () => {
 
   describe("brainRowUrl", () => {
     it("omits kind for a task so the common link stays short", () => {
-      expect(brainRowUrl("https://app.sidan.ai", "ws-1", "task-1")).toBe(
-        "https://app.sidan.ai/w/ws-1/brain?row=task-1",
+      expect(brainRowUrl("https://app.usebrian.ai", "ws-1", "task-1")).toBe(
+        "https://app.usebrian.ai/w/ws-1/brain?row=task-1",
       );
     });
 
@@ -57,7 +57,7 @@ describe("[COMP:app-web/brain-deep-link] Brain row deep links", () => {
     });
 
     it("round-trips through the parser", () => {
-      const url = brainRowUrl("https://app.sidan.ai", "ws-1", "row-9", "deal");
+      const url = brainRowUrl("https://app.usebrian.ai", "ws-1", "row-9", "deal");
       const query = url.slice(url.indexOf("?") + 1);
       expect(parseBrainDeepLink(new URLSearchParams(query))).toEqual({
         rowId: "row-9",

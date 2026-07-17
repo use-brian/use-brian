@@ -55,14 +55,16 @@
  */
 
 import { Router } from 'express'
-import { classifyTool, defaultPolicy } from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
+import { classifyTool, defaultPolicy } from '@use-brian/core'
+import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'
 import { customConnectorRoutes } from './custom-connectors.js'
 import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
+import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
+import type { S3Credentials } from '../files/s3-client.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -103,6 +105,17 @@ type ConnectorRouteOptions = {
     requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
     /** Validate-on-connect override (test seam). Defaults to the real probe. */
     validate?: typeof validateGcsByoBinding
+  }
+  /**
+   * Enables the workspace-scoped bring-your-own S3 storage endpoints
+   * (`/s3/connect`, `/s3/disconnect`). Omitted → those routes 404. Sibling of
+   * `gcsByo`. See docs/plans/byo-s3-storage.md.
+   */
+  s3Byo?: {
+    /** True iff the user is owner/admin of the workspace. */
+    requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
+    /** Validate-on-connect override (test seam). Defaults to the real probe. */
+    validate?: typeof validateS3ByoBinding
   }
 }
 
@@ -277,6 +290,128 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     } catch (err) {
       console.error('[connectors] gcs disconnect failed:', err)
       res.status(500).json({ error: 'Failed to disconnect GCS storage' })
+    }
+  })
+
+  // ── Bring-your-own S3-compatible storage (workspace-scoped) ────
+  //
+  // Sibling of the `gcs` connector above: same workspace-level binding and
+  // validate-on-connect flow, but authenticates with an access-key/secret-key
+  // pair against any S3-compatible bucket (AWS S3, MinIO, R2, B2, …).
+  // See docs/plans/byo-s3-storage.md.
+
+  router.post('/s3/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const s3Byo = opts.s3Byo
+    if (!s3Byo) { res.status(404).json({ error: 'S3 storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as {
+      workspaceId?: string
+      accessKeyId?: string
+      secretAccessKey?: string
+      bucket?: string
+      region?: string
+      endpoint?: string
+      forcePathStyle?: boolean
+    }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const bucket = typeof body.bucket === 'string' ? body.bucket.trim() : ''
+    const accessKeyId = typeof body.accessKeyId === 'string' ? body.accessKeyId.trim() : ''
+    const secretAccessKey = typeof body.secretAccessKey === 'string' ? body.secretAccessKey : ''
+    const region = typeof body.region === 'string' && body.region.trim() ? body.region.trim() : undefined
+    const endpoint = typeof body.endpoint === 'string' && body.endpoint.trim() ? body.endpoint.trim() : undefined
+    const forcePathStyle = typeof body.forcePathStyle === 'boolean' ? body.forcePathStyle : undefined
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!bucket) { res.status(400).json({ error: 'Missing bucket' }); return }
+    if (!accessKeyId || !secretAccessKey) { res.status(400).json({ error: 'Missing access key or secret key' }); return }
+
+    if (!(await s3Byo.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    const accessKey: S3Credentials = { accessKeyId, secretAccessKey }
+
+    // Validate-on-connect: prove write/read/delete works before we trust it.
+    const check = await (s3Byo.validate ?? validateS3ByoBinding)({ credentials: accessKey, bucket, region, endpoint, forcePathStyle })
+    if (!check.ok) {
+      res.status(400).json({ error: 'validation_failed', code: check.code, message: check.message }); return
+    }
+
+    const credentials: ConnectorCredentials = {
+      type: 's3',
+      accessKey,
+      bucket,
+      ...(region ? { region } : {}),
+      ...(endpoint ? { endpoint } : {}),
+      ...(forcePathStyle !== undefined ? { forcePathStyle } : {}),
+    }
+    // `disconnectedAt: null` clears any prior soft-disconnect marker on reconnect.
+    // Only non-secret bits live in config (the sweep targets the bucket after the key is gone).
+    const config = {
+      bucket,
+      ...(region ? { region } : {}),
+      ...(endpoint ? { endpoint } : {}),
+      ...(forcePathStyle !== undefined ? { forcePathStyle } : {}),
+      disconnectedAt: null,
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 's3')
+      if (existing) {
+        await connectorInstanceStore.update(userId, existing.id, { connected: true, credentials })
+        await connectorInstanceStore.setConfigSystem(existing.id, config)
+        res.json({ ok: true, connectorInstanceId: existing.id }); return
+      }
+      const created = await connectorInstanceStore.createWorkspaceInstance({
+        workspaceId,
+        provider: 's3',
+        label: 'S3-Compatible Storage',
+        connected: true,
+        credentials,
+        config,
+        createdBy: userId,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' }); return
+      }
+      console.error('[connectors] s3 connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect S3 storage' })
+    }
+  })
+
+  router.post('/s3/disconnect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const s3Byo = opts.s3Byo
+    if (!s3Byo) { res.status(404).json({ error: 'S3 storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await s3Byo.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 's3')
+      if (!existing) { res.json({ ok: true }); return }
+      // Disconnect = drop their keys entirely (zero standing access). New writes
+      // revert to the app default bucket and their BYO-bucket files go dormant
+      // (unreadable without the keys). We KEEP the workspace_files index rows so
+      // a reconnect (re-supplying the keys) revives them. `disconnectedAt` arms
+      // the staleness sweep, which retracts the dormant rows if no reconnect
+      // happens within the grace window. The bucket lives in `config` (non-
+      // secret) so the sweep can target it after the keys are gone.
+      await connectorInstanceStore.update(userId, existing.id, { connected: false, credentials: { type: 'none' } })
+      await connectorInstanceStore.setConfigSystem(existing.id, { disconnectedAt: new Date().toISOString() })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] s3 disconnect failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect S3 storage' })
     }
   })
 

@@ -31,7 +31,7 @@ import { ChevronDown, ChevronRight, ExternalLink, FileStack, Plus, Sparkles, Tra
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import {
   blueprintSectionCount,
   filterBlueprints,

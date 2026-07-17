@@ -30,13 +30,13 @@
  */
 
 import * as Y from 'yjs'
-import type { Block, Page } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
 import { FRAGMENT_FIELD, ID_NODE_TYPES, META_MAP } from './schema.js'
 import { pageToYDoc, yDocToSnapshot } from './encode.js'
 
 /**
  * The doc op vocabulary, structurally identical to `Op` in
- * `@sidanclaw/core` `doc/page-types.ts`. Declared locally so this
+ * `@use-brian/core` `doc/page-types.ts`. Declared locally so this
  * fs-free package doesn't take a runtime import on the core doc module;
  * the shapes are asserted compatible by the chat-route wiring that feeds it.
  */

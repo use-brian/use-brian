@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { extractionSpecSchema, type Tool, type ToolContext } from '@sidanclaw/core'
+import { extractionSpecSchema, type Tool, type ToolContext } from '@use-brian/core'
 import {
   blueprintSubjectAnchorKey,
   buildBlueprintSurfacePrompt,

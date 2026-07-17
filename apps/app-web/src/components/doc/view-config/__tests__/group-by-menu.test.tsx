@@ -21,7 +21,7 @@ import {
   GroupByMenu,
   isGroupableColumn,
 } from "../group-by-menu";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 
 const dict = en as unknown as Dictionary;
 

@@ -7,7 +7,7 @@ const context = (workspaceId?: string): ToolContext =>
     userId: 'user-1',
     assistantId: 'assistant-1',
     sessionId: 'session-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'web',
     channelId: 'chan-1',
     ...(workspaceId ? { workspaceId } : {}),

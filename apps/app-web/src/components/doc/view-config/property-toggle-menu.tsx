@@ -47,7 +47,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { Columns, Eye, EyeOff, GripVertical } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 
 export type PropertyToggleMenuProps = {
   columns: readonly A2UIColumn[];

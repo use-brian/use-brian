@@ -4,13 +4,13 @@
  * These are the **static** render paths — the block already carries the
  * values (a chart's inline `data`, a diagram's Mermaid `code`), so there is
  * no store call and no aggregation: the widget is a direct projection. The
- * renderer (`@sidanclaw/views-renderer`) consumes the result.
+ * renderer (`@use-brian/views-renderer`) consumes the result.
  *
  * Used by `page-render.ts` (the server payload path for `apps/web` / the
  * `GET /api/views/:id/payload` endpoint). The collaborative doc editor
  * holds its own byte-identical copy at
  * `apps/app-web/src/components/doc/block-visual.ts` (app-web does
- * not depend on `@sidanclaw/core`; the SDK types are duplicated there for the
+ * not depend on `@use-brian/core`; the SDK types are duplicated there for the
  * same reason — see `apps/app-web/CLAUDE.md`). **Keep the two in sync.**
  *
  * The *live* chart path (an `AggregateBinding` resolved against workspace

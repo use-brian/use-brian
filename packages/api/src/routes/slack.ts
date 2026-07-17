@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Slack webhook route — per-channel BYO credentials.
  *
@@ -25,8 +26,8 @@
 
 import { Router } from 'express'
 import type { Request } from 'express'
-import { createSlackAdapter, verifySlackSignature } from '@sidanclaw/channels'
-import type { IncomingMessage, SlackAdapterConfig } from '@sidanclaw/channels'
+import { createSlackAdapter, verifySlackSignature } from '@use-brian/channels'
+import type { IncomingMessage, SlackAdapterConfig } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { query } from '../db/client.js'
 import { withChatLock } from '../db/chat-lock.js'
@@ -35,13 +36,13 @@ import type { LinkCodeStore } from '../db/link-codes.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { mergeShadowUser } from '../db/linked-accounts.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent, buildTool, sanitize as sanitizeAnalytics } from '@sidanclaw/core'
+import { parseFileContent, buildTool, sanitize as sanitizeAnalytics } from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@sidanclaw/core'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@sidanclaw/core'
+import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, WorkflowEventDispatcher } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@sidanclaw/shared'
+import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { tryResolveSchedulerConfirmation } from '../scheduling/confirmation-registry.js'
@@ -112,7 +113,7 @@ type SlackRouteOptions = {
   /** Link-code claim (identity healing). When both set, a 6-char code in DM merges the Slack user into the code owner. See docs/architecture/platform/identity-healing.md. */
   linkedAccountStore?: LinkedAccountStore
   linkCodeStore?: LinkCodeStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
@@ -120,15 +121,15 @@ type SlackRouteOptions = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
-  gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
+  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   /**
    * Route a pulled media reference (a download URL) through the channel-media
    * intake (audio/video → recording → brain). Boot wires this over
@@ -151,9 +152,9 @@ type SlackRouteOptions = {
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   deferredConfirmationStore?: DeferredConfirmationStore
-  episodicStore?: import('@sidanclaw/core').EpisodicStore
-  sessionStateStore?: import('@sidanclaw/core').SessionStateStore
-  capabilityStore: import('@sidanclaw/core').CapabilityStore
+  episodicStore?: import('@use-brian/core').EpisodicStore
+  sessionStateStore?: import('@use-brian/core').SessionStateStore
+  capabilityStore: import('@use-brian/core').CapabilityStore
   /**
    * Connector-action audit deps. When both are set + the answering
    * assistant is workspace-scoped, every outbound Slack `chat.postMessage`
@@ -214,7 +215,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     // ── URL verification (must be BEFORE integration lookup) ────
     // Slack sends this challenge when the user creates their app
     // from the manifest. At that point no integration row exists
-    // yet — the user hasn't pasted credentials into sidanclaw. The
+    // yet — the user hasn't pasted credentials into Use Brian. The
     // challenge contains no sensitive data, so responding without
     // auth is safe and required for the "Create from manifest" flow.
     const body = req.body as { type?: string; challenge?: string }
@@ -347,7 +348,7 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     const outboundAuditHolder: {
       fn:
         | null
-        | ((event: import('@sidanclaw/channels').SlackOutboundAudit) => Promise<void>)
+        | ((event: import('@use-brian/channels').SlackOutboundAudit) => Promise<void>)
     } = { fn: null }
     const adapter = createSlackAdapter({
       botToken: slackCreds.bot_token,
@@ -987,7 +988,7 @@ type ProcessMessageParams = {
   memoryStore: MemoryStore
   usageStore?: UsageStore
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
@@ -995,24 +996,24 @@ type ProcessMessageParams = {
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   /** Stage 5: enables team-native connector_instance consumption. */
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
-  gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
+  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`) —
    *  delivered via Slack's external upload flow (needs `files:write`). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
   activeAbortControllers: Map<string, AbortController>
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
-  episodicStore?: import('@sidanclaw/core').EpisodicStore
-  sessionStateStore?: import('@sidanclaw/core').SessionStateStore
-  capabilityStore: import('@sidanclaw/core').CapabilityStore
+  episodicStore?: import('@use-brian/core').EpisodicStore
+  sessionStateStore?: import('@use-brian/core').SessionStateStore
+  capabilityStore: import('@use-brian/core').CapabilityStore
 }
 
 async function processMessage(params: ProcessMessageParams): Promise<void> {

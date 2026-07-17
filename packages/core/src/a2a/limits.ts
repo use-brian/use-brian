@@ -37,7 +37,7 @@ export const INITIAL_BUDGET = {
 
 /**
  * Error codes returned in `ConsultError`. JSON-RPC-shaped (`-32xxx` reserved
- * range mirrors A2A spec; `-33xxx` is sidanclaw additions).
+ * range mirrors A2A spec; `-33xxx` is Use Brian additions).
  *
  * Cycle / depth / budget rejections use `UNSUPPORTED_OPERATION` with a `reason`
  * field on the error so the caller's LLM sees a recoverable tool error rather
@@ -49,7 +49,7 @@ export const ERROR_CODES = {
   TASK_NOT_CANCELABLE: -32002,
   UNSUPPORTED_OPERATION: -32004,
   CONTENT_TYPE_NOT_SUPPORTED: -32005,
-  // sidanclaw additions
+  // Use Brian additions
   SHARING_BLOCKED: -33001,
   CAPABILITY_NOT_FOUND: -33002,
   CALLER_NOT_AUTHORIZED: -33003,

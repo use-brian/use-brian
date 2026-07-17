@@ -27,7 +27,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type { DocNotificationsStore, CommentThreadStore, InboxPayload } from '@sidanclaw/core'
+import type { DocNotificationsStore, CommentThreadStore, InboxPayload } from '@use-brian/core'
 
 export type InboxRouteOptions = {
   commentThreadStore: CommentThreadStore

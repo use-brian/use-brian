@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import type { ReactElement } from 'react'
-import type { A2UIWidget, ViewPayload } from '@sidanclaw/core'
+import type { A2UIWidget, ViewPayload } from '@use-brian/core'
 import { ViewRenderer, renderWidget } from '../render.js'
 
 function elementType(el: ReactElement): string {

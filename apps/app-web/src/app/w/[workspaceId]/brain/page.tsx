@@ -92,7 +92,7 @@ import {
   deleteCustomPageTemplate,
   listCustomPageTemplates,
 } from "@/lib/api/views";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { blankBlueprintBlocks, filterBlueprints } from "@/lib/blueprints";
 import { docPagePath } from "@/lib/doc-page-url";
 import {

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * One-command local boot for sidanclaw (oss-local-brain-wedge.md §12.7).
+ * One-command local boot for Use Brian (oss-local-brain-wedge.md §12.7).
  *
  * `pnpm start` — the whole single-player product on ONE GEMINI_API_KEY:
  *   1. load/prompt GEMINI_API_KEY + generate JWT_SECRET, persisted under
@@ -74,7 +74,7 @@ const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'u
 let geminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey
 // The single-player owner identity — shown in the app, no login. Local config
 // is the source of truth; prompt once (default the OS username) and persist.
-let ownerName = process.env.SIDANCLAW_OWNER_NAME || config.ownerName
+let ownerName = process.env.USEBRIAN_OWNER_NAME || config.ownerName
 if (!geminiKey || !ownerName) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   if (!geminiKey) {
@@ -127,7 +127,7 @@ const env = {
   GEMINI_API_KEY: geminiKey,
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
-  SIDANCLAW_SINGLE_PROCESS: '1',
+  USEBRIAN_SINGLE_PROCESS: '1',
   // API <-> doc-sync internal auth + the base URL doc-sync POSTs back to for the
   // auto-on-save brain ingest. 127.0.0.1 (not localhost) avoids the IPv6 ::1
   // resolution that the api's IPv4 listener refuses.
@@ -149,11 +149,11 @@ const env = {
   // (billing, teammates) and shows the upgrade affordance instead. The flag
   // defaults to the full hosted edition when unset, so only the local launcher
   // opts into 'oss'.
-  NEXT_PUBLIC_SIDANCLAW_EDITION: 'oss',
+  NEXT_PUBLIC_USEBRIAN_EDITION: 'oss',
   // Server-side edition mirror (the api gates the local-owner session on this)
   // + the owner's display name, both consumed by /auth/local-session.
-  SIDANCLAW_EDITION: 'oss',
-  SIDANCLAW_OWNER_NAME: ownerName,
+  USEBRIAN_EDITION: 'oss',
+  USEBRIAN_OWNER_NAME: ownerName,
   API_URL: `http://localhost:${PORTS.api}`,
   APP_URL: `http://localhost:${PORTS.appWeb}`,
   NEXT_PUBLIC_API_URL: `http://localhost:${PORTS.api}`,
@@ -166,10 +166,10 @@ const children = []
 // until the OS swaps the whole machine to death; with one, the leaking child
 // OOMs alone, run()'s exit handler names it, and the launcher shuts down
 // cleanly. The platform repo already caps its API dev process the same way.
-// Sized generously above observed steady-state; override with SIDANCLAW_HEAP_MB.
+// Sized generously above observed steady-state; override with USEBRIAN_HEAP_MB.
 const HEAP_MB = { pglite: 1024, api: 2048, 'doc-sync': 1024, 'app-web': 2048, 'discord-connector': 512, 'wa-connector': 512 }
 function run(label, cmd, args, extraEnv = {}) {
-  const heapMb = Number(process.env.SIDANCLAW_HEAP_MB) || HEAP_MB[label]
+  const heapMb = Number(process.env.USEBRIAN_HEAP_MB) || HEAP_MB[label]
   const nodeOptions = heapMb
     ? { NODE_OPTIONS: `${env.NODE_OPTIONS ?? ''} --max-old-space-size=${heapMb}`.trim() }
     : {}
@@ -210,7 +210,7 @@ function openBrowser(url) {
 // was populated on a different OS/arch and copied over (e.g. a Linux-built tree
 // synced to a Mac) rather than freshly `pnpm install`ed here. Detect the missing
 // native binding and fall back to Next's webpack mode, which runs on the WASM
-// swc bindings. A healthy install keeps Turbopack. Override with SIDANCLAW_WEBPACK.
+// swc bindings. A healthy install keeps Turbopack. Override with USEBRIAN_WEBPACK.
 function nextHasNativeSwc() {
   const a = arch()
   const p = platform()
@@ -247,7 +247,7 @@ await runOnce('build', 'pnpm', ['exec', 'turbo', 'run', 'build', '--filter=./pac
 
 if (useEmbedded) {
   console.log(`[launch] starting embedded brain (PGLite) at ${BRAIN_DIR} on :${PORTS.pglite} ...`)
-  run('pglite', 'pnpm', ['--filter', '@sidanclaw/api-open', 'exec', 'tsx', 'src/pglite-server.ts'],
+  run('pglite', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/pglite-server.ts'],
     { PGLITE_DATA_DIR: BRAIN_DIR, PGLITE_PORT: String(PORTS.pglite) })
   await waitForPort(PORTS.pglite, 'embedded brain')
   console.log('[launch] brain ready.')
@@ -256,10 +256,10 @@ if (useEmbedded) {
 }
 
 console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ...')
-run('api', 'pnpm', ['--filter', '@sidanclaw/api-open', 'exec', 'tsx', 'src/index.ts'])
-run('doc-sync', 'pnpm', ['--filter', '@sidanclaw/doc-sync', 'exec', 'tsx', 'src/index.ts'],
+run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts'])
+run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
-const forceWebpack = process.env.SIDANCLAW_WEBPACK === '1' || !nextHasNativeSwc()
+const forceWebpack = process.env.USEBRIAN_WEBPACK === '1' || !nextHasNativeSwc()
 if (forceWebpack) {
   console.log('[launch] native @next/swc binding for this platform not found — starting app-web with webpack (run `pnpm install` to restore Turbopack).')
   run('app-web', 'pnpm', ['--filter', 'app-web', 'exec', 'next', 'dev', '--webpack', '--port', String(PORTS.appWeb)])
@@ -278,17 +278,17 @@ await Promise.all([
 ])
 if (useLocalDiscordConnector) {
   console.log(`[launch] starting Discord Gateway connector (:${PORTS.discordConnector}) ...`)
-  run('discord-connector', 'pnpm', ['--filter', '@sidanclaw/discord-connector', 'exec', 'tsx', 'src/index.ts'], {
+  run('discord-connector', 'pnpm', ['--filter', '@use-brian/discord-connector', 'exec', 'tsx', 'src/index.ts'], {
     PORT: String(PORTS.discordConnector),
-    SIDANCLAW_API_URL: `http://127.0.0.1:${PORTS.api}`,
+    USEBRIAN_API_URL: `http://127.0.0.1:${PORTS.api}`,
   })
   await waitForPort(PORTS.discordConnector, 'Discord Gateway connector')
 }
 if (useLocalWaConnector) {
   console.log(`[launch] starting WhatsApp connector (:${PORTS.waConnector}) ...`)
-  run('wa-connector', 'pnpm', ['--filter', '@sidanclaw/wa-connector', 'exec', 'tsx', 'src/index.ts'], {
+  run('wa-connector', 'pnpm', ['--filter', '@use-brian/wa-connector', 'exec', 'tsx', 'src/index.ts'], {
     PORT: String(PORTS.waConnector),
-    SIDANCLAW_API_URL: `http://127.0.0.1:${PORTS.api}`,
+    USEBRIAN_API_URL: `http://127.0.0.1:${PORTS.api}`,
     WA_LOCAL_CREDS_DIR: join(CONFIG_DIR, 'wa-creds'),
   })
   await waitForPort(PORTS.waConnector, 'WhatsApp connector')
@@ -296,5 +296,5 @@ if (useLocalWaConnector) {
 const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordConnector}` : ' · discord external'
 const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
-console.log(`\n[launch] sidanclaw is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus})\n  Ctrl-C to stop everything.\n`)
+console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus})\n  Ctrl-C to stop everything.\n`)
 openBrowser(entryUrl)

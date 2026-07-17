@@ -13,7 +13,7 @@
 
 import { Router } from 'express'
 import { query } from '../db/client.js'
-import { validateHandle, generateHandle } from '@sidanclaw/core'
+import { validateHandle, generateHandle } from '@use-brian/core'
 
 export function handleRoutes(): Router {
   const router = Router()

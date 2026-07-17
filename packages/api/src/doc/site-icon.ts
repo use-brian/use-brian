@@ -2,7 +2,7 @@
  * Site-icon fetcher — resolve a website's real icon/logo and hand back its
  * bytes, for the `fetchSiteIcon` doc tool (`./site-icon-tool.ts`) to store
  * as an image page icon (`img:<workspaceId>/<fileId>`, see
- * `@sidanclaw/shared` `page-icon.ts`).
+ * `@use-brian/shared` `page-icon.ts`).
  *
  * Input is a user/model-supplied string: a bare domain (`theground.io`),
  * a site URL, or a direct image URL (e.g. found via web search). The

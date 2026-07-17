@@ -2,7 +2,7 @@ import type {
   AttemptState,
   PlanSource,
   PlanStepStatus,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from './client.js'
 
 export type PlanStepRow = {

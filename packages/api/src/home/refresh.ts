@@ -15,7 +15,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { createHomeTools, queryLoop, type HomeDockStore, type HomeSignals } from '@sidanclaw/core'
+import { createHomeTools, queryLoop, type HomeDockStore, type HomeSignals } from '@use-brian/core'
 
 type Provider = Parameters<typeof queryLoop>[0]['provider']
 

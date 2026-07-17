@@ -1,4 +1,4 @@
-import type { EntityLinksStore, MemoryStore } from '@sidanclaw/core'
+import type { EntityLinksStore, MemoryStore } from '@use-brian/core'
 import { query } from './client.js'
 import {
   createMemory, updateMemory, getMemoryById, getMemoryByIdSystem, searchMemories, searchMemoriesByIdPrefix,

@@ -23,8 +23,8 @@
  *   write tools drop out of injection on the next turn.
  */
 
-import { parseMarkdownFile, normalisePath } from '@sidanclaw/core'
-import type { KnowledgeRepoWriter, KnowledgeRepoWriteResult, Sensitivity } from '@sidanclaw/core'
+import { parseMarkdownFile, normalisePath } from '@use-brian/core'
+import type { KnowledgeRepoWriter, KnowledgeRepoWriteResult, Sensitivity } from '@use-brian/core'
 import * as github from '../github/client.js'
 import { splitFrontmatterBlock, resolveRepoFilePath } from './repo-files.js'
 
@@ -146,7 +146,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
 
   function commitMessage(changeSummary: string, entryPath: string, requestedBy?: { label?: string | null } | null): string {
     const subject = `kb(assistant): ${changeSummary.trim()}`.split('\n')[0]
-    const trailer = `Committed-via: sidanclaw assistant${requestedBy?.label ? ` on behalf of ${requestedBy.label}` : ''}`
+    const trailer = `Committed-via: Use Brian assistant${requestedBy?.label ? ` on behalf of ${requestedBy.label}` : ''}`
     return `${subject}\n\nEntry: ${entryPath}\n${trailer}`
   }
 

@@ -6,7 +6,7 @@
  * always present, community connector.json files validated + tagged
  * category:'community', malformed-JSON and schema-invalid entries
  * skipped, readdir failure → official-only fallback) and the
- * @sidanclaw/shared schema (ConnectorEntrySchema defaults + the
+ * @use-brian/shared schema (ConnectorEntrySchema defaults + the
  * OFFICIAL_CONNECTORS table's own integrity).
  */
 
@@ -19,7 +19,7 @@ vi.mock('node:fs', () => ({
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { loadConnectorRegistry } from '../load-registry.js'
-import { ConnectorEntrySchema, OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
+import { ConnectorEntrySchema, OFFICIAL_CONNECTORS } from '@use-brian/shared'
 
 const mockRead = vi.mocked(readFileSync)
 const mockReaddir = vi.mocked(readdirSync)

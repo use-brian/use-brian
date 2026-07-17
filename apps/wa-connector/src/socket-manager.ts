@@ -164,7 +164,7 @@ export type SocketManager = {
   ): Promise<{ jid: string; subject: string; participants: string[] }[]>
   /**
    * Leave a group. Used when the official bot is added to a group whose adder
-   * has no sidanclaw account (unresolvable) — the bot leaves rather than ingest.
+   * has no Use Brian account (unresolvable) — the bot leaves rather than ingest.
    */
   groupLeave(channelId: string, groupJid: string): Promise<void>
   getStatus(channelId: string): ManagedSocket | undefined
@@ -360,7 +360,10 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       headers: { 'Content-Type': 'application/json', 'X-Connector-Secret': connectorSecret },
       body: JSON.stringify({ channelId, mime: mediaInfo.mimeType, fileName: mediaInfo.fileName ?? null }),
     })
-    if (!res.ok) throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}`)
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 300)
+      throw new Error(`media-upload-url failed: ${res.status} ${res.statusText}${detail ? `: ${detail}` : ''}`)
+    }
     const { gcsKey, uploadUrl, storageUri } = (await res.json()) as { gcsKey: string; uploadUrl: string; storageUri?: string }
 
     const stream = (await downloadMediaMessage(msg, 'stream', {})) as unknown as import('node:stream').Readable
@@ -501,7 +504,7 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       },
       version,
       logger,
-      browser: ['sidanclaw', 'wa-connector', '1.0.0'],
+      browser: ['Use Brian', 'wa-connector', '1.0.0'],
       syncFullHistory: false,
       // `true` keeps the companion presence `available`, so WhatsApp pushes
       // every message in real time as a `notify` upsert — INCLUDING the owner's

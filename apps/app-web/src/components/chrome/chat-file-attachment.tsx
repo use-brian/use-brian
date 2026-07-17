@@ -16,7 +16,7 @@
  */
 
 import { useState } from "react";
-import type { ChatFileAttachment } from "@sidanclaw/chat-ui";
+import type { ChatFileAttachment } from "@use-brian/chat-ui";
 import { Download, FileText, Loader2 } from "lucide-react";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
@@ -37,7 +37,7 @@ async function downloadAttachment(att: ChatFileAttachment): Promise<void> {
     `${API_URL}/api/doc-files/${encodeURIComponent(att.workspaceId)}/${encodeURIComponent(att.fileId)}`,
   );
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-  // fetch followed the 302 to the signed GCS URL (CORS allows *.sidan.ai;
+  // fetch followed the 302 to the signed GCS URL (CORS allows *.usebrian.ai;
   // local dev streams same-origin bytes) — hand the blob over as a named save.
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);

@@ -30,7 +30,7 @@ export interface MenuTemplateOptions {
   /**
    * The auto-update item (label + clickability from `describeUpdateState`),
    * or null to omit it entirely (auto-update disabled: unpackaged dev runs,
-   * `SIDANCLAW_DISABLE_AUTO_UPDATE`). macOS: in the app menu after About
+   * `USEBRIAN_DISABLE_AUTO_UPDATE`). macOS: in the app menu after About
    * (the platform convention); Windows/Linux: in the File menu before Exit.
    */
   readonly update: { readonly label: string; readonly enabled: boolean } | null;
@@ -109,7 +109,7 @@ export function buildMenuTemplate(
       { label: `Target: ${opts.target.label}`, enabled: false },
       {
         label:
-          opts.target.kind === "cloud" ? "Switch to Local Brain…" : "Switch to sidanclaw Cloud",
+          opts.target.kind === "cloud" ? "Switch to Local Brain…" : "Switch to Use Brian Cloud",
         click: () => handlers.onSwitchTarget(),
       },
     );

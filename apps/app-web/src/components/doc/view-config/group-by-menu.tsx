@@ -26,7 +26,7 @@ import {
 } from "react";
 import { Layers } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 import type { PropertyKind } from "./filter-bar";
 
 /**

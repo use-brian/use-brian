@@ -281,13 +281,13 @@ describe('[COMP:channels/slack] outbound audit hook', () => {
 
   it('suppresses link previews on bot outbound (unfurl off)', async () => {
     // A message full of app links (a digest) must not explode into a stack of
-    // identical unfurl cards — every auth-gated app.sidan.ai link unfurls to
+    // identical unfurl cards — every auth-gated app.usebrian.ai link unfurls to
     // the same generic OG card. postMessage always sends unfurl_links:false /
     // unfurl_media:false.
     mockSlackOk('1680000000.000400')
     const adapter = createSlackAdapter({ botToken: 'xoxb-test' })
     await adapter.sendMessage('C_PUBLIC', {
-      text: 'see <https://app.sidan.ai/w/x/brain?row=1|task one>',
+      text: 'see <https://app.usebrian.ai/w/x/brain?row=1|task one>',
     })
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>
     const post = fetchMock.mock.calls.find((c) => String(c[0]).endsWith('chat.postMessage'))

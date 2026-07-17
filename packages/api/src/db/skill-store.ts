@@ -27,7 +27,7 @@
 
 import { query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import type { SkillContent, SkillMeta } from '@sidanclaw/core'
+import type { SkillContent, SkillMeta } from '@use-brian/core'
 import {
   SKILL_ACTIVATION_THRESHOLD,
   SKILL_USAGE_CONFIDENCE_INCREMENT,
@@ -35,7 +35,7 @@ import {
   bornConfidence,
   bornActivated,
   bornVerified,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 // ── Inputs ─────────────────────────────────────────────────────────
 

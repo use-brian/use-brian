@@ -4,7 +4,7 @@
  *
  * The model does the SMALL, creative part: pick a few anchor colours + a mood
  * (a {@link ThemeSeed}). The deterministic builder
- * (`@sidanclaw/shared` `buildThemeTokens`) does the rest — it expands the seed
+ * (`@use-brian/shared` `buildThemeTokens`) does the rest — it expands the seed
  * into the full light+dark token set with contrast guarantees. Asking the model
  * for ~4 hexes instead of ~50 mutually-harmonious, accessible ones is why a
  * cheap model is enough here and why results stay on-brand regardless of model
@@ -17,14 +17,14 @@
  * [COMP:doc/theme-generator]
  */
 
-import { collectStream, type LLMProvider, type Message, type TokenUsage } from '@sidanclaw/core'
+import { collectStream, type LLMProvider, type Message, type TokenUsage } from '@use-brian/core'
 import {
   buildThemeTokens,
   seedAppearance,
   themeSeedSchema,
   type CustomThemePayload,
   type ThemeSeed,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 
 /** The model couldn't produce a usable seed (unparseable / failed validation). */
 export class ThemeGenerationError extends Error {

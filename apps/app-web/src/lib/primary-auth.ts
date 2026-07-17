@@ -1,9 +1,9 @@
 /**
  * Where does primary auth live?
  *
- * Per the design rule "sidan.ai → sub-app, not the other way round",
- * only `sidan.ai` writes the shared `Domain=.sidan.ai` auth cookies.
- * This sub-app (`feed-web`) bounces the browser to sidan.ai for any
+ * Per the design rule "usebrian.ai → sub-app, not the other way round",
+ * only `usebrian.ai` writes the shared `Domain=.usebrian.ai` auth cookies.
+ * This sub-app (`feed-web`) bounces the browser to usebrian.ai for any
  * auth state change — OAuth, refresh, logout — and then catches the
  * round-trip back via a `next=` query param.
  *
@@ -12,18 +12,18 @@
  * redirects would mean every login wipes out the local session. We
  * fall back to the sub-app's own OAuth flow when this returns `null`.
  *
- * Production deploys set `NEXT_PUBLIC_PRIMARY_AUTH_URL=https://sidan.ai`
+ * Production deploys set `NEXT_PUBLIC_PRIMARY_AUTH_URL=https://usebrian.ai`
  * via the app's env config. We default to that when `NODE_ENV` is
  * `production` so the bare deploy still works without an explicit env
  * override — the override exists for staging deployments under a
  * different apex.
  *
  * Same allowlist as `/api/auth/refresh-and-return` and
- * `/api/auth/logout` on sidan.ai; if you change one, change the others.
+ * `/api/auth/logout` on usebrian.ai; if you change one, change the others.
  */
 
 const ENV_PRIMARY_AUTH_URL = process.env.NEXT_PUBLIC_PRIMARY_AUTH_URL;
-const DEFAULT_PROD_PRIMARY_AUTH_URL = "https://sidan.ai";
+const DEFAULT_PROD_PRIMARY_AUTH_URL = "https://usebrian.ai";
 
 export function primaryAuthUrl(): string | null {
   if (ENV_PRIMARY_AUTH_URL && ENV_PRIMARY_AUTH_URL.length > 0) {
@@ -36,12 +36,12 @@ export function primaryAuthUrl(): string | null {
 }
 
 /**
- * Base URL of the main marketing + auth-entry web app (`apps/web`, `sidan.ai`),
+ * Base URL of the main marketing + auth-entry web app (`apps/web`, `usebrian.ai`),
  * where deep account/plan config lives. App-web deep-links a few of its routes
  * (e.g. `/plans`).
  *
  * `NEXT_PUBLIC_APP_URL` overrides it; otherwise we reuse `primaryAuthUrl()`
- * (which resolves to `https://sidan.ai` in production) before falling back to
+ * (which resolves to `https://usebrian.ai` in production) before falling back to
  * the dev origin. Routing the default through `primaryAuthUrl()` is what stops
  * an unset prod env var from pointing users at `http://localhost:3000` — the
  * bug that sent prod redeem/upgrade clicks to a dev URL. Every app→marketing

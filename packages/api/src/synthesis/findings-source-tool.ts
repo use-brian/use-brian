@@ -18,7 +18,7 @@
 // (Research) + "Build status".
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '@sidanclaw/core'
+import { buildTool, type Tool } from '@use-brian/core'
 
 export type CreateFindingsSourceToolDeps = {
   /** The pre-gathered research findings (a `runPreflight` formatted gather string). */

@@ -44,7 +44,7 @@ import {
   createEntityMergeStore,
   createSpecializationCascadeStore,
 } from '../entity-merge-store.js'
-import type { ApplyMergeInput, EntityMergeRecord } from '@sidanclaw/core'
+import type { ApplyMergeInput, EntityMergeRecord } from '@use-brian/core'
 
 const repo = createEntityMergeStore()
 const cascade = createSpecializationCascadeStore()

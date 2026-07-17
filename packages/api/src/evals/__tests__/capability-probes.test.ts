@@ -122,7 +122,7 @@ describe('[COMP:evals/capability-probes] fixture workspace', () => {
     expect(fixture.unavailable).not.toContain('gcal')
     expect(fixture.unavailable.length).toBeGreaterThan(0)
     // …and the system prompt carries L1 + the unavailable block.
-    expect(fixture.systemPrompt).toContain('sidanclaw')
+    expect(fixture.systemPrompt).toContain('Use Brian')
     for (const id of fixture.unavailable.slice(0, 2)) {
       expect(fixture.systemPrompt.toLowerCase()).toContain(id.slice(0, 4).toLowerCase())
     }

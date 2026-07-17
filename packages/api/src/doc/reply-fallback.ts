@@ -28,7 +28,7 @@
  * → "Reply-to-page safety net".
  */
 
-import type { DocPageStore, Tool, ToolContext } from '@sidanclaw/core'
+import type { DocPageStore, Tool, ToolContext } from '@use-brian/core'
 
 export type PlaceReplyOnEmptyPageParams = {
   /** The anchored doc page (the open "New draft"). */

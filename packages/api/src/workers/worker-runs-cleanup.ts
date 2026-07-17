@@ -20,7 +20,7 @@
  *       "What's still missing" → worker_runs cleanup.
  */
 
-import type { WorkerRunsStore } from '@sidanclaw/core'
+import type { WorkerRunsStore } from '@use-brian/core'
 
 /**
  * How many days terminal worker_runs rows are retained. After this we

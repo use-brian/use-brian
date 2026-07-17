@@ -39,7 +39,7 @@ export function classifyNavigation(targetUrl: string, appOrigin: string): NavDec
  * Parse a sub-app refresh bounce: `<any origin>/api/auth/refresh-and-return?next=<url>`.
  *
  * In a browser this navigation lets the auth primary rotate the shared
- * `.sidan.ai` cookies and return. Inside the shell it can never work — the
+ * `.usebrian.ai` cookies and return. Inside the shell it can never work — the
  * primary is an external origin (the bounce would open uselessly in the system
  * browser) and the shell's session is a separate host-only cookie jar the
  * primary couldn't write anyway. The navigation handler intercepts it, runs the
@@ -75,7 +75,7 @@ const OAUTH_PROVIDER_HOSTS = ["accounts.google.com", "oauth2.googleapis.com"];
 /**
  * The `redirect_uri` callback path that marks a Google OAuth hop as a *connector*
  * connect (linking Drive/Gmail/Calendar to an already-signed-in workspace) rather
- * than a sidanclaw sign-in. The connectors page builds its OAuth URL with this
+ * than a Use Brian sign-in. The connectors page builds its OAuth URL with this
  * `redirect_uri` (apps/app-web `.../studio/connectors`).
  */
 const CONNECTOR_OAUTH_CALLBACK_PATH = "/api/auth/callback/google-connector";
@@ -87,7 +87,7 @@ const CONNECTOR_OAUTH_CALLBACK_PATH = "/api/auth/callback/google-connector";
  * connector flow points it back at the connector callback on the app. A connector
  * connect must NOT trigger the sign-in landing — it is handed to the system
  * browser like any other external origin (`classifyNavigation` → external), where
- * the browser's own `.sidan.ai` session (left over from desktop sign-in) completes
+ * the browser's own `.usebrian.ai` session (left over from desktop sign-in) completes
  * Google's redirect back to the callback. Loading it in-window is not an option:
  * Google refuses embedded user agents (see "Sign-in"). Returns false for a
  * non-provider host, a missing/unparseable `redirect_uri`, or a parse failure.

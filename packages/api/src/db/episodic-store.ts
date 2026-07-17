@@ -1,4 +1,4 @@
-import type { EpisodicStore, EpisodicMemoryRecord } from '@sidanclaw/core'
+import type { EpisodicStore, EpisodicMemoryRecord } from '@use-brian/core'
 import {
   createEpisodicMemory,
   fetchEpisodicByTopic,

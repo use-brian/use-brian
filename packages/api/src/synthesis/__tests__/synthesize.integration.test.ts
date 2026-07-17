@@ -9,12 +9,12 @@ import type {
   StreamChunk,
   Tool,
   WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
-import { createCrmTools, createTaskTools, createDocTools } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { createCrmTools, createTaskTools, createDocTools } from '@use-brian/core'
 
 /**
  * DB-integration proof of the REAL structural-synthesis engine
- * (`synthesizeFromSource`) against the local `sidanclaw` Postgres, driven by a
+ * (`synthesizeFromSource`) against the local `Use Brian` Postgres, driven by a
  * scripted mock provider. This is the closest local proof of recording-to-brain's
  * end-to-end behaviour: it wires the production deps (real saved-view / crm / task
  * / workflow-run stores, the real `searchRecording` source tool over seeded
@@ -27,7 +27,7 @@ import { createCrmTools, createTaskTools, createDocTools } from '@sidanclaw/core
  * transcript-segments retrieval integration test's connect/skip/seed pattern and
  * smoke.ts's scripted-provider shape.
  *
- * Requires a local `sidanclaw` DB with the recording + CRM + saved_views
+ * Requires a local `Use Brian` DB with the recording + CRM + saved_views
  * migrations applied. Skips silently when the DB is unavailable or a required
  * table is missing.
  *
@@ -44,7 +44,7 @@ import { createCrmTools, createTaskTools, createDocTools } from '@sidanclaw/core
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

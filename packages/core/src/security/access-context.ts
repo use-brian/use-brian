@@ -38,7 +38,7 @@ import type { Sensitivity } from './sensitivity.js'
  *
  * The runtime predicate helper lives in `packages/api/src/db/access-predicate.ts`
  * (`buildAccessPredicate(ctx, opts)`). This file owns just the type so it
- * can flow through `@sidanclaw/core` store interfaces without dragging in
+ * can flow through `@use-brian/core` store interfaces without dragging in
  * the API package.
  */
 export type AccessContext = {

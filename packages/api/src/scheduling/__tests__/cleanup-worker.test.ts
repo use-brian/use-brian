@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import type { JobStore } from '@sidanclaw/core'
+import type { JobStore } from '@use-brian/core'
 import { createCleanupWorker, DISABLED_TTL_MS } from '../cleanup-worker.js'
 
 beforeEach(() => {

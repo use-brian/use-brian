@@ -1,9 +1,9 @@
 // NOTE: env.js is intentionally NOT re-exported here. This barrel ('.') is the
 // CLIENT-SAFE / OPEN public surface — it must never pull in `env.ts`, which reads
 // `process.env` (60+ secrets). Server code that needs `getEnv()`/`Env` imports the
-// closed `@sidanclaw/shared-server` package (which re-exports this barrel + env).
+// closed `@use-brian/shared-server` package (which re-exports this barrel + env).
 // This split is load-bearing for the OSS extraction (the open package ships no
-// secrets); `@sidanclaw/shared-server` stays in the platform, not the submodule.
+// secrets); `@use-brian/shared-server` stays in the platform, not the submodule.
 // See packages/shared/CLAUDE.md → "Subpath exports".
 export * from './connector-registry.js'
 export * from './builtin-connectors.js'

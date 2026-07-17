@@ -13,7 +13,7 @@
 import { describe, it, expect, vi } from 'vitest'
 
 import { detectAndResolveNags } from '../nag-resolver.js'
-import type { JobStore, ScheduledJob } from '@sidanclaw/core'
+import type { JobStore, ScheduledJob } from '@use-brian/core'
 
 function job(over: Partial<ScheduledJob> = {}): ScheduledJob {
   return {

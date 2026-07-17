@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/doc-model",
+  "name": "@use-brian/doc-model",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@sidanclaw/core": "workspace:*",
+    "@use-brian/core": "workspace:*",
     "@tiptap/core": "^2.27.2",
     "@tiptap/extension-blockquote": "^2.27.2",
     "@tiptap/extension-link": "^2.27.2",

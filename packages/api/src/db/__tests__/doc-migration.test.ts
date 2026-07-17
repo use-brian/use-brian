@@ -4,7 +4,7 @@ import {
   runSelfTest,
   SELF_TEST_PAGE,
 } from '../doc-migration.js'
-import { snapshotFromUpdate, canonicalizePage } from '@sidanclaw/doc-model'
+import { snapshotFromUpdate, canonicalizePage } from '@use-brian/doc-model'
 
 describe('[COMP:api/doc-migration] block-page → Y.Doc converter', () => {
   it('round-trips all 16 block kinds with every id preserved', () => {

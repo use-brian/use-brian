@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { buildTool, type LLMProvider, type Message, type StreamChunk, type Tool } from '@sidanclaw/core'
+import { buildTool, type LLMProvider, type Message, type StreamChunk, type Tool } from '@use-brian/core'
 import { z } from 'zod'
 
 import {

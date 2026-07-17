@@ -6,8 +6,8 @@
 import { describe, it, expect } from "vitest";
 import {
   OFFICIAL_CONNECTOR_TOOLS,
-} from "@sidanclaw/shared/builtin-connectors";
-import { OFFICIAL_CONNECTORS } from "@sidanclaw/shared/connector-registry";
+} from "@use-brian/shared/builtin-connectors";
+import { OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 import {
   buildToolCatalog,
   catalogToolNames,

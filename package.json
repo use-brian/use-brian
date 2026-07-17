@@ -1,5 +1,5 @@
 {
-  "name": "sidanclaw",
+  "name": "Use Brian",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -15,8 +15,8 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
-    "smoke": "pnpm --filter @sidanclaw/core smoke",
-    "eval": "pnpm --filter @sidanclaw/api eval"
+    "smoke": "pnpm --filter @use-brian/core smoke",
+    "eval": "pnpm --filter @use-brian/api eval"
   },
   "devDependencies": {
     "@types/pg": "^8.11.10",

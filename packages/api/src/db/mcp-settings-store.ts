@@ -1,4 +1,4 @@
-import type { McpSettingsStore, McpToolSetting } from '@sidanclaw/core'
+import type { McpSettingsStore, McpToolSetting } from '@use-brian/core'
 import { query } from './client.js'
 
 export function createDbMcpSettingsStore(): McpSettingsStore {

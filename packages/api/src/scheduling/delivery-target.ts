@@ -20,8 +20,8 @@
  *
  * [COMP:scheduling/delivery-target]
  */
-import { parseTopicChannelId } from '@sidanclaw/channels'
-import type { DeliveryTargetResolver } from '@sidanclaw/core'
+import { parseTopicChannelId } from '@use-brian/channels'
+import type { DeliveryTargetResolver } from '@use-brian/core'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
 export function createDeliveryTargetResolver(

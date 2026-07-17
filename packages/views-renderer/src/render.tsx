@@ -13,15 +13,15 @@ import { Fragment, type JSX } from 'react'
 // Import directly from the views/a2ui module rather than the core
 // package barrel: the barrel re-exports `skills/loader` which uses
 // Node's `fs`, breaking client bundles that include this renderer
-// (e.g. apps/web/src/app/chat). Per @sidanclaw/views-renderer/CLAUDE.md,
-// "the schema (viewPayloadSchema) lives in @sidanclaw/core/views/a2ui.ts"
+// (e.g. apps/web/src/app/chat). Per @use-brian/views-renderer/CLAUDE.md,
+// "the schema (viewPayloadSchema) lives in @use-brian/core/views/a2ui.ts"
 // — this matches that intent.
 import {
   viewPayloadSchema,
   type A2UIRowValue,
   type A2UIWidget,
   type ViewPayload,
-} from '@sidanclaw/core/dist/views/a2ui.js'
+} from '@use-brian/core/dist/views/a2ui.js'
 import type { OnActionHandler, RenderWidgetOpts, ViewRendererProps } from './types.js'
 import { Badge } from './widgets/Badge.js'
 import { Button } from './widgets/Button.js'

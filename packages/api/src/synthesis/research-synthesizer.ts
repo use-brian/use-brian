@@ -37,7 +37,7 @@ import {
   type UsageStore,
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { createFindingsSourceTool } from './findings-source-tool.js'
 import { synthesizeFromSource, type SynthesisBlueprint } from './synthesize.js'
 import { extractionToBlueprintBody } from './blueprint-from-template.js'

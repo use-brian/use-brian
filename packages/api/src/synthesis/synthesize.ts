@@ -42,7 +42,7 @@ import {
   type TokenUsage,
   type Tool,
   type UsageStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
 
 export type SynthesisSourceKind = 'recording' | 'brain' | 'research'
@@ -441,7 +441,7 @@ export async function synthesizeFromSource(
         userId: source.userId,
         assistantId: source.assistantId,
         sessionId,
-        appId: 'sidanclaw',
+        appId: 'Use Brian',
         channelType: 'synthesis',
         channelId: source.sourceId,
         workspaceId: source.workspaceId,

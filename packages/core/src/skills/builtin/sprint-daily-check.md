@@ -2,9 +2,9 @@
 name: sprint-daily-check
 description: Daily sprint variance check — find tasks that have slipped their `due` date (not `done` / `archived`) and write `commitment:sprint_variance` memories for each new slip. The commitment-lifecycle worker resolves each automatically when the task clears (done / archived / replanned). Use via a daily scheduled workflow, or when the operator asks "how's the sprint?", "any slips?", "what's behind?".
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: planning
   applies_to_app_type: any
   when_to_use: A daily scheduled turn in any workspace that uses tasks for sprint planning (tags like `sprint:<id>`). Also valid as an ad-hoc operator query. Skip if the assistant lacks the `tasks` capability or no tasks have a `due` date.

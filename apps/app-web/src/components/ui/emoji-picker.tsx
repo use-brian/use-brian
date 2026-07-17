@@ -26,7 +26,7 @@ import { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { isImageIcon } from "@sidanclaw/shared/page-icon";
+import { isImageIcon } from "@use-brian/shared/page-icon";
 import { useT } from "@/lib/i18n/client";
 
 export type EmojiPickerProps = {

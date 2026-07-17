@@ -1,4 +1,4 @@
-import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@sidanclaw/core'
+import type { AccessContext, EntityLinksStore, TaskListFilters, TaskListRow, TaskRecord, TaskRecordStatus, TaskUpdateFields, TaskWriteActor } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'

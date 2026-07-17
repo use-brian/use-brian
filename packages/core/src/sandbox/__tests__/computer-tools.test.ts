@@ -212,7 +212,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
     const res = await run(tools.browserSnapshot, {})
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('sidanclaw extension')
+    expect(String(res.data)).toContain('Use Brian extension')
     expect(res.meta?.code).toBe('no_extension')
   })
 

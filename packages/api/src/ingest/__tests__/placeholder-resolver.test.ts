@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { IngestContext } from '@sidanclaw/core'
+import type { IngestContext } from '@use-brian/core'
 import { query } from '../../db/client.js'
 import { resolveIngestPlaceholders } from '../placeholder-resolver.js'
 

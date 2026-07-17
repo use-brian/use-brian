@@ -21,11 +21,11 @@
  * The helper here owns three things:
  *
  *   1. The wire shape of the per-op SSE event (`DocOpEvent`).
- *   2. A pure local `applyOpsLocal` clone of `@sidanclaw/core`'s
+ *   2. A pure local `applyOpsLocal` clone of `@use-brian/core`'s
  *      `applyOps` — mirrors the canonical executor in
  *      `packages/core/src/doc/ops.ts` so the optimistic update
  *      stays in sync with what the server commits. Vendored rather
- *      than imported because `@sidanclaw/core`'s barrel pulls in
+ *      than imported because `@use-brian/core`'s barrel pulls in
  *      `skills/loader` (Node `fs`) and breaks browser bundles —
  *      same constraint that drives `lib/api/views.ts` to mirror
  *      types locally.
@@ -44,7 +44,7 @@ import type { Block, Page } from "@/lib/api/views";
 // ── Wire shape ────────────────────────────────────────────────────────
 
 /**
- * The local `Op` union — mirrors `@sidanclaw/core/src/doc/page-types.ts`.
+ * The local `Op` union — mirrors `@use-brian/core/src/doc/page-types.ts`.
  * The server sends `op.block.id` as `tmp-*` for `add` ops within a
  * patch; the renderer treats the temp id as the working id locally and
  * relies on the post-patch `getCurrentPage` refresh (or the tool
@@ -177,7 +177,7 @@ export function publishDocOpEvent(event: DocOpEvent): void {
 
 /**
  * Pure client-side fold of an op list into a new page. Mirrors
- * `@sidanclaw/core/src/doc/ops.ts` `applyOps` semantics but stays
+ * `@use-brian/core/src/doc/ops.ts` `applyOps` semantics but stays
  * within app-web so we don't pull the core barrel into the browser
  * bundle. The two are kept in sync; the canonical executor remains
  * the server-side `applyOps` — drift means a temporary visual blip

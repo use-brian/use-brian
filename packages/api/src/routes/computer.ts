@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { createCloudBrowserProvider, registrableSiteOf } from '@sidanclaw/core'
+import { createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
   BrowserProfileStore,
   BrowserSkillGrantStore,
@@ -9,7 +9,7 @@ import type {
   SandboxOrchestrator,
   SandboxProvider,
   SessionVault,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 /**
  * Computer-use web surface (computer-use.md §5, §7):

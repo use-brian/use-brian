@@ -5,7 +5,7 @@
  * `mcp_search`/`mcp_call` tools) but also carries the built-in Google/Notion/
  * Fathom connector injectors, which need OAuth *app* credentials. Reading those
  * via `getEnv()` would couple the open module to the closed env schema
- * (`@sidanclaw/shared-server`). Instead they come through `getConnectorConfig`,
+ * (`@use-brian/shared-server`). Instead they come through `getConnectorConfig`,
  * which resolves credentials from an optional, user-owned JSON file and falls
  * back to `process.env` so the hosted platform (creds in env) is unchanged.
  *

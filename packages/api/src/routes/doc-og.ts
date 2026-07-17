@@ -22,7 +22,7 @@
  * fields is overkill and adds an extra dependency to `packages/api`.
  *
  * Rate limit: 30 calls / 60s per user via `createRateLimiter` from
- * `@sidanclaw/core`. Keyed by `req.userId` (set by `requireAuth`).
+ * `@use-brian/core`. Keyed by `req.userId` (set by `requireAuth`).
  *
  * Component tag: [COMP:api/doc-og-fetch].
  * Spec: docs/plans/doc-v1-execution.md → Phase 2 Bookmark block.
@@ -34,7 +34,7 @@ import { createHash } from 'node:crypto'
 import { lookup as dnsLookup } from 'node:dns'
 import { isIP, isIPv4, isIPv6 } from 'node:net'
 import { promisify } from 'node:util'
-import { createRateLimiter } from '@sidanclaw/core'
+import { createRateLimiter } from '@use-brian/core'
 
 const dnsLookupAsync = promisify(dnsLookup)
 

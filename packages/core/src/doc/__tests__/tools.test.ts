@@ -45,7 +45,7 @@ function ctx(overrides: { workspaceId?: string | null } = {}) {
     userId: USER_ID,
     assistantId: 'asst-1',
     sessionId: 'sess-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'web',
     channelId: 'web-1',
     workspaceId:
@@ -113,6 +113,7 @@ function fakeSavedViewStore(): SavedViewStore {
     pruneExpiredDraftsSystem: vi.fn().mockResolvedValue([]),
     getBrainSyncStateSystem: vi.fn().mockResolvedValue(null),
     markBrainIngestedSystem: vi.fn().mockResolvedValue(true),
+    getPageEventContextSystem: vi.fn().mockResolvedValue(null),
   }
 }
 

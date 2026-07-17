@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { z } from 'zod'
-import { buildTool, CONFIGURE_CAPABILITY, type ControlPlaneReader, type Tool, type ToolContext } from '@sidanclaw/core'
+import { buildTool, CONFIGURE_CAPABILITY, type ControlPlaneReader, type Tool, type ToolContext } from '@use-brian/core'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn().mockResolvedValue({

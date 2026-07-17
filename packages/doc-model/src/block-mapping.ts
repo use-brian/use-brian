@@ -28,7 +28,7 @@ import type {
   Page,
   RichTextContent,
   TableBlock,
-} from '@sidanclaw/core/dist/views/blocks.js'
+} from '@use-brian/core/dist/views/blocks.js'
 
 // Loose JSON node — we never construct prosemirror-model nodes here.
 export type PMNode = {

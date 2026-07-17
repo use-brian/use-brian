@@ -32,7 +32,7 @@ vi.mock('../client.js', () => ({
 }))
 
 import { createDbEmbeddingStore } from '../embedding-store.js'
-import type { EmbeddingResult } from '@sidanclaw/core'
+import type { EmbeddingResult } from '@use-brian/core'
 
 const store = createDbEmbeddingStore()
 

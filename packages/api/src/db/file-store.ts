@@ -1,4 +1,4 @@
-import type { AccessContext, FileStore } from '@sidanclaw/core'
+import type { AccessContext, FileStore } from '@use-brian/core'
 import { query } from './client.js'
 import { buildAccessPredicate } from './access-predicate.js'
 

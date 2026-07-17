@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/core",
+  "name": "@use-brian/core",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -15,8 +15,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@mozilla/readability": "^0.5.0",
-    "@sidanclaw/shared": "workspace:*",
-    "@sidanclaw/sidanclaw-kb": "workspace:*",
+    "@use-brian/shared": "workspace:*",
+    "@use-brian/sidanclaw-kb": "workspace:*",
     "docx": "^9.7.1",
     "e2b": "^2.32.0",
     "exceljs": "^4.4.0",

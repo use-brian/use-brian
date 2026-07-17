@@ -5,7 +5,7 @@
  * exactly one user's most recent channel-media recording via
  * `GET /internal/media/latest` (`packages/api-platform/src/routes/media.ts`).
  *
- * sidanclaw mints the token per turn (channel pipeline) and pushes it to a
+ * Use Brian mints the token per turn (channel pipeline) and pushes it to a
  * custom MCP connector — only ones the user granted media access — over the
  * reserved `X-Sidanclaw-Media-Token` header. The connector echoes it back as
  * `Authorization: Bearer <token>`; the endpoint verifies signature + expiry +
@@ -27,7 +27,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 export const MEDIA_TOKEN_AUD = 'media' as const
 
 export type MediaTokenPayload = {
-  /** The sidanclaw user UUID whose media this token unlocks (`created_by_user_id`). */
+  /** The Use Brian user UUID whose media this token unlocks (`created_by_user_id`). */
   sub: string
   /** Always `'media'` — verify rejects anything else. */
   aud: typeof MEDIA_TOKEN_AUD

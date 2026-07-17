@@ -13,7 +13,7 @@
  */
 
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { layoutDeck, resolveDeckStyle } from "@sidanclaw/shared/decks";
+import { layoutDeck, resolveDeckStyle } from "@use-brian/shared/decks";
 import { DeckSlide, deckSlideHeightPx } from "@/components/decks/deck-slide";
 import { BackButton } from "@/components/ui/back-button";
 import { Button } from "@/components/ui/button";

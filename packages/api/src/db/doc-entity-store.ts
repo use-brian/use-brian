@@ -40,11 +40,11 @@ import type {
   DocEntityType,
   CellValue,
   PropertyDef,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   docEntityInstanceSchema,
   docEntityTypeSchema,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getPool, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── Row projections ────────────────────────────────────────────────────

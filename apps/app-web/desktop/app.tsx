@@ -28,7 +28,7 @@
  * App Router supplies a boundary around every layout/page; the SPA has to add
  * its own. Without it, entering any `/w/[id]/*` surface suspends to the root
  * with no fallback and unmounts the whole tree (React #482), leaving only the
- * blank "sidanclaw" boot frame.
+ * blank "Use Brian" boot frame.
  */
 import { useEffect, useMemo, useState, Suspense } from "react";
 import {
@@ -293,7 +293,7 @@ function Boot() {
   return (
     <div style={shell}>
       <div style={{ width: 520, padding: 32 }}>
-        <h1 style={{ fontSize: 18, margin: "0 0 16px" }}>sidanclaw</h1>
+        <h1 style={{ fontSize: 18, margin: "0 0 16px" }}>Use Brian</h1>
         {state.k === "boot" && <p style={dim}>Loading…</p>}
         {state.k === "anon" && (
           <button type="button" style={button} onClick={() => window.sidanclawDesktop?.signIn?.()}>
@@ -411,7 +411,7 @@ function WorkspaceShell() {
                     its own. Without it, entering ANY workspace surface suspends
                     to the root with no fallback and unmounts the whole tree
                     (React #482 — "suspended while responding to synchronous
-                    input"), which read as the blank "sidanclaw" window. */}
+                    input"), which read as the blank "Use Brian" window. */}
                 <Suspense fallback={<SurfaceFallback />}>
                   <Outlet />
                 </Suspense>

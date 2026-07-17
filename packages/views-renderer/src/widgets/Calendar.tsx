@@ -60,7 +60,7 @@ import type {
 /**
  * The three interactive view modes. The wire schema's `initialView`
  * only seeds `'month' | 'week'` (see `CalendarWidget` in
- * `@sidanclaw/core`); `'day'` is reached via the in-grid Day tab, so it
+ * `@use-brian/core`); `'day'` is reached via the in-grid Day tab, so it
  * lives here as renderer-local state rather than as a payload field.
  */
 export type CalendarView = 'month' | 'week' | 'day'

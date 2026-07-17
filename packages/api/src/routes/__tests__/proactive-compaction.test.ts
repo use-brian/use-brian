@@ -24,8 +24,8 @@ vi.mock('../../db/sessions.js', async () => {
 // a usageStore is passed, so tests omit it and the helper no-ops.
 
 import { findRecentSplit, houseKeepEpisodic, runProactiveCompaction } from '../proactive-compaction.js'
-import { createCompactionCircuitBreaker, estimateTokens } from '@sidanclaw/core'
-import type { Message, EpisodicMemoryRecord, EpisodicStore, MemoryStore, LLMProvider, StreamChunk, AnalyticsLogger } from '@sidanclaw/core'
+import { createCompactionCircuitBreaker, estimateTokens } from '@use-brian/core'
+import type { Message, EpisodicMemoryRecord, EpisodicStore, MemoryStore, LLMProvider, StreamChunk, AnalyticsLogger } from '@use-brian/core'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 
 const userText = (text: string): Message => ({
@@ -283,7 +283,7 @@ function makeSession(partial: Partial<Session> = {}): Session {
     userId: partial.userId ?? 'u1',
     channelType: partial.channelType ?? 'telegram',
     channelId: partial.channelId ?? 'c1',
-    appId: partial.appId ?? 'sidanclaw',
+    appId: partial.appId ?? 'Use Brian',
     appOrigin: partial.appOrigin ?? null,
     status: partial.status ?? 'idle',
     compactSummary: partial.compactSummary ?? null,

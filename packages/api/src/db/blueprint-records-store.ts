@@ -21,7 +21,7 @@
  * [COMP:api/blueprint-records-store]
  */
 
-import type { BlueprintRecordFields, BlueprintRecordStatus, ExtractionField } from '@sidanclaw/core'
+import type { BlueprintRecordFields, BlueprintRecordStatus, ExtractionField } from '@use-brian/core'
 
 import { queryWithRLS } from './client.js'
 

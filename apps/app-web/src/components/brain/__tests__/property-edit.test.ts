@@ -211,8 +211,8 @@ describe("[COMP:app-web/brain-property-fields] property-edit logic", () => {
   });
 
   it("flattens attribute objects into displayable rows and ignores non-objects", () => {
-    expect(flattenAttributes({ repo: "sidanclaw", stars: 5, skip: null })).toEqual([
-      ["repo", "sidanclaw"],
+    expect(flattenAttributes({ repo: "Use Brian", stars: 5, skip: null })).toEqual([
+      ["repo", "Use Brian"],
       ["stars", "5"],
     ]);
     expect(flattenAttributes(["a"])).toEqual([]);

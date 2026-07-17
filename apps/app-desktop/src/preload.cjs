@@ -5,7 +5,7 @@
 // `signOut()` (ask the main process to clear this shell's own session — cookies
 // in the thin shell, the safeStorage token in bundled mode — and reload to the
 // sign-in landing). These are the only privileged surfaces the web/landing
-// content can reach. In **bundled mode** (main passes `--sidanclaw-bundled` via
+// content can reach. In **bundled mode** (main passes `--usebrian-bundled` via
 // webPreferences.additionalArguments) it additionally exposes the Bearer-token
 // bridge that activates app-web's `desktopAuthSource` (lib/desktop-auth-source.ts).
 // The thin remote shell does NOT pass that flag, so the token methods stay absent
@@ -26,18 +26,18 @@ const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
-  signIn: () => ipcRenderer.send("sidanclaw:sign-in"),
-  signOut: () => ipcRenderer.send("sidanclaw:sign-out"),
+  signIn: () => ipcRenderer.send("Use Brian:sign-in"),
+  signOut: () => ipcRenderer.send("Use Brian:sign-out"),
   // The offline landing's "Retry" button asks the shell to reload the app now.
   // Present in every mode (like signIn/out); the offline landing is shell-owned.
-  retry: () => ipcRenderer.send("sidanclaw:retry-load"),
+  retry: () => ipcRenderer.send("Use Brian:retry-load"),
   // Multi-account. `addAccount` starts the system-browser sign-in for a SECOND
   // account (stash, don't replace); `switchAccount` swaps the active account to a
   // saved one and resolves to `{ ok }` / `{ ok:false, error }` so the switcher
   // can show an inline message and clear its per-row spinner. Present in every
   // mode (like signIn/out); bundled mode stays single-account (switch errors).
-  addAccount: () => ipcRenderer.send("sidanclaw:add-account"),
-  switchAccount: (id) => ipcRenderer.invoke("sidanclaw:switch-account", id),
+  addAccount: () => ipcRenderer.send("Use Brian:add-account"),
+  switchAccount: (id) => ipcRenderer.invoke("Use Brian:switch-account", id),
   // Dual target (docs/plans/consumer-local-experience.md §2.2). `runLocal`
   // probes a local/self-hosted brain's paired API (`null` = the launcher
   // default address) and resolves `{ ok }` / `{ ok:false, error, url }`; on
@@ -45,14 +45,14 @@ const bridge = {
   // the cloud target and relaunches. Present in every mode; the landing that
   // calls them is shell-owned.
   runLocal: (url) =>
-    ipcRenderer.invoke("sidanclaw:run-local", typeof url === "string" ? url : null),
-  useCloud: () => ipcRenderer.send("sidanclaw:use-cloud"),
+    ipcRenderer.invoke("Use Brian:run-local", typeof url === "string" ? url : null),
+  useCloud: () => ipcRenderer.send("Use Brian:use-cloud"),
 };
 
-if (process.argv.includes("--sidanclaw-bundled")) {
+if (process.argv.includes("--usebrian-bundled")) {
   // Seed the token cache synchronously at load so the first authFetch has a
   // token without an async round-trip; the `AuthSource` getters are sync.
-  let cache = ipcRenderer.sendSync("sidanclaw:get-tokens") || null;
+  let cache = ipcRenderer.sendSync("Use Brian:get-tokens") || null;
 
   bridge.getAccessToken = () => (cache && cache.accessToken) || null;
   bridge.getRefreshToken = () => (cache && cache.refreshToken) || null;
@@ -60,11 +60,11 @@ if (process.argv.includes("--sidanclaw-bundled")) {
     // Update the local cache first (so a subsequent sync getAccessToken sees the
     // rotated token immediately), then persist to safeStorage via main.
     cache = tokens || null;
-    ipcRenderer.send("sidanclaw:set-tokens", tokens);
+    ipcRenderer.send("Use Brian:set-tokens", tokens);
   };
   bridge.clear = () => {
     cache = null;
-    ipcRenderer.send("sidanclaw:clear-tokens");
+    ipcRenderer.send("Use Brian:clear-tokens");
   };
 }
 

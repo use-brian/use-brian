@@ -20,8 +20,8 @@ vi.mock('../../db/sessions.js', async () => {
   }
 })
 
-import { createGeminiProvider } from '@sidanclaw/core'
-import type { MemoryStore } from '@sidanclaw/core'
+import { createGeminiProvider } from '@use-brian/core'
+import type { MemoryStore } from '@use-brian/core'
 import { runProactiveCompaction } from '../proactive-compaction.js'
 import type { Session, SessionMessage } from '../../db/sessions.js'
 
@@ -54,7 +54,7 @@ function session(partial: Partial<Session> = {}): Session {
     userId: 'u_hinson',
     channelType: 'telegram',
     channelId: '880211324',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     appOrigin: null,
     status: 'idle',
     compactSummary: null,

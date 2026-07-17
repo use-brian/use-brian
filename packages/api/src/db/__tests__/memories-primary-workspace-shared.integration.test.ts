@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import pg from 'pg'
-import type { AccessContext } from '@sidanclaw/core'
+import type { AccessContext } from '@use-brian/core'
 import {
   createMemory,
   getMemoryIndexRanked,
@@ -27,14 +27,14 @@ import {
  * `240_primary_memories_workspace_shared.sql` for the existing-row
  * backfill.
  *
- * Requires a local `sidanclaw` PostgreSQL database. Skips silently when
+ * Requires a local `Use Brian` PostgreSQL database. Skips silently when
  * unavailable (mirrors the other db/__tests__ integration suites).
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

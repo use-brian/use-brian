@@ -31,7 +31,7 @@ import type {
   ViewEntity,
   ViewState,
   ViewType,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── SQL projections ───────────────────────────────────────────────────
@@ -934,6 +934,26 @@ export function createDbSavedViewStore(
         [id, contentHash],
       )
       return result.rows.length > 0
+    },
+
+    async getPageEventContextSystem(id) {
+      // System-bypass read — the content-edit `updated` trigger (doc-sync →
+      // API /internal/page-event) has no member userId; doc-sync already
+      // clearance-gated the writers at connect, and the emit is workspace-scoped
+      // by the resolved `workspaceId`. Returns just what `PageLifecycleEvent`
+      // needs for an `updated` event.
+      const result = await query<{
+        workspaceId: string
+        parentId: string | null
+        title: string | null
+      }>(
+        `SELECT workspace_id   AS "workspaceId",
+                nest_parent_id AS "parentId",
+                name           AS "title"
+           FROM saved_views WHERE id = $1`,
+        [id],
+      )
+      return result.rows[0] ?? null
     },
   }
 }

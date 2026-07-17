@@ -23,9 +23,9 @@ import type {
   ExtractionField,
   ExtractionFieldType,
   ExtractionSpec,
-} from "@sidanclaw/doc-model";
-import { BLUEPRINT_CAPTURE_KINDS } from "@sidanclaw/doc-model";
-import { fieldKeyFromHeading } from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
+import { BLUEPRINT_CAPTURE_KINDS } from "@use-brian/doc-model";
+import { fieldKeyFromHeading } from "@use-brian/doc-model";
 import type { CustomTemplateUpdateInput } from "@/lib/api/views";
 
 /** Mirrors the server's `extractionFieldSchema` key rule (lowercase slug). */

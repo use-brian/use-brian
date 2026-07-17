@@ -2,7 +2,7 @@
  * Desktop multi-account — the shell's jar-local copy of the web's saved-account
  * model.
  *
- * The web keeps every account signed in on a browser in two `.sidan.ai` cookies
+ * The web keeps every account signed in on a browser in two `.usebrian.ai` cookies
  * (`accounts_store` httpOnly + `accounts_dir` JS-readable; see
  * `apps/web/src/lib/auth-cookies.ts`) and delegates switching to the primary's
  * `switch-account-and-return` route. The desktop shell can do **neither**: its

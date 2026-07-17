@@ -1,7 +1,7 @@
 {
-  "name": "@sidanclaw/sidanclaw-kb",
+  "name": "@use-brian/sidanclaw-kb",
   "version": "0.1.0",
-  "description": "Parser, wikilink resolver, and lint checks for sidanclaw knowledge bases. Shared between the API sync worker and the public CLI.",
+  "description": "Parser, wikilink resolver, and lint checks for Use Brian knowledge bases. Shared between the API sync worker and the public CLI.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -31,7 +31,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/sidanclaw/sidanclaw",
+    "url": "https://github.com/use-brian/use-brian",
     "directory": "packages/sidanclaw-kb"
   },
   "devDependencies": {

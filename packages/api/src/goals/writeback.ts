@@ -21,7 +21,7 @@ import {
   type GoalHostTerminal,
   type GoalRecord,
   type GoalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import { createHostStore } from './host-task.js'
 

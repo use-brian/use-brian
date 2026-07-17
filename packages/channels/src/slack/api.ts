@@ -101,7 +101,7 @@ export function createSlackApi(options: SlackApiOptions) {
           mrkdwn: opts?.mrkdwn ?? true,
           thread_ts: opts?.threadTs,
           // Suppress link previews on bot outbound. Every link the assistant
-          // posts is either an auth-gated app.sidan.ai page — which all unfurl
+          // posts is either an auth-gated app.usebrian.ai page — which all unfurl
           // to the SAME generic marketing card ("The shared brain for your
           // small team"), since the crawler can't see past the login — or an
           // occasional external link where a preview in a notification is

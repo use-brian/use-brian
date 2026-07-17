@@ -131,7 +131,7 @@ export type SlashMenuItem = {
   /**
    * The Notion-style markdown shortcut shown right-aligned in the row
    * (`#`, `1.`, `[]`, `>`, `"`, `---`). Display-only — the actual input
-   * rules live in `@sidanclaw/doc-model`'s schema. Omitted for items with
+   * rules live in `@use-brian/doc-model`'s schema. Omitted for items with
    * no inline shortcut (Page, Callout, Table, Link to page, media).
    */
   shortcut?: string;

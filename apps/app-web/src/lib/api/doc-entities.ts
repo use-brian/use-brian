@@ -3,7 +3,7 @@
  * Notion-database tables). Thin typed wrappers over
  * `packages/api/src/routes/doc-entities.ts`, all through `authFetch`.
  *
- * Wire types are declared locally (not imported from `@sidanclaw/core` — the
+ * Wire types are declared locally (not imported from `@use-brian/core` — the
  * core barrel pulls in `skills/loader`'s `fs`, breaking client bundles; same
  * constraint as `lib/api/views.ts`). The server re-validates every write with
  * `docEntityTypeSchema` / `docEntityInstanceSchema`, so these shapes are

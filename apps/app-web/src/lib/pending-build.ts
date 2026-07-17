@@ -5,7 +5,7 @@
  * action: `handleBuildPage` (doc-shell) calls `createDraft` (an `authFetch`
  * POST), then seeds the build turn. In production a sub-app can't refresh its
  * access token in place — on a 401, `authFetch` navigates the WHOLE browser to
- * `sidan.ai/api/auth/refresh-and-return?next=<page>` and back. That full-page
+ * `usebrian.ai/api/auth/refresh-and-return?next=<page>` and back. That full-page
  * round-trip reloads app-web and discards the prompt (it lived only in React
  * state), so the user sees "the page just refreshed and gave me no draft" — no
  * session, no draft row, nothing logged server-side, because the turn never ran.
@@ -52,7 +52,7 @@ const STORAGE_KEY = "doc:pending-build";
 
 /**
  * How long a stash stays replayable. Long enough to cover the auth round-trip
- * (even a full re-login on sidan.ai), short enough that a later, unrelated visit
+ * (even a full re-login on usebrian.ai), short enough that a later, unrelated visit
  * never resurrects a stale prompt.
  */
 export const PENDING_BUILD_TTL_MS = 3 * 60 * 1000;

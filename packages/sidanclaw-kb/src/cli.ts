@@ -29,7 +29,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   return { command, positional, flags }
 }
 
-const HELP = `kb — sidanclaw knowledge base CLI
+const HELP = `kb — Use Brian knowledge base CLI
 
 Usage:
   kb lint [<dir>] [flags]    Audit a KB directory
@@ -40,13 +40,13 @@ Flags for lint:
   --strict                   Exit non-zero on warnings (default: errors only)
 
 To start a new KB, use the template directly:
-  https://github.com/sidanclaw/sidanclaw-kb-template  ("Use this template")
+  https://github.com/use-brian/brian-kb-template  ("Use this template")
 
 To ingest content from any existing source (Notion, Confluence, Google Docs,
 markdown tree, pasted email, meeting transcript), invoke the kb-author skill
-in a sidanclaw chat — the model is the universal adapter.
+in a Use Brian chat — the model is the universal adapter.
 
-Docs: https://github.com/sidanclaw/sidanclaw/tree/main/packages/sidanclaw-kb
+Docs: https://github.com/use-brian/use-brian/tree/main/packages/sidanclaw-kb
 `
 
 async function main() {

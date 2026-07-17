@@ -11,7 +11,7 @@
  *
  * The bind lives in `bootOpenApi` — not the closed app boot — so BOTH
  * editions get task-event triggers: the OSS standalone entry
- * (`@sidanclaw/api-open`) and the closed platform app (`@sidanclaw/api-server`).
+ * (`@use-brian/api-open`) and the closed platform app (`@use-brian/api-server`).
  *
  * Best-effort: the dispatch is fire-and-forget and swallows its own errors,
  * so a task write never waits on — or fails because of — a workflow start.
@@ -23,7 +23,7 @@ import {
   createTaskLifecycleTrigger,
   type TaskLifecycleEvent,
   type WorkflowEventDispatcher,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 let sink: ((event: TaskLifecycleEvent) => Promise<void>) | null = null
 

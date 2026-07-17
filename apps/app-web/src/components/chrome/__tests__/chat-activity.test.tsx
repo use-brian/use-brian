@@ -14,7 +14,7 @@ import { renderToString } from "react-dom/server";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import type { ToolUsed } from "@sidanclaw/chat-ui";
+import type { ToolUsed } from "@use-brian/chat-ui";
 import type { BuildEvent } from "@/lib/build-events";
 import {
   ChatActivityFeed,
