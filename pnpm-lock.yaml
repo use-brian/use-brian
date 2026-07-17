@@ -35,7 +35,7 @@ importers:
       '@electric-sql/pglite-socket':
         specifier: ^0.2.4
         version: 0.2.4(@electric-sql/pglite-age@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pg_hashids@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pg_ivm@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pg_textsearch@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pg_uuidv7@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pgtap@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite-pgvector@0.0.4(@electric-sql/pglite@0.5.3))(@electric-sql/pglite@0.5.3)
-      '@sidanclaw/api':
+      '@use-brian/api':
         specifier: workspace:*
         version: link:../../packages/api
       dotenv:
@@ -94,18 +94,6 @@ importers:
       '@hocuspocus/provider':
         specifier: ^4.1.0
         version: 4.2.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
-      '@sidanclaw/chat-ui':
-        specifier: workspace:*
-        version: link:../../packages/chat-ui
-      '@sidanclaw/doc-model':
-        specifier: workspace:*
-        version: link:../../packages/doc-model
-      '@sidanclaw/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
-      '@sidanclaw/views-renderer':
-        specifier: workspace:*
-        version: link:../../packages/views-renderer
       '@tiptap/core':
         specifier: ^2.27.2
         version: 2.27.2(@tiptap/pm@2.27.2)
@@ -142,6 +130,18 @@ importers:
       '@tiptap/suggestion':
         specifier: ^2.27.2
         version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)
+      '@use-brian/chat-ui':
+        specifier: workspace:*
+        version: link:../../packages/chat-ui
+      '@use-brian/doc-model':
+        specifier: workspace:*
+        version: link:../../packages/doc-model
+      '@use-brian/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@use-brian/views-renderer':
+        specifier: workspace:*
+        version: link:../../packages/views-renderer
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -251,7 +251,7 @@ importers:
 
   apps/discord-connector:
     dependencies:
-      '@sidanclaw/channels':
+      '@use-brian/channels':
         specifier: workspace:*
         version: link:../../packages/channels
       express:
@@ -288,13 +288,13 @@ importers:
       '@hocuspocus/server':
         specifier: ^4.1.0
         version: 4.2.0(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
-      '@sidanclaw/api':
+      '@use-brian/api':
         specifier: workspace:*
         version: link:../../packages/api
-      '@sidanclaw/core':
+      '@use-brian/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@sidanclaw/doc-model':
+      '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../../packages/doc-model
       dotenv:
@@ -383,16 +383,16 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
-      '@sidanclaw/channels':
+      '@use-brian/channels':
         specifier: workspace:*
         version: link:../channels
-      '@sidanclaw/core':
+      '@use-brian/core':
         specifier: workspace:*
         version: link:../core
-      '@sidanclaw/doc-model':
+      '@use-brian/doc-model':
         specifier: workspace:*
         version: link:../doc-model
-      '@sidanclaw/shared':
+      '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared
       dotenv:
@@ -492,10 +492,10 @@ importers:
       '@mozilla/readability':
         specifier: ^0.5.0
         version: 0.5.0
-      '@sidanclaw/shared':
+      '@use-brian/shared':
         specifier: workspace:*
         version: link:../shared
-      '@sidanclaw/sidanclaw-kb':
+      '@use-brian/sidanclaw-kb':
         specifier: workspace:*
         version: link:../sidanclaw-kb
       docx:
@@ -556,9 +556,6 @@ importers:
 
   packages/doc-model:
     dependencies:
-      '@sidanclaw/core':
-        specifier: workspace:*
-        version: link:../core
       '@tiptap/core':
         specifier: ^2.27.2
         version: 2.27.2(@tiptap/pm@2.27.2)
@@ -592,6 +589,9 @@ importers:
       '@tiptap/starter-kit':
         specifier: ^2.27.2
         version: 2.27.2
+      '@use-brian/core':
+        specifier: workspace:*
+        version: link:../core
       prosemirror-model:
         specifier: ^1.25.2
         version: 1.25.9
@@ -654,12 +654,12 @@ importers:
       '@mermaid-js/layout-elk':
         specifier: ^0.2.1
         version: 0.2.1(mermaid@11.15.0)
-      '@sidanclaw/core':
-        specifier: workspace:*
-        version: link:../core
       '@tanstack/react-table':
         specifier: ^8.21
         version: 8.21.3(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      '@use-brian/core':
+        specifier: workspace:*
+        version: link:../core
       mermaid:
         specifier: ^11.4.1
         version: 11.15.0
@@ -11649,7 +11649,7 @@ snapshots:
       eslint: 9.39.4(jiti@2.7.0)
       eslint-import-resolver-node: 0.3.10
       eslint-import-resolver-typescript: 3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-jsx-a11y: 6.10.2(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react: 7.37.5(eslint@9.39.4(jiti@2.7.0))
       eslint-plugin-react-hooks: 7.1.1(eslint@9.39.4(jiti@2.7.0))
@@ -11682,7 +11682,7 @@ snapshots:
       tinyglobby: 0.2.17
       unrs-resolver: 1.12.2
     optionalDependencies:
-      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0))
+      eslint-plugin-import: 2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0))
     transitivePeerDependencies:
       - supports-color
 
@@ -11697,7 +11697,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1)(eslint@9.39.4(jiti@2.7.0)):
+  eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint-import-resolver-typescript@3.10.1(eslint-plugin-import@2.32.0(@typescript-eslint/parser@8.61.1(eslint@9.39.4(jiti@2.7.0))(typescript@5.9.3))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)))(eslint@9.39.4(jiti@2.7.0)):
     dependencies:
       '@rtsao/scc': 1.1.0
       array-includes: 3.1.9
