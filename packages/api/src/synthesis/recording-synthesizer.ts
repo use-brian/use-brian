@@ -26,6 +26,7 @@ import {
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
 } from '@sidanclaw/core'
+import { buildCitationIndex, formatTranscript } from '@sidanclaw/shared'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
 import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import type { RetrievalActor } from '@sidanclaw/core'
@@ -94,22 +95,29 @@ function titleFor(slug: string, name?: string): string {
  *  3 h recording ceiling is ~70k chars, so this only guards pathological input. */
 const MAX_INJECT_CHARS = 500_000
 
-function fmtStamp(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-}
+/**
+ * Hard ceiling on segments held in memory. Only a pathological recording gets
+ * near it (a 3 h meeting is ~2k segments); it exists so an absurd input degrades
+ * to a partial citation index instead of an OOM.
+ */
+const MAX_INDEX_SEGMENTS = 50_000
 
 /**
- * Read the recording's whole transcript as `[H:MM:SS] Speaker: text` lines, for
- * injection into the synthesis prompt. Returns null when there are no segments,
- * a read error, or the text exceeds `MAX_INJECT_CHARS` (caller falls back to the
- * search-tool sweep). Pages the store in blocks so one query never loads a
- * pathological recording whole.
+ * Read the recording's segments once, and serve BOTH consumers from that one
+ * read: the `## FULL TRANSCRIPT` prompt injection, and the citation index the
+ * fill resolves `[H:MM:SS]` against.
+ *
+ * `text` is undefined when the transcript exceeds `MAX_INJECT_CHARS` (the caller
+ * falls back to the search-tool sweep) — but `segments` is still returned, so a
+ * recording too large to inject still gets citations resolved. Pages the store in
+ * blocks so one query never loads a pathological recording whole.
  */
-async function loadRecordingTranscript(recordingId: string, actor: RetrievalActor): Promise<string | undefined> {
+async function loadRecordingTranscript(
+  recordingId: string,
+  actor: RetrievalActor,
+): Promise<{ text?: string; segments: RecordingSegmentHit[] }> {
   const BLOCK = 500
-  const lines: string[] = []
-  let chars = 0
+  const segments: RecordingSegmentHit[] = []
   try {
     for (let from = 0; ; from += BLOCK) {
       const hits: RecordingSegmentHit[] = await readRecordingRange(actor, {
@@ -118,18 +126,20 @@ async function loadRecordingTranscript(recordingId: string, actor: RetrievalActo
         toIndex: from + BLOCK - 1,
       })
       if (hits.length === 0) break
-      for (const h of hits) {
-        const line = `[${fmtStamp(h.start_ms)}] ${h.speaker ?? 'Speaker'}: ${h.segment_text}`
-        chars += line.length + 1
-        if (chars > MAX_INJECT_CHARS) return undefined // too big — fall back to the sweep
-        lines.push(line)
-      }
-      if (hits.length < BLOCK) break
+      segments.push(...hits)
+      if (hits.length < BLOCK || segments.length >= MAX_INDEX_SEGMENTS) break
     }
   } catch {
-    return undefined // read failed — fall back to the sweep
+    return { segments: [] } // read failed — fall back to the sweep, no citations
   }
-  return lines.length > 0 ? lines.join('\n') : undefined
+  if (segments.length === 0) return { segments: [] }
+  // The ONE transcript rendering (`@sidanclaw/shared`) — the same function that
+  // writes the transcript file, so the text the model cites from and the text we
+  // later parse citations out of cannot drift.
+  const text = formatTranscript(
+    segments.map((s) => ({ startMs: s.start_ms, speaker: s.speaker, text: s.segment_text })),
+  )
+  return { ...(text.length <= MAX_INJECT_CHARS ? { text } : {}), segments }
 }
 
 /**
@@ -197,7 +207,26 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
     //     quarter (2026-07-15). Handing it the whole text removes the discretion.
     //     Capped so a pathological >10 h recording can't blow the context; above
     //     the cap we fall back to the tool sweep.
-    const fullText = await loadRecordingTranscript(args.recordingId, actor)
+    const { text: fullText, segments } = await loadRecordingTranscript(args.recordingId, actor)
+
+    // 2c. The citation index: every `[H:MM:SS]` the model writes is resolved
+    //     against the transcript it was shown and persisted as a typed pointer.
+    //     The ceiling is the LAST SEGMENT'S END, not `recordings.duration_ms` —
+    //     the model can only ground a claim in what it read, so a moment past the
+    //     transcript is invented even when the audio runs longer (trailing
+    //     silence, or a truncated transcription).
+    const citationIndex =
+      segments.length > 0
+        ? buildCitationIndex(
+            segments.map((s) => ({
+              segmentIndex: s.segment_index,
+              startMs: s.start_ms,
+              endMs: s.end_ms,
+              speaker: s.speaker,
+            })),
+            Math.max(...segments.map((s) => s.end_ms)),
+          )
+        : undefined
 
     // 3. Doc-write tools, pinned to the brief page at build time (patchPage targets
     //    `anchorPageId`). `renderPage` is excluded — it mints a NEW draft, which
@@ -257,6 +286,7 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
         brainWriteTools,
         savedViewStore: deps.savedViewStore,
         blueprintRecordStore: deps.blueprintRecordStore,
+        ...(citationIndex ? { citationIndex } : {}),
         projectRecordPage: createRecordPageProjector(deps.docPageStore),
         usageStore: deps.usageStore,
         computeCostUsd: deps.computeCostUsd,

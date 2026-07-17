@@ -9,15 +9,18 @@
 
 import { describe, expect, it } from "vitest";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import { MEETING_NOTES_STARTER } from "@sidanclaw/doc-model";
 import {
   blankBlueprintBlocks,
   blueprintSectionCount,
   buildBlueprintPickerItems,
   BUILTIN_BLUEPRINT_SLUGS,
   filterBlueprints,
+  hasNoBlueprints,
   initialRecordingBlueprint,
   isBlueprint,
   recordingBlueprintToSlug,
+  starterInstallInput,
   templateExtractionFromBlocks,
   RECORDING_INGEST_ONLY,
   RECORDING_UNSET,
@@ -184,6 +187,66 @@ describe("[COMP:web/blueprints-library] Blueprint library helpers", () => {
         { kind: "paragraph", id: "p1", text: "just prose" },
       ] as unknown as Block[];
       expect(templateExtractionFromBlocks(blocks)).toBeUndefined();
+    });
+  });
+
+  describe("starter install (offer-on-intent)", () => {
+    it("treats a workspace with only plain skeletons as having no blueprints", () => {
+      // Skeletons cannot be filled — the picker would show nothing but
+      // "ingest only", which is the gap the starter offer exists to close.
+      expect(hasNoBlueprints([tpl({ id: "t1", name: "Skeleton" })])).toBe(true);
+      expect(
+        hasNoBlueprints([tpl({ id: "t2", name: "Real", extraction: SPEC_ONE })]),
+      ).toBe(false);
+      expect(hasNoBlueprints([])).toBe(true);
+    });
+
+    it("builds a create payload that is a BLUEPRINT, not a skeleton", () => {
+      const input = starterInstallInput(MEETING_NOTES_STARTER, {
+        name: "Meeting notes",
+        description: "d",
+      });
+      // extraction != null is the whole difference; a null here would install a
+      // template that never appears in any picker.
+      expect(input.extraction).not.toBeNull();
+      expect(input.extraction?.fields.map((f) => f.key)).toContain("action-items");
+      expect(input.extraction?.capture).toEqual(["task", "contact"]);
+      expect(input.category).toBe("meeting");
+    });
+
+    it("takes the row's name and description from the caller's dictionary", () => {
+      // The stored name is what the team reads in the picker forever, so it must
+      // be in their language — not the catalog's English.
+      const input = starterInstallInput(MEETING_NOTES_STARTER, {
+        name: "會議記錄",
+        description: "描述",
+      });
+      expect(input.name).toBe("會議記錄");
+      expect(input.description).toBe("描述");
+    });
+
+    it("mints fresh block ids on every install", () => {
+      // The catalog's ids are stable constants; installing twice must not
+      // produce two templates whose blocks collide.
+      let n = 0;
+      const gen = () => `fresh-${n++}`;
+      const a = starterInstallInput(MEETING_NOTES_STARTER, { name: "A", description: "" }, gen);
+      const b = starterInstallInput(MEETING_NOTES_STARTER, { name: "B", description: "" }, gen);
+      const idsA = a.blocks.map((x) => x.id);
+      const idsB = b.blocks.map((x) => x.id);
+      expect(idsA.every((id) => id.startsWith("fresh-"))).toBe(true);
+      expect(idsA.some((id) => idsB.includes(id))).toBe(false);
+    });
+
+    it("keeps the derived spec identical regardless of the block ids", () => {
+      // Ids are cosmetic; the CONTRACT must not drift between installs.
+      const a = starterInstallInput(MEETING_NOTES_STARTER, { name: "A", description: "" }, () =>
+        Math.random().toString(),
+      );
+      const b = starterInstallInput(MEETING_NOTES_STARTER, { name: "B", description: "" }, () =>
+        Math.random().toString(),
+      );
+      expect(a.extraction).toEqual(b.extraction);
     });
   });
 });

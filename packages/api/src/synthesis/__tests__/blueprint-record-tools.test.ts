@@ -41,6 +41,8 @@ function record(over: Partial<BlueprintRecord> = {}): BlueprintRecord {
     subject: 'Acme',
     anchorKey: blueprintSubjectAnchorKey('ws-1', 'bp-1', 'Acme'),
     fields: {},
+    // A chat-origin record has no transcript to cite — citations stay empty.
+    fieldCitations: {},
     status: 'incomplete',
     missing: ['summary'],
     sourceKind: 'chat',

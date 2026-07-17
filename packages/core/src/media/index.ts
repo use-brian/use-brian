@@ -7,11 +7,21 @@ export type { MediaAttachment } from './types.js'
 export {
   formatStamp,
   parseStamp,
+  scanStamps,
   formatTranscriptLine,
   formatTranscript,
   STAMP_RE,
   UNKNOWN_SPEAKER,
+  type StampMatch,
   type TranscriptLineSource,
+} from '@sidanclaw/shared'
+// Citations are the same story: the writer resolves them, the browser reads them.
+export {
+  buildCitationIndex,
+  extractCitations,
+  type CitationIndex,
+  type CitationSegment,
+  type FieldCitation,
 } from '@sidanclaw/shared'
 export { transcribeAudio, type TranscribeOptions, type TranscribeResult } from './transcribe.js'
 export { transcribeFirstAudio, type PreflightOptions } from './preflight.js'

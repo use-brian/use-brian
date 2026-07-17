@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   formatStamp,
   parseStamp,
+  scanStamps,
   formatTranscriptLine,
   formatTranscript,
 } from '../transcript-format.js'
@@ -52,6 +53,32 @@ describe('[COMP:media/transcript-format] parseStamp', () => {
 
   it('finds a citation embedded mid-sentence (how the model actually writes)', () => {
     expect(parseStamp('They pushed back on pricing [0:47:21] before the demo.')).toBe(2_841_000)
+  })
+})
+
+describe('[COMP:media/transcript-format] scanStamps', () => {
+  it('reports the offsets a citation occupies, so a link can be placed on it', () => {
+    const text = 'Ship it [0:47:21] now.'
+    expect(scanStamps(text)).toEqual([
+      { index: 8, length: 9, ms: 2_841_000, text: '[0:47:21]' },
+    ])
+    expect(text.slice(8, 8 + 9)).toBe('[0:47:21]')
+  })
+
+  it('skips an impossible stamp — it agrees with parseStamp by construction', () => {
+    expect(scanStamps('[00:85] then [0:00:15]').map((m) => m.ms)).toEqual([15_000])
+  })
+
+  it('does not carry lastIndex between calls', () => {
+    // A module-level /g regex would make the second call start mid-string and
+    // return nothing — results must not depend on call order.
+    const text = 'a [0:00:05] b'
+    expect(scanStamps(text)).toHaveLength(1)
+    expect(scanStamps(text)).toHaveLength(1)
+  })
+
+  it('finds nothing in prose', () => {
+    expect(scanStamps('no stamps here')).toEqual([])
   })
 })
 

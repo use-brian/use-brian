@@ -43,7 +43,12 @@ import {
   type Tool,
   type UsageStore,
 } from '@sidanclaw/core'
-import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
+import { extractCitations, type CitationIndex } from '@sidanclaw/shared'
+import type {
+  BlueprintRecord,
+  BlueprintRecordCitations,
+  BlueprintRecordStore,
+} from '../db/blueprint-records-store.js'
 
 export type SynthesisSourceKind = 'recording' | 'brain' | 'research'
 
@@ -156,6 +161,13 @@ export type SynthesizeDeps = {
   usageStore?: Pick<UsageStore, 'recordUsage'>
   /** Cost-of-the-extra-pass calculator; omit → COGS rows record 0. */
   computeCostUsd?: (model: string, usage: TokenUsage) => number
+  /**
+   * The transcript each `[H:MM:SS]` citation is resolved against, so a field's
+   * cited moments persist as typed pointers beside its text (migration 333).
+   * Absent (a brain / research fill, or a recording with no segments) ⇒ prose
+   * citations only, exactly as before.
+   */
+  citationIndex?: CitationIndex
   /** Loop budget; defaults to the synthesis fallback below. */
   budget?: ResearchDepthConfig
 }
@@ -392,7 +404,14 @@ export async function synthesizeFromSource(
   const written: Map<string, unknown> = new Map()
   const tools = new Map<string, Tool>()
   if (recordPath && spec && recordStore && record) {
-    const writeField = buildWriteFieldTool(spec, record, recordStore, source.userId, written)
+    const writeField = buildWriteFieldTool(
+      spec,
+      record,
+      recordStore,
+      source.userId,
+      written,
+      deps.citationIndex,
+    )
     tools.set(writeField.name, writeField)
   } else if (pageId) {
     for (const [name, t] of deps.buildDocTools(pageId)) tools.set(name, unattended(t))
@@ -510,10 +529,10 @@ export async function synthesizeFromSource(
 
 /**
  * The typed sink of a record-first fill: validate one value against its
- * contract field, flush it onto the record (incremental — a timed-out run
- * keeps everything already written), and tell the model what required keys
- * remain. Keys outside the contract are rejected; the model physically cannot
- * widen the record.
+ * contract field, resolve the moments it cites, flush both onto the record
+ * (incremental — a timed-out run keeps everything already written), and tell
+ * the model what required keys remain. Keys outside the contract are rejected;
+ * the model physically cannot widen the record.
  */
 function buildWriteFieldTool(
   spec: ExtractionSpec,
@@ -521,6 +540,7 @@ function buildWriteFieldTool(
   store: Pick<BlueprintRecordStore, 'mergeFields'>,
   userId: string,
   written: Map<string, unknown>,
+  citationIndex?: CitationIndex,
 ): Tool {
   const keyList = spec.fields
     .map((f) => `"${f.key}" (${f.type}${f.required ? ', required' : ''})`)
@@ -551,11 +571,24 @@ function buildWriteFieldTool(
         return { data: { error: validated.error }, isError: true }
       }
       written.set(field.key, validated.value)
-      await store.mergeFields(userId, record.id, { [field.key]: validated.value })
+      // Resolve the moments this text cites into typed pointers. Keyed even when
+      // empty: re-calling a key OVERWRITES its value, so its citations must be
+      // overwritten too — carrying the previous call's moments onto replacement
+      // text would attribute a claim to a moment that never made it.
+      const citations: BlueprintRecordCitations | undefined = citationIndex
+        ? { [field.key]: extractCitations(String(validated.value), citationIndex) }
+        : undefined
+      await store.mergeFields(userId, record.id, { [field.key]: validated.value }, citations)
       const remainingRequired = spec.fields
         .filter((f) => f.required && !written.has(f.key))
         .map((f) => f.key)
-      return { data: { saved: field.key, remainingRequired } }
+      // The citation count is fed back deliberately: a model that sees "cited: 0"
+      // on a field it believed it had grounded gets the chance to re-ground it,
+      // and an invented moment (dropped by the extractor) shows up as a gap.
+      const cited = citations?.[field.key]?.length
+      return {
+        data: { saved: field.key, remainingRequired, ...(cited === undefined ? {} : { cited }) },
+      }
     },
   })
 }

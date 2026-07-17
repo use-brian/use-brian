@@ -92,6 +92,19 @@ export {
   blocksToExtractionSpec,
 } from '@sidanclaw/core/dist/doc/custom-template-types.js'
 
+// Starter blueprints — the installable catalog, from the same fs-free leaf
+// discipline (it imports only `custom-template-types.js` + the `blocks.js`
+// types). The client needs it because INSTALL is a normal template create: the
+// blocks + derived spec POST to the existing route, minting a row the workspace
+// owns. See structural-synthesis.md -> "Starter blueprints".
+export {
+  type StarterBlueprint,
+  MEETING_NOTES_STARTER,
+  STARTER_BLUEPRINTS,
+  findStarterBlueprint,
+  starterExtractionSpec,
+} from '@sidanclaw/core/dist/doc/starter-blueprints.js'
+
 // Blueprint record helpers — the typed output contract's pure half (field
 // validation, completeness, page projection). Same fs-free leaf discipline.
 export {

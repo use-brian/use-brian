@@ -10,8 +10,11 @@
  */
 
 import { useState, useCallback } from "react";
+import { MEETING_NOTES_STARTER } from "@sidanclaw/doc-model";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { starterInstallInput } from "@/lib/blueprints";
+import { createCustomPageTemplate } from "@/lib/api/views";
 import {
   startRecordingUpload,
   estimateRecording,
@@ -28,8 +31,37 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
   const [message, setMessage] = useState<string>("");
   const [result, setResult] = useState<RecordingQueued | null>(null);
 
+  /**
+   * Offer the meeting starter when the upload carries no blueprint and the
+   * workspace has none to pick — otherwise the recording ingests with no brief
+   * page, so no citations and no player. Returns the new blueprint's id, or
+   * undefined if the user declined (or the install failed, which must not block
+   * a recording the user already paid to process).
+   */
+  const offerStarter = useCallback(async (): Promise<string | undefined> => {
+    const ok = await confirmDialog({
+      title: t.recordings.starterTitle,
+      description: t.recordings.starterBody,
+      confirmLabel: t.recordings.starterAction,
+      cancelLabel: t.recordings.starterSkip,
+    });
+    if (!ok) return undefined;
+    try {
+      const created = await createCustomPageTemplate(
+        workspaceId,
+        starterInstallInput(MEETING_NOTES_STARTER, {
+          name: t.recordings.starterName,
+          description: t.recordings.starterDescription,
+        }),
+      );
+      return created.id;
+    } catch {
+      return undefined; // Non-fatal: fall through to ingest-only.
+    }
+  }, [workspaceId, t]);
+
   const run = useCallback(
-    async (file: File, blueprintSlug?: string) => {
+    async (file: File, blueprintSlug?: string, offerStarterWhenNone = false) => {
       setResult(null);
       setMessage("");
       try {
@@ -54,8 +86,14 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           return;
         }
 
+        // Offered only AFTER the cost is accepted: the starter is about what
+        // shape the output takes, and asking before the user has committed to
+        // processing at all is a question about nothing.
+        const slug =
+          blueprintSlug ?? (offerStarterWhenNone ? await offerStarter() : undefined);
+
         setStatus("processing");
-        const res = await processRecording(recordingId, blueprintSlug);
+        const res = await processRecording(recordingId, slug);
         setResult(res);
         setStatus("done");
         // The 202 means QUEUED — the worker transcribes in the background.
@@ -74,7 +112,7 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         );
       }
     },
-    [workspaceId, assistantId, t],
+    [workspaceId, assistantId, t, offerStarter],
   );
 
   return { run, status, message, result };

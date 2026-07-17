@@ -39,12 +39,9 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import { STAMP_RE, parseStamp } from "@sidanclaw/shared";
+import { scanStamps } from "@sidanclaw/shared";
 
 const timecodeKey = new PluginKey("timecodeCitations");
-
-/** Global twin of the shared single-match regex, for scanning a text node. */
-const SCAN_RE = new RegExp(STAMP_RE.source, "g");
 
 export type TimecodeMatch = { from: number; to: number; ms: number; text: string };
 
@@ -58,15 +55,10 @@ export function findTimecodes(doc: PMNode): TimecodeMatch[] {
   const out: TimecodeMatch[] = [];
   doc.descendants((node, pos) => {
     if (!node.isText || !node.text) return;
-    const text = node.text;
-    SCAN_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = SCAN_RE.exec(text)) !== null) {
-      const ms = parseStamp(m[0]);
-      // null = an impossible stamp the model invented ([00:85]). Leave it as
-      // plain text rather than linking to a moment that never existed.
-      if (ms === null) continue;
-      out.push({ from: pos + m.index, to: pos + m.index + m[0].length, ms, text: m[0] });
+    // `scanStamps` skips an impossible stamp the model invented ([00:85]), so it
+    // stays plain text rather than linking to a moment that never existed.
+    for (const hit of scanStamps(node.text)) {
+      out.push({ from: pos + hit.index, to: pos + hit.index + hit.length, ms: hit.ms, text: hit.text });
     }
   });
   return out;

@@ -4847,6 +4847,13 @@ export const zh: Dictionary = {
     },
   },
   recordings: {
+    starterTitle: "要為這個錄音加上會議記錄嗎?",
+    starterBody:
+      "你還沒有任何藍圖，所以這個錄音只會歸檔到大腦，不會產生書面摘要。會議記錄藍圖會寫出摘要、決定事項與後續任務，並各自連到錄音中對應的時間點。之後可以隨時修改或刪除。",
+    starterAction: "加上會議記錄",
+    starterSkip: "只歸檔到大腦",
+    starterName: "會議記錄",
+    starterDescription: "從錄音整理出摘要、決定事項與後續任務，並各自標註出處的時間點。",
     uploadHint:
       "把通話錄音交給這個助理：它會完整轉錄、把重點歸檔到大腦，若是銷售通話還會擷取聯絡人、公司與後續任務。",
     uploadButton: "上傳錄音",

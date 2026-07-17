@@ -73,9 +73,44 @@ describe('[COMP:api/blueprint-records-store] blueprint records store', () => {
     mockQueryWithRLS.mockResolvedValue({ rows: [{ id: 'r-1' }] } as any)
     const ok = await store.mergeFields('u-1', 'r-1', { summary: 'text' })
     const sql = mockQueryWithRLS.mock.calls[0][1] as string
-    expect(sql).toContain('SET fields = fields || $2::jsonb')
-    expect(mockQueryWithRLS.mock.calls[0][2]).toEqual(['r-1', JSON.stringify({ summary: 'text' })])
+    expect(sql).toContain('fields = fields || $2::jsonb')
+    // No citations passed ⇒ an empty patch, which `||` leaves as a no-op. The
+    // column is NOT NULL, so it must never receive a literal null.
+    expect(mockQueryWithRLS.mock.calls[0][2]).toEqual(['r-1', JSON.stringify({ summary: 'text' }), '{}'])
     expect(ok).toBe(true)
+  })
+
+  it('mergeFields writes citations into the sidecar, not into fields', async () => {
+    // The shape the whole citation design rests on: `fields` stays a pure
+    // key → value map (four readers String() it), and provenance rides beside it
+    // in the same statement so a value and its citations cannot disagree about
+    // which fill wrote them.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockQueryWithRLS.mockResolvedValue({ rows: [{ id: 'r-1' }] } as any)
+    const cites = [{ startMs: 2_841_000, segmentIndex: 38, speaker: 'Priya', confidence: 'parsed' as const }]
+    await store.mergeFields('u-1', 'r-1', { decisions: 'Ship [0:47:21].' }, { decisions: cites })
+    const sql = mockQueryWithRLS.mock.calls[0][1] as string
+    expect(sql).toContain('field_citations = field_citations || $3::jsonb')
+    const params = mockQueryWithRLS.mock.calls[0][2] as string[]
+    expect(JSON.parse(params[1])).toEqual({ decisions: 'Ship [0:47:21].' })
+    expect(JSON.parse(params[2])).toEqual({ decisions: cites })
+  })
+
+  it('ensure resets citations with the values they describe on a fresh fill', async () => {
+    // A re-fill that kept the old citations would attribute new text to the
+    // previous fill's moments.
+    await store.ensure('u-1', {
+      workspaceId: 'ws-1',
+      blueprintId: 'bp-1',
+      specSnapshot: [],
+      subject: 'Acme',
+      anchorKey: 'k',
+      sourceKind: 'recording',
+      sensitivity: 'internal',
+      resetFields: true,
+    })
+    const sql = mockQueryWithRLS.mock.calls[0][1] as string
+    expect(sql).toContain("field_citations = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.field_citations END")
   })
 
   it('finalize stamps status + missing and only overwrites page_id when provided', async () => {

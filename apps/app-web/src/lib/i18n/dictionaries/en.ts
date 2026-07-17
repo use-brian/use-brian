@@ -5099,6 +5099,14 @@ export const en = {
     },
   },
   recordings: {
+    starterTitle: "Add meeting notes to this recording?",
+    starterBody:
+      "You have no blueprint yet, so this recording will be filed to the brain without a written brief. The meeting notes blueprint writes a summary, decisions, and action items, each linked to the moment it came from. You can edit or delete it later.",
+    starterAction: "Add meeting notes",
+    starterSkip: "File to the brain only",
+    starterName: "Meeting notes",
+    starterDescription:
+      "Summary, decisions, and action items from a recording, each citing the moment it came from.",
     uploadHint:
       "Hand this assistant a call recording: it transcribes the whole thing, files the key facts to the brain, and for a sales call pulls out the people, company, and next steps.",
     uploadButton: "Upload recording",

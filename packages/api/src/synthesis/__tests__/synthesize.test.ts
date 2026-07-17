@@ -12,6 +12,7 @@ vi.mock('@sidanclaw/core', async (importOriginal) => {
 })
 
 import { extractionSpecSchema } from '@sidanclaw/core'
+import { buildCitationIndex } from '@sidanclaw/shared'
 import {
   synthesizeFromSource,
   type SynthesisSource,
@@ -274,7 +275,8 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
 
     // Only the VALID write merged; completeness from required coverage.
     expect(rec.mergeFields).toHaveBeenCalledTimes(1)
-    expect(rec.mergeFields).toHaveBeenCalledWith('u-1', 'rec-row-1', { summary: 'All good.' })
+    // No citation index wired ⇒ no citations argument; the value merge is unchanged.
+    expect(rec.mergeFields).toHaveBeenCalledWith('u-1', 'rec-row-1', { summary: 'All good.' }, undefined)
     expect(rec.finalize).toHaveBeenCalledWith('u-1', 'rec-row-1', {
       status: 'complete',
       missing: [],
@@ -315,6 +317,121 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
       missing: [],
       pageId: 'page-new',
     })
+  })
+
+  // ── Typed citations (migration 333) ───────────────────────────────────
+  //
+  // The model cites `[H:MM:SS]` in the field's prose; the write path resolves
+  // each moment against the transcript and persists it as a typed pointer
+  // BESIDE the value — never inside it.
+
+  const CITE_INDEX = buildCitationIndex(
+    [
+      { segmentIndex: 0, startMs: 0, endMs: 30_000, speaker: 'Ken' },
+      { segmentIndex: 38, startMs: 2_800_000, endMs: 2_900_000, speaker: 'Priya' },
+    ],
+    2_900_000,
+  )
+
+  it('citations: resolves the moments a field cites and merges them beside the value', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+      citationIndex: CITE_INDEX,
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        const res = await opts.tools.get('writeField')!.execute(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          { key: 'summary', value: 'Ship Cantonese in Q3 [0:47:21].' } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          {} as any,
+        )
+        // The count is fed back so a model can notice an ungrounded field.
+        expect((res.data as { cited: number }).cited).toBe(1)
+        yield* gen(HAPPY)
+      })(),
+    )
+    await synthesizeFromSource(SOURCE, DOC_BLUEPRINT, { anchorKey: 'k', renderPage: false }, deps)
+
+    const [, , patch, citations] = rec.mergeFields.mock.calls[0]
+    // The VALUE is untouched prose — every downstream reader (page projection,
+    // getBlueprintRecord, send_page's recordField, {{lastRun.output.*}}) does
+    // String() on it, so a nested { value, citations } would ship
+    // "[object Object]" to all four.
+    expect(patch).toEqual({ summary: 'Ship Cantonese in Q3 [0:47:21].' })
+    expect(citations).toEqual({
+      summary: [{ startMs: 2_841_000, segmentIndex: 38, speaker: 'Priya', confidence: 'parsed' }],
+    })
+  })
+
+  it('citations: drops a moment past the end of the transcript', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+      citationIndex: CITE_INDEX,
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        // The transcript ends at 2,900,000ms — [2:00:00] never happened.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await opts.tools.get('writeField')!.execute({ key: 'summary', value: 'We agreed [2:00:00].' } as any, {} as any)
+        yield* gen(HAPPY)
+      })(),
+    )
+    await synthesizeFromSource(SOURCE, DOC_BLUEPRINT, { anchorKey: 'k', renderPage: false }, deps)
+
+    const [, , patch, citations] = rec.mergeFields.mock.calls[0]
+    // The prose is kept as the model wrote it; only the POINTER is refused.
+    expect(patch).toEqual({ summary: 'We agreed [2:00:00].' })
+    expect(citations).toEqual({ summary: [] })
+  })
+
+  it('citations: re-writing a key replaces its citations rather than accumulating them', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+      citationIndex: CITE_INDEX,
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        const wf = opts.tools.get('writeField')!
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await wf.execute({ key: 'summary', value: 'First draft [0:47:21].' } as any, {} as any)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await wf.execute({ key: 'summary', value: 'Rewritten, no citation.' } as any, {} as any)
+        yield* gen(HAPPY)
+      })(),
+    )
+    await synthesizeFromSource(SOURCE, DOC_BLUEPRINT, { anchorKey: 'k', renderPage: false }, deps)
+
+    // The key is present-but-empty, not absent: `field_citations || {...}` only
+    // overwrites keys it carries, so an omitted key would strand the first
+    // draft's moment on replacement text that no longer cites it.
+    const [, , , citations] = rec.mergeFields.mock.calls[1]
+    expect(citations).toEqual({ summary: [] })
+  })
+
+  it('citations: a non-recording fill writes values with no citations argument', async () => {
+    const rec = recordDeps()
+    const { deps } = build({
+      blueprintRecordStore: { ensure: rec.ensure, mergeFields: rec.mergeFields, finalize: rec.finalize },
+    })
+    queryLoopMock.mockImplementation((opts: { tools: Map<string, Tool> }) =>
+      (async function* () {
+        const res = await opts.tools.get('writeField')!.execute(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          { key: 'summary', value: 'A brain draft [0:47:21].' } as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          {} as any,
+        )
+        // No transcript to validate against ⇒ no claim about coverage at all.
+        expect(res.data).not.toHaveProperty('cited')
+        yield* gen(HAPPY)
+      })(),
+    )
+    await synthesizeFromSource(SOURCE, DOC_BLUEPRINT, { anchorKey: 'k', renderPage: false }, deps)
+    expect(rec.mergeFields.mock.calls[0][3]).toBeUndefined()
   })
 
   it('record path: a fill missing required fields finalizes incomplete with the missing keys', async () => {

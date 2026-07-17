@@ -55,6 +55,10 @@ export * from './custom-template-types.js'
 // record. See structural-synthesis.md -> "The record".
 export * from './blueprint-record.js'
 
+// Starter blueprints — the installable catalog. Blocks, not rows: installing
+// mints a real workspace-owned template through the normal create path.
+export * from './starter-blueprints.js'
+
 // Phase 1 chat tools
 export * from './tools.js'
 

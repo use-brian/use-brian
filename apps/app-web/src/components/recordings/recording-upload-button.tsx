@@ -25,6 +25,7 @@ import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
 import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
 import {
   buildBlueprintPickerItems,
+  hasNoBlueprints,
   initialRecordingBlueprint,
   recordingBlueprintToSlug,
   RECORDING_INGEST_ONLY,
@@ -106,7 +107,13 @@ export function RecordingUploadButton({
         onChange={(e) => {
           const f = e.target.files?.[0];
           if (f) {
-            void run(f, recordingBlueprintToSlug(blueprint));
+            // Offer the starter only when the picker had nothing to offer:
+            // an explicit "ingest only" pick is a real choice, not a gap.
+            void run(
+              f,
+              recordingBlueprintToSlug(blueprint),
+              blueprint === RECORDING_UNSET && hasNoBlueprints(workspaceBlueprints),
+            );
           }
           e.target.value = "";
         }}

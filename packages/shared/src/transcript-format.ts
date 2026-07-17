@@ -63,6 +63,39 @@ export function parseStamp(text: string): number | null {
   return ((h * 60 + min) * 60 + sec) * 1000
 }
 
+/** A citation found inside a longer text, with the offsets it occupies. */
+export type StampMatch = {
+  /** Character offset of the `[` within the scanned text. */
+  index: number
+  /** Length of the matched citation, including brackets. */
+  length: number
+  ms: number
+  text: string
+}
+
+/**
+ * Find every well-formed citation in a text, in order.
+ *
+ * The one scanner: the render-time decoration (which needs offsets to place a
+ * link) and the write-time citation extractor (which needs only the moment) both
+ * come through here, so a stamp either IS a citation for both of them or for
+ * neither. Impossible stamps are skipped, not returned — `parseStamp` owns that
+ * judgement, and this must not develop a second opinion about it.
+ */
+export function scanStamps(text: string): StampMatch[] {
+  // A fresh global twin per call: a module-level /g regex carries `lastIndex`
+  // between calls, which makes results depend on call order.
+  const re = new RegExp(STAMP_RE.source, 'g')
+  const out: StampMatch[] = []
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    const ms = parseStamp(m[0])
+    if (ms === null) continue
+    out.push({ index: m.index, length: m[0].length, ms, text: m[0] })
+  }
+  return out
+}
+
 /** One transcript line: `[H:MM:SS] Speaker: text`. */
 export function formatTranscriptLine(line: TranscriptLineSource): string {
   return `[${formatStamp(line.startMs)}] ${line.speaker || UNKNOWN_SPEAKER}: ${line.text}`

@@ -21,11 +21,24 @@
  * [COMP:api/blueprint-records-store]
  */
 
-import type { BlueprintRecordFields, BlueprintRecordStatus, ExtractionField } from '@sidanclaw/core'
+import type {
+  BlueprintRecordFields,
+  BlueprintRecordStatus,
+  ExtractionField,
+  FieldCitation,
+} from '@sidanclaw/core'
 
 import { queryWithRLS } from './client.js'
 
 export type BlueprintRecordSourceKind = 'recording' | 'brain' | 'research' | 'chat' | 'workflow'
+
+/**
+ * Citations per field key (migration 333) — a SIDECAR to `fields`, never nested
+ * inside it: `fields` is a pure key → value map and its readers (the page
+ * projection, `getBlueprintRecord`, `send_page`'s recordField, `{{lastRun.*}}`)
+ * all stringify whatever they find there.
+ */
+export type BlueprintRecordCitations = Record<string, FieldCitation[]>
 
 export type BlueprintRecord = {
   id: string
@@ -36,6 +49,8 @@ export type BlueprintRecord = {
   subject: string
   anchorKey: string
   fields: BlueprintRecordFields
+  /** Per-field citations (migration 333). `{}` for fills with no cited source. */
+  fieldCitations: BlueprintRecordCitations
   status: BlueprintRecordStatus
   missing: string[]
   sourceKind: BlueprintRecordSourceKind
@@ -67,8 +82,18 @@ export type EnsureBlueprintRecordInput = {
 export type BlueprintRecordStore = {
   /** Find-or-create by (workspace, anchor) — the artifact exists before any loop runs. */
   ensure(userId: string, input: EnsureBlueprintRecordInput): Promise<BlueprintRecord>
-  /** Shallow-merge validated values into `fields` (jsonb `||`). */
-  mergeFields(userId: string, id: string, patch: BlueprintRecordFields): Promise<boolean>
+  /**
+   * Shallow-merge validated values into `fields` (jsonb `||`), and their
+   * citations into the `field_citations` sidecar under the same keys. Both
+   * merge in ONE statement so a field's value and its provenance can never
+   * disagree about which fill wrote them.
+   */
+  mergeFields(
+    userId: string,
+    id: string,
+    patch: BlueprintRecordFields,
+    citations?: BlueprintRecordCitations,
+  ): Promise<boolean>
   /** Stamp completeness (+ the page projection when one was rendered). */
   finalize(
     userId: string,
@@ -114,6 +139,7 @@ type Row = {
   subject: string
   anchor_key: string
   fields: BlueprintRecordFields
+  field_citations: BlueprintRecordCitations | null
   status: string
   missing: string[]
   source_kind: string
@@ -126,7 +152,7 @@ type Row = {
 }
 
 const SELECT =
-  'id, workspace_id, blueprint_id, spec_snapshot, subject, anchor_key, fields, status, missing, source_kind, source_id, sensitivity, page_id, created_by, created_at, updated_at'
+  'id, workspace_id, blueprint_id, spec_snapshot, subject, anchor_key, fields, field_citations, status, missing, source_kind, source_id, sensitivity, page_id, created_by, created_at, updated_at'
 
 function rowToRecord(row: Row): BlueprintRecord {
   return {
@@ -137,6 +163,7 @@ function rowToRecord(row: Row): BlueprintRecord {
     subject: row.subject,
     anchorKey: row.anchor_key,
     fields: row.fields ?? {},
+    fieldCitations: row.field_citations ?? {},
     status: row.status === 'complete' ? 'complete' : 'incomplete',
     missing: Array.isArray(row.missing) ? row.missing : [],
     sourceKind: row.source_kind as BlueprintRecordSourceKind,
@@ -166,6 +193,9 @@ export function createDbBlueprintRecordStore(): BlueprintRecordStore {
            source_id = EXCLUDED.source_id,
            sensitivity = EXCLUDED.sensitivity,
            fields = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.fields END,
+           -- Citations reset with the values they describe: a fresh fill that
+           -- kept them would attribute new text to the old fill's moments.
+           field_citations = CASE WHEN $10 THEN '{}'::jsonb ELSE blueprint_records.field_citations END,
            status = 'incomplete',
            missing = '[]'::jsonb
          RETURNING ${SELECT}`,
@@ -185,11 +215,15 @@ export function createDbBlueprintRecordStore(): BlueprintRecordStore {
       return rowToRecord(result.rows[0])
     },
 
-    async mergeFields(userId, id, patch) {
+    async mergeFields(userId, id, patch, citations) {
       const result = await queryWithRLS<{ id: string }>(
         userId,
-        `UPDATE blueprint_records SET fields = fields || $2::jsonb WHERE id = $1 RETURNING id`,
-        [id, JSON.stringify(patch)],
+        `UPDATE blueprint_records
+         SET fields = fields || $2::jsonb,
+             field_citations = field_citations || $3::jsonb
+         WHERE id = $1
+         RETURNING id`,
+        [id, JSON.stringify(patch), JSON.stringify(citations ?? {})],
       )
       return result.rows.length > 0
     },
