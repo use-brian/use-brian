@@ -16,6 +16,8 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -75,6 +77,11 @@ import {
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl } from "./quick-capture.js";
 import { buildAppMenu } from "./menu.js";
+import {
+  buildUninstallScript,
+  collectUninstallPaths,
+  resolveBundlePath,
+} from "./uninstall.js";
 import {
   generatePkcePair,
   buildDesktopAuthStartUrl,
@@ -1242,6 +1249,43 @@ function appUrlFromArgv(argv: readonly string[]): string | null {
 // ── Menus + tray ───────────────────────────────────────────────
 
 /**
+ * One-click uninstall (menu → here). Confirm, then hand teardown to a detached
+ * script (uninstall.ts builds it) and quit: the script waits for this process
+ * to exit before removing the local traces and trashing the bundle, because a
+ * running app can't delete itself cleanly. Data traces cover both brand
+ * generations; account/workspace data is server-side and untouched.
+ */
+async function confirmAndUninstall(): Promise<void> {
+  const bundlePath = resolveBundlePath(app.getPath("exe"));
+  const { response } = await dialog.showMessageBox({
+    type: "warning",
+    message: `Uninstall ${app.name}?`,
+    detail:
+      "This removes the app and its local data from this Mac. " +
+      "Your account and workspace are stored in the cloud and are not affected. " +
+      "You can keep using Use Brian in the browser, or reinstall any time.",
+    buttons: ["Uninstall", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return;
+
+  // Best-effort: stop launching at login before the app disappears.
+  try {
+    app.setLoginItemSettings({ openAtLogin: false });
+  } catch {
+    /* not fatal — the login item dies with the bundle anyway */
+  }
+  const script = buildUninstallScript({
+    pid: process.pid,
+    paths: collectUninstallPaths(homedir()),
+    bundlePath,
+  });
+  spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }).unref();
+  app.quit();
+}
+
+/**
  * (Re)build + install the application menu. Called at startup and again on
  * every update-state change, so the update item's label tracks the state
  * (Electron menus are immutable once built — rebuild is the supported path).
@@ -1254,9 +1298,13 @@ function refreshAppMenu(): void {
       onSignOut: () => void signOut(),
       onUpdate: handleUpdateMenuClick,
       onSwitchTarget: () => void switchTargetFromMenu(),
+      onUninstall: () => void confirmAndUninstall(),
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
+      // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
+      // no bundle (and its exe lives in node_modules/electron).
+      uninstall: process.platform === "darwin" && app.isPackaged,
     }),
   );
 }

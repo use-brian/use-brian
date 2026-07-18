@@ -41,6 +41,12 @@ export interface MenuTemplateOptions {
    * Omit/null to keep the pre-dual-target menu.
    */
   readonly target?: { readonly kind: "cloud" | "local"; readonly label: string } | null;
+  /**
+   * Show "Uninstall <appName>…" in the macOS app menu. Packaged macOS builds
+   * only: Windows has the NSIS uninstaller, dev runs have no bundle to remove.
+   * Ignored off-mac. See `uninstall.ts`.
+   */
+  readonly uninstall?: boolean;
 }
 
 export interface MenuTemplateHandlers {
@@ -54,6 +60,8 @@ export interface MenuTemplateHandlers {
   onUpdate: () => void;
   /** Switch the shell's target (cloud ↔ local brain); persists + relaunches. */
   onSwitchTarget: () => void;
+  /** Confirm, tear down local traces, trash the bundle, quit (uninstall.ts). */
+  onUninstall: () => void;
 }
 
 /** Build the platform-appropriate menu template (pure). */
@@ -120,6 +128,14 @@ export function buildMenuTemplate(
     ? [{ label: opts.update.label, enabled: opts.update.enabled, click: () => handlers.onUpdate() }]
     : [];
 
+  // One-click uninstall — macOS app menu only (see MenuTemplateOptions.uninstall).
+  const uninstallItems: MenuItemConstructorOptions[] = opts.uninstall
+    ? [
+        { type: "separator" },
+        { label: `Uninstall ${appName}…`, click: () => handlers.onUninstall() },
+      ]
+    : [];
+
   const fileSubmenu: MenuItemConstructorOptions[] = [...appActions];
   if (updateItems.length > 0) fileSubmenu.push({ type: "separator" }, ...updateItems);
   fileSubmenu.push({ type: "separator" }, { role: "quit" });
@@ -132,6 +148,7 @@ export function buildMenuTemplate(
           ...updateItems,
           { type: "separator" },
           ...appActions,
+          ...uninstallItems,
           { type: "separator" },
           { role: "hide" },
           { role: "hideOthers" },

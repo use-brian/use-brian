@@ -26,8 +26,12 @@ export interface MenuHandlers {
   onUpdate: () => void;
   /** Switch the shell's target (cloud ↔ local brain); persists + relaunches. */
   onSwitchTarget: () => void;
+  /** Confirm, tear down local traces, trash the bundle, quit (uninstall.ts). */
+  onUninstall: () => void;
   /** Whether DevTools / reload affordances should be shown (dev only). */
   isDev: boolean;
+  /** Show "Uninstall …" in the macOS app menu (packaged macOS builds only). */
+  uninstall: boolean;
   /** The auto-update item state, or null to omit it (auto-update disabled). */
   update: { readonly label: string; readonly enabled: boolean } | null;
   /** The active target for the indicator + switch items (see menu-template.ts). */
@@ -42,6 +46,7 @@ export function buildAppMenu(handlers: MenuHandlers): Menu {
       appName: app.name,
       update: handlers.update,
       target: handlers.target,
+      uninstall: handlers.uninstall,
     },
     handlers,
   );

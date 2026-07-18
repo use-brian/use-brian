@@ -12,6 +12,7 @@ const handlers: MenuTemplateHandlers = {
   onSignOut: () => {},
   onUpdate: () => {},
   onSwitchTarget: () => {},
+  onUninstall: () => {},
 };
 
 /** Default options; spread + override per test. */
@@ -176,5 +177,26 @@ describe("[COMP:app-desktop/menu-template] target indicator + switch (§2.1/§2.
     const item = items.find((i) => i.label === "Switch to Local Brain…");
     (item?.click as () => void)();
     expect(onSwitchTarget).toHaveBeenCalledTimes(1);
+  });
+
+  it("uninstall item renders in the macOS app menu only when enabled, and clicks through", () => {
+    // Absent by default (dev runs, and when the flag is omitted entirely).
+    expect(
+      allItems(buildMenuTemplate(opts(), handlers)).find((i) => i.label?.startsWith("Uninstall")),
+    ).toBeUndefined();
+
+    const onUninstall = vi.fn();
+    const items = allItems(
+      buildMenuTemplate(opts({ uninstall: true }), { ...handlers, onUninstall }),
+    );
+    const item = items.find((i) => i.label === "Uninstall Use Brian…");
+    expect(item).toBeDefined();
+    (item?.click as () => void)();
+    expect(onUninstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("uninstall item never renders off-mac even when the flag is set", () => {
+    const items = allItems(buildMenuTemplate(opts({ isMac: false, uninstall: true }), handlers));
+    expect(items.find((i) => i.label?.startsWith("Uninstall"))).toBeUndefined();
   });
 });
