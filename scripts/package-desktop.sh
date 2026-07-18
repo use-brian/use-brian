@@ -92,9 +92,10 @@ if [[ -n "$SET_VERSION" && ! "$SET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 # Validate the required secrets are present (names only, never values).
+# GH_TOKEN is deliberately NOT required: the publish step probes push access and
+# falls back to the gh keyring login when the token is absent or under-scoped.
 required=(CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID)
 if [[ "$PUBLISH" == "1" ]]; then
-  required+=(GH_TOKEN)
   command -v gh >/dev/null 2>&1 || {
     echo "error: 'gh' (GitHub CLI) is required for --publish. Install: brew install gh" >&2
     exit 1
@@ -193,6 +194,22 @@ if [[ "$PUBLISH" == "1" ]]; then
   # The desktop source is open (apps/app-desktop in the public open-core repo),
   # so releases + the auto-update feed live on that same public repo.
   RELEASES_REPO="use-brian/use-brian"
+  # gh prefers $GH_TOKEN (sourced from .env.desktop) over its keyring login, and
+  # an under-scoped PAT 403s the upload only AFTER the expensive build (recurred
+  # on v0.0.4 and v0.0.6; a fine-grained PAT can even pass a permissions probe
+  # yet fail release writes). Prefer the keyring login when it can push; use
+  # $GH_TOKEN only as the fallback (e.g. headless CI with no keyring).
+  can_push() { "$@" api "repos/$RELEASES_REPO" --jq '.permissions.push' 2>/dev/null; }
+  if [[ "$(can_push env -u GH_TOKEN gh)" == "true" ]]; then
+    GH=(env -u GH_TOKEN gh)
+    echo "==> Publishing with the gh keyring login (ignoring GH_TOKEN if set)"
+  elif [[ -n "${GH_TOKEN:-}" && "$(can_push gh)" == "true" ]]; then
+    GH=(gh)
+    echo "==> Publishing with GH_TOKEN (no usable gh keyring login)"
+  else
+    echo "error: no GitHub auth with push access to $RELEASES_REPO (tried the gh keyring login, then GH_TOKEN)." >&2
+    exit 1
+  fi
   VERSION="$(node -p "require('$REPO_ROOT/apps/app-desktop/package.json').version")"
   TAG="v$VERSION"
   # A release without latest-mac.yml is INVISIBLE to auto-update on existing
@@ -212,11 +229,11 @@ if [[ "$PUBLISH" == "1" ]]; then
     echo "warn: $ZIP_BLOCKMAP not found - publishing without differential-download support."
   fi
   echo "==> Publishing $TAG to $RELEASES_REPO (uploading + marking latest)"
-  if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
-    gh release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
-    gh release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --prerelease=false --latest
+  if "${GH[@]}" release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+    "${GH[@]}" release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
+    "${GH[@]}" release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --prerelease=false --latest
   else
-    gh release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
+    "${GH[@]}" release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
       --title "$TAG" --notes "Use Brian desktop $TAG" --latest
   fi
   echo "==> Published: https://github.com/$RELEASES_REPO/releases/tag/$TAG"
