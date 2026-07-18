@@ -9,7 +9,7 @@
 **You make the calls. It does the rest.**
 
 [![CI](https://github.com/use-brian/use-brian/actions/workflows/ci.yml/badge.svg)](https://github.com/use-brian/use-brian/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/use-brian/sidanclaw)](https://github.com/use-brian/use-brian/stargazers)
+[![GitHub stars](https://img.shields.io/github/stars/use-brian/use-brian)](https://github.com/use-brian/use-brian/stargazers)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](./LICENSE)
 
 </div>

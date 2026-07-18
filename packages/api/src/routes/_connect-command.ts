@@ -94,7 +94,7 @@ function renderByoNotOwner(): OutgoingMessage {
     text:
       "Only this bot's owner can manage its connectors. " +
       'Connectors on BYO bots are account-wide for the owner — your own grants would have no effect here. ' +
-      "If you'd like your own assistant with your own connectors, chat with Use Brian directly (@sidanclaw_bot).",
+      "If you'd like your own assistant with your own connectors, chat with Use Brian directly (@use_brian_bot).",
   }
 }
 

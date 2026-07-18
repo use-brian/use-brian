@@ -8,8 +8,8 @@ import {
 describe("[COMP:app-web/telegram-link] Telegram link helpers", () => {
   describe("buildTelegramDeepLink", () => {
     it("builds the t.me start deep link", () => {
-      expect(buildTelegramDeepLink("sidanclaw_bot", "ABC123")).toBe(
-        "https://t.me/sidanclaw_bot?start=ABC123",
+      expect(buildTelegramDeepLink("use_brian_bot", "ABC123")).toBe(
+        "https://t.me/use_brian_bot?start=ABC123",
       );
     });
 

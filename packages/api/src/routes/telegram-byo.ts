@@ -757,7 +757,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //    BYO bots are per-assistant, so unlinked strangers in a private DM
       //    used to silently fall back to the owner's identity and pollute the
       //    owner's memory. We now redirect them to the official shared bot
-      //    (@sidanclaw_bot) instead. The owner onboards by linking via a
+      //    (@use_brian_bot) instead. The owner onboards by linking via a
       //    6-char code from the web UI.
       let channelUserId = ownerId
       let isIdentified = true
@@ -766,7 +766,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // from `channelUserId === ownerId` because an owner who linked their
       // own Telegram would have found.id === ownerId, which would otherwise
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
-      // the owner to the shared @sidanclaw_bot.
+      // the owner to the shared @use_brian_bot.
       let foundLinked = false
       const telegramUserId = incoming.userId
 
@@ -817,7 +817,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               // Tier 2 in private chat: redirect to the official shared bot.
               // Telegram never exposes email, so unlinked private-chat users
               // cannot be identified. Rather than silently impersonate the
-              // owner, we tell them to use @sidanclaw_bot (which has its own
+              // owner, we tell them to use @use_brian_bot (which has its own
               // Mini App sign-in onramp) or link via code from the web UI.
               privateChatRedirect = true
             }
@@ -832,7 +832,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 
       if (privateChatRedirect) {
         await adapter.sendMessage(incoming.channelId, {
-          text: "This is a private bot. To try Use Brian, DM @sidanclaw_bot to sign in and link your account.",
+          text: "This is a private bot. To try Use Brian, DM @use_brian_bot to sign in and link your account.",
         }).catch((err) => {
           console.error('[telegram-byo] redirect message send failed:', err)
         })
