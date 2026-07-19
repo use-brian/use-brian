@@ -251,40 +251,67 @@ const NGRAM_SIZE = 4
 const NGRAM_REPEAT_THRESHOLD = 3
 const WINDOW_SIZE = 100 // words
 
-function detectNgramRepetition(text: string): { looping: boolean; cleanEnd: number } {
-  const words = text.split(/\s+/).filter(Boolean)
-  if (words.length < WINDOW_SIZE) {
-    // Check full text if shorter than window
-    return checkNgrams(words, text)
-  }
+/**
+ * Markdown table scaffolding — cell separators (`|`) and delimiter cells
+ * (`---`, `:---`, `:---:`). Excluded from the token stream because they are
+ * layout, not content, and they repeat by construction.
+ *
+ * A 4-column delimiter row — `| :--- | :--- | :--- | :--- |` — tokenizes to
+ * `| :--- | :---` three times over, hitting NGRAM_REPEAT_THRESHOLD on its own.
+ * Every table with 4+ columns therefore read as a loop and was truncated at
+ * the delimiter row. Prod 2026-07-19 (session `b8e567d6`): a Telegram answer
+ * comparing three card tiers died at `| :---` on every attempt.
+ *
+ * Dropping the separators also lets each row's distinct label break up runs of
+ * repeated cell values (`| A | Yes | Yes |` / `| B | Yes | Yes |`), so ordinary
+ * tables stop reading as loops — while a genuinely identical row repeated 3×
+ * still trips, because its content tokens still align.
+ */
+const TABLE_SCAFFOLD_TOKEN = /^[|:-]+$/
 
-  // Use sliding window of last WINDOW_SIZE words
-  const windowWords = words.slice(-WINDOW_SIZE)
-  const result = checkNgrams(windowWords, text)
-  return result
+type Token = { text: string; end: number }
+
+/**
+ * Splits into content tokens, carrying each token's exact end offset in the
+ * source text. The offsets make `cleanEnd` exact; the previous implementation
+ * recovered it with `fullText.indexOf(word)`, which could resolve to an
+ * earlier identical word and trim to the wrong place.
+ */
+function tokenize(text: string): Token[] {
+  const tokens: Token[] = []
+  const re = /\S+/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    if (TABLE_SCAFFOLD_TOKEN.test(m[0])) continue
+    tokens.push({ text: m[0], end: m.index + m[0].length })
+  }
+  return tokens
 }
 
-function checkNgrams(words: string[], fullText: string): { looping: boolean; cleanEnd: number } {
-  if (words.length < NGRAM_SIZE) return { looping: false, cleanEnd: fullText.length }
+function detectNgramRepetition(text: string): { looping: boolean; cleanEnd: number } {
+  const tokens = tokenize(text)
+  // Sliding window of the last WINDOW_SIZE tokens (or all of them if shorter).
+  const window = tokens.length < WINDOW_SIZE ? tokens : tokens.slice(-WINDOW_SIZE)
+  return checkNgrams(window, text)
+}
+
+function checkNgrams(tokens: Token[], fullText: string): { looping: boolean; cleanEnd: number } {
+  if (tokens.length < NGRAM_SIZE) return { looping: false, cleanEnd: fullText.length }
 
   const counts = new Map<string, { count: number; firstEnd: number }>()
 
-  for (let i = 0; i <= words.length - NGRAM_SIZE; i++) {
-    const ngram = words.slice(i, i + NGRAM_SIZE).join(' ')
+  for (let i = 0; i <= tokens.length - NGRAM_SIZE; i++) {
+    let ngram = tokens[i].text
+    for (let j = 1; j < NGRAM_SIZE; j++) ngram += ' ' + tokens[i + j].text
     const entry = counts.get(ngram)
     if (entry) {
       entry.count++
       if (entry.count >= NGRAM_REPEAT_THRESHOLD) {
-        // Find where in the full text this ngram first ended — trim to there
+        // Trim to where this ngram first ended in the full text.
         return { looping: true, cleanEnd: entry.firstEnd }
       }
     } else {
-      // Approximate position of this ngram's end in the full text
-      const approxPos = fullText.indexOf(words[i + NGRAM_SIZE - 1], i > 0 ? fullText.indexOf(words[i]) : 0)
-      counts.set(ngram, {
-        count: 1,
-        firstEnd: approxPos !== -1 ? approxPos + words[i + NGRAM_SIZE - 1].length : fullText.length,
-      })
+      counts.set(ngram, { count: 1, firstEnd: tokens[i + NGRAM_SIZE - 1].end })
     }
   }
 
@@ -334,16 +361,46 @@ export function detectBlockRestart(buffer: string): { looping: boolean; cleanEnd
 type RepetitionDetected = {
   type: 'degenerate' | 'ngram' | 'restart'
   cleanText: string
+  /**
+   * Whether this attempt already yielded a `text_delta` downstream. Once it
+   * has, the attempt's text is unretractable — see `wrapTextLoopPrevention`.
+   */
+  emittedText: boolean
   /** Last usage seen before the stream was aborted. */
   lastUsage?: TokenUsage
+}
+
+/** Sums the token usage of two aborted attempts — both burned real tokens. */
+function combineUsage(a?: TokenUsage, b?: TokenUsage): TokenUsage {
+  if (!a || !b) return a ?? b ?? { inputTokens: 0, outputTokens: 0 }
+  const cacheRead = (a.cacheReadTokens ?? 0) + (b.cacheReadTokens ?? 0)
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+  }
 }
 
 /**
  * Detects text repetition loops in the LLM stream.
  *
- * On detection: aborts stream, retries once with temperature +0.2 and
- * anti-repetition instruction. If second attempt also loops, returns
- * truncated clean output.
+ * On detection the stream is aborted. What happens next depends on whether any
+ * text already reached the consumer:
+ *
+ * - **Nothing emitted yet** — retry once with temperature +0.2 and an
+ *   anti-repetition instruction. Safe, because there is no prefix to collide
+ *   with. This is the common shape for degenerate loops, which usually start
+ *   at the first chunk.
+ * - **Text already emitted** — stop and close the message. The consumer keeps
+ *   the clean prefix it received.
+ *
+ * The asymmetry is forced by the protocol: `StreamChunk` has no retraction, so
+ * every consumer concatenates `text_delta` (`accumulator.ts`, the chat SSE
+ * bridge, `channel-pipeline.ts`). A retry after emission does not *replace* the
+ * aborted prefix, it appends to it. Prod 2026-07-19 (session `b8e567d6`)
+ * delivered attempt-1 prefix + attempt-2 prefix + the clean text concatenated
+ * into one message — three interleaved drafts, the retry's raised temperature
+ * making its copy visibly diverge from the first.
  */
 export function wrapTextLoopPrevention(): StreamWrapper {
   return (inner) => async function* (request) {
@@ -351,7 +408,18 @@ export function wrapTextLoopPrevention(): StreamWrapper {
 
     if (!result) return // stream completed normally
 
-    // First detection — retry with higher temperature + anti-repetition instruction
+    // Already downstream — truncate rather than duplicate. Close the message
+    // ourselves: `drainForUsage` consumed the inner stream's `message_end`.
+    if (result.emittedText) {
+      yield {
+        type: 'message_end' as const,
+        stopReason: 'end_turn' as const,
+        usage: result.lastUsage ?? { inputTokens: 0, outputTokens: 0 },
+      }
+      return
+    }
+
+    // Nothing emitted — retry with higher temperature + anti-repetition instruction
     const retryRequest = {
       ...request,
       temperature: (request.temperature ?? 0.7) + 0.2,
@@ -364,30 +432,20 @@ export function wrapTextLoopPrevention(): StreamWrapper {
 
     if (!retryResult) return // retry succeeded
 
-    // Second detection — yield the clean portion from whichever attempt had more clean text
-    const useRetry = retryResult.cleanText.length >= result.cleanText.length
-    const cleanText = useRetry ? retryResult.cleanText : result.cleanText
-
-    if (cleanText.length > 0) {
-      yield { type: 'text_delta' as const, text: cleanText }
+    // Both attempts looped. The retry's text is downstream only if it emitted;
+    // otherwise nothing has been delivered and we emit the better clean prefix.
+    if (!retryResult.emittedText) {
+      const useRetry = retryResult.cleanText.length >= result.cleanText.length
+      const cleanText = useRetry ? retryResult.cleanText : result.cleanText
+      if (cleanText.length > 0) {
+        yield { type: 'text_delta' as const, text: cleanText }
+      }
     }
-    // Synthesize a message_end with combined usage from both attempts.
-    // Both consumed real tokens even though only one attempt's text is emitted.
-    const u1 = result.lastUsage
-    const u2 = retryResult.lastUsage
-    const bestUsage: TokenUsage = u1 && u2
-      ? {
-          inputTokens: u1.inputTokens + u2.inputTokens,
-          outputTokens: u1.outputTokens + u2.outputTokens,
-          ...((u1.cacheReadTokens ?? 0) + (u2.cacheReadTokens ?? 0) > 0
-            ? { cacheReadTokens: (u1.cacheReadTokens ?? 0) + (u2.cacheReadTokens ?? 0) }
-            : {}),
-        }
-      : (u1 ?? u2 ?? { inputTokens: 0, outputTokens: 0 })
+
     yield {
       type: 'message_end' as const,
       stopReason: 'end_turn' as const,
-      usage: bestUsage,
+      usage: combineUsage(result.lastUsage, retryResult.lastUsage),
     }
   }
 }
@@ -453,6 +511,7 @@ async function* streamWithDetection(
 ): AsyncGenerator<StreamChunk, RepetitionDetected | null> {
   let textBuffer = ''
   let inTextMode = false
+  let emittedText = false
 
   const stream = inner(request)
 
@@ -470,7 +529,7 @@ async function* streamWithDetection(
       if (detectDegenerateTokens(textBuffer) || detectSingleTokenRepeat(textBuffer)) {
         const clean = textBuffer.replace(/[\x08\u200B\u200C\u200D\uFEFF]+$/, '').trimEnd()
         const lastUsage = await drainForUsage(stream)
-        return { type: 'degenerate', cleanText: clean, lastUsage }
+        return { type: 'degenerate', cleanText: clean, emittedText, lastUsage }
       }
 
       // Check for n-gram repetition (only after enough text). The word-count
@@ -479,7 +538,7 @@ async function* streamWithDetection(
         const { looping, cleanEnd } = detectNgramRepetition(textBuffer)
         if (looping) {
           const lastUsage = await drainForUsage(stream)
-          return { type: 'ngram', cleanText: textBuffer.slice(0, cleanEnd), lastUsage }
+          return { type: 'ngram', cleanText: textBuffer.slice(0, cleanEnd), emittedText, lastUsage }
         }
       }
 
@@ -488,11 +547,17 @@ async function* streamWithDetection(
         const restart = detectBlockRestart(textBuffer)
         if (restart.looping) {
           const lastUsage = await drainForUsage(stream)
-          return { type: 'restart', cleanText: textBuffer.slice(0, restart.cleanEnd), lastUsage }
+          return {
+            type: 'restart',
+            cleanText: textBuffer.slice(0, restart.cleanEnd),
+            emittedText,
+            lastUsage,
+          }
         }
       }
 
       yield chunk
+      emittedText = true
     } else {
       if (chunk.type !== 'message_start' && chunk.type !== 'message_end') {
         // Non-text chunk (tool use) — reset text detection
