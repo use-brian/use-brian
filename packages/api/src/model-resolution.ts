@@ -3,58 +3,37 @@
  *
  * Used by the web chat route, Slack route, and Telegram route.
  * See docs/architecture/platform/cost-and-pricing.md for tier definitions.
+ *
+ * Every model-identity table here is DERIVED from the declarative registry
+ * (`@use-brian/shared/model-registry` — spec:
+ * docs/architecture/platform/model-registry.md) and re-exported under the
+ * pre-registry names so call sites don't churn. Policy that is not model
+ * identity — plan gating, budgets, sandbox leg routing — still lives here.
  */
 
-/** Model alias mapping for the selector */
-export const MODEL_MAP: Record<string, string> = {
-  // Standard chat tier — Gemini Flash 3, the **same model as Pro**, run on a
-  // tighter tool-round budget (see `chatTierBudget`). The synthetic id keeps
-  // Standard billable-distinct from Pro in `usage_tracking`: the provider
-  // (`packages/core/src/providers/gemini.ts`) maps it to the real
-  // `gemini-3-flash-preview` for the API call, and the cost-tracker prices it
-  // at Flash-3 rates. Flash Lite was retired from the chat tier on 2026-06-02
-  // (it underperformed) but stays the cheap background/extraction workhorse —
-  // those call sites pin `gemini-3.1-flash-lite` directly, not via this map.
-  standard: 'gemini-3-flash-standard',
-  pro: 'gemini-flash-3',           // Pro tier — Gemini Flash 3 (resolves to gemini-3-flash-preview)
-  max: 'gemini-3.5-flash',         // Max tier default — Gemini Flash 3.5 (frontier intelligence at Flash speeds)
-  // Research tier — Gemini Pro 3.1 on the deep (100/100) budget. Its own
-  // billing tier (10 credits, above Max's 6) since 2026-06-02. The synthetic
-  // id keeps it billable-distinct from Max in `usage_tracking`: the provider
-  // maps it to the real `gemini-3.1-pro-preview` for the API call, and the
-  // cost-tracker prices it at Pro-3.1 rates. Keeping research's recorded id
-  // distinct from the bare `gemini-3.1-pro-preview` also means historical rows
-  // (when Pro 3.1 was the Max default / research billed as Max) stay Max.
-  research: 'gemini-3-pro-research',
-}
+import {
+  chatTierDefaults,
+  tierModelIds,
+  tierForModelId,
+  tierCaseExpression,
+  type ModelTier,
+} from '@use-brian/shared/model-registry'
+
+/**
+ * Model alias mapping for the selector — the registry rows flagged with a
+ * `chatTierKey`. Standard runs Flash 3 (the same model as Pro) under a
+ * synthetic id and a tighter budget; Research runs Pro 3.1 under a synthetic
+ * id on the deep budget. See the registry rows for the full provenance notes.
+ */
+export const MODEL_MAP: Record<string, string> = chatTierDefaults()
 
 /**
  * Aliases (and resolved provider ids) that count as the "Standard"
- * intelligence tier. Standard now has two distinct faces:
- *
- *   - The user-facing Standard **chat** tier runs **Gemini Flash 3** — the
- *     same model as Pro — under a tighter tool-round budget (see
- *     `chatTierBudget`). It carries the synthetic id `gemini-3-flash-standard`
- *     so it stays billable-distinct from Pro in `usage_tracking`: the provider
- *     maps it to the real `gemini-3-flash-preview` for the API call, and the
- *     cost-tracker prices it at Flash-3 rates.
- *   - Background / extraction / classifier work (pattern extractor, splitter,
- *     titles, compaction, …) still pins **Gemini 3.1 Flash Lite** directly —
- *     it never routes through `MODEL_MAP.standard`, so it stays cheap. Those
- *     rows record `gemini-3.1-flash-lite` and must still classify as Standard.
- *
- * `gemini-3.1-flash-lite-preview` is the retired (pre-2026-05-25) Flash-Lite
- * SKU, kept so the admin tier classifier (`tierForModel`) doesn't reclassify
- * historical rows as `other`.
- *
- * See `docs/architecture/platform/cost-and-pricing.md` → "Model routing"
- * for the tier definition.
+ * intelligence tier: the synthetic chat id + the Flash Lite background
+ * workhorse (+ its retired preview SKU, so historical rows keep classifying).
+ * Derived from registry rows with `tier: 'standard'`.
  */
-export const STANDARD_TIER_MODELS: ReadonlySet<string> = new Set([
-  'gemini-3-flash-standard',        // Standard chat tier — Flash 3 on a tight budget (synthetic id)
-  'gemini-3.1-flash-lite',          // background / extraction workhorse + GA Flash-Lite id
-  'gemini-3.1-flash-lite-preview',  // retired Flash-Lite preview SKU (pre-2026-05-25 rows)
-])
+export const STANDARD_TIER_MODELS: ReadonlySet<string> = tierModelIds('standard')
 
 /** Whether the given alias / provider id maps to the Standard intelligence tier. */
 export function isStandardTier(model: string): boolean {
@@ -63,47 +42,24 @@ export function isStandardTier(model: string): boolean {
 
 /**
  * Aliases (and resolved provider ids) for the Pro tier — Gemini Flash 3.
- * Lists both the alias and historical resolved provider ids so admin
- * surfaces can map `usage_tracking.model` back to a tier consistently.
- *
- * See `docs/architecture/platform/cost-and-pricing.md` → "Model routing"
- * for the tier definition. The "Pro" bucket also covers consolidation /
- * compaction / synthesis turns per the bucketed routing rules.
+ * Derived from registry rows with `tier: 'pro'`.
  */
-export const PRO_TIER_MODELS: ReadonlySet<string> = new Set([
-  'pro',                         // Pro tier alias
-  'gemini-flash-3',              // Pro tier alias (used by MODEL_MAP)
-  'gemini-3-flash-preview',      // resolved provider id
-  'gemini-flash',                // legacy alias kept for back-compat with older rows
-])
+export const PRO_TIER_MODELS: ReadonlySet<string> = tierModelIds('pro')
 
 /**
- * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.5.
- *
- * `gemini-3.1-pro-preview` stays here for **historical** rows: it was the
- * prior Max default, and pre-2026-06-02 research turns billed at the Max
- * rate and recorded this id. Current research runs carry the synthetic
- * `gemini-3-pro-research` id (its own `research` tier), so live research no
- * longer lands in this set — only legacy rows do.
+ * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.5,
+ * plus the bare `gemini-3.1-pro-preview` legacy row (prior Max default +
+ * pre-2026-06-02 research turns billed as Max — historical rows never
+ * reprice). Derived from registry rows with `tier: 'max'`.
  */
-export const MAX_TIER_MODELS: ReadonlySet<string> = new Set([
-  'max',                         // Max tier alias (defaults to Flash 3.5)
-  'gemini-3.5-flash',            // resolved provider id — Max default
-  'gemini-3.1-pro-preview',      // historical: prior Max default + pre-2026-06-02 research (billed as Max)
-])
+export const MAX_TIER_MODELS: ReadonlySet<string> = tierModelIds('max')
 
 /**
- * Aliases (and resolved provider ids) for the Research tier — Gemini Pro 3.1
- * on the deep (100/100) budget. Its own billing tier (10 credits) since
- * 2026-06-02, above Max (6). Live research records the synthetic
- * `gemini-3-pro-research`; the provider maps it to `gemini-3.1-pro-preview`
- * for the API call. The bare `gemini-3.1-pro-preview` is intentionally NOT
- * here — it stays Max so historical rows don't reprice (see MAX_TIER_MODELS).
+ * Aliases for the Research tier — Pro 3.1 on the deep (100/100) budget under
+ * the synthetic `gemini-3-pro-research` id. Derived from registry rows with
+ * `tier: 'research'`.
  */
-export const RESEARCH_TIER_MODELS: ReadonlySet<string> = new Set([
-  'research',                    // Research-mode alias
-  'gemini-3-pro-research',       // resolved (synthetic) id — current research turns
-])
+export const RESEARCH_TIER_MODELS: ReadonlySet<string> = tierModelIds('research')
 
 /** Whether the model maps to the Pro intelligence tier. */
 export function isProTier(model: string): boolean {
@@ -124,13 +80,9 @@ export function isResearchTier(model: string): boolean {
  * Embedding model identifiers (used by Pipeline B / brain-mcp / retrieval).
  * Embeddings live on their own provider rate ladder and never feed back
  * into Standard / Pro / Max — they're a separate cost class on the
- * admin dashboard.
+ * admin dashboard. Derived from registry rows with `tier: 'embedding'`.
  */
-export const EMBEDDING_MODELS: ReadonlySet<string> = new Set([
-  'text-embedding-004',
-  'text-embedding-005',
-  'gemini-embedding-001',
-])
+export const EMBEDDING_MODELS: ReadonlySet<string> = tierModelIds('embedding')
 
 /** Whether the model is one of the known embedding endpoints. */
 export function isEmbeddingModel(model: string): boolean {
@@ -142,22 +94,14 @@ export function isEmbeddingModel(model: string): boolean {
  *
  * Returns one of: `standard` | `pro` | `max` | `research` | `embedding` |
  * `other`. The `other` bucket exists because `usage_tracking.model` may
- * contain legacy or per-call provider ids that aren't covered by any tier
- * set — instead of silently swallowing those rows the cost surface surfaces
- * them so we can spot drift.
- *
- * See `docs/architecture/platform/cost-and-pricing.md` → "Bucketed
- * routing rules" for the tier semantics.
+ * contain legacy or per-call provider ids that aren't covered by any
+ * registry row — instead of silently swallowing those rows the cost surface
+ * surfaces them so we can spot drift.
  */
-export type ModelTierLabel = 'standard' | 'pro' | 'max' | 'research' | 'embedding' | 'other'
+export type ModelTierLabel = ModelTier
 
 export function tierForModel(model: string): ModelTierLabel {
-  if (isStandardTier(model)) return 'standard'
-  if (isProTier(model))      return 'pro'
-  if (isResearchTier(model)) return 'research'
-  if (isMaxTier(model))      return 'max'
-  if (isEmbeddingModel(model)) return 'embedding'
-  return 'other'
+  return tierForModelId(model)
 }
 
 /**
@@ -167,22 +111,16 @@ export function tierForModel(model: string): ModelTierLabel {
  * symmetric so dashboards never disagree about which tier a row falls
  * into.
  */
-export const MODEL_TIER_SQL_CASE = `
-  CASE
-    WHEN model IN ('${Array.from(STANDARD_TIER_MODELS).join("','")}') THEN 'standard'
-    WHEN model IN ('${Array.from(PRO_TIER_MODELS).join("','")}')      THEN 'pro'
-    WHEN model IN ('${Array.from(RESEARCH_TIER_MODELS).join("','")}') THEN 'research'
-    WHEN model IN ('${Array.from(MAX_TIER_MODELS).join("','")}')      THEN 'max'
-    WHEN model IN ('${Array.from(EMBEDDING_MODELS).join("','")}')     THEN 'embedding'
-    ELSE 'other'
-  END
-`
+export const MODEL_TIER_SQL_CASE = tierCaseExpression('model')
 
 /**
  * Models each plan tier is allowed to use (plan = `workspaces.plan`).
  * Free → Standard only. Paid tiers → Standard + Pro + Max.
  * The backend silently downgrades unauthorized requests to the best
  * model the plan allows (no error — matches the "downgrade" spec).
+ *
+ * These are chat TIER KEYS (MODEL_MAP keys), not model ids — plan policy,
+ * deliberately not a registry derivation.
  */
 export const PLAN_ALLOWED_MODELS: Record<string, Set<string>> = {
   free:       new Set(['standard']),

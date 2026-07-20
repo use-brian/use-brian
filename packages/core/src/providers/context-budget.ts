@@ -17,6 +17,7 @@
  * `docs/architecture/engine/provider-abstraction.md` → "Context-budget wrapper".
  */
 
+import { modelContextWindow } from '@use-brian/shared/model-registry'
 import type { Message, ContentBlock } from './types.js'
 import { estimateTokens, estimateStringTokens } from '../compaction/index.js'
 
@@ -46,10 +47,11 @@ export const MESSAGE_TRUNCATION_MARKER =
 // ── Per-model input window ──────────────────────────────────────
 
 /**
- * Substring → input-token limit, matched in order (first hit wins), mirroring
- * `modelToCompactionTier`'s substring strategy so it survives the resolveModel
- * aliases and the real provider ids alike. Gemini's frontier window is 1M;
- * Claude Haiku (the outage-only fallback provider) is 200K.
+ * Substring → input-token limit fallback for ids the registry doesn't know,
+ * matched in order (first hit wins), mirroring `modelToCompactionTier`'s
+ * substring strategy so an unregistered vendor variant still gets a sane
+ * window. Registered models resolve their exact `contextWindow` from the
+ * model registry first.
  */
 const MODEL_INPUT_LIMITS: ReadonlyArray<{ match: string; limit: number }> = [
   { match: 'claude', limit: 200_000 },
@@ -62,6 +64,8 @@ const DEFAULT_INPUT_LIMIT = 1_048_576
 export const MODEL_CONTEXT_FIT_RATIO = 0.9
 
 export function resolveInputTokenLimit(model: string): number {
+  const known = modelContextWindow(model)
+  if (known) return known
   const m = model.toLowerCase()
   for (const { match, limit } of MODEL_INPUT_LIMITS) {
     if (m.includes(match)) return limit

@@ -5,92 +5,29 @@
  * Pricing is per million tokens.
  */
 
+import { bracketFor, modelRates, UNKNOWN_MODEL_RATES } from '@use-brian/shared/model-registry'
 import type { TokenUsage } from '../providers/types.js'
 
 // ── Model pricing (per million tokens, USD) ────────────────────
-
-type ModelPricing = {
-  inputPerM: number
-  outputPerM: number
-  cacheReadPerM: number
-  cacheWritePerM: number
-}
-
-const PRICING: Record<string, ModelPricing> = {
-  // Gemini (at launch) — prices from https://ai.google.dev/gemini-api/docs/pricing
-  // cacheWritePerM: Google charges cache *storage* per hour, not a one-time write
-  // cost. Kept as an approximation; the provider never sets cacheWriteTokens.
-  'gemini-3-flash-preview':       { inputPerM: 0.50,  outputPerM: 3.00,  cacheReadPerM: 0.05,  cacheWritePerM: 0.50 },
-  'gemini-3.1-pro-preview':       { inputPerM: 2.00,  outputPerM: 12.00, cacheReadPerM: 0.20,  cacheWritePerM: 2.00 },
-  // Gemini 3.5 Flash (Google I/O 2026 release, 2026-05-19). Max-tier default
-  // model — frontier-class on agentic/coding/tool-calling benchmarks at Flash
-  // speeds. Pricing per https://ai.google.dev/gemini-api/docs/pricing; cache
-  // read is 10% of input (the published Flash-family ratio) and cache write
-  // mirrors input as an approximation (Google charges storage per hour, not a
-  // one-time write fee — see the gemini-3-flash-preview comment above).
-  'gemini-3.5-flash':             { inputPerM: 1.50,  outputPerM: 9.00,  cacheReadPerM: 0.15,  cacheWritePerM: 1.50 },
-  'gemini-2.5-flash':             { inputPerM: 0.30,  outputPerM: 2.50,  cacheReadPerM: 0.03,  cacheWritePerM: 0.30 },
-  // Gemini 3.1 Flash Lite (Standard tier — replaces Gemma 4 26B). Google's
-  // published pricing for the Lite variant per docs/research/external/
-  // model-cost-comparison-2026.md. Cache pricing follows the same 10%-of-input
-  // / 100%-of-input ratio Google uses for the Flash family.
-  'gemini-3.1-flash-lite':         { inputPerM: 0.25, outputPerM: 1.50,  cacheReadPerM: 0.025, cacheWritePerM: 0.25 },
-  // Gemma 4 26B A4B (legacy Standard tier — superseded by Flash Lite). Kept
-  // here so cost calculations on historical `usage_tracking` rows that
-  // reference the old `model_resolved` value continue to compute (always $0
-  // since Gemma was Google AI Studio free-tier only).
-  'gemma-4-26b-a4b-it':           { inputPerM: 0.00,  outputPerM: 0.00,  cacheReadPerM: 0.00,  cacheWritePerM: 0.00 },
-  // Anthropic (deferred)
-  'claude-haiku-4-5':         { inputPerM: 1.00,  outputPerM: 5.00,  cacheReadPerM: 0.10,  cacheWritePerM: 1.25 },
-  'claude-sonnet-4-6':        { inputPerM: 3.00,  outputPerM: 15.00, cacheReadPerM: 0.30,  cacheWritePerM: 3.75 },
-  'claude-opus-4-6':          { inputPerM: 5.00,  outputPerM: 25.00, cacheReadPerM: 0.50,  cacheWritePerM: 6.25 },
-  // xAI Grok — powers the xSearch tool (reasoning variant) and the x.com
-  // URL redirect in urlReader (non-reasoning variant). Both variants price
-  // identically; reasoning is a free upgrade when the task benefits.
-  // Rates per https://docs.x.ai/docs/models (verified 2026-04-22).
-  // xAI does not charge for cache writes on the Responses API.
-  'grok-4-1-fast':                { inputPerM: 0.20, outputPerM: 0.50, cacheReadPerM: 0.05, cacheWritePerM: 0 },
-  'grok-4-1-fast-non-reasoning':  { inputPerM: 0.20, outputPerM: 0.50, cacheReadPerM: 0.05, cacheWritePerM: 0 },
-  // Gemini embedding model (brain vectors — embeddings.md §"Cost model").
-  // Input-only pricing; the batchEmbedContents response carries no usage
-  // metadata, so callers record the ~4-chars/token estimate as inputTokens.
-  'gemini-embedding-001':         { inputPerM: 0.025, outputPerM: 0, cacheReadPerM: 0, cacheWritePerM: 0 },
-}
-
-// Alias mapping
-const MODEL_ALIASES: Record<string, string> = {
-  'gemini-flash': 'gemini-3-flash-preview',
-  'gemini-flash-3': 'gemini-3-flash-preview',   // Pro tier — explicit alias
-  // Standard chat tier — same Flash 3 model as Pro (tighter tool budget), so
-  // it costs the same per token. The synthetic id keeps the row Standard-tier
-  // for billing while pricing at Flash-3 rates here. See model-resolution.ts.
-  'gemini-3-flash-standard': 'gemini-3-flash-preview',
-  // Research tier — same Pro 3.1 model, synthetic id; prices at Pro-3.1 rates.
-  'gemini-3-pro-research': 'gemini-3.1-pro-preview',
-  'gemini-pro': 'gemini-3.1-pro-preview',
-  'gemini-flash-25': 'gemini-2.5-flash',
-  // Historical id — Google retired the preview SKU on 2026-05-25; alias
-  // it back to the GA id so cost calculations on pre-cutover
-  // `usage_tracking` rows continue to resolve.
-  'gemini-3.1-flash-lite-preview': 'gemini-3.1-flash-lite',
-  'gemma-4-26b': 'gemma-4-26b-a4b-it',
-  // The embedder's namespaced model_id (`GEMINI_EMBEDDING_MODEL_ID`) — the
-  // embedding worker records usage under this string.
-  'gemini:gemini-embedding-001': 'gemini-embedding-001',
-}
+//
+// All rates live in the model registry (`@use-brian/shared/model-registry`,
+// per-row `rates`) — one declarative row per model, list price never promo.
+// This module only turns a registry rate blob + API-reported usage into USD.
 
 /**
- * Calculate actual USD cost for a single LLM call.
+ * Calculate actual USD cost for a single LLM call. Unknown / unpriced models
+ * fall back to `UNKNOWN_MODEL_RATES` (Flash 3) so drift shows up as nonzero
+ * cost instead of silently free rows.
  */
 export function calculateCost(model: string, usage: TokenUsage): number {
-  const resolvedModel = MODEL_ALIASES[model] ?? model
-  const p = PRICING[resolvedModel] ?? PRICING['gemini-3-flash-preview']
+  const rates = modelRates(model) ?? UNKNOWN_MODEL_RATES
+  const bracket = bracketFor(rates, usage.inputTokens)
 
   return (
-    (usage.inputTokens / 1_000_000) * p.inputPerM +
-    (usage.outputTokens / 1_000_000) * p.outputPerM +
-    ((usage.cacheReadTokens ?? 0) / 1_000_000) * p.cacheReadPerM +
-    ((usage.cacheWriteTokens ?? 0) / 1_000_000) * p.cacheWritePerM
+    (usage.inputTokens / 1_000_000) * bracket.inPerMTok +
+    (usage.outputTokens / 1_000_000) * bracket.outPerMTok +
+    ((usage.cacheReadTokens ?? 0) / 1_000_000) * rates.cacheReadPerMTok +
+    ((usage.cacheWriteTokens ?? 0) / 1_000_000) * rates.cacheWritePerMTok
   )
 }
 

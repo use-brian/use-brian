@@ -13,6 +13,7 @@
  * Spec: docs/architecture/engine/provider-abstraction.md → "Fallback wrapper".
  */
 import Anthropic from '@anthropic-ai/sdk'
+import { providerAliasMap, providerModelIds } from '@use-brian/shared/model-registry'
 import type {
   ContentBlock,
   LLMProvider,
@@ -27,11 +28,10 @@ import type {
   ToolDefinition,
 } from './types.js'
 
-const MODEL_ALIASES: Record<string, string> = {
-  // Per CLAUDE.md / Anthropic latest IDs — alias the abstract name to the
-  // dated snapshot so callers don't pin themselves to a deprecated revision.
-  'claude-haiku-4-5': 'claude-haiku-4-5-20251001',
-}
+// Alias → dated snapshot id, derived from the model registry (each anthropic
+// row's `apiModelId` pins the snapshot so callers don't pin themselves to a
+// deprecated revision).
+const MODEL_ALIASES: Record<string, string> = providerAliasMap('anthropic')
 
 function resolveModel(model: string): string {
   return MODEL_ALIASES[model] ?? model
@@ -305,7 +305,9 @@ export function createAnthropicProvider(options: AnthropicProviderOptions): LLMP
 
   return {
     name: 'anthropic',
-    models: ['claude-haiku-4-5'],
+    // Active anthropic registry rows — exactly ['claude-haiku-4-5'] today.
+    // Order matters: wrapFallback defaults its fallback model to models[0].
+    models: [...providerModelIds('anthropic')],
 
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
       const modelId = resolveModel(request.model)

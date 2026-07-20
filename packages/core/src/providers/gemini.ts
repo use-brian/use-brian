@@ -6,27 +6,12 @@
  * calling. We hit the REST API and preserve raw response parts (including
  * thoughtSignature) in session history.
  */
+import { providerAliasMap, recordedAliasIds, providerModelIds } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
 
-const MODEL_ALIASES: Record<string, string> = {
-  'gemini-flash': 'gemini-3-flash-preview',
-  'gemini-flash-3': 'gemini-3-flash-preview',   // Pro tier — explicit alias
-  // Standard chat tier — the same Flash 3 model as Pro, but a synthetic id so
-  // it stays billable-distinct in usage_tracking (it records the synthetic id;
-  // see SYNTHETIC_TIER_IDS below). Defined as MODEL_MAP.standard in
-  // packages/api/src/model-resolution.ts — keep the two strings in sync.
-  'gemini-3-flash-standard': 'gemini-3-flash-preview',
-  // Research tier — Gemini Pro 3.1, but a synthetic id so it stays
-  // billable-distinct from Max (and from historical Pro-3.1-as-Max rows).
-  // Defined as MODEL_MAP.research in model-resolution.ts.
-  'gemini-3-pro-research': 'gemini-3.1-pro-preview',
-  'gemini-pro': 'gemini-3.1-pro-preview',
-  'gemini-flash-25': 'gemini-2.5-flash',
-  // Background Standard tier (`gemini-3.1-flash-lite`) is the GA id Google
-  // accepts directly — no alias indirection needed. The preview SKU it
-  // used to resolve to (`gemini-3.1-flash-lite-preview`) was retired by
-  // Google on 2026-05-25; the GA id is the documented replacement.
-}
+/** Alias → real Google model id, derived from the model registry (each
+ * gemini row's alias/idAliases vs its `apiModelId`). */
+const MODEL_ALIASES: Record<string, string> = providerAliasMap('gemini')
 
 /**
  * Synthetic logical ids that share an underlying Google model with another
@@ -35,13 +20,10 @@ const MODEL_ALIASES: Record<string, string> = {
  * id in `message_start` so the row classifies as the right tier:
  *   - `gemini-3-flash-standard` (MODEL_MAP.standard) — Flash 3, vs Pro.
  *   - `gemini-3-pro-research`   (MODEL_MAP.research) — Pro 3.1, vs Max + history.
- * Every other model records its resolved provider id unchanged. Keep this set
- * in sync with the synthetic ids in `model-resolution.ts`.
+ * Every other model records its resolved provider id unchanged. Derived from
+ * the registry rows flagged `recordAlias`.
  */
-const SYNTHETIC_TIER_IDS: ReadonlySet<string> = new Set([
-  'gemini-3-flash-standard',
-  'gemini-3-pro-research',
-])
+const SYNTHETIC_TIER_IDS: ReadonlySet<string> = recordedAliasIds('gemini')
 
 function resolveModel(model: string): string {
   return MODEL_ALIASES[model] ?? model
@@ -710,7 +692,7 @@ export function createGeminiProvider(apiKey: string): LLMProvider {
 
   return {
     name: 'gemini',
-    models: ['gemini-flash', 'gemini-pro', 'gemini-flash-25', 'gemini-3-flash-standard', 'gemini-3-pro-research', 'gemini-3.1-flash-lite'],
+    models: [...providerModelIds('gemini')],
 
     // Stateless single-shot
     async *stream(request: ProviderRequest): AsyncIterable<StreamChunk> {

@@ -18,6 +18,10 @@
       "types": "./dist/connector-registry.d.ts",
       "default": "./dist/connector-registry.js"
     },
+    "./model-registry": {
+      "types": "./dist/model-registry.d.ts",
+      "default": "./dist/model-registry.js"
+    },
     "./mini-apps": {
       "types": "./dist/mini-apps.d.ts",
       "default": "./dist/mini-apps.js"
