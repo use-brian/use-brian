@@ -708,6 +708,7 @@ export const zh: Dictionary = {
         errNotPublished: "請先發布此頁面。",
         errHostnameTaken: "此主機名稱已被連接。",
         errInvalidHostname: "請輸入像 docs.yourcompany.com 的主機名稱。",
+        errBlockedHostname: "該主機名稱為保留名稱。請使用您自己的網域，例如 docs.yourcompany.com。",
         errDomainLimit: "此工作空間已達網域數量上限。",
       },
       generalAccessHint: "工作空間所有人的預設權限",

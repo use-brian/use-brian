@@ -51,13 +51,25 @@ describe('[COMP:doc/page-domains] Domain provisioner seam', () => {
       ])
     })
 
-    it('with no target configured, only requires the hostname to resolve', async () => {
+    it('with no target configured, never claims live even when the host resolves', async () => {
+      // A wildcard resolves every subdomain to our edge IPs, yet the edge 404s
+      // unattached hosts — "resolves" is not "served by us", so stay pending.
       mockCname.mockRejectedValueOnce(new Error('ENODATA'))
       mockA.mockResolvedValueOnce(['1.2.3.4'])
       const p = createManualDnsProvisioner({})
       const r = await p.check('docs.acme.com')
-      expect(r.live).toBe(true)
+      expect(r.live).toBe(false)
+      expect(r.error).toMatch(/not configured/i)
       expect(r.instructions).toEqual([])
+    })
+
+    it('with no target configured, reports a non-resolving host distinctly', async () => {
+      mockCname.mockRejectedValueOnce(new Error('ENODATA'))
+      mockA.mockRejectedValueOnce(new Error('ENOTFOUND'))
+      const p = createManualDnsProvisioner({})
+      const r = await p.check('docs.acme.com')
+      expect(r.live).toBe(false)
+      expect(r.error).toMatch(/does not resolve/i)
     })
   })
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  deriveOwnApexBlocks,
   isValidPageSlug,
   normalizeHostname,
   PAGE_SLUG_MAX_LENGTH,
@@ -98,6 +99,36 @@ describe('[COMP:doc/page-slug-helpers] Page slug + hostname helpers', () => {
       expect(normalizeHostname('notexample.io', { block })).toBe('notexample.io');
       // no blocklist -> any well-shaped public hostname is accepted
       expect(normalizeHostname('app.example.com')).toBe('app.example.com');
+    });
+  });
+
+  describe('deriveOwnApexBlocks', () => {
+    it('derives a `.apex` suffix from a 3-label origin host', () => {
+      expect(deriveOwnApexBlocks(['app.usebrian.ai', 'api.usebrian.ai'])).toEqual([
+        '.usebrian.ai',
+      ]);
+    });
+
+    it('blocks the apex and every subdomain once derived', () => {
+      const block = deriveOwnApexBlocks(['app.usebrian.ai']);
+      // apex itself, a bare subdomain, and a deep subdomain are all blocked
+      expect(normalizeHostname('usebrian.ai', { block })).toBeNull();
+      expect(normalizeHostname('saas.usebrian.ai', { block })).toBeNull();
+      expect(normalizeHostname('deep.saas.usebrian.ai', { block })).toBeNull();
+      // a lookalike registrable domain is NOT blocked
+      expect(normalizeHostname('notusebrian.ai', { block })).toBe('notusebrian.ai');
+    });
+
+    it('yields nothing for a 2-label apex origin (no bare-TLD block)', () => {
+      expect(deriveOwnApexBlocks(['usebrian.ai'])).toEqual([]);
+    });
+
+    it('skips a parent that is a known public suffix (multi-part TLD safety)', () => {
+      // app served directly at a registrable apex under a public suffix:
+      // stripping a label would leave `co.uk`, which must never be blocked.
+      expect(deriveOwnApexBlocks(['example.co.uk'])).toEqual([]);
+      // but a real subdomain under it derives the registrable apex correctly
+      expect(deriveOwnApexBlocks(['app.example.co.uk'])).toEqual(['.example.co.uk']);
     });
   });
 });

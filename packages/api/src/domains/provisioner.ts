@@ -6,8 +6,9 @@
  * `createDomainProvisioner(env)`:
  * - `manual` (open default): no side effects; verification is a live DNS
  *   lookup against `PAGE_DOMAIN_CNAME_TARGET`. With no target configured it
- *   only checks that the hostname resolves — ownership is then the
- *   deployer's responsibility (self-host).
+ *   cannot verify the host is served by this deployment (a wildcard resolves
+ *   every subdomain yet the edge 404s unattached hosts), so it never reports
+ *   live — status stays pending until a target or the edge provider is set.
  * - `vercel` (hosted): attaches the hostname to the app-web Vercel project;
  *   Vercel issues TLS once DNS points at it.
  *
@@ -60,11 +61,23 @@ export function createManualDnsProvisioner(opts: { cnameTarget?: string }): Doma
       try {
         const cnames = await resolveCname(hostname).catch(() => [] as string[])
         if (!target) {
-          if (cnames.length > 0) return { live: true, error: null, instructions }
-          const a = await resolve4(hostname)
-          return a.length > 0
-            ? { live: true, error: null, instructions }
-            : { live: false, error: 'hostname does not resolve', instructions }
+          // A bare DNS lookup does NOT prove this deployment serves the host.
+          // A wildcard (`*.apex`) resolves every subdomain to our edge IPs, yet
+          // the edge 404s any host not actually attached to it — so "resolves"
+          // is not "live". With no CNAME target to compare against (and no edge
+          // provider to query), verification is impossible here, so never claim
+          // live. Status stays pending_dns; the page still serves once the host
+          // is attached at the edge and DNS points here (status is UI-only, not
+          // a serving gate — see custom-domains.md).
+          const resolves =
+            cnames.length > 0 || (await resolve4(hostname).catch(() => [] as string[])).length > 0
+          return {
+            live: false,
+            error: resolves
+              ? 'verification is not configured on this deployment (set PAGE_DOMAIN_CNAME_TARGET or the Vercel provider); the page serves once this host is attached at the edge'
+              : 'hostname does not resolve',
+            instructions,
+          }
         }
         if (cnames.some((c) => stripDot(c) === target)) {
           return { live: true, error: null, instructions }

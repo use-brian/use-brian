@@ -812,6 +812,7 @@ export const en = {
         errNotPublished: "Publish the page first.",
         errHostnameTaken: "That hostname is already connected.",
         errInvalidHostname: "Enter a hostname like docs.yourcompany.com.",
+        errBlockedHostname: "That hostname is reserved. Use your own domain, like docs.yourcompany.com.",
         errDomainLimit: "This workspace reached its domain limit.",
       },
       generalAccessHint: "Default for everyone in the workspace",

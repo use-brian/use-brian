@@ -313,6 +313,7 @@ import { createDeckStore } from './db/deck-store.js'
 import { publicShareRoutes } from './routes/public-share.js'
 import { publicSiteRoutes } from './routes/public-sites.js'
 import { createDomainProvisioner } from './domains/provisioner.js'
+import { deriveOwnApexBlocks } from '@use-brian/shared/page-slugs'
 import { createEmailInboxProvider, setGlobalEmailInboxProvider } from './agentmail/provider.js'
 import { docThemesRoutes } from './routes/doc-themes.js'
 import { runIngestPage } from './doc/ingest-page-runner.js'
@@ -3638,10 +3639,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pageDomainsMaxPerWorkspace: env.PAGE_DOMAINS_MAX_PER_WORKSPACE
       ? Number(env.PAGE_DOMAINS_MAX_PER_WORKSPACE)
       : undefined,
-    // Blocked hostnames = this deployment's own origins (derived, exact) +
-    // operator policy from PAGE_DOMAIN_BLOCKED_HOSTS. Nothing hardcoded.
-    pageDomainBlockedHosts: [
-      ...[env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
+    // Blocked hostnames = this deployment's own origins (derived, exact) + the
+    // `.apex` suffixes derived from them (so a subdomain of our own domain,
+    // which rides the wildcard, can't be attached as a BYO domain and falsely
+    // verify) + operator policy from PAGE_DOMAIN_BLOCKED_HOSTS. Nothing hardcoded.
+    pageDomainBlockedHosts: (() => {
+      const originHosts = [env.API_URL, env.APP_URL, env.AUTHED_APP_URL]
         .map((url) => {
           if (!url) return null
           try {
@@ -3650,12 +3653,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             return null
           }
         })
-        .filter((h): h is string => Boolean(h)),
-      ...(env.PAGE_DOMAIN_BLOCKED_HOSTS ?? '')
+        .filter((h): h is string => Boolean(h))
+      const operator = (env.PAGE_DOMAIN_BLOCKED_HOSTS ?? '')
         .split(',')
         .map((h) => h.trim().toLowerCase())
-        .filter(Boolean),
-    ],
+        .filter(Boolean)
+      return [...originHosts, ...deriveOwnApexBlocks(originHosts), ...operator]
+    })(),
     workspaceGroupStore,
     analytics,
     taskStore,

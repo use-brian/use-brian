@@ -192,6 +192,8 @@ function DomainSection({
         return t.site.errHostnameTaken;
       case "invalid_hostname":
         return t.site.errInvalidHostname;
+      case "blocked_hostname":
+        return t.site.errBlockedHostname;
       case "domain_limit":
         return t.site.errDomainLimit;
       default:

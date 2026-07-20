@@ -78,6 +78,44 @@ export function hostMatchesEntry(hostname: string, entry: string): boolean {
 }
 
 /**
+ * Common multi-part public-suffix second levels (`example.co.uk`,
+ * `example.com.au`). Not a bundled public-suffix list — just a guard so the
+ * apex-derivation below never turns a registrable domain sitting directly under
+ * one of these into a block on the whole suffix (`.co.uk`). Extend via config,
+ * never a product hostname.
+ */
+const PUBLIC_SUFFIX_SECOND_LEVELS = new Set([
+  'co', 'com', 'org', 'net', 'gov', 'edu', 'ac', 'or', 'ne', 'go', 'gr',
+]);
+
+/**
+ * Derive `.apex` suffix-block entries from a deployment's own origin hosts, so
+ * a subdomain of the product's OWN domain (which rides the product's wildcard
+ * DNS) can never be attached as a "bring your own" custom domain. Such a host
+ * resolves for free via the wildcard yet the edge 404s it, so without this it
+ * would falsely verify as live — and it isn't a customer domain anyway.
+ *
+ * An origin with < 3 labels yields nothing: its exact host is already blocked,
+ * and stripping a label off a 2-label apex would produce a bare TLD. A parent
+ * that looks like a known public suffix (`co.uk`) is skipped so self-hosts on
+ * multi-part TLDs don't block their whole registrar namespace. First-party
+ * publishing under the product apex therefore needs an explicit operator
+ * allowlist or a separate apex — see custom-domains.md.
+ */
+export function deriveOwnApexBlocks(originHosts: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const raw of originHosts) {
+    const host = raw.trim().toLowerCase().replace(/\.$/, '');
+    const labels = host.split('.').filter(Boolean);
+    if (labels.length < 3) continue;
+    const parent = labels.slice(1);
+    if (parent.length === 2 && PUBLIC_SUFFIX_SECOND_LEVELS.has(parent[0])) continue;
+    out.add('.' + parent.join('.'));
+  }
+  return [...out];
+}
+
+/**
  * Normalize user input ("https://Docs.Acme.com/path" → "docs.acme.com").
  * Returns null when the input is not a usable public hostname. IDN input is
  * punycoded via the WHATWG URL parser (browser- and Node-consistent).

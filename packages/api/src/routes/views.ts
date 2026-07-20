@@ -993,6 +993,15 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
       block: opts.pageDomainBlockedHosts,
     })
     if (!hostname) {
+      // Well-formed but blocked (our own origin / a subdomain of our apex /
+      // operator policy) vs. genuinely malformed — distinct codes so the UI can
+      // explain a reserved host instead of "enter a valid hostname".
+      if (normalizeHostname(parsed.data.hostname)) {
+        return res.status(400).json({
+          error: 'This hostname is reserved and cannot be attached as a custom domain',
+          code: 'blocked_hostname',
+        })
+      }
       return res.status(400).json({ error: 'Not a usable public hostname', code: 'invalid_hostname' })
     }
     if (opts.pageGrantStore) {

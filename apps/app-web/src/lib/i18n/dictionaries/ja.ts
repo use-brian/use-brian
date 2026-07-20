@@ -720,6 +720,7 @@ export const ja: Dictionary = {
         errNotPublished: "先にページを公開してください。",
         errHostnameTaken: "このホスト名は既に接続されています。",
         errInvalidHostname: "docs.yourcompany.com のようなホスト名を入力してください。",
+        errBlockedHostname: "そのホスト名は予約されています。docs.yourcompany.com のように、ご自身のドメインを使用してください。",
         errDomainLimit: "このワークスペースのドメイン数が上限に達しました。",
       },
       generalAccessHint: "ワークスペース全員の既定",
