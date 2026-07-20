@@ -510,6 +510,50 @@ export async function promoteChannelPaste(input: {
   }
 }
 
+/**
+ * Assemble the outbound channel message from the buffered assistant turns.
+ *
+ * TERMINAL TURNS ONLY, and never a sum of `text_delta` chunks. Two incidents
+ * sit behind each half:
+ *
+ *  1. A turn carrying a `tool_use` block is mid-reasoning — the loop feeds the
+ *     result back and the model speaks again — so text riding alongside a call
+ *     is narration, never the answer. Delta-summing concatenated it into the
+ *     reply; on the scheduled-job twin of this path that shipped a model's
+ *     entire chain-of-thought, its own tool list included, to a user's Telegram
+ *     (2026-07-20, session `b8e567d6` — a job whose instructions named tools its
+ *     assistant held no connector grant for, so the model narrated the hunt for
+ *     them). `sanitizeDeliveryText` cannot cover this
+ *     class — it matches known scaffolding phrasings and free-form reasoning has
+ *     none; the signal that identifies it is structural, not lexical.
+ *  2. Deltas stream BEFORE the turn-boundary instruction-leak sanitiser rewrites
+ *     `response.content`, so a suppressed turn's text shipped anyway. Reading
+ *     the buffered content means a suppressed turn contributes nothing,
+ *     structurally rather than by downstream heuristics.
+ *
+ * Takes the turns already sliced to the delivery window: the grounding gate
+ * retracts a draft the query loop had ALREADY yielded as an `assistant_turn`
+ * (Phase 3b runs before the gate), so the caller cuts those turns off rather
+ * than letting retracted unverified figures back into the message.
+ *
+ * Reads `content` at call time on purpose — the gate's post-nudge trailer
+ * mutates the final text block IN PLACE after the turn was yielded, and an
+ * eagerly-copied string would drop it.
+ *
+ * Mirrors `inter-assistant/executor.ts`. Spec:
+ * docs/architecture/channels/inter-assistant.md → "Final-text assembly".
+ */
+export function assembleDeliverableText(turns: { content: ContentBlock[] }[]): string {
+  return turns
+    .filter((t) => !t.content.some((b) => b.type === 'tool_use'))
+    .flatMap((t) => t.content)
+    .filter((b): b is ContentBlock & { type: 'text'; text: string } =>
+      b.type === 'text' && 'text' in b && typeof (b as { text?: unknown }).text === 'string')
+    .map((b) => b.text)
+    .join('\n')
+    .trim()
+}
+
 // ── Pipeline ─────────────────────────────────────────────────────
 
 export async function processChannelMessage(params: ChannelPipelineParams): Promise<void> {
@@ -1146,7 +1190,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
 
   await updateSessionStatus(session.id, 'running')
   const confirmationResolver = createConfirmationResolver()
-  let responseText = ''
 
   // ── Outbound attachments (sendFile) ──
   // Only wired when filesApi is present — without it the pipeline could
@@ -1158,6 +1201,13 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   type PendingTurn = { content: ContentBlock[]; toolResults: ContentBlock[] }
   const pendingAssistantTurns: PendingTurn[] = []
   let flushed = false
+  // Index of the first turn eligible for delivery — the outbound message is
+  // built by `assembleDeliverableText` (see its doc comment for why terminal
+  // turns, not deltas). `grounding_nudge` advances this past the retracted
+  // draft: the query loop yields `assistant_turn` at Phase 3b BEFORE the gate
+  // runs, so without the cut the unverified figures the gate just retracted
+  // would sail straight back into the message.
+  let deliveryCutIdx = 0
   // Track the most-recently-flushed assistant `session_messages` row id
   // so a `sendResponse` returning a channel-native message id (Slack
   // `ts`, Telegram `message_id`) can stamp it onto that row via
@@ -1339,19 +1389,17 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     })) {
       switch (event.type) {
         case 'text_delta':
-          // Always accumulate so `sendResponse` at turn_complete has
-          // the full text — final-only channels (Telegram, Slack,
-          // WhatsApp) rely on this. Streaming channels (web SSE)
-          // additionally fire `onTextDelta` per chunk so the client
-          // can render text as it arrives.
-          responseText += event.text
+          // Streaming channels (web SSE) render text as it arrives; the
+          // client is a render layer that can drop control markers, so
+          // partial chunks are fine here. The final-only channels' outbound
+          // message is NOT built from these chunks — see
+          // `assembleDeliverableText`.
           await hooks.onTextDelta?.(event.text)
           break
         case 'grounding_nudge':
-          // The accumulated draft is superseded — the corrected turn's text
-          // re-accumulates from empty so the outbound message never carries
-          // the unverified figures.
-          responseText = ''
+          // The buffered draft is superseded — cut it out of the deliverable
+          // so the outbound message never carries the unverified figures.
+          deliveryCutIdx = pendingAssistantTurns.length
           analytics?.logEvent({
             userId, assistantId: assistant.id, sessionId: session.id,
             eventName: 'grounding_nudge_fired', channelType,
@@ -1479,15 +1527,35 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
           // so the raw tag would leak into the message body. Web parses
           // it client-side and renders chips. See
           // docs/architecture/features/follow-up-questions.md.
-          const { display: visibleText } = parseFollowUps(responseText)
+          const { display: visibleText } = parseFollowUps(
+            assembleDeliverableText(pendingAssistantTurns.slice(deliveryCutIdx)),
+          )
           const attachmentNotes = failedAttachmentNames.length > 0
             ? `${visibleText ? '\n\n' : ''}${failedAttachmentNames.map((n) => `Could not attach: ${n}`).join('\n')}`
             : ''
-          await sendResponseAndStampChannelId(
-            visibleText + attachmentNotes,
-            documents.length > 0 ? documents : undefined,
-          )
-          responseText = ''
+          const outboundText = visibleText + attachmentNotes
+          // Nothing deliverable: every turn was a tool call, retracted by the
+          // grounding gate, or stripped by the leak sanitiser. Delta-summing
+          // used to paper over this by shipping whatever streamed (narration,
+          // suppressed text) — the very leak this assembly closes. Send
+          // nothing rather than an empty bubble, and leave a trace: silence
+          // here is a real failure, not a clean turn.
+          if (!outboundText && documents.length === 0) {
+            console.warn(
+              `[${channelType}] no deliverable text at turn_complete (session ${session.id}) — nothing sent`,
+            )
+            analytics?.logEvent({
+              userId, assistantId: assistant.id, sessionId: session.id,
+              eventName: 'channel_delivery_empty', channelType,
+              metadata: { turns: pendingAssistantTurns.length, model: sanitizeAnalytics(model) },
+            })
+          } else {
+            await sendResponseAndStampChannelId(
+              outboundText,
+              documents.length > 0 ? documents : undefined,
+            )
+          }
+          deliveryCutIdx = pendingAssistantTurns.length
 
           // ── Cost tracking + analytics ──
           // Stage 5: cost attributes to the resolved billing party (team

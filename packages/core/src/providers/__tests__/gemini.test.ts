@@ -284,6 +284,129 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     for await (const _ of iter) void _
   }
 
+  it("reports stopReason 'incomplete' when the stream ends with no finishReason", async () => {
+    // Gemini states the finish reason on the final chunk. A stream that ends
+    // without one never said it finished, but the code defaulted to 'end_turn'
+    // — asserting something the provider had not said and disguising a cut-off
+    // turn as a complete one. Invisible to the truncation detector, which only
+    // looks for 'max_tokens', and a standing way for "the model stopped early"
+    // to be misread as "the model produced bad output".
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const encoder = new TextEncoder()
+    const noFinish = new Response(
+      new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                candidates: [{ content: { role: 'model', parts: [{ text: '{"summary":"cut off mid' }] } }],
+                usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 },
+              })}\n\n`,
+            ),
+          )
+          c.close()
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )
+    fetchMock.mockResolvedValueOnce(noFinish)
+    const { createGeminiProvider } = await import('../gemini.js')
+    const seen: string[] = []
+    for await (const chunk of createGeminiProvider('test-key').stream({
+      model: 'gemini-flash',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'extract' }],
+    })) {
+      const c = chunk as { type: string; stopReason?: string }
+      if (c.type === 'message_end' && c.stopReason) seen.push(c.stopReason)
+    }
+    expect(seen).toEqual(['incomplete'])
+    expect(err.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('NO finishReason')
+    err.mockRestore()
+  })
+
+  it("still reports 'end_turn' when the provider does state a clean finish", async () => {
+    fetchMock.mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    const seen: string[] = []
+    for await (const chunk of createGeminiProvider('test-key').stream({
+      model: 'gemini-flash',
+      systemPrompt: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+    })) {
+      const c = chunk as { type: string; stopReason?: string }
+      if (c.type === 'message_end' && c.stopReason) seen.push(c.stopReason)
+    }
+    expect(seen).toEqual(['end_turn'])
+  })
+
+  it('maps responseSchema into generationConfig — the mime type alone is only a hint', async () => {
+    // responseMimeType asks for JSON; responseSchema is what actually engages
+    // the constrained decoder. Documenting the mime type as decoder-constraining
+    // is what let 56 malformed-JSON extraction failures go unexplained
+    // (2026-07-20) — each one an episode that stored nothing.
+    fetchMock.mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    const schema = { type: 'object', properties: { summary: { type: 'string' } } }
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'extract' }],
+        responseFormat: 'json',
+        responseSchema: schema,
+      }),
+    )
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.generationConfig?.responseMimeType).toBe('application/json')
+    expect(body.generationConfig?.responseSchema).toEqual(schema)
+  })
+
+  it('retries WITHOUT the schema when Gemini rejects it, rather than failing the call', async () => {
+    // A schema is an output-quality optimisation, never a liveness dependency:
+    // Gemini accepts only a subset of JSON Schema and 400s the whole request on
+    // anything outside it, which would take every schema-using caller offline.
+    // Fail-open degrades to the unconstrained call the caller had before.
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fetchMock
+      .mockResolvedValueOnce(new Response('{"error":{"message":"Invalid JSON payload: responseSchema"}}', { status: 400 }))
+      .mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'extract' }],
+        responseFormat: 'json',
+        responseSchema: { type: 'object', properties: { nope: { $ref: '#/x' } } },
+      }),
+    )
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const retry = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    expect(retry.generationConfig?.responseSchema).toBeUndefined()
+    // The mime-type hint survives the retry — only the schema is dropped.
+    expect(retry.generationConfig?.responseMimeType).toBe('application/json')
+    expect(err.mock.calls.map((c) => c.join(' ')).join('\n')).toContain('responseSchema REJECTED')
+    err.mockRestore()
+  })
+
+  it('does not swallow a 400 that has nothing to do with a schema', async () => {
+    // Without a responseSchema on the request there is nothing to fail open to,
+    // so a 400 must still surface as an error rather than being retried away.
+    fetchMock.mockResolvedValueOnce(new Response('{"error":{"message":"quota"}}', { status: 400 }))
+    const { createGeminiProvider } = await import('../gemini.js')
+    await expect(
+      drain(
+        createGeminiProvider('test-key').stream({
+          model: 'gemini-flash',
+          systemPrompt: 'sys',
+          messages: [{ role: 'user', content: 'hi' }],
+        }),
+      ),
+    ).rejects.toThrow(/Gemini API error 400/)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('maps responseFormat json to generationConfig.responseMimeType when no tools are declared', async () => {
     fetchMock.mockResolvedValueOnce(sseOk())
     const { createGeminiProvider } = await import('../gemini.js')

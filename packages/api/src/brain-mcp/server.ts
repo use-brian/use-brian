@@ -119,7 +119,7 @@ export function brainMcpRoutes(opts: Options): Router {
       opts.agentTools && auth.scope === 'read_write'
         ? await resolveAgentGate(auth.workspaceId)
         : false
-    const server = new McpServer({ name: 'sidanclaw-brain', version: '1.0.0' })
+    const server = new McpServer({ name: 'use-brian-brain', version: '1.0.0' })
     for (const tool of buildBrainTools({
       workspaceId: auth.workspaceId,
       scope: auth.scope,

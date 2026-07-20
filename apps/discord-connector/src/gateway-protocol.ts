@@ -42,7 +42,7 @@ export function buildIdentify(token: string): GatewayPayload {
     d: {
       token,
       intents: GATEWAY_INTENTS,
-      properties: { os: 'linux', browser: 'Use Brian', device: 'sidanclaw-discord-connector' },
+      properties: { os: 'linux', browser: 'Use Brian', device: 'usebrian-discord-connector' },
     },
   }
 }

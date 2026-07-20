@@ -138,7 +138,7 @@ export function assistantMcpRoutes(opts: Options): Router {
     const resolveCtx = async () => ctx
 
     // ── One stateless McpServer per request, same as the brain MCP.
-    const server = new McpServer({ name: 'sidanclaw-assistant', version: '1.0.0' })
+    const server = new McpServer({ name: 'use-brian-assistant', version: '1.0.0' })
     const tools = [
       ...[...opts.agentTools.reads.values()].map((t) =>
         bridgeCoreTool(t, resolveCtx, assistant.workspaceId ?? ''),

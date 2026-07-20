@@ -215,7 +215,7 @@ export function AccountSection() {
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && nameDirty && onSaveName()}
                 // In the oss edition the owner name is local config (set via the
-                // launcher prompt / ~/.sidanclaw/config.json), so it is read-only
+                // launcher prompt / ~/.usebrian/config.json), so it is read-only
                 // here — an in-app edit would be re-clobbered on the next boot.
                 disabled={savingName || isOssEdition()}
                 className="flex-1 text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 disabled:opacity-60"
