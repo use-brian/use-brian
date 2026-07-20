@@ -1120,6 +1120,105 @@ describe('[COMP:brain/pipeline-b] processEpisode', () => {
     warn.mockRestore()
   })
 
+  it('recovers a raw NEWLINE inside a string literal, preserving it as content', async () => {
+    // The 41% family. RFC 8259 forbids every unescaped U+0000-U+001F inside a
+    // string, and \n \r \t are in that range — but the old sanitizer
+    // (`[\x00-\x08\x0B\x0C\x0E-\x1F]`) skipped exactly those three because they
+    // are legal BETWEEN tokens. So the one guard written to stop "Bad control
+    // character in string literal" could not stop its commonest cause, and the
+    // sibling test below never caught it: its fixture uses \v (0x0B), which the
+    // old strip DID handle. Every window failing means the episode extracts
+    // nothing, so this was silent data loss.
+    //
+    // Escaping (not stripping) is what makes it non-lossy: the old behavior
+    // welded "line one\nline two" into "line oneline two".
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+    const withRawNewline =
+      '{"summary":"line one\nline two","entities":[],"edges":[],"memories":[{"scope":"user","summary":"saved","detail":"d","tags":[],"why_not_entity":"n/a","why_not_task":"n/a"}],"tags":[]}'
+    const classification = JSON.stringify({
+      inferred_sensitivity: 'internal',
+      brief_reason: 'ok',
+    })
+    const deps = makeDeps({
+      provider: sequencedProvider([withRawNewline, classification]),
+      memories: memories.store,
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'something', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(memories.created.map((m) => m.summary)).toContain('saved')
+    // The newline survives as a real newline rather than being deleted.
+    expect(episodes.checkpointCalls[0]?.summaryText).toBe('line one\nline two')
+  })
+
+  it('recovers a raw TAB inside a string literal', async () => {
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+    const withRawTab =
+      '{"summary":"col a\tcol b","entities":[],"edges":[],"memories":[{"scope":"user","summary":"saved","detail":"d","tags":[],"why_not_entity":"n/a","why_not_task":"n/a"}],"tags":[]}'
+    const classification = JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'ok' })
+    const deps = makeDeps({
+      provider: sequencedProvider([withRawTab, classification]),
+      memories: memories.store,
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'something', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(episodes.checkpointCalls[0]?.summaryText).toBe('col a\tcol b')
+  })
+
+  it('reports truncated model output as incomplete JSON, not as a bogus syntax error', async () => {
+    // The structural family. The old `/\{[\s\S]*\}/` was greedy, so output that
+    // stopped mid-object got clipped to the LAST `}` — an inner object's —
+    // yielding a fragment that fails with `Expected ',' or ']' after array
+    // element`. That reads as "the model wrote bad syntax" when the truth is
+    // "the model stopped early"; 19 of 20 production instances reported the
+    // identical column, the fingerprint of end-of-input. Misdiagnosis cost:
+    // the 2026-07-16 response was to raise the token cap, which was never the
+    // cause (failing calls used 194-2646 of 8192 tokens).
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const truncated =
+      '{"summary":"s","entities":[],"edges":[],"memories":[{"scope":"user","summary":"saved","detail":"d"'
+    const episodes = spyEpisodes()
+    const deps = makeDeps({
+      provider: sequencedProvider([truncated, truncated]),
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'note', deps)
+
+    expect(result.extracted).toBe(false)
+    const reasons = warn.mock.calls.map((c) => c.join(' ')).join('\n')
+    expect(reasons).toContain('incomplete JSON')
+    expect(reasons).not.toContain("Expected ',' or ']' after array element")
+    warn.mockRestore()
+  })
+
+  it('ignores trailing prose after the JSON object', async () => {
+    // Balance-scanning ends at the matching brace, so a model that appends a
+    // sign-off after the object no longer drags it into the parse.
+    const memories = spyMemories()
+    const episodes = spyEpisodes()
+    const withTrailer =
+      '{"summary":"s","entities":[],"edges":[],"memories":[{"scope":"user","summary":"saved","detail":"d","tags":[],"why_not_entity":"n/a","why_not_task":"n/a"}],"tags":[]}\n\nHope that helps!'
+    const classification = JSON.stringify({ inferred_sensitivity: 'internal', brief_reason: 'ok' })
+    const deps = makeDeps({
+      provider: sequencedProvider([withTrailer, classification]),
+      memories: memories.store,
+      episodes: episodes.port,
+    })
+
+    const result = await processEpisode(baseEpisode(), 'something', deps)
+
+    expect(result.extracted).toBe(true)
+    expect(memories.created.map((m) => m.summary)).toContain('saved')
+  })
+
   it('recovers when the LLM emits a raw control character inside a string literal', async () => {
     // Regression: production logs at 2026-05-27 showed
     //   `JSON.parse failed: Bad control character in string literal in JSON at position 1225`

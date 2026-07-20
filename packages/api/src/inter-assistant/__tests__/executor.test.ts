@@ -130,6 +130,22 @@ function executor() {
   })
 }
 
+/**
+ * Same, but with the two stores that gate MCP injection — without both,
+ * `injectMcpTools` never runs, so anything derived from its result (the
+ * unavailable-capabilities block) is silently absent.
+ */
+function executorWithMcp() {
+  return createCalleeExecutor({
+    provider: {} as never,
+    tools: new Map(),
+    memoryStore: memoryStore() as never,
+    capabilityStore: { listActive: vi.fn().mockResolvedValue([]) } as never,
+    connectorStore: {} as never,
+    mcpSettingsStore: {} as never,
+  })
+}
+
 const baseParams = {
   callerAssistantId: 'caller-1',
   calleeAssistantId: 'callee-1',
@@ -212,7 +228,10 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     expect(mockInjectMcp.mock.calls[0][0].allowKnowledgeWrites).toBe(false)
   })
 
-  it('joins multi-turn text with newlines and skips text-less tool turns', async () => {
+  it('drops narration riding alongside a tool call, keeping only terminal-turn text', async () => {
+    // A turn carrying a tool_use block is mid-reasoning: the loop feeds the
+    // result back and the model speaks again. "Checking the brain." is
+    // narration addressed to no one, not the consult's answer.
     yields([
       { type: 'text_delta', text: 'Checking the brain.' },
       {
@@ -233,7 +252,57 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
       },
       { type: 'turn_complete', response: { content: [{ type: 'text', text: 'All clear.' }] } },
     ])
-    expect(await executor()(baseParams)).toBe('Checking the brain.\nAll clear.')
+    expect(await executor()(baseParams)).toBe('All clear.')
+  })
+
+  it('joins text across multiple terminal turns with newlines', async () => {
+    yields([
+      {
+        type: 'assistant_turn',
+        response: { content: [{ type: 'text', text: 'First finding.' }] },
+        toolResults: [],
+      },
+      {
+        type: 'assistant_turn',
+        response: { content: [{ type: 'text', text: 'Second finding.' }] },
+        toolResults: [],
+      },
+      { type: 'turn_complete', response: { content: [{ type: 'text', text: 'Second finding.' }] } },
+    ])
+    expect(await executor()(baseParams)).toBe('First finding.\nSecond finding.')
+  })
+
+  it('never delivers a mid-reasoning tool-hunting spiral (2026-07-20 chain-of-thought leak)', async () => {
+    // Repro of session b8e567d6: the job's instructions hardcoded
+    // `googleCalendarListEvents`, but its assistant held no connector grant for
+    // it (Google Calendar was connected, just granted to no assistant), so the
+    // tool was never on the surface. The model narrated its search for the
+    // missing tool — including a verbatim dump of
+    // its own tool list — in turns that each also carried a tool_use block, and
+    // never reached a terminal turn. That narration became finalText and shipped
+    // to the user's Telegram. sanitizeDeliveryText cannot catch this (it matches
+    // known scaffolding phrasings; free-form reasoning has none), so the
+    // executor must refuse to treat non-terminal text as deliverable: an
+    // all-narration consult is a typed FAILURE, not a delivery.
+    const SPIRAL =
+      'Wait, I see "Available connectors: gmail, github, knowledge" in my search results, ' +
+      'but `listConnectorInstances` only showed GitHub. There are NO `googleCalendarListEvents` ' +
+      'in the direct tool list. Let me try to `listConnectors` to see what is configured.'
+    yields([
+      { type: 'text_delta', text: SPIRAL },
+      {
+        type: 'assistant_turn',
+        response: {
+          content: [
+            { type: 'text', text: SPIRAL },
+            { type: 'tool_use', id: 'call_127', name: 'listConnectors', input: {} },
+          ],
+        },
+        toolResults: [{ type: 'tool_result', tool_use_id: 'call_127', content: [] }],
+      },
+      { type: 'turn_complete', response: { content: [] } },
+    ])
+    await expect(executor()(baseParams)).rejects.toMatchObject({ reason: 'empty_response' })
   })
 
   it('does not return re-streamed text from leak-suppressed + retried turns (2026-07-02 triplication)', async () => {
@@ -304,6 +373,45 @@ describe('[COMP:api/inter-assistant-executor] createCalleeExecutor', () => {
     })
     const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
     expect(systemPrompt).not.toContain('## Automated context — tools execute directly')
+  })
+
+  it('tells the callee which capabilities are unavailable (2026-07-19/20 GM Bro incident)', async () => {
+    // The two interactive paths (chat.ts, channel-pipeline.ts) have always
+    // appended `buildUnavailableCapabilitiesPrompt`; the callee path discarded
+    // injectMcpTools' `unavailable` list entirely. A scheduled job whose
+    // instructions named `googleCalendarListEvents` — for a connector its
+    // assistant held no grant for — therefore had no way to know the tool was
+    // off its surface. It fabricated the result one day ("No events were found
+    // on your Google Calendar", zero tool calls) and burned the whole run
+    // hunting for the tool the next. The entry carries the user-actionable fix,
+    // so the callee can report something the user can act on.
+    const notice =
+      'Google Calendar & Tasks (not connected or disabled for this assistant) — ' +
+      'if the user asks to add/check tasks, calendar events, or reminders, reply: ' +
+      '"I\'ll need Calendar access first. Type /connect gcal to authorize."'
+    mockInjectMcp.mockResolvedValueOnce({
+      enrichConfirmation: async (_t: string, i: unknown) => i,
+      unavailable: [notice],
+    } as never)
+    yieldsText()
+    // MCP injection only runs when both stores are wired — the bare `executor()`
+    // helper omits them, so this path needs the store-ful construction.
+    await executorWithMcp()(baseParams)
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).toContain('# Unavailable capabilities')
+    expect(systemPrompt).toContain('Type /connect gcal to authorize')
+    // The directive half matters as much as the list: without it the model
+    // treats absence as "keep looking".
+    expect(systemPrompt).toContain('Do not attempt to use them or search for them')
+  })
+
+  it('omits the unavailable-capabilities block when everything is reachable', async () => {
+    // Same wiring, but the default mock returns `unavailable: []` — a callee
+    // with every connector live must see no such section.
+    yieldsText()
+    await executorWithMcp()(baseParams)
+    const systemPrompt = mockQueryLoop.mock.calls[0][0].systemPrompt as string
+    expect(systemPrompt).not.toContain('# Unavailable capabilities')
   })
 
   it('emits a tool_executed analytics event for each tool a consult runs', async () => {

@@ -128,6 +128,8 @@ type GeminiRequest = {
     maxOutputTokens?: number
     temperature?: number
     responseMimeType?: string
+    /** Gemini's OpenAPI-subset JSON Schema — what actually constrains the decoder. */
+    responseSchema?: Record<string, unknown>
     thinkingConfig?: { thinkingLevel?: 'LOW' | 'HIGH'; includeThoughts?: boolean }
   }
 }
@@ -380,15 +382,40 @@ async function* streamGeminiSSE(
   // abort, and Cloud Run truncates the response at the 300s cap with the
   // session still in `status='running'`. See docs/architecture/feed/
   // stuck-session-sweeper.md for the recovery path.
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify(request),
-    signal,
-  })
+  const send = (body: GeminiRequest) =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+
+  let response = await send(request)
+
+  // Fail-open on a rejected responseSchema. Gemini accepts only a subset of
+  // JSON Schema, and a schema it dislikes comes back as a 400 for the WHOLE
+  // request — which would take every caller that uses one offline rather than
+  // merely un-constraining it. A schema is an output-quality optimisation; it
+  // must never be a liveness dependency. So: strip it, retry once, and be loud
+  // about it. The caller still validates the output, exactly as it did before
+  // schemas existed.
+  if (
+    response.status === 400 &&
+    request.generationConfig &&
+    'responseSchema' in request.generationConfig
+  ) {
+    const detail = await response.text()
+    console.error(
+      `[gemini] responseSchema REJECTED (400) for model=${modelId} — retrying without it. ` +
+      `Output is no longer decoder-constrained for this call; fix the schema to restore the guarantee. ` +
+      `Detail: ${detail.slice(0, 500)}`,
+    )
+    const { responseSchema: _dropped, ...generationConfig } = request.generationConfig
+    response = await send({ ...request, generationConfig })
+  }
 
   if (!response.ok) {
     const body = await response.text()
@@ -487,7 +514,7 @@ export function resolveGeminiThinkingLevel(
 
 function buildRequest(
   contents: GeminiContent[],
-  options: { systemPrompt: string; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json' },
+  options: { systemPrompt: string; tools?: ToolDefinition[]; maxTokens?: number; temperature?: number; thinkingLevel?: ThinkingLevel; responseFormat?: 'json'; responseSchema?: Record<string, unknown> },
   modelId: string,
 ): GeminiRequest {
   // Universal choke point: every request (stateless stream() AND stateful
@@ -520,13 +547,23 @@ function buildRequest(
     generationConfig: {
       maxOutputTokens: options.maxTokens,
       temperature: options.temperature,
-      // JSON mode: decoder-constrained syntactically-valid JSON. Only when
-      // the caller asked for it AND no tools are declared — Gemini rejects
-      // responseMimeType together with function declarations. Callers still
-      // schema-validate: this kills the malformed-JSON class (fences,
-      // commentary, trailing commas), not schema mismatches.
+      // JSON output. Only when the caller asked for it AND no tools are
+      // declared — Gemini rejects responseMimeType together with function
+      // declarations.
+      //
+      // `responseMimeType` alone is a HINT, not a constraint: it asks for JSON
+      // and the model usually complies, but nothing at the decoder enforces it.
+      // This was documented as "decoder-constrained… eliminating the
+      // malformed-output class" and that was simply wrong — production kept
+      // producing unparseable extraction output (2026-07-20). What actually
+      // engages Gemini's constrained decoder is `responseSchema`, so a caller
+      // that supplies one gets the real guarantee; a caller that doesn't is
+      // unchanged. Callers schema-validate either way.
       ...(options.responseFormat === 'json' && toolEntries.length === 0
-        ? { responseMimeType: 'application/json' }
+        ? {
+            responseMimeType: 'application/json',
+            ...(options.responseSchema ? { responseSchema: options.responseSchema } : {}),
+          }
         : {}),
       ...(() => {
         // Gemini 3 thinks on every turn regardless; `includeThoughts: true`
@@ -557,7 +594,17 @@ async function* convertStreamChunks(
 ): AsyncGenerator<{ chunk: StreamChunk; rawParts?: GeminiPart[] }> {
   yield { chunk: { type: 'message_start', model: modelId } }
 
-  let finishReason: StopReason = 'end_turn'
+  // Starts as `'incomplete'`, NOT `'end_turn'`. Gemini states the finish reason
+  // on the final chunk; a stream that ends without ever supplying one did not
+  // tell us it finished cleanly, and defaulting to `'end_turn'` asserted
+  // something the provider never said. That silently disguised cut-off turns as
+  // complete ones — invisible to the truncation detector, which only looks for
+  // `'max_tokens'`, and a standing way for "the model stopped early" to be
+  // misread downstream as "the model produced bad output" (the 2026-07-20
+  // extraction-parse misdiagnosis). Overwritten below the moment a real finish
+  // reason arrives, which is the overwhelmingly common path.
+  let finishReason: StopReason = 'incomplete'
+  let sawFinishReason = false
   let usage = { inputTokens: 0, outputTokens: 0 }
   let hasToolCalls = false
   let hasAnyContent = false
@@ -627,12 +674,22 @@ async function* convertStreamChunks(
 
     if (candidate.finishReason) {
       finishReason = mapFinishReason(candidate.finishReason)
+      sawFinishReason = true
     }
     if (data.usageMetadata) {
       usage = extractUsage(data.usageMetadata)
     }
   }
 
+  if (!sawFinishReason && !hasToolCalls) {
+    // Loud on purpose: this is the shape that used to be indistinguishable from
+    // a clean stop. Whatever consumed this turn got a partial answer.
+    console.error(
+      `[gemini] Stream ended with NO finishReason after ${chunkCount} chunk(s) ` +
+      `(model=${modelId}, hasContent=${hasAnyContent}) — reporting stopReason='incomplete'. ` +
+      `The turn may be cut mid-output; do not treat it as a completed answer.`,
+    )
+  }
   finishReason = resolveStopReason(finishReason, hasToolCalls)
 
   if (!hasAnyContent && chunkCount > 0) {

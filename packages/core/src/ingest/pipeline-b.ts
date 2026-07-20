@@ -374,6 +374,107 @@ const extractionOutputSchema = z.object({
 })
 
 type ExtractionOutput = z.infer<typeof extractionOutputSchema>
+
+/**
+ * The same contract as `extractionOutputSchema` above, expressed in Gemini's
+ * OpenAPI-subset JSON Schema so the decoder is actually CONSTRAINED to it.
+ *
+ * `responseMimeType: 'application/json'` alone is only a hint — the decoder can
+ * still emit unparseable output, and did: 56 failed extractions in three days,
+ * each one an episode that stored nothing. A `responseSchema` is what engages
+ * constrained decoding, which attacks that class at the source instead of
+ * repairing it in `parseExtraction` afterwards.
+ *
+ * **Kept by hand, deliberately.** `zod` here is v3, which has no
+ * `toJSONSchema()`, and a generic converter would emit constructs Gemini's
+ * subset rejects (`$ref`, `oneOf`, `additionalProperties: false`) — turning a
+ * quality optimisation into a 400 on every call. Hand-authoring keeps the
+ * emitted shape exactly what the API accepts.
+ *
+ * **The cost is drift**: this must be updated whenever the Zod schema changes.
+ * Drift is bounded rather than silent, because the Zod gate still runs on the
+ * parsed result and remains authoritative — a schema that falls behind loosens
+ * the decoder constraint, it cannot let a bad payload through. `[COMP:brain/pipeline-b]`
+ * covers the shape agreement.
+ *
+ * Only the two justification fields are `required`: everything else is
+ * nullish-with-default on the Zod side, and forcing the model to emit an empty
+ * array for every unused slot wastes tokens on the common single-topic window.
+ */
+const EXTRACTION_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    entities: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          kind: { type: 'string', enum: [...EXTRACT_ENTITY_KINDS] },
+          display_name: { type: 'string' },
+          canonical_id: { type: 'string', nullable: true },
+          // Open-ended bag: `z.record(z.unknown())`. Gemini's subset has no way
+          // to say "any keys, any values", so it is declared as a plain object
+          // and left unconstrained rather than forced into a false shape.
+          attributes: { type: 'object' },
+        },
+        required: ['kind', 'display_name'],
+      },
+    },
+    edges: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          source_ref: { type: 'string' },
+          target_ref: { type: 'string' },
+          edge_type: { type: 'string', enum: [...EDGE_TYPES] },
+          attributes: { type: 'object' },
+        },
+        required: ['source_ref', 'target_ref', 'edge_type'],
+      },
+    },
+    tasks: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          due_iso: { type: 'string', nullable: true },
+          assignee_ref: { type: 'string', nullable: true },
+        },
+        required: ['text'],
+      },
+    },
+    memories: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: [...MEMORY_SCOPES], nullable: true },
+          summary: { type: 'string' },
+          detail: { type: 'string', nullable: true },
+          tags: { type: 'array', items: { type: 'string' } },
+          why_not_entity: { type: 'string' },
+          why_not_task: { type: 'string' },
+        },
+        required: ['summary', 'why_not_entity', 'why_not_task'],
+      },
+    },
+    ephemeral: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          reason: { type: 'string', enum: [...EPHEMERAL_REASONS] },
+        },
+        required: ['text', 'reason'],
+      },
+    },
+    tags: { type: 'array', items: { type: 'string' } },
+  },
+}
 type ExtractedEntity = z.infer<typeof extractedEntitySchema>
 type ExtractedEdge = z.infer<typeof extractedEdgeSchema>
 type ExtractedMemory = z.infer<typeof extractedMemorySchema>
@@ -582,22 +683,111 @@ type ParseResult =
   | { ok: true; payload: ExtractionOutput }
   | { ok: false; reason: string }
 
+/** JSON's named short escapes for the control characters that have one. */
+const JSON_SHORT_ESCAPES: Record<string, string> = {
+  '\b': '\\b',
+  '\f': '\\f',
+  '\n': '\\n',
+  '\r': '\\r',
+  '\t': '\\t',
+}
+
+type BalancedScan = { ok: true; json: string } | { ok: false; reason: string }
+
+/**
+ * Walk from the first `{` to its MATCHING `}`, escaping raw ASCII control
+ * characters found inside string literals along the way. One string-aware pass
+ * doing two jobs the previous pair of regexes got wrong:
+ *
+ *  1. **Escape, don't exempt.** RFC 8259 forbids every unescaped U+0000-U+001F
+ *     inside a string, and tab / newline / carriage-return are in that range —
+ *     but the old `[\x00-\x08\x0B\x0C\x0E-\x1F]` strip skipped exactly those
+ *     three, because they are legal *between* tokens. So the one sanitizer
+ *     written to kill "Bad control character in string literal" could not kill
+ *     its three most common causes: 41% of production extraction failures.
+ *     Escaping rather than stripping is also non-lossy — the old strip welded
+ *     words together ("hello\nworld" -> "helloworld"), and a newline inside a
+ *     summary is content. Outside a string, whitespace is left untouched.
+ *  2. **Balance, don't glob.** The old `/\{[\s\S]*\}/` was greedy: on output
+ *     that stopped mid-object it clipped to the LAST `}` — an inner object's —
+ *     producing a structurally impossible fragment and a misleading
+ *     `Expected ',' or ']' after array element` when the truth was "the model
+ *     stopped early". 19 of 20 such production errors reported the identical
+ *     column, the fingerprint of end-of-input rather than of content. Scanning
+ *     to the matching brace reports incompleteness honestly, and drops any
+ *     trailing prose after the object as a bonus.
+ *
+ * Every window failing means the episode extracts NOTHING, so each of these is
+ * silent data loss into the brain, not a degraded result.
+ *
+ * NOT caused by the 8192-token cap: failing calls used 194-2646 output tokens
+ * and the `max_tokens` truncation branch has never fired. Raising the cap again
+ * (the 2026-07-16 change took it 4000 -> 8192) would fix nothing.
+ */
+function scanBalancedJsonObject(text: string): BalancedScan {
+  const start = text.indexOf('{')
+  if (start === -1) return { ok: false, reason: 'no JSON object in model output' }
+
+  let out = ''
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i]
+    if (escaped) {
+      out += ch
+      escaped = false
+      continue
+    }
+    if (inString) {
+      if (ch === '\\') {
+        out += ch
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = false
+        out += ch
+        continue
+      }
+      const code = ch.charCodeAt(0)
+      if (code < 0x20) {
+        out += JSON_SHORT_ESCAPES[ch] ?? `\\u${code.toString(16).padStart(4, '0')}`
+        continue
+      }
+      out += ch
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      out += ch
+      continue
+    }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      out += ch
+      if (depth === 0) return { ok: true, json: out }
+      continue
+    }
+    out += ch
+  }
+
+  return {
+    ok: false,
+    reason: `incomplete JSON: model output ended mid-object with ${depth} unclosed brace${depth === 1 ? '' : 's'}${inString ? ' inside an unterminated string' : ''}`,
+  }
+}
+
 function parseExtraction(rawText: string): ParseResult {
   const cleaned = rawText.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
-  const match = cleaned.match(/\{[\s\S]*\}/)
-  if (!match) return { ok: false, reason: 'no JSON object in model output' }
+  const scan = scanBalancedJsonObject(cleaned)
+  if (!scan.ok) return { ok: false, reason: scan.reason }
 
-  // Strip ASCII control characters other than \t\n\r — LLMs occasionally
-  // emit raw 0x00–0x1F bytes inside string literals (most often  or
-  // ), which `JSON.parse` rejects as "Bad control character in
-  // string literal". We strip rather than escape because the offending
-  // bytes never carry meaning in the extraction payload.
-  // Then drop trailing commas (`,]` / `,}`) — another common LLM output
-  // tic. `JSON.parse` rejects them; stripping is safe because they don't
-  // change semantics. Done as a second pass after control-char stripping.
-  const sanitized = match[0]
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
-    .replace(/,(\s*[\]}])/g, '$1')
+  // Drop trailing commas (`,]` / `,}`) — a common LLM output tic that
+  // `JSON.parse` rejects and that carries no semantics.
+  const sanitized = scan.json.replace(/,(\s*[\]}])/g, '$1')
 
   let parsed: unknown
   try {
@@ -865,6 +1055,11 @@ export async function processEpisode(
             maxTokens: EXTRACTION_MAX_OUTPUT_TOKENS,
             temperature: 0.1,
             responseFormat: 'json',
+            // The actual decoder constraint (the mime type alone is only a
+            // hint). Fail-open: a provider whose schema is rejected retries
+            // without it, so this can degrade output quality but never fail
+            // the call. See EXTRACTION_RESPONSE_SCHEMA.
+            responseSchema: EXTRACTION_RESPONSE_SCHEMA,
             // Decoder-constrained JSON needs no reasoning summary; on
             // gemini-3 (which thinks on every turn) LOW keeps thought tokens
             // from eating the output cap. Models without an explicit
@@ -876,7 +1071,12 @@ export async function processEpisode(
         // Attribute the spend the moment usage is known — failed-parse
         // attempts still consumed these tokens.
         await recordExtractionUsage(deps, episode, response.usage)
-        truncated = response.stopReason === 'max_tokens'
+        // `'incomplete'` counts as truncation: the stream ended without the
+        // provider ever saying why, so the JSON may simply stop mid-object —
+        // the same failure the cap produces, just unannounced. Classifying it
+        // as truncation gets the concision retry instead of the misleading
+        // "failed validation" message, which re-runs the same doomed shape.
+        truncated = response.stopReason === 'max_tokens' || response.stopReason === 'incomplete'
         rawText = response.content
           .filter((b) => b.type === 'text')
           .map((b) => (b.type === 'text' ? b.text : ''))

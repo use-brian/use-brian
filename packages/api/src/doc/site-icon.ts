@@ -147,7 +147,7 @@ async function fetchGuarded(
       res = await fetchFn(current.toString(), {
         signal,
         redirect: 'manual',
-        headers: { 'User-Agent': 'sidanclaw-site-icon/1.0', Accept: accept },
+        headers: { 'User-Agent': 'usebrian-site-icon/1.0', Accept: accept },
       })
     } catch {
       return null
