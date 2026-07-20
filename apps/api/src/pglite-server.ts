@@ -14,12 +14,26 @@ import { PGlite } from '@electric-sql/pglite'
 import { vector } from '@electric-sql/pglite-pgvector'
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm'
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { migratePglite } from './migrate-pglite.js'
 
-const dataDir = process.env.PGLITE_DATA_DIR || join(homedir(), '.sidanclaw', 'brain')
+/**
+ * Canonical dotdir is `~/.usebrian/`. A pre-rebrand install that still has a
+ * populated `~/.sidanclaw/brain` keeps using it so its brain is never orphaned
+ * (the launcher renames the whole dir on boot — see scripts/launch.mjs; this
+ * covers a standalone api run against a not-yet-migrated install).
+ */
+function defaultDataDir(): string {
+  const canonical = join(homedir(), '.usebrian', 'brain')
+  if (existsSync(canonical)) return canonical
+  const legacy = join(homedir(), '.sidanclaw', 'brain')
+  return existsSync(legacy) ? legacy : canonical
+}
+
+const dataDir = process.env.PGLITE_DATA_DIR || defaultDataDir()
 // Default to a distinctive high port so it never collides with a local Postgres
 // on 5432; the launcher sets PGLITE_PORT explicitly.
 const port = parseInt(process.env.PGLITE_PORT || '54329', 10)

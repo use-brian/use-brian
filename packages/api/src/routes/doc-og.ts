@@ -388,7 +388,7 @@ async function fetchOneHop(
       signal,
       redirect: 'manual',
       headers: {
-        'User-Agent': 'sidanclaw-doc-og/1.0',
+        'User-Agent': 'usebrian-doc-og/1.0',
         Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
       },
     })

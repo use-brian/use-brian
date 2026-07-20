@@ -33,7 +33,16 @@ export type StreamChunk =
   | { type: 'grounding_metadata'; sources: Array<{ url: string; title: string }> }
   | { type: 'message_end'; stopReason: StopReason; usage: TokenUsage }
 
-export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'safety'
+/**
+ * `'incomplete'` means the stream ended without the provider ever stating WHY —
+ * no finish reason at all. It is not a clean stop and must not be treated as
+ * one: the turn may be cut mid-sentence or mid-JSON. Distinct from
+ * `'max_tokens'` (provider said it hit the cap) and from `'end_turn'`
+ * (provider said it finished). Callers that care about completeness should
+ * treat it like a truncation; callers that don't can ignore it exactly as they
+ * ignore `'end_turn'`.
+ */
+export type StopReason = 'end_turn' | 'tool_use' | 'max_tokens' | 'safety' | 'incomplete'
 
 export type TokenUsage = {
   inputTokens: number
@@ -144,15 +153,32 @@ export type ProviderRequest = {
   thinkingLevel?: ThinkingLevel
   signal?: AbortSignal
   /**
-   * Advisory hint: constrain generation to syntactically-valid JSON at the
-   * decoder (Gemini maps it to `responseMimeType: application/json`).
-   * Providers without a JSON mode ignore it — callers must still schema-
-   * validate the output (the hint removes the malformed-JSON failure class,
-   * not the schema-mismatch one). Ignored when `tools` are present: JSON
-   * mode and function calling are mutually exclusive on Gemini.
+   * Advisory HINT ONLY: ask for JSON output (Gemini maps it to
+   * `responseMimeType: application/json`). It does **not** constrain the
+   * decoder on its own — that requires `responseSchema` below. This was
+   * documented as decoder-constraining for months and it is not: malformed
+   * JSON kept arriving (2026-07-20, 56 extraction failures in three days).
+   * Providers without a JSON mode ignore it, and callers must schema-validate
+   * regardless. Ignored when `tools` are present: JSON mode and function
+   * calling are mutually exclusive on Gemini.
    * See docs/architecture/brain/ingest-pipeline.md → "Extraction".
    */
   responseFormat?: 'json'
+  /**
+   * The actual decoder constraint: a JSON Schema (Gemini's OpenAPI subset —
+   * `type` / `properties` / `required` / `items` / `enum` / `additionalProperties`,
+   * no `$ref`, no `oneOf`) the output is forced to satisfy. Only meaningful
+   * alongside `responseFormat: 'json'`.
+   *
+   * Deliberately typed as an opaque record rather than a Zod type: the mapping
+   * is provider-specific, and each provider takes only the subset it supports.
+   * Providers that don't support it ignore it, so this is always additive.
+   *
+   * Fail-open by contract: a provider that has its schema REJECTED must retry
+   * without it rather than fail the call — a bad schema degrades output
+   * quality, it must never take the caller offline.
+   */
+  responseSchema?: Record<string, unknown>
 }
 
 export type StreamFn = (request: ProviderRequest) => AsyncIterable<StreamChunk>

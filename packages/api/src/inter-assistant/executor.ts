@@ -445,6 +445,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // 3. Build tool set: clone base tools + capability filter + MCP injection.
     const calleeCapabilities = new Set(await options.capabilityStore.listActive(params.calleeAssistantId))
     const calleeTools = filterToolsByCapabilities(new Map(options.tools), calleeCapabilities)
+    /** Capabilities MCP injection could not provide — see the assignment below. */
+    let unavailableCapabilities: string[] = []
 
     if (options.connectorStore && options.mcpSettingsStore) {
       try {
@@ -452,7 +454,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           calleeActorUserId,
           calleeAssistant.workspaceId,
         )
-        await injectMcpTools({
+        const mcpInjection = await injectMcpTools({
           userId: connectorUserId,
           assistantId: params.calleeAssistantId,
           tools: calleeTools,
@@ -482,6 +484,23 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           allowKnowledgeWrites: false,
           filesApi: options.filesApi,
         })
+        // Capabilities the injection could NOT provide (connector not
+        // connected, disabled for this assistant, credentials expired, blocked
+        // by policy). Both interactive paths — `chat.ts` and
+        // `channel-pipeline.ts` — append this to the system prompt so the model
+        // knows what it cannot reach; the callee path silently dropped it,
+        // which is how a scheduled job spent its whole run hunting for tools
+        // that were never on its surface (2026-07-20) and, the day before,
+        // simply INVENTED their results: a single turn with zero tool calls
+        // asserting "No events were found on your Google Calendar" for a
+        // connector it had no grant for. The unavailable entries carry the
+        // user-actionable fix too (e.g. "Type /connect gcal to authorize"), so
+        // the callee can report something the user can act on instead of
+        // improvising. See docs/architecture/integrations/mcp.md →
+        // "Connecting from Telegram" (Nudges + Closed-world wrapper) and
+        // docs/architecture/channels/inter-assistant.md → "Unavailable
+        // capabilities on the callee path".
+        unavailableCapabilities = mcpInjection.unavailable
       } catch (err) {
         console.error('[inter-assistant] MCP injection failed for callee:', err)
         // MCP failure is non-fatal; continue with base + capability-filtered tools.
@@ -1063,7 +1082,27 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
+    // What this consult CANNOT reach, stated up front — parity with the two
+    // interactive paths (`chat.ts`, `channel-pipeline.ts`), which have always
+    // injected this. Without it the callee has no way to distinguish "this tool
+    // is missing from my surface" from "I haven't found it yet", and the two
+    // failure modes that produces are exactly the 2026-07-19/20 pair: invent the
+    // result, or burn the whole run searching. Empty list → empty string, so an
+    // unpinned callee with everything connected is unchanged.
+    // Imported lazily, like `injectSkills` below — `route-helpers` pulls a wide
+    // dependency chain and this file is on the boot path (cf. the boot-time TDZ
+    // this repo has hit before). Skipped entirely when nothing is unavailable.
+    let unavailableBlock = ''
+    if (unavailableCapabilities.length > 0) {
+      try {
+        const { buildUnavailableCapabilitiesPrompt } = await import('../routes/route-helpers.js')
+        unavailableBlock = buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+      } catch (err) {
+        console.error('[inter-assistant] unavailable-capabilities prompt failed (skipped):', err)
+      }
+    }
+
+    const fullSystemPrompt = `${systemPrompt}${docAnchorBlock}${priorRunMemoryBlock}${workflowGuardBlock}${recordCreationGuardBlock}${directExecutionBlock}${askPolicyDropBlock}${unavailableBlock}${skillPromptFragment}${blueprintPromptFragment}\n\n# Context\nCurrent date and time: ${currentDateTime}\nTimezone: ${calleeOwner.timezone}\n\n${memoryContext}`
 
     // 6. Build messages and run the query loop.
     //
@@ -1412,6 +1451,24 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           // Finalised turn content — a leak-suppressed turn has its text
           // blocks stripped and contributes nothing; a retried turn
           // contributes only the attempt that landed.
+          //
+          // TERMINAL TURNS ONLY. A turn that also carries a `tool_use` block is
+          // mid-reasoning by the provider contract: the loop feeds the tool
+          // result back and the model speaks again, so text riding alongside a
+          // call is narration ("Wait, I should check X…"), never the answer.
+          // Joining it into the deliverable shipped a model's entire
+          // chain-of-thought — including a verbatim dump of its own tool list —
+          // to a user's Telegram (2026-07-20, session b8e567d6: a scheduled job's
+          // instructions named `googleCalendarListEvents` / `googleTasksListTasks`
+          // while its assistant held no connector grant for them, so the model
+          // hunted for the missing tools and narrated the search — and that
+          // narration was the only text any turn produced).
+          // `sanitizeDeliveryText` cannot cover this class — it matches known
+          // scaffolding phrasings, and free-form reasoning has none; the shape
+          // that identifies it is structural (text + tool_use in one turn), not
+          // lexical. Dropping it is also why an all-narration run now fails
+          // `empty_response` honestly instead of delivering the spiral.
+          if (event.response.content.some((b) => b.type === 'tool_use')) continue
           const turnText = event.response.content
             .filter((b): b is { type: 'text'; text: string } => b.type === 'text' && 'text' in b)
             .map((b) => b.text)
