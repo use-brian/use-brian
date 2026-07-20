@@ -21,13 +21,13 @@ function makeTool(execute: Tool['execute']): Tool {
 }
 
 describe('[COMP:integrations/connector-health] classifyConnectorAuthError', () => {
-  it('flags 401 / 403 / invalid-credential messages as auth failures', () => {
+  it('flags 401 / invalid-credential messages as auth failures', () => {
     // The exact strings the provider clients emit.
     expect(classifyConnectorAuthError(new Error('GitHub PAT is invalid or revoked (401): Bad credentials'))).toBe(true)
-    expect(classifyConnectorAuthError('GitHub error: GitHub API error (403): forbidden')).toBe(true)
     expect(classifyConnectorAuthError('Notion token is invalid or expired. Please reconnect.')).toBe(true)
     expect(classifyConnectorAuthError('Fathom token is invalid or expired.')).toBe(true)
     expect(classifyConnectorAuthError('Google token refresh failed: invalid_grant')).toBe(true)
+    expect(classifyConnectorAuthError(new Error('401 Unauthorized'))).toBe(true)
   })
 
   it('does NOT flag transient / non-auth errors (so a blip never marks a live connector dead)', () => {
@@ -35,6 +35,42 @@ describe('[COMP:integrations/connector-health] classifyConnectorAuthError', () =
     expect(classifyConnectorAuthError(new Error('fetch failed: ECONNRESET'))).toBe(false)
     expect(classifyConnectorAuthError(new Error('GitHub API error (500): server error'))).toBe(false)
     expect(classifyConnectorAuthError('rate limit exceeded')).toBe(false)
+  })
+
+  // ── 403 is NOT 401 ──────────────────────────────────────────────
+  // Regression: production incident 2026-07-20. A fine-grained GitHub PAT with
+  // `Pull requests: Read` on one repo but not another returned this verbatim.
+  // The old classifier matched a bare `\b403\b` and flipped the whole connector
+  // to auth_failed, which made the next injection skip the GitHub tools for
+  // EVERY repo. The credential was alive the entire time.
+  it('does NOT flag a per-resource 403 — the credential is alive, it just cannot touch that resource', () => {
+    const real =
+      'GitHub error: GitHub API error (403): {"message":"Resource not accessible by personal access token",' +
+      '"documentation_url":"https://docs.github.com/rest/pulls/pulls#list-pull-requests","status":"403"}'
+    expect(classifyConnectorAuthError(real)).toBe(false)
+    expect(classifyConnectorAuthError('GitHub error: GitHub API error (403): forbidden')).toBe(false)
+    expect(classifyConnectorAuthError('GitHub API error (403): Resource not accessible by integration')).toBe(false)
+  })
+
+  it('does NOT flag a 403 rate limit or IP allow-list refusal', () => {
+    expect(classifyConnectorAuthError('GitHub API error (403): API rate limit exceeded for user ID 4171296')).toBe(false)
+    expect(classifyConnectorAuthError('GitHub API error (403): You have exceeded a secondary rate limit')).toBe(false)
+    expect(classifyConnectorAuthError('GitHub API error (403): Although you appear to have the correct authorization credentials, your IP address is not permitted')).toBe(false)
+  })
+
+  it('DOES flag a 403 that names a re-authorization requirement (SSO/SAML)', () => {
+    expect(
+      classifyConnectorAuthError(
+        'GitHub API error (403): Resource protected by organization SAML enforcement. ' +
+          'You must grant your Personal Access Token access to this organization.',
+      ),
+    ).toBe(true)
+  })
+
+  it('ignores an incidental 401/403 that is not an HTTP status', () => {
+    // A bare \b403\b previously matched any of these.
+    expect(classifyConnectorAuthError('GitHub error: pull request #403 could not be merged')).toBe(false)
+    expect(classifyConnectorAuthError('GitHub error: 401 files changed')).toBe(false)
   })
 })
 

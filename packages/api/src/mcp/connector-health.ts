@@ -21,24 +21,90 @@ import type { Tool } from '@use-brian/core'
 import type { ConnectorInstanceStore, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 
 /**
- * True when an error/message looks like a credential or authorization failure
- * (the connector needs reconnecting), as opposed to a transient network blip,
- * rate limit, or a not-found. Deliberately conservative: only a clear auth
- * signal flips health, so a flaky network never marks a live connector dead.
- * Matches the messages the provider clients emit (github/notion/fathom/google).
+ * Message fragments that mean the CREDENTIAL ITSELF is dead — reconnecting is
+ * the only recovery. Provider-agnostic (github/notion/fathom/google).
+ */
+const CREDENTIAL_DEAD_SIGNALS = [
+  'invalid_grant',
+  'bad credentials',
+  'invalid or revoked',
+  'invalid or expired',
+  'expired or revoked',
+  'token expired',
+  'token has been revoked',
+  'unauthorized',
+]
+
+/**
+ * 403s that STILL need a human to re-authorize the credential: the token is
+ * structurally valid but was never authorized for this org, so reconnecting
+ * (and completing SSO) is genuinely the fix. GitHub's SAML/SSO wording.
+ */
+const FORBIDDEN_REAUTH_SIGNALS = [
+  'saml enforcement',
+  'saml sso',
+  'single sign-on',
+  'must grant your personal access token',
+]
+
+/**
+ * Refusals that must NEVER flip health even though the provider returns 403.
+ * The credential is alive and works elsewhere — it simply may not touch THIS
+ * resource, or it is being throttled. Reconnecting changes nothing, and marking
+ * the connector dead disables it for every other repo/workflow in the
+ * workspace. (Production incident 2026-07-20: a fine-grained GitHub PAT lacking
+ * `Pull requests: Read` on one of two repos returned `403 Resource not
+ * accessible by personal access token`; that flipped the whole connector to
+ * `auth_failed`, so the next injection skipped the GitHub tools entirely and the
+ * morning digest lost GitHub for every repo.)
+ */
+const NOT_CREDENTIAL_SIGNALS = [
+  'resource not accessible',
+  'rate limit',
+  'abuse detection',
+  'ip allow list',
+  'ip address is not permitted',
+]
+
+/**
+ * True when `code` appears as an HTTP status rather than as an incidental
+ * number. A bare `\b403\b` also matches a PR number, an id, or a count — an
+ * unrelated message mentioning "403" must not mark a live connector dead.
+ */
+function hasHttpStatus(msg: string, code: '401' | '403'): boolean {
+  return new RegExp(
+    `\\(${code}\\)` +                                  // "GitHub API error (403):"
+      `|"?status"?\\s*[:=]\\s*"?${code}\\b` +          // `"status":"403"` / `status: 403`
+      `|\\bhttp[^0-9]{0,3}${code}\\b` +                // "HTTP 403"
+      `|\\b${code}\\s+(?:unauthorized|forbidden)\\b`,  // "401 Unauthorized"
+  ).test(msg)
+}
+
+/**
+ * True when an error/message means the connector's stored credential is dead
+ * and needs reconnecting. Deliberately conservative — a transient blip, a 404,
+ * a rate limit, or a per-resource permission gap must never mark a live
+ * connector dead.
+ *
+ * 401 and 403 are NOT equivalent and must not be conflated:
+ *   401 → "your credential is bad"            → auth_failed
+ *   403 → "you may not touch THIS resource"   → healthy, unless the message
+ *          says the token needs re-authorizing (SSO/SAML).
  */
 export function classifyConnectorAuthError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
-  return (
-    /\b(401|403)\b/.test(msg) ||
-    msg.includes('invalid_grant') ||
-    msg.includes('bad credentials') ||
-    msg.includes('invalid or revoked') ||
-    msg.includes('invalid or expired') ||
-    msg.includes('expired or revoked') ||
-    msg.includes('unauthorized') ||
-    msg.includes('forbidden')
-  )
+
+  // Unambiguous credential death wins outright.
+  if (CREDENTIAL_DEAD_SIGNALS.some((s) => msg.includes(s))) return true
+  if (hasHttpStatus(msg, '401')) return true
+
+  // Explicit per-resource / quota refusals are healthy, whatever status rides along.
+  if (NOT_CREDENTIAL_SIGNALS.some((s) => msg.includes(s))) return false
+
+  // A 403 only counts when it names a re-authorization requirement.
+  if (hasHttpStatus(msg, '403')) return FORBIDDEN_REAUTH_SIGNALS.some((s) => msg.includes(s))
+
+  return false
 }
 
 /** Fire-and-forget health writer — never blocks or fails the tool call. */
