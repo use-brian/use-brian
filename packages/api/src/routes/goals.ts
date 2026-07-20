@@ -29,7 +29,7 @@ import {
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getGoalById, setGoalStatusSystem, updateGoalSystem } from '../db/goals.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 

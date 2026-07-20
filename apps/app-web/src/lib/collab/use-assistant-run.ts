@@ -19,7 +19,7 @@
 
 import { useEffect, useState } from "react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 
 /** An awareness client state may carry the server-published run field. */
 type AwarenessWithRun = { assistantRun?: AssistantRunState | null };

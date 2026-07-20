@@ -5,13 +5,13 @@ import pg from 'pg'
  * Schema-application test for migration 131 (pending_ingest_batches).
  * Verifies the table shape, the partial drain index, the events JSONB
  * default, and ON DELETE CASCADE on both rule_id and workspace_id.
- * Skips silently when the local `sidanclaw` database is unavailable.
+ * Skips silently when the local `Use Brian` database is unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

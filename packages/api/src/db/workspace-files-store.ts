@@ -1,4 +1,4 @@
-import type { WorkspaceFilesStore } from '@sidanclaw/core'
+import type { WorkspaceFilesStore } from '@use-brian/core'
 import {
   createWorkspaceFile,
   getWorkspaceFileById,

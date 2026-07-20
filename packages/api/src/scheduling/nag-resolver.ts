@@ -22,8 +22,8 @@
  * Component tag: [COMP:api/scheduling-nag-resolver].
  */
 
-import type { JobStore, ScheduledJob } from '@sidanclaw/core'
-import { computeNextRun } from '@sidanclaw/core'
+import type { JobStore, ScheduledJob } from '@use-brian/core'
+import { computeNextRun } from '@use-brian/core'
 
 export type NagResolutionResult = {
   /** Number of activeNag rows cleared by this call. */

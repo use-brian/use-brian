@@ -2,7 +2,7 @@
  * Unit tests for the deferred-confirmation prompt delivery module
  * (Phase 2 cutover §E). Component tag: [COMP:scheduling/confirmation-prompt].
  *
- * Pure unit tests — the `@sidanclaw/channels` adapters are mocked, so no
+ * Pure unit tests — the `@use-brian/channels` adapters are mocked, so no
  * network. Covers the BYO → shared-bot token resolution order and the
  * best-effort delivery contract: a send failure is logged and swallowed,
  * never thrown (the confirmation still times out gracefully).
@@ -12,14 +12,14 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('@sidanclaw/channels', () => ({
+vi.mock('@use-brian/channels', () => ({
   createSlackAdapter: vi.fn(),
   createTelegramAdapter: vi.fn(),
   createWhatsAppAdapter: vi.fn(),
 }))
 
-import { createTelegramAdapter } from '@sidanclaw/channels'
-import type { ToolConfirmationRequest } from '@sidanclaw/core'
+import { createTelegramAdapter } from '@use-brian/channels'
+import type { ToolConfirmationRequest } from '@use-brian/core'
 
 import { resolveTelegramBotToken, sendConfirmationPrompt } from '../confirmation-prompt.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'

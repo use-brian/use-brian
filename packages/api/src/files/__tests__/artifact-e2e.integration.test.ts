@@ -3,7 +3,7 @@ import pg from 'pg'
 import os from 'node:os'
 import path from 'node:path'
 import { mkdtempSync } from 'node:fs'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 /**
  * END-TO-END integration for the large-content-artifacts chain (goal
@@ -26,7 +26,7 @@ import type { RetrievalActor } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -67,7 +67,7 @@ describeIf('[COMP:files/artifact-e2e] promote → job → worker → retrieval (
   let workspaceId: string
   let assistantId: string
   let actor: RetrievalActor
-  let filesApi: import('@sidanclaw/core').FilesApi
+  let filesApi: import('@use-brian/core').FilesApi
   let promote: import('../artifact-promote.js').ArtifactPromoter
   let jobsStore: typeof import('../../db/file-ingest-jobs-store.js')
   let retrieval: typeof import('../../db/retrieval-store.js')

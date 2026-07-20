@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { FilesContext } from '@sidanclaw/core'
+import type { FilesContext } from '@use-brian/core'
 
 // Unit-level store test: `query` and the SSE notify are mocked so no pg /
 // LISTEN infra is needed — what's under test is the store's row mapping,

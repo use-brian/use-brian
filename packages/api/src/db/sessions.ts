@@ -89,7 +89,7 @@ export type SessionMessage = {
   attachments: SessionMessageAttachment[]
 }
 
-/** One outbound attachment — mirrors `OutboundAttachment` in @sidanclaw/core. */
+/** One outbound attachment — mirrors `OutboundAttachment` in @use-brian/core. */
 export type SessionMessageAttachment = {
   fileId: string
   workspaceId: string
@@ -140,7 +140,7 @@ export async function findOrCreateSession(params: {
    */
   effectiveClearance?: string | null
 }): Promise<Session> {
-  const appId = params.appId ?? 'sidanclaw'
+  const appId = params.appId ?? 'Use Brian'
   const appOrigin = params.appOrigin ?? null
   const visibility = params.visibility ?? 'owner'
   const workspaceId = params.workspaceId ?? null
@@ -179,7 +179,7 @@ export async function findSessionByChannel(params: {
   channelId: string
   appId?: string
 }): Promise<Session | null> {
-  const appId = params.appId ?? 'sidanclaw'
+  const appId = params.appId ?? 'Use Brian'
   const result = await query<Session>(
     `SELECT id, assistant_id as "assistantId", user_id as "userId",
             channel_type as "channelType", channel_id as "channelId",
@@ -222,7 +222,7 @@ export async function createInspectionSession(params: {
   userId: string
   appId?: string
 }): Promise<Session> {
-  const appId = params.appId ?? 'sidanclaw'
+  const appId = params.appId ?? 'Use Brian'
   // Fresh UUID per call — no conflict on the (assistant, user,
   // channel_type, channel_id, app_id) uniqueness constraint, since the
   // channel_id is unique per Ask. crypto.randomUUID() ships in Node ≥ 19.
@@ -844,7 +844,7 @@ export async function getPreferredChannel(
 // ── Introspection: workspace session history (audit §6-a) ────────────
 //
 // Backs the `listWorkspaceSessions` / `readSessionTranscript` introspection
-// tools (SessionHistoryIntrospectionPort in @sidanclaw/core). The workspace
+// tools (SessionHistoryIntrospectionPort in @use-brian/core). The workspace
 // primary may read the workspace's assistants' transcripts. Both reads scope
 // via the `assistants.workspace_id = $1` join — which structurally EXCLUDES
 // other members' personal assistants (their `workspace_id` is NULL or a

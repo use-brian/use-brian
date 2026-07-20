@@ -741,7 +741,7 @@ export const MAX_LIST_INDENT = 12
  * schema). Lenient by construction: 0 / negative / non-integer /
  * non-number all normalize to "no indent", and a value past the cap clamps, so
  * a stray model value can never reject a page. The block↔ProseMirror mapping
- * (`@sidanclaw/doc-model` `block-mapping.ts`) further clamps an illegal jump to
+ * (`@use-brian/doc-model` `block-mapping.ts`) further clamps an illegal jump to
  * one level deeper than its predecessor when it builds the nested list tree.
  */
 const listIndentSchema = z.preprocess((v) => {

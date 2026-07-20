@@ -26,7 +26,7 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import { MessageSquare, X } from "lucide-react";
-import { isImageIcon } from "@sidanclaw/shared/page-icon";
+import { isImageIcon } from "@use-brian/shared/page-icon";
 import {
   fetchPublicPageFor,
   publicStreamUrlFor,

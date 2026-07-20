@@ -6,7 +6,7 @@
  *
  * Lock #15 v1 ships **two** mention types: `@person` (workspace member)
  * and `@page` (workspace page). Both node specs are mirrored in the SHARED
- * schema (`@sidanclaw/doc-model` → `PersonMention` / `PageMention`) so the
+ * schema (`@use-brian/doc-model` → `PersonMention` / `PageMention`) so the
  * Yjs server derives the same node types and an inline mention round-trips
  * through the CRDT to every collaborator. This file's `PersonMentionNode`
  * is the byte-identical browser copy (registered in the editor while the
@@ -97,7 +97,7 @@ export type PersonMentionExtensionOptions = {
 
 /**
  * The `personMention` ProseMirror node — byte-identical to
- * `@sidanclaw/doc-model`'s `PersonMention` (kept in lockstep so the two Yjs
+ * `@use-brian/doc-model`'s `PersonMention` (kept in lockstep so the two Yjs
  * ends agree). Inline atom carrying `{ id, name, avatarUrl }`; renders an
  * `<span data-mention="person">@name</span>` pill.
  */

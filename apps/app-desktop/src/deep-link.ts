@@ -1,13 +1,13 @@
 /**
- * Deep-link resolution — map a `sidanclaw://` URL to a canvas URL to load.
+ * Deep-link resolution — map a `usebrian://` URL to a canvas URL to load.
  *
  * Pure: `resolveDeepLink` takes the raw URL + config and returns an absolute
  * URL string, or `null` when the link does not parse, is not our scheme, or
  * fails the same-origin path guard. Unit-tests with no Electron.
  *
  * Supported links:
- *   sidanclaw://open?path=/w/<ws>/p/<page>  -> ${appUrl}/w/<ws>/p/<page>
- *   sidanclaw://capture                      -> quickCaptureUrl(appUrl)
+ *   usebrian://open?path=/w/<ws>/p/<page>  -> ${appUrl}/w/<ws>/p/<page>
+ *   usebrian://capture                      -> quickCaptureUrl(appUrl)
  *
  * Spec: docs/architecture/features/app-desktop.md → "deep-link.ts"
  * [COMP:app-desktop/deep-link]
@@ -21,7 +21,7 @@ interface DeepLinkConfig {
 }
 
 /**
- * Resolve a `sidanclaw://` deep link to an absolute canvas URL.
+ * Resolve a `usebrian://` deep link to an absolute canvas URL.
  *
  * Returns `null` for anything that does not parse, is not our scheme, or whose
  * `path` would leave the canvas origin. The `path` query param **must start

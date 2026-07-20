@@ -20,7 +20,7 @@
  * [COMP:app-web/build-activity]
  */
 
-import type { ToolUsed } from "@sidanclaw/chat-ui";
+import type { ToolUsed } from "@use-brian/chat-ui";
 import type { BuildEvent } from "@/lib/build-events";
 
 export type BuildActivity = {

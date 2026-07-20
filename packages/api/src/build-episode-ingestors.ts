@@ -2,7 +2,7 @@
  * OPEN episode-ingestor factory — the open default for `ports.buildEpisodeIngestors`.
  *
  * Pipeline B (the entity/fact/edge extraction coordinator) lives in OPEN core
- * (`@sidanclaw/core` → `processEpisode`), and every store it needs is built in
+ * (`@use-brian/core` → `processEpisode`), and every store it needs is built in
  * the open boot graph. The only thing the hosted tier kept closed was the thin
  * WIRING that (a) persists an Episode row and (b) calls `processEpisode` over
  * those stores. This module is the open implementation of exactly that wiring,
@@ -26,7 +26,7 @@ import {
   type PipelineBEpisode,
   type Sensitivity,
   type SourceKind,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { EpisodeIngestorDeps } from './boot.js'
 import type { EpisodeSensitivity } from './db/episodes-store.js'
 import type { BrainEpisodeIngestor, ChatEpisodeIngestor } from './ingest-port.js'

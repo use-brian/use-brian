@@ -15,7 +15,7 @@
 import type { FetchProvider, FetchResult } from './fetch-stack.js'
 import { isXHost } from './fetch-xai.js'
 
-const USER_AGENT = 'Mozilla/5.0 (compatible; sidanclaw/1.0)'
+const USER_AGENT = 'Mozilla/5.0 (compatible; use-brian/1.0)'
 
 export const rawFetchProvider: FetchProvider = {
   name: 'raw',

@@ -30,7 +30,7 @@ const ctx: ToolContext = {
   userId: 'u',
   assistantId: 'a',
   sessionId: 's',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c',
   abortSignal: new AbortController().signal,

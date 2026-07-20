@@ -26,7 +26,7 @@
  * [COMP:api/doc-page-store]
  */
 
-import type { DocPageRead, DocPageStore, NameOrigin, Page } from '@sidanclaw/core'
+import type { DocPageRead, DocPageStore, NameOrigin, Page } from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 
 // ── Row projections ────────────────────────────────────────────────────

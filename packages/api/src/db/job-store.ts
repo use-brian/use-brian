@@ -1,4 +1,4 @@
-import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@sidanclaw/core'
+import type { JobStore, ScheduledJob, ScheduledJobMode, ScheduledJobState, StructuredSchedule } from '@use-brian/core'
 import { query } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 

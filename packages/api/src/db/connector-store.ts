@@ -35,7 +35,7 @@ import {
   decryptCredentials,
 } from './credential-crypto.js'
 import type { ChannelCredentials } from './channel-integrations.js'
-import type { ConnectorAuthType } from '@sidanclaw/shared'
+import type { ConnectorAuthType } from '@use-brian/shared'
 
 // ── Types ──────────────────────────────────────────────────────
 

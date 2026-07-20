@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { Block, Page } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
 import { pageToPlaintext } from '../block-mapping.js'
 import { pageToYDoc, yDocToPlaintext } from '../encode.js'
 import { ALL_KINDS_PAGE } from './fixtures.js'

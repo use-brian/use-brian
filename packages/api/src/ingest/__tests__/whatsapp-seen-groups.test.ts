@@ -10,7 +10,7 @@ import {
   recordSeenWhatsappGroup,
   recordRosteredWhatsappGroups,
 } from '../whatsapp-seen-groups.js'
-import type { ChannelIntegrationConfig } from '@sidanclaw/api/db/channel-integrations.js'
+import type { ChannelIntegrationConfig } from '@use-brian/api/db/channel-integrations.js'
 
 const INTEGRATION_ID = 'cint_wa_1'
 const GROUP = '120363000000000000@g.us'

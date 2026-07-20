@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { extractCitations, formatStamp, type CitationIndex } from '@sidanclaw/shared'
+import { extractCitations, formatStamp, type CitationIndex } from '@use-brian/shared'
 import type { AccessContext } from '../security/access-context.js'
 import { unionCompartments } from '../security/compartments.js'
 import { buildTool, type Tool } from '../tools/types.js'

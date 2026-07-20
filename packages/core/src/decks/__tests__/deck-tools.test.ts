@@ -1,6 +1,6 @@
 import JSZip from 'jszip'
 import { beforeEach, describe, expect, it } from 'vitest'
-import type { DeckSpec } from '@sidanclaw/shared/decks'
+import type { DeckSpec } from '@use-brian/shared/decks'
 import type { FilesApi, FilesContext } from '../../workspace-files/api.js'
 import type { WorkspaceFile } from '../../workspace-files/types.js'
 import type { ToolContext } from '../../tools/types.js'

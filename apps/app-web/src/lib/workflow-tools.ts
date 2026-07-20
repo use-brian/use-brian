@@ -10,7 +10,7 @@
  *
  * Two group sources:
  *   - **Built-in** — the curated first-party base tools below. app-web cannot
- *     import `@sidanclaw/core` (where these are registered), so the list is a
+ *     import `@use-brian/core` (where these are registered), so the list is a
  *     small local catalog; the names are verified against
  *     `packages/core/src/tools/base/index.ts` (`createBaseTools`) and
  *     `packages/core/src/memory/tools.ts`. It is a convenience catalog, not a
@@ -20,7 +20,7 @@
  *   - **Connectors** — derived at runtime from the shared connector registry
  *     (`OFFICIAL_CONNECTORS` order × `OFFICIAL_CONNECTOR_TOOLS`), never
  *     hardcoded, so adding a connector surfaces it here for free. Imported via
- *     the `@sidanclaw/shared/builtin-connectors` subpath (not the barrel) to
+ *     the `@use-brian/shared/builtin-connectors` subpath (not the barrel) to
  *     keep the server-only `env.js` module out of the client bundle — the same
  *     rule `connector-action-grants.tsx` follows.
  *
@@ -31,8 +31,8 @@
 import {
   OFFICIAL_CONNECTOR_TOOLS,
   type BuiltinToolClassification,
-} from "@sidanclaw/shared/builtin-connectors";
-import { OFFICIAL_CONNECTORS } from "@sidanclaw/shared/connector-registry";
+} from "@use-brian/shared/builtin-connectors";
+import { OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 
 /** One selectable tool row. `name` is the exact allow-list match key. */
 export type ToolCatalogItem = {

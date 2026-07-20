@@ -38,7 +38,7 @@
  * `client_secret` of an `oauth`-typed blob.
  *
  * Google / Notion / Fathom additionally need their OAuth *app* credentials: the
- * server-side secret via `~/.sidanclaw/connectors.config.json` (or `*_CLIENT_*`
+ * server-side secret via `~/.usebrian/connectors.config.json` (or `*_CLIENT_*`
  * env) for the callback's token exchange, and the public client id via
  * `NEXT_PUBLIC_*_CLIENT_ID` for app-web's client-side authorize redirect. GitHub
  * is PAT-only and needs neither.
@@ -55,8 +55,8 @@
  */
 
 import { Router } from 'express'
-import { classifyTool, defaultPolicy } from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@sidanclaw/shared'
+import { classifyTool, defaultPolicy } from '@use-brian/core'
+import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance, ConnectorHealthStatus } from '../db/connector-instance-store.js'
 import { buildConnectorAuthHeaders } from '../mcp/auth-headers.js'

@@ -42,7 +42,7 @@ function ctx(overrides: { workspaceId?: string | null } = {}) {
     userId: USER,
     assistantId: 'a',
     sessionId: 's',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'web',
     channelId: 'web-1',
     workspaceId: overrides.workspaceId === undefined ? WS : overrides.workspaceId,

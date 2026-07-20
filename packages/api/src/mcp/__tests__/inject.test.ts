@@ -442,9 +442,13 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9200/mcp', 'Actor MCP', {
       Authorization: 'Bearer tok',
       'X-Tenant': 'acme',
+      'X-UseBrian-Actor-Channel': 'web',
       'X-Sidanclaw-Actor-Channel': 'web',
+      'X-UseBrian-User-Id': 'u-actor-1',
       'X-Sidanclaw-User-Id': 'u-actor-1',
+      'X-UseBrian-Actor-Id': 'ceo@corp.com',
       'X-Sidanclaw-Actor-Id': 'ceo@corp.com',
+      'X-UseBrian-Actor-Email': 'ceo@corp.com',
       'X-Sidanclaw-Actor-Email': 'ceo@corp.com',
     })
   })
@@ -492,6 +496,7 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     })
     // Media token present; actor headers absent (that connector opted out of identity).
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9210/mcp', 'Media MCP', {
+      'X-UseBrian-Media-Token': 'tok.media.sig',
       'X-Sidanclaw-Media-Token': 'tok.media.sig',
     })
   })
@@ -516,8 +521,11 @@ describe('[COMP:api/mcp-inject] custom connector auth threading', () => {
     })
     // Actor headers present (identity opt-in), but NO media token.
     expect(discoverMcpServer).toHaveBeenCalledWith('http://localhost:9211/mcp', 'No-Media MCP', {
+      'X-UseBrian-Actor-Channel': 'whatsapp',
       'X-Sidanclaw-Actor-Channel': 'whatsapp',
+      'X-UseBrian-User-Id': 'u-media-2',
       'X-Sidanclaw-User-Id': 'u-media-2',
+      'X-UseBrian-Actor-Id': '+15551234567',
       'X-Sidanclaw-Actor-Id': '+15551234567',
     })
   })
@@ -847,7 +855,7 @@ describe('[COMP:integrations/connector-health] team-native connector health gate
   function teamGithub(healthStatus: 'ok' | 'auth_failed') {
     return {
       id: 'ci-ws', scope: 'workspace', userId: null, workspaceId: 'ws-1',
-      provider: 'github', label: 'sidanclaw', connectedEmail: null, url: null,
+      provider: 'github', label: 'Use Brian', connectedEmail: null, url: null,
       custom: false, config: {}, sensitivity: 'internal', connected: true,
       ingestionEnabled: false, credentialsType: 'oauth', healthStatus,
       lastError: null, lastCheckedAt: null, createdBy: null,

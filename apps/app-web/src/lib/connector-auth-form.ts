@@ -16,7 +16,7 @@
  * Component tag: [COMP:app-web/connector-auth-form].
  */
 
-import type { ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
+import type { ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 
 export type CustomConnectorForm = {
   name: string;

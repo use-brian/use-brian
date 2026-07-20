@@ -80,7 +80,7 @@ function makeContext(over: Partial<ToolContext> = {}): ToolContext {
     userId: 'u-1',
     assistantId: 'a-1',
     sessionId: 's-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'telegram',
     channelId: 'c-1',
     workspaceId: 'ws-1',

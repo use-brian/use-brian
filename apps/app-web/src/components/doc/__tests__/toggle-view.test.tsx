@@ -26,7 +26,7 @@ import {
   splitBlock,
 } from "@tiptap/pm/commands";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";

@@ -1,4 +1,4 @@
-import type { PlanStepRecord, PlanStore } from '@sidanclaw/core'
+import type { PlanStepRecord, PlanStore } from '@use-brian/core'
 import {
   upsertPlanStep,
   updatePlanStepStatus,

@@ -26,7 +26,7 @@
  *     help pages authored afterwards, and would need a backfill over
  *     `saved_views` blocks to catch up.
  *
- * The parse is `parseStamp` from `@sidanclaw/shared` — the SAME module the
+ * The parse is `parseStamp` from `@use-brian/shared` — the SAME module the
  * transcriber, the transcript file, and the synthesis prompt use. Writer and
  * reader change together or the model cites stamps the UI cannot linkify. It
  * also rejects an impossible stamp (`[00:85]`), so a hallucinated citation
@@ -39,7 +39,7 @@ import { Extension } from "@tiptap/core";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import { scanStamps } from "@sidanclaw/shared";
+import { scanStamps } from "@use-brian/shared";
 
 const timecodeKey = new PluginKey("timecodeCitations");
 

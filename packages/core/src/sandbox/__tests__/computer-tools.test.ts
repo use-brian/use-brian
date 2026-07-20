@@ -212,7 +212,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     const tools = createComputerTools({ local, cloud: fakeProvider('cloud') })
     const res = await run(tools.browserSnapshot, {})
     expect(res.isError).toBe(true)
-    expect(String(res.data)).toContain('sidanclaw extension')
+    expect(String(res.data)).toContain('Use Brian extension')
     expect(res.meta?.code).toBe('no_extension')
   })
 
@@ -468,6 +468,34 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       expect(String(res.data)).toContain('asking for a login')
       expect(String(res.data)).toContain('https://app.test/w/ws-1/computer/sess-1')
       expect(paused).toBe(1)
+    })
+
+    it('a DataDome device-check interstitial (original URL, site title, challenge iframe only) is detected', async () => {
+      // Klook 2026-07-19: DataDome serves the challenge at the ORIGINAL url
+      // with the site's own title — only the iframe's accessible name gives
+      // it away. The old node pattern missed it, so the model silently gave
+      // up on the site instead of offering the take-over link.
+      const cloud = fakeProvider('cloud')
+      cloud.snapshot = async () => {
+        cloud.calls.push('snapshot')
+        return {
+          url: 'https://www.klook.com/zh-HK/activity/103233?package_id=351986',
+          title: 'klook.com',
+          nodes: [
+            { ref: '@e1', role: 'Iframe', name: 'DataDome Device Check' },
+            { ref: '@e2', role: 'button', name: 'Contact us' },
+          ],
+        }
+      }
+      const tools = createComputerTools({
+        local: fakeProvider('local'),
+        cloud,
+        cloudAvailable: () => true,
+        takeoverLinkFor: () => 'https://app.test/w/ws-1/computer/sess-1',
+      })
+      const res = await run(tools.browserNavigate, { url: 'https://s.klook.com/c/V1Molp7O30' })
+      expect(String(res.data)).toContain('human-verification challenge')
+      expect(String(res.data)).toContain('https://app.test/w/ws-1/computer/sess-1')
     })
 
     it('a captcha-free snapshot resets the counter', async () => {

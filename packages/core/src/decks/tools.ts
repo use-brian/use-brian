@@ -7,7 +7,7 @@ import {
   deckSpecShape,
   type DeckSpec,
   type DeckStyle,
-} from '@sidanclaw/shared/decks'
+} from '@use-brian/shared/decks'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { FilesApi, FilesContext } from '../workspace-files/api.js'
 import { ctxFor, errorMessage, workspaceGate } from '../workspace-files/tool-helpers.js'
@@ -74,7 +74,7 @@ export interface DeckStorePort {
 export interface DeckToolOptions {
   filesApi: FilesApi
   deckStore: DeckStorePort
-  /** app-web origin (e.g. https://app.sidan.ai) for previewUrl links; omit to skip links. */
+  /** app-web origin (e.g. https://app.usebrian.ai) for previewUrl links; omit to skip links. */
   appOrigin?: string
 }
 

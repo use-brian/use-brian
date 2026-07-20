@@ -5,8 +5,8 @@ import { selectFreshestAccessToken, getValidAccessToken } from "@/lib/auth-fetch
 // the offline guard below is the only thing standing between a stale token and
 // a full-page bounce to the primary.
 vi.mock("@/lib/primary-auth", () => ({
-  primaryAuthUrl: () => "https://sidan.ai",
-  buildPrimaryAuthUrl: () => "https://sidan.ai",
+  primaryAuthUrl: () => "https://usebrian.ai",
+  buildPrimaryAuthUrl: () => "https://usebrian.ai",
 }));
 
 /**
@@ -79,7 +79,7 @@ describe("[COMP:app-web/auth-fetch] offline refresh guard", () => {
   });
 
   it("offline: does NOT navigate to the primary — returns the current token (no logout)", async () => {
-    const location = { href: "https://app.sidan.ai/w/1", origin: "https://app.sidan.ai" };
+    const location = { href: "https://app.usebrian.ai/w/1", origin: "https://app.usebrian.ai" };
     vi.stubGlobal("window", { location });
     vi.stubGlobal("document", { cookie: `access_token=${expiredToken}` });
     vi.stubGlobal("navigator", { onLine: false });
@@ -90,11 +90,11 @@ describe("[COMP:app-web/auth-fetch] offline refresh guard", () => {
     // NOT fire (href unchanged) — so the desktop shell never intercepts a failed
     // refresh and never bounces the user to sign-in. This is the offline→logout fix.
     expect(token).toBe(expiredToken);
-    expect(location.href).toBe("https://app.sidan.ai/w/1");
+    expect(location.href).toBe("https://app.usebrian.ai/w/1");
   });
 
   it("online: a stale token triggers the primary refresh-and-return bounce (unchanged prod behavior)", async () => {
-    const location = { href: "https://app.sidan.ai/w/1", origin: "https://app.sidan.ai" };
+    const location = { href: "https://app.usebrian.ai/w/1", origin: "https://app.usebrian.ai" };
     vi.stubGlobal("window", { location });
     vi.stubGlobal("document", { cookie: `access_token=${expiredToken}` });
     vi.stubGlobal("navigator", { onLine: true });

@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ReactElement } from 'react'
 import { renderWidget } from '../render.js'
-import type { TableWidget } from '@sidanclaw/core'
+import type { TableWidget } from '@use-brian/core'
 
 function elementType(el: ReactElement): string {
   const t = el.type

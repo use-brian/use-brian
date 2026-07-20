@@ -9,7 +9,7 @@
  */
 
 import type { EpisodeSensitivity } from './db/episodes-store.js'
-import type { PipelineBResult, SourceKind } from '@sidanclaw/core'
+import type { PipelineBResult, SourceKind } from '@use-brian/core'
 
 export type ChatEpisodeInput = {
   workspaceId: string

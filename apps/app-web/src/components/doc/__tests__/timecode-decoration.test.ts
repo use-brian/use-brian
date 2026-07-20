@@ -3,7 +3,7 @@
  *
  * app-web's vitest is node-only, so this exercises the pure `findTimecodes`
  * scan against a real ProseMirror doc built from the shared
- * `@sidanclaw/doc-model` schema (matching `ai-generating-decoration.test.ts`);
+ * `@use-brian/doc-model` schema (matching `ai-generating-decoration.test.ts`);
  * the click interception is an e2e concern.
  *
  * The contract that matters: a citation is TEXT the model wrote, found by the
@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import { findTimecodes } from "../timecode-decoration";
 
 const schema = docSchema();

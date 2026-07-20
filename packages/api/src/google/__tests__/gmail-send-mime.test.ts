@@ -136,28 +136,28 @@ describe('[COMP:tools/gmail-send-as] sendGmailMessage From header (alias sending
   })
 
   it('sets the From header on the text-only path when an alias is given', async () => {
-    await sendGmailMessage(TOKEN, { ...BASE, from: 'hinson.wong@sidan.ai' })
+    await sendGmailMessage(TOKEN, { ...BASE, from: 'hinson.wong@usebrian.ai' })
 
     const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
     const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
-    expect(decoded).toContain('From: hinson.wong@sidan.ai')
+    expect(decoded).toContain('From: hinson.wong@usebrian.ai')
   })
 
   it('sets the From header on the multipart (attachments) path', async () => {
     await sendGmailMessage(TOKEN, {
       ...BASE,
-      from: 'hinson.wong@sidan.ai',
+      from: 'hinson.wong@usebrian.ai',
       attachments: [{ filename: 'a.txt', mime: 'text/plain', data: new Uint8Array([1]) }],
     })
 
     const mime = (sentRequest().init.body as Buffer).toString('utf-8')
-    expect(mime).toContain('From: hinson.wong@sidan.ai')
+    expect(mime).toContain('From: hinson.wong@usebrian.ai')
   })
 
   it('strips embedded CR/LF from To/From/Subject so no extra header line can be injected', async () => {
     await sendGmailMessage(TOKEN, {
       to: 'a@b.co\r\nBcc: evil@attacker.com',
-      from: 'hinson.wong@sidan.ai\r\nX-Injected: yes',
+      from: 'hinson.wong@usebrian.ai\r\nX-Injected: yes',
       subject: 'Hi\r\nBcc: evil@attacker.com',
       body: 'x',
     })

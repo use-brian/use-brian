@@ -7,7 +7,7 @@
  * authorization gate; user reads go through the app pool (`queryWithRLS`),
  * confined by the `goals_workspace_member` policy.
  */
-import type { DoneWhenNode, EventSubscription, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalMeans, GoalRecord, GoalStatus } from '@sidanclaw/core'
+import type { DoneWhenNode, EventSubscription, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 
 /**

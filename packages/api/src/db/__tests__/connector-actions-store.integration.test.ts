@@ -7,7 +7,7 @@ import { query } from '../client.js'
 /**
  * Integration tests for createDbConnectorActionStore (WU-6.6).
  *
- * Requires the local `sidanclaw` PostgreSQL database with migration 136
+ * Requires the local `Use Brian` PostgreSQL database with migration 136
  * (`connector_actions`, WU-6.1) applied. Skips silently when the DB isn't
  * reachable OR when migration 136 hasn't run yet — WU-6.1 is a separate
  * work unit, and this suite is a no-op until it ships.
@@ -19,7 +19,7 @@ let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
   // Probe through client.js's `query` — the same pool the store-under-test
-  // uses. A hardcoded `sidanclaw` pool would skip-guard the wrong
+  // uses. A hardcoded `Use Brian` pool would skip-guard the wrong
   // connection: the store resolves its DB from DATABASE_URL, so guarding a
   // fixed db name lets the suite run (and fail) when the two diverge.
   // Migration 136 + the SV 2026-05-14 `source_memory_id` column must exist.
@@ -35,7 +35,7 @@ async function canConnect(): Promise<boolean> {
   } catch {
     return false
   }
-  pool = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  pool = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   return true
 }
 

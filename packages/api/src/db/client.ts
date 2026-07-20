@@ -19,7 +19,7 @@ const CURRENT_USER_ID_SENTINEL = '00000000-0000-0000-0000-000000000000'
  * The fallback must therefore be small: a service whose deploy script forgets
  * `PG_POOL_MAX` must not be able to eat the fleet's slots (the 2026-06-12
  * brain-500s incident: doc-sync + api-admin ran an unbounded 120-per-pool
- * default and starved sidanclaw-api). Exported for tests.
+ * default and starved brian-api). Exported for tests.
  */
 export function resolvePoolMax(raw: string | undefined): number {
   const n = parseInt(raw ?? '', 10)

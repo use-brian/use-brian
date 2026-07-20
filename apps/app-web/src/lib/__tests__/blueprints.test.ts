@@ -8,8 +8,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
-import { MEETING_NOTES_STARTER } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
+import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
 import {
   blankBlueprintBlocks,
   blueprintSectionCount,

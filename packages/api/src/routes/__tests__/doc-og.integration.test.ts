@@ -7,7 +7,7 @@ import {
   parseOgTags,
   type FetchFn,
 } from '../doc-og.js'
-import { createRateLimiter } from '@sidanclaw/core'
+import { createRateLimiter } from '@use-brian/core'
 
 /** Build a stub fetch that returns a fixed HTML body + status. */
 function htmlFetch(html: string, status = 200): FetchFn {

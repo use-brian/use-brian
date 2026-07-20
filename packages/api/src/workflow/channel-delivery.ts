@@ -25,13 +25,13 @@
  * [COMP:workflow/channel-delivery]
  */
 
-import type { DeliverToChannel, DeliveryOutcome } from '@sidanclaw/core'
-import { sanitizeDeliveryText } from '@sidanclaw/shared'
+import type { DeliverToChannel, DeliveryOutcome } from '@use-brian/core'
+import { sanitizeDeliveryText } from '@use-brian/shared'
 import {
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
-} from '@sidanclaw/channels'
+} from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
 import { query } from './../db/client.js'

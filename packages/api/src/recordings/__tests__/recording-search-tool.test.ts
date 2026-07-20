@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { RetrievalActor, ToolContext } from '@sidanclaw/core'
+import type { RetrievalActor, ToolContext } from '@use-brian/core'
 
 // Mock the retrieval store so the tool's routing + closure-binding can be
 // asserted with no DB. vi.hoisted keeps the mock fns referenceable from the

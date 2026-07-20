@@ -1,4 +1,4 @@
-import type { AccessContext, EntityLinksStore, Sensitivity } from '@sidanclaw/core'
+import type { AccessContext, EntityLinksStore, Sensitivity } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getPool, query } from './client.js'

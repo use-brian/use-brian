@@ -2,7 +2,7 @@
  * Pure mappers from *model-authored* visual blocks to their A2UI widget —
  * the client copy of `packages/core/src/views/block-widgets.ts`.
  *
- * app-web does not depend on `@sidanclaw/core` (the core barrel pulls in
+ * app-web does not depend on `@use-brian/core` (the core barrel pulls in
  * `skills/loader` + `fs`, which breaks client bundles — the same reason the
  * `views` SDK is duplicated here), so this small, stable mapper is duplicated
  * rather than imported. **Keep it byte-for-byte in sync with the core copy.**
@@ -23,7 +23,7 @@ import type {
   KpiWidget,
   LineChartWidget,
   PieChartWidget,
-} from "@sidanclaw/views-renderer";
+} from "@use-brian/views-renderer";
 import type { ChartBlock, ChartData, DiagramBlock } from "@/lib/api/views";
 
 /**

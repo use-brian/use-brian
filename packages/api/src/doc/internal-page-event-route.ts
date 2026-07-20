@@ -50,7 +50,7 @@ import {
   type PageLifecycleAction,
   type PageLifecycleEvent,
   type SavedViewStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 export type InternalPageEventRouteOptions = {
   savedViewStore: SavedViewStore

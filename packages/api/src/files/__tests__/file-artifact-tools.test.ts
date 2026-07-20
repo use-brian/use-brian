@@ -7,7 +7,7 @@ vi.mock('../../db/retrieval-store.js', () => ({
 
 import { createSearchFileContentTool } from '../file-artifact-tools.js'
 import { searchFileSegments, readFileSegmentRange } from '../../db/retrieval-store.js'
-import type { ToolContext } from '@sidanclaw/core'
+import type { ToolContext } from '@use-brian/core'
 
 const mockSearch = vi.mocked(searchFileSegments)
 const mockRange = vi.mocked(readFileSegmentRange)

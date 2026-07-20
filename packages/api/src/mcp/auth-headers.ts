@@ -25,12 +25,17 @@ const MAX_HEADER_NAME_LENGTH = 128
 const MAX_HEADER_VALUE_LENGTH = 8192
 
 /**
- * Reserved outbound-header namespace for sidanclaw-asserted values (the actor
+ * Reserved outbound-header namespaces for Use Brian-asserted values (the actor
  * identity headers below). User-controllable config — `preflightHeadersToRecord`
- * — drops any header in this namespace so a user can't forge an identity claim
+ * — drops any header in these namespaces so a user can't forge an identity claim
  * that a connector trusts for auth. Lowercase; matched case-insensitively.
+ *
+ * Two namespaces during the rebrand transition: `x-usebrian-` is canonical;
+ * `x-sidanclaw-` is the legacy namespace still dual-emitted for connectors
+ * that consume it. Retire the legacy emit (never the guard) after a
+ * deprecation window.
  */
-export const RESERVED_HEADER_PREFIX = 'x-sidanclaw-'
+export const RESERVED_HEADER_PREFIXES = ['x-usebrian-', 'x-sidanclaw-'] as const
 
 export function isValidHeaderName(name: string): boolean {
   return name.length > 0 && name.length <= MAX_HEADER_NAME_LENGTH && HEADER_NAME_RE.test(name)
@@ -157,10 +162,12 @@ export function preflightHeadersToRecord(
       typeof (row as { value?: unknown }).value === 'string'
     ) {
       const { name, value } = row as { name: string; value: string }
-      // Reserve the sidanclaw namespace: a user-config header may never set an
-      // `X-Sidanclaw-*` value, or it could forge the actor identity a connector
-      // trusts for auth. (Validation of the charset still happens at merge.)
-      if (name.length > 0 && !name.toLowerCase().startsWith(RESERVED_HEADER_PREFIX)) {
+      // Reserve the Use Brian namespaces: a user-config header may never set an
+      // `X-UseBrian-*` or legacy `X-Sidanclaw-*` value, or it could forge the
+      // actor identity a connector trusts for auth. (Charset validation still
+      // happens at merge.)
+      const lower = name.toLowerCase()
+      if (name.length > 0 && !RESERVED_HEADER_PREFIXES.some((p) => lower.startsWith(p))) {
         out[name] = value
       }
     }
@@ -181,11 +188,11 @@ export type ActorIdentity = {
   id?: string | null
   /** The user's email, when known (also sent on channel turns). */
   email?: string | null
-  /** Stable sidanclaw user UUID — the key that never changes across channels. */
+  /** Stable Use Brian user UUID — the key that never changes across channels. */
   userId: string
   /**
    * Opaque, short-lived media capability token (minted by the closed platform,
-   * HMAC-signed). When set, `injectMcpTools` emits it as `X-Sidanclaw-Media-Token`
+   * HMAC-signed). When set, `injectMcpTools` emits it as `X-UseBrian-Media-Token` (+ legacy `X-Sidanclaw-Media-Token`)
    * to connectors that opted in via `sendMediaToken`, letting them fetch this
    * user's latest recording server-to-server. Open core carries the string only;
    * it never signs or verifies it. Emitted separately from the actor headers.
@@ -199,15 +206,26 @@ export type ActorIdentity = {
  * preflight headers) and the user-config path can't set the namespace, so the
  * model and the user are both unable to influence them — the value is a
  * sidanclaw-backend assertion. Trustworthy when the connector authenticates the
- * connection (the connection auth proves it's sidanclaw; the header says which
+ * connection (the connection auth proves it's Use Brian; the header says which
  * user). Empty/missing fields are simply omitted.
  */
 export function actorIdentityHeaders(actor: ActorIdentity): Record<string, string> {
+  // Dual-emit during the rebrand transition: canonical `X-UseBrian-*` plus
+  // legacy `X-Sidanclaw-*` (same values) so existing connector servers keep
+  // working. Drop the legacy set after a deprecation window.
   const headers: Record<string, string> = {
+    'X-UseBrian-Actor-Channel': actor.channel,
     'X-Sidanclaw-Actor-Channel': actor.channel,
+    'X-UseBrian-User-Id': actor.userId,
     'X-Sidanclaw-User-Id': actor.userId,
   }
-  if (actor.id) headers['X-Sidanclaw-Actor-Id'] = actor.id
-  if (actor.email) headers['X-Sidanclaw-Actor-Email'] = actor.email
+  if (actor.id) {
+    headers['X-UseBrian-Actor-Id'] = actor.id
+    headers['X-Sidanclaw-Actor-Id'] = actor.id
+  }
+  if (actor.email) {
+    headers['X-UseBrian-Actor-Email'] = actor.email
+    headers['X-Sidanclaw-Actor-Email'] = actor.email
+  }
   return headers
 }

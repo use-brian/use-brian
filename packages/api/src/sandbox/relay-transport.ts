@@ -1,4 +1,4 @@
-import type { RelayCommandResult, RelayCommandTransport } from '@sidanclaw/core'
+import type { RelayCommandResult, RelayCommandTransport } from '@use-brian/core'
 
 /**
  * The api-side half of the local-browser path (computer-use.md §4): a

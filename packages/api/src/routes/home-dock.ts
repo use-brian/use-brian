@@ -16,7 +16,7 @@
  */
 
 import { Router, type Request, type Response } from 'express'
-import { mergeHomeDock, type HomeDockStore, type HomeSignals, type ResolvedDock } from '@sidanclaw/core'
+import { mergeHomeDock, type HomeDockStore, type HomeSignals, type ResolvedDock } from '@use-brian/core'
 
 export type HomeDockRoutesDeps = {
   homeDockStore: HomeDockStore

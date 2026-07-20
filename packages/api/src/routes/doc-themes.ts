@@ -23,7 +23,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type { LLMProvider } from '@sidanclaw/core'
+import type { LLMProvider } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import {
   ThemeLimitReachedError,

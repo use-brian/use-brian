@@ -7,14 +7,14 @@ import pg from 'pg'
  * CHECK + routing_schedule conditional CHECK fire, the UNIQUE
  * (connector_instance_id, rule_order) constraint, and the
  * ON DELETE CASCADE on the parent connector_instance FK. Requires a
- * local PostgreSQL `sidanclaw` database with migrations applied;
+ * local PostgreSQL `Use Brian` database with migrations applied;
  * skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

@@ -42,8 +42,8 @@ import {
   type Sensitivity,
   type Tool,
   type ToolContext,
-} from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'

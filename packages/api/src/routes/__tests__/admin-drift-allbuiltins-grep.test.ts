@@ -57,7 +57,7 @@ const PLANNED_FOLLOWUP_ALLOWLIST = new Set([
   'apps/web/src/app/(app)/studio/connectors/page.tsx',
   // app-web consolidation port of the same connectors page (the line was
   // copied verbatim from the allowlisted apps/web instance above). The
-  // @sidanclaw/shared subpath dep is now in place (app-web imports
+  // @use-brian/shared subpath dep is now in place (app-web imports
   // OFFICIAL_CONNECTOR_TOOLS / OFFICIAL_OAUTH_SCOPES / MINI_APPS from the
   // ./builtin-connectors + ./mini-apps subpaths; OFFICIAL_CONNECTORS is
   // reachable via ./connector-registry), so the derive is now mechanically

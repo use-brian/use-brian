@@ -17,7 +17,7 @@
  * surface still compiles and the store can be wired through interfaces.
  */
 
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 import { query } from './client.js'
 
 export type ConnectorActionStatus =

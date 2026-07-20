@@ -31,7 +31,7 @@ import type {
   ViewEntity,
   ViewState,
   ViewType,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
 
 // ── SQL projections ───────────────────────────────────────────────────

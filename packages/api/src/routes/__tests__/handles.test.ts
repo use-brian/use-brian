@@ -30,7 +30,7 @@ describe('[COMP:api/handles-route] Handle search', () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{
         id: 'a_team_owned',
-        name: 'sidanclaw - Product',
+        name: 'Use Brian - Product',
         bio: 'private team assistant',
         iconSeed: 7,
         connectionCount: '0',

@@ -3,7 +3,7 @@
  * GET /api/skills/catalog/:slug (the creator's instant template load).
  * Component tag: [COMP:api/skills-route].
  *
- * Unlike skills.test.ts this file does NOT mock @sidanclaw/core — the route
+ * Unlike skills.test.ts this file does NOT mock @use-brian/core — the route
  * resolves the REAL `skill-builder` builtin (proving the methodology ships)
  * and the draft call runs through the real generator against a mock provider
  * that streams canned JSON.
@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
-import { loadBuiltinSkills, type LLMProvider, type Message, type StreamChunk } from '@sidanclaw/core'
+import { loadBuiltinSkills, type LLMProvider, type Message, type StreamChunk } from '@use-brian/core'
 
 import { skillRoutes } from '../skills.js'
 

@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 vi.mock('../memories.js', async (importActual) => ({
   ...(await importActual<typeof import('../memories.js')>()),

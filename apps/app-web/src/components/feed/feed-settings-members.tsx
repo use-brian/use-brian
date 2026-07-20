@@ -11,7 +11,7 @@
  *
  * The toggle calls PATCH /api/workspaces/:workspaceId/members/:userId/permissions
  * (admin/owner gated server-side; see
- * `sidanclaw/packages/api/src/routes/workspaces.ts`) with optimistic
+ * `use-brian/packages/api/src/routes/workspaces.ts`) with optimistic
  * update + revert-on-failure, one row in flight at a time.
  *
  * Port deltas (disposition rules §6):

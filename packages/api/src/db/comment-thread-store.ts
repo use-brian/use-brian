@@ -28,8 +28,8 @@ import type {
   CommentThreadSummary,
   CreateThreadParams,
   InboxPendingReply,
-} from '@sidanclaw/core'
-import { deriveCommentTitle } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { deriveCommentTitle } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 import { findOrCreateSession, addSessionMessage, getSessionMessages } from './sessions.js'
 

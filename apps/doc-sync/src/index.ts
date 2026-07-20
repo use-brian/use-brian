@@ -8,7 +8,7 @@
  * all peers (human tabs + the server-side AI client), and persists a debounced
  * snapshot. See docs/architecture/features/doc.md → "Real-time collaboration".
  *
- * Reuses `@sidanclaw/api` (auth + DB pool) and `@sidanclaw/doc-model` (the
+ * Reuses `@use-brian/api` (auth + DB pool) and `@use-brian/doc-model` (the
  * shared schema + encode). The testable logic lives in `auth-hook.ts`,
  * `clearance-gate.ts`, `persistence.ts`; this file is the wiring.
  */
@@ -19,7 +19,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { WebSocketServer } from 'ws'
 import { Hocuspocus } from '@hocuspocus/server'
 import * as Y from 'yjs'
-import { getPool, query, queryWithRLS } from '@sidanclaw/api/db/client.js'
+import { getPool, query, queryWithRLS } from '@use-brian/api/db/client.js'
 import {
   applyOpsToYDoc,
   FRAGMENT_FIELD,
@@ -29,7 +29,7 @@ import {
   deriveRunBlockId,
   type DocOp,
   type AssistantRunChannel,
-} from '@sidanclaw/doc-model'
+} from '@use-brian/doc-model'
 import { resolveAuth } from './auth-hook.js'
 import { assertPageAccess, isReadOnlyRole, type RlsQuery } from './clearance-gate.js'
 import {
@@ -233,7 +233,7 @@ runSweepTimer.unref()
  *
  * NOTE (web-QA): the live broadcast + persistence of an AI apply needs a
  * running service + a connected browser to verify end-to-end; the op→doc
- * transform itself is unit-tested in `@sidanclaw/doc-model` (`apply-ops`).
+ * transform itself is unit-tested in `@use-brian/doc-model` (`apply-ops`).
  */
 async function handleInternalApply(
   req: IncomingMessage,

@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Telegram BYO webhook route — per-channel BYO credentials.
  *
@@ -26,8 +27,8 @@
  */
 
 import { Router } from 'express'
-import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@sidanclaw/channels'
-import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@sidanclaw/channels'
+import { createTelegramAdapter, createTelegramApi, verifyTelegramWebhook, validateTelegramCredentials, TELEGRAM_BOT_DOWNLOAD_LIMIT_BYTES } from '@use-brian/channels'
+import type { IncomingMessage, TelegramAdapterConfig, RequireMentionConfig, ChatSeenEvent } from '@use-brian/channels'
 import { findAssistantById, findUserById } from '../db/users.js'
 import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
@@ -36,13 +37,13 @@ import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebh
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@sidanclaw/core'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@sidanclaw/core'
-import { transcribeFirstAudio, sanitize as sanitizeAnalytics } from '@sidanclaw/core'
+import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
+import { transcribeFirstAudio, sanitize as sanitizeAnalytics } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@sidanclaw/shared'
+import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { cacheInboundImage } from './channel-file-cache.js'
 import { billingPartyForAssistant } from '../billing-party.js'
@@ -92,7 +93,7 @@ type TelegramByoRouteOptions = {
   integrationStore: ChannelIntegrationStore
   linkedAccountStore?: LinkedAccountStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
@@ -105,24 +106,24 @@ type TelegramByoRouteOptions = {
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /** Transient upload cache (`file_cache`). When present, inbound photos are
    *  cached before block-building so the `<attached_file id>` tag gives the
    *  model a promotable reference (`saveFileToBrain` on request). See
    *  docs/architecture/engine/file-handling.md → "Save-on-request". */
-  fileStore?: import('@sidanclaw/core').FileStore
+  fileStore?: import('@use-brian/core').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   deferredConfirmationStore?: DeferredConfirmationStore
-  episodicStore?: import('@sidanclaw/core').EpisodicStore
-  sessionStateStore?: import('@sidanclaw/core').SessionStateStore
-  capabilityStore: import('@sidanclaw/core').CapabilityStore
+  episodicStore?: import('@use-brian/core').EpisodicStore
+  sessionStateStore?: import('@use-brian/core').SessionStateStore
+  capabilityStore: import('@use-brian/core').CapabilityStore
   /**
    * Voice-message transcription config. Mirrors the official Telegram route —
    * see docs/architecture/media/transcription.md.
@@ -756,7 +757,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       //    BYO bots are per-assistant, so unlinked strangers in a private DM
       //    used to silently fall back to the owner's identity and pollute the
       //    owner's memory. We now redirect them to the official shared bot
-      //    (@sidanclaw_bot) instead. The owner onboards by linking via a
+      //    (@use_brian_bot) instead. The owner onboards by linking via a
       //    6-char code from the web UI.
       let channelUserId = ownerId
       let isIdentified = true
@@ -765,7 +766,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // from `channelUserId === ownerId` because an owner who linked their
       // own Telegram would have found.id === ownerId, which would otherwise
       // cause Step 2 to re-run and (in a private chat) incorrectly redirect
-      // the owner to the shared @sidanclaw_bot.
+      // the owner to the shared @use_brian_bot.
       let foundLinked = false
       const telegramUserId = incoming.userId
 
@@ -816,7 +817,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
               // Tier 2 in private chat: redirect to the official shared bot.
               // Telegram never exposes email, so unlinked private-chat users
               // cannot be identified. Rather than silently impersonate the
-              // owner, we tell them to use @sidanclaw_bot (which has its own
+              // owner, we tell them to use @use_brian_bot (which has its own
               // Mini App sign-in onramp) or link via code from the web UI.
               privateChatRedirect = true
             }
@@ -831,7 +832,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 
       if (privateChatRedirect) {
         await adapter.sendMessage(incoming.channelId, {
-          text: "This is a private bot. To try sidanclaw, DM @sidanclaw_bot to sign in and link your account.",
+          text: "This is a private bot. To try Use Brian, DM @use_brian_bot to sign in and link your account.",
         }).catch((err) => {
           console.error('[telegram-byo] redirect message send failed:', err)
         })
@@ -962,7 +963,7 @@ type ProcessMessageParams = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   linkedAccountStore?: LinkedAccountStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: AssistantConnectorStore
@@ -975,22 +976,22 @@ type ProcessMessageParams = {
   knowledgeStore?: KnowledgeStoreInterface
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace files store (Q3 §10). Optional. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Files orchestration API. Enables outbound documents (`sendFile`). */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /** Transient upload cache (`file_cache`) — inbound photos cached for
    *  save-on-request promotion. See file-handling.md → "Save-on-request". */
-  fileStore?: import('@sidanclaw/core').FileStore
+  fileStore?: import('@use-brian/core').FileStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingConfResolvers: Map<string, { resolver: ConfirmationResolver; chatId: string }>
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
-  episodicStore?: import('@sidanclaw/core').EpisodicStore
-  sessionStateStore?: import('@sidanclaw/core').SessionStateStore
-  capabilityStore: import('@sidanclaw/core').CapabilityStore
+  episodicStore?: import('@use-brian/core').EpisodicStore
+  sessionStateStore?: import('@use-brian/core').SessionStateStore
+  capabilityStore: import('@use-brian/core').CapabilityStore
   voiceTranscription?: {
     enabled: boolean
     apiKey: string

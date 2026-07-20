@@ -8,7 +8,7 @@ import type {
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFileSupersedePatch,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryWithRLS, rollbackAndRelease } from './client.js'
@@ -152,7 +152,7 @@ function toIndexRow(row: IndexRow): WorkspaceFileIndexRow {
  * `edge-hooks.ts`). `opts` is optional so existing call sites keep
  * compiling unchanged. The `documents...` data rides a separate `opts`
  * arg rather than `WorkspaceFileCreateInput` because that input type is
- * a `@sidanclaw/core` contract — widening it is a follow-up.
+ * a `@use-brian/core` contract — widening it is a follow-up.
  */
 export async function createWorkspaceFile(
   userId: string,

@@ -36,7 +36,7 @@ import {
   type UsageStore,
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { createBrainSourceTool } from './brain-source-tool.js'
 import {
   createRecordPageProjector,

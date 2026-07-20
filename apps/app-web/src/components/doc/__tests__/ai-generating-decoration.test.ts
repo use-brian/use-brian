@@ -5,11 +5,11 @@
  * placement (the widget DOM + the meta-toggled plugin are an e2e concern). The
  * contract: the widget sits just after the matching top-level block, and no
  * position resolves for a missing/cleared anchor. Docs built via the shared
- * `@sidanclaw/doc-model` schema, matching `comment-decorations.test.ts`.
+ * `@use-brian/doc-model` schema, matching `comment-decorations.test.ts`.
  */
 
 import { describe, expect, it } from "vitest";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import { anchorWidgetPos } from "../ai-generating-decoration";
 
 const schema = docSchema();

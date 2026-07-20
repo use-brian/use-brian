@@ -1,5 +1,5 @@
 import { query } from './client.js'
-import type { EpisodicMessageSpan } from '@sidanclaw/core'
+import type { EpisodicMessageSpan } from '@use-brian/core'
 
 export type EpisodicMemoryRow = {
   id: string

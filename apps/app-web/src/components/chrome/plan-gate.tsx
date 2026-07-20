@@ -20,7 +20,7 @@ import { getUsage } from "@/lib/api/usage";
 import { webAppUrl } from "@/lib/primary-auth";
 import { useT } from "@/lib/i18n/client";
 
-const OSS_REPO_URL = "https://github.com/sidanclaw/sidanclaw";
+const OSS_REPO_URL = "https://github.com/use-brian/use-brian";
 
 export function PlanGate({ workspaceId }: { workspaceId: string }) {
   const t = useT();

@@ -15,8 +15,12 @@
  * name, role, me }. All displayed workspace fields (name, role, purpose,
  * iconSeed) come straight from the `GET /api/workspaces/:id` detail fetch
  * here, and the icon-regenerate path updates local state via `refetch()`
- * instead of pushing into a switcher list (the app-web switcher
- * re-fetches its list when it opens).
+ * instead of pushing into a switcher list. Because the route context is a
+ * static snapshot, a successful rename must also broadcast
+ * `emitWorkspaceRenamed` (picked up by `WorkspaceContextProvider` + the
+ * switcher's cached list) and patch the ported-surface adapter cache via
+ * `updateWorkspace` — otherwise the top-left chrome shows the old name
+ * until a full reload.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -34,9 +38,13 @@ import {
 } from "@/lib/api/workspaces";
 import { listCustomPageTemplates } from "@/lib/api/views";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { getUserInfo } from "@/lib/user";
-import { useWorkspaceContext } from "@/lib/workspace-context";
+import {
+  useWorkspaceContext,
+  emitWorkspaceRenamed,
+} from "@/lib/workspace-context";
+import { updateWorkspace } from "@/contexts/workspace-context";
 import { canDeleteWorkspace } from "@/lib/workspace-permissions";
 import { TeamAvatar } from "@/components/team-avatar";
 import {
@@ -201,7 +209,8 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
 
   async function rename() {
     if (!data) return;
-    if (!nameInput.trim() || nameInput.trim() === data.name) {
+    const next = nameInput.trim();
+    if (!next || next === data.name) {
       setEditing(false);
       return;
     }
@@ -209,9 +218,17 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       const res = await authFetch(`${API_URL}/api/workspaces/${data.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: nameInput.trim() }),
+        body: JSON.stringify({ name: next }),
       });
-      if (res.ok) await refetch();
+      if (res.ok) {
+        // Propagate beyond this modal: the route context is a static
+        // snapshot, so the top-left chrome (and any other `ctx.name`
+        // consumer) only updates via this broadcast; the adapter cache
+        // keeps ported `useWorkspaces()` surfaces consistent too.
+        emitWorkspaceRenamed({ workspaceId: data.id, name: next });
+        updateWorkspace(data.id, { name: next });
+        await refetch();
+      }
     } finally {
       setEditing(false);
     }

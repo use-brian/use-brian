@@ -1,4 +1,4 @@
-import { createWhatsAppAdapter } from '@sidanclaw/channels'
+import { createWhatsAppAdapter } from '@use-brian/channels'
 import type {
   AnalyticsLogger,
   ConfirmationDecision,
@@ -10,8 +10,8 @@ import type {
   MemoryStore,
   TaskStore,
   UsageStore,
-} from '@sidanclaw/core'
-import { getToolDisplayName } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import { getToolDisplayName } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { DbEpisodesStore } from '../db/episodes-store.js'
 import type { IngestRulesStore } from '../db/ingest-rules-store.js'

@@ -24,8 +24,8 @@ import { isLocalDevEnv } from './dev-auth.js'
  *      cloud (`K_SERVICE`/`NODE_ENV=production`) or in the hosted edition.
  *
  * The owner's display name is local config, not user-editable server state: the
- * launcher prompts once, persists it to `~/.sidanclaw/config.json`, and passes
- * it here via `SIDANCLAW_OWNER_NAME`. `findOrCreateUser` re-applies it every
+ * launcher prompts once, persists it to `~/.usebrian/config.json`, and passes
+ * it here via `USEBRIAN_OWNER_NAME`. `findOrCreateUser` re-applies it every
  * boot (idempotent against stable config), so the oss account UI shows it
  * read-only. Spec: docs/architecture/platform/auth.md → "Local owner session".
  *
@@ -34,14 +34,14 @@ import { isLocalDevEnv } from './dev-auth.js'
 
 /**
  * True in the open single-player edition. The launcher exports
- * `SIDANCLAW_EDITION=oss` (and `NEXT_PUBLIC_SIDANCLAW_EDITION=oss` for app-web)
+ * `USEBRIAN_EDITION=oss` (and `NEXT_PUBLIC_USEBRIAN_EDITION=oss` for app-web)
  * into every child's env; either satisfies the server-side gate. Defaults to the
  * hosted edition when unset, so a hosted deploy never opts in by accident.
  */
 export function isOssEdition(): boolean {
   return (
-    process.env.SIDANCLAW_EDITION === 'oss' ||
-    process.env.NEXT_PUBLIC_SIDANCLAW_EDITION === 'oss'
+    process.env.USEBRIAN_EDITION === 'oss' ||
+    process.env.NEXT_PUBLIC_USEBRIAN_EDITION === 'oss'
   )
 }
 
@@ -53,7 +53,7 @@ const OWNER_DEFAULT_NAME = 'You'
 
 export type LocalSessionDeps = {
   jwtSecret: string | undefined
-  /** From `SIDANCLAW_OWNER_NAME` (launcher → ~/.sidanclaw/config.json). */
+  /** From `USEBRIAN_OWNER_NAME` (launcher → ~/.usebrian/config.json). */
   ownerName?: string
   /** Injectable for unit tests; defaults to the real DB-backed upsert. */
   createUser?: typeof findOrCreateUser

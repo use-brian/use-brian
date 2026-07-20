@@ -2,9 +2,9 @@
 name: product-research-daily-check
 description: Periodic product-research turn — read research goals + the workspace's target_competitor edges + prior findings, scan the landscape for what changed, save findings as memories, optionally iterate the active research draft. Use via a scheduled workflow (weekly / biweekly), or when the operator asks "any moves from competitors?", "what's new in <space>?", "anything to update on the roadmap?".
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: research
   applies_to_app_type: any
   when_to_use: A scheduled turn for any workspace running periodic landscape / competitor research (memory tag `commitment:goal_research_*`). Also valid as an ad-hoc operator query. Skip when no research goals are configured — propose creating one first, don't fabricate scope.
@@ -73,7 +73,7 @@ The persona's hard rule: "if it's been pitched or rejected, skip it or explain w
 
 ### 4. Do the research
 
-Use the assistant's available tools to scan the landscape — `mcp_search` over connectors / inspiration tools / web search (if connected). Constrained to the goal scope from step 1. For each scope item, ask: what changed since the last cycle? What's a recurring user complaint sidanclaw's architecture could solve? Any pricing / distribution / policy shifts?
+Use the assistant's available tools to scan the landscape — `mcp_search` over connectors / inspiration tools / web search (if connected). Constrained to the goal scope from step 1. For each scope item, ask: what changed since the last cycle? What's a recurring user complaint Use Brian's architecture could solve? Any pricing / distribution / policy shifts?
 
 Skip noise per the L2 persona: funding rounds without a product delta, generic AI news, benchmark releases, things already decided on.
 
@@ -96,7 +96,7 @@ saveMemory({
 })
 ```
 
-For findings that propose a roadmap action (a feature idea, a pricing move), include the "why sidanclaw is uniquely positioned" + an effort tier in the detail.
+For findings that propose a roadmap action (a feature idea, a pricing move), include the "why Use Brian is uniquely positioned" + an effort tier in the detail.
 
 ### 6. Optionally iterate the active research draft
 
@@ -109,7 +109,7 @@ If no active draft exists for the topic and the operator hasn't asked for one, *
 If invoked by an operator query:
 
 - **What changed** — 3-5 bullets. What, who, why it matters. Source link each.
-- **Feature suggestions** — 1-3 ideas: problem → proposal → why sidanclaw is uniquely positioned → effort tier (days/weeks/months).
+- **Feature suggestions** — 1-3 ideas: problem → proposal → why Use Brian is uniquely positioned → effort tier (days/weeks/months).
 - **Open questions** — things you couldn't resolve.
 
 Under ~500 words. Nothing changed? Say so in one line. Ad-hoc questions get direct answers, no digest framing.

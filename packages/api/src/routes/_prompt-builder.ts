@@ -44,8 +44,8 @@
  * when a user's custom instructions are vague or conflicting.
  */
 
-import type { TopicClassification } from '@sidanclaw/core'
-import { FOLLOW_UP_QUESTIONS_ADDENDUM } from '@sidanclaw/core'
+import type { TopicClassification } from '@use-brian/core'
+import { FOLLOW_UP_QUESTIONS_ADDENDUM } from '@use-brian/core'
 import type { ResolveAppSoul } from '../tool-injection-port.js'
 
 export type ReplyContextInput = {
@@ -109,7 +109,7 @@ export type BuildPromptParams = {
   /**
    * `# Workspace Files` index — the L1 ambient awareness block for the
    * Q3 filesystem primitive (company-brain §10). Built by
-   * `buildWorkspaceFilesContext()` from `@sidanclaw/core`. Sits in the
+   * `buildWorkspaceFilesContext()` from `@use-brian/core`. Sits in the
    * stable prefix right after `# Memories`. Pass `null` / empty string
    * to omit (e.g. assistant lacks the `files` capability, or no
    * workspace bound to the assistant).
@@ -117,7 +117,7 @@ export type BuildPromptParams = {
   workspaceFilesContext?: string | null
   /**
    * Always-on session-state tier. Formatted by `buildSessionStateBlock`
-   * in `@sidanclaw/core`. Unlike `episodicContext`, this is injected on
+   * in `@use-brian/core`. Unlike `episodicContext`, this is injected on
    * every turn regardless of topic-classifier verdict — its job is to
    * surface "what's open / resolved right now" so the model doesn't
    * re-derive it from raw history. `null` or empty string = block omitted.
@@ -127,7 +127,7 @@ export type BuildPromptParams = {
   sessionStateBlock?: string | null
   /**
    * Drive-oriented execution-plan tier. Formatted by `buildActivePlanBlock`
-   * in `@sidanclaw/core`. Injected ONLY while the session has an `active`
+   * in `@use-brian/core`. Injected ONLY while the session has an `active`
    * task attempt (the builder returns `null` for dormant/archived attempts),
    * so it cannot leak into an unrelated turn. `null` or empty = block omitted.
    *
@@ -143,7 +143,7 @@ export type BuildPromptParams = {
    * Doc page-authoring protocol injected as a SKILL block for an assistant
    * working on the doc surface that is not itself a `kind='app'` doc
    * assistant (the workspace primary by default, or any assistant the user
-   * switched to). Built by `buildDocSkillBlock` in `@sidanclaw/core`. Sits in
+   * switched to). Built by `buildDocSkillBlock` in `@use-brian/core`. Sits in
    * the stable prefix right after the skills fragment so it rides the prompt
    * cache within a doc session. `null` / empty = omitted (the common case
    * off-doc). Only set when the doc tools are actually injected

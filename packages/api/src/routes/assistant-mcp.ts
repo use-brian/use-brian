@@ -32,7 +32,7 @@ import {
   type CapabilityStore,
   type Tool,
   type ToolContext,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { parseAuthToken, verifySecret, type ApiKeyStore } from '../db/api-key-store.js'
 import { findAssistantById } from '../db/users.js'
 import { query } from '../db/client.js'

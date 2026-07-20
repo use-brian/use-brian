@@ -5,7 +5,7 @@ import {
   reduceToolEvent,
   TOOL_CHIP_COLLAPSE_THRESHOLD,
 } from "../entry-thread";
-import type { ToolUsed } from "@sidanclaw/chat-ui";
+import type { ToolUsed } from "@use-brian/chat-ui";
 
 describe("[COMP:app-web/brain-entry-thread] tool timeline reducer", () => {
   const running: ToolUsed[] = [{ id: "t1", name: "searchKnowledge", status: "running" }];

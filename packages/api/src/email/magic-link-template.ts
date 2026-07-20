@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Magic-link email body templates — per locale.
  *
@@ -34,13 +35,13 @@ type TemplateStrings = {
 // unreachable host (e.g. localhost). The icon is a static public asset and
 // is the same across every environment.
 const BRAND_ICON_URL = 'https://sidan.ai/icon.png'
-const BRAND_WORDMARK = 'sidanclaw'
+const BRAND_WORDMARK = 'Use Brian'
 
 const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
   en: {
-    subject: 'Your sidanclaw sign-in link',
+    subject: 'Your Use Brian sign-in link',
     preheader: 'Tap to sign in — link expires in 15 minutes.',
-    heading: 'Sign in to sidanclaw',
+    heading: 'Sign in to Use Brian',
     body: 'Tap the button below to sign in. This link expires in 15 minutes and can only be used once.',
     cta: 'Sign in',
     tagline: 'Your team\'s shared brain',
@@ -49,9 +50,9 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     codeLabel: 'Or enter this code on the sign-in screen:',
   },
   ja: {
-    subject: 'sidanclaw サインインリンク',
+    subject: 'Use Brian サインインリンク',
     preheader: 'タップしてサインイン — 15分間のみ有効です。',
-    heading: 'sidanclaw にサインイン',
+    heading: 'Use Brian にサインイン',
     body: '下のボタンをタップしてサインインしてください。15分間有効で、一回のみご利用いただけます。',
     cta: 'サインイン',
     tagline: 'チーム共有ブレイン',
@@ -60,9 +61,9 @@ const TEMPLATES: Record<MagicLinkLocale, TemplateStrings> = {
     codeLabel: 'または、サインイン画面でこのコードを入力してください：',
   },
   zh: {
-    subject: '您的 sidanclaw 登入連結',
+    subject: '您的 Use Brian 登入連結',
     preheader: '點擊登入 — 連結 15 分鐘內有效。',
-    heading: '登入 sidanclaw',
+    heading: '登入 Use Brian',
     body: '點擊下方按鈕完成登入。本連結 15 分鐘內有效，僅限使用一次。',
     cta: '登入',
     tagline: '你的團隊共享大腦',

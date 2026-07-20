@@ -6,7 +6,7 @@
  * bad key, a wrong bucket, or a missing IAM role fails HERE — at setup — not
  * at the user's first file upload. See docs/plans/byo-google-storage.md §4.
  *
- * The probe round-trips a small object under the reserved `.sidanclaw/`
+ * The probe round-trips a small object under the reserved `.usebrian/`
  * prefix and deletes it. The credential object is passed straight through to
  * the GCS client and is never referenced by field name or logged.
  */
@@ -14,7 +14,7 @@
 import { createGcsFilesClient, type GcsServiceAccountCredentials, type GcsFilesClient } from './gcs-client.js'
 
 /** Stable key for the connect-time probe object. */
-export const BYO_HEALTHCHECK_KEY = '.sidanclaw/healthcheck'
+export const BYO_HEALTHCHECK_KEY = '.usebrian/healthcheck'
 
 export type GcsByoValidateFailureCode =
   | 'invalid_key' // key won't parse / sign (bad PEM, malformed JSON)
@@ -68,7 +68,7 @@ export async function validateGcsByoBinding(
     return { ok: false, code: code === 'unknown' ? 'invalid_key' : code, message }
   }
 
-  const probe = Buffer.from('sidanclaw byo storage healthcheck')
+  const probe = Buffer.from('Use Brian byo storage healthcheck')
   try {
     await client.writeBlob(BYO_HEALTHCHECK_KEY, probe, { workspaceId: 'healthcheck', mime: 'text/plain' })
     const read = await client.readBlob(BYO_HEALTHCHECK_KEY)

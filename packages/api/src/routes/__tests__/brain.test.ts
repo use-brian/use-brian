@@ -24,7 +24,7 @@ import type {
   EntityStore,
   RetrievalStore,
   SearchResultRow,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 

@@ -30,7 +30,7 @@ export interface MenuTemplateOptions {
   /**
    * The auto-update item (label + clickability from `describeUpdateState`),
    * or null to omit it entirely (auto-update disabled: unpackaged dev runs,
-   * `SIDANCLAW_DISABLE_AUTO_UPDATE`). macOS: in the app menu after About
+   * `USEBRIAN_DISABLE_AUTO_UPDATE`). macOS: in the app menu after About
    * (the platform convention); Windows/Linux: in the File menu before Exit.
    */
   readonly update: { readonly label: string; readonly enabled: boolean } | null;
@@ -41,6 +41,12 @@ export interface MenuTemplateOptions {
    * Omit/null to keep the pre-dual-target menu.
    */
   readonly target?: { readonly kind: "cloud" | "local"; readonly label: string } | null;
+  /**
+   * Show "Uninstall <appName>…" in the macOS app menu. Packaged macOS builds
+   * only: Windows has the NSIS uninstaller, dev runs have no bundle to remove.
+   * Ignored off-mac. See `uninstall.ts`.
+   */
+  readonly uninstall?: boolean;
 }
 
 export interface MenuTemplateHandlers {
@@ -54,6 +60,8 @@ export interface MenuTemplateHandlers {
   onUpdate: () => void;
   /** Switch the shell's target (cloud ↔ local brain); persists + relaunches. */
   onSwitchTarget: () => void;
+  /** Confirm, tear down local traces, trash the bundle, quit (uninstall.ts). */
+  onUninstall: () => void;
 }
 
 /** Build the platform-appropriate menu template (pure). */
@@ -109,7 +117,7 @@ export function buildMenuTemplate(
       { label: `Target: ${opts.target.label}`, enabled: false },
       {
         label:
-          opts.target.kind === "cloud" ? "Switch to Local Brain…" : "Switch to sidanclaw Cloud",
+          opts.target.kind === "cloud" ? "Switch to Local Brain…" : "Switch to Use Brian Cloud",
         click: () => handlers.onSwitchTarget(),
       },
     );
@@ -118,6 +126,14 @@ export function buildMenuTemplate(
   // The single auto-update item (state-derived label; absent when disabled).
   const updateItems: MenuItemConstructorOptions[] = opts.update
     ? [{ label: opts.update.label, enabled: opts.update.enabled, click: () => handlers.onUpdate() }]
+    : [];
+
+  // One-click uninstall — macOS app menu only (see MenuTemplateOptions.uninstall).
+  const uninstallItems: MenuItemConstructorOptions[] = opts.uninstall
+    ? [
+        { type: "separator" },
+        { label: `Uninstall ${appName}…`, click: () => handlers.onUninstall() },
+      ]
     : [];
 
   const fileSubmenu: MenuItemConstructorOptions[] = [...appActions];
@@ -132,6 +148,7 @@ export function buildMenuTemplate(
           ...updateItems,
           { type: "separator" },
           ...appActions,
+          ...uninstallItems,
           { type: "separator" },
           { role: "hide" },
           { role: "hideOthers" },

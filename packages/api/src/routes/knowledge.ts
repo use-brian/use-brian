@@ -24,7 +24,7 @@ import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import { listUsableWorkspaceConnectors } from '../connectors/usable-connectors.js'
 import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspace-store.js'
 import * as github from '../github/client.js'
-import type { AccessContext, Sensitivity } from '@sidanclaw/core'
+import type { AccessContext, Sensitivity } from '@use-brian/core'
 import { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
 
 // Re-exported for existing consumers/tests; the implementations moved to
@@ -1162,12 +1162,12 @@ export function workspaceKnowledgeRoutes({
       const body = content.endsWith('\n') ? content : `${content}\n`
       const newFile = `${frontmatter}${body}`
 
-      const branch = `sidanclaw/kb-${branchSlug(entry.path)}-${Date.now().toString(36)}`
+      const branch = `brian/kb-${branchSlug(entry.path)}-${Date.now().toString(36)}`
       await githubOps.createBranchRef(pat, owner, repo, branch, headSha)
       await githubOps.createOrUpdateFile(pat, owner, repo, {
         path: filePath,
         content: newFile,
-        message: `kb: update ${entry.path} via sidanclaw`,
+        message: `kb: update ${entry.path} via Use Brian`,
         branch,
       })
 
@@ -1186,7 +1186,7 @@ export function workspaceKnowledgeRoutes({
       const trimmedComment = typeof comment === 'string' ? comment.trim() : ''
       const prBody = [
         trimmedComment.length > 0 ? trimmedComment : null,
-        `Proposed from the sidanclaw knowledge reader${proposerEmail ? ` by ${proposerEmail}` : ''}. Entry: \`${entry.path}\`.`,
+        `Proposed from the Use Brian knowledge reader${proposerEmail ? ` by ${proposerEmail}` : ''}. Entry: \`${entry.path}\`.`,
       ].filter(Boolean).join('\n\n')
 
       const pr = await githubOps.createPullRequest(pat, owner, repo, {

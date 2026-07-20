@@ -5,12 +5,12 @@
  * `mcp_search`/`mcp_call` tools) but also carries the built-in Google/Notion/
  * Fathom connector injectors, which need OAuth *app* credentials. Reading those
  * via `getEnv()` would couple the open module to the closed env schema
- * (`@sidanclaw/shared-server`). Instead they come through `getConnectorConfig`,
+ * (`@use-brian/shared-server`). Instead they come through `getConnectorConfig`,
  * which resolves credentials from an optional, user-owned JSON file and falls
  * back to `process.env` so the hosted platform (creds in env) is unchanged.
  *
  * Resolution order per provider:
- *   1. `~/.sidanclaw/connectors.config.json` (override path: `CONNECTORS_CONFIG_PATH`)
+ *   1. `~/.usebrian/connectors.config.json` (legacy `~/.sidanclaw/` fallback; override path: `CONNECTORS_CONFIG_PATH`)
  *   2. `process.env.<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET`
  *   3. undefined  → the connector injector no-ops (connector-less boot)
  *
@@ -50,13 +50,24 @@ let _fileConfig: FileConfig | null = null
 /** Load + memoize the optional connectors.config.json. Missing/invalid → {}. */
 function loadConnectorConfig(): FileConfig {
   if (_fileConfig) return _fileConfig
-  const path = process.env.CONNECTORS_CONFIG_PATH || join(homedir(), '.sidanclaw', 'connectors.config.json')
-  try {
-    const parsed = fileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')))
-    _fileConfig = parsed.success ? parsed.data : {}
-  } catch {
-    // Absent (the default for the open product) or unreadable → no connectors.
-    _fileConfig = {}
+  // Canonical dotdir first; legacy `~/.sidanclaw/` fallback covers a
+  // standalone API run against a not-yet-migrated install (the launcher
+  // renames the whole dir on boot — see scripts/launch.mjs).
+  const candidates = process.env.CONNECTORS_CONFIG_PATH
+    ? [process.env.CONNECTORS_CONFIG_PATH]
+    : [
+        join(homedir(), '.usebrian', 'connectors.config.json'),
+        join(homedir(), '.sidanclaw', 'connectors.config.json'),
+      ]
+  _fileConfig = {}
+  for (const path of candidates) {
+    try {
+      const parsed = fileSchema.safeParse(JSON.parse(readFileSync(path, 'utf8')))
+      _fileConfig = parsed.success ? parsed.data : {}
+      break
+    } catch {
+      // Absent (the default for the open product) or unreadable → try next.
+    }
   }
   return _fileConfig
 }

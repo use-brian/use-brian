@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import pg from 'pg'
-import type { AccessContext, RetrievalActor } from '@sidanclaw/core'
+import type { AccessContext, RetrievalActor } from '@use-brian/core'
 
 /**
  * [COMP:brain/store-permission-coverage] — WU-4.2 spec gate.
@@ -31,14 +31,14 @@ import type { AccessContext, RetrievalActor } from '@sidanclaw/core'
  * spec, and docs/historical/completion-plan.md → WS-4 for the
  * work-unit scope.
  *
- * Requires a local `sidanclaw` PostgreSQL database with migrations
+ * Requires a local `Use Brian` PostgreSQL database with migrations
  * through 132 applied. Skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

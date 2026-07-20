@@ -18,14 +18,14 @@ import pg from 'pg'
  * blocklist" (Q20) and `packages/core/src/ingest/pipeline-b.ts`
  * (`processEpisode` step 0).
  *
- * Requires a local `sidanclaw` PostgreSQL database with migration 122
+ * Requires a local `Use Brian` PostgreSQL database with migration 122
  * applied. Skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

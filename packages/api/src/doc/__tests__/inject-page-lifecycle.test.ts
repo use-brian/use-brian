@@ -24,7 +24,7 @@ import type {
   Tool,
   WorkflowRunStore,
   WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 vi.mock('../../db/client.js', () => ({
   query: vi.fn(),
@@ -45,7 +45,7 @@ vi.mock('../../db/saved-views-store.js', () => ({
 import { injectDocTools } from '../inject.js'
 import { createDbSavedViewStore } from '../../db/saved-views-store.js'
 import { setPageEventDispatcher } from '../../page-event-fanout.js'
-import type { DispatchEvent, WorkflowEventDispatcher } from '@sidanclaw/core'
+import type { DispatchEvent, WorkflowEventDispatcher } from '@use-brian/core'
 
 function noopStore<T>(): T {
   return new Proxy({}, { get: () => vi.fn() }) as T

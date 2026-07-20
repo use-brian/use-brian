@@ -17,7 +17,7 @@
  * [COMP:api/doc-notifications-store]
  */
 
-import type { DocNotificationsStore, InboxMention } from '@sidanclaw/core'
+import type { DocNotificationsStore, InboxMention } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 
 const MENTION_COLS = `

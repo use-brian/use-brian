@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import pg from 'pg'
-import type { GoalRecord, GoalStore } from '@sidanclaw/core'
+import type { GoalRecord, GoalStore } from '@use-brian/core'
 
 /**
  * Integration tests for the goal stall reaper's SQL sweeps and the
- * `entityCount` done_when predicate. Requires a local PostgreSQL `sidanclaw`
+ * `entityCount` done_when predicate. Requires a local PostgreSQL `Use Brian`
  * with the goals migrations applied. Skips silently when unavailable.
  *
  * [COMP:goals/reaper] [COMP:goals/entity-count]
@@ -13,7 +13,7 @@ import type { GoalRecord, GoalStore } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

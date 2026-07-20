@@ -31,7 +31,7 @@ export const duckDuckGoProvider: SearchProvider = {
   async search(query, maxResults, signal): Promise<SearchResult[]> {
     const url = `${DDG_ENDPOINT}?q=${encodeURIComponent(query)}`
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; sidanclaw/1.0)' },
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; use-brian/1.0)' },
       signal,
     })
 

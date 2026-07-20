@@ -12,7 +12,7 @@
  * a forged callback's `state` nonce can never match the victim's cookie.
  *
  * Kept separate from `auth-cookies.ts` (server-set auth tokens) because this one
- * is client-set and short-lived; the two share only the `.sidan.ai` domain +
+ * is client-set and short-lived; the two share only the `.usebrian.ai` domain +
  * `Secure`-in-prod conventions.
  */
 
@@ -29,7 +29,7 @@ const isSecure = process.env.NODE_ENV === "production";
  *
  * Domain is deliberately omitted: the connector callback is same-origin with
  * the connectors page (both on the app origin), so a host-only cookie suffices
- * and avoids the `.sidan.ai` domain-cookie surface for a value that lives for
+ * and avoids the `.usebrian.ai` domain-cookie surface for a value that lives for
  * one round-trip.
  */
 export function connectorOauthStateCookieString(nonce: string): string {

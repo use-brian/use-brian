@@ -1,13 +1,13 @@
 import { describe, it, expect, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 /**
  * Integration tests for WU-5.5 — the `provenance` derivation chain.
  *
  * `provenance-store.test.ts` covers the UUID gate without a database.
  * This suite exercises the real `derived_from` + `re_extracted_at`
- * derivation walks against a live `sidanclaw` PostgreSQL with migrations
+ * derivation walks against a live `Use Brian` PostgreSQL with migrations
  * through 132 applied. Skips silently when the DB is unavailable.
  *
  * Spec: docs/architecture/brain/retrieval-layer.md §`provenance(row_id)`
@@ -17,7 +17,7 @@ import type { RetrievalActor } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

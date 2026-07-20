@@ -17,7 +17,7 @@ const ctx: ToolContext = {
   userId: 'u-1',
   assistantId: 'a-1',
   sessionId: 'workflow_run_run-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'workflow',
   channelId: 'run-1',
   workspaceId: 'ws-1',

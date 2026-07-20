@@ -7,7 +7,7 @@
 // turn (the pipeline re-reads the user row from the DB before the query loop).
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { ContentBlock } from '@sidanclaw/core'
+import type { ContentBlock } from '@use-brian/core'
 import type { ArtifactPromoter } from '../../files/artifact-promote.js'
 import { promoteChannelPaste } from '../channel-pipeline.js'
 

@@ -4,7 +4,7 @@
  *
  * A large document / paste is filed synchronously into workspace_files, then the
  * boundary `enqueueFileIngestJob`s the parse/chunk/decompose work; the
- * file-ingest worker on `sidanclaw-api-workers` drains via
+ * file-ingest worker on `brian-api-workers` drains via
  * `claimNextFileIngestJob` (`FOR UPDATE SKIP LOCKED`), then
  * `markFileIngestJobDone` / `markFileIngestJobFailed` (with bounded retry).
  * Mirrors `recording-jobs-store.ts` (minus the recording blueprint).

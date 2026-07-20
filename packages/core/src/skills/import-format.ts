@@ -2,7 +2,7 @@
  * Imported-skill dialect normalizer.
  *
  * Parses a skill file brought in from outside (GitHub / URL import) into the
- * sidanclaw draft shape, detecting which dialect it was written in and
+ * Use Brian draft shape, detecting which dialect it was written in and
  * flagging — never rewriting — anything that will not carry over.
  *
  * Spec: docs/architecture/engine/skill-system.md → "Importing skills
@@ -103,7 +103,7 @@ export function parseImportedSkill(fileName: string, raw: string): ParsedImport 
   const [, yaml, body] = fmMatch
   const meta = parseYamlFrontmatter(yaml!)
 
-  // Agent Skills spec (and sidanclaw's own format, legacy flat included):
+  // Agent Skills spec (and Use Brian's own format, legacy flat included):
   // frontmatter carries both name and description — parseSkillMarkdown
   // already speaks this dialect in full.
   if (meta.name && meta.description) {

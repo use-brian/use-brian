@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor, RetrievalStore } from '@sidanclaw/core'
+import type { RetrievalActor, RetrievalStore } from '@use-brian/core'
 
 /**
  * Integration tests for createDbAggregateStore (company-brain WU-5.4).
  *
- * Requires the local `sidanclaw` PostgreSQL database with migrations
+ * Requires the local `Use Brian` PostgreSQL database with migrations
  * through 296 (tasks table + CRM→entity unification) applied: the `deals`
  * primitive reads `entities` rows (kind='deal'), tasks its own table.
  * Skips silently when the DB isn't reachable — matches the pattern in
@@ -17,7 +17,7 @@ import type { RetrievalActor, RetrievalStore } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

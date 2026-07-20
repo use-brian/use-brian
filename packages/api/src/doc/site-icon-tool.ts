@@ -26,8 +26,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { buildTool, type FilesApi, type Tool } from '@sidanclaw/core'
-import { imageIconToken } from '@sidanclaw/shared'
+import { buildTool, type FilesApi, type Tool } from '@use-brian/core'
+import { imageIconToken } from '@use-brian/shared'
 
 import { fetchSiteIconImage, type BytesFetchFn } from './site-icon.js'
 

@@ -6,10 +6,10 @@
  * through `authFetch` so token refresh is handled transparently.
  *
  * Wire types are declared locally rather than imported from
- * `@sidanclaw/core` — the core barrel pulls in `skills/loader` which
+ * `@use-brian/core` — the core barrel pulls in `skills/loader` which
  * uses Node's `fs`, breaking client bundles. (The same constraint
  * drives `packages/views-renderer/src/types.ts` to import from
- * `@sidanclaw/core/dist/views/a2ui.js` directly.) The shapes here
+ * `@use-brian/core/dist/views/a2ui.js` directly.) The shapes here
  * mirror the canonical types in `packages/core/src/views/blocks.ts`
  * and `packages/core/src/views/types.ts`; the Zod validators on the
  * server are the authoritative contract.
@@ -20,13 +20,13 @@
  */
 
 import { authFetch } from "@/lib/auth-fetch";
-import type { ViewPayload } from "@sidanclaw/views-renderer";
+import type { ViewPayload } from "@use-brian/views-renderer";
 import type {
   CustomPageTemplate,
   CustomPageTemplateSummary,
   CustomTemplateCreateInput,
   ExtractionSpec,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import {
   Briefcase,
   Building2,
@@ -41,7 +41,7 @@ import {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-// ── Wire-format types (mirror `@sidanclaw/core/src/views/*`) ─────────
+// ── Wire-format types (mirror `@use-brian/core/src/views/*`) ─────────
 
 export type ViewEntity =
   | "tasks"
@@ -586,7 +586,7 @@ export async function getView(viewId: string): Promise<ViewMetadata> {
 // ── Custom page templates (migration 281) ─────────────────────────────
 //
 // Workspace-shared, user-authored templates. Distinct from the built-in
-// `listPageTemplates()` catalog (`@sidanclaw/doc-model`, no args) — these are
+// `listPageTemplates()` catalog (`@use-brian/doc-model`, no args) — these are
 // fetched per workspace. The gallery merges both.
 
 export async function listCustomPageTemplates(
@@ -1384,7 +1384,7 @@ export function daysUntilPrune(autoPruneAtIso: string | null): number | null {
 //
 // Wrappers over the export/import HTTP routes in
 // `packages/api/src/routes/views.ts`. The converters themselves are the pure
-// hub in `@sidanclaw/core`; these are I/O glue. Downloads go through
+// hub in `@use-brian/core`; these are I/O glue. Downloads go through
 // `authFetch` (blob), NOT a plain `<a href>`: auth is a bearer token read from
 // JS, so a plain link/`window.open` can't carry it (it would 401).
 // Spec: docs/architecture/features/doc-conversion.md.

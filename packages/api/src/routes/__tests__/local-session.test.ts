@@ -53,40 +53,40 @@ function makeApp(deps: Partial<LocalSessionDeps>) {
 }
 
 describe('[COMP:api/local-session] isOssEdition gate', () => {
-  it('is true when SIDANCLAW_EDITION=oss', () => {
-    const prev = process.env.SIDANCLAW_EDITION
+  it('is true when USEBRIAN_EDITION=oss', () => {
+    const prev = process.env.USEBRIAN_EDITION
     try {
-      process.env.SIDANCLAW_EDITION = 'oss'
+      process.env.USEBRIAN_EDITION = 'oss'
       expect(isOssEdition()).toBe(true)
     } finally {
-      if (prev === undefined) delete process.env.SIDANCLAW_EDITION
-      else process.env.SIDANCLAW_EDITION = prev
+      if (prev === undefined) delete process.env.USEBRIAN_EDITION
+      else process.env.USEBRIAN_EDITION = prev
     }
   })
 
-  it('is true when NEXT_PUBLIC_SIDANCLAW_EDITION=oss (the launcher app-web var)', () => {
-    const prev = { s: process.env.SIDANCLAW_EDITION, n: process.env.NEXT_PUBLIC_SIDANCLAW_EDITION }
+  it('is true when NEXT_PUBLIC_USEBRIAN_EDITION=oss (the launcher app-web var)', () => {
+    const prev = { s: process.env.USEBRIAN_EDITION, n: process.env.NEXT_PUBLIC_USEBRIAN_EDITION }
     try {
-      delete process.env.SIDANCLAW_EDITION
-      process.env.NEXT_PUBLIC_SIDANCLAW_EDITION = 'oss'
+      delete process.env.USEBRIAN_EDITION
+      process.env.NEXT_PUBLIC_USEBRIAN_EDITION = 'oss'
       expect(isOssEdition()).toBe(true)
     } finally {
-      if (prev.s === undefined) delete process.env.SIDANCLAW_EDITION
-      else process.env.SIDANCLAW_EDITION = prev.s
-      if (prev.n === undefined) delete process.env.NEXT_PUBLIC_SIDANCLAW_EDITION
-      else process.env.NEXT_PUBLIC_SIDANCLAW_EDITION = prev.n
+      if (prev.s === undefined) delete process.env.USEBRIAN_EDITION
+      else process.env.USEBRIAN_EDITION = prev.s
+      if (prev.n === undefined) delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION
+      else process.env.NEXT_PUBLIC_USEBRIAN_EDITION = prev.n
     }
   })
 
   it('defaults to false (hosted) when unset, so a hosted deploy never opts in', () => {
-    const prev = { s: process.env.SIDANCLAW_EDITION, n: process.env.NEXT_PUBLIC_SIDANCLAW_EDITION }
+    const prev = { s: process.env.USEBRIAN_EDITION, n: process.env.NEXT_PUBLIC_USEBRIAN_EDITION }
     try {
-      delete process.env.SIDANCLAW_EDITION
-      delete process.env.NEXT_PUBLIC_SIDANCLAW_EDITION
+      delete process.env.USEBRIAN_EDITION
+      delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION
       expect(isOssEdition()).toBe(false)
     } finally {
-      if (prev.s !== undefined) process.env.SIDANCLAW_EDITION = prev.s
-      if (prev.n !== undefined) process.env.NEXT_PUBLIC_SIDANCLAW_EDITION = prev.n
+      if (prev.s !== undefined) process.env.USEBRIAN_EDITION = prev.s
+      if (prev.n !== undefined) process.env.NEXT_PUBLIC_USEBRIAN_EDITION = prev.n
     }
   })
 })

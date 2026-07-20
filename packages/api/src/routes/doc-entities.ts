@@ -20,7 +20,7 @@
 
 import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
-import type { DocEntityStore, CellValue, PropertyDef } from '@sidanclaw/core'
+import type { DocEntityStore, CellValue, PropertyDef } from '@use-brian/core'
 import type { WorkspaceStore } from '../db/workspace-store.js'
 
 export type DocEntitiesRouteOptions = {

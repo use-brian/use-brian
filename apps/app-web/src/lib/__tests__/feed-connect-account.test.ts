@@ -14,7 +14,7 @@ describe("[COMP:app-web/feed-connect-account] connect-account helper", () => {
       apiUrl: "http://localhost:4000",
       platform: "threads",
       assistantId: "a-1",
-      origin: "https://app.sidan.ai",
+      origin: "https://app.usebrian.ai",
       workspaceId: "ws-1",
     });
     const parsed = new URL(url);
@@ -23,7 +23,7 @@ describe("[COMP:app-web/feed-connect-account] connect-account helper", () => {
     );
     expect(parsed.searchParams.get("assistantId")).toBe("a-1");
     expect(parsed.searchParams.get("return_to")).toBe(
-      "https://app.sidan.ai/w/ws-1/feed?connected=threads",
+      "https://app.usebrian.ai/w/ws-1/feed?connected=threads",
     );
   });
 
@@ -32,7 +32,7 @@ describe("[COMP:app-web/feed-connect-account] connect-account helper", () => {
       apiUrl: "http://localhost:4000",
       platform: "twitter",
       assistantId: "a-2",
-      origin: "https://app.sidan.ai",
+      origin: "https://app.usebrian.ai",
       workspaceId: "ws-9",
     });
     const parsed = new URL(url);

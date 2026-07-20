@@ -6,14 +6,14 @@ import pg from 'pg'
  * propagation (large-content-artifacts §Phase 2.1). Component tag:
  * [COMP:files/artifact-index].
  *
- * Requires a local `sidanclaw` DB with migration 297 applied; skips silently
+ * Requires a local `Use Brian` DB with migration 297 applied; skips silently
  * when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

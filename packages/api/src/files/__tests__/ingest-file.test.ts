@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { FilesApi } from '@sidanclaw/core'
+import type { FilesApi } from '@use-brian/core'
 import { createFileIngestor, FileIngestError, type FileIngestContext } from '../ingest-file.js'
 
 function fakeWriteBytes(over?: { fail?: 'quota' | 'conflict' }) {

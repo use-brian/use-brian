@@ -24,12 +24,12 @@
 
 import { useEffect, useRef } from "react";
 import type * as Y from "yjs";
-import { yDocToPlaintext } from "@sidanclaw/doc-model";
+import { yDocToPlaintext } from "@use-brian/doc-model";
 import { requestAutoTitle } from "@/lib/api/views";
 
 /**
  * Body plaintext length (chars) before the human trigger fires. Mirrors
- * `AUTO_TITLE_MIN_CHARS` in `@sidanclaw/core` (`doc/auto-title.ts`) — kept
+ * `AUTO_TITLE_MIN_CHARS` in `@use-brian/core` (`doc/auto-title.ts`) — kept
  * as a local copy because core isn't browser-bundleable. The server re-checks
  * the authoritative value; this is only the "don't even bother" gate.
  */

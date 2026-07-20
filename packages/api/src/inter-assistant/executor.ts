@@ -32,7 +32,7 @@ import type {
   AssistantMode,
   ResearchDepthConfig,
   WorkerRunsStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   queryLoop,
   buildMemoryContext,
@@ -52,8 +52,8 @@ import {
   runPreflight,
   buildPreflightPrompt,
   EvidenceAccumulator,
-} from '@sidanclaw/core'
-import type { SavedViewStore, EngineHooks } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { SavedViewStore, EngineHooks } from '@use-brian/core'
 import type { ResearchSynthesizeFn } from '../synthesis/research-synthesizer.js'
 import {
   findOrCreateSession,
@@ -74,7 +74,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type {
   McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore,
   EpisodicStore, UsageStore, AnalyticsLogger, RetrievalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { DeferredConfirmationStore } from '../db/deferred-confirmation-store.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import type { ChatEpisodeIngestor } from '../ingest-port.js'
@@ -112,7 +112,7 @@ export type CalleeExecutorOptions = {
    * getter (the executor is constructed before the files block), so read it
    * from `options` at call time — never destructure it at executor creation.
    */
-  filesApi?: import('@sidanclaw/core').FilesApi
+  filesApi?: import('@use-brian/core').FilesApi
   /**
    * Tool-use interception port (remote MCP only), forwarded to the callee's
    * `injectMcpTools`. Open default = unset. See
@@ -571,7 +571,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
         userId: calleeActorUserId,
         assistantId: params.calleeAssistantId,
         sessionId: session.id,
-        appId: 'sidanclaw',
+        appId: 'Use Brian',
         channelType: 'workflow',
         channelId: session.id,
         workspaceId: calleeAssistant.workspaceId ?? undefined,
@@ -925,7 +925,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       clearance: calleeAssistant.clearance,
     }
     const [soul, identityMemories, memoryIndex] = await Promise.all([
-      options.memoryStore.getSoul(params.calleeAssistantId, calleeActorUserId, 'sidanclaw'),
+      options.memoryStore.getSoul(params.calleeAssistantId, calleeActorUserId, 'Use Brian'),
       options.memoryStore.getIdentity(calleeCtx),
       options.memoryStore.getIndex(calleeCtx),
     ])
@@ -1208,7 +1208,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
             userId: calleeActorUserId,
             assistantId: params.calleeAssistantId,
             sessionId: session.id,
-            appId: 'sidanclaw',
+            appId: 'Use Brian',
             channelType: 'assistant-call',
             channelId: params.callerAssistantId,
             workspaceId: calleeAssistant.workspaceId ?? undefined,
@@ -1370,7 +1370,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
           userId: calleeActorUserId,
           assistantId: params.calleeAssistantId,
           sessionId: session.id,
-          appId: 'sidanclaw',
+          appId: 'Use Brian',
           channelType: 'assistant-call',
           channelId: params.callerAssistantId,
           // A page anchor already passed the workspace gate above — the doc

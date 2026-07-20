@@ -6,13 +6,13 @@ import pg from 'pg'
  * entity_links). Verifies the lookup is seeded with the locked
  * vocabulary, the edge_type FK rejects unknown types, the visibility
  * CHECK fires, and indexes are present. Skips silently when the
- * local `sidanclaw` database is unavailable.
+ * local `Use Brian` database is unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

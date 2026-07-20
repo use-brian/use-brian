@@ -31,7 +31,7 @@ import {
   type ControlPlaneReader,
   type Tool,
   type ToolContext,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { PendingApprovalsStore } from '../db/pending-approvals-store.js'
 import { bandOf } from './banding.js'
 import { createAgentWriteTools, type AgentWriteToolDeps } from './write-tools.js'

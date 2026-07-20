@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildCitationIndex } from '@sidanclaw/shared'
+import { buildCitationIndex } from '@use-brian/shared'
 import { createTaskTools, type TaskToolEvent } from '../tools.js'
 import type { TaskRecord, TaskStore } from '../types.js'
 
@@ -113,7 +113,7 @@ const ctx = {
   assistantId: 'assistant_1',
   userId: 'user_1',
   sessionId: 'session_1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c_1',
   workspaceId: 'workspace_1',

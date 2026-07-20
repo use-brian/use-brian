@@ -1,7 +1,7 @@
 /**
  * The canonical Tiptap/ProseMirror schema for a doc page — shared by
  * the browser editor (`apps/app-web`), the Yjs sync server
- * (`apps/doc-sync`), the server-side AI client (`@sidanclaw/core`), and
+ * (`apps/doc-sync`), the server-side AI client (`@use-brian/core`), and
  * the block→Y.Doc migration. Both Yjs ends MUST build the schema from this
  * one list or documents corrupt (y-prosemirror maps a ProseMirror schema to
  * the CRDT; a node/attr that exists on one end and not the other desyncs).

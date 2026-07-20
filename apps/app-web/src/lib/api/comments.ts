@@ -5,7 +5,7 @@
  * `packages/api/src/routes/comments.ts`. All calls go through `authFetch`
  * for transparent token refresh.
  *
- * Wire types are declared locally (not imported from `@sidanclaw/core` —
+ * Wire types are declared locally (not imported from `@use-brian/core` —
  * the core barrel pulls in fs-using modules that break the browser bundle;
  * same constraint as `lib/api/views.ts`). They mirror `CommentThread` in
  * `packages/core/src/doc/comment-types.ts`; the server Zod validators are

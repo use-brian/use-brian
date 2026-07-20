@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { formatStamp } from "@sidanclaw/shared";
+import { formatStamp } from "@use-brian/shared";
 import { useT } from "@/lib/i18n/client";
 import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 import {

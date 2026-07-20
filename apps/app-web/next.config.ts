@@ -32,7 +32,7 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_API_URL:
       process.env.NEXT_PUBLIC_API_URL ??
       (process.env.NODE_ENV === "development" ? "" : API_URL),
-    NEXT_PUBLIC_CORE_WEB_URL: process.env.NEXT_PUBLIC_CORE_WEB_URL ?? "https://sidan.ai",
+    NEXT_PUBLIC_CORE_WEB_URL: process.env.NEXT_PUBLIC_CORE_WEB_URL ?? "https://usebrian.ai",
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ?? "",
   },

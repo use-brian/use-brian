@@ -19,7 +19,7 @@
  * exactly as it did before this seam existed (and the verifier stays
  * FAIL-CLOSED regardless).
  */
-import type { GoalRecord } from '@sidanclaw/core'
+import type { GoalRecord } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { countOpenSubGoalsSystem } from '../db/goals.js'
 

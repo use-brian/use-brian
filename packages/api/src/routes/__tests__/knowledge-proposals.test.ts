@@ -214,7 +214,7 @@ describe('[COMP:api/knowledge-proposals] POST /entries/:id/proposals', () => {
       .send({ content: 'new body', comment: 'Fixed the fee table' })
     expect(res.status).toBe(201)
     expect(res.body).toMatchObject({ prUrl: 'https://github.com/acme/kb/pull/7', prNumber: 7 })
-    expect(res.body.branch).toMatch(/^sidanclaw\/kb-vault-/)
+    expect(res.body.branch).toMatch(/^brian\/kb-vault-/)
 
     // Branch off the source head.
     expect(githubOps.createBranchRef).toHaveBeenCalledWith(

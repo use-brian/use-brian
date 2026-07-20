@@ -3,7 +3,7 @@
  * classifier-golden-set fixture skeleton for hand-labelling.
  *
  * Usage:
- *   pnpm --filter @sidanclaw/api exec tsx scripts/dump-classifier-fixtures.ts \
+ *   pnpm --filter @use-brian/api exec tsx scripts/dump-classifier-fixtures.ts \
  *     --workspace=<workspace-id> --limit=20
  *
  * Output is written to stdout — paste into

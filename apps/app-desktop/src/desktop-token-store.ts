@@ -2,12 +2,12 @@
  * Desktop token store — the Bearer-token persistence core for the **bundled**
  * desktop app (Phase 4, docs/plans/canvas-desktop-bundled-offline.md).
  *
- * The thin remote shell authenticates with `.sidan.ai` cookies written into the
+ * The thin remote shell authenticates with `.usebrian.ai` cookies written into the
  * Electron cookie jar (`buildSessionCookies` in `desktop-auth.ts`). A bundled
  * app loads from a `file://` / `app://` origin where those cookies don't apply,
  * so it must hold the JWT pair itself — encrypted at rest via the OS keychain
  * (`safeStorage`) and handed to the renderer through the preload token bridge
- * (`window.sidanclawDesktop.getAccessToken` …), which activates the dormant
+ * (`window.usebrianDesktop.getAccessToken` …), which activates the dormant
  * `desktopAuthSource` in app-web (`lib/desktop-auth-source.ts`).
  *
  * Everything here is **pure / IO-injectable** so it unit-tests with no Electron,

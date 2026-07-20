@@ -27,7 +27,7 @@ import type {
   A2UIRowValue,
   A2UIWidget,
   TableWidget,
-} from "@sidanclaw/views-renderer";
+} from "@use-brian/views-renderer";
 import type { ViewToolbarValue } from "./view-toolbar";
 import type { Filter } from "./filter-bar";
 

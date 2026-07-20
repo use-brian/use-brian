@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import type { Request, Response, NextFunction } from 'express'
-import { sanitize } from '@sidanclaw/core'
-import type { AnalyticsStore } from '@sidanclaw/core'
+import { sanitize } from '@use-brian/core'
+import type { AnalyticsStore } from '@use-brian/core'
 import { isValidDateString } from './route-helpers.js'
 
 /**

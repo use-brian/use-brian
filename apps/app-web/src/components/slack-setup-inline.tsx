@@ -57,7 +57,7 @@ export function SlackSetupInline({
   // Manifest customization — pure UI state, not persisted
   const defaultSeed = iconSeed ?? Array.from(assistantId).reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
   const [appName, setAppName] = useState(assistantName || "My AI Assistant");
-  const [appDescription, setAppDescription] = useState("Personal AI assistant powered by sidanclaw");
+  const [appDescription, setAppDescription] = useState("Personal AI assistant powered by Use Brian");
   const [bgColor, setBgColor] = useState(() => getIconColor(defaultSeed));
 
   const canSubmit =

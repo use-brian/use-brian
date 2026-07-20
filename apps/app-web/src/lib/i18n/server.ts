@@ -8,7 +8,7 @@ import { getDictionary, type Dictionary } from "./dictionaries";
  * Resolve the current locale from the `locale` cookie, falling back to
  * negotiation against `Accept-Language`, then to the default locale.
  *
- * In production the cookie scope is `.sidan.ai`, so app-web sees
+ * In production the cookie scope is `.usebrian.ai`, so app-web sees
  * whatever apps/web's switcher last set. In dev (separate `localhost`
  * origins) app-web reads its own cookie or `Accept-Language`.
  */

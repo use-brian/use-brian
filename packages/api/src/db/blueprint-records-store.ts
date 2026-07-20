@@ -26,7 +26,7 @@ import type {
   BlueprintRecordStatus,
   ExtractionField,
   FieldCitation,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 import { queryWithRLS } from './client.js'
 

@@ -15,7 +15,7 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { viewsRoutes } from '../views.js'
-import type { Page, SavedView } from '@sidanclaw/core'
+import type { Page, SavedView } from '@use-brian/core'
 
 const WS = '00000000-0000-0000-0000-000000000010'
 const UID = '00000000-0000-0000-0000-000000000020'

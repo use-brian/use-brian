@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 /**
  * Integration tests for WU-5.3 — `search` + `recentEpisodes` of the
- * `RetrievalStore` surface. Requires a local `sidanclaw` PostgreSQL
+ * `RetrievalStore` surface. Requires a local `Use Brian` PostgreSQL
  * database with migrations through 132 applied (universal columns +
  * entities + entity_links + episodes + kb_chunks). Skips silently when
  * the DB is unavailable or required migrations haven't landed.
@@ -13,7 +13,7 @@ import type { RetrievalActor } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

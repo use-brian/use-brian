@@ -16,11 +16,11 @@ describeIf('[COMP:api/agentmail-client] AgentMail live integration', () => {
 
   it('inbox lifecycle: create is idempotent on clientId, get resolves, delete removes', async () => {
     const clientId = `sidanclaw-it-${Date.now()}`
-    const created = await provider.createInbox({ clientId, displayName: 'sidanclaw integration test' })
+    const created = await provider.createInbox({ clientId, displayName: 'Use Brian integration test' })
     try {
       expect(created.inboxId).toContain('@')
 
-      const again = await provider.createInbox({ clientId, displayName: 'sidanclaw integration test' })
+      const again = await provider.createInbox({ clientId, displayName: 'Use Brian integration test' })
       expect(again.inboxId).toBe(created.inboxId)
 
       const fetched = await provider.getInbox(created.inboxId)

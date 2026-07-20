@@ -73,7 +73,7 @@ export type EmailAdapterOptions = {
   send: EmailSendPort
   /**
    * REQUIRED delivery sanitizer — pass `sanitizeDeliveryText` from
-   * `@sidanclaw/shared/delivery-sanitize`. Injected because this package is
+   * `@use-brian/shared/delivery-sanitize`. Injected because this package is
    * dependency-free; the graded invariant holds this file to calling it.
    */
   sanitizeDeliveryText: (text: string) => string

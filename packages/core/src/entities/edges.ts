@@ -7,7 +7,7 @@
  *
  * Spec: docs/architecture/brain/data-model.md §Edge vocabulary. When
  * adding a new edge, update the table in data-model.md first (and its
- * sidanclaw-kb/ pair), then mirror it here.
+ * brian-kb/ pair), then mirror it here.
  */
 
 // ── Endpoint kinds ─────────────────────────────────────────────────

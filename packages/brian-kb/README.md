@@ -1,13 +1,13 @@
-# @sidanclaw/sidanclaw-kb
+# @use-brian/brian-kb
 
-Parser, wikilink resolver, and lint checks for [sidanclaw](https://sidan.ai) knowledge bases. Shared between the API sync worker and the public CLI — single source of truth for how KB markdown is read and validated.
+Parser, wikilink resolver, and lint checks for [Use Brian](https://usebrian.ai) knowledge bases. Shared between the API sync worker and the public CLI — single source of truth for how KB markdown is read and validated.
 
 ## Install (CLI use)
 
 ```
-npm install -g @sidanclaw/sidanclaw-kb
+npm install -g @use-brian/brian-kb
 # or invoke directly:
-npx @sidanclaw/sidanclaw-kb <command>
+npx @use-brian/brian-kb <command>
 ```
 
 ## CLI — `kb lint`
@@ -66,7 +66,7 @@ import {
 
   readFrontmatter,         // low-level utility
   report,                  // CLI-side formatter
-} from '@sidanclaw/sidanclaw-kb'
+} from '@use-brian/brian-kb'
 ```
 
 ### Sync-worker use (pre-parsed entries, no filesystem)
@@ -95,7 +95,7 @@ process.exit(exit)
 ## Scaffolding a new KB
 
 Not this package's job — use the template directly:
-<https://github.com/sidanclaw/sidanclaw-kb-template> ("Use this template")
+<https://github.com/use-brian/brian-kb-template> ("Use this template")
 
 ## License
 

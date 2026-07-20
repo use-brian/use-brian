@@ -4,7 +4,7 @@ import pg from 'pg'
 /**
  * Integration test for migrations 232 + 233 — workspace deletion cascades its
  * assistants and its consolidation_logs (and, transitively, all workspace
- * brain data). Requires a local PostgreSQL `sidanclaw` database with both
+ * brain data). Requires a local PostgreSQL `Use Brian` database with both
  * migrations applied; skips silently otherwise.
  *
  * Before 232 the `assistants.workspace_id` FK was ON DELETE SET NULL, which
@@ -25,7 +25,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

@@ -15,7 +15,7 @@ dist/
 *.tsbuildinfo
 
 # Local brain store (PGLite default)
-.sidanclaw/
+.use-brian/
 
 # OS / editor
 .DS_Store

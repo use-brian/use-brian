@@ -1,14 +1,14 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve, join } from 'node:path'
-import { parseSkillMarkdown } from '@sidanclaw/core'
-import type { SkillContent } from '@sidanclaw/core'
+import { parseSkillMarkdown } from '@use-brian/core'
+import type { SkillContent } from '@use-brian/core'
 
 const TOOLS_DIR = resolve(
-  import.meta.dirname, '..', '..', '..', '..', 'sidanclaw-tools',
+  import.meta.dirname, '..', '..', '..', '..', 'brian-tools',
 )
 
 /**
- * Load the community skill registry from sidanclaw-tools/skills/<name>/SKILL.md.
+ * Load the community skill registry from brian-tools/skills/<name>/SKILL.md.
  * Called once at server boot. Returns full SkillContent[] (with prompt body).
  */
 export function loadSkillRegistry(): SkillContent[] {
@@ -34,11 +34,11 @@ export function loadSkillRegistry(): SkillContent[] {
   } catch (err) {
     const e = err as NodeJS.ErrnoException
     // Expected in a clean open-source clone: community skills live in the
-    // optional sidanclaw-tools submodule, so its skills dir is absent (ENOENT).
-    // Populate it with `git submodule update --init sidanclaw-tools`. Any other
+    // optional brian-tools submodule, so its skills dir is absent (ENOENT).
+    // Populate it with `git submodule update --init brian-tools`. Any other
     // error is a real problem worth a warn.
     if (e.code === 'ENOENT') {
-      console.log('[registry] No community skills (sidanclaw-tools not present)')
+      console.log('[registry] No community skills (brian-tools not present)')
     } else {
       console.warn('[registry] Failed to load community skills:', e.message)
     }

@@ -43,7 +43,7 @@ import {
   type Message,
   type TokenUsage,
   type Tool,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 /** The model couldn't produce a usable draft or reply. */
 export class SkillDraftError extends Error {

@@ -62,7 +62,7 @@ function firstParagraph(body: string): string | null {
 /**
  * Generate a full KB markdown file (Tier-1 frontmatter + body) matching the
  * authoring shape the sync parser reads back (title / description / tags /
- * sensitivity — see sidanclaw-kb README → "Authoring").
+ * sensitivity — see brian-kb README → "Authoring").
  */
 function buildKbFileContent(params: {
   title: string

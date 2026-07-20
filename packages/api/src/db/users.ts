@@ -1,5 +1,5 @@
 import { query, getPool } from './client.js'
-import { generateHandle } from '@sidanclaw/core'
+import { generateHandle } from '@use-brian/core'
 
 export type User = {
   id: string
@@ -287,6 +287,32 @@ export async function promoteChannelUser(
        updated_at = now()
      WHERE id = $1`,
     [userId, updates.authProvider, updates.authProviderId, updates.name ?? null, updates.avatarUrl ?? null],
+  )
+}
+
+/**
+ * Backfill profile fields from an OAuth provider sign-in WITHOUT touching the
+ * auth_provider pair. Used by the cross-provider Google branch (verified
+ * Google email matches an existing row created by another method, e.g. email
+ * magic-link): the row keeps its original provider — the sign-in is an
+ * alternate authentication method, not a provider switch — but gains the
+ * provider's display name / avatar where it has none. Same no-clobber avatar
+ * rule as findOrCreateUser / promoteChannelUser (user-profile.md → "Avatar
+ * precedence"). See docs/architecture/platform/auth.md → "Account resolution
+ * (Google side)".
+ */
+export async function backfillUserProfileFromProvider(
+  userId: string,
+  updates: { name?: string; avatarUrl?: string },
+): Promise<void> {
+  if (!updates.name && !updates.avatarUrl) return
+  await query(
+    `UPDATE users SET
+       name = COALESCE($2, name),
+       avatar_url = CASE WHEN avatar_source = 'uploaded' THEN avatar_url ELSE COALESCE($3, avatar_url) END,
+       updated_at = now()
+     WHERE id = $1`,
+    [userId, updates.name ?? null, updates.avatarUrl ?? null],
   )
 }
 
@@ -761,7 +787,7 @@ export async function listAccessibleAssistants(
 /**
  * Find an assistant by its ID (no RLS — used by webhook routes before the
  * user is known, e.g. Slack BYO where the assistant_id comes from the URL
- * and the Slack user hasn't been mapped to a sidanclaw user yet).
+ * and the Slack user hasn't been mapped to a Use Brian user yet).
  */
 export type AssistantKind = 'standard' | 'app' | 'primary' | 'primary'
 

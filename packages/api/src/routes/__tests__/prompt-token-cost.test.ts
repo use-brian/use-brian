@@ -58,7 +58,7 @@ afterAll(() => {
     `  Layer 1 baseline: ${LAYER_1_TOKENS} tokens (${LAYER_1_CHARS} chars).`,
     '  Production truth lives in usageMetadata.promptTokenCount —',
     '  treat the numbers above as proxies, not invoices.',
-    `  Regenerate the committed snapshot: \`pnpm --filter @sidanclaw/api token-report\`.`,
+    `  Regenerate the committed snapshot: \`pnpm --filter @use-brian/api token-report\`.`,
     '',
   ].join('\n'))
 })

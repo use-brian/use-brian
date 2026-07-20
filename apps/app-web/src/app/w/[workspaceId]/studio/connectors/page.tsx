@@ -27,7 +27,7 @@
  *   - The per-assistant-permissions link is workspace-scoped
  *     (`/w/[workspaceId]/studio/assistants?...`).
  *   - `OFFICIAL_OAUTH_SCOPES` is the local mirror (app-web has no
- *     `@sidanclaw/shared` dep). Every user-facing string flows through
+ *     `@use-brian/shared` dep). Every user-facing string flows through
  *     `useT()`.
  *
  * INFRA NOTE (connector OAuth env): the OAuth connect paths build the provider
@@ -37,7 +37,7 @@
  * fathom}` (workspace-aware via `state`). Each client id must reach the browser
  * bundle as a real `NEXT_PUBLIC_*` build var: Turborepo strict env mode strips
  * bare vars like `GOOGLE_CLIENT_ID`, so the `next.config.ts` env mapping only
- * lands when that var is declared in `sidanclaw/turbo.json` build.env (or a
+ * lands when that var is declared in `use-brian/turbo.json` build.env (or a
  * real `NEXT_PUBLIC_*` var is set in the Vercel project). Missing it ships an
  * empty `client_id` (Google `Error 400: invalid_request`). PAT connectors
  * (GitHub) and custom MCP servers need no OAuth. See
@@ -68,8 +68,8 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { cn } from "@/lib/utils";
-import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@sidanclaw/shared/builtin-connectors";
-import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@sidanclaw/shared/connector-registry";
+import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
+import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
 import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
@@ -2409,7 +2409,7 @@ function ConnectorsList() {
                       <code className="bg-muted px-1 py-0.5 rounded text-[11px]">repo</code>{" "}
                       {tc.patHelpScope}{" "}
                       <a
-                        href="https://github.com/settings/tokens/new?scopes=repo,read:user&description=sidanclaw"
+                        href="https://github.com/settings/tokens/new?scopes=repo,read:user&description=Use Brian"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="text-primary hover:underline"

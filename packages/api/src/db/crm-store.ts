@@ -1,4 +1,4 @@
-import type { CrmStore, EntityLinksStore } from '@sidanclaw/core'
+import type { CrmStore, EntityLinksStore } from '@use-brian/core'
 import {
   createCompany, getCompanyById, listCompanies, updateCompany,
   createContact, getContactById, listContacts, updateContact,

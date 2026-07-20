@@ -20,7 +20,7 @@ import { webAppUrl } from "@/lib/primary-auth";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 // Deep-link target for `/plans`, which still lives in the marketing app
-// (apps/web). `webAppUrl()` resolves the prod-safe base (sidan.ai in prod)
+// (apps/web). `webAppUrl()` resolves the prod-safe base (usebrian.ai in prod)
 // instead of an inline localhost fallback — that fallback is what sent prod
 // clicks to http://localhost:3000. `/redeem` is NOT here: it moved in-app, so
 // the redeem link below is same-origin.

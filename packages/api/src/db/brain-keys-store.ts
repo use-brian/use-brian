@@ -16,7 +16,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 import { hashSecret } from './api-key-store.js'
 

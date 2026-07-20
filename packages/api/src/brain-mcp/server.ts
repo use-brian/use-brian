@@ -9,7 +9,7 @@
  * Stateless transport: a fresh `McpServer` + transport is built per request,
  * with the tool surface scope-gated to the authenticating key. The MCP
  * protocol itself is handled by `@modelcontextprotocol/sdk` (the same SDK
- * the connector client already uses) — sidanclaw is an MCP client elsewhere;
+ * the connector client already uses) — Use Brian is an MCP client elsewhere;
  * this makes it also an MCP server.
  *
  * Component tag: [COMP:api/brain-mcp].
@@ -19,7 +19,7 @@
 import { Router } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import type { Tool, Embedder } from '@sidanclaw/core'
+import type { Tool, Embedder } from '@use-brian/core'
 import type { BrainKeyStore } from '../db/brain-keys-store.js'
 import type { OAuthAuthorizationStore } from '../db/oauth-authorization-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -93,7 +93,7 @@ type Options = {
    * Computer-use R2: the logic-block store behind `writeBrowserSkill` — the
    * OSS authoring skill's brain-sync tool. Optional; write-scope keys only.
    */
-  browserSkills?: import('@sidanclaw/core').BrowserSkillStore
+  browserSkills?: import('@use-brian/core').BrowserSkillStore
 }
 
 export function brainMcpRoutes(opts: Options): Router {

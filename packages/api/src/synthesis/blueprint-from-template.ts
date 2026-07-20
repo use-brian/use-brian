@@ -9,7 +9,7 @@
 // becomes the loop's system prompt; the engine adds the source-specific gather
 // + cite envelope. See structural-synthesis.md → "The blueprint object".
 
-import type { ExtractionField, ExtractionSpec } from '@sidanclaw/core'
+import type { ExtractionField, ExtractionSpec } from '@use-brian/core'
 
 function shapeWord(outputType: ExtractionField['outputType']): string {
   if (outputType === 'list') return 'a markdown bulleted list'

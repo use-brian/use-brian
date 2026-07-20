@@ -28,7 +28,7 @@ import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import type { StudioAssistantSummary } from "@/lib/api/studio";
 import type { ViewListRow } from "@/lib/api/views";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import type { WorkspaceSkillSummary } from "@/lib/api/skills";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
 import type {
@@ -74,7 +74,7 @@ import {
   quietFieldCls,
 } from "@/components/brain/skill-document";
 import { cn } from "@/lib/utils";
-import { isImageIcon } from "@sidanclaw/shared/page-icon";
+import { isImageIcon } from "@use-brian/shared/page-icon";
 
 const MODEL_ALIASES: WorkflowModelAlias[] = ["standard", "pro", "max"];
 

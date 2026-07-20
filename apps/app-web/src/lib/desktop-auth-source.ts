@@ -1,7 +1,7 @@
 /**
  * Desktop auth source — the Bearer-token half of the auth seam.
  *
- * The web app authenticates via `.sidan.ai` cookies (`auth-fetch.ts`). A
+ * The web app authenticates via `.usebrian.ai` cookies (`auth-fetch.ts`). A
  * *bundled* desktop app (see `docs/plans/doc-desktop-bundled-offline.md`)
  * loads from a `file://` / `app://` origin, where doc-domain cookies don't
  * apply — so it authenticates with a Bearer token held by the Electron shell
@@ -65,8 +65,22 @@ interface DesktopBridge {
 
 declare global {
   interface Window {
+    /** Canonical bridge name (desktop shells ≥ the 2026-07 rebrand dual-expose). */
+    usebrianDesktop?: DesktopBridge;
+    /** Legacy bridge name — the only one pre-rebrand shells expose. */
     sidanclawDesktop?: DesktopBridge;
   }
+}
+
+/**
+ * Resolve the desktop preload bridge under either name. Old shells in the
+ * wild expose only `sidanclawDesktop`; rebranded shells expose both. Every
+ * app-web read goes through this accessor; drop the legacy fallback only
+ * once pre-rebrand desktop installs are gone.
+ */
+export function desktopBridge(): DesktopBridge | undefined {
+  if (typeof window === "undefined") return undefined;
+  return window.usebrianDesktop ?? window.sidanclawDesktop;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
@@ -79,7 +93,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 export function isDesktopAuth(): boolean {
   return (
     typeof window !== "undefined" &&
-    typeof window.sidanclawDesktop?.getAccessToken === "function"
+    typeof desktopBridge()?.getAccessToken === "function"
   );
 }
 
@@ -91,8 +105,8 @@ export function isDesktopAuth(): boolean {
  * can skip the browser/primary-auth path entirely.
  *
  * This MUST take precedence over `buildPrimaryAuthUrl(...)`: in Electron the
- * primary (`sidan.ai`) is an external origin, so the nav policy opens its
- * `/api/auth/logout` in the SYSTEM browser — clearing the `.sidan.ai` cookies of
+ * primary (`usebrian.ai`) is an external origin, so the nav policy opens its
+ * `/api/auth/logout` in the SYSTEM browser — clearing the `.usebrian.ai` cookies of
  * the user's *web* session while the desktop app's separate cookie jar stays
  * signed in. Bridge-routed logout is the only way to sign the desktop app out.
  *
@@ -101,7 +115,7 @@ export function isDesktopAuth(): boolean {
  */
 export function desktopSignOut(): boolean {
   const signOut =
-    typeof window !== "undefined" ? window.sidanclawDesktop?.signOut : undefined;
+    desktopBridge()?.signOut;
   if (typeof signOut !== "function") return false;
   signOut();
   return true;
@@ -151,16 +165,16 @@ export interface AuthSource {
 
 /**
  * The desktop source. Reads tokens from the bridge; refreshes by calling the
- * API's `/auth/refresh` directly (no same-origin Next route, no `.sidan.ai`
+ * API's `/auth/refresh` directly (no same-origin Next route, no `.usebrian.ai`
  * cookie redirect); "login" opens the system-browser PKCE flow via the shell.
  */
 export const desktopAuthSource: AuthSource = {
   getAccessToken() {
-    return window.sidanclawDesktop?.getAccessToken?.() ?? null;
+    return desktopBridge()?.getAccessToken?.() ?? null;
   },
 
   async refresh(): Promise<RefreshOutcome> {
-    const bridge = window.sidanclawDesktop;
+    const bridge = desktopBridge();
     const refreshToken = bridge?.getRefreshToken?.();
     if (!refreshToken) {
       bridge?.clear?.();
@@ -197,6 +211,6 @@ export const desktopAuthSource: AuthSource = {
   },
 
   redirectToLogin() {
-    window.sidanclawDesktop?.signIn?.();
+    desktopBridge()?.signIn?.();
   },
 };

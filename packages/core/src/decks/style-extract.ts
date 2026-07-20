@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { deriveDeckStyle, type DeckStyle, type ExtractedThemeScheme } from '@sidanclaw/shared/decks';
+import { deriveDeckStyle, type DeckStyle, type ExtractedThemeScheme } from '@use-brian/shared/decks';
 
 /**
  * Extracts a DeckStyle from a reference .pptx — palette + typography only.

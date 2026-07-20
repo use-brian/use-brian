@@ -2,9 +2,9 @@
 name: scan-inspiration
 description: Scan the connected X handle's surroundings (home timeline, an X List, recent search) for posts worth replying to. Returns 5–10 ranked candidates with a one-line "why this one" per candidate. Use when the operator asks "what should I reply to?", "find me inspiration", "scan timeline", or schedules recurring scans via cron.
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: communication
   applies_to_app_type: distribution
   when_to_use: When the operator wants to surface replyable posts from the connected handle's network. Skip when no inspiration sources are configured (no list, no search query, timeline disabled) — direct the operator to set them up first.

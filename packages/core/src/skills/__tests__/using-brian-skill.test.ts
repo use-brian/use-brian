@@ -1,8 +1,8 @@
 /**
- * Fixture test for the using-sidanclaw built-in skill.
- * Component tag: [COMP:engine/using-sidanclaw-skill].
+ * Fixture test for the using-brian built-in skill.
+ * Component tag: [COMP:engine/using-brian-skill].
  *
- * The skill is the consult-first grounding for "can sidanclaw do X?"
+ * The skill is the consult-first grounding for "can Use Brian do X?"
  * questions (2026-07-07 capability-hallucination fix). This asserts the
  * load-bearing pieces survive edits: the activation trigger, the
  * validate-don't-assert protocol (proposeWorkflow as the oracle), the
@@ -15,9 +15,9 @@
 import { describe, it, expect } from 'vitest'
 import { loadBuiltinSkills } from '../loader.js'
 
-const skill = loadBuiltinSkills().find((s) => s.id === 'using-sidanclaw')
+const skill = loadBuiltinSkills().find((s) => s.id === 'using-brian')
 
-describe('[COMP:engine/using-sidanclaw-skill] using-sidanclaw skill', () => {
+describe('[COMP:engine/using-brian-skill] using-brian skill', () => {
   it('is registered as a built-in productivity skill, surfaced in every app', () => {
     expect(skill).toBeDefined()
     expect(skill?.source).toBe('builtin')

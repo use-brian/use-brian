@@ -16,7 +16,7 @@ vi.mock('../client.js', () => ({ queryWithRLS: vi.fn() }))
 
 import { createDbHomeDockStore } from '../home-dock-store.js'
 import { queryWithRLS } from '../client.js'
-import type { HomeDockLayout } from '@sidanclaw/core'
+import type { HomeDockLayout } from '@use-brian/core'
 
 const mockQuery = vi.mocked(queryWithRLS)
 

@@ -1,6 +1,6 @@
 /**
  * Control-plane reader — DB adapter for the Tier-1 agent read tools
- * (`createControlPlaneTools` in @sidanclaw/core). One reader instance is
+ * (`createControlPlaneTools` in @use-brian/core). One reader instance is
  * built at boot in `apps/api/src/index.ts` and shared by every agent
  * surface (brain MCP / assistant MCP / public-api chat).
  *
@@ -23,8 +23,8 @@ import type {
   ControlPlaneMode,
   ControlPlaneReader,
   ControlPlaneSkill,
-} from '@sidanclaw/core'
-import { OFFICIAL_CONNECTORS } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import { OFFICIAL_CONNECTORS } from '@use-brian/shared'
 import { listAccessibleAssistants, getUserAssistant, getWorkspacePrimaryAssistant } from '../db/users.js'
 import { listChannelsForWorkspace } from '../db/channels-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'

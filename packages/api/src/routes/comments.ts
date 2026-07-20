@@ -31,7 +31,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import type { CommentThreadStore } from '@sidanclaw/core'
+import type { CommentThreadStore } from '@use-brian/core'
 
 export type CommentRouteOptions = {
   commentThreadStore: CommentThreadStore

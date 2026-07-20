@@ -4,7 +4,7 @@
  * re-exports them for compatibility).
  */
 
-import { normalisePath } from '@sidanclaw/core'
+import { normalisePath } from '@use-brian/core'
 
 /**
  * Split a raw markdown file into its verbatim frontmatter block (including

@@ -7,14 +7,14 @@ import pg from 'pg'
  * workspace_files, companies, contacts, deals) carries the universal
  * column set, the visibility + valid indexes are present, defaults
  * apply, and the memories Q11 visibility CHECK exists. Requires a
- * local PostgreSQL `sidanclaw` database with migrations applied;
+ * local PostgreSQL `Use Brian` database with migrations applied;
  * skips silently when unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

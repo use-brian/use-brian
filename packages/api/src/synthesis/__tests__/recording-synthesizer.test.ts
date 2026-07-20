@@ -13,8 +13,8 @@ vi.mock('../synthesize.js', async (orig) => ({
   ...(await orig<typeof import('../synthesize.js')>()),
   synthesizeFromSource: synthesizeMock,
 }))
-vi.mock('@sidanclaw/core', async (orig) => ({
-  ...(await orig<typeof import('@sidanclaw/core')>()),
+vi.mock('@use-brian/core', async (orig) => ({
+  ...(await orig<typeof import('@use-brian/core')>()),
   loadBuiltinSkills: loadBuiltinSkillsMock,
   createDocTools: createDocToolsMock,
   createCrmTools: createCrmToolsMock,

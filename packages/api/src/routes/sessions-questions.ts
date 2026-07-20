@@ -29,7 +29,7 @@
  */
 
 import { Router } from 'express'
-import type { WorkerRunsStore, WorkerStatus } from '@sidanclaw/core'
+import type { WorkerRunsStore, WorkerStatus } from '@use-brian/core'
 import { findSessionById } from '../db/sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'

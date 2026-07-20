@@ -54,10 +54,10 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
-import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@sidanclaw/core'
+import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@use-brian/core'
 import { updateWorkspaceFileMeta } from '../db/workspace-files.js'
 import { updateTask } from '../db/tasks.js'
-import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@sidanclaw/core'
+import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
@@ -70,7 +70,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §B3 Brain inbox / web UI
    */
-  entityKindClassifier?: import('@sidanclaw/core').Classifier<import('@sidanclaw/core').EntityKind>
+  entityKindClassifier?: import('@use-brian/core').Classifier<import('@use-brian/core').EntityKind>
   /**
    * Pending-classifications store — when provided, exposes
    * `GET /:workspaceId/pending-classifications` (list unresolved) and
@@ -80,7 +80,7 @@ type RouteOptions = {
    * Spec: docs/architecture/brain/classification/README.md
    *   §Pending-reclassification queue
    */
-  pendingClassificationStore?: import('@sidanclaw/core').PendingClassificationStore
+  pendingClassificationStore?: import('@use-brian/core').PendingClassificationStore
   /**
    * Files API — when provided, exposes `GET
    * /:workspaceId/workspace_file/:rowId/content` so the brain detail

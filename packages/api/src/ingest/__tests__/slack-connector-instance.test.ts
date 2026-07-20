@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { DEFAULT_INGEST_RULES } from '@sidanclaw/core'
+import { DEFAULT_INGEST_RULES } from '@use-brian/core'
 
 const query = vi.fn()
 const queryWithRLS = vi.fn()

@@ -66,7 +66,7 @@ describe('[COMP:api/dev-auth] isLocalDevEnv gate', () => {
     const prev = { node: process.env.NODE_ENV, k: process.env.K_SERVICE }
     try {
       process.env.NODE_ENV = 'development'
-      process.env.K_SERVICE = 'sidanclaw-api'
+      process.env.K_SERVICE = 'brian-api'
       expect(isLocalDevEnv()).toBe(false)
     } finally {
       process.env.NODE_ENV = prev.node

@@ -49,12 +49,12 @@ import type {
   CustomPageTemplate,
   EntityRefKind,
   ExtractionFieldType,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import {
   EXTRACTION_FIELD_TYPES,
   BLUEPRINT_CAPTURE_KINDS,
   ENTITY_REF_KINDS,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import {
   deleteCustomPageTemplate,
   getCustomPageTemplate,

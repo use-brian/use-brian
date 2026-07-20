@@ -15,8 +15,8 @@
  * [COMP:api/home-signals]
  */
 
-import { computeNextRun, type HomeSignals, type WorkflowTrigger } from '@sidanclaw/core'
-import type { SavedViewStore } from '@sidanclaw/core'
+import { computeNextRun, type HomeSignals, type WorkflowTrigger } from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { countBrainInbox } from '../db/brain-inbox-store.js'
 import { isOssEdition } from '../routes/local-session.js'

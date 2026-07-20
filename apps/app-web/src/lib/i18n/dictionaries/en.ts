@@ -17,9 +17,9 @@ export const en = {
     back: "Back",
   },
   login: {
-    title: "Sign in to sidanclaw",
+    title: "Sign in to Use Brian",
     description:
-      "Your company brain for tasks, CRM, knowledge, and workflows. Sign in with the same account you use for sidanclaw.",
+      "Your company brain for tasks, CRM, knowledge, and workflows. Sign in with the same account you use for Use Brian.",
     continueWithGoogle: "Continue with Google",
     // Local-only dev sign-in affordance — compiled out of production
     // bundles. See src/app/api/auth/dev-login/route.ts.
@@ -48,9 +48,9 @@ export const en = {
   // code (replaces the bare 127.0.0.1 callback page). See app/desktop/signed-in.
   desktopSignedIn: {
     title: "You're signed in",
-    body: "You can close this tab and return to Sidanclaw.",
+    body: "You can close this tab and return to Use Brian.",
     errorTitle: "Sign-in didn't finish",
-    errorBody: "Head back to Sidanclaw and start sign-in again.",
+    errorBody: "Head back to Use Brian and start sign-in again.",
   },
   workspace: {
         brain: {
@@ -100,7 +100,7 @@ export const en = {
   },
   planGate: {
     title: "This workspace needs a plan",
-    body: "sidanclaw Cloud runs on paid plans. Chat, channels, and automations are paused for this workspace until a plan is active.",
+    body: "Use Brian Cloud runs on paid plans. Chat, channels, and automations are paused for this workspace until a plan is active.",
     dataNote: "Everything you've stored stays intact and exportable.",
     startTrial: "Start your 30-day free trial",
     choosePlan: "Choose a plan",
@@ -158,8 +158,8 @@ export const en = {
     // Assistant switcher — pick which workspace assistant this chat talks to.
     switchAssistant: "Switch assistant",
     switchAssistantTitle: "Talk to",
-    emptyTitle: "Ask sidanclaw",
-    emptyDesc: "Describe what you want to see (a table, a board, a list) and sidanclaw will draft a view.",
+    emptyTitle: "Ask Use Brian",
+    emptyDesc: "Describe what you want to see (a table, a board, a list) and Use Brian will draft a view.",
     // Per-message actions (hover-reveal on assistant bubbles).
     retry: "Retry",
     retrying: "Retrying…",
@@ -404,11 +404,11 @@ export const en = {
     },
   },
   sharedPage: {
-    footer: "Shared with sidanclaw",
+    footer: "Shared with Use Brian",
     unavailable: "This shared page is no longer available.",
     siteNotFoundTitle: "Page not found",
     siteNotFoundBody: "This page doesn't exist or is no longer published.",
-    poweredByCta: "Try sidanclaw free",
+    poweredByCta: "Try Use Brian free",
     commentsHeading: "Comments",
     commentDrawerTitle: "Comment",
     commentDrawerClose: "Close",
@@ -607,10 +607,10 @@ export const en = {
     landing: {
       title: "What do you want to see?",
       subtitle:
-        "Describe a view, a page, or a question and sidanclaw drafts it for you.",
+        "Describe a view, a page, or a question and Use Brian drafts it for you.",
       placeholder: "e.g. A board of open deals by stage",
       send: "Create",
-      // Escape hatch from the "describe it and sidanclaw drafts it" chatter: open
+      // Escape hatch from the "describe it and Use Brian drafts it" chatter: open
       // an empty page and write it yourself, no AI prompt. Sits under the
       // composer as a quiet text button.
       startBlank: "Start with a blank page",
@@ -626,7 +626,7 @@ export const en = {
       // Page-body "drafting" indicator shown while the assistant builds the
       // page after a landing prompt (so the WIP is visible without opening
       // the chat). [COMP:app-web/page-build-indicator]
-      building: "sidanclaw is drafting this page…",
+      building: "Use Brian is drafting this page…",
       buildingHint: "Building it live — no need to open the chat.",
       buildingThinking: "Thinking…",
       // Section label for the live reasoning stream (model's internal thinking).
@@ -701,7 +701,7 @@ export const en = {
     setupChecklist: {
       ariaLabel: "Set up your workspace",
       title: "Get set up",
-      subtitle: "A few quick steps to make sidanclaw yours.",
+      subtitle: "A few quick steps to make Use Brian yours.",
       dismissAriaLabel: "Dismiss the setup checklist",
       connectTitle: "Connect a tool",
       connectDesc: "Link the apps your work already lives in.",
@@ -1355,7 +1355,7 @@ export const en = {
       draftsDesc: "Drafts you create with chat appear here. They auto-prune after 30 days unless saved.",
       searchTitle: "No matches",
       searchDesc: "No pages match your search. Try a different term, or ask chat to find what you need.",
-      searchCta: "Ask sidanclaw",
+      searchCta: "Ask Use Brian",
     },
     // Phase 4 — Error states (boundary, network banner, collab status).
     errors: {
@@ -1475,7 +1475,7 @@ export const en = {
     },
     privacy: {
       analyticsTitle: "Analytics",
-      analyticsDesc: "Help us improve sidanclaw with anonymized usage analytics.",
+      analyticsDesc: "Help us improve Use Brian with anonymized usage analytics.",
       dataTitle: "Your data",
       deleteMemoriesTitle: "Delete all memories",
       deleteMemoriesDesc: "Permanently remove every memory across all your assistants. This cannot be undone.",
@@ -1779,7 +1779,7 @@ export const en = {
       preflightErrDuplicate: "This header name is already used.",
       actorIdentityTitle: "Send signed-in user identity",
       actorIdentityDesc: "Sends the signed-in user's identity (email on web, phone on WhatsApp, handle on Telegram, user id on Slack) to this server with every request, so it can act on their behalf. Off by default.",
-      actorIdentityNoAuthWarning: "This connector has no authentication, so the server cannot verify the identity came from sidanclaw. Add a bearer token or custom header above before relying on it for sign-in.",
+      actorIdentityNoAuthWarning: "This connector has no authentication, so the server cannot verify the identity came from Use Brian. Add a bearer token or custom header above before relying on it for sign-in.",
       mediaTokenTitle: "Allow fetching this user's media",
       mediaTokenDesc: "Lets this server fetch the signed-in user's most recent voice note or video (sent on a channel) to process it. Each request carries a short-lived token scoped to this user only, so the server can never reach anyone else's media. Off by default.",
       // ── Workspace-owned connectors: transfer + clearance-gated management ──

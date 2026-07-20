@@ -41,7 +41,7 @@ import type {
   ReconciliationOverride,
   SpecializationCascadeRepository,
   SpecializationPointer,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getPool, query } from './client.js'
 
 // Specialization tables that can carry a merge cascade. Post CRM↔entity

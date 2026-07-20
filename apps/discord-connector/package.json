@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/discord-connector",
+  "name": "@use-brian/discord-connector",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@sidanclaw/channels": "workspace:*",
+    "@use-brian/channels": "workspace:*",
     "express": "^5",
     "ws": "^8.18.0",
     "zod": "^3.24"

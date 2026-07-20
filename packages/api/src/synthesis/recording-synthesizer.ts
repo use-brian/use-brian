@@ -27,11 +27,11 @@ import {
   type UsageStore,
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
-} from '@sidanclaw/core'
-import { buildCitationIndex, formatTranscript } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import { buildCitationIndex, formatTranscript } from '@use-brian/shared'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
 import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 import {
   createRecordPageProjector,
   synthesizeFromSource,
@@ -141,7 +141,7 @@ async function loadRecordingTranscript(
     return { segments: [] } // read failed — fall back to the sweep, no citations
   }
   if (segments.length === 0) return { segments: [] }
-  // The ONE transcript rendering (`@sidanclaw/shared`) — the same function that
+  // The ONE transcript rendering (`@use-brian/shared`) — the same function that
   // writes the transcript file, so the text the model cites from and the text we
   // later parse citations out of cannot drift.
   const text = formatTranscript(

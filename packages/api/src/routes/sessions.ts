@@ -4,7 +4,7 @@ import { findSessionByChannel, findSessionById, getSessionMessages, renameSessio
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
-import { canRead } from '@sidanclaw/core'
+import { canRead } from '@use-brian/core'
 import {
   type SessionEvent,
   type SubscribeSessionEvents,

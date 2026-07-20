@@ -213,6 +213,107 @@ describe('[COMP:providers/text-loop] Text loop prevention', () => {
     expect(text).toContain('I found the issue')
   })
 
+  it('passes a markdown table through untouched (prod 2026-07-19)', async () => {
+    // Session b8e567d6: a Telegram answer comparing three card tiers. The
+    // 4-column delimiter row tokenized to `| :--- | :---` three times over and
+    // tripped the n-gram detector, killing every attempt at `| :---`.
+    const answer = [
+      '這三張卡（綠卡、藍卡、黑卡）的本地日常簽賬回贈基本上是一樣的，最核心的差別在於「海外簽賬」：',
+      '',
+      '### 1. 里數回贈比例差別',
+      '',
+      '| 簽賬類別 | 綠卡 (普通版) | 藍卡 (優先理財) | 黑卡 (優先私人理財) |',
+      '| :--- | :--- | :--- | :--- |',
+      '| 本地簽賬 | HK$6/里 | HK$6/里 | HK$6/里 |',
+      '| 海外簽賬 | HK$6/里 | HK$4/里 | HK$4/里 |',
+      '',
+      '以上係三個 tier 的主要分別。',
+    ].join('\n')
+
+    // Character-by-character, the way a real provider streams it.
+    const stream = composeWrappers(
+      mockStream(textChunks([...answer])),
+      wrapTextLoopPrevention(),
+    )
+
+    const response = await collectStream(stream({
+      model: 'test',
+      messages: [],
+      systemPrompt: 'test',
+    }))
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.type === 'text' ? b.text : '')
+      .join('')
+
+    // Delivered verbatim: not truncated at the delimiter row, not duplicated.
+    expect(text).toBe(answer)
+  })
+
+  it('truncates rather than duplicating once text is downstream', async () => {
+    // The protocol has no retraction, so a loop detected after emission must
+    // close the message, never re-stream. Prod 2026-07-19 shipped attempt-1 +
+    // attempt-2 + clean-text concatenated into one reply.
+    const opening = 'Here is the honest summary of what the audit turned up today. '
+    const looping = 'the same phrase again ' // trips the 4-gram threshold
+    const answer = opening + looping.repeat(4)
+
+    const stream = composeWrappers(
+      mockStream(textChunks([...answer])),
+      wrapTextLoopPrevention(),
+    )
+
+    const response = await collectStream(stream({
+      model: 'test',
+      messages: [],
+      systemPrompt: 'test',
+    }))
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.type === 'text' ? b.text : '')
+      .join('')
+
+    // Clean prefix survives, exactly once, and the turn still finalizes.
+    expect(text).toContain('honest summary')
+    expect(text.match(/honest summary/g)).toHaveLength(1)
+    expect(text.startsWith(opening)).toBe(true)
+    expect(response.stopReason).toBe('end_turn')
+  })
+
+  it('still retries when the loop starts before anything is emitted', async () => {
+    // Degenerate spam in the very first chunk: nothing has reached the
+    // consumer, so retrying is safe and the good attempt is delivered whole.
+    let attempt = 0
+    const inner: StreamFn = async function* () {
+      attempt++
+      yield { type: 'message_start', model: 'test' }
+      if (attempt === 1) {
+        yield { type: 'text_delta', text: '\b\b\b\b\b\b\b\b\b\b\b\b' }
+      } else {
+        yield { type: 'text_delta', text: 'A clean answer on the second attempt.' }
+      }
+      yield { type: 'message_end', stopReason: 'end_turn', usage: { inputTokens: 0, outputTokens: 0 } }
+    }
+
+    const response = await collectStream(
+      composeWrappers(inner, wrapTextLoopPrevention())({
+        model: 'test',
+        messages: [],
+        systemPrompt: 'test',
+      }),
+    )
+
+    const text = response.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.type === 'text' ? b.text : '')
+      .join('')
+
+    expect(attempt).toBe(2)
+    expect(text).toBe('A clean answer on the second attempt.')
+  })
+
   it('does not interfere with tool use chunks', async () => {
     const chunks: StreamChunk[] = [
       { type: 'message_start', model: 'test' },

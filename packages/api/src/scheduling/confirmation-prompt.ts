@@ -16,9 +16,9 @@
  * Component tag: [COMP:scheduling/confirmation-prompt].
  */
 
-import type { ToolConfirmationRequest } from '@sidanclaw/core'
-import { createSlackAdapter, createTelegramAdapter, createWhatsAppAdapter } from '@sidanclaw/channels'
-import { getToolDisplayName, formatConfirmationInput } from '@sidanclaw/shared'
+import type { ToolConfirmationRequest } from '@use-brian/core'
+import { createSlackAdapter, createTelegramAdapter, createWhatsAppAdapter } from '@use-brian/channels'
+import { getToolDisplayName, formatConfirmationInput } from '@use-brian/shared'
 import { query } from '../db/client.js'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 
@@ -38,7 +38,7 @@ export type ConfirmationPromptDeps = {
 
 /**
  * Resolve a Telegram bot token: BYO `channel_integrations` row first, then
- * the official shared sidanclaw bot. `undefined` → neither is configured and
+ * the official shared Use Brian bot. `undefined` → neither is configured and
  * the caller falls through to persist-only.
  */
 export async function resolveTelegramBotToken(

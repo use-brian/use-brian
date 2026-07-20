@@ -3,7 +3,7 @@ import { createTokens, verifyRefreshToken } from '../auth/jwt.js'
 import { requireAuth } from '../auth/middleware.js'
 import { verifyTgLinkToken } from '../auth/tg-link-token.js'
 import { isValidTimezone } from '../auth/client-timezone.js'
-import { findOrCreateUser, findUserById, findUserByEmail, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
+import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUserByEmail, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
 import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { ApiKeyStore } from '../db/api-key-store.js'
@@ -36,7 +36,7 @@ export type NotifyTelegramLinked = (
 export type EmailAuthDeps = {
   magicLinkStore?: MagicLinkStore
   smtpClient?: SmtpClient
-  /** Used to build the verify URL embedded in the email — e.g. `https://sidan.ai`. */
+  /** Used to build the verify URL embedded in the email — e.g. `https://usebrian.ai`. */
   appUrl: string
 }
 
@@ -110,6 +110,7 @@ export function authRoutes(
       const googleData = await googleRes.json() as {
         sub: string
         email: string
+        email_verified?: string | boolean
         name?: string
         picture?: string
         aud: string
@@ -121,11 +122,25 @@ export function authRoutes(
         return
       }
 
-      // Check for existing shadow user with same email — promote instead of
-      // creating a new account. See docs/architecture/channels/channel-user-identity.md.
+      // Email-first account resolution — the verified email is the account
+      // anchor, mirroring the magic-link flow's findOrCreateEmailUser. See
+      // docs/architecture/platform/auth.md → "Account resolution (Google
+      // side)". Both email-match branches key an existing account off the
+      // email, so they require tokeninfo's email_verified claim; an
+      // unverified match must return cleanly rather than fall through to
+      // findOrCreateUser, whose INSERT hits idx_users_email (the 2026-07-17
+      // duplicate-key 500 behind login's `auth_failed`).
+      const emailVerified = String(googleData.email_verified) === 'true'
       let user: User
       let isNew = false
       const existingShadow = await findUserByEmail(googleData.email)
+      const isThisGoogleIdentity =
+        existingShadow?.authProvider === 'google' &&
+        existingShadow.authProviderId === googleData.sub
+      if (existingShadow && !isThisGoogleIdentity && !emailVerified) {
+        res.status(401).json({ error: 'google_email_unverified' })
+        return
+      }
       if (existingShadow && existingShadow.authProvider === 'channel') {
         await promoteChannelUser(existingShadow.id, {
           authProvider: 'google',
@@ -147,6 +162,30 @@ export function authRoutes(
           existingShadow.timezone = captureTz
         }
         user = { ...existingShadow, authProvider: 'google', authProviderId: googleData.sub }
+      } else if (existingShadow && !isThisGoogleIdentity) {
+        // Cross-provider sign-in: the row was created by another method
+        // (email magic-link, or a google row whose stored sub differs).
+        // Sign into it as-is — auth_provider is NOT changed, matching the
+        // email flow's "alternate authentication method, not a provider
+        // switch" policy — and backfill profile fields it lacks.
+        await backfillUserProfileFromProvider(existingShadow.id, {
+          name: googleData.name,
+          avatarUrl: googleData.picture,
+        })
+        if (
+          captureTz &&
+          (!existingShadow.timezone || existingShadow.timezone === 'UTC')
+        ) {
+          await updateUserTimezone(existingShadow.id, captureTz).catch((err) =>
+            console.error('[auth/google] cross-provider tz backfill failed:', err),
+          )
+          existingShadow.timezone = captureTz
+        }
+        user = {
+          ...existingShadow,
+          name: existingShadow.name ?? googleData.name ?? null,
+          avatarUrl: existingShadow.avatarUrl ?? googleData.picture ?? null,
+        }
       } else {
         const result = await findOrCreateUser({
           authProvider: 'google',
@@ -552,9 +591,9 @@ export function authRoutes(
   //
   // The Electron shell completes Google OAuth in the system browser, then the
   // browser-side `/desktop/auth` bridge mints a single-use code here (for the
-  // already-authenticated user) and 302s to `sidanclaw://auth?code=…`. The app
+  // already-authenticated user) and 302s to `usebrian://auth?code=…`. The app
   // exchanges that code for the JWT pair over TLS. A PKCE verifier binds the
-  // code to the app instance so a local app that hijacks the `sidanclaw://`
+  // code to the app instance so a local app that hijacks the `usebrian://`
   // scheme can't redeem a stolen code (it lacks the verifier). RFC 8252 + 7636.
   // See docs/architecture/platform/auth.md → "Desktop app sign-in (PKCE handoff)".
   const B64URL_RE = /^[A-Za-z0-9_-]+$/
@@ -828,9 +867,13 @@ const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onbo
 
 // Sidan-owned hosts an absolute `nextPath` may target. Lets a magic-link
 // sign-in carry a cross-app return (e.g. the desktop bridge at
-// `https://app.sidan.ai/desktop/auth?…`) the same way the Google OAuth
+// `https://app.usebrian.ai/desktop/auth?…`) the same way the Google OAuth
 // callback does. Mirrors the web `ALLOWED_RETURN_HOSTS` allowlists; keep in sync.
 const ALLOWED_NEXT_HOSTS = new Set<string>([
+  'usebrian.ai',
+  'feed.usebrian.ai',
+  'app.usebrian.ai',
+  // Legacy domain, kept through the rebrand transition; drop once sidan.ai retires.
   'sidan.ai',
   'feed.sidan.ai',
   'app.sidan.ai',

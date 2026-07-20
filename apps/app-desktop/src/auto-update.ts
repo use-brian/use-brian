@@ -21,7 +21,7 @@
 export interface AutoUpdateGateInput {
   /** `app.isPackaged` — an unpackaged dev run has no app-update.yml feed. */
   readonly isPackaged: boolean;
-  /** `cfg.autoUpdate` — the `SIDANCLAW_DISABLE_AUTO_UPDATE` kill-switch (config.ts). */
+  /** `cfg.autoUpdate` — the `USEBRIAN_DISABLE_AUTO_UPDATE` kill-switch (config.ts). */
   readonly autoUpdate: boolean;
 }
 
@@ -43,7 +43,7 @@ export function shouldEnableAutoUpdate(input: AutoUpdateGateInput): AutoUpdateGa
     return { enabled: false, reason: "unpackaged dev run (no app-update.yml feed)" };
   }
   if (!input.autoUpdate) {
-    return { enabled: false, reason: "SIDANCLAW_DISABLE_AUTO_UPDATE is set" };
+    return { enabled: false, reason: "USEBRIAN_DISABLE_AUTO_UPDATE is set" };
   }
   return { enabled: true, reason: "packaged build with a release feed" };
 }

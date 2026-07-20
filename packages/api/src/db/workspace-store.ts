@@ -22,8 +22,8 @@
  */
 
 import type { PoolClient } from 'pg'
-import { minSensitivity, parseTranscriptionPrefs } from '@sidanclaw/core'
-import type { Sensitivity, WorkspaceTranscriptionPrefs } from '@sidanclaw/core'
+import { minSensitivity, parseTranscriptionPrefs } from '@use-brian/core'
+import type { Sensitivity, WorkspaceTranscriptionPrefs } from '@use-brian/core'
 import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './teamspace-store.js'
 import { query, queryWithRLS, getPool } from './client.js'
 import type { ConnectorGrantStore } from './connector-grant-store.js'

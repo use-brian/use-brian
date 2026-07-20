@@ -11,7 +11,7 @@
 
 import * as Y from 'yjs'
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror'
-import type { Page } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Page } from '@use-brian/core/dist/views/blocks.js'
 import { docSchema, FRAGMENT_FIELD, META_MAP } from './schema.js'
 import { blocksToPMDoc, pageToPlaintext, pmDocToBlocks, type PMDoc } from './block-mapping.js'
 

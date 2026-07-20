@@ -164,7 +164,7 @@ export type SocketManager = {
   ): Promise<{ jid: string; subject: string; participants: string[] }[]>
   /**
    * Leave a group. Used when the official bot is added to a group whose adder
-   * has no sidanclaw account (unresolvable) — the bot leaves rather than ingest.
+   * has no Use Brian account (unresolvable) — the bot leaves rather than ingest.
    */
   groupLeave(channelId: string, groupJid: string): Promise<void>
   getStatus(channelId: string): ManagedSocket | undefined
@@ -325,7 +325,7 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
     }
   }
 
-  // ── Forward inbound to sidanclaw-api ──
+  // ── Forward inbound to brian-api ──
 
   async function forwardToApi(message: WhatsAppIncomingMessage) {
     try {
@@ -504,7 +504,7 @@ export function createSocketManager(options: SocketManagerOptions): SocketManage
       },
       version,
       logger,
-      browser: ['sidanclaw', 'wa-connector', '1.0.0'],
+      browser: ['Use Brian', 'wa-connector', '1.0.0'],
       syncFullHistory: false,
       // `true` keeps the companion presence `available`, so WhatsApp pushes
       // every message in real time as a `notify` upsert — INCLUDING the owner's

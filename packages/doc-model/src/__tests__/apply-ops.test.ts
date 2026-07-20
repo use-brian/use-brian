@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as Y from 'yjs'
-import type { Block, Page } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
 import { pageToYDoc, yDocToSnapshot, pageToYDocUpdate, yDocFromUpdate } from '../encode.js'
 import { applyOpsToYDoc, type DocOp } from '../apply-ops.js'
 

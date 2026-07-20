@@ -15,7 +15,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, GDriveFilesStore, McpSettingsStore, FilesApi } from '@sidanclaw/core'
+import type { Tool, KnowledgeStoreInterface, GDriveFilesStore, McpSettingsStore, FilesApi } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'

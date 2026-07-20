@@ -6,7 +6,7 @@
  * consume: `blocksToMarkdown` (→ Markdown emphasis) and `blocksToDocx`
  * (→ docx `TextRun` flags).
  *
- * It mirrors `@sidanclaw/doc-model`'s `block-mapping.ts` mention contract
+ * It mirrors `@use-brian/doc-model`'s `block-mapping.ts` mention contract
  * (`@name` / `📄 Title`) so a mention survives serialization as its label
  * instead of vanishing — but it lives in `core` (not `doc-model`) because the
  * docx writer is node-only and `core` is the import-safe base both serializers

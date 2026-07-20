@@ -20,7 +20,7 @@ const LINUX_FIREFOX =
   "Mozilla/5.0 (X11; Linux x86_64; rv:127.0) Gecko/20100101 Firefox/127.0";
 // The app-desktop shell: Chromium UA, never "Firefox" — keeps the ⌘ binding.
 const MAC_ELECTRON =
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) sidanclaw/1.0.0 Chrome/124.0.6367.243 Electron/30.0.9 Safari/537.36";
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) use-brian/1.0.0 Chrome/124.0.6367.243 Electron/30.0.9 Safari/537.36";
 
 const key = (mods: Partial<Record<"metaKey" | "ctrlKey" | "shiftKey" | "altKey", boolean>>) => ({
   metaKey: false,

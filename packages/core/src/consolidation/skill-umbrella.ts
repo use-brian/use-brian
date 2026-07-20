@@ -32,7 +32,7 @@ import { z } from 'zod'
 //
 // Mirrors `packages/api/src/db/skill-store.ts` `WorkspaceSkill` for the
 // columns the curator actually reads. Re-stating the shape here keeps
-// `@sidanclaw/core` decoupled from `@sidanclaw/api` (matches the same
+// `@use-brian/core` decoupled from `@use-brian/api` (matches the same
 // dependency boundary every other store-shaped consumer in core uses).
 
 export type UmbrellaSkill = {

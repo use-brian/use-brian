@@ -14,7 +14,7 @@ import {
   type FilesApi,
   type FilesContext,
   type FileSensitivity,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { toEpisodeSensitivity } from '../episode-sensitivity.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import { indexFileArtifact } from './artifact-index.js'

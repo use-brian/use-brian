@@ -4,15 +4,15 @@ import {
   CommunityRegistrySchema,
   OFFICIAL_CONNECTORS,
   type ConnectorEntry,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 
 const TOOLS_DIR = resolve(
-  import.meta.dirname, '..', '..', '..', '..', 'sidanclaw-tools',
+  import.meta.dirname, '..', '..', '..', '..', 'brian-tools',
 )
 
 /**
  * Load the connector registry: official connectors + community connectors
- * from sidanclaw-tools/connectors/<name>/connector.json. Called once at server boot.
+ * from brian-tools/connectors/<name>/connector.json. Called once at server boot.
  */
 export function loadConnectorRegistry(): ConnectorEntry[] {
   const official = OFFICIAL_CONNECTORS
@@ -44,12 +44,12 @@ export function loadConnectorRegistry(): ConnectorEntry[] {
     return [...official, ...community]
   } catch (err) {
     const e = err as NodeJS.ErrnoException
-    // A clean open-source clone has no sidanclaw-tools submodule, so the
+    // A clean open-source clone has no brian-tools submodule, so the
     // connectors dir is simply absent (ENOENT). That is the expected default,
-    // not a fault — populate it with `git submodule update --init sidanclaw-tools`
+    // not a fault — populate it with `git submodule update --init brian-tools`
     // to load community connectors. Any other error is a real problem worth a warn.
     if (e.code === 'ENOENT') {
-      console.log('[registry] No community connectors (sidanclaw-tools not present)')
+      console.log('[registry] No community connectors (brian-tools not present)')
     } else {
       console.warn('[registry] Failed to load community connectors:', e.message)
     }

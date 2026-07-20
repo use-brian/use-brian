@@ -27,7 +27,7 @@ import type {
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFilesStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { GcsFilesClient } from './gcs-client.js'
 import { buildStorageKey, buildStorageUri, type StorageUriScheme } from './gcs-client.js'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'

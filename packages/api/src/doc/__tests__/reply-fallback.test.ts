@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { DocPageStore, Page, Tool, ToolContext } from '@sidanclaw/core'
+import type { DocPageStore, Page, Tool, ToolContext } from '@use-brian/core'
 import { placeReplyOnEmptyPage, placeReplyAtAnchor } from '../reply-fallback.js'
 
 const USER_ID = 'user-1'
@@ -9,7 +9,7 @@ const ctx = {
   userId: USER_ID,
   assistantId: 'asst-1',
   sessionId: 'sess-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'web-1',
   workspaceId: 'ws-1',

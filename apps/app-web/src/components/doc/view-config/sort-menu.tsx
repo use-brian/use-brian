@@ -25,7 +25,7 @@ import {
 } from "react";
 import { ArrowDownNarrowWide, ArrowUpNarrowWide } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
-import type { A2UIColumn } from "@sidanclaw/views-renderer";
+import type { A2UIColumn } from "@use-brian/views-renderer";
 
 export type SortDirection = "asc" | "desc";
 

@@ -3,8 +3,8 @@
  *
  * Before the single-app cutover (docs/architecture/features/web-ui.md) the
  * authenticated surfaces lived at root paths on the marketing origin
- * (`sidan.ai/brain`, `/studio`, …). The marketing proxy now 308s those to
- * this app **path-preserved** (`app.sidan.ai/brain`), but every route here
+ * (`usebrian.ai/brain`, `/studio`, …). The marketing proxy now 308s those to
+ * this app **path-preserved** (`app.usebrian.ai/brain`), but every route here
  * is workspace-scoped (`/w/<id>/brain`) — so without this mapping each
  * forwarded legacy link (old bookmarks, the pre-fix invite bounce, external
  * deep-links) dead-ends in a 404.

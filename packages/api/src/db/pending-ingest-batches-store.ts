@@ -1,4 +1,4 @@
-import type { BatchStore, PendingBatch } from '@sidanclaw/core'
+import type { BatchStore, PendingBatch } from '@use-brian/core'
 import { getPool } from './client.js'
 
 /**

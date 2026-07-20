@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
 import { randomUUID } from 'node:crypto'
-import { workspaceFileStatus } from '@sidanclaw/core'
+import { workspaceFileStatus } from '@use-brian/core'
 
 /**
  * Integration test for the SV(2) draft lifecycle conventions on
@@ -16,7 +16,7 @@ import { workspaceFileStatus } from '@sidanclaw/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -69,7 +69,7 @@ async function addMember(client: pg.PoolClient, workspaceId: string, userId: str
 }
 
 describeIf('[COMP:files/draft-lifecycle] workspace_files draft lifecycle (integration)', () => {
-  let store: import('@sidanclaw/core').WorkspaceFilesStore
+  let store: import('@use-brian/core').WorkspaceFilesStore
 
   beforeAll(async () => {
     process.env.DATABASE_URL ??= 'postgres:///sidanclaw'

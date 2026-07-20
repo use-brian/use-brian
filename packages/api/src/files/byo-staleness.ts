@@ -20,7 +20,7 @@
  */
 
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
-import type { WorkspaceFilesStore } from '@sidanclaw/core'
+import type { WorkspaceFilesStore } from '@use-brian/core'
 
 /** Grace window after disconnect before a binding's dormant data is reclaimed. */
 export const BYO_DISCONNECT_GRACE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days

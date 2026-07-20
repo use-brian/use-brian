@@ -175,7 +175,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
         // otherwise leave orphaned cookies in the jar) — it reloads into the
         // sign-in landing itself. See `desktopSignOut`.
         if (desktopSignOut()) return;
-        // Web: clear the session server-side so `Domain=.sidan.ai` cookies go
+        // Web: clear the session server-side so `Domain=.usebrian.ai` cookies go
         // too (JS-only clears can't reach them). Use hard navigation after so
         // every in-memory app state resets along with the cookies.
         await fetch("/api/auth/logout", {

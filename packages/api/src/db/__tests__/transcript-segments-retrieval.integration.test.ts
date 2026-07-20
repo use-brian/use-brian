@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 import { segmentTranscript, type Utterance } from '../transcript-segments-store.js'
 
 /**
@@ -10,7 +10,7 @@ import { segmentTranscript, type Utterance } from '../transcript-segments-store.
  * BEFORE the Phase-2 transcription writer targets them. Component tag:
  * [COMP:brain/transcript-segments-store].
  *
- * Requires a local `sidanclaw` DB with migration 280 applied. Skips silently
+ * Requires a local `Use Brian` DB with migration 280 applied. Skips silently
  * when the DB is unavailable or the table is missing (mirrors the
  * entity-instance retrieval integration skip pattern).
  *
@@ -25,7 +25,7 @@ import { segmentTranscript, type Utterance } from '../transcript-segments-store.
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

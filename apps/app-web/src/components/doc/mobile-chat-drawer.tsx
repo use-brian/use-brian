@@ -52,7 +52,7 @@ import { AssistantAvatar } from "../assistant-avatar";
 import { getAssistantIdentity, type AssistantIdentity } from "@/lib/api/views";
 import type { ChatTargetPage } from "@/lib/chat-target";
 import type { ModelTier } from "@/lib/chat-model";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 

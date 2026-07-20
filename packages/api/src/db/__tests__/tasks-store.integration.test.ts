@@ -4,14 +4,14 @@ import pg from 'pg'
 /**
  * Integration test for createDbTaskStore + the tasks RLS / trigger surface
  * defined in migration 113. Requires a local PostgreSQL database named
- * `sidanclaw` with that migration applied. Skips silently when the DB is
+ * `Use Brian` with that migration applied. Skips silently when the DB is
  * unavailable.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -293,8 +293,8 @@ describeIf('[COMP:api/tasks-store] tasks store + RLS (integration)', () => {
       const mod = await import('../tasks-store.js')
       const created: string[] = []
       const spyStore = mod.createDbTaskStore({ onTaskCreate: (t) => created.push(t.id) })
-      const first = await spyStore.create({ userId, workspaceId, title: 'Add setup to task sidanclaw' })
-      const second = await spyStore.create({ userId, workspaceId, title: 'Add setup to task sidanclaw' })
+      const first = await spyStore.create({ userId, workspaceId, title: 'Add setup to task Use Brian' })
+      const second = await spyStore.create({ userId, workspaceId, title: 'Add setup to task Use Brian' })
       expect(second.id).toBe(first.id)
       expect(created).toEqual([first.id]) // fired exactly once
     })

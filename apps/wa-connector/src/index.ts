@@ -53,7 +53,7 @@ if (!pool) {
 const socketManager = createSocketManager({
   bucket,
   pool,
-  apiUrl: env.SIDANCLAW_API_URL,
+  apiUrl: env.USEBRIAN_API_URL,
   connectorSecret: env.WA_CONNECTOR_SECRET,
 })
 

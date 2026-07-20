@@ -1,4 +1,4 @@
-import type { GoalStore } from '@sidanclaw/core'
+import type { GoalStore } from '@use-brian/core'
 import {
   countOpenSubGoalsSystem,
   createGoal,

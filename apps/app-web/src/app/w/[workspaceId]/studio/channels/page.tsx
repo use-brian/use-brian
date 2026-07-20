@@ -1568,7 +1568,7 @@ function AddChannelForm({
   const [manifestOpen, setManifestOpen] = useState(false);
   const [appName, setAppName] = useState("My AI Assistant");
   const [appDescription, setAppDescription] = useState(
-    "AI assistant powered by sidanclaw",
+    "AI assistant powered by Use Brian",
   );
   const [bgColor, setBgColor] = useState("#1e293b");
   const [manifestCopied, setManifestCopied] = useState(false);

@@ -23,7 +23,7 @@ const NOTION_CLIENT_SECRET = process.env.NOTION_CLIENT_SECRET ?? "";
  * parses the intent + workspace id and redirects to the workspace-scoped route.
  *
  * INFRA (degraded): requires `NOTION_CLIENT_ID` / `NOTION_CLIENT_SECRET` and a
- * `app.sidan.ai/...` redirect_uri allowlisted in the Notion OAuth app.
+ * `app.usebrian.ai/...` redirect_uri allowlisted in the Notion OAuth app.
  * Doc-web does not set `NEXT_PUBLIC_NOTION_CLIENT_ID` yet, so the connect
  * button can't reach this callback until that lands.
  *

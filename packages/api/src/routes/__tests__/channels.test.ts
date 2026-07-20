@@ -24,7 +24,7 @@ vi.mock('../../db/client.js', async (importOriginal) => ({
   queryWithRLS: vi.fn(),
 }))
 
-vi.mock('@sidanclaw/channels', () => ({
+vi.mock('@use-brian/channels', () => ({
   validateSlackCredentials: vi.fn(),
   validateTelegramCredentials: vi.fn(),
   validateDiscordCredentials: vi.fn(),
@@ -59,7 +59,7 @@ import {
   validateDiscordCredentials,
   createTelegramApi,
   createSlackApi,
-} from '@sidanclaw/channels'
+} from '@use-brian/channels'
 import { channelsRoutes } from '../channels.js'
 import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'

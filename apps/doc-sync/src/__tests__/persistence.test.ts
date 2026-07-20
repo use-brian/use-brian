@@ -6,7 +6,7 @@ import {
   storePageSnapshot,
   type SysQuery,
 } from '../persistence.js'
-import { pageToYDoc, snapshotFromUpdate } from '@sidanclaw/doc-model'
+import { pageToYDoc, snapshotFromUpdate } from '@use-brian/doc-model'
 
 describe('[COMP:doc-sync/persistence] loadPageUpdate', () => {
   it('returns the stored ydoc bytes when present', async () => {

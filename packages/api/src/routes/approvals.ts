@@ -62,7 +62,7 @@ export type UnifiedApprovalRouteOptions = {
    * grant at approve time (THE grant is the review). Absent → the card
    * still offers Deny / Allow once.
    */
-  browserSkillGrants?: import('@sidanclaw/core').BrowserSkillGrantStore | null
+  browserSkillGrants?: import('@use-brian/core').BrowserSkillGrantStore | null
   /**
    * Email channel stranger-sender cards (`kind='email_sender'`, agentmail.md
    * D4). Approve = allowlist the sender on the inbox's integration row

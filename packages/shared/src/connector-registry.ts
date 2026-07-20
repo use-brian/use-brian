@@ -141,7 +141,7 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
   {
     id: 'computer',
     name: 'Computer Use',
-    description: 'Let the assistant browse and act in a controlled browser: your own Chrome via the sidanclaw extension for account-sensitive sites, or a cloud browser for public ones. Sends require your approval.',
+    description: 'Let the assistant browse and act in a controlled browser: your own Chrome via the Use Brian extension for account-sensitive sites, or a cloud browser for public ones. Sends require your approval.',
     category: 'official',
     auth_type: 'none',
     oauth_required: false,

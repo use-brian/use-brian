@@ -241,11 +241,11 @@ describe("[COMP:app-desktop/desktop-accounts] buildAccountStoreCookies", () => {
 
   it("emits an httpOnly store cookie and a JS-readable dir cookie, 30d, on the app origin", () => {
     const now = 1_000_000;
-    const specs = buildAccountStoreCookies("https://app.sidan.ai", store, dir, now);
+    const specs = buildAccountStoreCookies("https://app.usebrian.ai", store, dir, now);
     const byName = Object.fromEntries(specs.map((s) => [s.name, s]));
 
     expect(byName.accounts_store).toMatchObject({
-      url: "https://app.sidan.ai",
+      url: "https://app.usebrian.ai",
       name: "accounts_store",
       httpOnly: true,
       secure: true,
@@ -264,7 +264,7 @@ describe("[COMP:app-desktop/desktop-accounts] buildAccountStoreCookies", () => {
   });
 
   it("round-trips through the cookie parsers", () => {
-    const specs = buildAccountStoreCookies("https://app.sidan.ai", store, dir, 0);
+    const specs = buildAccountStoreCookies("https://app.usebrian.ai", store, dir, 0);
     const byName = Object.fromEntries(specs.map((s) => [s.name, s.value]));
     expect(parseAccountStore(byName.accounts_store)).toEqual(store);
     expect(parseAccountDir(byName.accounts_dir)).toEqual(dir);

@@ -25,7 +25,7 @@ import { useT } from "@/lib/i18n/client";
  * toggles instead of being swallowed by ProseMirror as a node selection.
  *
  * Typing `> ` creates one (see `TOGGLE_INPUT_REGEX` in
- * `@sidanclaw/doc-model`); the quote markdown trigger is `| `. An OPEN toggle
+ * `@use-brian/doc-model`); the quote markdown trigger is `| `. An OPEN toggle
  * with no body renders Notion's muted "Empty toggle" row (click-to-create
  * first child); the editable content + that row sit in a `.doc-toggle-col`
  * column so both stay one indent right of the chevron. Mod-Enter flips

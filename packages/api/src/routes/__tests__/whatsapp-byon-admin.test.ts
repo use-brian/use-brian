@@ -24,7 +24,7 @@ vi.mock('../../ingest/whatsapp-connector-instance.js', () => ({
 
 import { whatsappIngestAdminRoutes } from '../whatsapp-byon-admin.js'
 import { query } from '../../db/client.js'
-import type { IngestRuleEditorStore, IngestRuleSummary } from '@sidanclaw/core'
+import type { IngestRuleEditorStore, IngestRuleSummary } from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 import type { ChannelIntegration, ChannelIntegrationStore } from '../../db/channel-integrations.js'

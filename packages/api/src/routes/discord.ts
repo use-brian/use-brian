@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Discord internal route — Gateway connector seam.
  *
@@ -23,19 +24,19 @@
 
 import { timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
-import { createDiscordAdapter, respondToInteraction } from '@sidanclaw/channels'
-import type { IncomingMessage, OutgoingAction } from '@sidanclaw/channels'
+import { createDiscordAdapter, respondToInteraction } from '@use-brian/channels'
+import type { IncomingMessage, OutgoingAction } from '@use-brian/channels'
 import { findAssistantById } from '../db/users.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { resolveChannelUser, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import { parseFileContent, buildTool } from '@sidanclaw/core'
+import { parseFileContent, buildTool } from '@use-brian/core'
 import { z } from 'zod'
-import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@sidanclaw/core'
-import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@sidanclaw/core'
+import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
+import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, DiscordCredentials } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
-import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@sidanclaw/shared'
+import { getToolDisplayName, humanizeToolName, describeToolInput, formatConfirmationInput } from '@use-brian/shared'
 import { processChannelMessage } from './channel-pipeline.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
@@ -51,23 +52,23 @@ export type DiscordRouteOptions = {
   checkCreditBudget?: import('./route-helpers.js').CreditBudgetGate
   integrationStore: ChannelIntegrationStore
   channelUserStore?: ChannelUserStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
   mcpSettingsStore?: McpSettingsStore
   assistantConnectorStore?: import('../db/assistant-connector-store.js').AssistantConnectorStore
   connectorGrantStore?: import('../db/connector-grant-store.js').ConnectorGrantStore
   connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
-  knowledgeStore?: import('@sidanclaw/core').KnowledgeStoreInterface
-  gdriveFilesStore?: import('@sidanclaw/core').GDriveFilesStore
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  knowledgeStore?: import('@use-brian/core').KnowledgeStoreInterface
+  gdriveFilesStore?: import('@use-brian/core').GDriveFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Promotes an over-threshold text paste to a durable artifact
    *  (large-content-artifacts §Phase 3.2). Absent ⇒ pastes pass through. */
-  artifactPromoter?: import('@sidanclaw/api/files/artifact-promote.js').ArtifactPromoter | null
+  artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
-  episodicStore?: import('@sidanclaw/core').EpisodicStore
-  sessionStateStore?: import('@sidanclaw/core').SessionStateStore
+  episodicStore?: import('@use-brian/core').EpisodicStore
+  sessionStateStore?: import('@use-brian/core').SessionStateStore
   /**
    * Route a pulled Discord attachment (CDN URL) through the channel-media intake
    * (audio/video → recording → brain). Boot wires it over `acquireAndIngest`.
@@ -85,7 +86,7 @@ export type DiscordRouteOptions = {
     assistantId: string
     actingUserId: string
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
-  capabilityStore: import('@sidanclaw/core').CapabilityStore
+  capabilityStore: import('@use-brian/core').CapabilityStore
 }
 
 // Natural-language → decision mapping for Discord text-based confirmation.

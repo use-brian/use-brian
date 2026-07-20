@@ -22,7 +22,7 @@ vi.mock('../../db/client.js', () => ({
 const sendMessage = vi.fn(
   async (_channelId: string, _msg: unknown, _opts?: { threadTs?: string }) => '1751970000.111111',
 )
-vi.mock('@sidanclaw/channels', () => ({
+vi.mock('@use-brian/channels', () => ({
   createSlackAdapter: vi.fn(() => ({ sendMessage })),
   createTelegramAdapter: vi.fn(() => ({ sendMessage })),
   createWhatsAppAdapter: vi.fn(() => ({ sendMessage })),

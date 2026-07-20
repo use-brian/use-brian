@@ -1582,7 +1582,7 @@ export function looksLikeInstructionLeak(text: string): boolean {
 /**
  * Leading scaffold-primer a reasoning model sometimes emits before its real
  * answer — e.g. `Your reply to the user MUST start here:\n<reply>`. The marker
- * is NOT from any sidanclaw prompt (it is absent from the tree); the model
+ * is NOT from any Use Brian prompt (it is absent from the tree); the model
  * narrates its own output structure, typically right after a control-signal
  * tool_result (tool-budget exhaustion, loop block). {@link looksLikeInstructionLeak}
  * misses it because the marker PLUS a complete reply runs past that detector's

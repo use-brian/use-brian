@@ -23,8 +23,8 @@ import request from 'supertest'
 import { readFileSync } from 'node:fs'
 import { createHmac } from 'node:crypto'
 
-vi.mock('@sidanclaw/core', async (io) => ({
-  ...(await io<typeof import('@sidanclaw/core')>()),
+vi.mock('@use-brian/core', async (io) => ({
+  ...(await io<typeof import('@use-brian/core')>()),
   advanceWorkflowRun: vi.fn(async () => ({ kind: 'completed', runId: 'run-1' })),
 }))
 

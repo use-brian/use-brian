@@ -5,7 +5,7 @@ import {
   type SkillGovernance,
   type SkillOfferableViewer,
 } from '../route-helpers.js'
-import type { Tool } from '@sidanclaw/core'
+import type { Tool } from '@use-brian/core'
 import type { SkillStore } from '../../db/skill-store.js'
 
 /**

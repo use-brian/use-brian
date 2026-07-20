@@ -5,7 +5,7 @@
  * tokens (`:crm_contacts`, `:workspace_members`) rather than literal
  * email lists, so "realtime for mail from a known contact" stays correct
  * as the workspace's people change. The ingest engine
- * (`createIngestEngine`, `@sidanclaw/core`) calls a `PlaceholderResolver`
+ * (`createIngestEngine`, `@use-brian/core`) calls a `PlaceholderResolver`
  * at event-evaluation time — never at rule-creation time — to expand
  * each token to its current literal list (ingest.md §"placeholder
  * resolution — dynamic at evaluation time").
@@ -23,7 +23,7 @@
  * [COMP:api/ingest-placeholder-resolver]
  */
 
-import type { IngestContext } from '@sidanclaw/core'
+import type { IngestContext } from '@use-brian/core'
 import { query } from '../db/client.js'
 
 /** Lowercased emails of every CRM contact in the workspace. Contacts are

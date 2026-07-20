@@ -1910,7 +1910,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
    The shell loads app-web inside a frameless `titleBarStyle: "hiddenInset"`
    BrowserWindow, so the macOS traffic-light buttons float over the top-left of
    our own content and no part of the window is draggable. `is-canvas-desktop`
-   is added to <html> when `window.sidanclawDesktop` exists (doc-shell.tsx
+   is added to <html> when `window.usebrianDesktop` (or legacy `window.sidanclawDesktop`) exists (doc-shell.tsx
    effect, plus the layout.tsx before-paint script for prod no-flash), so none
    of this touches the browser build. Two things only the shell needs:
 
@@ -1988,7 +1988,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
 }
 
 /* Inline link mark — `.doc-link`, stamped by the shared schema's Link
-   extension (`@sidanclaw/doc-model`), the legacy per-block editors, and the
+   extension (`@use-brian/doc-model`), the legacy per-block editors, and the
    read-only/public renderer, so resting + hover states match across surfaces.
    Notion's treatment: a link keeps the ink colour of its surrounding text and
    reads as a link via a muted underline that strengthens on hover — NOT the

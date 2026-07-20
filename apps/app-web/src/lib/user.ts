@@ -10,7 +10,7 @@ export type UserInfo = {
   id?: string;
   name: string;
   email: string;
-  /** Profile photo URL, carried on the shared `.sidan.ai` `user` cookie. A
+  /** Profile photo URL, carried on the shared `.usebrian.ai` `user` cookie. A
    *  hot-linked Google photo or our own avatar-proxy URL; absent → initials.
    *  See `docs/architecture/platform/user-profile.md`. */
   avatarUrl?: string;
@@ -27,12 +27,12 @@ export function getUserInfo(): UserInfo | null {
 
 /**
  * Choose the `user` cookie that matches the *authenticated* account, robust to
- * duplicate cookies (a `.sidan.ai` domain cookie + a stale host-only twin).
+ * duplicate cookies (a `.usebrian.ai` domain cookie + a stale host-only twin).
  *
  * The old read picked the LAST `user=` occurrence, leaning on RFC 6265 §5.4
  * ordering ("oldest first"). That ordering isn't reliable across browsers or
  * once a twin is re-set — and a cross-origin account switch
- * (`switch-account-and-return` on the primary) re-sets the `.sidan.ai` cookie
+ * (`switch-account-and-return` on the primary) re-sets the `.usebrian.ai` cookie
  * yet **cannot clear the host-only twin on this sub-app's own host** (a
  * different origin), so a stale twin can sort last. The switcher derives its
  * active-account checkmark (and its "is this the current account?" switch
@@ -54,7 +54,7 @@ export function getUserInfo(): UserInfo | null {
  * — preserving the prior behavior in every non-twin case. Pure + exported for
  * tests (the app-web vitest env has no `document`). See
  * `docs/architecture/platform/auth.md` → "Duplicate cookies after the
- * .sidan.ai migration".
+ * .usebrian.ai migration".
  */
 export function selectActiveUser(cookie: string): UserInfo | null {
   const candidates: UserInfo[] = [];

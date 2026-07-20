@@ -21,7 +21,7 @@ import type { ApprovalDeliveryDispatcher } from './approval.js'
 
 export type ApprovalDeliveryDeps = {
   webBaseUrl: string
-  /** Token for the official sidanclaw Telegram bot. Optional — telegram delivery is skipped when absent. */
+  /** Token for the official Use Brian Telegram bot. Optional — telegram delivery is skipped when absent. */
   telegramBotToken?: string
 }
 

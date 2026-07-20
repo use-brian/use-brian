@@ -19,7 +19,7 @@
 // DESCRIPTOR search) already exists and the pair would be model-confusable.
 
 import { z } from 'zod'
-import { buildTool, actorFromContext, type Embedder, type Tool } from '@sidanclaw/core'
+import { buildTool, actorFromContext, type Embedder, type Tool } from '@use-brian/core'
 import {
   searchFileSegments,
   readFileSegmentRange,

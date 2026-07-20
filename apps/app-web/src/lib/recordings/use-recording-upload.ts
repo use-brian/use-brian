@@ -27,7 +27,7 @@
  */
 
 import { createElement, useState, useCallback } from "react";
-import { MEETING_NOTES_STARTER } from "@sidanclaw/doc-model";
+import { MEETING_NOTES_STARTER } from "@use-brian/doc-model";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {

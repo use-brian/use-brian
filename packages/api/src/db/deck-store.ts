@@ -9,8 +9,8 @@
  *
  * Spec: docs/architecture/features/deck-generation.md. [COMP:api/deck-store]
  */
-import type { DeckRecord, DeckStorePort, FilesContext } from '@sidanclaw/core'
-import type { DeckSpec, DeckStyle } from '@sidanclaw/shared/decks'
+import type { DeckRecord, DeckStorePort, FilesContext } from '@use-brian/core'
+import type { DeckSpec, DeckStyle } from '@use-brian/shared/decks'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { query } from './client.js'
 

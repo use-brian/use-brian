@@ -7,7 +7,7 @@
  * handle), so it only egresses to connectors the user explicitly enables.
  *
  * Trust posture: the header is trustworthy because the connector authenticates
- * sidanclaw's connection, so we warn when no auth is configured (the identity
+ * Use Brian's connection, so we warn when no auth is configured (the identity
  * claim is unverifiable on an open endpoint). See
  * docs/architecture/engine/tool-hooks.md.
  */

@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ExtractionSpec } from "@sidanclaw/doc-model";
+import type { ExtractionSpec } from "@use-brian/doc-model";
 import {
   applyHeadingChange,
   applyKeyChange,

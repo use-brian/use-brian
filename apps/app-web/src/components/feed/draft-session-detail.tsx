@@ -36,7 +36,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { ChatMarkdown } from "@sidanclaw/chat-ui";
+import { ChatMarkdown } from "@use-brian/chat-ui";
 import { Check, Copy, Pencil, RotateCcw, Square, Trash2 } from "lucide-react";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { authFetch } from "@/lib/auth-fetch";
@@ -2026,7 +2026,7 @@ export function DraftSessionDetail() {
                   className={`flex flex-col items-start group ${enterClass}`}
                 >
                   {/* Assistant attribution — the assistant's own pixel-
-                      creature icon + display name (e.g. "sidanclaw -
+                      creature icon + display name (e.g. "Use Brian -
                       Threads"), matching how the main web app identifies
                       the assistant in chat. Not the connected Threads/X
                       account avatar: the assistant is the AI voice, the

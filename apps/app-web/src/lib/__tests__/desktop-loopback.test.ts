@@ -16,7 +16,7 @@ describe("[COMP:app-web/desktop-loopback] loopbackRedirectBase", () => {
     expect(loopbackRedirectBase("https://evil.example/cb")).toBeNull();
     expect(loopbackRedirectBase("http://evil.example:80/cb")).toBeNull();
     expect(loopbackRedirectBase("http://169.254.169.254:80/cb")).toBeNull();
-    expect(loopbackRedirectBase("http://app.sidan.ai/cb")).toBeNull();
+    expect(loopbackRedirectBase("http://app.usebrian.ai/cb")).toBeNull();
   });
 
   it("rejects https, a missing port, and a wrong path", () => {
@@ -27,7 +27,7 @@ describe("[COMP:app-web/desktop-loopback] loopbackRedirectBase", () => {
   });
 
   it("rejects a custom scheme, junk, and empty input", () => {
-    expect(loopbackRedirectBase("sidanclaw://auth/cb")).toBeNull();
+    expect(loopbackRedirectBase("usebrian://auth/cb")).toBeNull();
     expect(loopbackRedirectBase("file:///cb")).toBeNull();
     expect(loopbackRedirectBase("not a url")).toBeNull();
     expect(loopbackRedirectBase(null)).toBeNull();

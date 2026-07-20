@@ -16,7 +16,7 @@
  * [COMP:api/page-actions-store]
  */
 
-import type { PageAction, PageActionSpec } from '@sidanclaw/core'
+import type { PageAction, PageActionSpec } from '@use-brian/core'
 
 import { queryWithRLS } from './client.js'
 

@@ -20,7 +20,7 @@ COPY apps/wa-connector/src ./apps/wa-connector/src
 # pnpm topological build, not turbo: emulated (`--platform linux/amd64` on
 # arm64 / QEMU) turbo aborts on EINTR creating its `.turbo` log dir. `<pkg>...`
 # = package + dependency closure, built deps-first (same as turbo's `^build`).
-RUN pnpm --filter "@sidanclaw/wa-connector..." run build
+RUN pnpm --filter "@use-brian/wa-connector..." run build
 
 # ── Stage 3: Production image ─────────────────────────────────
 FROM node:22-slim AS runner

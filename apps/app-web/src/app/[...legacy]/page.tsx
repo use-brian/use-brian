@@ -10,7 +10,7 @@ type Team = { id: string; name: string };
  * Legacy bare-path catch-all — `[COMP:app-web/legacy-redirect]`.
  *
  * Serves the pre-consolidation root paths the marketing proxy forwards
- * here path-preserved (`app.sidan.ai/brain`, `/studio/skills`, …; see
+ * here path-preserved (`app.usebrian.ai/brain`, `/studio/skills`, …; see
  * `MOVED_TO_APP_PREFIXES` in apps/web). Static routes (`/teams`, `/login`,
  * `/w/...`, `/share/...`) take precedence over this catch-all, and unknown
  * paths still `notFound()` — only the allowlisted legacy surfaces redirect.

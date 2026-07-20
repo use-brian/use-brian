@@ -16,7 +16,7 @@
  * Spec: docs/architecture/features/teamspaces.md. [COMP:api/teamspace-store]
  */
 
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 import { getPool, query, queryWithRLS } from './client.js'
 
 export type Teamspace = {

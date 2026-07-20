@@ -21,7 +21,7 @@ import type {
   RetrievalActor,
   RetrievalEnvelope,
   RetrievalStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { composeRetrievalStore } from '../retrieval-store.js'
 
 const actor: RetrievalActor = {

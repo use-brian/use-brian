@@ -222,7 +222,7 @@ const ctx = {
   assistantId: 'assistant_1',
   userId: 'user_1',
   sessionId: 'session_1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'c_1',
   workspaceId: WS_A,
@@ -667,7 +667,7 @@ describe('[COMP:crm/cross-entity] cross-entity filters', () => {
 
   // WS2 eval finding: the SUT lifted third-party product names (Attio,
   // HubSpot) straight out of a field description and recommended them to
-  // users as if they were sidanclaw connectors. Model-visible CRM text
+  // users as if they were Use Brian connectors. Model-visible CRM text
   // (top-level tool description + every input-field .describe()) must name
   // no external product — describe capabilities generically instead.
   it('no CRM tool description names a third-party CRM product', () => {

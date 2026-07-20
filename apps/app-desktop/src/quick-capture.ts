@@ -2,7 +2,7 @@
  * Quick-capture target URL.
  *
  * Pure helper shared by the global hotkey, the tray menu, the app menu, and the
- * `sidanclaw://capture` deep link so they all jump to one place.
+ * `usebrian://capture` deep link so they all jump to one place.
  *
  * Spec: docs/architecture/features/app-desktop.md → "quick-capture.ts"
  * [COMP:app-desktop/quick-capture]

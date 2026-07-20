@@ -5,7 +5,7 @@ import { configDefaults, defineConfig } from 'vitest/config'
 // Core's integration suites (`*.integration.test.ts`) hit live LLM
 // providers and are gated on their API-key env vars; they run via
 // `vitest.integration.config.ts`. Excluding them here keeps the default
-// run unit-only and consistent with @sidanclaw/api.
+// run unit-only and consistent with @use-brian/api.
 export default defineConfig({
   server: {
     fs: {

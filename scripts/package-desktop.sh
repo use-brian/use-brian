@@ -92,9 +92,10 @@ if [[ -n "$SET_VERSION" && ! "$SET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 # Validate the required secrets are present (names only, never values).
+# GH_TOKEN is deliberately NOT required: the publish step probes push access and
+# falls back to the gh keyring login when the token is absent or under-scoped.
 required=(CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID)
 if [[ "$PUBLISH" == "1" ]]; then
-  required+=(GH_TOKEN)
   command -v gh >/dev/null 2>&1 || {
     echo "error: 'gh' (GitHub CLI) is required for --publish. Install: brew install gh" >&2
     exit 1
@@ -109,14 +110,14 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 1
 fi
 
-DMG="$REPO_ROOT/apps/app-desktop/release/sidanclaw.dmg"
-ZIP="$REPO_ROOT/apps/app-desktop/release/sidanclaw.zip"
+DMG="$REPO_ROOT/apps/app-desktop/release/usebrian.dmg"
+ZIP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip"
 # The electron-updater feed: existing installs resolve the latest release, read
 # latest-mac.yml, and download the zip (the blockmap enables differential
 # downloads). electron-builder emits both alongside the artifacts because
 # electron-builder.yml carries a `publish:` block.
 FEED_YML="$REPO_ROOT/apps/app-desktop/release/latest-mac.yml"
-ZIP_BLOCKMAP="$REPO_ROOT/apps/app-desktop/release/sidanclaw.zip.blockmap"
+ZIP_BLOCKMAP="$REPO_ROOT/apps/app-desktop/release/usebrian.zip.blockmap"
 PKG_JSON="$REPO_ROOT/apps/app-desktop/package.json"
 
 # Apply the version change BEFORE the build so the new version is baked into the
@@ -153,9 +154,9 @@ if [[ "$SKIP_BUILD" == "1" ]]; then
   }
 else
   echo "==> Building app-desktop (tsc + asset copy)"
-  pnpm --filter @sidanclaw/app-desktop run build
+  pnpm --filter @use-brian/app-desktop run build
   echo "==> Packaging + signing + notarizing the app (Apple notary, a few min)"
-  pnpm --filter @sidanclaw/app-desktop exec electron-builder --mac
+  pnpm --filter @use-brian/app-desktop exec electron-builder --mac
 fi
 
 # electron-builder signs + notarizes + staples the .app (it submits the .zip),
@@ -192,7 +193,23 @@ if [[ "$PUBLISH" == "1" ]]; then
   # Keep RELEASES_REPO in sync with electron-builder.yml's `publish` block.
   # The desktop source is open (apps/app-desktop in the public open-core repo),
   # so releases + the auto-update feed live on that same public repo.
-  RELEASES_REPO="sidanclaw/sidanclaw"
+  RELEASES_REPO="use-brian/use-brian"
+  # gh prefers $GH_TOKEN (sourced from .env.desktop) over its keyring login, and
+  # an under-scoped PAT 403s the upload only AFTER the expensive build (recurred
+  # on v0.0.4 and v0.0.6; a fine-grained PAT can even pass a permissions probe
+  # yet fail release writes). Prefer the keyring login when it can push; use
+  # $GH_TOKEN only as the fallback (e.g. headless CI with no keyring).
+  can_push() { "$@" api "repos/$RELEASES_REPO" --jq '.permissions.push' 2>/dev/null; }
+  if [[ "$(can_push env -u GH_TOKEN gh)" == "true" ]]; then
+    GH=(env -u GH_TOKEN gh)
+    echo "==> Publishing with the gh keyring login (ignoring GH_TOKEN if set)"
+  elif [[ -n "${GH_TOKEN:-}" && "$(can_push gh)" == "true" ]]; then
+    GH=(gh)
+    echo "==> Publishing with GH_TOKEN (no usable gh keyring login)"
+  else
+    echo "error: no GitHub auth with push access to $RELEASES_REPO (tried the gh keyring login, then GH_TOKEN)." >&2
+    exit 1
+  fi
   VERSION="$(node -p "require('$REPO_ROOT/apps/app-desktop/package.json').version")"
   TAG="v$VERSION"
   # A release without latest-mac.yml is INVISIBLE to auto-update on existing
@@ -212,15 +229,15 @@ if [[ "$PUBLISH" == "1" ]]; then
     echo "warn: $ZIP_BLOCKMAP not found - publishing without differential-download support."
   fi
   echo "==> Publishing $TAG to $RELEASES_REPO (uploading + marking latest)"
-  if gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
-    gh release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
-    gh release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --prerelease=false --latest
+  if "${GH[@]}" release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+    "${GH[@]}" release upload "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" --clobber
+    "${GH[@]}" release edit "$TAG" --repo "$RELEASES_REPO" --draft=false --prerelease=false --latest
   else
-    gh release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
-      --title "$TAG" --notes "sidanclaw desktop $TAG" --latest
+    "${GH[@]}" release create "$TAG" "${ASSETS[@]}" --repo "$RELEASES_REPO" \
+      --title "$TAG" --notes "Use Brian desktop $TAG" --latest
   fi
   echo "==> Published: https://github.com/$RELEASES_REPO/releases/tag/$TAG"
-  echo "    Download:  https://github.com/$RELEASES_REPO/releases/latest/download/sidanclaw.dmg"
+  echo "    Download:  https://github.com/$RELEASES_REPO/releases/latest/download/usebrian.dmg"
 fi
 
 echo

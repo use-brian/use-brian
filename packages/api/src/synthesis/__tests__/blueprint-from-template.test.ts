@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractionSpecSchema, type ExtractionSpec } from '@sidanclaw/core'
+import { extractionSpecSchema, type ExtractionSpec } from '@use-brian/core'
 import { extractionToBlueprintBody } from '../blueprint-from-template.js'
 
 const SPEC: ExtractionSpec = extractionSpecSchema.parse({

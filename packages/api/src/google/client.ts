@@ -9,7 +9,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { GmailOutgoingAttachment } from '@sidanclaw/core'
+import type { GmailOutgoingAttachment } from '@use-brian/core'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
@@ -463,7 +463,7 @@ function buildMultipartMessage(params: {
   body: string
   attachments: GmailOutgoingAttachment[]
 }): Buffer {
-  const boundary = `=_sidanclaw_${randomUUID()}`
+  const boundary = `=_usebrian_${randomUUID()}`
   const lines: string[] = [
     ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
     `To: ${sanitizeHeaderValue(params.to)}`,
@@ -861,7 +861,7 @@ export async function createDriveFile(
   if (params.mimeType) metadata.mimeType = params.mimeType
   if (params.folderId) metadata.parents = [params.folderId]
 
-  const boundary = '---sidanclaw-multipart'
+  const boundary = '---usebrian-multipart'
   const body = [
     `--${boundary}`,
     'Content-Type: application/json; charset=UTF-8',
@@ -929,7 +929,7 @@ export async function updateDriveFileContent(
   const metadata: Record<string, unknown> = {}
   if (params.name) metadata.name = params.name
 
-  const boundary = '---sidanclaw-multipart'
+  const boundary = '---usebrian-multipart'
   const body = [
     `--${boundary}`,
     'Content-Type: application/json; charset=UTF-8',

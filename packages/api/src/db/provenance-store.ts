@@ -7,8 +7,8 @@ import type {
   RetrievalEnvelope,
   RetrievalStore,
   Sensitivity,
-} from '@sidanclaw/core'
-import { canRead } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { canRead } from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 
 /**

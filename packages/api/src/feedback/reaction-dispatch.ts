@@ -35,7 +35,7 @@
 import {
   classifyReaction,
   reactionDetailsLabel,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 import { findSessionMessageByChannelTriple } from '../db/sessions.js'
 import { recordFeedback, type FeedbackSource } from './record.js'
 

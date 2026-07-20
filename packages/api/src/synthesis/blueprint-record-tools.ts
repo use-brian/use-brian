@@ -38,8 +38,8 @@ import {
   type DocPageStore,
   type ExtractionSpec,
   type Tool,
-} from '@sidanclaw/core'
-import type { SavedViewStore } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { SavedViewStore } from '@use-brian/core'
 import type { PageTemplateStore } from '../db/page-templates-store.js'
 import type { BlueprintRecord, BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import { createRecordPageProjector } from './synthesize.js'

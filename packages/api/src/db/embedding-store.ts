@@ -1,7 +1,7 @@
 /**
  * `embedding-store.ts` — company-brain WU-8.3.
  *
- * Fulfils the `EmbeddingStore` interface from `@sidanclaw/core`
+ * Fulfils the `EmbeddingStore` interface from `@use-brian/core`
  * (`packages/core/src/embeddings/worker.ts`). The async embedding worker
  * calls `withClaimedRows(primitive, limit, handler)`; this store owns the
  * transaction, the `SELECT ... FOR UPDATE SKIP LOCKED` lease, the priority
@@ -40,7 +40,7 @@ import type {
   EmbeddingPrimitive,
   EmbeddingResult,
   EmbeddingStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getPool } from './client.js'
 
 type PrimitiveConfig = {

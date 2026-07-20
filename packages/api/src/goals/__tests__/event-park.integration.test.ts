@@ -5,13 +5,13 @@ import {
   createWorkflowEventDispatcher,
   type DispatchEvent,
   type EventSubscription,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { createGoalDriver, type GoalDriverDeps, type GoalLoopState } from '../driver.js'
 import { createGoalWorkTools } from '../work-tools.js'
 
 /**
  * Integration test for the goals `until:event` park → dispatch → resume cycle
- * (task-goal-seeker.md §4.11; mig 293). Requires a local PostgreSQL `sidanclaw`
+ * (task-goal-seeker.md §4.11; mig 293). Requires a local PostgreSQL `Use Brian`
  * with the goals migrations applied. Skips silently when the DB is unavailable.
  *
  * Exercises the REAL store (`awaiting_event` read/write/clear + the finder), the
@@ -26,7 +26,7 @@ import { createGoalWorkTools } from '../work-tools.js'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

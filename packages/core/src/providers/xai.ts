@@ -3,7 +3,7 @@
  *
  * Calls xAI's OpenAI-Responses-compatible endpoint to power the `xSearch`
  * tool and the x.com URL redirect in `urlReader`. Does not implement the
- * `LLMProvider` interface — sidanclaw's chat stack is Gemini-only today.
+ * `LLMProvider` interface — Use Brian's chat stack is Gemini-only today.
  *
  * Spec: docs/architecture/integrations/xai.md.
  */
@@ -38,7 +38,7 @@ export type XaiResponsesRequest = {
 /**
  * Token usage reported by xAI's Responses API. Shape mirrors OpenAI's —
  * `input_tokens`, `output_tokens`, optional cache hit count. We map to
- * sidanclaw's `TokenUsage` shape at the tool layer so the billing
+ * Use Brian's `TokenUsage` shape at the tool layer so the billing
  * pipeline (cost-tracker + usageStore) can consume it generically.
  */
 export type XaiUsage = {
@@ -97,7 +97,7 @@ export type XaiResponsesData = {
 }
 
 /**
- * Normalise xAI's reported usage into sidanclaw's `TokenUsage` shape.
+ * Normalise xAI's reported usage into Use Brian's `TokenUsage` shape.
  * Returns zeros when the API omits the field — never throws, because a
  * partial response should still be billable at whatever was reported.
  */

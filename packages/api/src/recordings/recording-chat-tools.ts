@@ -24,7 +24,7 @@
 // actor from the ToolContext per call so read ceilings hold on every path.
 
 import { z } from 'zod'
-import { buildTool, actorFromContext, type Embedder, type Tool } from '@sidanclaw/core'
+import { buildTool, actorFromContext, type Embedder, type Tool } from '@use-brian/core'
 import {
   searchRecording as searchRecordingFn,
   readRecordingRange,

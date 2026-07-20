@@ -6,7 +6,7 @@ import type {
   Page,
   SavedViewStore,
   StreamChunk,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { runDocAutoTitle } from '../auto-title.js'
 
 const USER_ID = 'user-1'

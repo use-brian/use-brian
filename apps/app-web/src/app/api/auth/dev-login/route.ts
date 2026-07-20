@@ -8,7 +8,7 @@
 // the real Bearer token and every RLS-scoped query works.
 //
 // app-web is a sub-app that defers all auth state changes to the primary
-// (sidan.ai) in production — only the primary writes the shared `.sidan.ai`
+// (usebrian.ai) in production — only the primary writes the shared `.usebrian.ai`
 // cookies. So this route is DOUBLY dead in production: the guard below 404s
 // when `NODE_ENV === "production"` OR `primaryAuthUrl()` resolves (the same
 // "is this prod / a sub-app deploy" signal the callback + refresh routes

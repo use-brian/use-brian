@@ -2,8 +2,8 @@
  * Linked-identity store — auth-only half of the user_linked_accounts split.
  *
  * Stage 3 of the team-connector promotion. "This external provider identity
- * IS this sidanclaw user." Used by the mini-app auto-login path and by
- * any webhook enrichment step that needs to look up the sidanclaw user
+ * IS this Use Brian user." Used by the mini-app auto-login path and by
+ * any webhook enrichment step that needs to look up the Use Brian user
  * behind an external identity.
  *
  * Routing decisions (which assistant does this identity talk to?) live in
@@ -40,7 +40,7 @@ const COLS = `
 
 export type LinkedIdentityStore = {
   /**
-   * Look up the sidanclaw user behind an external provider identity.
+   * Look up the Use Brian user behind an external provider identity.
    * System-level (no RLS) — called by webhook handlers before a user
    * session exists. Analogous to the legacy `findByProvider`.
    */

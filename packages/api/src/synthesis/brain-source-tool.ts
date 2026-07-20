@@ -19,7 +19,7 @@
 // → "The three fill modes" (Generate) + "searchRecording as an in-process tool".
 
 import { z } from 'zod'
-import { buildTool, type RetrievalActor, type Tool } from '@sidanclaw/core'
+import { buildTool, type RetrievalActor, type Tool } from '@use-brian/core'
 import { search as searchBrain, type RetrievalStoreDeps } from '../db/retrieval-store.js'
 
 export type CreateBrainSourceToolDeps = {

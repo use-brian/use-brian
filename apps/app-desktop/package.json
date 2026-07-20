@@ -1,8 +1,8 @@
 {
-  "name": "@sidanclaw/app-desktop",
-  "productName": "sidanclaw",
-  "version": "0.0.4",
-  "description": "sidanclaw — saved table + board views over your tasks, CRM, and workflow runs.",
+  "name": "@use-brian/app-desktop",
+  "productName": "Use Brian",
+  "version": "0.0.7",
+  "description": "Use Brian — saved table + board views over your tasks, CRM, and workflow runs.",
   "author": "SIDAN Lab",
   "private": true,
   "type": "module",

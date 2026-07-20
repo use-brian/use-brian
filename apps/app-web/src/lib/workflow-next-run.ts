@@ -6,8 +6,8 @@
  * `schedule` (a `ScheduleConfig` identical in shape to core's
  * `StructuredSchedule`), so the next fire time is derivable client-side. This is
  * a faithful port of `computeNextRun` from `packages/core/src/scheduling/schedule.ts`
- * — app-web deliberately does NOT depend on `@sidanclaw/core` (only
- * `@sidanclaw/shared` + `@sidanclaw/views-renderer`), the same reason the
+ * — app-web deliberately does NOT depend on `@use-brian/core` (only
+ * `@use-brian/shared` + `@use-brian/views-renderer`), the same reason the
  * `/api/views` SDK is duplicated rather than imported. Kept pure (Intl + Date
  * only, no React) so it's unit-testable.
  *

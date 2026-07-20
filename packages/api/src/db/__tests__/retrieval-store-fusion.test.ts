@@ -10,7 +10,7 @@ import {
  * Wired-path tests for WU-5.7 — RRF fusion + trust weighting + MMR
  * diversification as composed inside `retrieval-store.ts`'s `search()`.
  *
- * `rrf.test.ts` / `mmr.test.ts` exercise the pure `@sidanclaw/core`
+ * `rrf.test.ts` / `mmr.test.ts` exercise the pure `@use-brian/core`
  * primitives. This suite exercises `fuseAndDiversify` — the exact
  * Layer-3 pipeline `search()` runs over its fan-out candidate set
  * (`rrfFuse([fts, graph, recency])` → `rowTrustWeight` → `mmrRerank`).

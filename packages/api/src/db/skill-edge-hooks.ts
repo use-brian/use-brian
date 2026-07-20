@@ -5,8 +5,8 @@ import type {
   EntitySource,
   LinkKind,
   Sensitivity,
-} from '@sidanclaw/core'
-import { parseSkillReferences } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { parseSkillReferences } from '@use-brian/core'
 
 /**
  * Skill edge derivation (`docs/architecture/engine/skill-system.md` §6).

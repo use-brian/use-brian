@@ -9,7 +9,7 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import type { McpServerConfig, McpToolInfo } from '@sidanclaw/core'
+import type { McpServerConfig, McpToolInfo } from '@use-brian/core'
 
 const CONNECT_TIMEOUT = 10_000
 const CALL_TIMEOUT = 30_000
@@ -34,7 +34,7 @@ export async function discoverMcpServer(
   name: string,
   headers?: Record<string, string>,
 ): Promise<McpServerConfig> {
-  const client = new Client({ name: 'sidanclaw', version: '1.0.0' })
+  const client = new Client({ name: 'Use Brian', version: '1.0.0' })
   const transport = new StreamableHTTPClientTransport(new URL(url), buildTransportOptions(headers))
 
   try {
@@ -57,7 +57,7 @@ export async function discoverMcpServer(
  * A remote MCP tool result that carried inline image content (e.g. sampled
  * video frames). Returned by `callRemoteMcpTool` instead of a bare string so
  * the images can be lifted onto `ToolResult.images` and shown to the model.
- * See `@sidanclaw/core` `mcpResultToToolResult`.
+ * See `@use-brian/core` `mcpResultToToolResult`.
  */
 export type McpImageToolResult = {
   text: string
@@ -75,7 +75,7 @@ export async function callRemoteMcpTool(
   input: Record<string, unknown>,
   headers?: Record<string, string>,
 ): Promise<unknown> {
-  const client = new Client({ name: 'sidanclaw', version: '1.0.0' })
+  const client = new Client({ name: 'Use Brian', version: '1.0.0' })
   const transport = new StreamableHTTPClientTransport(new URL(serverUrl), buildTransportOptions(headers))
 
   try {

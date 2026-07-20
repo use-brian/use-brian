@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { handleConnectCommand } from '../_connect-command.js'
 
-const APP_URL = 'https://sidan.ai'
+const APP_URL = 'https://usebrian.ai'
 
 describe('[COMP:api/connect-command] handleConnectCommand', () => {
   it('returns handled=false for unrelated text so the caller falls through', () => {
@@ -52,7 +52,7 @@ describe('[COMP:api/connect-command] handleConnectCommand', () => {
     }
   })
 
-  it('refuses BYO non-owners with a pointer to @sidanclaw_bot', () => {
+  it('refuses BYO non-owners with a pointer to @use_brian_bot', () => {
     const r = handleConnectCommand({
       text: '/connect gdrive',
       isLinked: true,
@@ -61,7 +61,7 @@ describe('[COMP:api/connect-command] handleConnectCommand', () => {
     })
     expect(r.handled).toBe(true)
     expect(r.message?.text).toContain('owner')
-    expect(r.message?.text).toContain('@sidanclaw_bot')
+    expect(r.message?.text).toContain('@use_brian_bot')
   })
 
   it('falls back to plain text when appUrl is missing', () => {

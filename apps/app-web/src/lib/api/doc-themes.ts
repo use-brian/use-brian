@@ -3,9 +3,9 @@
  * migration 225). Thin typed wrappers over `authFetch` so token refresh is
  * transparent — same shape as `lib/api/views.ts`.
  *
- * Wire types are declared locally (not imported from `@sidanclaw/shared`) to
+ * Wire types are declared locally (not imported from `@use-brian/shared`) to
  * keep the browser bundle lean; the server Zod schemas are the authoritative
- * contract. The token maps mirror `@sidanclaw/shared` `CustomThemePayload`.
+ * contract. The token maps mirror `@use-brian/shared` `CustomThemePayload`.
  *
  * See docs/architecture/features/doc-custom-themes.md.
  *
@@ -35,7 +35,7 @@ export type DocThemeSeed = {
 /**
  * The light/dark doc mode a theme wants by default. Prefers the explicit
  * `appearance`; falls back to the `mood` for older seeds (where `dark` was the
- * only signal of intent). Mirrors `seedAppearance` in `@sidanclaw/shared` — kept
+ * only signal of intent). Mirrors `seedAppearance` in `@use-brian/shared` — kept
  * local so the browser bundle doesn't pull in the shared package (see the wire-type
  * note above).
  */

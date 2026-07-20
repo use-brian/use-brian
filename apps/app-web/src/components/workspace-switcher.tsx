@@ -15,14 +15,14 @@
  * shell, switching the active workspace is a doc-internal navigation to
  * `/w/<id>/p`, and Log out clears the local session. Only account
  * management (Add another account, switching accounts) still bounces to
- * the **main web app** / the primary (`sidan.ai`) — rewriting the shared
- * `.sidan.ai` cookies is the primary's job (sub-app rule).
+ * the **main web app** / the primary (`usebrian.ai`) — rewriting the shared
+ * `.usebrian.ai` cookies is the primary's job (sub-app rule).
  *
  * **Multi-account** — the account section lists every account signed in on
  * this browser, read from the JS-readable `accounts_dir` cookie the primary
- * (sidan.ai) writes on `.sidan.ai` (so it rides along to app.sidan.ai).
+ * (usebrian.ai) writes on `.usebrian.ai` (so it rides along to app.usebrian.ai).
  * The active row gets a checkmark; clicking another row switches to it.
- * Switching rewrites the shared `.sidan.ai` cookies, which only the primary
+ * Switching rewrites the shared `.usebrian.ai` cookies, which only the primary
  * may do (sub-app rule), so it's a top-level redirect to the primary's
  * `/api/auth/switch-account-and-return` endpoint, landing back on this app's
  * workspace picker. In dev (no shared cookie scope, "Add account" punts to
@@ -38,6 +38,7 @@ import { useRouter } from "next/navigation";
 import { docPagePath } from "@/lib/doc-page-url";
 import { routeProgress } from "@/lib/route-progress";
 import { useT } from "@/lib/i18n/client";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { format } from "@/lib/i18n/format";
 import { authFetch } from "@/lib/auth-fetch";
 import { primaryAuthUrl, webAppUrl } from "@/lib/primary-auth";
@@ -54,7 +55,11 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { useWorkspaceContext } from "@/lib/workspace-context";
+import {
+  useWorkspaceContext,
+  WORKSPACE_RENAMED_EVENT,
+  type WorkspaceRenamedDetail,
+} from "@/lib/workspace-context";
 import {
   SettingsModal,
   type SettingsSection,
@@ -108,7 +113,7 @@ export function WorkspaceSwitcher() {
     useState<SettingsSection>("ws-general");
   // Multi-account state. `accountsDir` lists every account signed in on this
   // browser (from the JS-readable `accounts_dir` cookie the primary writes on
-  // `.sidan.ai`); re-read each time the popover opens. `switching` drives the
+  // `.usebrian.ai`); re-read each time the popover opens. `switching` drives the
   // per-row spinner before the switch redirect navigates away; `accountError`
   // surfaces a failed switch bounced back via `?accountError=`.
   const [accountsDir, setAccountsDir] = useState<AccountDirEntry[]>(() =>
@@ -160,6 +165,26 @@ export function WorkspaceSwitcher() {
     return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
   }, []);
 
+  // Keep the lazily-cached workspace list in sync with a settings-modal
+  // rename (the trigger label itself reads `ctx.name`, which the provider
+  // updates from the same event) — without this the popover rows show the
+  // old name until a full reload.
+  useEffect(() => {
+    function onRenamed(e: Event) {
+      const detail = (e as CustomEvent<WorkspaceRenamedDetail>).detail;
+      if (!detail?.workspaceId || !detail.name) return;
+      setWorkspaces((prev) =>
+        prev
+          ? prev.map((w) =>
+              w.id === detail.workspaceId ? { ...w, name: detail.name } : w,
+            )
+          : prev,
+      );
+    }
+    window.addEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
+    return () => window.removeEventListener(WORKSPACE_RENAMED_EVENT, onRenamed);
+  }, []);
+
   // Re-read the account directory each time the popover opens so it reflects
   // accounts added/switched in another tab (or on the web app) since the last
   // render. Also clears any transient switch state.
@@ -192,7 +217,7 @@ export function WorkspaceSwitcher() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Switch the active account. Rewriting the shared `.sidan.ai` cookies is the
+  // Switch the active account. Rewriting the shared `.usebrian.ai` cookies is the
   // primary's job (sub-app rule), so bounce the browser to its
   // switch-account-and-return endpoint and land back on this app's workspace
   // picker (`/`) — the newly-active account may not have access to the
@@ -205,12 +230,12 @@ export function WorkspaceSwitcher() {
     setAccountError(null);
     setSwitching(accountId);
     // In the Electron shell the switch happens in the shell's OWN cookie jar (the
-    // primary's shared `.sidan.ai` cookies are unreachable from it), so route
+    // primary's shared `.usebrian.ai` cookies are unreachable from it), so route
     // through the bridge instead of bouncing to the primary. It resolves with the
     // outcome: on success the shell reloads the window; on failure we surface the
     // message inline and clear the spinner. Same shell-takes-precedence pattern
     // as `desktopSignOut()`.
-    const switchViaShell = window.sidanclawDesktop?.switchAccount;
+    const switchViaShell = desktopBridge()?.switchAccount;
     if (typeof switchViaShell === "function") {
       void switchViaShell(accountId).then((res) => {
         if (!res.ok) {
@@ -268,7 +293,7 @@ export function WorkspaceSwitcher() {
   function handleAddAccount() {
     setOpen(false);
     const addViaShell =
-      typeof window !== "undefined" ? window.sidanclawDesktop?.addAccount : undefined;
+      desktopBridge()?.addAccount;
     if (typeof addViaShell === "function") {
       addViaShell();
       return;

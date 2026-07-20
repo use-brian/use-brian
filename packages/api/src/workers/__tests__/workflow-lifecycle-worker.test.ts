@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import type { WorkflowRecord, WorkflowTrigger } from '@sidanclaw/core'
+import type { WorkflowRecord, WorkflowTrigger } from '@use-brian/core'
 import {
   createWorkflowLifecycleWorker,
   type LifecycleSweepRecord,

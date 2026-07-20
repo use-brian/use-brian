@@ -78,7 +78,7 @@ describe("[COMP:app-desktop/target-store] targets", () => {
       appUrl: CLOUD_APP_URL,
       apiUrl: CLOUD_API_URL,
       auth: "pkce",
-      label: "sidanclaw Cloud",
+      label: "Use Brian Cloud",
     });
     expect(Object.isFrozen(t)).toBe(true);
   });
@@ -152,7 +152,7 @@ describe("[COMP:app-desktop/target-store] persisted record serde", () => {
 describe("[COMP:app-desktop/target-store] indicator + URL helpers", () => {
   it("suffixes page titles for a local target only (empty title -> the label alone)", () => {
     const local = { kind: "local" as const, label: "Local Brain (localhost:3003)" };
-    const cloud = { kind: "cloud" as const, label: "sidanclaw Cloud" };
+    const cloud = { kind: "cloud" as const, label: "Use Brian Cloud" };
     expect(targetWindowTitle("Inbox", local)).toBe("Inbox · Local Brain (localhost:3003)");
     expect(targetWindowTitle("  ", local)).toBe("Local Brain (localhost:3003)");
     expect(targetWindowTitle("Inbox", cloud)).toBe("Inbox");

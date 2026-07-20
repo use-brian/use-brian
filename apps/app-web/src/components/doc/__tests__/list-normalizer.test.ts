@@ -13,7 +13,7 @@
 
 import { describe, expect, it, afterEach } from "vitest";
 import { Editor } from "@tiptap/core";
-import { docSchema } from "@sidanclaw/doc-model";
+import { docSchema } from "@use-brian/doc-model";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { browserDocExtensions } from "../doc-schema";
 import { firstAdjacentListJoinPos } from "../list-normalizer";

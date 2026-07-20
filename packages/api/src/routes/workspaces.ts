@@ -28,7 +28,7 @@ import {
   defaultClearanceForAppType,
   isAppType,
   type AppType,
-} from '@sidanclaw/shared'
+} from '@use-brian/shared'
 import { query, queryWithRLS } from '../db/client.js'
 import { findUserById } from '../db/users.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'

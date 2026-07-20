@@ -1001,7 +1001,7 @@ export async function runFeedInspirationScan(
 // `packages/api-platform/src/routes/feed.ts`) plus — scope exception, same
 // as Voice above — the OPEN workspace members routes
 // (`GET /api/workspaces/:id`, `PATCH .../members/:userId/permissions` in
-// `sidanclaw/packages/api/src/routes/workspaces.ts`), which no other app-web
+// `use-brian/packages/api/src/routes/workspaces.ts`), which no other app-web
 // SDK module wraps (docs/plans/feed-web-consolidation.md §7.6).
 
 /** `distribution_profiles.auto_reply_mode` — how inbound replies are handled. */

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { z } from 'zod'
-import { buildTool, type Tool, type ToolContext } from '@sidanclaw/core'
+import { buildTool, type Tool, type ToolContext } from '@use-brian/core'
 import { resolveResumeOutcomeNote } from '../session-resume-replay.js'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ const context: ToolContext = {
   userId: 'user-1',
   assistantId: 'asst-1',
   sessionId: 'sess-1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web',
   channelId: 'web-1',
   abortSignal: new AbortController().signal,

@@ -8,7 +8,7 @@
  *   - a non-member C cannot read it;
  *   - an owner-scoped (`visibility='owner'`) session of A stays invisible to B.
  *
- * Requires the local `sidanclaw` DB with migration 223 applied. Skips silently
+ * Requires the local `Use Brian` DB with migration 223 applied. Skips silently
  * when the DB isn't reachable / the column is absent — matches the pattern in
  * aggregate-store.integration.test.ts.
  *
@@ -22,7 +22,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -99,7 +99,7 @@ async function makeSession(
 ): Promise<string> {
   const r = await client.query(
     `INSERT INTO sessions (assistant_id, user_id, channel_type, channel_id, app_id, visibility, workspace_id, effective_clearance)
-     VALUES ($1, $2, $3, gen_random_uuid()::text, 'sidanclaw', $4, $5, $6)
+     VALUES ($1, $2, $3, gen_random_uuid()::text, 'Use Brian', $4, $5, $6)
      RETURNING id`,
     [assistantId, userId, channelType, visibility, workspaceId, effectiveClearance],
   )

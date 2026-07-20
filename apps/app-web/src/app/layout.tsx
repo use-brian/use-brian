@@ -23,17 +23,17 @@ const APP_DESCRIPTION =
   "Your company brain: tasks, CRM, knowledge, and workflows in one AI workspace.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://app.sidan.ai"),
-  // sidanclaw is the whole authenticated app; "Doc" is just its default tab
+  metadataBase: new URL("https://app.usebrian.ai"),
+  // Use Brian is the whole authenticated app; "Doc" is just its default tab
   // (alongside Brain, Studio, Workflow, …), so the app-level title/brand is
-  // "sidanclaw" — not "Doc by sidanclaw". A page with its own title renders as
-  // "<page> · sidanclaw" via the template.
+  // "Use Brian" — not "Doc by Use Brian". A page with its own title renders as
+  // "<page> · Use Brian" via the template.
   title: {
-    default: "sidanclaw",
-    template: "%s · sidanclaw",
+    default: "Use Brian",
+    template: "%s · Use Brian",
   },
   description: APP_DESCRIPTION,
-  applicationName: "sidanclaw",
+  applicationName: "Use Brian",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "any" },
@@ -46,15 +46,15 @@ export const metadata: Metadata = {
   manifest: "/site.webmanifest",
   openGraph: {
     type: "website",
-    siteName: "sidanclaw",
-    title: "sidanclaw",
+    siteName: "Use Brian",
+    title: "Use Brian",
     description: APP_DESCRIPTION,
     url: "/",
-    images: [{ url: "/icon.png", width: 512, height: 512, alt: "sidanclaw" }],
+    images: [{ url: "/icon.png", width: 512, height: 512, alt: "Use Brian" }],
   },
   twitter: {
     card: "summary",
-    title: "sidanclaw",
+    title: "Use Brian",
     description: APP_DESCRIPTION,
     images: ["/icon.png"],
   },
@@ -69,14 +69,14 @@ export const metadata: Metadata = {
 };
 
 // Tag <html> before first paint when we're running inside the Electron desktop
-// shell (apps/app-desktop), whose preload exposes `window.sidanclawDesktop`
+// shell (apps/app-desktop), whose preload exposes `window.usebrianDesktop` (+ legacy `window.sidanclawDesktop`)
 // BEFORE any page script runs. The `is-canvas-desktop` class gates desktop-only
 // chrome in globals.css (a draggable title-bar strip that clears the macOS
 // traffic lights + non-selectable app chrome) and is a no-op in the browser.
 // On Windows (`platform === "win32"`) the window keeps a standard OS frame with
 // no traffic lights, so `is-canvas-desktop-win` zeroes the title-bar inset.
 // Same run-before-paint, no-flash shape as THEME_PREPAINT_SCRIPT; no user input.
-const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.sidanclawDesktop;if(!d)return;var c=document.documentElement.classList;c.add("is-canvas-desktop");if(d.platform==="win32")c.add("is-canvas-desktop-win");}catch(e){}})();`;
+const DESKTOP_SHELL_PREPAINT_SCRIPT = `(()=>{try{var d=window.usebrianDesktop||window.sidanclawDesktop;if(!d)return;var c=document.documentElement.classList;c.add("is-canvas-desktop");if(d.platform==="win32")c.add("is-canvas-desktop-win");}catch(e){}})();`;
 
 // iOS Safari zooms the page when a form control with a computed font-size
 // under 16px receives focus, and the zoom persists after blur — the app then

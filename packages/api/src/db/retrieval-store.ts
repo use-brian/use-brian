@@ -20,7 +20,7 @@ import type {
   SearchInput,
   SearchResultRow,
   VectorHit,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   DEFAULT_MMR_LAMBDA,
   RRF_METHOD,
@@ -30,7 +30,7 @@ import {
   rowTrustWeight,
   rrfFuse,
   vectorRankedList,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { queryWithRLS } from './client.js'
 

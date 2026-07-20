@@ -31,7 +31,7 @@ import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import type { ChatMarkdownProps } from "@sidanclaw/chat-ui";
+import type { ChatMarkdownProps } from "@use-brian/chat-ui";
 
 /** How long the ✓ "copied" state shows before reverting (matches the
  *  per-message copy flash + the block menu's copy-link flash). */

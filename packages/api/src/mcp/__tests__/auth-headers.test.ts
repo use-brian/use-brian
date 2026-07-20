@@ -240,21 +240,30 @@ describe('[COMP:api/connector-preflight-headers] preflightHeadersToRecord', () =
 describe('[COMP:api/actor-identity] actorIdentityHeaders', () => {
   it('builds the full reserved-namespace header set', () => {
     expect(actorIdentityHeaders({ channel: 'web', id: 'a@b.com', email: 'a@b.com', userId: 'u-1' })).toEqual({
+      'X-UseBrian-Actor-Channel': 'web',
       'X-Sidanclaw-Actor-Channel': 'web',
+      'X-UseBrian-User-Id': 'u-1',
       'X-Sidanclaw-User-Id': 'u-1',
+      'X-UseBrian-Actor-Id': 'a@b.com',
       'X-Sidanclaw-Actor-Id': 'a@b.com',
+      'X-UseBrian-Actor-Email': 'a@b.com',
       'X-Sidanclaw-Actor-Email': 'a@b.com',
     })
   })
 
   it('always sends channel + user id; omits absent id / email', () => {
     expect(actorIdentityHeaders({ channel: 'telegram', userId: 'u-2' })).toEqual({
+      'X-UseBrian-Actor-Channel': 'telegram',
       'X-Sidanclaw-Actor-Channel': 'telegram',
+      'X-UseBrian-User-Id': 'u-2',
       'X-Sidanclaw-User-Id': 'u-2',
     })
     expect(actorIdentityHeaders({ channel: 'slack', id: 'U0999', email: null, userId: 'u-3' })).toEqual({
+      'X-UseBrian-Actor-Channel': 'slack',
       'X-Sidanclaw-Actor-Channel': 'slack',
+      'X-UseBrian-User-Id': 'u-3',
       'X-Sidanclaw-User-Id': 'u-3',
+      'X-UseBrian-Actor-Id': 'U0999',
       'X-Sidanclaw-Actor-Id': 'U0999',
     })
   })

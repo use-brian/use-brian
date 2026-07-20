@@ -8,7 +8,7 @@
  *
  * These were split out of `comment-thread-body.tsx` so the public share route
  * can render an IDENTICAL comment card without pulling that module's heavy,
- * auth-bound deps (`@sidanclaw/chat-ui`, `authFetch`, the composer + its model
+ * auth-bound deps (`@use-brian/chat-ui`, `authFetch`, the composer + its model
  * controls) into the anonymous bundle. Keeping them here is also the anti-drift
  * guarantee: the editor and the share view render the same avatar, the same
  * `ThreadGutter` connecting line, and the same relative-time, so the two

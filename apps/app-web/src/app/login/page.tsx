@@ -72,9 +72,9 @@ function LoginInner() {
       ? t.errorDevLogin
       : undefined;
 
-  // Per the design rule "sidan.ai → sub-app, not the other way round",
-  // production sign-in happens at sidan.ai (it's the only origin that
-  // can write the shared `.sidan.ai` cookies). This page renders only
+  // Per the design rule "usebrian.ai → sub-app, not the other way round",
+  // production sign-in happens at usebrian.ai (it's the only origin that
+  // can write the shared `.usebrian.ai` cookies). This page renders only
   // the moment between mount and the redirect, then unloads. Dev keeps
   // the local Google button because localhost can't share cookies.
   useEffect(() => {

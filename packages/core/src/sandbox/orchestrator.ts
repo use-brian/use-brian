@@ -102,7 +102,8 @@ export function looksLikeLoginWall(url: string): boolean {
  * Heuristics for "this page is a human-verification challenge" (captcha /
  * bot-check interstitial). Unlike the login-wall regex these read the whole
  * snapshot — the major walls (Cloudflare "Just a moment", Google /sorry/,
- * reCAPTCHA/hCaptcha widgets, PerimeterX press-and-hold, Amazon robot check)
+ * reCAPTCHA/hCaptcha widgets, PerimeterX press-and-hold, Amazon robot check,
+ * DataDome's "DataDome Device Check" iframe on an otherwise-empty snapshot)
  * mostly serve the challenge at the ORIGINAL url, so a URL test alone can
  * never catch them. Kept deliberately specific: a plain page that merely
  * MENTIONS captchas must not trip it.
@@ -110,7 +111,7 @@ export function looksLikeLoginWall(url: string): boolean {
 const CAPTCHA_URL_PATTERN = /\/sorry\/|__cf_chl|\/cdn-cgi\/challenge-platform\/|captcha/i
 const CAPTCHA_TITLE_PATTERN =
   /just a moment|attention required|verify you are human|are you a robot|robot check|unusual traffic|security check|please verify/i
-const CAPTCHA_NODE_PATTERN = /recaptcha|hcaptcha|verify you are human|i'?m not a robot|press & hold/i
+const CAPTCHA_NODE_PATTERN = /recaptcha|hcaptcha|datadome|verify you are human|i'?m not a robot|press & hold/i
 
 export function looksLikeCaptcha(page: {
   url: string

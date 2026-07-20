@@ -33,8 +33,8 @@ import {
   type RunSectionEpisode,
   type SavedViewStore,
   type UpsertPageSource,
-} from '@sidanclaw/core'
-import type { DocPageStore } from '@sidanclaw/core'
+} from '@use-brian/core'
+import type { DocPageStore } from '@use-brian/core'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
 import type { EpisodeSensitivity } from '../db/episodes-store.js'
 import type { DocPageSourceStore } from '../db/doc-page-source-store.js'

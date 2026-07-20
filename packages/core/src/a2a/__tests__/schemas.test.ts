@@ -343,7 +343,7 @@ describe('[COMP:a2a/limits] Limit constants', () => {
   })
 
   it('error code ranges follow JSON-RPC convention', () => {
-    // -32xxx is JSON-RPC reserved range; -33xxx is sidanclaw additions
+    // -32xxx is JSON-RPC reserved range; -33xxx is Use Brian additions
     expect(ERROR_CODES.TASK_NOT_FOUND).toBeGreaterThanOrEqual(-32999)
     expect(ERROR_CODES.TASK_NOT_FOUND).toBeLessThan(-32000)
     expect(ERROR_CODES.SHARING_BLOCKED).toBeGreaterThanOrEqual(-33999)

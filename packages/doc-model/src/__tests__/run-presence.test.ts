@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import type { Block } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block } from '@use-brian/core/dist/views/blocks.js'
 import {
   deriveRunStep,
   deriveRunBlockId,

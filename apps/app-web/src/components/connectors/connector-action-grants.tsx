@@ -12,7 +12,7 @@
  *
  * Saves via PATCH /api/assistant-connector-grants/:assistantId/:connectorId.
  *
- * The tool catalog is sourced directly from `@sidanclaw/shared`'s
+ * The tool catalog is sourced directly from `@use-brian/shared`'s
  * `OFFICIAL_CONNECTOR_TOOLS` (the single source of truth, imported via the
  * `./builtin-connectors` subpath so the server-only `env.js` barrel never
  * reaches the client bundle). No local mirror — same registry as apps/web.
@@ -28,7 +28,7 @@ import { authFetch } from "@/lib/auth-fetch";
 import {
   OFFICIAL_CONNECTOR_TOOLS,
   type BuiltinConnectorTool,
-} from "@sidanclaw/shared/builtin-connectors";
+} from "@use-brian/shared/builtin-connectors";
 import { useT } from "@/lib/i18n/client";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";

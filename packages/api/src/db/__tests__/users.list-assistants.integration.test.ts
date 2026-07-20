@@ -10,14 +10,14 @@ import pg from 'pg'
  * `assistant_members` grant AND `workspace_members` — with *different* roles
  * in each — must appear exactly once, carrying the higher-privilege role.
  *
- * Requires a local PostgreSQL database named `sidanclaw`. Skips silently
+ * Requires a local PostgreSQL database named `Use Brian`. Skips silently
  * when the DB is unavailable. See docs/workflow/testing.md.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {
@@ -38,7 +38,7 @@ const describeIf = ok ? describe : describe.skip
 
 // The function under test reaches Postgres through the shared `getPool()`
 // (reads DATABASE_URL, defaulted to postgres:///sidanclaw by the
-// integration vitest config) — the same `sidanclaw` DB this suite's own
+// integration vitest config) — the same `Use Brian` DB this suite's own
 // pool fixtures write to.
 const { listAccessibleAssistants } = await import('../users.js')
 

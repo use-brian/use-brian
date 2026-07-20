@@ -27,7 +27,7 @@
 
 import { query, queryWithRLS } from './client.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
-import type { SkillContent, SkillMeta } from '@sidanclaw/core'
+import type { SkillContent, SkillMeta } from '@use-brian/core'
 import {
   SKILL_ACTIVATION_THRESHOLD,
   SKILL_USAGE_CONFIDENCE_INCREMENT,
@@ -35,7 +35,7 @@ import {
   bornConfidence,
   bornActivated,
   bornVerified,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 // ── Inputs ─────────────────────────────────────────────────────────
 
@@ -704,7 +704,20 @@ export function createDbWorkspaceSkillStore(hooks?: WorkspaceSkillStoreHooks): W
          WHERE assistant_id = $1`,
         [assistantId],
       )
-      return result.rows
+      // Rebrand alias: the `using-sidanclaw` builtin was renamed `using-brian`
+      // (2026-07-19), but pre-rename rows keep the old slug. Normalize on read
+      // so an old disable still applies; a row already stored under the new
+      // slug wins over a normalized legacy row.
+      const hasNew = result.rows.some((r) => r.skillId === 'using-brian')
+      const rows: Array<{ skillId: string; enabled: boolean }> = []
+      for (const r of result.rows) {
+        if (r.skillId === 'using-sidanclaw') {
+          if (!hasNew) rows.push({ ...r, skillId: 'using-brian' })
+        } else {
+          rows.push(r)
+        }
+      }
+      return rows
     },
 
     async setEnabled(assistantId, skillId, enabled) {

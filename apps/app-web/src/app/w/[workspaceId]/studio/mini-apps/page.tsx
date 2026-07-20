@@ -28,7 +28,7 @@
  * an "Alpha" pill and a "Contact us for trial" CTA that opens a `mailto:`.
  * `status: 'coming_soon'` cards render disabled with no CTA.
  *
- * The `MINI_APPS` registry is imported directly from `@sidanclaw/shared`
+ * The `MINI_APPS` registry is imported directly from `@use-brian/shared`
  * (the `./mini-apps` subpath, so the server-only `env.js` barrel never reaches
  * the client bundle) — the single source of truth, same as apps/web. No local
  * mirror.
@@ -47,7 +47,7 @@ import {
   type MiniAppId,
   type MiniAppMeta,
   type SupportedApp,
-} from "@sidanclaw/shared/mini-apps";
+} from "@use-brian/shared/mini-apps";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 import { useT } from "@/lib/i18n/client";
@@ -55,7 +55,7 @@ import { format } from "@/lib/i18n";
 import { isOssEdition } from "@/lib/edition";
 
 const AUTHED_APP_URL =
-  process.env.NEXT_PUBLIC_AUTHED_APP_URL ?? "https://app.sidan.ai";
+  process.env.NEXT_PUBLIC_AUTHED_APP_URL ?? "https://app.usebrian.ai";
 // Alpha mini-apps are gated behind a trial request rather than self-serve
 // open — the card opens a pre-filled mailto here. Mirrors the contact
 // address used by the billing / pricing "Contact sales" CTAs.

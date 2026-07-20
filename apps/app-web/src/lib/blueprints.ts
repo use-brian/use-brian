@@ -21,12 +21,12 @@ import type {
   CustomTemplateCreateInput,
   ExtractionSpec,
   StarterBlueprint,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import {
   blocksToExtractionSpec,
   starterExtractionSpec,
   withFreshBlockIds,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import type { Block } from "@/lib/api/views";
 import { newBlockId } from "@/lib/api/views";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";

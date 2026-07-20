@@ -61,7 +61,7 @@ import {
   type Tool,
   type McpServerConfig,
   type McpSettingsStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildFullSystemPrompt } from './_prompt-builder.js'
 
 // ── Token helpers ────────────────────────────────────────────────

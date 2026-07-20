@@ -7,7 +7,7 @@
  *
  * A `saved_views.icon` value is either an emoji grapheme or an image token
  * `img:<workspaceId>/<fileId>` (minted by the assistant's `fetchSiteIcon`
- * tool — see `@sidanclaw/shared` `page-icon.ts`). Emoji render as the
+ * tool — see `@use-brian/shared` `page-icon.ts`). Emoji render as the
  * historical `<span>`; image tokens render an `<img>` whose bytes load
  * through `GET /api/doc-files/:workspaceId/:fileId` — that route is
  * Bearer-auth only (no cookie), so a plain `<img src>` can't reach it:
@@ -28,7 +28,7 @@
 
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { parseImageIcon } from "@sidanclaw/shared/page-icon";
+import { parseImageIcon } from "@use-brian/shared/page-icon";
 import { authFetch } from "@/lib/auth-fetch";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";

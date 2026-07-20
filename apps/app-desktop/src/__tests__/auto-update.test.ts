@@ -33,7 +33,7 @@ describe("[COMP:app-desktop/auto-update] Auto-update decision core", () => {
     it("disables when the kill-switch is set, even packaged", () => {
       const gate = shouldEnableAutoUpdate({ isPackaged: true, autoUpdate: false });
       expect(gate.enabled).toBe(false);
-      expect(gate.reason).toMatch(/SIDANCLAW_DISABLE_AUTO_UPDATE/);
+      expect(gate.reason).toMatch(/USEBRIAN_DISABLE_AUTO_UPDATE/);
     });
   });
 

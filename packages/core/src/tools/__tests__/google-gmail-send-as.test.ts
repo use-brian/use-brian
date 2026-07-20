@@ -74,7 +74,7 @@ function makeContext(over: Partial<ToolContext> = {}): ToolContext {
     userId: 'u-1',
     assistantId: 'a-1',
     sessionId: 's-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'telegram',
     channelId: 'c-1',
     workspaceId: 'ws-1',
@@ -119,12 +119,12 @@ describe('[COMP:tools/gmail-send-as] gmailSendMessage alias sending', () => {
   it('passes `from` through to the api layer untouched', async () => {
     const { api, sent } = gmailApi()
     const result = await sendTool(api).execute(
-      { ...SEND, from: 'hinson.wong@sidan.ai' },
+      { ...SEND, from: 'hinson.wong@usebrian.ai' },
       makeContext(),
     )
 
     expect(result.isError).toBeUndefined()
-    expect(sent[0].from).toBe('hinson.wong@sidan.ai')
+    expect(sent[0].from).toBe('hinson.wong@usebrian.ai')
   })
 
   it('relays an api-layer rejection honestly (e.g. Gmail refusing an unverified alias)', async () => {
@@ -148,12 +148,12 @@ describe('[COMP:tools/gmail-send-as] gmailSendMessage alias sending', () => {
       const tool = sendTool(gmailApi().api, filesApiFor([pdf]))
 
       const lines = await tool.describeConfirmation!(
-        { ...SEND, from: 'hinson.wong@sidan.ai', attachments: [pdf.id] },
+        { ...SEND, from: 'hinson.wong@usebrian.ai', attachments: [pdf.id] },
         makeContext(),
       )
 
       expect(lines).toEqual([
-        '• From: hinson.wong@sidan.ai',
+        '• From: hinson.wong@usebrian.ai',
         '• To: a@b.co',
         '• Subject: Hi',
         '• Body: Hello',

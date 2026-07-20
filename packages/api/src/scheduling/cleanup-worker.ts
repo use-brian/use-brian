@@ -16,7 +16,7 @@
  * history plane".
  */
 
-import type { JobStore } from '@sidanclaw/core'
+import type { JobStore } from '@use-brian/core'
 
 /** Default tick cadence. Daily — rows have a 30-day TTL after disable. */
 export const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000

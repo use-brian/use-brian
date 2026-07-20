@@ -56,7 +56,7 @@ import {
   listViews,
   type ViewListRow,
 } from "@/lib/api/views";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import { listWorkspaceSkills, type WorkspaceSkillSummary } from "@/lib/api/skills";
 import { WorkflowBoard } from "@/components/workflow/workflow-board";
 import { StepEditor } from "@/components/workflow/step-editor";

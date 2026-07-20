@@ -25,7 +25,7 @@
  */
 
 import { useSyncExternalStore } from "react";
-import type { AssistantRunState } from "@sidanclaw/doc-model";
+import type { AssistantRunState } from "@use-brian/doc-model";
 
 type Listener = () => void;
 

@@ -5,7 +5,7 @@
  * `packages/api/src/routes/inbox.ts`. All calls go through `authFetch` for
  * transparent token refresh.
  *
- * Wire types are declared locally (not imported from `@sidanclaw/core` — the
+ * Wire types are declared locally (not imported from `@use-brian/core` — the
  * core barrel pulls in fs-using modules that break the browser bundle; same
  * constraint as `lib/api/comments.ts` / `views.ts`). They mirror
  * `packages/core/src/doc/inbox-types.ts`; the server is authoritative.

@@ -2,7 +2,7 @@
  * Feed connect-account OAuth URL builder. Ported from
  * `apps/feed-web/src/lib/connect-account.ts`
  * (docs/plans/feed-web-consolidation.md §4); the `return_to` now lands inside
- * app-web's Feed surface instead of feed.sidan.ai (origin allowlisted
+ * app-web's Feed surface instead of feed.usebrian.ai (origin allowlisted
  * server-side against `env.AUTHED_APP_URL` — `threads-oauth.ts` /
  * `twitter-oauth.ts` in `packages/api-platform`).
  *

@@ -196,7 +196,7 @@ describe("[COMP:app-web/block-actions] applyTurnIntoAt on an atom embed", () => 
 // `toggleTaskList` where task lists aren't registered, or no-op on heading 4).
 
 import { getSchema } from "@tiptap/core";
-import { docExtensions } from "@sidanclaw/doc-model";
+import { docExtensions } from "@use-brian/doc-model";
 import { skillBodySchemaExtensions } from "@/lib/skill-markdown";
 import {
   availableTurnIntoKinds,

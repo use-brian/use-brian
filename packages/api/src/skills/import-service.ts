@@ -1,6 +1,6 @@
 /**
  * Skill import service — fetch a skill file (or Agent Skills folder) from a
- * public URL or a GitHub repo, normalize it into a sidanclaw draft, and map
+ * public URL or a GitHub repo, normalize it into a Use Brian draft, and map
  * folder support files onto `workspace_skill_files` kinds. Parse-only: the
  * service never writes to the database.
  *
@@ -15,7 +15,7 @@ import {
   type ImportDialect,
   type ImportedSkillDraft,
   type ImportWarning,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import {
   fetchAllowlistedRaw,
   normalizeImportUrl,

@@ -10,7 +10,7 @@
  * This is the one link unit tests can't prove: that Gemini accepts an image
  * part sitting alongside the functionResponse in the tool-results turn.
  *
- * Run:  GEMINI_API_KEY=... pnpm --filter @sidanclaw/core tsx scripts/verify-mcp-image.ts
+ * Run:  GEMINI_API_KEY=... pnpm --filter @use-brian/core tsx scripts/verify-mcp-image.ts
  *       (optional VERIFY_MODEL=gemini-flash-3 to match the prod chat model)
  */
 

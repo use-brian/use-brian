@@ -25,7 +25,7 @@
  * [COMP:corrections/soft-delete-store]
  */
 
-import type { RowSnapshot, SoftDeletePrimitive, SoftDeleteRepository } from '@sidanclaw/core'
+import type { RowSnapshot, SoftDeletePrimitive, SoftDeleteRepository } from '@use-brian/core'
 import { getPool, query } from './client.js'
 
 /**

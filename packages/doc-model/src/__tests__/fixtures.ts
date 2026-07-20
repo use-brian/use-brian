@@ -1,4 +1,4 @@
-import type { Block, Page } from '@sidanclaw/core/dist/views/blocks.js'
+import type { Block, Page } from '@use-brian/core/dist/views/blocks.js'
 
 const rich = (text: string) => ({
   type: 'doc',

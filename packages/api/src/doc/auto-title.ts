@@ -26,8 +26,8 @@ import {
   type LLMProvider,
   type SavedViewStore,
   type TokenUsage,
-} from '@sidanclaw/core'
-import { pageToPlaintext } from '@sidanclaw/doc-model'
+} from '@use-brian/core'
+import { pageToPlaintext } from '@use-brian/doc-model'
 
 export type RunDocAutoTitleParams = {
   userId: string

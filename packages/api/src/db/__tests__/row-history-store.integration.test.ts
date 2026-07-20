@@ -1,19 +1,19 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import pg from 'pg'
-import type { RetrievalActor } from '@sidanclaw/core'
+import type { RetrievalActor } from '@use-brian/core'
 
 /**
  * Integration test for WU-6.9 — the unified `getRowHistory({ primitive,
  * row_id })` surface (D.7 supersession audit + D.8 authorship).
  *
- * Requires a local `sidanclaw` PostgreSQL database with mig 128
+ * Requires a local `Use Brian` PostgreSQL database with mig 128
  * (universal columns) applied. Skips silently otherwise.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

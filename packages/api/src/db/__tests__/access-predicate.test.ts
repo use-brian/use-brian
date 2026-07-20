@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 import {
   buildAccessPredicate,
   type AccessContext,

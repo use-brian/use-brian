@@ -1,5 +1,5 @@
 /**
- * @sidanclaw/views-renderer — public exports.
+ * @use-brian/views-renderer — public exports.
  *
  * See ./CLAUDE.md for the package's role and the A2UI v0.8 catalog.
  */

@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import type { SavedViewStore } from '@sidanclaw/core'
+import type { SavedViewStore } from '@use-brian/core'
 import { createViewsPruneWorker } from '../views-prune-worker.js'
 
 beforeEach(() => {

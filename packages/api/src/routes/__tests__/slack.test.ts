@@ -3,7 +3,7 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
 // Mock channels
-vi.mock('@sidanclaw/channels', () => {
+vi.mock('@use-brian/channels', () => {
   const sendMessage = vi.fn().mockResolvedValue('msg_1')
   const sendStatus = vi.fn().mockResolvedValue('status_1')
   const editMessage = vi.fn().mockResolvedValue(undefined)
@@ -48,8 +48,8 @@ vi.mock('../../db/sessions.js', () => ({
 }))
 
 // Mock core
-vi.mock('@sidanclaw/core', async () => {
-  const actual = await vi.importActual<typeof import('@sidanclaw/core')>('@sidanclaw/core')
+vi.mock('@use-brian/core', async () => {
+  const actual = await vi.importActual<typeof import('@use-brian/core')>('@use-brian/core')
   return {
     ...actual,
     queryLoop: vi.fn(),
@@ -72,7 +72,7 @@ vi.mock('../../billing/credit-gate.js', () => ({
 }))
 
 import { slackRoutes } from '../slack.js'
-import { verifySlackSignature } from '@sidanclaw/channels'
+import { verifySlackSignature } from '@use-brian/channels'
 import { getChannelForWebhook, resolveAssistantForSurface, resolveRoutingForSurface } from '../../db/channels-store.js'
 
 const mockVerifySignature = vi.mocked(verifySlackSignature)

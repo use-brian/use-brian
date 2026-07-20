@@ -10,7 +10,7 @@ import type {
   WorkflowRecord,
   WorkflowRunRecord,
   WorkflowStepRunRecord,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 const WS = '00000000-0000-0000-0000-000000000001'
 const USER = '00000000-0000-0000-0000-000000000002'

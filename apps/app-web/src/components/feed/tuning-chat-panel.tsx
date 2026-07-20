@@ -4,7 +4,7 @@
  * Tuning chat panel — ported faithfully from
  * `apps/feed-web/src/components/tuning-chat-panel.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3): the chat surface where the
- * operator teaches the assistant voice rules over `@sidanclaw/chat-ui` +
+ * operator teaches the assistant voice rules over `@use-brian/chat-ui` +
  * `POST /api/chat` SSE, with session resume (`channelId='tuning'`), voice
  * notes, copy/retry, a model-tier picker gated by the workspace plan, and
  * the research-mode toggle gated by the free-research quota.
@@ -36,7 +36,7 @@ import {
   useChatSession,
   useMessageStream,
   type Message,
-} from "@sidanclaw/chat-ui";
+} from "@use-brian/chat-ui";
 import { authFetch } from "@/lib/auth-fetch";
 import { fetchFeedSessionIdByChannel } from "@/lib/api/feed";
 import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";

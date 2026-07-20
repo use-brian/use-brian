@@ -53,7 +53,7 @@ const ctx = {
   assistantId: 'a1',
   userId: 'u1',
   sessionId: 's1',
-  appId: 'sidanclaw',
+  appId: 'Use Brian',
   channelType: 'web' as const,
   channelId: 'c1',
   abortSignal: new AbortController().signal,

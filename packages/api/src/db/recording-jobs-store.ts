@@ -4,7 +4,7 @@
  *
  * Recording transcription runs OFF the inline HTTP request: the `/process` route
  * (and, later, the channel media-ingest paths) `enqueueRecordingJob`, and the
- * recording-process worker on `sidanclaw-api-workers` drains via
+ * recording-process worker on `brian-api-workers` drains via
  * `claimNextRecordingJob` (`FOR UPDATE SKIP LOCKED`), then `markRecordingJobDone`
  * / `markRecordingJobFailed` (with bounded retry).
  *

@@ -14,16 +14,16 @@
  *
  * Run locally via Cloud SQL Proxy — same pattern as scripts/migrate.ts:
  *
- *   cloud-sql-proxy internal-process-490404:asia-east1:sidanclaw-db --port 5433 &
+ *   cloud-sql-proxy internal-process-490404:asia-east1:brian-db --port 5433 &
  *   RAW_URL=$(gcloud secrets versions access latest --secret=DATABASE_URL \
  *     --project=internal-process-490404)
  *   LOCAL_URL=$(echo "$RAW_URL" | sed -E \
  *     's|@/sidanclaw\?host=/cloudsql/[^&]+|@127.0.0.1:5433/sidanclaw|')
  *   CHANNEL_CREDENTIAL_KEY=$(gcloud secrets versions access latest \
  *     --secret=CHANNEL_CREDENTIAL_KEY --project=internal-process-490404) \
- *   WEBHOOK_BASE_URL=https://sidanclaw-api-1011357498898.asia-east1.run.app \
+ *   WEBHOOK_BASE_URL=https://brian-api-1011357498898.asia-east1.run.app \
  *   DATABASE_URL="$LOCAL_URL" \
- *     pnpm --filter @sidanclaw/api tsx scripts/refresh-tg-webhooks.ts
+ *     pnpm --filter @use-brian/api tsx scripts/refresh-tg-webhooks.ts
  *
  * Idempotent — running twice just re-POSTs the same setWebhook call.
  */
@@ -38,7 +38,7 @@ import {
   decryptCredentials,
   type TelegramCredentials,
 } from '../src/db/channel-integrations.js'
-import { createTelegramApi } from '@sidanclaw/channels'
+import { createTelegramApi } from '@use-brian/channels'
 
 const DATABASE_URL = process.env.DATABASE_URL
 const WEBHOOK_BASE_URL = process.env.WEBHOOK_BASE_URL

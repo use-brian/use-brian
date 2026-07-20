@@ -7,7 +7,7 @@ import type {
   RowHistoryPrimitive,
   RowHistoryVersion,
   RowStatus,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { queryWithRLS } from './client.js'
 import { getEntityHistory } from './entities-store.js'
 import { getMemoryHistory } from './memories.js'

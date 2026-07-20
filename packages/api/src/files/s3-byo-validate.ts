@@ -8,7 +8,7 @@
  * HERE — at setup — not at the user's first file upload. See
  * docs/plans/byo-s3-storage.md §4.
  *
- * The probe round-trips a small object under the reserved `.sidanclaw/`
+ * The probe round-trips a small object under the reserved `.usebrian/`
  * prefix and deletes it. The credential object is passed straight through to
  * the S3 client and is never referenced by field name or logged.
  */
@@ -17,7 +17,7 @@ import { createS3FilesClient, type S3Credentials } from './s3-client.js'
 import type { GcsFilesClient } from './gcs-client.js'
 
 /** Stable key for the connect-time probe object. */
-export const S3_BYO_HEALTHCHECK_KEY = '.sidanclaw/healthcheck'
+export const S3_BYO_HEALTHCHECK_KEY = '.usebrian/healthcheck'
 
 export type S3ByoValidateFailureCode =
   | 'invalid_key' // access key / secret rejected (signature / auth)
@@ -115,7 +115,7 @@ export async function validateS3ByoBinding(
     return { ok: false, code: code === 'unknown' ? 'invalid_key' : code, message }
   }
 
-  const probe = Buffer.from('sidanclaw byo s3 storage healthcheck')
+  const probe = Buffer.from('Use Brian byo s3 storage healthcheck')
   try {
     await client.writeBlob(S3_BYO_HEALTHCHECK_KEY, probe, { workspaceId: 'healthcheck', mime: 'text/plain' })
     const read = await client.readBlob(S3_BYO_HEALTHCHECK_KEY)

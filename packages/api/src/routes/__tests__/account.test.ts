@@ -116,7 +116,7 @@ describe('[COMP:api/account-route] Account routes', () => {
       '/api/account',
       accountRoutes({
         linkCodeStore: linkCodeStore as never,
-        getTelegramBotUsername: async () => 'sidanclaw_bot',
+        getTelegramBotUsername: async () => 'use_brian_bot',
       }),
       { userId: 'u_1' },
     )
@@ -126,7 +126,7 @@ describe('[COMP:api/account-route] Account routes', () => {
     const res = await request(app).post('/api/account/telegram/link-code')
     expect(res.status).toBe(200)
     expect(res.body.code).toBe('ABC123')
-    expect(res.body.botUsername).toBe('sidanclaw_bot')
+    expect(res.body.botUsername).toBe('use_brian_bot')
     expect(linkCodeStore.create).toHaveBeenCalledWith({ userId: 'u_1', assistantId: 'a_first' })
   })
 

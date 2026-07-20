@@ -29,7 +29,7 @@ import type {
   EpisodeReExtractionRepository,
   MemoryRetractionRepository,
   MemoryRetractionSnapshot,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { getPool, query } from './client.js'
 
 // ── Memory retraction ────────────────────────────────────────────────

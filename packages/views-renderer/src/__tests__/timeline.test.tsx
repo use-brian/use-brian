@@ -21,7 +21,7 @@ import {
   rowIdSignature,
   shiftRange,
 } from '../widgets/Timeline.js'
-import type { TimelineWidget } from '@sidanclaw/core'
+import type { TimelineWidget } from '@use-brian/core'
 
 function elementType(el: ReactElement): string {
   const t = el.type

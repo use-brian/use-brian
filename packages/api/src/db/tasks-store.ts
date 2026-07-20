@@ -1,4 +1,4 @@
-import type { EntityLinksStore, TaskRecord, TaskStore } from '@sidanclaw/core'
+import type { EntityLinksStore, TaskRecord, TaskStore } from '@use-brian/core'
 import { createTask, findRecentDuplicateTask, getTaskById, listTasks, updateTask } from './tasks.js'
 
 /**

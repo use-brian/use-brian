@@ -6,7 +6,7 @@
  * mismatch. Write-scope keys only (the tool is not in READ_TOOL_NAMES).
  */
 import { describe, it, expect } from 'vitest'
-import { createInMemoryBrowserSkillStore } from '@sidanclaw/core'
+import { createInMemoryBrowserSkillStore } from '@use-brian/core'
 import { buildWriteBrowserSkillTool } from '../tools.js'
 
 const GOOD_CODE = `
@@ -110,7 +110,7 @@ describe('[COMP:mcp/write-browser-skill] writeBrowserSkill (brain MCP)', () => {
 describe('[COMP:oss/browser-skill-author] The OSS authoring skill teaches the governed vocabulary', () => {
   it('SKILL.md documents every runner verb, the terminal submit, and the sync tool - prose and runner cannot drift', async () => {
     const fs = await import('node:fs/promises')
-    const { RUNNER_VERBS } = await import('@sidanclaw/core')
+    const { RUNNER_VERBS } = await import('@use-brian/core')
     const skillMd = await fs.readFile(
       new URL('../../../../../.claude/skills/browser-skill-author/SKILL.md', import.meta.url),
       'utf8',

@@ -6,7 +6,7 @@
  * fetches and streams it — no base64 in the request payload, so multi-MB clips
  * are fine.
  *
- * See docs/architecture/channels/whatsapp.md → "Outbound (sidanclaw replies)".
+ * See docs/architecture/channels/whatsapp.md → "Outbound (Use Brian replies)".
  * Component tag: [COMP:wa-connector/send].
  */
 

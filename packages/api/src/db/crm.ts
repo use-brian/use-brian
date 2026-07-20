@@ -7,7 +7,7 @@ import type {
   EntityLinksStore,
   EntityRecord,
   Sensitivity,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { query, queryGated, queryWithRLS } from './client.js'

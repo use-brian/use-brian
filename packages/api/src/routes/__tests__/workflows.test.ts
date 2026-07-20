@@ -18,8 +18,8 @@ const mockDefParse = vi.fn()
 const mockTriggerParse = vi.fn()
 const mockAdvance = vi.fn()
 
-vi.mock('@sidanclaw/core', async (io) => ({
-  ...(await io<typeof import('@sidanclaw/core')>()),
+vi.mock('@use-brian/core', async (io) => ({
+  ...(await io<typeof import('@use-brian/core')>()),
   WorkflowDefinitionSchema: { safeParse: (...a: unknown[]) => mockDefParse(...a) },
   WorkflowTriggerSchema: { safeParse: (...a: unknown[]) => mockTriggerParse(...a) },
   advanceWorkflowRun: (...a: unknown[]) => mockAdvance(...a),

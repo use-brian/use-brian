@@ -1,4 +1,4 @@
-import type { CacheStore } from '@sidanclaw/core'
+import type { CacheStore } from '@use-brian/core'
 import { query } from './client.js'
 
 export function createDbCacheStore(): CacheStore {

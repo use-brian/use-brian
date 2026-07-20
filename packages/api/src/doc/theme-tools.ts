@@ -21,8 +21,8 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool, type LLMProvider } from '@sidanclaw/core'
-import { seedAppearance, type CustomThemePayload } from '@sidanclaw/shared'
+import { buildTool, type Tool, type LLMProvider } from '@use-brian/core'
+import { seedAppearance, type CustomThemePayload } from '@use-brian/shared'
 
 import type { DocThemeStore } from '../db/doc-themes-store.js'
 import { refineCustomTheme, ThemeGenerationError } from './theme-generator.js'

@@ -35,7 +35,7 @@ import {
   type DocPageStore,
   type ExecutorDeps,
   type SendPageResult,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 import type { BlueprintRecordStore } from '../db/blueprint-records-store.js'
 import type { PageSendLogStore } from '../db/page-send-log-store.js'

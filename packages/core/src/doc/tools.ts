@@ -61,7 +61,7 @@
  */
 
 import { z } from 'zod'
-import { stripFollowUps } from '@sidanclaw/shared'
+import { stripFollowUps } from '@use-brian/shared'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { CrmStore } from '../crm/types.js'
 import type { TaskStore } from '../tasks/types.js'
@@ -215,7 +215,7 @@ export type DocPageStore = {
  *
  * The implementation (`packages/api/src/doc/doc-gateway.ts`) POSTs to
  * the sync service, which applies the ops to the authoritative in-memory
- * doc via `@sidanclaw/doc-model` `applyOpsToYDoc`. Concurrency is handled
+ * doc via `@use-brian/doc-model` `applyOpsToYDoc`. Concurrency is handled
  * by the CRDT + the observe-then-reconcile rule (ops whose target a human
  * deleted come back in `skipped`), not by a version reject. See
  * `docs/architecture/features/doc.md` → "Real-time collaboration".

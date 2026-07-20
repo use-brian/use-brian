@@ -3,7 +3,7 @@
  *
  * A hardened BrowserWindow loads the deployed canvas web app and adds the
  * native capabilities a browser cannot: a global quick-capture hotkey, a tray,
- * OS-level menus, a `sidanclaw://` deep-link protocol, and a system-browser
+ * OS-level menus, a `usebrian://` deep-link protocol, and a system-browser
  * sign-in flow (RFC 8252 + PKCE). It owns no UI and no backend — every pixel is
  * served by apps/app-web. All decisions are delegated to the pure helpers
  * (config / window-policy / deep-link / quick-capture / desktop-auth) so this
@@ -16,6 +16,8 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { existsSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { homedir } from "node:os";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import {
@@ -75,6 +77,11 @@ import {
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl } from "./quick-capture.js";
 import { buildAppMenu } from "./menu.js";
+import {
+  buildUninstallScript,
+  collectUninstallPaths,
+  resolveBundlePath,
+} from "./uninstall.js";
 import {
   generatePkcePair,
   buildDesktopAuthStartUrl,
@@ -161,7 +168,7 @@ const BUNDLE_INDEX = join(__dirname, "..", "renderer", "index.html");
 
 const AUTH_COOKIE_NAMES = ["access_token", "refresh_token", "user"] as const;
 /**
- * The saved-account cookies (mirroring the web's `.sidan.ai` store) the shell
+ * The saved-account cookies (mirroring the web's `.usebrian.ai` store) the shell
  * keeps in its own host-only jar. Kept SEPARATE from `AUTH_COOKIE_NAMES`:
  * `signOut()` clears these too, but the per-tick keep-alive must NOT, or it would
  * wipe every saved account on each refresh. See `apps/app-desktop/desktop-accounts.ts`.
@@ -232,7 +239,7 @@ function createWindow(): BrowserWindow {
       webSecurity: true,
       // Bundled mode only: tell the preload to expose the Bearer token bridge.
       // Absent in the thin shell, so its `isDesktopAuth()` stays false (cookies).
-      additionalArguments: cfg.bundled ? ["--sidanclaw-bundled"] : [],
+      additionalArguments: cfg.bundled ? ["--usebrian-bundled"] : [],
     },
   });
 
@@ -527,7 +534,7 @@ function ensureWindow(): BrowserWindow {
 
 function focusWindow(win: BrowserWindow): void {
   if (win.isMinimized()) win.restore();
-  // Sign-in completes in the *system browser* (the loopback/`sidanclaw://`
+  // Sign-in completes in the *system browser* (the loopback/`usebrian://`
   // callback), so when we get here that browser is the frontmost macOS app and
   // we are a background process. `win.focus()` alone can't make our window key
   // from the background — macOS blocks focus stealing — so the window surfaces
@@ -577,7 +584,7 @@ function summonAndCapture(): void {
 
 /**
  * The PKCE verifier is persisted here as well as held in memory: on macOS the
- * `sidanclaw://auth` callback often arrives in a freshly-launched process (cold
+ * `usebrian://auth` callback often arrives in a freshly-launched process (cold
  * start / relaunch), which has no in-memory verifier. Persisting it lets
  * whichever process handles the callback complete the exchange.
  */
@@ -603,7 +610,7 @@ function clearPersistedVerifier(): void {
 
 // ── Bundled-mode token store (Bearer auth) ─────────────────────
 //
-// In bundled mode the renderer's origin isn't `app.sidan.ai`, so cookies
+// In bundled mode the renderer's origin isn't `app.usebrian.ai`, so cookies
 // don't apply — it authenticates with a Bearer token the shell holds, encrypted
 // via the OS keychain (`safeStorage`) in `tokens.bin`. The preload bridge seeds
 // the renderer from `get-tokens` and persists rotations via `set-tokens`. The
@@ -677,7 +684,7 @@ function closeAuthServer(): void {
 /**
  * Open the system browser to complete OAuth. The single-use code returns over an
  * ephemeral `http://127.0.0.1:<port>/cb` loopback redirect (RFC 8252 §7.3) — this
- * works in an unpackaged dev run, unlike the `sidanclaw://auth` scheme. If the
+ * works in an unpackaged dev run, unlike the `usebrian://auth` scheme. If the
  * loopback server can't bind, fall back to the scheme (packaged builds only).
  */
 function startSignIn(opts: { addAccount?: boolean } = {}): void {
@@ -741,7 +748,7 @@ function startSignIn(opts: { addAccount?: boolean } = {}): void {
 
 async function completeSignIn(code: string): Promise<void> {
   // In-memory state is authoritative for the loopback transport (same process);
-  // the persisted blob covers the cross-process `sidanclaw://auth` fallback. Both
+  // the persisted blob covers the cross-process `usebrian://auth` fallback. Both
   // carry the add-account intent so the right process knows to stash vs replace.
   const pending = pendingVerifier
     ? { verifier: pendingVerifier, addAccount: pendingAddAccount }
@@ -1106,7 +1113,7 @@ function startSessionKeepalive(): void {
 // Product updates ship through the remote web app on every load (thin shell);
 // this updates the SHELL BINARY itself. electron-updater reads the packaged
 // `app-update.yml` (electron-builder writes it from the `publish:` block),
-// resolves the latest `sidanclaw/sidanclaw` GitHub release, compares its
+// resolves the latest `use-brian/use-brian` GitHub release, compares its
 // `latest-mac.yml` / `latest.yml` feed against the running version, downloads
 // in the background, and installs on quit (`autoInstallOnAppQuit`) or on the
 // explicit "Restart to Update" click. Every decision (gate / state / labels /
@@ -1179,7 +1186,7 @@ function startAutoUpdate(): void {
       void dialog.showMessageBox({
         type: "info",
         message: "You're up to date",
-        detail: `sidanclaw v${app.getVersion()} is the latest version.`,
+        detail: `Use Brian v${app.getVersion()} is the latest version.`,
       });
     }
   });
@@ -1196,7 +1203,7 @@ function startAutoUpdate(): void {
     if (!alreadyReady && Notification.isSupported()) {
       new Notification({
         title: "Update ready",
-        body: `Restart sidanclaw to finish updating to v${info.version}.`,
+        body: `Restart Use Brian to finish updating to v${info.version}.`,
       }).show();
     }
   });
@@ -1234,12 +1241,49 @@ function handleIncomingUrl(rawUrl: string): void {
   }
 }
 
-/** Pull the first `sidanclaw://` argument out of a process argv (relaunch). */
+/** Pull the first `usebrian://` argument out of a process argv (relaunch). */
 function appUrlFromArgv(argv: readonly string[]): string | null {
   return argv.find((arg) => arg.startsWith(`${cfg.protocolScheme}://`)) ?? null;
 }
 
 // ── Menus + tray ───────────────────────────────────────────────
+
+/**
+ * One-click uninstall (menu → here). Confirm, then hand teardown to a detached
+ * script (uninstall.ts builds it) and quit: the script waits for this process
+ * to exit before removing the local traces and trashing the bundle, because a
+ * running app can't delete itself cleanly. Data traces cover both brand
+ * generations; account/workspace data is server-side and untouched.
+ */
+async function confirmAndUninstall(): Promise<void> {
+  const bundlePath = resolveBundlePath(app.getPath("exe"));
+  const { response } = await dialog.showMessageBox({
+    type: "warning",
+    message: `Uninstall ${app.name}?`,
+    detail:
+      "This removes the app and its local data from this Mac. " +
+      "Your account and workspace are stored in the cloud and are not affected. " +
+      "You can keep using Use Brian in the browser, or reinstall any time.",
+    buttons: ["Uninstall", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return;
+
+  // Best-effort: stop launching at login before the app disappears.
+  try {
+    app.setLoginItemSettings({ openAtLogin: false });
+  } catch {
+    /* not fatal — the login item dies with the bundle anyway */
+  }
+  const script = buildUninstallScript({
+    pid: process.pid,
+    paths: collectUninstallPaths(homedir()),
+    bundlePath,
+  });
+  spawn("/bin/sh", ["-c", script], { detached: true, stdio: "ignore" }).unref();
+  app.quit();
+}
 
 /**
  * (Re)build + install the application menu. Called at startup and again on
@@ -1254,9 +1298,13 @@ function refreshAppMenu(): void {
       onSignOut: () => void signOut(),
       onUpdate: handleUpdateMenuClick,
       onSwitchTarget: () => void switchTargetFromMenu(),
+      onUninstall: () => void confirmAndUninstall(),
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
+      // Packaged macOS only: Windows has the NSIS uninstaller; a dev run has
+      // no bundle (and its exe lives in node_modules/electron).
+      uninstall: process.platform === "darwin" && app.isPackaged,
     }),
   );
 }
@@ -1269,7 +1317,7 @@ function refreshAppMenu(): void {
 function buildTrayMenu(): Menu {
   const update = updateMenuItem();
   const template: MenuItemConstructorOptions[] = [
-    { label: "Open sidanclaw", click: () => focusWindow(ensureWindow()) },
+    { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
@@ -1285,7 +1333,7 @@ function buildTrayMenu(): Menu {
     { type: "separator" },
     { label: `Target: ${cfg.targetLabel}`, enabled: false },
     {
-      label: cfg.target === "cloud" ? "Switch to Local Brain…" : "Switch to sidanclaw Cloud",
+      label: cfg.target === "cloud" ? "Switch to Local Brain…" : "Switch to Use Brian Cloud",
       click: () => void switchTargetFromMenu(),
     },
   );
@@ -1349,28 +1397,28 @@ if (!gotLock) {
   });
 
   // The sign-in landing's button asks the main process to start the flow.
-  ipcMain.on("sidanclaw:sign-in", () => startSignIn());
+  ipcMain.on("Use Brian:sign-in", () => startSignIn());
 
   // The offline landing's "Retry" button asks the shell to reload the app now
   // (the watcher already auto-retries every few seconds; this is the manual
   // path). Stops the watcher first so the manual load isn't double-fired.
-  ipcMain.on("sidanclaw:retry-load", () => void retryLoad(ensureWindow()));
+  ipcMain.on("Use Brian:retry-load", () => void retryLoad(ensureWindow()));
 
   // The web logout UI (workspace switcher / settings) asks the shell to sign
   // out in place. Registered in EVERY mode (unlike the bundled token bridge):
   // the thin shell clears its own cookie jar here, which the web UI cannot do
   // for itself without bouncing to the primary's external logout (→ system
   // browser → logs out the *web* session, not this app). See `signOut()`.
-  ipcMain.on("sidanclaw:sign-out", () => void signOut());
+  ipcMain.on("Use Brian:sign-out", () => void signOut());
 
   // Multi-account. The web switcher's "Add another account" / account-switch
   // rows route through the shell in Electron: the primary (where the web's
-  // shared `.sidan.ai` account cookies live) is an external origin the
+  // shared `.usebrian.ai` account cookies live) is an external origin the
   // host-only jar can't reach, so the shell owns its own saved-account store.
   // Registered in every mode like sign-in/out; bundled mode (Bearer tokens, not
   // cookies) stays single-account — `switchAccount` returns an error there.
-  ipcMain.on("sidanclaw:add-account", () => startSignIn({ addAccount: true }));
-  ipcMain.handle("sidanclaw:switch-account", (_event, accountId: unknown): Promise<SwitchResult> =>
+  ipcMain.on("Use Brian:add-account", () => startSignIn({ addAccount: true }));
+  ipcMain.handle("Use Brian:switch-account", (_event, accountId: unknown): Promise<SwitchResult> =>
     typeof accountId === "string"
       ? switchAccount(accountId)
       : Promise.resolve({ ok: false, error: "switch" }),
@@ -1381,7 +1429,7 @@ if (!gotLock) {
   // target and relaunches on the next tick so the landing can paint its
   // "Restarting..." state before the process dies. `use-cloud` switches back,
   // keeping the local address remembered for the return trip.
-  ipcMain.handle("sidanclaw:run-local", async (_event, rawUrl: unknown) => {
+  ipcMain.handle("Use Brian:run-local", async (_event, rawUrl: unknown) => {
     const input = typeof rawUrl === "string" && rawUrl.trim() ? rawUrl : DEFAULT_LOCAL_APP_URL;
     // The dev env override outranks the persisted record (§2.1 precedence),
     // so a switch would persist but never survive the relaunch — refuse with
@@ -1397,14 +1445,14 @@ if (!gotLock) {
     setTimeout(() => persistTargetAndRelaunch("local", target.appUrl), 150);
     return { ok: true, url: target.appUrl };
   });
-  ipcMain.on("sidanclaw:use-cloud", () =>
+  ipcMain.on("Use Brian:use-cloud", () =>
     persistTargetAndRelaunch("cloud", rememberedLocalAppUrl()),
   );
 
   // Bundled-mode token bridge: the preload reads/writes the Bearer token here.
   // Registered only in bundled mode so the thin shell exposes no token surface.
   if (cfg.bundled) {
-    ipcMain.on("sidanclaw:get-tokens", (event) => {
+    ipcMain.on("Use Brian:get-tokens", (event) => {
       const t = readStoredTokens();
       // Synchronous reply (the renderer's AuthSource getters are sync). Hand back
       // only the renderer-facing subset, never the raw stored record.
@@ -1412,12 +1460,12 @@ if (!gotLock) {
         ? { accessToken: t.accessToken, refreshToken: t.refreshToken, user: t.user }
         : null;
     });
-    ipcMain.on("sidanclaw:set-tokens", (_event, tokens: unknown) => persistRendererTokens(tokens));
-    ipcMain.on("sidanclaw:clear-tokens", () => clearStoredTokens());
+    ipcMain.on("Use Brian:set-tokens", (_event, tokens: unknown) => persistRendererTokens(tokens));
+    ipcMain.on("Use Brian:clear-tokens", () => clearStoredTokens());
   }
 
   app.whenReady().then(() => {
-    // macOS resolves `sidanclaw://` through the bundle Info.plist (the `protocols:`
+    // macOS resolves `usebrian://` through the bundle Info.plist (the `protocols:`
     // block in electron-builder.yml). Windows/Linux register the running executable
     // with the OS; an UNPACKAGED Windows dev run must pass execPath + the script
     // path explicitly, or the scheme would point at the bare electron binary.

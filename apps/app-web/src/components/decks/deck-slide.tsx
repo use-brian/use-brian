@@ -2,7 +2,7 @@
 
 /**
  * Deck slide renderer — draws ONE slide from the SHARED layout engine's
- * primitive display list (`@sidanclaw/shared/decks`). Parity by
+ * primitive display list (`@use-brian/shared/decks`). Parity by
  * construction: this file maps primitives to absolutely-positioned
  * HTML/SVG and contains NO layout math — the same display list drives the
  * .pptx writer in core, so what this shows is what the file contains.
@@ -24,7 +24,7 @@ import {
   type DeckBox,
   type DeckPrimitive,
   type DeckSlideLayout,
-} from "@sidanclaw/shared/decks";
+} from "@use-brian/shared/decks";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 

@@ -25,8 +25,8 @@ import type {
   WorkflowRunStore,
   WorkflowStepRunRecord,
   WorkflowStore,
-} from '@sidanclaw/core'
-import { advanceWorkflowRun } from '@sidanclaw/core'
+} from '@use-brian/core'
+import { advanceWorkflowRun } from '@use-brian/core'
 import type { WorkspaceAuditStore } from '../db/workspace-audit-store.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import type { SessionResumeStore } from '../db/session-resume-store.js'
@@ -239,7 +239,7 @@ export async function resumeFromApproval(
     userId: run.triggeredBy ?? workflow.createdBy,
     assistantId: primaryAssistantId,
     sessionId: `workflow_run_${run.id}`,
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     channelType: 'workflow',
     channelId: run.id,
     workspaceId: run.workspaceId,

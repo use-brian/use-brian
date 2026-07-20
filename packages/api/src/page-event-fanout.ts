@@ -9,8 +9,8 @@
  * build never binds one) `publishPageLifecycle` is a no-op.
  *
  * The bind lives in `bootOpenApi` — not the closed app boot — so BOTH editions
- * get page-event triggers: the OSS standalone entry (`@sidanclaw/api-open`) and
- * the closed platform app (`@sidanclaw/api-server`), which reuses the same
+ * get page-event triggers: the OSS standalone entry (`@use-brian/api-open`) and
+ * the closed platform app (`@use-brian/api-server`), which reuses the same
  * dispatcher off the `BootContext`.
  *
  * Same shape as `page-share-fanout.ts` — a module-local holder the boot path
@@ -26,7 +26,7 @@ import {
   createPageLifecycleTrigger,
   type PageLifecycleEvent,
   type WorkflowEventDispatcher,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 let sink: ((event: PageLifecycleEvent) => Promise<void>) | null = null
 

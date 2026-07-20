@@ -34,7 +34,7 @@ export function hasInFlight(recs: ReadonlyArray<Pick<RecordingSummary, "status">
 /**
  * `durationMs` → `H:MM:SS` / `M:SS`, the row's duration chip.
  *
- * Deliberately NOT `formatStamp` from `@sidanclaw/shared`: that renders a
+ * Deliberately NOT `formatStamp` from `@use-brian/shared`: that renders a
  * CITATION (always `H:MM:SS`, so `[0:47:21]` parses back), and a 90-second memo
  * showing "0:01:30" in a list reads as a bug. Same numbers, different job —
  * a citation must round-trip, a duration must read naturally.

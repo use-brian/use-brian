@@ -21,7 +21,7 @@ import {
   type OAuthCredentials,
   type ConnectorCredentials,
 } from './connector-store.js'
-import type { ConnectorAuthType } from '@sidanclaw/shared'
+import type { ConnectorAuthType } from '@use-brian/shared'
 
 // ── Types ──────────────────────────────────────────────────────
 

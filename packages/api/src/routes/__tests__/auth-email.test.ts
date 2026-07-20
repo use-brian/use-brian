@@ -93,7 +93,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('returns 200 and sends an email on the happy path', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/request-link')
@@ -107,7 +107,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
     expect(smtp.sent[0].to).toBe('a@b.com')
     // The link lands on the confirm page (no consume-on-GET), carries the
     // locale, and the OTP is passed alongside for the email body.
-    expect(smtp.sent[0].link).toContain('https://sidan.ai/login/verify?token=')
+    expect(smtp.sent[0].link).toContain('https://usebrian.ai/login/verify?token=')
     expect(smtp.sent[0].link).toContain('&lang=en')
     expect(smtp.sent[0].code).toBe('123456')
   })
@@ -115,7 +115,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('returns 200 even for an invalid email (no enumeration)', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/request-link')
@@ -130,7 +130,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('rate-limits at 3 requests per email per hour', async () => {
     const store = makeStore({ countRecentForEmail: async () => 3 })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/request-link')
@@ -144,7 +144,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('rate-limits at 10 requests per IP per hour', async () => {
     const store = makeStore({ countRecentForIp: async () => 10 })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/request-link')
@@ -164,7 +164,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app)
       .post('/auth/email/request-link')
@@ -183,7 +183,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app)
       .post('/auth/email/request-link')
@@ -202,7 +202,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/request-link')
@@ -221,7 +221,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app)
       .post('/auth/email/request-link')
@@ -239,7 +239,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     // The invite page sends signed-out invitees to /login?next=/invite?token=…
     // — without this prefix the resume is dropped and a brand-new user has to
@@ -260,7 +260,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       },
     })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     // Relative /desktop is no longer allowlisted — the desktop bridge only
     // travels as an absolute app-origin URL (see ALLOWED_NEXT_HOSTS).
@@ -269,8 +269,8 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       .send({ email: 'a@b.com', nextPath: '/desktop/auth?challenge=abc' })
     expect(calls[0]?.nextPath).toBeUndefined()
 
-    // Absolute URL on the doc host (prod: the bridge lives on app.sidan.ai).
-    const abs = 'https://app.sidan.ai/desktop/auth?challenge=abc&redirect=http://127.0.0.1:5000/cb'
+    // Absolute URL on the doc host (prod: the bridge lives on app.usebrian.ai).
+    const abs = 'https://app.usebrian.ai/desktop/auth?challenge=abc&redirect=http://127.0.0.1:5000/cb'
     await request(app)
       .post('/auth/email/request-link')
       .send({ email: 'a@b.com', nextPath: abs })
@@ -286,7 +286,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('does NOT thread addAccount into the verify link by default', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app).post('/auth/email/request-link').send({ email: 'a@b.com' })
 
@@ -298,7 +298,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('appends &addAccount=1 to the verify link when addAccount is requested', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app)
       .post('/auth/email/request-link')
@@ -313,7 +313,7 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
   it('accepts addAccount as the string "1" (query-form coercion)', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     await request(app)
       .post('/auth/email/request-link')
@@ -359,7 +359,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
   it('returns 400 on a missing or empty token', async () => {
     const store = makeStore()
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const r1 = await request(app).post('/auth/email/verify').send({})
     expect(r1.status).toBe(400)
@@ -370,7 +370,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
   it('returns 401 when the token is expired, used, or unknown', async () => {
     const store = makeStore({ consumeByToken: async () => null })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify')
@@ -388,7 +388,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
     findOrCreateUserMock.mockResolvedValueOnce({ user: { ...FAKE_USER, email: 'new@example.com' }, isNew: true })
 
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify')
@@ -416,7 +416,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
     })
 
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify')
@@ -444,7 +444,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
     promoteChannelUserMock.mockResolvedValueOnce(undefined)
 
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify')
@@ -464,7 +464,7 @@ describe('[COMP:api/auth-email-verify] POST /auth/email/verify', () => {
     findUserByEmailMock.mockResolvedValueOnce(FAKE_USER)
 
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify')
@@ -487,7 +487,7 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
     const consumeByCode = vi.fn(async () => ({ status: 'invalid' as const }))
     const store = makeStore({ consumeByCode })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const badCode = await request(app).post('/auth/email/verify-code').send({ email: 'a@b.com', code: '12ab56' })
     expect(badCode.status).toBe(400)
@@ -502,7 +502,7 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
   it('returns 429 too_many_attempts when the store reports the lockout', async () => {
     const store = makeStore({ consumeByCode: async () => ({ status: 'locked' }) })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify-code')
@@ -515,7 +515,7 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
   it('returns 401 expired_or_used for a wrong / expired / unknown code', async () => {
     const store = makeStore({ consumeByCode: async () => ({ status: 'invalid' }) })
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify-code')
@@ -536,7 +536,7 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
     })
 
     const smtp = makeSmtp()
-    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://sidan.ai' })
+    const app = makeApp({ magicLinkStore: store, smtpClient: smtp.client, appUrl: 'https://usebrian.ai' })
 
     const res = await request(app)
       .post('/auth/email/verify-code')

@@ -13,7 +13,7 @@ export default defineConfig({
     fs: {
       // Same superproject-store allowance as packages/core/vitest.config.ts:
       // in absorbed (submodule-of-platform) mode, inlined ESM deps reached
-      // through @sidanclaw/core (pptxgenjs) resolve into the superproject's
+      // through @use-brian/core (pptxgenjs) resolve into the superproject's
       // .pnpm store one level above this repo's workspace root, which
       // vite's default fs.allow boundary rejects. Harmless standalone.
       allow: [fileURLToPath(new URL('../../..', import.meta.url))],

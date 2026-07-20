@@ -7,7 +7,7 @@ import {
   type DeckPrimitive,
   type DeckSpec,
   type DeckStyle,
-} from '@sidanclaw/shared/decks';
+} from '@use-brian/shared/decks';
 
 // ESM/CJS interop guard: depending on the loader (node, vitest, tsx) the
 // default import is either the PptxGenJS class itself or a namespace whose

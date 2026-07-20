@@ -42,8 +42,8 @@ import {
   type TokenUsage,
   type Tool,
   type UsageStore,
-} from '@sidanclaw/core'
-import { extractCitations, type CitationIndex } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import { extractCitations, type CitationIndex } from '@use-brian/shared'
 import type {
   BlueprintRecord,
   BlueprintRecordCitations,
@@ -460,7 +460,7 @@ export async function synthesizeFromSource(
         userId: source.userId,
         assistantId: source.assistantId,
         sessionId,
-        appId: 'sidanclaw',
+        appId: 'Use Brian',
         channelType: 'synthesis',
         channelId: source.sourceId,
         workspaceId: source.workspaceId,

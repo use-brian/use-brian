@@ -3,7 +3,7 @@
  *
  * > **Scope note.** The *production* server-side AI write path is
  * > block-structured, not flat-text: it applies the `Op` vocabulary to the
- * > real y-prosemirror `XmlFragment` doc via `@sidanclaw/doc-model`
+ * > real y-prosemirror `XmlFragment` doc via `@use-brian/doc-model`
  * > `applyOpsToYDoc` (called by the `apps/doc-sync` `/internal/apply`
  * > endpoint). That path enforces the no-clobber rule at *block* granularity
  * > — an op whose target a human deleted is skipped, not forced. THIS module

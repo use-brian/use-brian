@@ -14,7 +14,7 @@
  * [COMP:api/assistant-modes-store]
  */
 
-import type { AssistantMode } from '@sidanclaw/core'
+import type { AssistantMode } from '@use-brian/core'
 import { query } from './client.js'
 
 const MODE_COLS = `

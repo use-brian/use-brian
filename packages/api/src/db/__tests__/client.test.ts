@@ -85,7 +85,7 @@ describe('[COMP:api/db-client] Database client', () => {
     // Two pools per process against the db-f1-micro 25-slot ceiling: a service
     // whose deploy script forgets PG_POOL_MAX must not be able to starve the
     // fleet (the 2026-06-12 brain-500s incident — doc-sync + api-admin ran an
-    // unbounded 120-per-pool default and sidanclaw-api could not get a slot).
+    // unbounded 120-per-pool default and brian-api could not get a slot).
     expect(resolvePoolMax(undefined)).toBe(4)
   })
 
@@ -198,7 +198,7 @@ describe('[COMP:api/db-client] getAppPool production fail-closed', () => {
 
   it('throws on Cloud Run (K_SERVICE) even without NODE_ENV=production', async () => {
     vi.stubEnv('NODE_ENV', 'test')
-    vi.stubEnv('K_SERVICE', 'sidanclaw-api')
+    vi.stubEnv('K_SERVICE', 'brian-api')
     vi.stubEnv('DATABASE_URL_APP', '')
     vi.stubEnv('PG_SINGLE_CONNECTION', '')
     const fresh = await freshClient()

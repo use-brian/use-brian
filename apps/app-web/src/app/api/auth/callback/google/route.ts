@@ -23,8 +23,8 @@ function isAllowedNext(path: string): boolean {
 }
 
 export async function GET(request: Request) {
-  // Defense in depth: in production, only sidan.ai writes the shared
-  // `.sidan.ai` auth cookies. The login page already redirects away
+  // Defense in depth: in production, only usebrian.ai writes the shared
+  // `.usebrian.ai` auth cookies. The login page already redirects away
   // before any OAuth flow lands here, so this branch is dead in prod —
   // but if something does bounce here (stale bookmark, stray
   // redirect_uri), we don't write cookies; we send the user to the
@@ -73,7 +73,7 @@ export async function GET(request: Request) {
     }
 
     // Backend creates or finds the user and returns app JWTs. Same endpoint
-    // as apps/web — distribution-web users are sidanclaw users.
+    // as apps/web — distribution-web users are Use Brian users.
     const authRes = await fetch(`${API_URL}/auth/google`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -120,7 +120,7 @@ export async function GET(request: Request) {
     // Set-Cookie headers instead of `cookies.set()` so the framework's
     // name-keyed cookie map doesn't clobber the fresh domain-scoped
     // tokens. See `docs/architecture/platform/auth.md` → "Duplicate
-    // cookies after the .sidan.ai migration".
+    // cookies after the .usebrian.ai migration".
     appendLegacyHostOnlyClears(response);
     return response;
   } catch (err) {

@@ -5,7 +5,7 @@
  * Phase 4 — `@page` mention extension.
  *
  * The `pageMention` node spec is mirrored in the SHARED schema
- * (`@sidanclaw/doc-model` → `PageMention`) so the Yjs sync server derives
+ * (`@use-brian/doc-model` → `PageMention`) so the Yjs sync server derives
  * the same node type and an inline page reference round-trips through the
  * CRDT to every collaborator (y-prosemirror maps the ProseMirror schema to
  * the CRDT — a node type on one end and not the other desyncs). This file's
@@ -13,7 +13,7 @@
  * attrs, parse/render) — registered in the editor while the shared one is
  * filtered out of `browserDocExtensions()` so they don't collide.
  * (Consolidating onto one exported node is a follow-up that needs the
- * `@sidanclaw/doc-model` barrel to re-export `PageMention` — see the
+ * `@use-brian/doc-model` barrel to re-export `PageMention` — see the
  * handoff report.)
  *
  *   1. **v1 composed setup (default).** Install both
@@ -58,7 +58,7 @@ import {
 
 /**
  * The `pageMention` ProseMirror node — byte-identical to
- * `@sidanclaw/doc-model`'s `PageMention` (kept in lockstep so the two Yjs
+ * `@use-brian/doc-model`'s `PageMention` (kept in lockstep so the two Yjs
  * ends agree). Inline atom; renders an `<a>` pill so it's keyboard-focusable
  * + Cmd-clickable in the read-only viewer.
  */
@@ -158,7 +158,7 @@ export function createPageMentionExtension(
     // Rendering-only override of the base node's `/p/<id>` href: the pill
     // links to the workspace-scoped page route. `.extend()` leaves the node
     // *spec* (name/attrs/parse) untouched, so Yjs schema parity with
-    // `@sidanclaw/doc-model` holds — same pattern as the React node-views in
+    // `@use-brian/doc-model` holds — same pattern as the React node-views in
     // `doc-schema.ts`. Without a workspaceId (schema-only test editors) the
     // base-identical relative href stays as the fallback.
     renderHTML({ node, HTMLAttributes }) {

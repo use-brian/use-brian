@@ -2,9 +2,9 @@
 name: workflow-builder
 description: Guided setup for a recurring or triggered automation — interview the user (goal, trigger, steps, which assistant per step, delivery channel, optional doc page), then proposeWorkflow → confirm → createWorkflow. Use for "set up an automation", "build a workflow", "do X every week / when Y happens".
 license: MIT
-compatibility: Designed for sidanclaw
+compatibility: Designed for Use Brian
 metadata:
-  author: sidanclaw
+  author: Use Brian
   category: productivity
   applies_to_app_type: any
   when_to_use: The user wants a recurring/triggered automation — "set up an automation", "build a workflow", "do X every Monday", "when a PR is merged...". Run the interview; never create a workflow from a one-line request without proposing it first.

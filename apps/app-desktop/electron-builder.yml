@@ -1,9 +1,9 @@
-appId: ai.sidan.desktop
-productName: sidanclaw
+appId: ai.usebrian.desktop
+productName: Use Brian
 # Stable, version-less artifact filenames so the marketing hero CTA can link a
 # fixed "latest" URL (see apps/web/src/lib/desktop-download.ts and
 # docs/architecture/features/app-desktop.md → "Distribution & download").
-artifactName: sidanclaw.${ext}
+artifactName: usebrian.${ext}
 directories:
   output: release
   buildResources: build
@@ -12,7 +12,7 @@ files:
   - "!dist/__tests__/**"
   # The bundled renderer (Phase 4). Today this is the Phase 0 connectivity spike;
   # the Approach-B Vite SPA build emits to the same path. Loaded via loadFile only
-  # when SIDANCLAW_BUNDLED=1, so packaging it is inert for the thin-shell build.
+  # when USEBRIAN_BUNDLED=1, so packaging it is inert for the thin-shell build.
   - renderer/**
   - package.json
 mac:
@@ -43,13 +43,13 @@ mac:
 #                     Regenerate with `apps/app-desktop/build/make-dmg-art.py`.
 #   icon.png          the rounded-squircle app icon (Finder draws it on the left).
 # `contents` x/y are icon CENTRES in window space (origin top-left); they line up
-# with the backdrop's icon wells, and Finder renders the "sidanclaw" / "Applications"
+# with the backdrop's icon wells, and Finder renders the "Use Brian" / "Applications"
 # labels just below them. Finder owns the label COLOR (it follows the viewer's
 # Light/Dark appearance — a DMG can't force it), so the backdrop carries slate
 # legibility plates behind both label slots tuned to read in either mode. Keep
 # window == background dimensions.
 dmg:
-  title: Install sidanclaw
+  title: Install Use Brian
   background: build/background.tiff
   iconSize: 120
   window:
@@ -64,7 +64,7 @@ dmg:
       type: link
       path: /Applications
 # ── Windows (Tier 1, ship-fast) ─────────────────────────────────────────────
-# Produces an NSIS installer (sidanclaw.exe, via the stable artifactName above).
+# Produces an NSIS installer (usebrian.exe, via the stable artifactName above).
 # electron-builder auto-generates the Windows .ico from build/icon.png (1024x1024),
 # exactly as it derives the mac .icns — so no separate icon asset is needed.
 #
@@ -73,7 +73,7 @@ dmg:
 # is fine for VM QA and a click-through beta, and mirrors how the mac block produces
 # an unsigned build when the Apple certs are absent. When the Windows cert lands
 # (Azure Trusted Signing or SSL.com eSigner), wire signing in the release workflow /
-# here. The `protocols:` block below already registers `sidanclaw://` on Windows —
+# here. The `protocols:` block below already registers `usebrian://` on Windows —
 # the NSIS installer writes the registry keys. See
 # docs/architecture/features/app-desktop.md → "Build, sign, ship (Windows)".
 win:
@@ -87,16 +87,16 @@ nsis:
 # Where `electron-builder --publish always` uploads artifacts. The marketing CTA
 # links the "latest" GitHub Release asset, which must be public-readable for an
 # unauthenticated download. The desktop source is open (this app lives in the
-# public open-core repo `sidanclaw/sidanclaw`), so releases + the auto-update feed
+# public open-core repo `use-brian/use-brian`), so releases + the auto-update feed
 # publish to that same public repo. electron-builder uploads to a *draft* release
 # (assets land hidden); `scripts/package-desktop.sh --publish` then un-drafts it +
 # marks it latest so `releases/latest/download` resolves. Needs GH_TOKEN with
 # contents:write on the repo. See "Distribution & download" in the spec.
 publish:
   provider: github
-  owner: sidanclaw
-  repo: sidanclaw
+  owner: use-brian
+  repo: use-brian
 protocols:
-  - name: sidanclaw
+  - name: Use Brian
     schemes:
-      - sidanclaw
+      - usebrian

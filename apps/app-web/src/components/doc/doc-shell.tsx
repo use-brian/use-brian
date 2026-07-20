@@ -103,7 +103,7 @@ import {
   withFreshBlockIds,
   yDocToSnapshot,
   type CustomPageTemplateSummary,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 import { EmptyPageLanding } from "./empty-page-landing";
 import { TemplateGallery } from "./template-gallery";
 import { SaveAsTemplateDialog, type SaveAsTemplateInput } from "./save-as-template-dialog";
@@ -754,17 +754,20 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   }, []);
 
   // Desktop shell chrome: tag <html> when running inside the Electron desktop
-  // app (apps/app-desktop), whose preload exposes `window.sidanclawDesktop`.
+  // app (apps/app-desktop), whose preload exposes `window.usebrianDesktop` (+ legacy `window.sidanclawDesktop`).
   // The `is-canvas-desktop` class gates the desktop-only chrome in globals.css —
   // a draggable title-bar strip that clears the macOS traffic lights and
   // non-selectable app chrome. layout.tsx also stamps this before paint (for the
   // production no-flash path); doing it here too makes it robust to that script
   // being absent (e.g. a stale dev root layout) and survives hydration. No-op in
-  // a normal browser, where `window.sidanclawDesktop` is undefined.
+  // a normal browser, where neither desktop bridge global is defined.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const desktop = (window as unknown as { sidanclawDesktop?: { platform?: string } })
-      .sidanclawDesktop;
+    const w = window as unknown as {
+      usebrianDesktop?: { platform?: string };
+      sidanclawDesktop?: { platform?: string };
+    };
+    const desktop = w.usebrianDesktop ?? w.sidanclawDesktop;
     if (!desktop) return;
     document.documentElement.classList.add("is-canvas-desktop");
     // Windows keeps a standard OS frame (no macOS traffic lights), so zero the
@@ -954,7 +957,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     setTopError(null);
     // Stash the intent so it survives the mandatory auth-refresh full-page
     // redirect: `createDraft` below is an `authFetch` POST, and in production a
-    // 401 bounces the whole browser to sidan.ai and back, reloading this page
+    // 401 bounces the whole browser to usebrian.ai and back, reloading this page
     // and dropping `trimmed` (React state). The resume effect replays it on
     // return. A replay (`fromResume`) never re-stashes, so a still-broken
     // session can't loop. See docs/architecture/platform/auth.md → "A sub-app

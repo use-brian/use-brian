@@ -1,15 +1,15 @@
 <div align="center">
 
-<img src="assets/mascot.png" alt="sidanclaw" width="132" />
+<img src="assets/mascot.png" alt="Use Brian" width="132" />
 
-# sidanclaw
+# Use Brian
 
 ### Brain, agent, workflows, and docs.
 
 **You make the calls. It does the rest.**
 
-[![CI](https://github.com/sidanclaw/sidanclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/sidanclaw/sidanclaw/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/sidanclaw/sidanclaw)](https://github.com/sidanclaw/sidanclaw/stargazers)
+[![CI](https://github.com/use-brian/use-brian/actions/workflows/ci.yml/badge.svg)](https://github.com/use-brian/use-brian/actions/workflows/ci.yml)
+[![GitHub stars](https://img.shields.io/github/stars/use-brian/use-brian)](https://github.com/use-brian/use-brian/stargazers)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](./LICENSE)
 
 </div>
@@ -19,7 +19,7 @@
 Every other AI meets you for the first time, every time. You re-explain your
 whole company every morning, like the guy in Memento.
 
-sidanclaw is an open, self-hosted AI for solo founders, indie hackers, and small
+Use Brian is an open, self-hosted AI for solo founders, indie hackers, and small
 teams. It runs on your machine, learns how your work actually happens, and then
 does the work: drafts the reply, runs the workflow, files the doc, updates the
 record. You stay on the decisions. It handles the rest.
@@ -45,21 +45,21 @@ record. You stay on the decisions. It handles the rest.
 ([get one here](https://aistudio.google.com/apikey)).
 
 ```bash
-git clone https://github.com/sidanclaw/sidanclaw.git
-cd sidanclaw
-export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.sidanclaw/
+git clone https://github.com/use-brian/use-brian.git
+cd use-brian
+export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.usebrian/
 pnpm install
 pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; opens your browser
 ```
 
 That is it. There is no step three. The store defaults to an embedded PGLite
-database under `~/.sidanclaw/`; point `DATABASE_URL` at a local Postgres if you
+database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
 
 ### Your data stays yours
 
 **0** external services. **1** model key. The brain, the store, and the canvas
-all stay local; the only outbound call sidanclaw makes is to the Gemini API with
+all stay local; the only outbound call Use Brian makes is to the Gemini API with
 your own key. Nothing else about your work leaves your machine.
 
 ## How you use it
@@ -105,7 +105,7 @@ event without you. You set the policy per tool in the app.
 
 That one Gemini key is the floor, not the ceiling. Each key below is optional, and
 each is a service you choose to talk to, so nothing turns on by itself. Drop them
-into `.env` or `~/.sidanclaw/`.
+into `.env` or `~/.usebrian/`.
 
 | Capability | Key(s) to set | What you get |
 |---|---|---|
@@ -119,7 +119,7 @@ into `.env` or `~/.sidanclaw/`.
 | Fathom connector | `FATHOM_CLIENT_ID` / `FATHOM_CLIENT_SECRET` | Fathom via your own OAuth app |
 | GitHub connector | Personal Access Token (entered in the UI) | GitHub, no env key needed |
 
-Connector client id / secret can also live in `~/.sidanclaw/connectors.config.json`.
+Connector client id / secret can also live in `~/.usebrian/connectors.config.json`.
 Every key is documented in [`.env.example`](./.env.example).
 
 ## What's in the box
@@ -135,7 +135,7 @@ Every key is documented in [`.env.example`](./.env.example).
 
 ## Growing into a team
 
-sidanclaw is single-player by design, like most of your actual work. When you add
+Use Brian is single-player by design, like most of your actual work. When you add
 a teammate, the app offers a one-click migration to the hosted version, no
 re-entry. The paywall is a capability (a shared, always-on team graph that cannot
 exist single-player), never a nag.
@@ -143,7 +143,7 @@ exist single-player), never a nag.
 ## License
 
 **AGPLv3** ([`LICENSE`](./LICENSE)): real, OSI and FSF approved open source with a
-network-copyleft clause. Run a modified sidanclaw as a hosted service and you
+network-copyleft clause. Run a modified Use Brian as a hosted service and you
 publish your changes. We will be reading. A commercial license is available for
 orgs that cannot accept AGPL, powered by the [CLA](./CLA.md) every contributor
 signs.
@@ -156,6 +156,6 @@ public issue.
 
 ## Star the repo
 
-If this resonates, [star it](https://github.com/sidanclaw/sidanclaw). It helps
+If this resonates, [star it](https://github.com/use-brian/use-brian). It helps
 more people find their own brain. Or star it because your current AI has the
 memory of a goldfish. Either way.

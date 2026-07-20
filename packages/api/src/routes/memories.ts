@@ -26,7 +26,7 @@
  */
 
 import { Router } from 'express'
-import type { AccessContext, Sensitivity } from '@sidanclaw/core'
+import type { AccessContext, Sensitivity } from '@use-brian/core'
 import {
   listMemories, getMemoryById, updateMemory, deleteMemory,
   searchMemories, getMemoryStats, getSoul,

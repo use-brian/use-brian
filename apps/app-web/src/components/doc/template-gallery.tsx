@@ -4,7 +4,7 @@
  * Page template gallery — the "/template" slash action's chooser, and the
  * "Start from a template" picker on the empty-page landing.
  *
- * Lists BOTH the shared built-in Notion-style templates (`@sidanclaw/doc-model`
+ * Lists BOTH the shared built-in Notion-style templates (`@use-brian/doc-model`
  * `listPageTemplates` — the same catalog the brain-MCP `listPageTemplates` /
  * `createPageFromTemplate` tools read) AND the workspace's CUSTOM templates
  * (`workspace_page_templates`, fetched by the caller). Custom templates appear
@@ -29,7 +29,7 @@ import {
   type CustomPageTemplateSummary,
   type PageTemplateCategory,
   type PageTemplateSummary,
-} from "@sidanclaw/doc-model";
+} from "@use-brian/doc-model";
 
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { cn } from "@/lib/utils";

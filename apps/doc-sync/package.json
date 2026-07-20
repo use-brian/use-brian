@@ -1,5 +1,5 @@
 {
-  "name": "@sidanclaw/doc-sync",
+  "name": "@use-brian/doc-sync",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -13,9 +13,9 @@
   },
   "dependencies": {
     "@hocuspocus/server": "^4.1.0",
-    "@sidanclaw/api": "workspace:*",
-    "@sidanclaw/doc-model": "workspace:*",
-    "@sidanclaw/core": "workspace:*",
+    "@use-brian/api": "workspace:*",
+    "@use-brian/doc-model": "workspace:*",
+    "@use-brian/core": "workspace:*",
     "dotenv": "^16",
     "ws": "^8.21.0",
     "yjs": "13.6.31"

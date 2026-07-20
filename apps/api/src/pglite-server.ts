@@ -24,7 +24,7 @@ const dataDir = process.env.PGLITE_DATA_DIR || join(homedir(), '.sidanclaw', 'br
 // on 5432; the launcher sets PGLITE_PORT explicitly.
 const port = parseInt(process.env.PGLITE_PORT || '54329', 10)
 // Open migrations dir, resolved relative to this file (src/ and dist/ are
-// siblings under sidanclaw/apps/api, so the path is the same either way).
+// siblings under use-brian/apps/api, so the path is the same either way).
 const here = dirname(fileURLToPath(import.meta.url))
 const migrationsDir = resolve(here, '../../../packages/api/migrations')
 

@@ -13,7 +13,7 @@
 
 import { parseMarkdownFile } from './parser.js'
 import { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'
-import { buildLintIndex, runAllChecks, type Finding, type LintInputEntry } from '@sidanclaw/sidanclaw-kb'
+import { buildLintIndex, runAllChecks, type Finding, type LintInputEntry } from '@use-brian/brian-kb'
 import type { Sensitivity } from '../security/sensitivity.js'
 
 // ── Types ──────────────────────────────────────────────────────

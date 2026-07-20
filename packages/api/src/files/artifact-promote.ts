@@ -10,7 +10,7 @@
 // promotion NEVER fails the upload/message that triggered it (the file_cache
 // row still exists; behavior falls back to the pre-artifact pointer).
 
-import type { FilesApi, FilesContext } from '@sidanclaw/core'
+import type { FilesApi, FilesContext } from '@use-brian/core'
 import { indexFileArtifact } from './artifact-index.js'
 
 export type PromotedArtifact = {

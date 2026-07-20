@@ -1,4 +1,4 @@
-import type { AnalyticsStore, AnalyticsEvent, DailyReport, WeeklyReport } from '@sidanclaw/core'
+import type { AnalyticsStore, AnalyticsEvent, DailyReport, WeeklyReport } from '@use-brian/core'
 import { query } from './client.js'
 
 export function createDbAnalyticsStore(): AnalyticsStore {

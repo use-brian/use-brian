@@ -19,7 +19,7 @@
  * Doc: docs/architecture/features/views.md.
  */
 
-import type { SavedViewStore } from '@sidanclaw/core'
+import type { SavedViewStore } from '@use-brian/core'
 
 /**
  * Default tick cadence. Daily — drafts have a 30-day TTL by default,

@@ -6,7 +6,7 @@
  * convert it to real blocks instead of dropping it in as literal `###` / `- `
  * text. Single-line / inline pastes are left to the editor's default handler.
  *
- * The conversion reuses the canonical hub, both from `@sidanclaw/doc-model`:
+ * The conversion reuses the canonical hub, both from `@use-brian/doc-model`:
  * `markdownToBlocks` (the faithful importer — re-exported by doc-model from
  * core's fs-free `dist/doc/markdown.js` leaf, so the core barrel's
  * `skills/loader`/`fs` never enters the browser bundle) → `blocksToPMDoc` (the
@@ -20,7 +20,7 @@
  * [COMP:app-web/markdown-paste]
  */
 
-import { blocksToPMDoc, markdownToBlocks, type PMDoc } from "@sidanclaw/doc-model";
+import { blocksToPMDoc, markdownToBlocks, type PMDoc } from "@use-brian/doc-model";
 
 /**
  * True when pasted text is worth converting to blocks: it spans multiple lines
@@ -40,7 +40,7 @@ export function looksLikeBlockMarkdown(text: string): boolean {
 /**
  * Convert pasted Markdown into a ProseMirror doc JSON for insertion, or `null`
  * when the text isn't block-structured Markdown (let the default inline paste
- * run). The returned JSON's node types are the shared `@sidanclaw/doc-model`
+ * run). The returned JSON's node types are the shared `@use-brian/doc-model`
  * schema's, so the editor can `schema.nodeFromJSON` it directly.
  */
 export function markdownPasteToPMDoc(text: string): PMDoc | null {

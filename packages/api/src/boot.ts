@@ -1,5 +1,5 @@
 /**
- * bootOpenApi — the OPEN composition root for the sidanclaw HTTP API.
+ * bootOpenApi — the OPEN composition root for the Use Brian HTTP API.
  *
  * This module builds the entire OPEN slice of the API service: the express
  * app + middleware, the LLM provider stack, every open DB store, the open tool
@@ -7,17 +7,17 @@
  * open background workers. It imports ZERO closed code — every closed seam is
  * an OPTIONAL injected PORT with a safe default (allow-all credit gate, no-op
  * usage recorder, inert feed hooks, no-op episode ingestors, …). The closed
- * platform entry (`apps/api/src/index.ts`, `@sidanclaw/api-server`) calls this
+ * platform entry (`apps/api/src/index.ts`, `@use-brian/api-server`) calls this
  * with the real impls + a `mountExtraRoutes` hook that mounts the 33 closed
  * routes onto the same app against the SAME store instances exposed on
- * `BootContext`. A standalone open entry (`sidanclaw/apps/api`,
- * `@sidanclaw/api-open`) calls it with no ports → all safe defaults.
+ * `BootContext`. A standalone open entry (`use-brian/apps/api`,
+ * `@use-brian/api-open`) calls it with no ports → all safe defaults.
  *
  * See the open-core split (repo CLAUDE.md; plan in git history) §10 (ports & adapters DI), §12.5
  * (the open/closed manifest), and /tmp/squash/apps-split-plan.md for the full
  * inventory of open vs closed mounts.
  *
- * INVARIANT: never import `@sidanclaw/api-platform/*` or `@sidanclaw/shared-server`
+ * INVARIANT: never import `@use-brian/api-platform/*` or `@use-brian/shared-server`
  * from this file. The classification rule is mechanical — those two specifiers
  * are the only "closed" import surfaces. Config + secrets arrive through the
  * `env` option, not `getEnv()`.
@@ -29,7 +29,7 @@ import { randomUUID } from 'node:crypto'
 import type http from 'node:http'
 
 import express, { type Express } from 'express'
-import { createTelegramApi } from '@sidanclaw/channels'
+import { createTelegramApi } from '@use-brian/channels'
 import {
   createGeminiProvider, createAnthropicProvider, wrapProvider, wrapFallback,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
@@ -122,11 +122,11 @@ import {
   type SandboxTaskStore,
   type Sensitivity,
   type SessionVault,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@sidanclaw/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 
-// ── OPEN package imports (@sidanclaw/api) ──────────────────────────
+// ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
 import { getTaskByIdSystem } from './db/tasks.js'
 import { createBrowserSkillsStore } from './db/browser-skills-store.js'
@@ -356,7 +356,7 @@ import {
   reclassifyEntityKind as reclassifyEntityKindFn,
   promoteEntityToCrm as promoteEntityToCrmFn,
 } from './db/entities-store.js'
-import { createClassifierSelfHealWorker } from '@sidanclaw/core'
+import { createClassifierSelfHealWorker } from '@use-brian/core'
 import { supersedeMemoriesByTags } from './db/memories.js'
 import { composeRetrievalStore, createDbRetrievalStore } from './db/retrieval-store.js'
 import { createDbProvenanceStore } from './db/provenance-store.js'
@@ -1180,7 +1180,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     if (isOssEdition()) {
       app.use(
         '/auth',
-        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.SIDANCLAW_OWNER_NAME }),
+        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.USEBRIAN_OWNER_NAME }),
       )
       console.log('[local-session] oss local-owner session enabled at /auth/local-session.')
     }
@@ -1612,7 +1612,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
   const assistantModesStore = createAssistantModesStore()
 
-  const { createInProcessTransport } = await import('@sidanclaw/core')
+  const { createInProcessTransport } = await import('@use-brian/core')
   const consultTransport = createInProcessTransport({
     getConnectionModeId: (caller, callee) => connectionStore.getConnectionModeId(caller, callee),
     getMode: (modeId) => assistantModesStore.get(modeId),
@@ -2657,7 +2657,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // every public mount registered after it (the Mini App outage class;
     // graded by invariants/route-mount-order). See
     // docs/architecture/features/deck-generation.md.
-    // previewUrl targets the AUTHENTICATED app origin (app.sidan.ai) — the
+    // previewUrl targets the AUTHENTICATED app origin (app.usebrian.ai) — the
     // /w/… deck route lives in app-web, and the marketing site does NOT
     // redirect /w/* (MOVED_TO_APP_PREFIXES covers only pre-consolidation
     // paths). Same fallback chain as the computer-use take-over link below.
@@ -3254,9 +3254,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Built-in connector lifecycle (list / store-credentials / disconnect /
   // rename / delete). OSS-only: the hosted edition mounts its own richer closed
   // `/api/connectors` route, so mounting this open one there would shadow it.
-  // Gated on the same `SIDANCLAW_EDITION` flag the launcher sets for the open
+  // Gated on the same `USEBRIAN_EDITION` flag the launcher sets for the open
   // single-player edition. See routes/connectors.ts.
-  if (process.env.SIDANCLAW_EDITION === 'oss') {
+  if (process.env.USEBRIAN_EDITION === 'oss') {
     app.use('/api/connectors', requireAuth(env.JWT_SECRET), connectorRoutes({
       connectorStore,
       connectorInstanceStore,
@@ -3329,7 +3329,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         })
         return
       }
-      const { isAppType, defaultClearanceForAppType } = await import('@sidanclaw/shared')
+      const { isAppType, defaultClearanceForAppType } = await import('@use-brian/shared')
       if (appType !== undefined && appType !== null && !isAppType(appType)) {
         res.status(400).json({
           error: `Unknown app type: ${String(appType)}. Supported: distribution.`,
@@ -3781,7 +3781,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Shared workflow event-trigger dispatcher (the `page` / connector / channel
   // event source) + its binding to the saved-views store's page-write path.
   // This lives in bootOpenApi — not the closed app boot — so BOTH editions get
-  // it: the OSS standalone entry (`@sidanclaw/api-open`) and the closed platform
+  // it: the OSS standalone entry (`@use-brian/api-open`) and the closed platform
   // app. The closed app reuses this instance off the BootContext for its Slack
   // webhook + connector-poll producers (`createApiIngestWorkflowTrigger`); it no
   // longer constructs or binds its own. `setPageEventDispatcher` wires the
@@ -4468,7 +4468,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Pipeline B (when the platform passed an episode-ingestor port; OSS
   // without one runs store-only) → stamp source_episode_id + indexing status.
   // Same single-service model as every worker: runs only where runWorkers is
-  // set (prod: sidanclaw-api-workers).
+  // set (prod: brian-api-workers).
   const fileIngestWorker = filesApi
     ? createFileIngestWorker({
         claim: claimNextFileIngestJob,
@@ -4857,7 +4857,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   async function start(): Promise<{ server: http.Server; port: number }> {
     return new Promise((resolve) => {
       server = app.listen(port, () => {
-        console.log(`sidanclaw api running on port ${port}`)
+        console.log(`Use Brian api running on port ${port}`)
         console.log(`Tools loaded: ${allTools.size}`)
         resolve({ server: server!, port })
       })

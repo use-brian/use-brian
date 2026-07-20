@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import type { ReactElement } from 'react'
 import { interpolateCardSchema } from '../widgets/Board.js'
 import { renderWidget } from '../render.js'
-import type { A2UIWidget, BoardWidget } from '@sidanclaw/core'
+import type { A2UIWidget, BoardWidget } from '@use-brian/core'
 
 function elementType(el: ReactElement): string {
   const t = el.type

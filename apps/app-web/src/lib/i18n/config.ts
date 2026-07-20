@@ -4,7 +4,7 @@
  * Locale is selected via the `locale` cookie (set on first visit
  * based on the request's `Accept-Language` header, or by the user via
  * the locale switcher in apps/web — app-web shares the cookie via
- * the `.sidan.ai` domain scope in production). No URL prefix.
+ * the `.usebrian.ai` domain scope in production). No URL prefix.
  *
  * Mirrors `apps/web/src/lib/i18n/config.ts` — keep them in sync if you
  * add a locale.

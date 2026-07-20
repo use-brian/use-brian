@@ -2,7 +2,7 @@
 
 By signing this Contributor License Agreement ("Agreement") you accept and agree
 to the following terms for your past, present, and future Contributions
-submitted to the sidanclaw project ("Project"). Except for the license granted
+submitted to the Use Brian project ("Project"). Except for the license granted
 here, you retain all right, title, and interest in and to your Contributions.
 
 1. **Definitions.** "You" means the individual or legal entity signing this

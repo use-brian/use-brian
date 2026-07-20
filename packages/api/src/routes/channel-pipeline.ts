@@ -1,3 +1,4 @@
+// REBRAND-CUTOVER: this file contains sidan.ai runtime values that must flip to usebrian.ai when DNS + Vercel domains + OAuth consoles + webhooks are cut over. Grep REBRAND-CUTOVER.
 /**
  * Shared channel message processing pipeline.
  *
@@ -24,10 +25,10 @@ import {
   modelToCompactionTier, SensitivityAccumulator, CompartmentAccumulator,
   buildWorkspaceFilesContext, AttachmentCollector,
   EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote,
-} from '@sidanclaw/core'
-import type { FilesApi, OutboundAttachment } from '@sidanclaw/core'
-import type { OutgoingDocument } from '@sidanclaw/channels'
-import { parseFollowUps } from '@sidanclaw/shared'
+} from '@use-brian/core'
+import type { FilesApi, OutboundAttachment } from '@use-brian/core'
+import type { OutgoingDocument } from '@use-brian/channels'
+import { parseFollowUps } from '@use-brian/shared'
 import { runProactiveCompaction } from './proactive-compaction.js'
 import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
@@ -43,7 +44,7 @@ import type {
   ConfirmationResolver, Message, TopicClassification, ClassifierRecentTurn,
   EpisodicStore, CapabilityStore, TokenUsage,
   SessionStateStore, SessionStateRecord,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 
 import { mintActorMediaToken } from '../media-token.js'
 import { findUserById } from '../db/users.js'
@@ -330,7 +331,7 @@ export type ChannelPipelineParams = {
    * and rewrites `messageText` + `userContentBlocks` to carry the manifest +
    * head excerpt instead of the blob. Absent (or below threshold) ⇒ the turn
    * is untouched. See large-content-artifacts §Phase 3.2 +
-   * sidanclaw/packages/api/src/files/paste-promotion.ts.
+   * use-brian/packages/api/src/files/paste-promotion.ts.
    */
   rawUserText?: string
   /** Whether this is a group chat (affects context assembly). */
@@ -396,7 +397,7 @@ export type ChannelPipelineParams = {
   /** Workspace files store (Q3 §10). When set + the assistant has the
    *  `files` capability + `assistant.workspaceId` is bound, the
    *  `# Workspace Files` L1 block is injected. Optional. */
-  workspaceFilesStore?: import('@sidanclaw/core').WorkspaceFilesStore
+  workspaceFilesStore?: import('@use-brian/core').WorkspaceFilesStore
   /** Files orchestration API. When set, the pipeline wires a per-turn
    *  `AttachmentCollector` into the tool context (enabling `sendFile`) and
    *  resolves collected attachments to bytes (`readBytes`) at
@@ -407,12 +408,12 @@ export type ChannelPipelineParams = {
    * Promotes an over-threshold paste to a durable workspace_files artifact
    * (large-content-artifacts §Phase 3.2, decision D6). Wired once at boot from
    * the channel route options. Absent/null ⇒ pastes pass through untouched.
-   * See sidanclaw/packages/api/src/files/artifact-promote.ts.
+   * See use-brian/packages/api/src/files/artifact-promote.ts.
    */
   artifactPromoter?: ArtifactPromoter | null
   skillStore?: SkillStore
   pendingMessageStore?: PendingMessageStore
-  workerManager?: import('@sidanclaw/core').WorkerManager
+  workerManager?: import('@use-brian/core').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
   capabilityStore: CapabilityStore
@@ -565,7 +566,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     const gate = await checkUsageBudget(assistant.workspaceId, workspacePlan, params.checkCreditBudget)
     budgetStatus = gate.status
     if (gate.status === 'blocked') {
-      await hooks.sendError(new Error('This workspace has no active sidanclaw plan. The workspace owner can pick a plan at sidan.ai/plans, or self-host the open-source version.'))
+      await hooks.sendError(new Error('This workspace has no active Use Brian plan. The workspace owner can pick a plan at sidan.ai/plans, or self-host the open-source version.'))
       return
     }
     if (
@@ -614,7 +615,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     budgetStatus !== 'downgraded'
   ) {
     try {
-      const { classifyResearchIntent } = await import('@sidanclaw/core')
+      const { classifyResearchIntent } = await import('@use-brian/core')
       const adaptive = await classifyResearchIntent({ provider, message: messageText })
       if (adaptive.research) {
         effectiveModelAlias = 'research'
@@ -809,7 +810,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       compartments,
     }
     const [soul, identityMemories, rankedIndex] = await Promise.all([
-      memoryStore.getSoul(assistant.id, userId, 'sidanclaw'),
+      memoryStore.getSoul(assistant.id, userId, 'Use Brian'),
       memoryStore.getIdentity(viewerCtx),
       memoryStore.getIndexRanked(viewerCtx, PER_TURN_INDEX_CAP),
     ])
@@ -1238,7 +1239,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         provider, model, message: messageText, tools: allTools,
         context: {
           userId, assistantId: assistant.id, sessionId: session.id,
-          appId: 'sidanclaw', channelType, channelId,
+          appId: 'Use Brian', channelType, channelId,
           userTimezone,
           abortSignal: new AbortController().signal,
           requestTools: allTools,
@@ -1288,7 +1289,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // the assistant message row) and BEFORE sendResponse, so the linkage
   // exists before the user sees the reply.
   let pendingClaimLedger: Extract<
-    import('@sidanclaw/core').QueryEvent,
+    import('@use-brian/core').QueryEvent,
     { type: 'claim_ledger' }
   >['claims'] | null = null
 
@@ -1300,7 +1301,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       messages, tools: allTools,
       context: {
         userId, assistantId: assistant.id, sessionId: session.id,
-        appId: 'sidanclaw', channelType, channelId,
+        appId: 'Use Brian', channelType, channelId,
         workspaceId: assistant.workspaceId ?? undefined,
         assistantKind: assistant.kind,
         preferredChannel,

@@ -29,7 +29,7 @@ import type {
   FilesApi,
   FilesContext,
   WorkspaceFilesStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import type { FilesClientResolver } from '../files/files-api.js'
 import { buildStorageKey } from '../files/gcs-client.js'

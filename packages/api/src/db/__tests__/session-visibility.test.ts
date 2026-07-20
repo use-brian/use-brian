@@ -34,7 +34,7 @@ function row(over: Record<string, unknown> = {}) {
     userId: U,
     channelType: 'web',
     channelId: 'c-1',
-    appId: 'sidanclaw',
+    appId: 'Use Brian',
     appOrigin: null,
     status: 'idle',
     compactSummary: null,

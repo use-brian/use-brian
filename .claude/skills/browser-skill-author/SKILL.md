@@ -1,12 +1,12 @@
 ---
 name: browser-skill-author
-description: Author a sidanclaw browser skill (logic-block) and sync it into a company brain via the brain MCP writeBrowserSkill tool. Use when asked to "build a browser skill", "automate a browsing flow for sidanclaw", or to harden a self-healed draft skill. Requires a read_write sidanclaw brain key (sk_brain_*) connected as an MCP server.
+description: Author a Use Brian browser skill (logic-block) and sync it into a company brain via the brain MCP writeBrowserSkill tool. Use when asked to "build a browser skill", "automate a browsing flow for Use Brian", or to harden a self-healed draft skill. Requires a read_write Use Brian brain key (sk_brain_*) connected as an MCP server.
 ---
 
 # Browser-skill author
 
 You are authoring a **logic-block**: a deterministic, reviewed browsing script a
-sidanclaw assistant runs against a **browser profile** via `runBrowserSkill`.
+Use Brian assistant runs against a **browser profile** via `runBrowserSkill`.
 The kb-author analog for browsing: you write the artifact, the brain governs it.
 
 ## The shape

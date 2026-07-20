@@ -1,6 +1,6 @@
 // [COMP:files/file-ingest-worker] — the file-ingest drain loop
 // (large-content-artifacts §Phase 2.2), started in the open boot beside the
-// embedding worker and registered on sidanclaw-api-workers.
+// embedding worker and registered on brian-api-workers.
 //
 // Same start()/stop() + re-entry-guard contract as the recording-process worker.
 // Each tick drains the file_ingest_jobs queue back-to-back at concurrency 1
@@ -17,8 +17,8 @@
 // text) short-circuit to markDone without chunking or decomposition — see
 // docs/architecture/brain/file-artifacts.md §"Explicitly NOT in v1".
 
-import type { FilesContext, FilesReadBytesResult, FilesResult } from '@sidanclaw/core'
-import { parseFileContent } from '@sidanclaw/core'
+import type { FilesContext, FilesReadBytesResult, FilesResult } from '@use-brian/core'
+import { parseFileContent } from '@use-brian/core'
 import { getPool } from '../db/client.js'
 import type { FileIngestJob } from '../db/file-ingest-jobs-store.js'
 import type { BrainEpisodeIngestor } from '../ingest-port.js'
@@ -49,7 +49,7 @@ export type FileIngestWorkerDeps = {
   markFailed: (id: string, error: string) => Promise<{ retrying: boolean }>
   /** The workspace FilesApi (BYO-aware); only `readBytes` is used. */
   filesApi: FileIngestReadPort
-  /** Parse bytes -> canonical text. Default: `parseFileContent` (@sidanclaw/core). */
+  /** Parse bytes -> canonical text. Default: `parseFileContent` (@use-brian/core). */
   parse?: (buffer: Buffer, mime: string, fileName: string) => Promise<{ text: string; summary: string }>
   /** Chunk parsed text into file_segments (idempotent). Default: `indexFileArtifact`. */
   index?: (input: {

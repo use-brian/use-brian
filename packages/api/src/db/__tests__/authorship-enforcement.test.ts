@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import type { Sensitivity } from '@sidanclaw/core'
+import type { Sensitivity } from '@use-brian/core'
 
 import { assertAuthorshipPresent } from '../authorship-guard.js'
 import { createCompany, createContact, createDeal } from '../crm.js'

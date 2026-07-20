@@ -11,7 +11,7 @@
  * same Node process (packages/api/src/index.ts).
  */
 
-import type { ConfirmationDecision, ConfirmationResolver } from '@sidanclaw/core'
+import type { ConfirmationDecision, ConfirmationResolver } from '@use-brian/core'
 
 /**
  * Each entry carries its OWNER (the deliver-target user + channel the

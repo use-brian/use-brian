@@ -25,7 +25,7 @@ import { useT } from "@/lib/i18n/client";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
 import { listCustomPageTemplates } from "@/lib/api/views";
 import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
-import type { CustomPageTemplateSummary } from "@sidanclaw/doc-model";
+import type { CustomPageTemplateSummary } from "@use-brian/doc-model";
 import {
   buildBlueprintPickerItems,
   initialRecordingBlueprint,

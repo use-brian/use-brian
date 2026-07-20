@@ -17,7 +17,7 @@
 
 import { useState } from "react";
 import { Dialog } from "@base-ui/react/dialog";
-import { PAGE_TEMPLATE_CATEGORIES, type PageTemplateCategory } from "@sidanclaw/doc-model";
+import { PAGE_TEMPLATE_CATEGORIES, type PageTemplateCategory } from "@use-brian/doc-model";
 
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";

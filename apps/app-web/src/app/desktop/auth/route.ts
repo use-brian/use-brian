@@ -14,10 +14,10 @@ import { loopbackRedirectBase } from "@/lib/desktop-loopback";
  *
  * The code returns over the shell's **loopback redirect** (`http://127.0.0.1:
  * <port>/cb`, RFC 8252 §7.3) when one is supplied — this reaches an unpackaged
- * `dist/main.js` dev run, which the `sidanclaw://auth` custom scheme cannot. We
+ * `dist/main.js` dev run, which the `usebrian://auth` custom scheme cannot. We
  * only ever redirect to a loopback host, never an arbitrary URL, so this can't
  * be turned into an open redirect that leaks the code. With no (or an invalid)
- * `redirect`, we fall back to `sidanclaw://auth` for older / packaged builds.
+ * `redirect`, we fall back to `usebrian://auth` for older / packaged builds.
  *
  * Failure handling keeps the user in the desktop flow: any failure 302s back to
  * the app with `error=…` so it shows a native dialog, except a missing browser
@@ -29,13 +29,13 @@ import { loopbackRedirectBase } from "@/lib/desktop-loopback";
  */
 
 const API_URL = process.env.API_URL ?? "http://localhost:4000";
-const SCHEME = "sidanclaw";
+const SCHEME = "usebrian";
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{16,256}$/;
 const STATE_RE = /^[A-Za-z0-9_-]{8,128}$/;
 
 /**
  * 302 the code/error back to the app. To the loopback server when one was
- * supplied (preferred), else to the `sidanclaw://auth` scheme. `state` is echoed
+ * supplied (preferred), else to the `usebrian://auth` scheme. `state` is echoed
  * so the loopback server can reject a callback that isn't from its sign-in.
  */
 function redirectToApp(

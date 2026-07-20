@@ -1,5 +1,5 @@
 /**
- * Normalize a raw MCP tool return into a sidanclaw `ToolResult`.
+ * Normalize a raw MCP tool return into a Use Brian `ToolResult`.
  *
  * A remote MCP tool returns either plain text (a string / content array) or,
  * when it emits image content, a `{ text, images }` payload (see the API

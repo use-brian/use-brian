@@ -12,7 +12,7 @@
  * [COMP:doc-sync/auth]
  */
 
-import { verifyAccessToken } from '@sidanclaw/api/auth/jwt.js'
+import { verifyAccessToken } from '@use-brian/api/auth/jwt.js'
 
 export type AuthResult =
   | { kind: 'user'; userId: string }

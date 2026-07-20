@@ -32,7 +32,7 @@ import type {
   RetrievalStore,
   SearchResultRow,
   Sensitivity,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import { query } from '../db/client.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'

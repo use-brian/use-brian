@@ -29,7 +29,7 @@ vi.mock('../client.js', () => ({
 }))
 
 import { createSoftDeleteStore } from '../soft-delete-store.js'
-import type { RowSnapshot } from '@sidanclaw/core'
+import type { RowSnapshot } from '@use-brian/core'
 
 const store = createSoftDeleteStore()
 const NOW = new Date('2026-05-18T12:00:00Z')

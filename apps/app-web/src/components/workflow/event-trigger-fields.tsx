@@ -49,7 +49,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { isImageIcon } from "@sidanclaw/shared/page-icon";
+import { isImageIcon } from "@use-brian/shared/page-icon";
 
 type Props = {
   workspaceId: string | null;

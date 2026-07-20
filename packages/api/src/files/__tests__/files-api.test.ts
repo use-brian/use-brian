@@ -9,7 +9,7 @@ import type {
   WorkspaceFileIndexRow,
   WorkspaceFileMetaPatch,
   WorkspaceFilesStore,
-} from '@sidanclaw/core'
+} from '@use-brian/core'
 import type { WorkspaceAuditStore } from '../../db/workspace-audit-store.js'
 
 function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Map<string, string> } {

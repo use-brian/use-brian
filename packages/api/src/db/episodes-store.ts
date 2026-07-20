@@ -1,4 +1,4 @@
-import type { AccessContext } from '@sidanclaw/core'
+import type { AccessContext } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { queryWithRLS } from './client.js'

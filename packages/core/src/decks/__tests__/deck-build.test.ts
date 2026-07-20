@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
-import { deckSpecSchema, DECK_PRESET_STYLES } from '@sidanclaw/shared/decks';
+import { deckSpecSchema, DECK_PRESET_STYLES } from '@use-brian/shared/decks';
 import { isPrivateAddress } from '../image-resolve.js';
 import { writeDeckPptx } from '../pptx-writer.js';
 import { extractDeckStyle, parseThemeScheme } from '../style-extract.js';
