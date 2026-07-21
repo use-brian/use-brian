@@ -466,6 +466,10 @@ export interface OpenApiEnv {
   // routing and every menu (model-registry plan L12); the base URL is a
   // constant in the provider module, never an env var.
   DASHSCOPE_API_KEY?: string
+  // Optional DashScope base-URL override. Unset = the international (Singapore)
+  // endpoint. Set to the Beijing host (https://dashscope.aliyuncs.com/compatible-mode/v1)
+  // for a mainland-China deployment. Applies to Qwen chat, embeddings, and media.
+  DASHSCOPE_BASE_URL?: string
   // Optional connector / channel config (closed-secret gated; open passes none).
   GOOGLE_CLIENT_ID?: string
   CHANNEL_CREDENTIAL_KEY?: string
@@ -955,6 +959,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // key. The same transport backs the `gemini` chat provider (below), the
   // shared embedder, and the media backend, so one OAuth-token cache serves
   // all three. See docs/architecture/engine/provider-abstraction.md.
+  // DashScope host: international (Singapore) by default; override to the
+  // Beijing endpoint for mainland China. Shared by Qwen chat, embeddings, media.
+  const dashscopeBaseUrl = env.DASHSCOPE_BASE_URL || DASHSCOPE_INTL_BASE_URL
   const vertexTx: GoogleTransport | undefined = env.VERTEX_PROJECT_ID
     ? vertexTransport({
         project: env.VERTEX_PROJECT_ID,
@@ -974,7 +981,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? { adapter: 'vertex', transport: vertexTx }
     : env.GEMINI_API_KEY
       ? { adapter: 'google-ai-studio', apiKey: env.GEMINI_API_KEY }
-      : { adapter: 'alicloud', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: DASHSCOPE_INTL_BASE_URL }
+      : { adapter: 'alicloud', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: dashscopeBaseUrl }
   const sharedEmbedder = createEmbedderForAdapter(embedderConfig)
 
   // Media backend for file distillation + short-audio transcription. Google
@@ -985,7 +992,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ? { kind: 'google', transport: vertexTx }
     : env.GEMINI_API_KEY
       ? { kind: 'google', transport: aiStudioTransport(env.GEMINI_API_KEY) }
-      : { kind: 'dashscope', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: DASHSCOPE_INTL_BASE_URL }
+      : { kind: 'dashscope', apiKey: env.DASHSCOPE_API_KEY ?? '', baseUrl: dashscopeBaseUrl }
 
   const voiceTranscription = {
     enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
@@ -1134,8 +1141,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     `[provider] gemini transport: ${vertexTx ? `vertex (${env.VERTEX_LOCATION || 'asia-east2'})` : 'ai-studio'}`,
   )
 
-  const providerInstances: Record<string, LLMProvider> = {
-    gemini: wrapProvider(createGeminiProvider(geminiTransport)),
+  // Gemini is registered only when it has a real credential (AI Studio key or
+  // a Vertex project). Registering a keyless `gemini` would defeat the
+  // registry's L12 rule — it would appear "configured", its models would show
+  // in menus and be picked as the tier default, then 401 at call time. A
+  // pure-Qwen deployment leaves it out entirely.
+  const providerInstances: Record<string, LLMProvider> = {}
+  if (env.GEMINI_API_KEY || env.VERTEX_PROJECT_ID) {
+    providerInstances['gemini'] = wrapProvider(createGeminiProvider(geminiTransport))
   }
   if (env.FALLBACK_PROVIDER_ENABLED) {
     if (env.ANTHROPIC_API_KEY) {
@@ -1146,7 +1159,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
   if (env.DASHSCOPE_API_KEY) {
     providerInstances[`openai-compat:${DASHSCOPE_INTL_LABEL}`] = wrapProvider(
-      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: DASHSCOPE_INTL_BASE_URL, label: DASHSCOPE_INTL_LABEL }),
+      createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: dashscopeBaseUrl, label: DASHSCOPE_INTL_LABEL }),
     )
   }
   // Selection-surface derivations (model-registry.md L10/L12): which
@@ -3258,6 +3271,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     checkCreditBudget: ports.checkCreditBudget,
     meteredProfileStore,
     meteredModelsAvailable,
+    configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
     checkMeteredSpendCap: ports.meteredBilling?.checkMeteredSpendCap,
     chargeMeteredSurcharge: ports.meteredBilling?.chargeMeteredSurcharge,
@@ -3331,6 +3345,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/v1', publicApiRoutes({
     provider,
+    configuredProviders,
     tools: allTools,
     systemPrompt: LAYER_1_SYSTEM_PROMPT,
     apiKeyStore,

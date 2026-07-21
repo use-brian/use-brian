@@ -28,7 +28,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -251,6 +251,13 @@ type WebChatOptions = {
    */
   meteredProfileStore?: import('../db/metered-profile-store.js').MeteredProfileStore
   meteredModelsAvailable?: ReadonlySet<string>
+  /**
+   * Provider names configured at boot. Used to substitute a servable model
+   * when the resolved default (always Gemini) has no configured provider — a
+   * deployment with no Google credential (Qwen-only) then serves chat by
+   * default instead of erroring. See `ensureServableModel`.
+   */
+  configuredProviders?: ReadonlySet<string>
   estimateMeteredTurn?: (modelAlias: string, toolRounds: number) => { modelAlias: string; toolRounds: number; minCredits: number; maxCredits: number } | null
   checkMeteredSpendCap?: (workspaceId: string) => Promise<{ allowed: boolean; usedCredits: number; capCredits: number }>
   chargeMeteredSurcharge?: (params: { workspaceId: string; requestId: string; modelAlias: string; profileId?: string | null; toolRounds?: number | null; modelCostUsd: number; chargedByUserId?: string | null }) => Promise<{ charged: boolean; credits: number }>
@@ -3611,11 +3618,17 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      const model = meteredTurn
+      const resolvedModel = meteredTurn
         ? meteredTurn.alias
         : researchMode && budgetStatus !== 'downgraded'
           ? resolveModel('research', 'max_5x', budgetStatus)
           : resolveModel(requestedModel, userPlan, budgetStatus)
+      // Substitute a configured model when the default (Gemini) has no key —
+      // lets a Qwen-only deployment serve chat by default. No-op when Gemini
+      // is configured, or when the caller doesn't pass configuredProviders.
+      const model = options.configuredProviders
+        ? ensureServableModel(resolvedModel, options.configuredProviders)
+        : resolvedModel
 
       // Reset worker manager — prevents stale workers from prior requests blocking Phase 4b
       options.workerManager?.reset()

@@ -11,6 +11,7 @@ import {
   resolveModel,
   wouldBudgetDowngradeAffectModel,
   chatTierBudget,
+  ensureServableModel,
 } from '../model-resolution.js'
 
 // Research became its own billing tier on 2026-06-02 (10 credits, above Max's
@@ -239,5 +240,33 @@ describe('[COMP:api/model-resolution] chatTierBudget', () => {
 
   it('returns null for unknown models — queryLoop defaults stand', () => {
     expect(chatTierBudget({ model: 'unknown-model-id', researchMode: false })).toBeNull()
+  })
+})
+
+describe('[COMP:api/model-resolution] ensureServableModel — default falls to a configured provider', () => {
+  const GEMINI = new Set(['gemini'])
+  const QWEN = new Set(['openai-compat:dashscope-intl'])
+  const BOTH = new Set(['gemini', 'openai-compat:dashscope-intl'])
+
+  it('keeps the model when its provider is configured', () => {
+    expect(ensureServableModel('gemini-3-flash-standard', GEMINI)).toBe('gemini-3-flash-standard')
+    expect(ensureServableModel('gemini-3-flash-standard', BOTH)).toBe('gemini-3-flash-standard')
+  })
+
+  it('substitutes a configured Qwen model when the Gemini default has no provider', () => {
+    // The whole point: a Qwen-only deploy resolves the Gemini tier default,
+    // whose provider is absent — swap it for a configured, menu-listed model
+    // rather than throwing "not configured" in the router.
+    const out = ensureServableModel('gemini-3-flash-standard', QWEN)
+    expect(out).not.toBe('gemini-3-flash-standard')
+    expect(out.startsWith('qwen') || out.startsWith('deepseek')).toBe(true)
+  })
+
+  it('is a no-op when nothing is configured (routing then fails loudly)', () => {
+    expect(ensureServableModel('gemini-3-flash-standard', new Set())).toBe('gemini-3-flash-standard')
+  })
+
+  it('leaves an already-Qwen pick untouched on a Qwen deploy', () => {
+    expect(ensureServableModel('qwen3.7-plus', QWEN)).toBe('qwen3.7-plus')
   })
 })

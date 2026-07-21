@@ -17,8 +17,51 @@ import {
   tierForModelId,
   tierCaseExpression,
   tierClassifierExpression,
+  registryRow,
+  menuForClass,
+  type ModelClass,
   type ModelTier,
 } from '@use-brian/shared/model-registry'
+
+/**
+ * Ensure the resolved model can actually be served by a configured provider,
+ * substituting a configured chat model when it can't.
+ *
+ * The chat-tier defaults are all Gemini (`chatTierDefaults()`), so on a
+ * deployment with no Google credential the default model resolves to a Gemini
+ * id whose provider isn't in the routing table — the routing provider would
+ * throw "not configured". This lets such a deployment (e.g. Qwen-only via
+ * DashScope, the LLM-provider set a region like Hong Kong can reach) serve
+ * chat by default rather than only when a Qwen model is picked by hand.
+ *
+ * Preference order: keep the requested model if its provider is configured;
+ * else the same class from a configured provider; else any configured,
+ * menu-listed chat model. Qwen chat models are class `metered`, so a Qwen-only
+ * deploy falls through to the metered tier here — correct for self-host, where
+ * there is no plan gate. Returns the input unchanged when nothing is
+ * configured (routing then fails loudly rather than silently mis-serving).
+ *
+ * @param configuredProviders provider names present in the boot routing table.
+ */
+export function ensureServableModel(
+  model: string,
+  configuredProviders: ReadonlySet<string>,
+): string {
+  const row = registryRow(model)
+  if (!row || configuredProviders.has(row.provider)) return model
+
+  const sameClass = menuForClass(row.class, configuredProviders)
+  if (sameClass.length > 0) return sameClass[0].alias
+
+  // Fall through the chat classes in descending capability so the substitute
+  // is the best a configured provider offers.
+  const CLASS_FALLBACK_ORDER: readonly ModelClass[] = ['max', 'research', 'standard-pro', 'metered']
+  for (const cls of CLASS_FALLBACK_ORDER) {
+    const rows = menuForClass(cls, configuredProviders)
+    if (rows.length > 0) return rows[0].alias
+  }
+  return model
+}
 
 /**
  * Model alias mapping for the selector — the registry rows flagged with a
