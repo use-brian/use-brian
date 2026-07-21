@@ -21,7 +21,7 @@
  * [COMP:app-web/models-settings]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, Pencil, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -100,6 +100,15 @@ export function ModelsSection() {
 
   const clampRounds = (n: number) => Math.min(200, Math.max(10, Math.round(n) || 10));
 
+  // Alias -> human product name, from the served menu (registry displayName).
+  // Profiles store aliases; every label a user reads prefers the real name.
+  const displayNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const list of Object.values(menuClasses)) for (const m of list) map.set(m.alias, m.displayName);
+    return map;
+  }, [menuClasses]);
+  const nameFor = useCallback((alias: string) => displayNames.get(alias) ?? alias, [displayNames]);
+
   const onCreate = useCallback(async () => {
     if (!workspaceId || !newModel || !newName.trim()) return;
     setSaving(true);
@@ -139,7 +148,7 @@ export function ModelsSection() {
     if (!workspaceId) return;
     const ok = await confirmDialog({
       title: t.deleteTitle,
-      description: t.deleteBody.replace("{name}", `${profile.modelAlias} / ${profile.name}`),
+      description: t.deleteBody.replace("{name}", `${nameFor(profile.modelAlias)} / ${profile.name}`),
       variant: "destructive",
       confirmLabel: t.deleteCta,
     });
@@ -184,11 +193,11 @@ export function ModelsSection() {
                 : "";
             const classLabel =
               cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
-            // Label with the WIRE model (apiModelId), not the alias: aliases
-            // like gemini-3-pro-research are stable billing labels that
-            // survive model upgrades, so they misread as stale versions
-            // (research actually serves gemini-3.1-pro-preview).
-            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.apiModelId ?? "");
+            // Label with the human product name (registry displayName) —
+            // never the alias: aliases like gemini-3-pro-research are stable
+            // billing labels that survive model upgrades, so they misread as
+            // stale versions (research actually serves Gemini 3.1 Pro).
+            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.displayName ?? "");
             // A pin option only exists for a model that genuinely differs
             // from the registry default (and from other pins) by wire id —
             // standard-pro's two aliases are the standard/pro billing labels
@@ -203,10 +212,10 @@ export function ModelsSection() {
             });
             const items: SearchableSelectItem[] = [
               { value: "", label: registryLabel },
-              ...pins.map((m) => ({ value: `a:${m.alias}`, label: m.alias })),
+              ...pins.map((m) => ({ value: `a:${m.alias}`, label: m.displayName })),
               ...profiles.map((p) => ({
                 value: `p:${p.id}`,
-                label: `${p.modelAlias} / ${p.name}`,
+                label: `${nameFor(p.modelAlias)} / ${p.name}`,
                 hint: t.roundsLabel.replace("{rounds}", String(p.toolRounds)),
               })),
             ];
@@ -247,7 +256,7 @@ export function ModelsSection() {
                   <Gauge className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium">
-                      {p.modelAlias} / {p.name}
+                      {nameFor(p.modelAlias)} / {p.name}
                     </div>
                     <div className="text-[11.5px] text-muted-foreground">
                       {t.roundsLabel.replace("{rounds}", String(p.toolRounds))}
@@ -265,7 +274,7 @@ export function ModelsSection() {
                         if (!workspaceId) return;
                         const value = await promptDialog({
                           title: t.renameTitle,
-                          description: t.renameBody.replace("{name}", `${p.modelAlias} / ${p.name}`),
+                          description: t.renameBody.replace("{name}", `${nameFor(p.modelAlias)} / ${p.name}`),
                           defaultValue: p.name,
                           confirmLabel: t.renameCta,
                         });
@@ -299,11 +308,11 @@ export function ModelsSection() {
             <div className="flex flex-wrap items-center gap-2">
               <Select value={newModel} onValueChange={(v) => { if (v) setNewModel(v); }}>
                 <SelectTrigger size="sm" aria-label={t.modelLabel} className="min-w-40 text-xs">
-                  <span>{newModel || t.modelPlaceholder}</span>
+                  <span>{newModel ? nameFor(newModel) : t.modelPlaceholder}</span>
                 </SelectTrigger>
                 <SelectContent>
                   {models.map((m) => (
-                    <SelectItem key={m.alias} value={m.alias}>{m.alias}</SelectItem>
+                    <SelectItem key={m.alias} value={m.alias}>{m.displayName}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

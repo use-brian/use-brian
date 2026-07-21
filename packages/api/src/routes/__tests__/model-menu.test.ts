@@ -54,6 +54,10 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     // serialized apiModelId is what lets pickers collapse them.
     expect(res.body.classes['standard-pro'].map((m: { apiModelId: string }) => m.apiModelId))
       .toEqual(['gemini-3-flash-preview', 'gemini-3-flash-preview'])
+    // Labels come from the registry displayName; alias rows of one model
+    // share one human name.
+    expect(res.body.classes['standard-pro'].map((m: { displayName: string }) => m.displayName))
+      .toEqual(['Gemini 3 Flash', 'Gemini 3 Flash'])
     expect(res.body.classes['metered'].map((m: { alias: string }) => m.alias).sort())
       .toEqual(['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3.7-max', 'qwen3.7-plus'])
     expect(res.body.meteredBillingAvailable).toBe(true)

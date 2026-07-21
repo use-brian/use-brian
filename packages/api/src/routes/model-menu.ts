@@ -45,6 +45,9 @@ const MENU_CLASSES: ModelClass[] = ['standard-pro', 'max', 'research', 'metered'
 function serializeRow(row: ModelRegistryRow) {
   return {
     alias: row.alias,
+    // Human product name — what every picker label shows (aliases and wire
+    // ids stay technical identities).
+    displayName: row.displayName,
     // Wire id: lets pickers collapse alias rows of the same underlying
     // model (standard-pro's two tier labels) instead of listing fake choices.
     apiModelId: row.apiModelId,

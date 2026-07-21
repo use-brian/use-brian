@@ -13,6 +13,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 export type MenuModel = {
   alias: string;
+  displayName: string;
   apiModelId: string;
   class: string;
   provider: string;
