@@ -168,6 +168,11 @@ export function ModelsSection() {
           <div>
             <div className="text-[12.5px] font-medium">{t.defaultsTitle}</div>
             <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.defaultsBlurb}</p>
+            {models.length > 0 && profiles.length === 0 ? (
+              <p className="mt-1.5 rounded-md bg-muted/40 px-2.5 py-1.5 text-[11.5px] text-muted-foreground">
+                {t.defaultsNoProfilesHint}
+              </p>
+            ) : null}
           </div>
           {DEFAULTABLE_CLASSES.map((cls) => {
             const curated = menuClasses[cls] ?? [];

@@ -1682,6 +1682,7 @@ export const ja: Dictionary = {
         classMax: "Max",
         classResearch: "Research",
         registryDefault: "レジストリの既定 ({alias})",
+        defaultsNoProfilesHint: "従量課金モデル(DeepSeek や Qwen など)は、プロファイルとして保存するとここで選べるようになります。下の「従量課金モデルのプロファイル」で作成すると、予算付きでこのメニューに表示されます。",
         profilesTitle: "従量課金モデルのプロファイル",
         profilesBlurb: "従量課金モデルに対する保存済み予算です。プロファイルは 1 メッセージで使えるツールラウンド数を固定し、チャットでの選択時にその予算で見積もりと確認を行ってから課金されます。",
         loading: "プロファイルを読み込み中...",

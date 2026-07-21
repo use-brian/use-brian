@@ -1670,6 +1670,7 @@ export const zh: Dictionary = {
         classMax: "Max",
         classResearch: "Research",
         registryDefault: "登錄檔預設 ({alias})",
+        defaultsNoProfilesHint: "按量計費模型(如 DeepSeek 與 Qwen 系列)儲存為設定檔後即可在此選用: 請在下方「按量計費模型設定檔」建立,建立後會連同預算一起出現在這些選單中。",
         profilesTitle: "按量計費模型設定檔",
         profilesBlurb: "針對按量計費模型儲存的預算。設定檔固定每則訊息可用的工具回合數;在聊天中選用時會先以該預算進行估價與確認,才會產生費用。",
         loading: "正在載入設定檔...",
