@@ -288,13 +288,26 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       }
 
       // ── Pre-flight: team-owner guard ─────────────────────────
-      // If the user owns any teams, block deletion. Teams cascade via
-      // FK on `teams.owner_user_id ON DELETE CASCADE`, which would
-      // silently wipe team assistants + sessions + memories + KB —
-      // destroying data belonging to other team members. Require
-      // explicit transfer first.
-      const ownedTeams = await query<{ id: string; name: string }>(
-        `SELECT id, name FROM workspaces WHERE owner_user_id = $1`,
+      // Owned workspaces cascade via FK on `workspaces.owner_user_id
+      // ON DELETE CASCADE`, which would silently wipe workspace
+      // assistants + sessions + memories + KB. That is only a problem
+      // when the workspace has OTHER members — so the guard blocks on
+      // shared workspaces only. Solo-owned workspaces (including the
+      // auto-created Personal one, which is never user-deletable) hold
+      // nobody else's data and are torn down by the cascade below.
+      // The pre-2026-07-21 version blocked on ANY owned workspace,
+      // which made account deletion unsatisfiable for every user: the
+      // Personal workspace exists since signup and can't be deleted.
+      const ownedTeams = await query<{ id: string; name: string; member_count: string }>(
+        `SELECT w.id, w.name,
+                (SELECT COUNT(*) FROM workspace_members wm
+                  WHERE wm.workspace_id = w.id AND wm.user_id <> $1) AS member_count
+           FROM workspaces w
+          WHERE w.owner_user_id = $1
+            AND EXISTS (
+              SELECT 1 FROM workspace_members wm
+               WHERE wm.workspace_id = w.id AND wm.user_id <> $1
+            )`,
         [userId],
       )
 
@@ -302,8 +315,12 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
         res.status(409).json({
           error: 'transfer_team_ownership_required',
           message:
-            'You still own teams. Transfer team ownership or delete these teams before deleting your account — otherwise all team data (assistants, memories, knowledge) would be lost.',
-          teams: ownedTeams.rows.map((r) => ({ id: r.id, name: r.name })),
+            'You still own workspaces with other members. Transfer ownership, remove the other members, or delete these workspaces before deleting your account — otherwise their shared data (assistants, memories, knowledge) would be lost.',
+          teams: ownedTeams.rows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            memberCount: Number(r.member_count),
+          })),
         })
         return
       }

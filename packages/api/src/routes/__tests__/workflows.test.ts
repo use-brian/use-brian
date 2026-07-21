@@ -204,6 +204,40 @@ describe('[COMP:api/workflows-route] delete / run', () => {
   })
 })
 
+describe('[COMP:api/workflows-route] DELETE /workflows (bulk)', () => {
+  it('requires workspaceId', async () => {
+    expect((await request(app('u-1')).delete('/api/workflows')).status).toBe(400)
+  })
+
+  it('rejects a plain member with 403 (admin-gated)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('member')
+    const res = await request(app('u-1')).delete('/api/workflows?workspaceId=' + WS)
+    expect(res.status).toBe(403)
+    expect(workflowStore.delete).not.toHaveBeenCalled()
+  })
+
+  it('deletes every workflow (archived included), clears triggers, emits audits', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workflowStore.list.mockResolvedValueOnce([wf(), wf({ id: 'wf-2', name: 'Archived one' })])
+    workflowStore.delete.mockResolvedValue(true)
+    jobStore.listTriggerJobsForWorkflowSystem.mockResolvedValue([{ id: 'job-1' }])
+
+    const res = await request(app('u-1', { jobStore, resolvePrimary })).delete(
+      '/api/workflows?workspaceId=' + WS,
+    )
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, deleted: 2 })
+    // Archived rows must be in scope — the list call opts in.
+    expect(workflowStore.list).toHaveBeenCalledWith('u-1', WS, { includeArchived: true })
+    expect(workflowStore.delete).toHaveBeenCalledTimes(2)
+    expect(jobStore.delete).toHaveBeenCalledTimes(2)
+    expect(emitAudit).toHaveBeenCalledTimes(2)
+    expect(emitAudit).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'workflow.deleted', workflowId: 'wf-2' }),
+    )
+  })
+})
+
 describe('[COMP:api/workflows-route] schedule trigger → backing scheduled_jobs row', () => {
   const scheduleTrigger = {
     kind: 'schedule',

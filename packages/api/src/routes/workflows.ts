@@ -688,6 +688,51 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
     })
   })
 
+  // ── DELETE /workflows?workspaceId= — bulk delete ───────────────────────
+  //
+  // Clears EVERY workflow in the workspace (archived included) in one call:
+  // the list-page "Delete all" affordance. Deleting one-by-one through each
+  // builder page was the only path before, which at real workspace scale
+  // (hundreds of accumulated workflows) is no path at all. Admin-gated —
+  // single delete stays member-level, but nuking the whole automation
+  // surface is an operator action. Each workflow gets the same teardown as
+  // the single route: row delete (runs cascade), backing scheduled-trigger
+  // rows cleared, `workflow.deleted` audit emitted.
+  router.delete('/workflows', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) return unauthorized(res)
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : ''
+    if (!workspaceId) return badRequest(res, 'workspaceId is required')
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) return notMember(res)
+    if (role !== 'admin' && role !== 'owner') {
+      return void res.status(403).json({ error: 'Requires admin role' })
+    }
+
+    const rows = await opts.workflowStore.list(userId, workspaceId, { includeArchived: true })
+    let deleted = 0
+    for (const workflow of rows) {
+      const ok = await opts.workflowStore.delete(userId, workflow.id)
+      if (!ok) continue
+      deleted++
+      if (opts.jobStore) {
+        await clearWorkflowScheduleTriggers({ jobStore: opts.jobStore }, workflow.id).catch((err) =>
+          console.warn('[workflows] schedule-trigger clear on bulk delete failed:', err),
+        )
+      }
+      opts.emitAudit?.({
+        type: 'workflow.deleted',
+        workspaceId,
+        userId,
+        workflowId: workflow.id,
+        name: workflow.name,
+      })
+    }
+
+    res.json({ ok: true, deleted })
+  })
+
   // ── DELETE /workflows/:id ──────────────────────────────────────────────
   router.delete('/workflows/:id', async (req, res) => {
     const userId = (req as { userId?: string }).userId

@@ -65,6 +65,8 @@ export type WorkspaceAuditEventType =
   | 'file.appended'
   | 'file.meta_updated'
   | 'file.deleted'
+  // Workspace data flush (workspaces.md → "Workspace data flush")
+  | 'workspace.data_flushed'
 
 export type WorkspaceAuditEvent = {
   id: string

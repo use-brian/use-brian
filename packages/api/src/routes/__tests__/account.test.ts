@@ -258,6 +258,42 @@ describe('[COMP:api/account-route] Account routes', () => {
     expect(res.body.assistants[0].memberCount).toBe(3)
   })
 
+  it('returns 409 when user owns workspaces with other members', async () => {
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
+    // Guard 1: no shared personal assistants.
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    // Guard 2: one owned workspace with another member.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'ws_team', name: 'Shared WS', member_count: '2' }],
+      rowCount: 1,
+    } as never)
+
+    const res = await request(app).delete('/api/account')
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('transfer_team_ownership_required')
+    expect(res.body.teams).toHaveLength(1)
+    expect(res.body.teams[0].memberCount).toBe(2)
+  })
+
+  it('guards only on workspaces that have OTHER members', async () => {
+    // The guard query must scope to shared workspaces. Every user owns
+    // their auto-created Personal workspace (never deletable), so a guard
+    // on "any owned workspace" makes account deletion unsatisfiable for
+    // every user — the 2026-07-21 dead-end.
+    const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', stripeCustomerId: null } as never)
+    const pool = mockPool()
+    const mockClient = (await pool.connect()) as unknown as { query: ReturnType<typeof vi.fn> }
+    mockClient.query.mockResolvedValue({ rows: [], rowCount: 0 })
+
+    const res = await request(app).delete('/api/account')
+    expect(res.status).toBe(204)
+    // The owned-workspaces guard (2nd query) must predicate on other members.
+    const guardSql = mockQuery.mock.calls[1][0] as string
+    expect(guardSql).toMatch(/wm\.user_id <> \$1/)
+  })
+
   it('performs transactional teardown for solo user', async () => {
     const app = createTestApp('/api/account', accountRoutes(), { userId: 'u_1' })
     mockFindUserById.mockResolvedValueOnce({
@@ -265,7 +301,8 @@ describe('[COMP:api/account-route] Account routes', () => {
       stripeCustomerId: null,
       authProvider: 'google',
     } as never)
-    // No team-owned assistants
+    // No team-owned assistants (guard 1) and no shared workspaces (guard 2)
+    // — the beforeEach default empty resolution covers both.
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
 
     // The pool.connect().query calls

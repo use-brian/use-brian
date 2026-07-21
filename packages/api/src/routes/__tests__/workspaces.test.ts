@@ -21,11 +21,19 @@ vi.mock('../../db/client.js', () => ({
 vi.mock('../../db/users.js', () => ({
   findUserById: vi.fn(),
 }))
+vi.mock('../../db/workspace-flush.js', () => {
+  class WorkspaceFlushNotOwnerError extends Error {}
+  return {
+    flushWorkspaceData: vi.fn(),
+    WorkspaceFlushNotOwnerError,
+  }
+})
 
 import { workspaceRoutes } from '../workspaces.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { findUserById } from '../../db/users.js'
 import { InvalidRecordingBlueprintError } from '../../db/workspace-store.js'
+import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../../db/workspace-flush.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
@@ -167,6 +175,34 @@ describe('[COMP:api/workspaces-route] requireWorkspaceRole gate', () => {
     workspaceStore.getRole.mockResolvedValueOnce('owner')
     workspaceStore.delete.mockResolvedValueOnce(true)
     expect((await request(app('u-1')).delete('/api/workspaces/ws-1')).status).toBe(204)
+  })
+
+  it('DELETE /:workspaceId/data requires the owner role', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const res = await request(app('u-1')).delete('/api/workspaces/ws-1/data')
+    expect(res.status).toBe(403)
+    expect(vi.mocked(flushWorkspaceData)).not.toHaveBeenCalled()
+  })
+
+  it('DELETE /:workspaceId/data flushes for the owner and reports counts', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    vi.mocked(flushWorkspaceData).mockResolvedValueOnce({
+      deleted: { tasks: 1287, workflows: 225, memories: 0 },
+      total: 1512,
+    })
+    const res = await request(app('u-1')).delete('/api/workspaces/ws-1/data')
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(res.body.total).toBe(1512)
+    expect(res.body.deleted.tasks).toBe(1287)
+    expect(vi.mocked(flushWorkspaceData)).toHaveBeenCalledWith('u-1', 'ws-1')
+  })
+
+  it('DELETE /:workspaceId/data maps the store owner re-check to 403', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    vi.mocked(flushWorkspaceData).mockRejectedValueOnce(new WorkspaceFlushNotOwnerError())
+    const res = await request(app('u-1')).delete('/api/workspaces/ws-1/data')
+    expect(res.status).toBe(403)
   })
 
   it('POST /:workspaceId/members 404s an email with no matching user', async () => {

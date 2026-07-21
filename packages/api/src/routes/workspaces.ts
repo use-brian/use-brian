@@ -10,6 +10,7 @@
  *   GET    /:workspaceId                                  — get workspace details + members
  *   PATCH  /:workspaceId                                  — update workspace name
  *   DELETE /:workspaceId                                  — delete workspace (owner only, non-personal)
+ *   DELETE /:workspaceId/data                             — flush all workspace data, keep the shell (owner only)
  *   POST   /:workspaceId/members                          — add member by email
  *   DELETE /:workspaceId/members/:userId                  — remove member
  *   PATCH  /:workspaceId/members/:userId                  — update member role
@@ -37,6 +38,7 @@ import {
   getWorkspaceMembershipWithClearanceSystem,
   InvalidRecordingBlueprintError,
 } from '../db/workspace-store.js'
+import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { createConnectionStore } from '../db/connection-store.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
@@ -541,6 +543,45 @@ export function workspaceRoutes({
     } catch (err) {
       console.error('[workspaces] delete failed:', err)
       res.status(500).json({ error: 'Failed to delete workspace' })
+    }
+  })
+
+  // ── DELETE /:workspaceId/data — flush all workspace data ───────────────
+  //
+  // The self-serve "start over": deletes every content row the workspace's
+  // brain holds (memories, episodes, entities, tasks, goals, workflows +
+  // runs, pages, files, recordings, knowledge, sessions, scheduled jobs)
+  // while preserving the shell — workspace, members, assistants, connectors,
+  // channels, settings, billing, audit. Works on the Personal workspace,
+  // which is the whole point: that workspace can never be deleted, so this
+  // is its only full-reset path. Owner-only; the store re-checks ownership
+  // inside the transaction. Spec: workspaces.md → "Workspace data flush".
+
+  router.delete('/:workspaceId/data', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const role = await requireWorkspaceRole(req as any, res, 'owner')
+    if (!role) return
+
+    try {
+      const result = await flushWorkspaceData(userId, req.params.workspaceId)
+      if (auditStore) {
+        void auditStore.append({
+          workspaceId: req.params.workspaceId,
+          actorUserId: userId,
+          eventType: 'workspace.data_flushed',
+          details: { total: result.total },
+        })
+      }
+      res.json({ ok: true, deleted: result.deleted, total: result.total })
+    } catch (err) {
+      if (err instanceof WorkspaceFlushNotOwnerError) {
+        res.status(403).json({ error: 'Only the workspace owner can flush workspace data' })
+        return
+      }
+      console.error('[workspaces] data flush failed:', err)
+      res.status(500).json({ error: 'Failed to flush workspace data' })
     }
   })
 
