@@ -93,9 +93,10 @@ export function WorkspaceChrome({
   const t = useT().docPage;
   const router = useRouter();
   const pathname = usePathname();
-  // The single connectivity driver for the bundled desktop app — mounted here
-  // (chrome is on every surface) so the global offline flag + write-queue flush
-  // run app-wide, not just on the doc page. No-op on web/thin shell.
+  // The single connectivity driver — mounted here (chrome is on every surface)
+  // so the global offline flag + write-queue flush run app-wide, not just on
+  // the doc page. The collab socket signal reaches it via the module store
+  // (`publishCollabConnected`, published by doc-shell).
   useOfflineSync();
   // The ONE workspace realtime EventSource per tab (realtime-sync). Routes
   // server change signals to per-domain CustomEvents; surfaces refetch via

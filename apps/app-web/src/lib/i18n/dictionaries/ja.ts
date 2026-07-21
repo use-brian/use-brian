@@ -1217,6 +1217,9 @@ export const ja: Dictionary = {
       collabConnected: "リアルタイム",
       collabReconnecting: "再接続中…",
       collabOffline: "オフライン — 再接続時に変更が保存されます",
+      collabOfflineUnavailableTitle: "このページはオフラインでは利用できません",
+      collabOfflineUnavailableBody:
+        "このデバイスではまだ開かれていないページです。オンラインに戻ると読み込まれます。",
     },
   },
   settings: {

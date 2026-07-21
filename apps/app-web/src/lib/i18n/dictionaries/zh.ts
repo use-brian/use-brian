@@ -1204,6 +1204,9 @@ export const zh: Dictionary = {
       collabConnected: "即時連線",
       collabReconnecting: "重新連線中…",
       collabOffline: "離線 — 重新連線後將儲存變更",
+      collabOfflineUnavailableTitle: "此頁面無法離線使用",
+      collabOfflineUnavailableBody:
+        "此裝置尚未開啟過此頁面。恢復連線後將自動載入。",
     },
   },
   settings: {

@@ -123,7 +123,11 @@ import {
 import { PageBuildIndicator } from "./page-build-indicator";
 import { subscribeBuildActivity } from "@/lib/build-activity";
 import { offlineWrite } from "@/lib/offline/offline-writes";
-import { useIsOffline, usePendingWrites } from "@/lib/offline/use-offline-sync";
+import {
+  useIsOffline,
+  usePendingWrites,
+  publishCollabConnected,
+} from "@/lib/offline/use-offline-sync";
 
 type ShellProps = {
   workspaceId: string;
@@ -210,8 +214,18 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // claw + status pill, and the chat composer's double-text guard below.
   const assistantRun = useAssistantRun(collab.provider);
 
-  // App-level offline state for the bundled desktop app, read from the global
-  // signal (the single driver lives in WorkspaceChrome). No-op on web/thin shell.
+  // Feed the collab socket into the global connectivity classifier: a live doc
+  // losing its sync socket flips the app to "degraded" (Offline pill; metadata
+  // writes queue) even while `navigator.onLine` stays true. "connecting"
+  // counts as up so the initial dial doesn't flash the pill; reset on unmount
+  // so a closed doc doesn't pin the app degraded.
+  useEffect(() => {
+    publishCollabConnected(collab.status !== "disconnected");
+    return () => publishCollabConnected(true);
+  }, [collab.status]);
+
+  // App-level offline state, read from the global signal (the single driver
+  // lives in WorkspaceChrome).
   const offline = useIsOffline();
   const pendingWrites = usePendingWrites();
 

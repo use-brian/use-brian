@@ -1384,6 +1384,9 @@ export const en = {
       collabConnected: "Live",
       collabReconnecting: "Reconnecting…",
       collabOffline: "Offline — changes save when you reconnect",
+      collabOfflineUnavailableTitle: "This page isn't available offline",
+      collabOfflineUnavailableBody:
+        "It hasn't been opened on this device yet. It will load when you're back online.",
     },
   },
   // ── Settings surface ─────────────────────────────────────────

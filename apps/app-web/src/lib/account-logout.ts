@@ -29,25 +29,32 @@
  */
 
 import { desktopSignOut } from "@/lib/desktop-auth-source";
+import { clearLocalDocCaches } from "@/lib/offline/idb";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { setUserInfoCache } from "@/lib/user";
 
 export function signOutActiveAccount(): void {
   if (typeof window === "undefined") return;
-  // Electron shell signs out + switches in its own jar (and reloads in place).
-  if (desktopSignOut()) return;
-  const primary = primaryAuthUrl();
-  if (primary) {
-    const u = new URL("/api/auth/logout", primary);
-    u.searchParams.set("scope", "active");
-    // Land on the app root: the switched-into account re-resolves its workspace
-    // there, and a full sign-out (last account) falls to `/login` via the guard.
-    u.searchParams.set("next", `${window.location.origin}/`);
-    window.location.href = u.toString();
-    return;
-  }
-  // Dev: no primary, single-account host-only cookies — full clear → /login.
   void (async () => {
+    // Scrub the offline doc caches BEFORE the session ends: page content
+    // persisted for offline editing must not outlive the sign-out on a shared
+    // browser. Internally time-bounded, so a hung IndexedDB can't strand the
+    // user mid-sign-out.
+    await clearLocalDocCaches();
+    // Electron shell signs out + switches in its own jar (and reloads in place).
+    if (desktopSignOut()) return;
+    const primary = primaryAuthUrl();
+    if (primary) {
+      const u = new URL("/api/auth/logout", primary);
+      u.searchParams.set("scope", "active");
+      // Land on the app root: the switched-into account re-resolves its
+      // workspace there, and a full sign-out (last account) falls to `/login`
+      // via the guard.
+      u.searchParams.set("next", `${window.location.origin}/`);
+      window.location.href = u.toString();
+      return;
+    }
+    // Dev: no primary, single-account host-only cookies — full clear → /login.
     try {
       await fetch("/api/auth/logout", { method: "POST" });
     } catch {

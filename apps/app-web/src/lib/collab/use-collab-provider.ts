@@ -6,6 +6,12 @@
  * presenting the user's JWT, and both are torn down on unmount / pageId change
  * (StrictMode double-mount safe via the effect cleanup).
  *
+ * Every client also attaches `y-indexeddb` persistence, so an opened page and
+ * any offline edits survive reloads and replay on reconnect (CRDT merge — both
+ * sides kept, never a destructive overwrite). The teardown's
+ * `persistence.destroy()` only detaches listeners; the local store survives.
+ * The stores are scrubbed on sign-out (`clearLocalDocCaches`).
+ *
  * [COMP:app-web/collab-provider]
  */
 
@@ -14,7 +20,7 @@ import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import type { IndexeddbPersistence } from "y-indexeddb";
 import { getValidAccessToken } from "@/lib/auth-fetch";
-import { isDesktopAuth } from "@/lib/desktop-auth-source";
+import { hasLoadedState } from "@/lib/collab/doc-empty";
 
 /**
  * Resolve the sync server URL for this page session. Order:
@@ -90,33 +96,38 @@ export function useCollabProvider(pageId: string | null): CollabHandle {
     });
     setBundle({ doc, provider });
 
-    // Bundled desktop only (Phase 4, docs/plans/doc-desktop-bundled-offline.md):
-    // persist the doc to IndexedDB so an opened page survives offline and edits
-    // replay on reconnect. Gated on `isDesktopAuth()` (the bundled token bridge)
-    // so the web app and thin shell are unaffected — they keep the "live, not
-    // snapshot" contract with no local persistence. Loaded dynamically so the
-    // web bundle never executes `y-indexeddb`.
+    // Offline-first (ALL clients — web, thin shell, bundled desktop; originally
+    // Phase 4 of docs/plans/doc-desktop-bundled-offline.md, extended to the web
+    // after typed-but-unsynced notes were lost in a doc-sync outage): persist
+    // the doc to IndexedDB so an opened page survives offline — edits made
+    // while disconnected live in the local store across reloads/navigation and
+    // replay on reconnect, where the Yjs CRDT merge keeps BOTH sides (there is
+    // no destructive "pick one version" path). Loaded dynamically to keep the
+    // heavy module out of the initial bundle.
     let cancelled = false;
     let persistence: IndexeddbPersistence | null = null;
-    if (isDesktopAuth()) {
-      void import("y-indexeddb")
-        .then(({ IndexeddbPersistence: Idb }) => {
-          if (cancelled) return; // effect torn down before the import resolved
-          persistence = new Idb(`doc-page-${pageId}`, doc);
-          // Offline-usable: once local state loads, treat the editor as ready
-          // even if the socket never connects.
-          void persistence.whenSynced
-            .then(() => {
-              if (!cancelled) setSynced(true);
-            })
-            .catch(() => {
-              /* local load failed; stay dependent on the live socket */
-            });
-        })
-        .catch(() => {
-          /* offline persistence unavailable; behave as online-only */
-        });
-    }
+    void import("y-indexeddb")
+      .then(({ IndexeddbPersistence: Idb }) => {
+        if (cancelled) return; // effect torn down before the import resolved
+        persistence = new Idb(`doc-page-${pageId}`, doc);
+        // Offline-usable: once local state loads, treat the editor as ready
+        // even if the socket never connects — but ONLY when the store actually
+        // held state (the page has been opened on this device before). A page
+        // never seen on this device has an empty local store; unblocking the
+        // editor on that would render a server-backed page as a blank
+        // editable doc. Those stay skeleton-gated on the live socket, and the
+        // editor shows the offline-unavailable notice instead.
+        void persistence.whenSynced
+          .then(() => {
+            if (!cancelled && hasLoadedState(doc)) setSynced(true);
+          })
+          .catch(() => {
+            /* local load failed; stay dependent on the live socket */
+          });
+      })
+      .catch(() => {
+        /* offline persistence unavailable; behave as online-only */
+      });
 
     return () => {
       cancelled = true;

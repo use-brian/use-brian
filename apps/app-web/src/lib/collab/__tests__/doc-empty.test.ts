@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
 import { FRAGMENT_FIELD } from "@use-brian/doc-model";
-import { isYFragmentEmpty } from "../doc-empty";
+import { hasLoadedState, isYFragmentEmpty } from "../doc-empty";
 
 /**
  * Guards the draft-landing gate: a placeholder draft is the "what do you want to
@@ -47,5 +47,33 @@ describe("[COMP:app-web/doc-empty] isYFragmentEmpty", () => {
     const f = frag();
     f.insert(0, [new Y.XmlElement("heading")]);
     expect(isYFragmentEmpty(f)).toBe(false);
+  });
+});
+
+/**
+ * Guards the offline-readiness rule in `use-collab-provider`: the local
+ * IndexedDB copy may unblock the editor only when it actually loaded state.
+ * A doc that loaded nothing (page never opened on this device) must NOT count
+ * — rendering it would present a server-backed page as a blank editable doc.
+ */
+describe("[COMP:app-web/doc-empty] hasLoadedState", () => {
+  it("is false for a fresh doc that loaded nothing", () => {
+    expect(hasLoadedState(new Y.Doc())).toBe(false);
+  });
+
+  it("is true once any struct lands, even a visually empty paragraph", () => {
+    const doc = new Y.Doc();
+    doc.getXmlFragment(FRAGMENT_FIELD).insert(0, [new Y.XmlElement("paragraph")]);
+    expect(hasLoadedState(doc)).toBe(true);
+  });
+
+  it("is true after applying a remote update (the IndexedDB load path)", () => {
+    const source = new Y.Doc();
+    source
+      .getXmlFragment(FRAGMENT_FIELD)
+      .insert(0, [new Y.XmlElement("paragraph")]);
+    const loaded = new Y.Doc();
+    Y.applyUpdate(loaded, Y.encodeStateAsUpdate(source));
+    expect(hasLoadedState(loaded)).toBe(true);
   });
 });

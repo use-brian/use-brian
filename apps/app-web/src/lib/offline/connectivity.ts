@@ -1,6 +1,6 @@
 /**
- * Connectivity signal for the bundled desktop offline layer (Phase 5,
- * docs/plans/doc-desktop-bundled-offline.md).
+ * Connectivity signal for the offline layer (all clients; originally Phase 5
+ * of docs/plans/doc-desktop-bundled-offline.md).
  *
  * Combines two signals app-web already has — `navigator.onLine` and the
  * collab socket status (`CollabStatus` from `use-collab-provider.ts`) — into one
@@ -8,7 +8,7 @@
  * are queued vs. issued, and (c) when to flush the write-queue on recovery.
  *
  * Pure → unit-testable. The React glue (event listeners + wiring to the collab
- * provider) lives in a thin hook, gated on `isDesktopAuth()`.
+ * provider) lives in a thin hook (`use-offline-sync.ts`).
  *
  * [COMP:app-web/offline-connectivity]
  */

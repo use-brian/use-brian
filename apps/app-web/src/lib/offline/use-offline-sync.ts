@@ -1,21 +1,26 @@
 "use client";
 
 /**
- * Connectivity + reconnect-flush hook for the bundled desktop app (Phase 5).
+ * Connectivity + reconnect-flush hook for ALL clients (web, thin shell,
+ * bundled desktop — originally Phase 5 of the bundled-desktop offline plan,
+ * un-gated when the web app went offline-first).
  *
  * Combines `navigator.onLine` with the collab socket status into one
  * classification, reflects it into the offline-write manager's `online` flag,
  * and flushes the queued writes on the offline→online rising edge. Returns the
  * state for an Offline pill + pending-write count.
  *
- * Gated: on web + the thin shell (`isDesktopAuth()` false) it stays "online" and
- * touches nothing — no listeners, no flush.
+ * The collab socket signal arrives through a module-level store
+ * (`publishCollabConnected`), published by `doc-shell` (which owns the
+ * provider) and consumed here — the driver mounts in WorkspaceChrome, above
+ * where the socket lives, so a prop can't reach it. "connecting" counts as up
+ * (the initial dial must not flash the Offline pill); only a provider sitting
+ * in "disconnected" degrades the classification.
  *
  * [COMP:app-web/use-offline-sync]
  */
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isDesktopAuth } from "@/lib/desktop-auth-source";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   classifyConnectivity,
   isEffectivelyOffline,
@@ -32,26 +37,50 @@ import {
 
 export interface OfflineSyncState {
   connectivity: Connectivity;
-  /** True when the bundled app should show the Offline affordance + queue writes. */
+  /** True when the app should show the Offline affordance + queue writes. */
   offline: boolean;
   /** Count of writes queued for replay. */
   pending: number;
 }
 
+// ── Collab-socket signal (module store) ────────────────────────
+// True unless a mounted doc page reports its sync socket as down. Pages
+// publish on status change and reset to true on unmount, so no open doc
+// means "up" (navigator.onLine alone decides).
+let collabConnected = true;
+const collabListeners = new Set<() => void>();
+
+/** Publish the collab socket state (doc-shell; reset to true on unmount). */
+export function publishCollabConnected(connected: boolean): void {
+  if (collabConnected === connected) return;
+  collabConnected = connected;
+  for (const l of collabListeners) l();
+}
+
+export function getCollabConnected(): boolean {
+  return collabConnected;
+}
+
+function subscribeCollabConnected(listener: () => void): () => void {
+  collabListeners.add(listener);
+  return () => {
+    collabListeners.delete(listener);
+  };
+}
+
 /**
- * Reader hook: true when the bundled app is offline. Backed by the module-level
- * connectivity flag (driven by the single `useOfflineSync` driver in
- * WorkspaceChrome), so any component anywhere can gate its controls on it.
- * Always false on web + the thin shell (the `isDesktopAuth()` gate).
+ * Reader hook: true when the app is offline (navigator down, or the live doc's
+ * sync socket down). Backed by the module-level connectivity flag (driven by
+ * the single `useOfflineSync` driver in WorkspaceChrome), so any component
+ * anywhere can gate its controls on it.
  */
 export function useIsOffline(): boolean {
-  const bundled = isDesktopAuth();
   const online = useSyncExternalStore(
     subscribeOnline,
     getOnline,
     () => true,
   );
-  return bundled && !online;
+  return !online;
 }
 
 /** Reader hook: number of writes queued for replay (for the "N pending" badge). */
@@ -64,20 +93,24 @@ export function usePendingWrites(): number {
 /**
  * The single connectivity DRIVER — mount once high in the tree (WorkspaceChrome,
  * which is present on every `/w/[id]/*` surface). Watches `navigator.onLine`
- * (+ an optional collab-socket signal), reflects it into the module flag, and
- * flushes the queued writes on the offline→online rising edge.
+ * + the published collab-socket signal, reflects the classification into the
+ * module flag, and flushes the queued writes on the offline→online rising edge.
  */
-export function useOfflineSync(collabConnected = true): OfflineSyncState {
-  const bundled = isDesktopAuth();
+export function useOfflineSync(): OfflineSyncState {
   const [navOnline, setNavOnline] = useState(() =>
     typeof navigator === "undefined" ? true : navigator.onLine,
   );
   const [pending, setPending] = useState(0);
   const prevRef = useRef<Connectivity>("online");
+  const collabUp = useSyncExternalStore(
+    subscribeCollabConnected,
+    getCollabConnected,
+    () => true,
+  );
 
-  // navigator online/offline events (bundled only).
+  // navigator online/offline events.
   useEffect(() => {
-    if (!bundled || typeof window === "undefined") return;
+    if (typeof window === "undefined") return;
     const on = () => setNavOnline(true);
     const off = () => setNavOnline(false);
     window.addEventListener("online", on);
@@ -87,26 +120,26 @@ export function useOfflineSync(collabConnected = true): OfflineSyncState {
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
     };
-  }, [bundled]);
+  }, []);
 
-  // Pending-write count (always subscribe; it's a no-op count on web).
+  // Pending-write count.
   useEffect(() => subscribePendingCount(setPending), []);
 
-  const connectivity: Connectivity = bundled
-    ? classifyConnectivity({ navigatorOnline: navOnline, collabConnected })
-    : "online";
+  const connectivity: Connectivity = classifyConnectivity({
+    navigatorOnline: navOnline,
+    collabConnected: collabUp,
+  });
 
   // Reflect into the module flag + flush queued writes on recovery.
   useEffect(() => {
-    if (!bundled) return;
     setOnline(connectivity === "online");
     if (shouldFlushQueue(prevRef.current, connectivity)) void flushWriteQueue();
     prevRef.current = connectivity;
-  }, [bundled, connectivity]);
+  }, [connectivity]);
 
   return {
     connectivity,
-    offline: bundled && isEffectivelyOffline(connectivity),
+    offline: isEffectivelyOffline(connectivity),
     pending,
   };
 }

@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { getUserInfo, getCachedUserInfo, type UserInfo } from "@/lib/user";
 import { authFetch } from "@/lib/auth-fetch";
 import { desktopSignOut } from "@/lib/desktop-auth-source";
+import { clearLocalDocCaches } from "@/lib/offline/idb";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -166,11 +167,14 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
       });
 
       if (res.status === 204) {
-        // Account deleted on the backend; now clear the session. In the
-        // Electron shell, clear the shell's own cookie jar via the bridge
-        // (the sub-app `/api/auth/logout` is a no-op in prod, so it would
-        // otherwise leave orphaned cookies in the jar) — it reloads into the
-        // sign-in landing itself. See `desktopSignOut`.
+        // Account deleted on the backend; scrub the locally cached doc pages
+        // (offline editing stores) so deleted-account content doesn't linger
+        // in the browser, then clear the session. In the Electron shell,
+        // clear the shell's own cookie jar via the bridge (the sub-app
+        // `/api/auth/logout` is a no-op in prod, so it would otherwise leave
+        // orphaned cookies in the jar) — it reloads into the sign-in landing
+        // itself. See `desktopSignOut`.
+        await clearLocalDocCaches();
         if (desktopSignOut()) return;
         // Web: clear the session server-side so `Domain=.usebrian.ai` cookies go
         // too (JS-only clears can't reach them). Use hard navigation after so

@@ -1,13 +1,14 @@
 /**
- * Offline write manager for the bundled desktop app (Phase 5,
- * docs/plans/doc-desktop-bundled-offline.md). Wraps the *non-Yjs* REST writes
- * (page rename / icon / clearance / full-width today) so they queue when offline
- * and replay on reconnect, instead of failing. In-doc edits already survive
- * offline via Yjs + `y-indexeddb`; this covers the metadata writes around them.
+ * Offline write manager for ALL clients (originally Phase 5 of
+ * docs/plans/doc-desktop-bundled-offline.md, un-gated when the web app went
+ * offline-first). Wraps the *non-Yjs* REST writes (page rename / icon /
+ * clearance / full-width today) so they queue when offline and replay on
+ * reconnect, instead of failing. In-doc edits already survive offline via
+ * Yjs + `y-indexeddb`; this covers the metadata writes around them.
  *
- * Gated: on web + the thin shell (`isDesktopAuth()` false) `offlineWrite` runs
- * the SDK call directly — identical to calling it inline. Only the bundled app,
- * while offline, queues.
+ * While the `online` flag (kept fresh by `use-offline-sync`) is up,
+ * `offlineWrite` runs the SDK call directly — identical to calling it inline.
+ * Offline, it queues.
  *
  * Scope (v1): last-write-wins metadata writes on an EXISTING page (safe to
  * coalesce + replay idempotently). Creates / reparent / entity writes (temp-id
@@ -22,7 +23,6 @@ import {
   setViewFullWidth,
   setViewClearance,
 } from "@/lib/api/views";
-import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "./idb";
 import {
   enqueueWrite,
@@ -35,7 +35,7 @@ import {
 const QUEUE_KEY = "offline:write-queue";
 
 // ── Connectivity flag (kept fresh by use-offline-sync) ─────────
-// Defaults online so writes go straight through before the hook mounts / on web.
+// Defaults online so writes go straight through before the hook mounts.
 let online = true;
 const onlineListeners = new Set<(online: boolean) => void>();
 export function setOnline(value: boolean): void {
@@ -109,13 +109,12 @@ export interface OfflineWriteSpec<R> {
 }
 
 /**
- * Run a write now (online / web) — calling `exec` then `onResult`, propagating
- * errors so the caller's existing try/catch surfaces them — OR, when offline in
- * the bundled app, enqueue it for replay and apply the optimistic update without
- * throwing.
+ * Run a write now (online) — calling `exec` then `onResult`, propagating
+ * errors so the caller's existing try/catch surfaces them — OR, when offline,
+ * enqueue it for replay and apply the optimistic update without throwing.
  */
 export async function offlineWrite<R>(spec: OfflineWriteSpec<R>): Promise<void> {
-  if (!isDesktopAuth() || online) {
+  if (online) {
     const result = await spec.exec();
     spec.onResult?.(result);
     return;
@@ -150,7 +149,6 @@ const EXECUTORS: Record<string, (payload: unknown) => Promise<unknown>> = {
 
 /** Replay queued writes in order (call on the offline→online rising edge). */
 export async function flushWriteQueue(): Promise<void> {
-  if (!isDesktopAuth()) return;
   await ensureLoaded();
   if (queue.length === 0) return;
   const result = await replayQueue(queue, async (op) => {

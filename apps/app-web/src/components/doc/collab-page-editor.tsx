@@ -55,7 +55,11 @@ import {
   withFreshBlockIds,
   type CustomPageTemplateSummary,
 } from "@use-brian/doc-model";
-import type { CollabHandle } from "@/lib/collab/use-collab-provider";
+import { CloudOff } from "lucide-react";
+import type {
+  CollabHandle,
+  CollabStatus,
+} from "@/lib/collab/use-collab-provider";
 import { colorForUserId } from "@/lib/collab/cursor-color";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -193,7 +197,7 @@ export function CollabPageEditor({
   onTemplateSeeded,
   onContentChange,
 }: CollabPageEditorProps) {
-  const { doc, provider, synced } = collab;
+  const { doc, provider, synced, status } = collab;
   if (!doc || !provider) {
     return (
       <>
@@ -208,6 +212,7 @@ export function CollabPageEditor({
       provider={provider}
       canEdit={canEdit !== false}
       synced={synced}
+      status={status}
       user={user}
       viewId={viewId}
       nameOrigin={nameOrigin}
@@ -228,6 +233,7 @@ function CollabEditorInner({
   provider,
   canEdit,
   synced,
+  status,
   user,
   viewId,
   nameOrigin,
@@ -244,6 +250,7 @@ function CollabEditorInner({
   provider: HocuspocusProvider;
   canEdit: boolean;
   synced: boolean;
+  status: CollabStatus;
   user?: { id: string; name: string; avatarUrl?: string | null };
   viewId?: string;
   nameOrigin?: string;
@@ -1197,7 +1204,18 @@ function CollabEditorInner({
           onThreadChanged={refetchThreads}
         />
       ) : null}
-      {!synced ? <EditorSkeleton overlay /> : null}
+      {/* Not yet ready: while (re)connecting show the loading shimmer; when the
+          socket is DOWN and no local copy exists (a page never opened on this
+          device — `use-collab-provider`'s readiness rule), show an honest
+          offline notice instead of an eternal skeleton. It blocks pointer
+          input so nobody types into a blank doc that actually has content. */}
+      {!synced ? (
+        status === "disconnected" ? (
+          <OfflineDocUnavailable />
+        ) : (
+          <EditorSkeleton overlay />
+        )
+      ) : null}
       {canEdit ? (
         <FloatingToolbar
           editor={editor}
@@ -1333,6 +1351,29 @@ function CollabEditorInner({
           }}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Shown in place of the editor when the sync socket is down AND this device
+ * has no local copy of the page (never opened here, so IndexedDB is empty).
+ * Opaque + interactive-blocking: the Yjs doc behind it is blank, and letting
+ * the user type into it would misrepresent a page that has server content.
+ */
+function OfflineDocUnavailable() {
+  const t = useT().docPage.errors;
+  return (
+    <div className="absolute inset-0 z-10 flex items-start justify-center bg-background pt-16">
+      <div className="flex max-w-sm flex-col items-center gap-2 text-center">
+        <CloudOff className="size-6 text-muted-foreground" aria-hidden />
+        <p className="text-sm font-medium text-foreground">
+          {t.collabOfflineUnavailableTitle}
+        </p>
+        <p className="text-sm text-muted-foreground">
+          {t.collabOfflineUnavailableBody}
+        </p>
+      </div>
     </div>
   );
 }
