@@ -90,7 +90,7 @@ describe('[COMP:routes/assistants-system-prompt-access] PATCH /:assistantId syst
     expect(updateValues).toContain(null)
   })
 
-  it('still blocks a non-owner from renaming (owner-only field, 403, no UPDATE)', async () => {
+  it('blocks a plain member from renaming (rename is owner-or-admin, 403, no UPDATE)', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never) // membership
 
     const res = await request(makeApp({ userId: 'u-member' }))
@@ -98,17 +98,50 @@ describe('[COMP:routes/assistants-system-prompt-access] PATCH /:assistantId syst
       .send({ name: 'Renamed by member' })
 
     expect(res.status).toBe(403)
-    expect(res.body.error).toBe('Only the owner can update assistant settings')
+    expect(res.body.error).toBe('Only the owner or a workspace admin can rename this assistant')
     // Only the membership check ran — no UPDATE.
     expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
   })
 
-  it('rejects a non-owner request that bundles the system prompt with an owner-only field', async () => {
+  it('lets a workspace admin rename the assistant (200, UPDATE issued, no team requery)', async () => {
+    mockQueryWithRLS
+      .mockResolvedValueOnce({ rows: [{ role: 'admin' }], rowCount: 1 } as never) // membership
+      .mockResolvedValueOnce({ rows: [{ ...updatedRow, name: 'Renamed by admin' }], rowCount: 1 } as never) // UPDATE
+
+    const res = await request(makeApp({ userId: 'u-admin' }))
+      .patch('/api/assistants/a-1')
+      .send({ name: 'Renamed by admin' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.name).toBe('Renamed by admin')
+
+    // membership check + UPDATE only — rename authorizes off member.role, so no
+    // separate team-role requery (unlike clearance).
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
+    const updateSql = mockQueryWithRLS.mock.calls[1][1] as string
+    const updateValues = mockQueryWithRLS.mock.calls[1][2] as unknown[]
+    expect(updateSql).toContain('name = $')
+    expect(updateValues).toContain('Renamed by admin')
+  })
+
+  it('still blocks an admin from owner-only fields, even bundled with a rename (bio stays owner-only)', async () => {
+    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'admin' }], rowCount: 1 } as never) // membership
+
+    const res = await request(makeApp({ userId: 'u-admin' }))
+      .patch('/api/assistants/a-1')
+      .send({ name: 'New name', bio: 'Admin cannot set this' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('Only the owner can update assistant settings')
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1) // membership only, no UPDATE
+  })
+
+  it('rejects a non-owner request that bundles the system prompt with an owner-only field (bio)', async () => {
     mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never) // membership
 
     const res = await request(makeApp({ userId: 'u-member' }))
       .patch('/api/assistants/a-1')
-      .send({ systemPrompt: 'New persona', name: 'Sneaky rename' })
+      .send({ systemPrompt: 'New persona', bio: 'Sneaky bio' })
 
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('Only the owner can update assistant settings')

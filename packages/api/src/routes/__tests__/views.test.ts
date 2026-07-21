@@ -159,6 +159,9 @@ function makeApp(opts: {
   pageTemplateStore?: unknown
   /** Blueprint records store (migration 307). Omit → records routes return 503. */
   blueprintRecordStore?: unknown
+  /** Page grant store (sharing/publish). Omit → share routes return 503 and
+   *  GET /views/:id reports `published: false`. */
+  pageGrantStore?: unknown
 }): { app: express.Express; stores: Stores } {
   const resolvedRole = 'role' in opts ? opts.role ?? null : 'member'
   const stores: Stores = {
@@ -193,6 +196,9 @@ function makeApp(opts: {
         : {}),
       ...(opts.blueprintRecordStore
         ? { blueprintRecordStore: opts.blueprintRecordStore as never }
+        : {}),
+      ...(opts.pageGrantStore
+        ? { pageGrantStore: opts.pageGrantStore as never }
         : {}),
     }),
   )
@@ -1304,6 +1310,31 @@ describe('[COMP:api/views-routes] view-page metadata', () => {
     expect(res.body.state).toBe('draft')
     expect(res.body.icon).toBe('📊')
     expect(res.body.autoPruneAt).toBe('2026-06-25T00:00:00.000Z')
+    // No pageGrantStore wired → the resolved publish state defaults to false.
+    expect(res.body.published).toBe(false)
+  })
+
+  it('GET /views/:id reports published: true when the cascade resolver finds a live grant', async () => {
+    const pageGrantStore = {
+      resolvePublishedPage: vi.fn().mockResolvedValue({ pageId: 'sv-page-1', role: 'view' }),
+    }
+    const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture())
+    const res = await request(app).get('/api/views/sv-page-1')
+    expect(res.status).toBe(200)
+    expect(res.body.published).toBe(true)
+    expect(pageGrantStore.resolvePublishedPage).toHaveBeenCalledWith('sv-page-1')
+  })
+
+  it('GET /views/:id reports published: false when the resolver finds nothing', async () => {
+    const pageGrantStore = {
+      resolvePublishedPage: vi.fn().mockResolvedValue(null),
+    }
+    const { app, stores } = makeApp({ userId: USER_ID, pageGrantStore })
+    stores.savedViewStore.getById.mockResolvedValueOnce(savedViewFixture())
+    const res = await request(app).get('/api/views/sv-page-1')
+    expect(res.status).toBe(200)
+    expect(res.body.published).toBe(false)
   })
 
   it('GET /views/:id returns 404 when missing', async () => {

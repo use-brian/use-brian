@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { serverApiFetch } from "@/lib/server-fetch";
 import { getServerDictionary } from "@/lib/i18n/server";
+import { safeWorkspaceNext } from "@/lib/legacy-paths";
 
 type Team = { id: string; name: string; role?: string };
 
@@ -12,15 +13,28 @@ type Team = { id: string; name: string; role?: string };
  * failed fetch (`!data`) bounces to `/login`; a genuinely empty list
  * renders the picker with no rows — effectively unreachable since every
  * user has a Personal workspace auto-created at signup.
+ *
+ * `?next=<workspace-relative path>` (set by the `[...legacy]` catch-all)
+ * is appended to whichever workspace is chosen, so a legacy deep-link keeps
+ * its destination through the picker instead of dropping it at the door.
+ * Sanitized by `safeWorkspaceNext` — the picker must not become an open
+ * redirect. See `[COMP:app-web/legacy-redirect]`.
  */
-export default async function TeamsPage() {
-  const [data, { dict }] = await Promise.all([
+export default async function TeamsPage(props: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const [data, { dict }, searchParams] = await Promise.all([
     serverApiFetch<{ teams?: Team[] }>("/api/workspaces"),
     getServerDictionary(),
+    props.searchParams,
   ]);
   if (!data) redirect("/login");
   const teams = data.teams ?? [];
-  if (teams.length === 1) redirect(`/w/${teams[0].id}`);
+  const rawNext = searchParams.next;
+  const next = safeWorkspaceNext(
+    Array.isArray(rawNext) ? rawNext[0] : rawNext,
+  );
+  if (teams.length === 1) redirect(`/w/${teams[0].id}${next}`);
 
   const t = dict.teams;
 
@@ -46,7 +60,7 @@ export default async function TeamsPage() {
           {teams.map((team) => (
             <li key={team.id}>
               <Link
-                href={`/w/${team.id}`}
+                href={`/w/${team.id}${next}`}
                 className="group flex items-center justify-between rounded-xl border border-border bg-card px-4 py-3.5 transition-all duration-200 hover:border-primary/40 hover:bg-accent active:bg-accent/80 hover-lift"
               >
                 <div className="space-y-0.5">

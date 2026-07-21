@@ -51,6 +51,7 @@ import type {
 } from './page-types.js'
 import { bindingConfigSchema } from '../views/schemas.js'
 import { chartBlockSchema, coerceHeadingLevel } from '../views/blocks.js'
+import { liftTableRows } from './markdown.js'
 
 // ── id generator default ─────────────────────────────────────────────
 
@@ -284,6 +285,14 @@ function applyOne(
             `applyOps[${opIndex}]: edit produced an invalid chart block — ${parsed.error.issues[0]?.message ?? 'unknown chart error'}`,
           )
         }
+      }
+      // Mirror the lift for table rows: an `edit` patch replacing `rows` rides
+      // the open `patch` record, bypassing `liftedBlockSchema` — stray cell
+      // shapes (plain string / `{ text }` / bare paragraph) would persist and
+      // render as an empty grid (see `liftTableRows` in markdown.ts).
+      if (current.kind === 'table' && 'rows' in op.patch) {
+        const tbl = merged as Extract<Block, { kind: 'table' }>
+        tbl.rows = liftTableRows(tbl.rows) as typeof tbl.rows
       }
       // Mirror the binding guard for headings: a model often patches a
       // heading's level with a Notion/Markdown-flavored value (`"h2"`, `"##"`),

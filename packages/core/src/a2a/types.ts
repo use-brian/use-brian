@@ -281,7 +281,7 @@ export type ConsultRequest = {
    * stripped. See docs/architecture/engine/scheduled-jobs.md →
    * "Deferred confirmations".
    */
-  deliver?: { channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'; channelId: string }
+  deliver?: { channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'; channelId: string }
   /**
    * Optional page anchor for a workflow `assistant_call` step. Always a
    * concrete `saved_views` id by the time it is on the wire — the workflow

@@ -70,7 +70,9 @@ describe("[COMP:app-web/goals-board] goals SDK", () => {
     expect(url).not.toContain("status=");
     expect(url).not.toContain("hostType=");
     expect(url).not.toContain("includeTerminal=");
+    expect(url).not.toContain("confirmed=");
   });
+
 
   it("returns [] on a non-OK response (board renders its empty state)", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ error: "nope" }, 500));
@@ -100,6 +102,7 @@ describe("[COMP:app-web/goals-board] confirmGoal clarity gate (§12)", () => {
     expect(r.ok).toBe(true);
     expect(r.goal).toEqual(SAMPLE);
   });
+
 
   it("maps a non-OK HTTP response to an error result", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({ error: "nope" }, 500));
@@ -141,6 +144,11 @@ describe("[COMP:app-web/goals-board] getGoalDetail", () => {
     budget: { maxSpend: 50 },
     policy: { approval: "ask" },
     completionClaim: { because: "all sub-tasks closed", verifiedAt: "2026-06-30T12:00:00.000Z" },
+    brief: {
+      verification: "The task carries a vendor comparison page.",
+      approach: "Search the brain, research the web, write the page.",
+      judgeReason: "Research and drafting fit the assistant.",
+    },
   };
 
   it("fetches one goal by id and parses the richer detail envelope", async () => {
@@ -159,5 +167,36 @@ describe("[COMP:app-web/goals-board] getGoalDetail", () => {
   it("returns null when the envelope carries no goal", async () => {
     mockAuthFetch.mockResolvedValueOnce(json({}));
     expect(await getGoalDetail("g1")).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/triage-panel] triage SDK surface (§8)", () => {
+  it("threads the confirmed filter (triage lists false, the board lists true)", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ goals: [] }));
+    await listGoals("ws-1", { confirmed: false });
+    expect(mockAuthFetch.mock.calls[0][0] as string).toContain("confirmed=false");
+    mockAuthFetch.mockResolvedValueOnce(json({ goals: [] }));
+    await listGoals("ws-1", { confirmed: true });
+    expect(mockAuthFetch.mock.calls[1][0] as string).toContain("confirmed=true");
+  });
+
+  it("sends brief edits (verification / approach) in the confirm body", async () => {
+    mockAuthFetch.mockResolvedValueOnce(json({ ok: true, goal: SAMPLE }));
+    await confirmGoal("g1", undefined, {
+      verification: "Three vendors compared.",
+      approach: "Research, then write the page.",
+    });
+    const [, init] = mockAuthFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.verification).toBe("Three vendors compared.");
+    expect(body.approach).toBe("Research, then write the page.");
+  });
+
+  it("carries hostTitle on list rows (the triage list leads with the task title)", async () => {
+    mockAuthFetch.mockResolvedValueOnce(
+      json({ goals: [{ ...SAMPLE, hostTitle: "Compare CRM vendors" }] }),
+    );
+    const out = await listGoals("ws-1", { confirmed: false });
+    expect(out[0]?.hostTitle).toBe("Compare CRM vendors");
   });
 });

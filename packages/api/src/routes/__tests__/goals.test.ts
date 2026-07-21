@@ -124,6 +124,7 @@ describe('[COMP:api/goals-route] GET /api/goals', () => {
         outcome: 'ship it',
         status: 'active',
         host: { type: 'task', id: 't1' },
+        hostTitle: null,
         parentGoalId: null,
         recipeId: null,
         blockerReason: null,
@@ -146,6 +147,28 @@ describe('[COMP:api/goals-route] GET /api/goals', () => {
       hostId: undefined,
       includeTerminal: true,
     })
+  })
+
+  it('threads the §8 confirmed filter (drafts for triage, confirmed for the board)', async () => {
+    const { app, goalStore } = makeApp({ userId: 'u1', role: 'member', goals: [] })
+    await request(app).get('/api/goals?workspaceId=w1&confirmed=false')
+    expect(goalStore.list).toHaveBeenLastCalledWith(
+      'u1',
+      'w1',
+      expect.objectContaining({ confirmed: false }),
+    )
+    await request(app).get('/api/goals?workspaceId=w1&confirmed=true')
+    expect(goalStore.list).toHaveBeenLastCalledWith(
+      'u1',
+      'w1',
+      expect.objectContaining({ confirmed: true }),
+    )
+    await request(app).get('/api/goals?workspaceId=w1')
+    expect(goalStore.list).toHaveBeenLastCalledWith(
+      'u1',
+      'w1',
+      expect.objectContaining({ confirmed: undefined }),
+    )
   })
 })
 
@@ -178,6 +201,35 @@ describe('[COMP:api/goals-route] POST /api/goals/:id/confirm — clarity gate (�
     expect(res.body.ok).toBe(true)
     expect(assessClarity).toHaveBeenCalledWith({ outcome: 'Close the Acme deal', userId: 'u1' })
     expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', { confirm: true, outcome: 'Close the Acme deal' })
+  })
+
+  it('assesses and persists §8 brief edits (verification / approach) alongside the outcome', async () => {
+    mockGetGoalById.mockResolvedValue({
+      ...DRAFT_GOAL,
+      brief: { verification: 'old check', approach: 'old plan', judgeReason: 'fits' },
+    } as never)
+    mockUpdateGoalSystem.mockResolvedValue({ ...DRAFT_GOAL, confirmedAt: NOW } as never)
+    const assessClarity = vi.fn().mockResolvedValue({ clear: true })
+    const { app } = makeApp({ userId: 'u1', role: 'member', assessClarity })
+
+    const res = await request(app)
+      .post('/api/goals/g1/confirm')
+      .send({ verification: 'At least three vendors compared.' })
+
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    // The gate reviews the edited configuration (edit merged onto the brief).
+    expect(assessClarity).toHaveBeenCalledWith({
+      outcome: 'grow the business',
+      verification: 'At least three vendors compared.',
+      approach: 'old plan',
+      userId: 'u1',
+    })
+    expect(mockUpdateGoalSystem).toHaveBeenCalledWith('g1', {
+      confirm: true,
+      outcome: undefined,
+      brief: { verification: 'At least three vendors compared.', approach: 'old plan', judgeReason: 'fits' },
+    })
   })
 
   it('arms without a clarity check when no assessor is wired (OSS / no provider)', async () => {
@@ -337,6 +389,7 @@ describe('[COMP:api/goals-route] GET /api/goals/:id — drill-down detail', () =
       outcome: 'grow the business',
       status: 'active',
       host: { type: 'task', id: 't1' },
+      hostTitle: null,
       parentGoalId: null,
       recipeId: null,
       blockerReason: null,

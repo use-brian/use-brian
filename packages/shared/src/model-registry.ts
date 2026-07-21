@@ -803,6 +803,26 @@ export function menuForClass(cls: ModelClass, configuredProviders?: ReadonlySet<
   )
 }
 
+/**
+ * Active rows of a class from configured providers, IGNORING the `menu` flag.
+ *
+ * `menuForClass` is the user-facing selection surface, so it requires
+ * `menu === true`. The `background` class is internal routing only and is
+ * deliberately never menu-flagged (see the `qwen3.5-flash` row — "Internal
+ * routing only, NEVER a menu"), which makes every background model invisible
+ * to `menuForClass`. Substitution for background lanes (auto-title, topic and
+ * research classifiers, session-state diff) must therefore go through here,
+ * or a Qwen-only deployment falls through to a metered CHAT model and pays
+ * chat prices for a 32-token title.
+ */
+export function activeForClass(cls: ModelClass, configuredProviders?: ReadonlySet<string>): ModelRegistryRow[] {
+  return MODEL_REGISTRY.filter((row) =>
+    row.class === cls &&
+    row.status === 'active' &&
+    (!configuredProviders || configuredProviders.has(row.provider)),
+  )
+}
+
 const CHAT_TIER_KEYS: ReadonlySet<string> = new Set(['standard', 'pro', 'max', 'research'])
 
 /** Callable ids for a provider's `models` listing: active, non-embedding

@@ -505,7 +505,7 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     goalStoreMod = await import('../goals-store.js')
   })
 
-  it('drafts an unconfirmed goal for a TOP-LEVEL task only; hostTaskDone flips true once the task closes; confirm arms it', async () => {
+  it('drafts an unconfirmed goal WITH a brief only when the judge passes (§8); hostTaskDone flips true once the task closes; confirm arms it', async () => {
     const c = await pool!.connect()
     let userId: string
     let workspaceId: string
@@ -517,32 +517,60 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
       c.release()
     }
 
-    // Wire the auto-draft hook exactly as boot does.
+    // Wire the v2 judge-conditional hook exactly as boot does: a triage judge
+    // decides per task; only a pass mints a draft, and the draft carries the
+    // judge's brief. This stub passes titles containing "research" and fails
+    // everything else (deterministic — no LLM in an integration test).
+    const brief = {
+      verification: 'The task carries a vendor comparison page.',
+      approach: 'Search the brain, research the web, write the page.',
+      judgeReason: 'Research and drafting fit the assistant.',
+    }
+    const judged: string[] = []
     const store = tasksStore.createDbTaskStore({
       onTaskCreate: (task, uid) => {
-        void goals.createGoal({
-          workspaceId: task.workspaceId,
-          host: { type: 'task', id: task.id },
-          outcome: `Complete: ${task.title}`,
-          doneWhen: { kind: 'query', query: { predicate: { hostTaskDone: true } } },
-          confirmed: false,
-          createdByUserId: uid,
-        })
+        void (async () => {
+          judged.push(task.title)
+          if (!task.title.includes('research')) return // judge fail → no draft
+          await goals.createGoal({
+            workspaceId: task.workspaceId,
+            host: { type: 'task', id: task.id },
+            outcome: `A vendor comparison for: ${task.title}`,
+            doneWhen: { kind: 'query', query: { predicate: { hostTaskDone: true } } },
+            confirmed: false,
+            createdByUserId: uid,
+            brief,
+          })
+        })()
       },
     })
 
-    const title = `autopilot-${Date.now()}-${Math.round(performance.now())}`
+    const stamp = `${Date.now()}-${Math.round(performance.now())}`
+    const title = `autopilot-research-${stamp}`
     const top = await store.create({ userId, workspaceId, title })
+    const human = await store.create({ userId, workspaceId, title: `sign-contract-${stamp}` })
     const sub = await store.create({ userId, workspaceId, title: 'child', parentId: top.id })
     await new Promise((r) => setTimeout(r, 100)) // let the fire-and-forget drafts settle
 
-    // Top-level → exactly one DRAFT goal; a sub-task → none.
+    // Judge pass → exactly one DRAFT goal carrying the brief; judge fail → no
+    // goal at all; a sub-task never reaches the judge.
     const hostGoals = await goals.listGoalsByHostSystem({ type: 'task', id: top.id })
     expect(hostGoals).toHaveLength(1)
     const goal = hostGoals[0]
     expect(goal.confirmedAt).toBeNull()
     expect(goal.host).toEqual({ type: 'task', id: top.id })
+    expect(goal.brief).toEqual(brief)
+    expect(await goals.listGoalsByHostSystem({ type: 'task', id: human.id })).toHaveLength(0)
     expect(await goals.listGoalsByHostSystem({ type: 'task', id: sub.id })).toHaveLength(0)
+    expect(judged).not.toContain('child')
+
+    // The triage surface's list: unconfirmed drafts, labelled by host task.
+    const drafts = await goals.listGoals(userId, workspaceId, { confirmed: false })
+    const draftRow = drafts.find((g) => g.id === goal.id)
+    expect(draftRow?.hostTitle).toBe(title)
+    // The board's list: confirmed only — the draft must not appear.
+    const confirmedRows = await goals.listGoals(userId, workspaceId, { confirmed: true })
+    expect(confirmedRows.some((g) => g.id === goal.id)).toBe(false)
 
     // done_when (hostTaskDone): false while open, true once the task closes —
     // the resolver follows the supersession chain, so the close's new id is found.
@@ -552,11 +580,14 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     expect(await resolvers.query({ predicate: { hostTaskDone: true } })).toBe(true)
 
     // Enforcement: a workflow that tried to work an unconfirmed goal blocks it
-    // for clarification; confirming un-blocks it so it can be spun up.
+    // for clarification; confirming un-blocks it so it can be spun up. Confirm
+    // may also carry §8 brief edits — they persist.
     await goals.setGoalStatusSystem(goal.id, 'blocked', 'unconfirmed_needs_clarification')
-    const confirmed = await goals.updateGoalSystem(goal.id, { confirm: true })
+    const editedBrief = { ...brief, verification: 'At least three vendors compared.' }
+    const confirmed = await goals.updateGoalSystem(goal.id, { confirm: true, brief: editedBrief })
     expect(confirmed?.confirmedAt).not.toBeNull()
     expect(confirmed?.status).toBe('active') // un-blocked → ready to spin up
+    expect(confirmed?.brief).toEqual(editedBrief)
   })
 
   it('an edit to a hosted task repoints its goal so host_id tracks the live id', async () => {
@@ -592,6 +623,57 @@ describeIf('[COMP:goals/auto-draft] task-autopilot auto-draft + done detection',
     expect(byNew).toHaveLength(1)
     expect(byNew[0].id).toBe(goal.id) // same goal row, repointed
     expect(await goals.listGoalsByHostSystem({ type: 'task', id: top.id })).toHaveLength(0)
+  })
+})
+
+describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
+  let goals: GoalsMod
+  beforeAll(async () => {
+    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
+    goals = await import('../goals.js')
+  })
+
+  it('round-trips the brief through create, read, and updateGoalSystem edits; explicit goals carry none', async () => {
+    const c = await pool!.connect()
+    let userId: string
+    let workspaceId: string
+    try {
+      userId = await makeUser(c)
+      workspaceId = await makeWorkspace(c, userId)
+      await addMember(c, workspaceId, userId)
+    } finally {
+      c.release()
+    }
+
+    const brief = {
+      verification: 'The task carries a comparison page.',
+      approach: 'Search the brain, then write the page.',
+      judgeReason: 'Research fits the assistant.',
+    }
+    const drafted = await goals.createGoal({
+      workspaceId,
+      outcome: 'A comparison page exists',
+      doneWhen: { kind: 'query', query: { predicate: { hostTaskDone: true } } },
+      confirmed: false,
+      createdByUserId: userId,
+      brief,
+    })
+    expect(drafted.brief).toEqual(brief)
+    expect((await goals.getGoalByIdSystem(drafted.id))?.brief).toEqual(brief)
+
+    // Triage edits persist via updateGoalSystem (the confirm route's write path).
+    const edited = { ...brief, approach: 'Ask the CRM first, then write the page.' }
+    const updated = await goals.updateGoalSystem(drafted.id, { brief: edited })
+    expect(updated?.brief).toEqual(edited)
+
+    // A goal created without a brief (setGoal path) stays brief-less.
+    const explicit = await goals.createGoal({
+      workspaceId,
+      outcome: 'An explicit goal',
+      doneWhen: { kind: 'subtasks' },
+      createdByUserId: userId,
+    })
+    expect(explicit.brief).toBeNull()
   })
 })
 

@@ -22,7 +22,7 @@ type Team = { id: string; name: string };
  * Workspace resolution mirrors the root landing (`app/page.tsx`):
  *   - id in path   → /w/:id            (`/workspaces/<id>` bookmarks)
  *   - 1 workspace  → /w/:id<suffix>    (straight into the surface)
- *   - 0/n          → /teams            (picker; the sub-path is dropped)
+ *   - 0/n          → /teams?next=…     (picker, destination preserved)
  */
 export default async function LegacyPathPage(props: {
   params: Promise<{ legacy: string[] }>;
@@ -74,5 +74,13 @@ export default async function LegacyPathPage(props: {
   if (teams.length === 1) {
     redirect(`/w/${teams[0].id}${target.suffix}${query}`);
   }
-  redirect(`/teams${query}`);
+  // 0 or many workspaces → the picker. Carry the intended destination as
+  // `?next=` so choosing a workspace still lands where the link meant to go.
+  // Dropping it here is what made Telegram `/connect gmail` a dead end for
+  // multi-workspace users (2026-07-21).
+  const intended = `${target.suffix}${query}`;
+  const pickerQuery = intended
+    ? `?next=${encodeURIComponent(intended)}`
+    : "";
+  redirect(`/teams${pickerQuery}`);
 }

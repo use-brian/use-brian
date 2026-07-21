@@ -12,6 +12,7 @@ import {
   wouldBudgetDowngradeAffectModel,
   chatTierBudget,
   ensureServableModel,
+  backgroundLatencyBudgetMs,
 } from '../model-resolution.js'
 
 // Research became its own billing tier on 2026-06-02 (10 credits, above Max's
@@ -268,5 +269,52 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 
   it('leaves an already-Qwen pick untouched on a Qwen deploy', () => {
     expect(ensureServableModel('qwen3.7-plus', QWEN)).toBe('qwen3.7-plus')
+  })
+
+  // Background lanes (auto-title, topic/research classifiers, session-state
+  // diff) are internal routing and never menu-flagged, so the menu-scoped
+  // lookup can't see them. Before this, a Qwen-only deploy fell through to a
+  // metered CHAT model — a 32-token title billed at chat rates — or, at the
+  // call sites that never resolved at all, hard-failed every turn with
+  // "[routing] model 'gemini-3.1-flash-lite' ... is not configured".
+  it('substitutes the Qwen BACKGROUND model, not a metered chat model', () => {
+    expect(ensureServableModel('gemini-3.1-flash-lite', QWEN)).toBe('qwen3.5-flash')
+  })
+
+  it('keeps the Gemini background model when Gemini is configured', () => {
+    expect(ensureServableModel('gemini-3.1-flash-lite', GEMINI)).toBe('gemini-3.1-flash-lite')
+    expect(ensureServableModel('gemini-3.1-flash-lite', BOTH)).toBe('gemini-3.1-flash-lite')
+  })
+
+  it('is a no-op for a background model when nothing is configured', () => {
+    expect(ensureServableModel('gemini-3.1-flash-lite', new Set())).toBe('gemini-3.1-flash-lite')
+  })
+})
+
+// The auto-title budget silently assumed a sub-second Gemini Flash Lite.
+// Measured 2026-07-21 on a title-shaped call: qwen3.5-flash took 4.3s/9.6s/4.3s
+// against the old flat 10s ceiling, so a Qwen-only deploy dropped the in-stream
+// title_update on most turns (the title itself still landed in DB).
+describe('[COMP:api/model-resolution] backgroundLatencyBudgetMs — budget follows the serving provider', () => {
+  it('gives the Gemini background lane the tight budget', () => {
+    expect(backgroundLatencyBudgetMs('gemini-3.1-flash-lite')).toBe(10_000)
+  })
+
+  it('gives an OpenAI-compatible (DashScope) model a wider budget', () => {
+    expect(backgroundLatencyBudgetMs('qwen3.5-flash')).toBeGreaterThan(
+      backgroundLatencyBudgetMs('gemini-3.1-flash-lite'),
+    )
+  })
+
+  it('covers the whole openai-compat family, not one label', () => {
+    // A new `openai-compat:<label>` row must inherit the slower budget rather
+    // than silently regressing to the Gemini assumption.
+    for (const alias of ['qwen3.5-flash', 'qwen3.7-plus', 'deepseek-v4-pro']) {
+      expect(backgroundLatencyBudgetMs(alias)).toBe(25_000)
+    }
+  })
+
+  it('falls back to the tight budget for an unknown id', () => {
+    expect(backgroundLatencyBudgetMs('not-a-real-model')).toBe(10_000)
   })
 })

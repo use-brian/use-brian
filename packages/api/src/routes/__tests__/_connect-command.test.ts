@@ -111,3 +111,64 @@ describe('[COMP:api/connect-command] handleConnectCommand', () => {
     }
   })
 })
+
+// ── Workspace scoping ──────────────────────────────────────────
+// Every app-web route is `/w/<id>/...`; the bare `/studio/connectors` form
+// only resolves via the `[...legacy]` catch-all, which can pick a workspace
+// on its own ONLY when the user has exactly one. On 2026-07-21 a user with 8
+// workspaces tapped `/connect gmail` and landed on the `/teams` picker with
+// the sub-path dropped, so the button appeared to do nothing. The assistant
+// is workspace-bound, so callers pass its id and the link skips the guess.
+describe('[COMP:api/connect-command] workspace-scoped Mini App links', () => {
+  const WS = '3ccdb5fe-4bf0-4a29-bf32-2690ea0529a8'
+
+  function nextOf(url: string): string {
+    return new URL(url).searchParams.get('next') ?? ''
+  }
+
+  it('targets /w/<workspaceId>/studio/connectors when a workspace is known', () => {
+    const r = handleConnectCommand({
+      text: '/connect gmail',
+      isLinked: true,
+      appUrl: APP_URL,
+      workspaceId: WS,
+    })
+    const a = r.message?.actions?.[0]
+    expect(a && 'url' in a).toBe(true)
+    const next = nextOf((a as { url: string }).url)
+    expect(next).toBe(`/w/${WS}/studio/connectors?connect=gmail`)
+  })
+
+  it('scopes every button in the no-argument menu', () => {
+    const r = handleConnectCommand({
+      text: '/connect',
+      isLinked: true,
+      appUrl: APP_URL,
+      workspaceId: WS,
+    })
+    expect(r.message?.actions?.length).toBeGreaterThan(0)
+    for (const a of r.message?.actions ?? []) {
+      if (!('url' in a)) continue
+      expect(nextOf(a.url).startsWith(`/w/${WS}/studio/connectors?connect=`)).toBe(true)
+    }
+  })
+
+  it('falls back to the bare legacy path when no workspace is resolvable', () => {
+    const r = handleConnectCommand({ text: '/connect gmail', isLinked: true, appUrl: APP_URL })
+    const a = r.message?.actions?.[0]
+    expect(nextOf((a as { url: string }).url)).toBe('/studio/connectors?connect=gmail')
+  })
+
+  it('keeps the BYO bot handle alongside the workspace scope', () => {
+    const r = handleConnectCommand({
+      text: '/connect gmail',
+      isLinked: true,
+      appUrl: APP_URL,
+      workspaceId: WS,
+      botUsername: 'gm_bro_bot',
+    })
+    const url = (r.message?.actions?.[0] as { url: string }).url
+    expect(new URL(url).searchParams.get('bot')).toBe('gm_bro_bot')
+    expect(nextOf(url)).toContain(`/w/${WS}/`)
+  })
+})

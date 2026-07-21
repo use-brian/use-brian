@@ -64,13 +64,19 @@ export function createGoalWorkTools(
     async execute(input, context) {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
-      // Clarity gate (§12) — don't arm a goal an agent couldn't recognise as
-      // done. Assess the would-be outcome (the refinement, or the current one).
+      // Clarity gate (§12, widened §8) — don't arm a goal an agent couldn't
+      // recognise as done. Assess the would-be configuration: the outcome (the
+      // refinement, or the current one) plus the triage brief when present.
       if (deps.assessClarity) {
         const existing = await getGoalByIdSystem(input.goal_id)
         if (!existing) return { data: 'Goal not found.', isError: true }
         const outcome = input.outcome?.trim() || existing.outcome
-        const verdict = await deps.assessClarity({ outcome, userId: context.userId })
+        const verdict = await deps.assessClarity({
+          outcome,
+          verification: existing.brief?.verification,
+          approach: existing.brief?.approach,
+          userId: context.userId,
+        })
         if (!verdict.clear) {
           return {
             data:

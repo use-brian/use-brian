@@ -26,7 +26,7 @@ export type PendingApprovalStatus =
    */
   | 'auto_approved'
 
-export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp'
+export type ApprovalDeliveryChannel = 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
 
 /**
  * Application-enforced taxonomy for the `kind` column (mig 137).

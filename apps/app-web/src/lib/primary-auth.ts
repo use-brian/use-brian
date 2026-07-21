@@ -22,10 +22,19 @@
  * `/api/auth/logout` on usebrian.ai; if you change one, change the others.
  */
 
+import { isOssEdition } from "@/lib/edition";
+
 const ENV_PRIMARY_AUTH_URL = process.env.NEXT_PUBLIC_PRIMARY_AUTH_URL;
 const DEFAULT_PROD_PRIMARY_AUTH_URL = "https://usebrian.ai";
 
 export function primaryAuthUrl(): string | null {
+  // The open single-player edition owns auth locally (the local-owner session),
+  // so it never delegates to a primary — including in a production build, where
+  // `next build` freezes NODE_ENV to "production" and the check below would
+  // otherwise wrongly bounce every self-hosted user to usebrian.ai.
+  if (isOssEdition()) {
+    return null;
+  }
   if (ENV_PRIMARY_AUTH_URL && ENV_PRIMARY_AUTH_URL.length > 0) {
     return ENV_PRIMARY_AUTH_URL;
   }

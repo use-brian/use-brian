@@ -2149,6 +2149,11 @@ function SettingsTab({
   }
 
   const isOwner = role === "owner";
+  // Rename is a team-admin right: the owner OR a workspace admin may rename the
+  // assistant (a workspace admin manages the shared assistant roster). Mirrors
+  // the PATCH gate in packages/api/src/routes/assistants.ts. The rest of this
+  // tab (Channel Models, Team, Danger Zone) stays owner-only.
+  const canRename = role === "owner" || role === "admin";
   // Primary assistants anchor their workspace and cannot be deleted
   // (server enforces via 409 primary_not_deletable in
   // packages/api/src/routes/assistants.ts). Surface that up front
@@ -2182,11 +2187,11 @@ function SettingsTab({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                disabled={!isOwner}
+                disabled={!canRename}
                 maxLength={100}
                 className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
               />
-              {isOwner && (
+              {canRename && (
                 <button
                   onClick={saveName}
                   disabled={saving === "name" || !name.trim() || name.trim() === assistantName}

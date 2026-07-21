@@ -25,6 +25,25 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(LAYER_1_SYSTEM_PROMPT).toMatch(/haven't checked/)
   })
 
+  it('bans the em dash and never demonstrates it', () => {
+    // Founder rule 2026-07-22: assistants must never emit "—" — humans type
+    // "-", and the long dash reads as AI-generated. The prompt few-shots style
+    // as much as it instructs, so beyond the ban rule itself the character may
+    // not appear anywhere in the emitted constants (the ban line names it
+    // once, as a mention). If an edit reintroduces one, this fails.
+    const emDashes = (s: string) => s.split('—').length - 1
+    expect(LAYER_1_SYSTEM_PROMPT).toContain('Never type the em dash character')
+    expect(emDashes(LAYER_1_SYSTEM_PROMPT)).toBe(1)
+    for (const addendum of [
+      RESEARCH_MODE_ADDENDUM,
+      FOLLOW_UP_QUESTIONS_ADDENDUM,
+      COORDINATOR_BASE_ADDENDUM,
+      COORDINATOR_RESEARCH_ADDENDUM,
+    ]) {
+      expect(emDashes(addendum)).toBe(0)
+    }
+  })
+
   it('FOLLOW_UP_QUESTIONS_ADDENDUM is the opt-in chip-render block', () => {
     expect(FOLLOW_UP_QUESTIONS_ADDENDUM).toContain('<followup>')
     expect(FOLLOW_UP_QUESTIONS_ADDENDUM).toMatch(/2-4 questions/)
@@ -80,8 +99,8 @@ describe('[COMP:context-engine/layer-1-system-prompt] system-prompt constants', 
     expect(COORDINATOR_RESEARCH_ADDENDUM).toMatch(/Don't pre-empt Phase 4/)
     expect(COORDINATOR_RESEARCH_ADDENDUM).toMatch(/Save without asking/)
     // The four-phase protocol is still intact.
-    expect(COORDINATOR_RESEARCH_ADDENDUM).toContain('Phase 1 — recall')
-    expect(COORDINATOR_RESEARCH_ADDENDUM).toContain('Phase 4 — ingest + reply')
+    expect(COORDINATOR_RESEARCH_ADDENDUM).toContain('Phase 1 - recall')
+    expect(COORDINATOR_RESEARCH_ADDENDUM).toContain('Phase 4 - ingest + reply')
   })
 
   it('COORDINATOR_BASE_ADDENDUM forbids prose questions while workers run', () => {

@@ -545,6 +545,15 @@ export type ViewMetadata = {
    * badge — empty / absent → no badge.
    */
   scheduledJobs?: ScheduledJobSummary[];
+  /**
+   * Whether the page is currently live on the public web: a live `published`
+   * grant on the page or any ancestor whose clearance is still public, plus
+   * the workspace external-sharing switch (the same `resolvePublishedPage`
+   * gate the anonymous `/share/p/<id>` route uses, so it is cascade-aware).
+   * Present only on `GET /api/views/:id`; the mutating endpoints omit it.
+   * Drives the page-header Published badge.
+   */
+  published?: boolean;
 };
 
 async function json<T>(res: Response): Promise<T> {

@@ -227,6 +227,59 @@ const RICHTEXT_KINDS = new Set([
 const PLAINTEXT_KINDS = new Set(['text', 'heading'])
 
 /**
+ * Lift ONE table cell from the model's stray shapes into the canonical opaque
+ * richText doc a `table` block stores (`{ type:'doc', content:[paragraph] }`).
+ * The cell schema is an open `z.record`, so ANY object validates — and the
+ * block→ProseMirror bridge (`doc-model` `richTextToContent`) reads only
+ * `.content`, silently degrading every unrecognized shape to an empty
+ * paragraph. Coerced shapes, in check order:
+ *
+ *   - a bare paragraph node (`{ type:'paragraph', … }`) → wrapped in a doc
+ *     (checked before the `content`-array pass-through: a paragraph's own
+ *     `content` is INLINE nodes, not the `paragraph+` a cell requires)
+ *   - a canonical / doc-like cell (`type:'doc'` or a `content` array) → by
+ *     reference, untouched
+ *   - a plain string, or `{ text }` / `{ type:'text', text }` → one-paragraph
+ *     doc via `inlineRich` (inline marks parsed, like a Markdown bullet)
+ *
+ * Anything else passes through by reference (renders empty, as before).
+ */
+function liftTableCell(raw: unknown): unknown {
+  if (typeof raw === 'string') return inlineRich(raw.trim())
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw
+  const cell = raw as Record<string, unknown>
+  if (cell.type === 'paragraph') return { type: 'doc', content: [cell] }
+  if (cell.type === 'doc' || Array.isArray(cell.content)) return raw
+  if (typeof cell.text === 'string') return inlineRich(cell.text.trim())
+  return raw
+}
+
+/**
+ * Lift every stray-shaped cell in a `table` block's `rows` grid (see
+ * `liftTableCell`). Preserves referential identity — returns the SAME array
+ * when no cell needed lifting — so the common canonical case stays a pure
+ * pass-through. Non-array rows / grids pass through untouched (the schema
+ * rejects those with a real error). Shared by the pre-validation lift below
+ * (`renderPage` / `createSubPage` / `patchPage` `add`) and `applyOps`'s
+ * `edit` merge (`ops.ts`), which is the only table write path that bypasses
+ * the lifted schemas.
+ */
+export function liftTableRows(rows: unknown): unknown {
+  if (!Array.isArray(rows)) return rows
+  let changed = false
+  const lifted = rows.map((row) => {
+    if (!Array.isArray(row)) return row
+    const cells = row.map(liftTableCell)
+    if (cells.some((c, i) => c !== row[i])) {
+      changed = true
+      return cells
+    }
+    return row
+  })
+  return changed ? lifted : rows
+}
+
+/**
  * Tool-input boundary repair for the model's most common block-shape slip:
  * authoring a list / quote / callout / toggle block with a plain `text`
  * field — the shape `text` / `heading` blocks use — instead of the opaque
@@ -265,6 +318,9 @@ const PLAINTEXT_KINDS = new Set(['text', 'heading'])
  * child was a `{ kind:'text', richText }` verdict line was rejected
  * `ops.15.block.children.0.text: Required`; the turn thrashed and then died on
  * a stream-idle stall with no reply ("it did nothing").
+ *
+ * A third repair (2026-07-22) lifts stray-shaped `table` cells — see
+ * `liftTableRows` above.
  */
 export function liftListItemText(raw: unknown): unknown {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw
@@ -291,6 +347,17 @@ export function liftListItemText(raw: unknown): unknown {
   ) {
     const { richText, ...rest } = next
     next = { ...rest, text: richTextToPlain(richText as RichTextContent) }
+  }
+
+  // Table cells (repair #3, 2026-07-22): a `table` authored with plain-string
+  // / `{ text }` / bare-paragraph cells instead of opaque richText docs. The
+  // open-record cell schema accepts any object, so these validated fine and
+  // rendered as an empty grid — prod repro: "Client Discovery: Expert Local
+  // Consultant", page `78942466`, patchPage in autonomous session `ab286573`
+  // (2026-07-21) — every cell arrived as `{ "text": "…" }` and persisted empty.
+  if (next.kind === 'table' && Array.isArray(next.rows)) {
+    const rows = liftTableRows(next.rows)
+    if (rows !== next.rows) next = { ...next, rows }
   }
 
   // Recurse into container children (repair #2). Preserve the array's

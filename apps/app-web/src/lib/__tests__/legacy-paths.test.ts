@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { resolveLegacyPath } from "../legacy-paths";
+import { resolveLegacyPath, safeWorkspaceNext } from "../legacy-paths";
 
 describe("[COMP:app-web/legacy-redirect] resolveLegacyPath", () => {
   it("maps workspace-scoped surfaces to their /w suffix", () => {
@@ -97,5 +97,42 @@ describe("[COMP:app-web/legacy-redirect] resolveLegacyPath", () => {
     expect(resolveLegacyPath([])).toBeNull();
     // Workspace-scoped names must match the first segment exactly.
     expect(resolveLegacyPath(["brains"])).toBeNull();
+  });
+});
+
+// ── ?next= carried through the workspace picker ────────────────
+// A multi-workspace user used to lose the destination at `/teams`. The
+// catch-all now forwards it as `?next=` and the picker appends it to the
+// chosen workspace — but the picker must not become an open redirect.
+describe("[COMP:app-web/legacy-redirect] safeWorkspaceNext", () => {
+  it("passes through workspace-relative paths and query-only values", () => {
+    expect(safeWorkspaceNext("/studio/connectors?connect=gmail")).toBe(
+      "/studio/connectors?connect=gmail",
+    );
+    expect(safeWorkspaceNext("/brain")).toBe("/brain");
+    expect(safeWorkspaceNext("?connected=gmail")).toBe("?connected=gmail");
+  });
+
+  it("returns empty for missing values", () => {
+    expect(safeWorkspaceNext(undefined)).toBe("");
+    expect(safeWorkspaceNext(null)).toBe("");
+    expect(safeWorkspaceNext("")).toBe("");
+  });
+
+  it("rejects protocol-relative and absolute URLs (open-redirect guard)", () => {
+    expect(safeWorkspaceNext("//evil.example.com")).toBe("");
+    expect(safeWorkspaceNext("/\\evil.example.com")).toBe("");
+    expect(safeWorkspaceNext("https://evil.example.com")).toBe("");
+    expect(safeWorkspaceNext("/redirect?to=https://evil.example.com")).toBe("");
+  });
+
+  it("rejects values that are not workspace-relative", () => {
+    expect(safeWorkspaceNext("studio/connectors")).toBe("");
+    expect(safeWorkspaceNext("javascript:alert(1)")).toBe("");
+  });
+
+  it("rejects control characters and whitespace smuggling", () => {
+    expect(safeWorkspaceNext("/brain\n/evil")).toBe("");
+    expect(safeWorkspaceNext("/brain evil")).toBe("");
   });
 });

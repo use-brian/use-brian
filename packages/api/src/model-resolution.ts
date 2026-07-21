@@ -19,6 +19,7 @@ import {
   tierClassifierExpression,
   registryRow,
   menuForClass,
+  activeForClass,
   type ModelClass,
   type ModelTier,
 } from '@use-brian/shared/model-registry'
@@ -53,6 +54,17 @@ export function ensureServableModel(
   const sameClass = menuForClass(row.class, configuredProviders)
   if (sameClass.length > 0) return sameClass[0].alias
 
+  // Background lanes (auto-title, topic/research classifiers, session-state
+  // diff) are internal routing and never carry `menu: true`, so the
+  // menu-scoped lookup above cannot see them. Without this, a Qwen-only
+  // deployment substitutes a metered CHAT model for a 32-token title —
+  // functional, but paying chat rates for background work. Prefer a same-class
+  // background model from a configured provider first.
+  if (row.class === 'background') {
+    const background = activeForClass('background', configuredProviders)
+    if (background.length > 0) return background[0].alias
+  }
+
   // Fall through the chat classes in descending capability so the substitute
   // is the best a configured provider offers.
   const CLASS_FALLBACK_ORDER: readonly ModelClass[] = ['max', 'research', 'standard-pro', 'metered']
@@ -61,6 +73,30 @@ export function ensureServableModel(
     if (rows.length > 0) return rows[0].alias
   }
   return model
+}
+
+/**
+ * Wall-clock budget for a background-lane call that a user-facing SSE stream
+ * waits on before giving up and closing (currently auto-title). Missing the
+ * budget is not an error — the write is still in flight and lands in DB — but
+ * the client loses the in-stream `title_update` and sees the placeholder until
+ * its next fetch.
+ *
+ * Derived from the SERVING provider, because the budget silently assumed a
+ * sub-second Gemini Flash Lite. Measured 2026-07-21 on a title-shaped call
+ * (32 max tokens): `gemini-3.1-flash-lite` well under a second;
+ * `qwen3.5-flash` 4.3s / 9.6s / 4.3s — brushing the old 10s ceiling before
+ * stream assembly and the fresh-message DB read are added, so a Qwen-only
+ * deployment missed it on most turns.
+ *
+ * Keep this a provider-family question, not a per-model table: a new
+ * OpenAI-compatible label inherits the slower budget automatically rather than
+ * silently regressing to the Gemini assumption.
+ */
+export function backgroundLatencyBudgetMs(model: string): number {
+  const row = registryRow(model)
+  if (row?.provider.startsWith('openai-compat:')) return 25_000
+  return 10_000
 }
 
 /**

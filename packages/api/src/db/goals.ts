@@ -7,7 +7,7 @@
  * authorization gate; user reads go through the app pool (`queryWithRLS`),
  * confined by the `goals_workspace_member` policy.
  */
-import type { DoneWhenNode, EventSubscription, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core'
+import type { DoneWhenNode, EventSubscription, GoalBrief, GoalCompletionClaim, GoalCreateParams, GoalHostRef, GoalListFilters, GoalListRow, GoalMeans, GoalRecord, GoalStatus } from '@use-brian/core'
 import { query, queryWithRLS } from './client.js'
 
 /**
@@ -29,7 +29,7 @@ const FULL_SELECT = `
   outcome, done_when as "doneWhen", means, budget, policy, status,
   blocker_reason as "blockerReason", created_by_user_id as "createdByUserId",
   confirmed_at as "confirmedAt", completion_claim as "completionClaim",
-  created_at as "createdAt", updated_at as "updatedAt"
+  brief, created_at as "createdAt", updated_at as "updatedAt"
 `
 
 const TERMINAL_STATUSES = ['done', 'abandoned']
@@ -51,6 +51,7 @@ type GoalRow = {
   createdByUserId: string | null
   confirmedAt: Date | null
   completionClaim: GoalCompletionClaim | null
+  brief: GoalBrief | null
   createdAt: Date
   updatedAt: Date
 }
@@ -74,6 +75,7 @@ function toRecord(row: GoalRow): GoalRecord {
     createdByUserId: row.createdByUserId,
     confirmedAt: row.confirmedAt,
     completionClaim: row.completionClaim,
+    brief: row.brief,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -86,9 +88,9 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
     `INSERT INTO goals (
        workspace_id, parent_goal_id, recipe_id, host_type, host_id,
        outcome, done_when, means, budget, policy, status, created_by_user_id,
-       confirmed_at
+       confirmed_at, brief
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13)
+     VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13, $14::jsonb)
      RETURNING ${FULL_SELECT}`,
     [
       params.workspaceId,
@@ -103,9 +105,10 @@ export async function createGoal(params: GoalCreateParams): Promise<GoalRecord> 
       JSON.stringify(params.policy ?? {}),
       params.status ?? 'active',
       params.createdByUserId ?? null,
-      // Explicitly-created goals are confirmed; the auto-draft hook passes
-      // `confirmed: false` to mint a draft (autopilot §4).
+      // Explicitly-created goals are confirmed; the judge-draft path passes
+      // `confirmed: false` to mint a draft (autopilot §4/§8).
       params.confirmed === false ? null : new Date(),
+      params.brief ? JSON.stringify(params.brief) : null,
     ],
   )
   return toRecord(result.rows[0])
@@ -147,16 +150,22 @@ export async function stampGoalCompletionSystem(
   return result.rows.length === 0 ? null : toRecord(result.rows[0])
 }
 
-/** User-scoped workspace listing for the goals board. */
+/** User-scoped workspace listing for the goals board + triage surface. Each
+ *  row carries `hostTitle` (a scalar subselect on `tasks`; NULL for non-task
+ *  hosts) — safe across bi-temporal task edits because host-repoint keeps
+ *  `host_id` current. */
 export async function listGoals(
   userId: string,
   workspaceId: string,
   filters: GoalListFilters = {},
-): Promise<GoalRecord[]> {
+): Promise<GoalListRow[]> {
   const wheres: string[] = ['workspace_id = $1']
   const values: unknown[] = [workspaceId]
   let idx = 2
 
+  if (filters.confirmed !== undefined) {
+    wheres.push(filters.confirmed ? 'confirmed_at IS NOT NULL' : 'confirmed_at IS NULL')
+  }
   if (filters.status) {
     if (Array.isArray(filters.status)) {
       wheres.push(`status = ANY($${idx})`)
@@ -190,15 +199,17 @@ export async function listGoals(
   const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200)
   values.push(limit)
 
-  const result = await queryWithRLS<GoalRow>(
+  const result = await queryWithRLS<GoalRow & { hostTitle: string | null }>(
     userId,
-    `SELECT ${FULL_SELECT} FROM goals
+    `SELECT ${FULL_SELECT},
+       (SELECT t.title FROM tasks t WHERE t.id = goals.host_id AND goals.host_type = 'task') as "hostTitle"
+     FROM goals
      WHERE ${wheres.join(' AND ')}
      ORDER BY updated_at DESC
      LIMIT $${idx}`,
     values,
   )
-  return result.rows.map(toRecord)
+  return result.rows.map((row) => ({ ...toRecord(row), hostTitle: row.hostTitle }))
 }
 
 /** System read: goals bound to a given host — the rollup lookup. */
@@ -226,13 +237,14 @@ export async function setGoalStatusSystem(
 }
 
 /** Update a goal's curated fields and/or confirm it (autopilot §4). `confirm:
- *  true` sets `confirmed_at = now()` (arming a draft); `outcome` / `doneWhen`
- *  let the creator amend the auto-drafted detail; `means` sets the workflow the
- *  acting loop runs (spin-up); `budget` backs the kickoff default (no
- *  unbudgeted autonomy). System path (the route/tool is the authz gate). */
+ *  true` sets `confirmed_at = now()` (arming a draft); `outcome` / `doneWhen` /
+ *  `brief` let the creator amend the drafted detail (§8 triage edits); `means`
+ *  sets the workflow the acting loop runs (spin-up); `budget` backs the kickoff
+ *  default (no unbudgeted autonomy). System path (the route/tool is the authz
+ *  gate). */
 export async function updateGoalSystem(
   id: string,
-  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; confirm?: boolean },
+  fields: { outcome?: string; doneWhen?: DoneWhenNode; means?: GoalMeans; budget?: GoalRecord['budget']; brief?: GoalBrief | null; confirm?: boolean },
 ): Promise<GoalRecord | null> {
   const sets: string[] = []
   const values: unknown[] = []
@@ -241,6 +253,7 @@ export async function updateGoalSystem(
   if (fields.budget !== undefined) { sets.push(`budget = $${idx++}::jsonb`); values.push(JSON.stringify(fields.budget)) }
   if (fields.doneWhen !== undefined) { sets.push(`done_when = $${idx++}::jsonb`); values.push(JSON.stringify(fields.doneWhen)) }
   if (fields.means !== undefined) { sets.push(`means = $${idx++}::jsonb`); values.push(JSON.stringify(fields.means)) }
+  if (fields.brief !== undefined) { sets.push(`brief = $${idx++}::jsonb`); values.push(fields.brief ? JSON.stringify(fields.brief) : null) }
   if (fields.confirm) {
     sets.push('confirmed_at = now()')
     // Confirming resolves an "unconfirmed → needs clarification" block: re-arm

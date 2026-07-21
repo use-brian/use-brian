@@ -161,7 +161,7 @@ const assistantCallStepSchema = z.object({
    */
   deliver: z
     .object({
-      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp']),
+      channelType: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']),
       channelId: z.string().min(1).max(256),
       thread: z.object({ fromStep: stepIdSchema }).strict().optional(),
     })
@@ -201,7 +201,7 @@ const assistantCallStepSchema = z.object({
 // ── tool_call ───────────────────────────────────────────────────────────
 
 const approvalSchema = z.object({
-  deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp']).optional(),
+  deliveryChannel: z.enum(['web', 'telegram', 'slack', 'whatsapp', 'msteams']).optional(),
   expiresAfterHours: z.number().int().min(1).max(24 * 30).optional(),
 })
 

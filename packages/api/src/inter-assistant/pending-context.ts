@@ -33,7 +33,7 @@ export async function buildPendingContext(
   store: PendingMessageStore,
   userId: string,
   assistantId: string,
-  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email',
+  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams',
 ): Promise<PendingContextResult> {
   const pendingMessages = await store.getPendingForDelivery(userId, assistantId)
   if (pendingMessages.length === 0) {

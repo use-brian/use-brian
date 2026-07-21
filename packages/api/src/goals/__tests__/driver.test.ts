@@ -36,6 +36,7 @@ function makeGoal(over: Partial<GoalRecord> = {}): GoalRecord {
     createdByUserId: 'u1',
     confirmedAt: new Date(0), // confirmed → the acting loop may run it
     completionClaim: null,
+    brief: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
     ...over,

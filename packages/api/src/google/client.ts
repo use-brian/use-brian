@@ -10,6 +10,7 @@
 
 import { randomUUID } from 'node:crypto'
 import type { GmailOutgoingAttachment } from '@use-brian/core'
+import { renderEmailBody } from '@use-brian/channels'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
@@ -452,9 +453,35 @@ function filenameParams(filename: string): string {
 }
 
 /**
- * Assemble a multipart/mixed RFC 822 message: base64 text part + base64
- * attachment parts. Returned as a Buffer — the upload endpoint takes the
- * raw bytes, not base64url-in-JSON.
+ * Lines for a multipart/alternative body section: the model's markdown
+ * rendered to a text/plain part (markers stripped) + a text/html part
+ * (`renderEmailBody`, packages/channels/src/email/markdown.ts) — email
+ * clients pick the richest part they can render, so markdown never ships
+ * literally. Used standalone (no attachments) and nested inside
+ * multipart/mixed (attachments). See
+ * docs/architecture/integrations/gmail.md → "Body formatting".
+ */
+function alternativeBodyLines(body: string, boundary: string): string[] {
+  const { text, html } = renderEmailBody(body)
+  return [
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    foldBase64(Buffer.from(text, 'utf-8').toString('base64')),
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    foldBase64(Buffer.from(html, 'utf-8').toString('base64')),
+    `--${boundary}--`,
+  ]
+}
+
+/**
+ * Assemble a multipart/mixed RFC 822 message: a nested multipart/alternative
+ * body (text + html) + base64 attachment parts. Returned as a Buffer — the
+ * upload endpoint takes the raw bytes, not base64url-in-JSON.
  */
 function buildMultipartMessage(params: {
   to: string
@@ -464,6 +491,7 @@ function buildMultipartMessage(params: {
   attachments: GmailOutgoingAttachment[]
 }): Buffer {
   const boundary = `=_usebrian_${randomUUID()}`
+  const altBoundary = `=_usebrian_alt_${randomUUID()}`
   const lines: string[] = [
     ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
     `To: ${sanitizeHeaderValue(params.to)}`,
@@ -472,10 +500,9 @@ function buildMultipartMessage(params: {
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
     '',
     `--${boundary}`,
-    'Content-Type: text/plain; charset=utf-8',
-    'Content-Transfer-Encoding: base64',
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
     '',
-    foldBase64(Buffer.from(params.body, 'utf-8').toString('base64')),
+    ...alternativeBodyLines(params.body, altBoundary),
   ]
   for (const att of params.attachments) {
     const mime = att.mime || 'application/octet-stream'
@@ -522,17 +549,20 @@ export async function sendGmailMessage(
     return await res.json() as { id: string; threadId: string }
   }
 
-  // Text-only: legacy base64url-in-JSON path, byte-identical to before.
+  // No attachments: base64url-in-JSON endpoint, multipart/alternative body
+  // (rendered text + html — see alternativeBodyLines).
   const encodedSubject = encodeHeaderWord(params.subject)
+  const altBoundary = `=_usebrian_alt_${randomUUID()}`
 
   // Build RFC 2822 message
   const rawMessage = [
     ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
     `To: ${sanitizeHeaderValue(params.to)}`,
     `Subject: ${encodedSubject}`,
-    'Content-Type: text/plain; charset=utf-8',
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${altBoundary}"`,
     '',
-    params.body,
+    ...alternativeBodyLines(params.body, altBoundary),
   ].join('\r\n')
 
   const encoded = Buffer.from(rawMessage)

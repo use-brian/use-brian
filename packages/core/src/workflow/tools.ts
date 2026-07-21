@@ -650,7 +650,11 @@ async function dependencyIssues(
       if (
         step.type === 'assistant_call' &&
         step.deliver &&
-        step.deliver.channelType !== 'web'
+        step.deliver.channelType !== 'web' &&
+        // Teams targets have no channel-enumeration API to preflight against
+        // (the listTeamsChannels equivalent is a P5 follow-up), so they skip
+        // reachability validation — the send simply attempts at run time.
+        step.deliver.channelType !== 'msteams'
       ) {
         targets.push({ stepId: step.id, channelType: step.deliver.channelType, channelId: step.deliver.channelId })
       }

@@ -150,6 +150,10 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [flushOpen, setFlushOpen] = useState(false);
   const [flushResult, setFlushResult] = useState<number | null>(null);
   const [flushError, setFlushError] = useState(false);
+  const [transferTarget, setTransferTarget] = useState("");
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferDone, setTransferDone] = useState(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
   const [editingPurpose, setEditingPurpose] = useState(false);
   const [purposeInput, setPurposeInput] = useState("");
   const [purposeSaving, setPurposeSaving] = useState(false);
@@ -320,6 +324,41 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       if (res.ok) onWorkspaceDeleted();
     } catch {
       // ignore
+    }
+  }
+
+  // Transfer ownership to another member (owner-only; the server re-checks
+  // inside the store transaction). On success the acting user is demoted to
+  // admin, so the refetch collapses this whole owner-only Advanced area.
+  async function transferOwnership() {
+    if (!data || !transferTarget) return;
+    setTransferError(null);
+    try {
+      const res = await authFetch(
+        `${API_URL}/api/workspaces/${data.id}/transfer-ownership`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ newOwnerUserId: transferTarget }),
+        },
+      );
+      if (!res.ok) {
+        const err = (await res.json().catch(() => ({}))) as {
+          message?: string;
+          error?: string;
+        };
+        setTransferError(
+          err.message ?? err.error ?? t.workspaceDetailInline.transferOwnershipFailed,
+        );
+        return;
+      }
+      setTransferDone(true);
+      setTransferTarget("");
+      await refetch();
+    } catch {
+      setTransferError(t.workspaceDetailInline.networkError);
+    } finally {
+      setTransferOpen(false);
     }
   }
 
@@ -557,6 +596,62 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           </button>
           {advancedOpen && (
             <div className="mt-4 space-y-6">
+              {/* Transfer ownership (workspaces.md → "Ownership transfer").
+                  Owner-only, non-personal, and only meaningful with another
+                  member to hand the workspace to. Consequential rather than
+                  destructive, but it still goes through the type-to-confirm
+                  gate: it moves billing responsibility and cannot be undone
+                  by the acting user. */}
+              {!data.isPersonal &&
+                data.members.some((m) => m.userId !== data.ownerUserId) && (
+                  <div className="space-y-3">
+                    <p className="text-[13px] text-muted-foreground">
+                      {t.workspaceDetailInline.transferOwnershipDescription}
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={transferTarget}
+                        onValueChange={(v) => {
+                          setTransferTarget(v ?? "");
+                          setTransferError(null);
+                          setTransferDone(false);
+                        }}
+                      >
+                        <SelectTrigger className="bg-muted/50 w-56">
+                          <SelectValue
+                            placeholder={t.workspaceDetailInline.transferOwnershipSelect}
+                          />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {data.members
+                            .filter((m) => m.userId !== data.ownerUserId)
+                            .map((m) => (
+                              <SelectItem key={m.userId} value={m.userId}>
+                                {m.userName ?? m.email ?? m.userId}
+                              </SelectItem>
+                            ))}
+                        </SelectContent>
+                      </Select>
+                      <button
+                        type="button"
+                        onClick={() => setTransferOpen(true)}
+                        disabled={!transferTarget}
+                        className="text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+                      >
+                        {t.workspaceDetailInline.transferOwnershipTitle}
+                      </button>
+                    </div>
+                    {transferDone && (
+                      <p className="text-[13px] text-muted-foreground">
+                        {t.workspaceDetailInline.transferOwnershipDone}
+                      </p>
+                    )}
+                    {transferError && (
+                      <p className="text-[13px] text-red-400">{transferError}</p>
+                    )}
+                  </div>
+                )}
+
               {/* Flush all workspace data. Works on every workspace including
                   the Personal one (which can never be deleted) — this is its
                   only full-reset path. */}
@@ -625,6 +720,20 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
         confirmLabel={t.workspaceDetailInline.flushDataTitle}
         onCancel={() => setFlushOpen(false)}
         onConfirm={flushWorkspace}
+      />
+      <TypeToConfirmDialog
+        open={transferOpen}
+        workspaceName={data.name}
+        title={t.workspaceDetailInline.transferOwnershipDialogTitle}
+        description={format(t.workspaceDetailInline.transferOwnershipConfirm, {
+          name:
+            data.members.find((m) => m.userId === transferTarget)?.userName ??
+            data.members.find((m) => m.userId === transferTarget)?.email ??
+            "",
+        })}
+        confirmLabel={t.workspaceDetailInline.transferOwnershipTitle}
+        onCancel={() => setTransferOpen(false)}
+        onConfirm={transferOwnership}
       />
     </div>
   );

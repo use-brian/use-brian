@@ -25,6 +25,7 @@
 
 import type { ChannelAdapter, IncomingFile, IncomingMessage, OutgoingMessage } from '../types.js'
 import { parseEmailAddress } from './address.js'
+import { renderEmailBody } from './markdown.js'
 
 /**
  * The inbound `message.received` message payload shape the adapter consumes.
@@ -61,6 +62,8 @@ export type EmailSendPort = {
   reply(params: {
     inReplyToMessageId: string
     text: string
+    /** HTML alternative — sent as multipart/alternative alongside `text`. */
+    html?: string
     attachments?: Array<{ filename: string; contentType: string; contentBase64: string }>
   }): Promise<{ messageId: string; threadId: string }>
 }
@@ -86,7 +89,9 @@ export function createEmailAdapter(options: EmailAdapterOptions): ChannelAdapter
   return {
     type: 'email',
     maxMessageLength: EMAIL_MAX_LENGTH,
-    supportsMarkdown: false,
+    // The adapter renders markdown itself (renderEmailBody below) — the
+    // model may compose in its native GFM and recipients see a real email.
+    supportsMarkdown: true,
     supportsMessageEdit: false,
     drainDelayMs: 0,
 
@@ -141,16 +146,21 @@ export function createEmailAdapter(options: EmailAdapterOptions): ChannelAdapter
     async sendMessage(_channelId: string, response: OutgoingMessage): Promise<string> {
       // Raw-text exit with no render layer: strip planning scaffolding
       // before anything leaves (delivery-sanitize invariant).
-      const text = options.sanitizeDeliveryText(response.text ?? '').trim()
+      const sanitized = options.sanitizeDeliveryText(response.text ?? '').trim()
       const attachments = (response.documents ?? []).map((doc) => ({
         filename: doc.filename,
         contentType: doc.mime,
         contentBase64: Buffer.from(doc.data).toString('base64'),
       }))
-      if (!text && attachments.length === 0) return ''
+      if (!sanitized && attachments.length === 0) return ''
+      // The model composes in markdown; email clients don't parse it. Render
+      // the multipart/alternative pair here so the recipient gets a real
+      // email, never literal `**bold**` markers.
+      const { text, html } = renderEmailBody(sanitized)
       const result = await options.send.reply({
         inReplyToMessageId: options.replyToMessageId,
         text,
+        ...(html ? { html } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
       })
       return result.messageId

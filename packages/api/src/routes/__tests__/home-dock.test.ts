@@ -20,6 +20,7 @@ const SIGNALS: HomeSignals = {
   brainReviewCount: 2,
   approvalsCount: 0,
   autopilotCount: 0,
+  taskTriageCount: 0,
   connectorAttentionCount: 0,
   workflowAttentionCount: 0,
   upcomingWorkflows: [{ id: 'wf1', name: 'Weekly digest', nextRunAt: '2026-07-08T09:00:00.000Z' }],

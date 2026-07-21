@@ -5,11 +5,14 @@
  *
  *   GET  /                — list goals for a workspace (filterable by status /
  *                           hostType / hostId — the last backs the Brain task
- *                           panel finding a task's goal)
+ *                           panel finding a task's goal — and `confirmed`, the
+ *                           §8 draft-vs-armed split; rows carry `hostTitle`)
  *   GET  /:id             — one goal's richer detail (the board drill-down):
  *                           the acceptance contract (doneWhen / budget / policy /
- *                           means) + the verified completion claim
- *   POST /:id/confirm     — arm a DRAFT goal (autopilot); optional `outcome` edit
+ *                           means) + the verified completion claim + the triage
+ *                           brief (§8)
+ *   POST /:id/confirm     — arm a DRAFT goal (autopilot); optional `outcome` /
+ *                           `verification` / `approach` edits (§8)
  *   POST /:id/outcome     — edit the goal's outcome text (draft or armed); a
  *                           completed goal is refused (409)
  *   POST /:id/work        — spin up the acting loop: set the means (a chosen
@@ -24,8 +27,10 @@ import { Router } from 'express'
 import {
   GOAL_HOST_TYPES,
   GOAL_STATUSES,
+  type GoalBrief,
   type GoalClarityAssessor,
   type GoalHostType,
+  type GoalListRow,
   type GoalRecord,
   type GoalStatus,
   type GoalStore,
@@ -54,13 +59,15 @@ const HOST_TYPE_SET: ReadonlySet<string> = new Set(GOAL_HOST_TYPES)
 
 /** Board / panel projection — drops internal fields; surfaces `confirmedAt`
  *  (draft vs armed) + `hasWorkflow` (armed vs working) so the UI can pick the
- *  right action (Confirm / Work this). */
-function projectGoal(g: GoalRecord) {
+ *  right action (Confirm / Work this), plus `hostTitle` on list rows (the
+ *  triage surface labels drafts by their task). */
+function projectGoal(g: GoalRecord | GoalListRow) {
   return {
     id: g.id,
     outcome: g.outcome,
     status: g.status,
     host: g.host,
+    hostTitle: 'hostTitle' in g ? (g.hostTitle ?? null) : null,
     parentGoalId: g.parentGoalId,
     recipeId: g.recipeId,
     blockerReason: g.blockerReason,
@@ -72,9 +79,10 @@ function projectGoal(g: GoalRecord) {
 }
 
 /** Drill-down projection — the board projection plus the full acceptance
- *  contract (`doneWhen` / `budget` / `policy` / `means`) and the verified
- *  completion claim (`completionClaim`, already ISO-stamped). Backs the
- *  goal-detail page. */
+ *  contract (`doneWhen` / `budget` / `policy` / `means`), the verified
+ *  completion claim (`completionClaim`, already ISO-stamped), and the triage
+ *  brief (§8 — the editable verification/approach on the triage pane). Backs
+ *  the goal-detail page. */
 function projectGoalDetail(g: GoalRecord) {
   return {
     ...projectGoal(g),
@@ -83,6 +91,7 @@ function projectGoalDetail(g: GoalRecord) {
     budget: g.budget,
     policy: g.policy,
     completionClaim: g.completionClaim,
+    brief: g.brief,
   }
 }
 
@@ -117,12 +126,17 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
         : undefined
     const hostId = typeof req.query.hostId === 'string' ? req.query.hostId : undefined
     const includeTerminal = req.query.includeTerminal === 'true'
+    // Draft-vs-armed split (§8): the triage surface lists confirmed=false,
+    // the Autopilot board lists confirmed=true. Omitted = both (back-compat).
+    const confirmed =
+      req.query.confirmed === 'true' ? true : req.query.confirmed === 'false' ? false : undefined
 
     const goals = await opts.goalStore.list(userId, workspaceId, {
       status,
       hostType,
       hostId,
       includeTerminal,
+      confirmed,
     })
     res.json({ goals: goals.map(projectGoal) })
   })
@@ -157,18 +171,38 @@ export function goalsRoutes(opts: GoalsRouteOptions): Router {
       res.status(404).json({ error: 'Not found' })
       return
     }
-    const body = (req.body ?? {}) as { outcome?: string }
+    const body = (req.body ?? {}) as { outcome?: string; verification?: string; approach?: string }
     const outcome = typeof body.outcome === 'string' && body.outcome.trim() ? body.outcome.trim() : undefined
-    // Clarity gate (§12) — block confirmation of a goal an agent couldn't
-    // recognise as done; surface the clarifying question for the user to answer.
+    // Triage-brief edits (§8): the triage pane lets the user amend the judge's
+    // verification / approach before arming. Merge onto the existing brief;
+    // an edit with no existing brief still persists one (judgeReason empty).
+    const verification =
+      typeof body.verification === 'string' && body.verification.trim() ? body.verification.trim() : undefined
+    const approach = typeof body.approach === 'string' && body.approach.trim() ? body.approach.trim() : undefined
+    const brief: GoalBrief | undefined =
+      verification !== undefined || approach !== undefined
+        ? {
+            verification: verification ?? existing.brief?.verification ?? '',
+            approach: approach ?? existing.brief?.approach ?? '',
+            judgeReason: existing.brief?.judgeReason ?? '',
+          }
+        : undefined
+    // Clarity gate (§12, widened §8) — block confirmation of a configuration an
+    // agent couldn't work; surface the clarifying question for the user.
     if (opts.assessClarity) {
-      const verdict = await opts.assessClarity({ outcome: outcome ?? existing.outcome, userId })
+      const effectiveBrief = brief ?? existing.brief ?? undefined
+      const verdict = await opts.assessClarity({
+        outcome: outcome ?? existing.outcome,
+        verification: effectiveBrief?.verification,
+        approach: effectiveBrief?.approach,
+        userId,
+      })
       if (!verdict.clear) {
         res.json({ ok: false, needsClarification: true, question: verdict.clarifyingQuestion ?? null })
         return
       }
     }
-    const goal = await updateGoalSystem(req.params.id, { confirm: true, outcome })
+    const goal = await updateGoalSystem(req.params.id, { confirm: true, outcome, brief })
     res.json({ ok: true, goal: goal ? projectGoal(goal) : null })
   })
 

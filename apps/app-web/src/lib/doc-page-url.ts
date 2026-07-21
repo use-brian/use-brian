@@ -177,7 +177,7 @@ export function surfaceFromPathname(
  *  its own); a recording is a single artifact other pages link INTO by id and
  *  that a `[H:MM:SS]` citation deep-links to with `#t=`. The board is the panel;
  *  the artifact keeps its URL. */
-export const PANEL_IDS = ["approvals", "goals", "recordings"] as const;
+export const PANEL_IDS = ["approvals", "goals", "triage", "recordings"] as const;
 export type PanelId = (typeof PANEL_IDS)[number];
 
 const PANEL_ID_SET: ReadonlySet<string> = new Set(PANEL_IDS);

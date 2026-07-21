@@ -85,7 +85,9 @@ export function markdownToTelegramHTML(text: string): string {
   // ── 6. Headers → bold line ───────────────────────────────────
   // Telegram has no header tag; bold + line break is the closest render.
   // Must run before the bold rule so `### **text**` collapses cleanly.
-  out = out.replace(/^#{1,6}\s+(.+?)\s*#*\s*$/gm, '<b>$1</b>')
+  // Trailing whitespace is matched as [ \t] only — a bare \s* would eat the
+  // newline(s) after the heading and glue it to the next paragraph.
+  out = out.replace(/^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, '<b>$1</b>')
 
   // ── 7. Horizontal rules → drop ───────────────────────────────
   out = out.replace(/^[-*_]{3,}\s*$/gm, '')
@@ -202,8 +204,8 @@ export function stripMarkdown(text: string): string {
   // Links → text (url), or just text for tel/tg schemes
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, '$1 ($2)')
 
-  // Headers
-  out = out.replace(/^#{1,6}\s+(.+?)\s*#*\s*$/gm, '$1')
+  // Headers ([ \t] only — \s* would eat the blank line after the heading)
+  out = out.replace(/^#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$/gm, '$1')
 
   // Horizontal rules
   out = out.replace(/^[-*_]{3,}\s*$/gm, '')

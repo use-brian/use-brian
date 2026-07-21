@@ -56,6 +56,25 @@ That is it. There is no step three. The store defaults to an embedded PGLite
 database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
 
+### If the web app dies with "JavaScript heap out of memory"
+
+Turbopack's dev cache under `apps/app-web/.next` is keyed by a generation id,
+and a Next.js upgrade starts a fresh one without reclaiming the old. Left alone
+it grows across upgrades until `next-server` is holding gigabytes before it
+compiles anything, and app-web hits its heap cap on the next compile.
+
+`pnpm dev` prunes generations untouched for 7 days on every boot (keeping the
+live one) and warns when the remaining cache passes 4 GB. If app-web still dies,
+clear it outright - it is regenerable build output:
+
+```bash
+rm -rf apps/app-web/.next
+```
+
+Raising the heap cap is the wrong fix here: with a clean cache the dev server
+idles around 320 MB and peaks near 190 MB of JS heap after compiling a dozen
+routes, so a cap in the low gigabytes is already generous.
+
 ### Your data stays yours
 
 **0** external services. **1** model key. The brain, the store, and the canvas

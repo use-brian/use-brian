@@ -140,7 +140,7 @@ export type AssistantCallStep = WorkflowStepCommon & {
    * See `docs/architecture/engine/scheduled-jobs.md` → "Channel delivery".
    */
   deliver?: {
-    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'
+    channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     channelId: string
     thread?: { fromStep: string }
   }
@@ -188,7 +188,7 @@ export type ToolCallStep = WorkflowStepCommon & {
    * omitted = use workflow-level default; missing both = web-UI-only delivery.
    */
   approval?: {
-    deliveryChannel?: 'web' | 'telegram' | 'slack' | 'whatsapp'
+    deliveryChannel?: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     /**
      * Hours before the approval auto-expires (status='expired').
      * Omit for no expiry — totally detached, user can return any time.

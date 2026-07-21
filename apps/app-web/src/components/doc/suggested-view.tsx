@@ -24,6 +24,7 @@ import {
   ArrowUp,
   Brain,
   Cable,
+  ClipboardCheck,
   CheckCircle2,
   ChevronRight,
   Clock,
@@ -529,9 +530,10 @@ function cardConfig(kind: ResolvedNeed["kind"], workspaceId: string, t: Suggeste
         cta: t.approvalsCta,
       };
     case "autopilot":
-      // Autopilot — draft goals awaiting a confirm + blocked goals. The
-      // goals board has no sidebar slot (Approvals precedent): this card
-      // and the Brain task panel are its entry points.
+      // Autopilot — confirmed goals ready to kick start + blocked goals
+      // (drafts count under task_triage, §8). The goals board has no sidebar
+      // slot (Approvals precedent): this card and the Brain task panel are
+      // its entry points.
       return {
         accent: "workflow" as const,
         Icon: Target,
@@ -540,6 +542,19 @@ function cardConfig(kind: ResolvedNeed["kind"], workspaceId: string, t: Suggeste
         title: t.autopilotTitle,
         fallbackCaption: t.autopilotCaption,
         cta: t.autopilotCta,
+      };
+    case "task_triage":
+      // Tasks assignable (§8) — judge-drafted goals awaiting the user's
+      // triage on the Triage panel. Same attention-routed pattern as
+      // Autopilot: this card is the entry point; no sidebar slot.
+      return {
+        accent: "approve" as const,
+        Icon: ClipboardCheck,
+        href: `/w/${workspaceId}/p?panel=triage`,
+        panel: "triage" as PanelId | null,
+        title: t.taskTriageTitle,
+        fallbackCaption: t.taskTriageCaption,
+        cta: t.taskTriageCta,
       };
     case "connector_attention":
       // A connected tool's credentials died at call time (health_status =

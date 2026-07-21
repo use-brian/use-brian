@@ -457,6 +457,162 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
     })
   })
 
+  describe('transferOwnership', () => {
+    // Scripted transactional client: each non-BEGIN/COMMIT/ROLLBACK query
+    // pops the next result from `script`. Lets a test drive the SELECT
+    // outcomes (workspace row, member row, cap check) and the UPDATEs.
+    function makeTxClient(script: Array<{ rows?: unknown[]; rowCount?: number }>): {
+      client: { query: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }
+    } {
+      const queue = [...script]
+      const client = {
+        query: vi.fn(async (sql: string) => {
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return undefined
+          const next = queue.shift() ?? { rows: [], rowCount: 0 }
+          return { rows: next.rows ?? [], rowCount: next.rowCount ?? (next.rows?.length ?? 0) }
+        }),
+        release: vi.fn(),
+      }
+      mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
+      return { client }
+    }
+
+    const WS_ROW = { ownerUserId: 'u_owner', isPersonal: false, plan: 'pro' }
+
+    it('swaps owner_user_id and both member roles in one transaction', async () => {
+      const { client } = makeTxClient([
+        { rows: [WS_ROW] },                 // SELECT workspaces FOR UPDATE
+        { rows: [{ role: 'member' }] },     // SELECT workspace_members (new owner)
+        { rowCount: 1 },                    // UPDATE workspaces
+        { rowCount: 1 },                    // UPDATE new owner member row
+        { rowCount: 1 },                    // UPDATE old owner member row
+      ])
+
+      const result = await store.transferOwnership('u_owner', 't_1', 'u_new')
+      expect(result).toBe('transferred')
+
+      const commands = client.query.mock.calls.map((c) => c[0])
+      expect(commands[0]).toBe('BEGIN')
+      expect(commands[commands.length - 1]).toBe('COMMIT')
+
+      // Workspace row lock + ownership re-check inside the transaction.
+      const wsSelect = client.query.mock.calls[1][0] as string
+      expect(wsSelect).toContain('FOR UPDATE')
+
+      const wsUpdate = client.query.mock.calls[3]
+      expect(wsUpdate[0]).toContain('UPDATE workspaces SET owner_user_id = $1')
+      expect(wsUpdate[1]).toEqual(['u_new', 't_1'])
+
+      // New owner promoted to owner @ confidential; old owner demoted to
+      // admin @ confidential (operator role default).
+      const promote = client.query.mock.calls[4]
+      expect(promote[0]).toContain(`role = 'owner'`)
+      expect(promote[0]).toContain(`clearance = 'confidential'`)
+      expect(promote[1]).toEqual(['t_1', 'u_new'])
+      const demote = client.query.mock.calls[5]
+      expect(demote[0]).toContain(`role = 'admin'`)
+      expect(demote[0]).toContain(`clearance = 'confidential'`)
+      expect(demote[1]).toEqual(['t_1', 'u_owner'])
+    })
+
+    it('returns not_owner when the acting user is not the owner (no writes)', async () => {
+      const { client } = makeTxClient([{ rows: [WS_ROW] }])
+      const result = await store.transferOwnership('u_impostor', 't_1', 'u_new')
+      expect(result).toBe('not_owner')
+      const commands = client.query.mock.calls.map((c) => c[0])
+      expect(commands).toContain('ROLLBACK')
+      // No write ran ("FOR UPDATE" on the SELECT is the row lock, not a write).
+      expect(commands.join(' ')).not.toContain('UPDATE workspaces SET')
+      expect(commands.join(' ')).not.toContain('UPDATE workspace_members')
+    })
+
+    it('returns not_owner when the workspace does not exist', async () => {
+      makeTxClient([{ rows: [] }])
+      expect(await store.transferOwnership('u_owner', 't_missing', 'u_new')).toBe('not_owner')
+    })
+
+    it('refuses to transfer a Personal workspace', async () => {
+      const { client } = makeTxClient([
+        { rows: [{ ...WS_ROW, isPersonal: true }] },
+      ])
+      const result = await store.transferOwnership('u_owner', 't_personal', 'u_new')
+      expect(result).toBe('personal_workspace')
+      expect(client.query.mock.calls.map((c) => c[0])).toContain('ROLLBACK')
+    })
+
+    it('returns already_owner when the target is the current owner', async () => {
+      makeTxClient([{ rows: [WS_ROW] }])
+      expect(await store.transferOwnership('u_owner', 't_1', 'u_owner')).toBe('already_owner')
+    })
+
+    it('returns not_a_member when the target has no workspace_members row', async () => {
+      const { client } = makeTxClient([
+        { rows: [WS_ROW] },
+        { rows: [] }, // member lookup finds nothing
+      ])
+      const result = await store.transferOwnership('u_owner', 't_1', 'u_stranger')
+      expect(result).toBe('not_a_member')
+      const sqls = client.query.mock.calls.map((c) => c[0]).join(' ')
+      expect(sqls).not.toContain('UPDATE workspaces SET')
+      expect(sqls).not.toContain('UPDATE workspace_members')
+    })
+
+    it('blocks a free-workspace transfer to a recipient at the owned-free cap', async () => {
+      makeTxClient([
+        { rows: [{ ...WS_ROW, plan: 'free' }] },
+        { rows: [{ role: 'member' }] },
+        { rows: [{ ownsPaid: false, freeOwned: 2 }] }, // cap check
+      ])
+      expect(await store.transferOwnership('u_owner', 't_free', 'u_new')).toBe('recipient_free_cap')
+    })
+
+    it('lets a free-workspace transfer through when the recipient owns a paid workspace', async () => {
+      makeTxClient([
+        { rows: [{ ...WS_ROW, plan: 'free' }] },
+        { rows: [{ role: 'member' }] },
+        { rows: [{ ownsPaid: true, freeOwned: 5 }] }, // cap lifted
+        { rowCount: 1 },
+        { rowCount: 1 },
+        { rowCount: 1 },
+      ])
+      expect(await store.transferOwnership('u_owner', 't_free', 'u_new')).toBe('transferred')
+    })
+
+    it('skips the cap check entirely for a paid workspace', async () => {
+      const { client } = makeTxClient([
+        { rows: [WS_ROW] },                 // plan: 'pro'
+        { rows: [{ role: 'admin' }] },
+        { rowCount: 1 },
+        { rowCount: 1 },
+        { rowCount: 1 },
+      ])
+      expect(await store.transferOwnership('u_owner', 't_1', 'u_new')).toBe('transferred')
+      const sqls = client.query.mock.calls.map((c) => c[0] as string)
+      expect(sqls.join(' ')).not.toContain('ownsPaid')
+    })
+
+    it('rolls back and rethrows on a mid-transaction failure', async () => {
+      const client = {
+        query: vi.fn(async (sql: string) => {
+          if (sql === 'BEGIN' || sql === 'ROLLBACK') return undefined
+          if (sql.includes('FOR UPDATE') && sql.includes('workspaces'))
+            return { rows: [WS_ROW], rowCount: 1 }
+          if (sql.includes('workspace_members') && sql.startsWith('SELECT'))
+            return { rows: [{ role: 'member' }], rowCount: 1 }
+          throw new Error('connection reset')
+        }),
+        release: vi.fn(),
+      }
+      mockGetPool.mockReturnValue({ connect: vi.fn().mockResolvedValue(client) } as never)
+
+      await expect(store.transferOwnership('u_owner', 't_1', 'u_new')).rejects.toThrow(/connection reset/)
+      const commands = client.query.mock.calls.map((c) => c[0])
+      expect(commands).toContain('ROLLBACK')
+      expect(commands).not.toContain('COMMIT')
+      expect(client.release).toHaveBeenCalled()
+    })
+  })
+
   describe('updateMemberDraftPermission', () => {
     // The store's UPDATE filters out role='owner' rows so an owner's
     // effective permission is never represented as a stored boolean.

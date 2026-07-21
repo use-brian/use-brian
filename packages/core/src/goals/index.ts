@@ -54,6 +54,13 @@ export {
   parseVerifyVerdict,
 } from './verify.js'
 export {
+  type TaskTriageBrief,
+  type TaskTriageInput,
+  type TaskTriageJudge,
+  createTaskTriageJudge,
+  parseTriageVerdict,
+} from './triage.js'
+export {
   type GoalToolEvent,
   type GoalToolEventContext,
   type GoalToolOptions,
@@ -71,8 +78,10 @@ export {
   type GoalMeans,
   type GoalRecord,
   type GoalCompletionClaim,
+  type GoalBrief,
   type GoalCreateParams,
   type GoalListFilters,
+  type GoalListRow,
   type GoalStore,
   type GoalHostTerminal,
   type HostAdapter,

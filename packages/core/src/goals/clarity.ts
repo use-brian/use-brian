@@ -24,6 +24,12 @@ export type GoalClarityVerdict = {
 export type AssessGoalClarityInput = {
   /** The goal's outcome — the agent's work target and recognisable end state. */
   outcome: string
+  /** Triage-brief verification criteria (§8), when the goal carries a brief —
+   *  reviewed for checkability alongside the outcome. */
+  verification?: string | null
+  /** Triage-brief approach (§8) — reviewed for sanity (does it plausibly reach
+   *  the outcome?). */
+  approach?: string | null
   /** Confirming user, for COGS attribution only; the assessment ignores it. */
   userId?: string
 }
@@ -31,12 +37,13 @@ export type AssessGoalClarityInput = {
 export type GoalClarityAssessor = (input: AssessGoalClarityInput) => Promise<GoalClarityVerdict>
 
 const CLARITY_SYSTEM_PROMPT = [
-  'You review GOAL definitions for an autonomous assistant. A confirmed goal is worked autonomously, iteration after iteration, until it is "done".',
-  'Decide ONE thing: could an agent working in this company recognise when this goal is complete, and tell what to actually do?',
+  'You review GOAL configurations for an autonomous assistant. A confirmed goal is worked autonomously, iteration after iteration, until it is "done".',
+  'Decide ONE thing: is this goal configured well enough to work — could an agent recognise when it is complete, and tell what to actually do?',
   'Return clear=true when the outcome names a concrete deliverable, state, or condition (work being involved is fine).',
-  'Return clear=false ONLY when it is too vague to ever recognise as done — open-ended aspirations with no end state ("grow the business", "improve marketing", "misc stuff").',
-  'Be LENIENT: err toward clear. Block only the genuinely unverifiable.',
-  'When clear=false, give ONE short question that would pin down a recognisable done state.',
+  'When VERIFICATION is provided, it must describe a check someone could actually perform against the outcome; when APPROACH is provided, it must plausibly reach the outcome. A verification or approach that contradicts the outcome makes the configuration unclear.',
+  'Return clear=false ONLY when the configuration is too vague or inconsistent to ever recognise as done — open-ended aspirations with no end state ("grow the business", "improve marketing", "misc stuff"), or a verification/approach that does not match the outcome.',
+  'Be LENIENT: err toward clear. Block only the genuinely unworkable.',
+  'When clear=false, give ONE short question that would pin down a workable configuration.',
   'Respond with ONLY a JSON object: {"clear": true|false, "question": "<question, or empty when clear>"}.',
 ].join('\n')
 
@@ -50,13 +57,20 @@ export function createGoalClarityAssessor(deps: {
   /** Optional COGS sink — boot records this under an `overhead:goal-clarity` source. */
   onUsage?: (usage: TokenUsage, userId?: string) => void
 }): GoalClarityAssessor {
-  return async ({ outcome, userId }) => {
+  return async ({ outcome, verification, approach, userId }) => {
     try {
+      const content = [
+        `GOAL OUTCOME: ${outcome}`,
+        verification?.trim() ? `VERIFICATION: ${verification.trim()}` : null,
+        approach?.trim() ? `APPROACH: ${approach.trim()}` : null,
+      ]
+        .filter((l): l is string => l !== null)
+        .join('\n')
       const response = await collectStream(
         deps.provider.stream({
           model: deps.model,
           systemPrompt: CLARITY_SYSTEM_PROMPT,
-          messages: [{ role: 'user', content: `GOAL OUTCOME: ${outcome}` }],
+          messages: [{ role: 'user', content }],
           maxTokens: 400,
           temperature: 0.1,
         }),

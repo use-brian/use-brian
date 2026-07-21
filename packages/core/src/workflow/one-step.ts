@@ -63,7 +63,7 @@ export function frameSchedulerPrompt(instructions: string): string {
 export const REMINDER_WORKFLOW_DESCRIPTION = 'Scheduled reminder workflow.'
 
 export type ReminderDeliverTarget = {
-  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'
+  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
   channelId: string
 }
 

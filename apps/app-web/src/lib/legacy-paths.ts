@@ -85,3 +85,30 @@ export function resolveLegacyPath(
   }
   return null;
 }
+
+/**
+ * Sanitize a `?next=` value carried through the workspace picker.
+ *
+ * The picker is the one place a legacy deep-link loses its destination: a
+ * user with exactly one workspace is redirected straight to
+ * `/w/<id><suffix>`, but a user with several used to be dropped on `/teams`
+ * with the sub-path discarded. On 2026-07-21 that made Telegram's
+ * `/connect gmail` a dead end for an 8-workspace user — the Mini App opened
+ * the picker instead of the Gmail card, so the button appeared to do
+ * nothing. `[...legacy]` now forwards the intended destination as `?next=`
+ * and the picker appends it to whichever workspace is chosen.
+ *
+ * The value is workspace-RELATIVE (`/studio/connectors?connect=gmail`), so
+ * it must start with `/` or `?` and must never begin `//` or `/\` — those
+ * are protocol-relative URLs and would turn the picker into an open
+ * redirect. Anything else yields `""` (fall back to the workspace root).
+ */
+export function safeWorkspaceNext(raw: string | undefined | null): string {
+  if (!raw) return "";
+  if (raw.startsWith("//") || raw.startsWith("/\\")) return "";
+  if (!raw.startsWith("/") && !raw.startsWith("?")) return "";
+  // A control char, a space, or a scheme separator means someone is trying
+  // to escape the relative-path contract.
+  if (/[\u0000-\u0020]/.test(raw) || raw.includes("://")) return "";
+  return raw;
+}

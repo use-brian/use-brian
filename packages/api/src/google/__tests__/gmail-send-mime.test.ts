@@ -2,10 +2,12 @@
  * Unit tests for `sendGmailMessage` MIME assembly.
  * Component tag: [COMP:tools/gmail-attachments].
  *
- * Mocks global `fetch`. Verifies the two send paths: text-only stays on the
- * base64url-in-JSON endpoint byte-identical to before; attachments switch to
- * the media-upload endpoint with a decodable multipart/mixed RFC 822 body
- * (RFC 2047 subject, RFC 2231 filename*, base64 parts).
+ * Mocks global `fetch`. Verifies the two send paths: no attachments stays on
+ * the base64url-in-JSON endpoint with a multipart/alternative body (markdown
+ * rendered to text + html — gmail.md → "Body formatting"); attachments switch
+ * to the media-upload endpoint with a decodable multipart/mixed RFC 822 body
+ * (nested multipart/alternative, RFC 2047 subject, RFC 2231 filename*,
+ * base64 parts).
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
@@ -35,8 +37,14 @@ function sentRequest(): { url: string; init: { headers: Record<string, string>; 
   return { url, init }
 }
 
+/** Decode a base64-CTE MIME part's body back to utf-8. */
+function decodePart(part: string): string {
+  const b64 = part.split('\r\n\r\n')[1].replace(/\r\n/g, '').trim()
+  return Buffer.from(b64, 'base64').toString('utf-8')
+}
+
 describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => {
-  it('text-only: posts base64url JSON to the plain send endpoint (legacy path unchanged)', async () => {
+  it('no attachments: posts base64url JSON with a multipart/alternative (text + html) body', async () => {
     const result = await sendGmailMessage(TOKEN, BASE)
 
     expect(result).toEqual({ id: 'msg-1', threadId: 'thr-1' })
@@ -47,7 +55,32 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
     const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
     expect(decoded).toContain('To: a@b.co')
     expect(decoded).toContain('Subject: Report')
-    expect(decoded).toContain('See attached.')
+    expect(decoded).toContain('Content-Type: multipart/alternative')
+
+    const boundary = /boundary="([^"]+)"/.exec(decoded)?.[1]
+    expect(boundary).toBeTruthy()
+    const parts = decoded.split(`--${boundary}`)
+    expect(parts[1]).toContain('Content-Type: text/plain; charset=utf-8')
+    expect(decodePart(parts[1])).toBe('See attached.')
+    expect(parts[2]).toContain('Content-Type: text/html; charset=utf-8')
+    expect(decodePart(parts[2])).toBe('<p>See attached.</p>')
+  })
+
+  it('renders markdown bodies: html part gets real tags, text part gets markers stripped', async () => {
+    await sendGmailMessage(TOKEN, {
+      to: 'a@b.co',
+      subject: 'Update',
+      body: 'Hi **team**,\n\n- one\n- two',
+    })
+
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    const boundary = /boundary="([^"]+)"/.exec(decoded)?.[1]
+    const parts = decoded.split(`--${boundary}`)
+    expect(decodePart(parts[1])).toBe('Hi team,\n\n• one\n• two')
+    const html = decodePart(parts[2])
+    expect(html).toContain('<strong>team</strong>')
+    expect(html).toContain('<li>one</li>')
   })
 
   it('with attachments: posts multipart/mixed RFC 822 to the upload endpoint', async () => {
@@ -70,14 +103,20 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
     const boundary = /boundary="([^"]+)"/.exec(mime)?.[1]
     expect(boundary).toBeTruthy()
     const parts = mime.split(`--${boundary}`)
-    // preamble/headers, text part, attachment part, closing '--'
+    // preamble/headers, alternative body part, attachment part, closing '--'
     expect(parts).toHaveLength(4)
     expect(parts[3].trim()).toBe('--')
 
-    expect(parts[1]).toContain('Content-Type: text/plain; charset=utf-8')
-    expect(parts[1]).toContain('Content-Transfer-Encoding: base64')
-    const textB64 = parts[1].split('\r\n\r\n')[1].replace(/\r\n/g, '').trim()
-    expect(Buffer.from(textB64, 'base64').toString('utf-8')).toBe('See attached.')
+    // Body part is a nested multipart/alternative: text/plain + text/html.
+    expect(parts[1]).toContain('Content-Type: multipart/alternative')
+    const altBoundary = /boundary="([^"]+)"/.exec(parts[1])?.[1]
+    expect(altBoundary).toBeTruthy()
+    const altParts = parts[1].split(`--${altBoundary}`)
+    expect(altParts[1]).toContain('Content-Type: text/plain; charset=utf-8')
+    expect(altParts[1]).toContain('Content-Transfer-Encoding: base64')
+    expect(decodePart(altParts[1])).toBe('See attached.')
+    expect(altParts[2]).toContain('Content-Type: text/html; charset=utf-8')
+    expect(decodePart(altParts[2])).toBe('<p>See attached.</p>')
 
     expect(parts[2]).toContain('Content-Type: application/pdf; name="receipt.pdf"')
     expect(parts[2]).toContain('Content-Disposition: attachment; filename="receipt.pdf"')
@@ -108,7 +147,8 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
     })
 
     const mime = (sentRequest().init.body as Buffer).toString('utf-8')
-    const b64Block = mime.split('Content-Transfer-Encoding: base64\r\n\r\n')[2] ?? ''
+    // Blocks: [1] text/plain, [2] text/html (the alternative pair), [3] attachment.
+    const b64Block = mime.split('Content-Transfer-Encoding: base64\r\n\r\n')[3] ?? ''
     const lines = b64Block.split('\r\n').filter((l) => /^[A-Za-z0-9+/=]+$/.test(l))
     expect(lines.length).toBeGreaterThan(1)
     for (const line of lines) expect(line.length).toBeLessThanOrEqual(76)
@@ -127,7 +167,7 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
 })
 
 describe('[COMP:tools/gmail-send-as] sendGmailMessage From header (alias sending)', () => {
-  it('omits the From header when no alias is given (byte-identical to before)', async () => {
+  it('omits the From header when no alias is given', async () => {
     await sendGmailMessage(TOKEN, BASE)
 
     const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw

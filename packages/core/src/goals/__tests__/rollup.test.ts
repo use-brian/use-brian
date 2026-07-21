@@ -20,6 +20,7 @@ function goal(over: Partial<GoalRecord> = {}): GoalRecord {
     createdByUserId: null,
     confirmedAt: null,
     completionClaim: null,
+    brief: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
     ...over,

@@ -96,4 +96,14 @@ describe("[COMP:app-web/page-header] Page header (Notion navbar)", () => {
   it("renders the ⋯ overflow-menu trigger", () => {
     expect(renderHeader()).toContain(dict.docPage.headerMoreAria);
   });
+
+  it("shows the Published badge linking to the public page when live on the web", () => {
+    const html = renderHeader({ published: true });
+    expect(html).toContain("/share/p/view-1");
+    expect(html).toContain(dict.docPage.publishedBadge);
+  });
+
+  it("hides the Published badge when the page is not published", () => {
+    expect(renderHeader()).not.toContain("/share/p/view-1");
+  });
 });

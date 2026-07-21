@@ -799,11 +799,22 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
 
     // The page's recurring "research & update this page" schedules. Owner-
     // scoped + enabled-only inside the store. Absent jobStore → empty list.
-    const scheduledJobs = opts.jobStore
-      ? (await opts.jobStore.listEnabledByView(userId, view.id)).map(scheduledJobSummary)
-      : []
+    // `published` is the RESOLVED publish-to-web state (a live `published`
+    // grant on the page or any ancestor + the workspace switch — the same
+    // cascade gate the anonymous /share/p/:id route uses), so the page-header
+    // badge is truthful for children inside a published subtree too. Absent
+    // pageGrantStore → false. Both fields are GET-only; mutating endpoints
+    // return bare viewMetadata.
+    const [scheduledJobs, publishedResolution] = await Promise.all([
+      opts.jobStore
+        ? opts.jobStore.listEnabledByView(userId, view.id).then((jobs) => jobs.map(scheduledJobSummary))
+        : Promise.resolve([]),
+      opts.pageGrantStore
+        ? opts.pageGrantStore.resolvePublishedPage(view.id)
+        : Promise.resolve(null),
+    ])
 
-    res.json({ ...viewMetadata(view), scheduledJobs })
+    res.json({ ...viewMetadata(view), scheduledJobs, published: publishedResolution !== null })
   })
 
   // GET /views/:id/payload  — fully rendered A2UI payload via renderPage

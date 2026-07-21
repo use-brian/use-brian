@@ -315,6 +315,50 @@ describe('[COMP:doc/ops] applyOps — edit', () => {
     const merged = out.blocks[0] as Extract<Block, { kind: 'chart' }>
     expect(merged.data?.points).toEqual([{ label: 'A', value: 9 }])
   })
+
+  it('lifts stray-shaped table cells in a `rows` patch (the open patch bypasses the lifted schema)', () => {
+    // Guards the 2026-07-21 "empty tables" path (page 78942466): the add path
+    // lifts `{ text }` cells via liftedBlockSchema, but an `edit` patch rides
+    // the open record straight into the merge — without the mirror lift the
+    // stray cells persist and render as an empty grid.
+    const page: Page = {
+      blocks: [
+        {
+          kind: 'table',
+          id: 't1',
+          rows: [
+            [
+              { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'old' }] }] },
+            ],
+          ],
+          hasHeaderRow: true,
+        } as Block,
+      ],
+    }
+    const { page: out } = applyOps(
+      page,
+      [
+        {
+          op: 'edit',
+          blockId: 't1',
+          // The wire shape a model actually sends — stray cells, not
+          // RichTextContent — hence the cast past the compile-time Op type.
+          patch: { rows: [[{ text: 'Company Name' }, 'Expert Local Consultant']] } as unknown as Record<
+            string,
+            unknown
+          >,
+        },
+      ],
+      makeIdGen(),
+    )
+    const merged = out.blocks[0] as Extract<Block, { kind: 'table' }>
+    const cellText = (cell: unknown): string => {
+      const doc = cell as { content?: { content?: { text?: string }[] }[] }
+      return (doc.content?.[0]?.content ?? []).map((n) => n.text ?? '').join('')
+    }
+    expect(cellText(merged.rows[0][0])).toBe('Company Name')
+    expect(cellText(merged.rows[0][1])).toBe('Expert Local Consultant')
+  })
 })
 
 describe('[COMP:doc/ops] applyOps — delete', () => {

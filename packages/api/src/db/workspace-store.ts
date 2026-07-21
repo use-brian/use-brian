@@ -185,6 +185,37 @@ async function memberCountsSystem(
 
 // ── Store ──────────────────────────────────────────────────────
 
+/**
+ * Outcome of `transferOwnership`. A single discriminated string so the route
+ * can map each failure to a distinct HTTP response:
+ *   - `transferred`          — done; roles swapped, `owner_user_id` moved.
+ *   - `not_owner`            — workspace missing, or the acting user is not
+ *                              its owner (indistinguishable on purpose — the
+ *                              in-transaction re-check mirrors the flush's
+ *                              defense-in-depth posture).
+ *   - `personal_workspace`   — Personal workspaces are never transferable:
+ *                              they are tied to the owner's account lifecycle
+ *                              (deleted via `ON DELETE CASCADE` on
+ *                              `owner_user_id`), and the partial unique index
+ *                              `workspaces_owner_personal_unique` permits at
+ *                              most one personal workspace per owner.
+ *   - `already_owner`        — the target user is the current owner.
+ *   - `not_a_member`         — the target user has no `workspace_members` row
+ *                              (the spec requires the new owner to already be
+ *                              a member).
+ *   - `recipient_free_cap`   — the workspace is on `'free'` and the recipient
+ *                              already owns 2 free workspaces with no paid one
+ *                              (the same anti-abuse cap as creation; without it
+ *                              transfer is a trivial cap bypass).
+ */
+export type TransferOwnershipResult =
+  | 'transferred'
+  | 'not_owner'
+  | 'personal_workspace'
+  | 'already_owner'
+  | 'not_a_member'
+  | 'recipient_free_cap'
+
 export type WorkspaceStore = {
   create(userId: string, name: string, purpose: string): Promise<Workspace>
   list(userId: string): Promise<Workspace[]>
@@ -204,6 +235,18 @@ export type WorkspaceStore = {
   addMember(userId: string, workspaceId: string, memberUserId: string, role?: 'admin' | 'member'): Promise<WorkspaceMember>
   removeMember(userId: string, workspaceId: string, memberUserId: string): Promise<boolean>
   updateMemberRole(userId: string, workspaceId: string, memberUserId: string, role: 'admin' | 'member'): Promise<boolean>
+  /**
+   * Transfer workspace ownership to another existing member (spec:
+   * workspaces.md → "Ownership transfer"). One transaction on the system
+   * pool: the `workspaces` table has no RLS, so authorization is the route's
+   * `owner` gate plus an in-transaction `owner_user_id` re-check under a
+   * `FOR UPDATE` row lock (the same posture as `flushWorkspaceData`). On
+   * success the target's member row becomes `owner` and the acting owner's
+   * becomes `admin` (both at `'confidential'` clearance, the operator role
+   * default). Billing state (plan, Stripe ids) rides with the workspace row
+   * untouched.
+   */
+  transferOwnership(actingUserId: string, workspaceId: string, newOwnerUserId: string): Promise<TransferOwnershipResult>
   updateMemberDraftPermission(userId: string, workspaceId: string, memberUserId: string, canDraft: boolean): Promise<boolean>
   getRole(userId: string, workspaceId: string): Promise<'owner' | 'admin' | 'member' | null>
   /**
@@ -1275,6 +1318,93 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         [role, workspaceId, memberUserId, clearance],
       )
       return (result.rowCount ?? 0) > 0
+    },
+
+    async transferOwnership(actingUserId, workspaceId, newOwnerUserId) {
+      const client = await getPool().connect()
+      try {
+        await client.query('BEGIN')
+
+        // Lock the workspace row for the duration of the swap and re-check
+        // ownership inside the transaction (route-gate TOCTOU defense).
+        const ws = await client.query<{
+          ownerUserId: string
+          isPersonal: boolean
+          plan: WorkspacePlan
+        }>(
+          `SELECT owner_user_id AS "ownerUserId", is_personal AS "isPersonal", plan
+             FROM workspaces WHERE id = $1 FOR UPDATE`,
+          [workspaceId],
+        )
+        const row = ws.rows[0]
+        if (!row || row.ownerUserId !== actingUserId) {
+          await client.query('ROLLBACK')
+          return 'not_owner'
+        }
+        if (row.isPersonal) {
+          await client.query('ROLLBACK')
+          return 'personal_workspace'
+        }
+        if (newOwnerUserId === actingUserId) {
+          await client.query('ROLLBACK')
+          return 'already_owner'
+        }
+
+        // The new owner must already be a workspace member (locked decision,
+        // workspaces.md → "Ownership transfer").
+        const member = await client.query<{ role: string }>(
+          `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE`,
+          [workspaceId, newOwnerUserId],
+        )
+        if (member.rows.length === 0) {
+          await client.query('ROLLBACK')
+          return 'not_a_member'
+        }
+
+        // Free-cap backstop: receiving a 'free' workspace counts against the
+        // recipient's owned-free cap exactly like creating one would —
+        // otherwise create-then-transfer trivially bypasses the
+        // row-harvesting backstop (workspaces.md → "Creation cap").
+        if (row.plan === 'free') {
+          const cap = await client.query<{ ownsPaid: boolean; freeOwned: number }>(
+            `SELECT
+               EXISTS(SELECT 1 FROM workspaces WHERE owner_user_id = $1 AND plan <> 'free') AS "ownsPaid",
+               (SELECT count(*)::int FROM workspaces WHERE owner_user_id = $1 AND plan = 'free') AS "freeOwned"`,
+            [newOwnerUserId],
+          )
+          const { ownsPaid, freeOwned } = cap.rows[0]
+          if (!ownsPaid && freeOwned >= 2) {
+            await client.query('ROLLBACK')
+            return 'recipient_free_cap'
+          }
+        }
+
+        await client.query(
+          `UPDATE workspaces SET owner_user_id = $1, updated_at = now() WHERE id = $2`,
+          [newOwnerUserId, workspaceId],
+        )
+        // Both sides land on 'confidential' — the operator role default
+        // (sensitivity.md → User clearance Q18): the new owner is promoted,
+        // and the outgoing owner steps down to admin, keeping operator access.
+        await client.query(
+          `UPDATE workspace_members SET role = 'owner', clearance = 'confidential'
+           WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, newOwnerUserId],
+        )
+        await client.query(
+          `UPDATE workspace_members SET role = 'admin', clearance = 'confidential'
+           WHERE workspace_id = $1 AND user_id = $2`,
+          [workspaceId, actingUserId],
+        )
+
+        await client.query('COMMIT')
+        return 'transferred'
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw err
+      } finally {
+        client.release()
+      }
     },
 
     async updateMemberDraftPermission(_userId, workspaceId, memberUserId, canDraft) {

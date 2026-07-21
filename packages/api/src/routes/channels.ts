@@ -24,6 +24,7 @@ import {
   validateSlackCredentials,
   validateTelegramCredentials,
   validateDiscordCredentials,
+  validateMsTeamsCredentials,
   createTelegramApi,
   createSlackApi,
 } from '@use-brian/channels'
@@ -45,6 +46,7 @@ import {
   type ChannelAssistant,
 } from '../db/channels-store.js'
 import { ensureSlackConnectorInstance } from '../ingest/slack-connector-instance.js'
+import { ensureMsTeamsConnectorInstance } from '../ingest/msteams-connector-instance.js'
 import { query, queryWithRLS } from '../db/client.js'
 
 // Per-integration behavior config accepted by `PATCH .../channels/:id/config`.
@@ -143,6 +145,15 @@ const connectDiscordSchema = z.object({
   // Ed25519 application public key — only needed if the workspace also wires
   // the HTTP Interactions transport. Ignored by the Gateway path.
   publicKey: z.string().min(1).optional(),
+  defaultAssistantId: z.string().uuid().nullish(),
+  displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
+const connectMsTeamsSchema = z.object({
+  // Azure Bot (single-tenant): Microsoft App id + client secret + tenant id.
+  appId: z.string().min(1),
+  appPassword: z.string().min(1),
+  tenantId: z.string().min(1),
   defaultAssistantId: z.string().uuid().nullish(),
   displayName: z.string().min(1).max(200).optional(),
 }).strict()
@@ -829,6 +840,108 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       // server-invite URL (a bot must be in a server before it can be messaged).
       botId: info.botId,
       connectorError,
+    })
+  })
+
+  // POST /workspaces/:workspaceId/channels/msteams — Microsoft Teams BYO
+  // connect. Validates the Azure Bot credentials by minting a Bot Connector
+  // token, find-or-creates the workspace channel, and upserts the encrypted
+  // credentials. Returns the messaging-endpoint URL the operator must paste
+  // into their Azure Bot. See docs/architecture/channels/msteams.md.
+  router.post('/workspaces/:workspaceId/channels/msteams', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+
+    const parsed = connectMsTeamsSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    let info
+    try {
+      info = await validateMsTeamsCredentials({
+        appId: parsed.data.appId,
+        appPassword: parsed.data.appPassword,
+        tenantId: parsed.data.tenantId,
+      })
+    } catch (err) {
+      // A successful token mint proves the app registration + secret + tenant.
+      // It does NOT prove the Teams app is installed/reachable — that flips to
+      // "Connected" on the first inbound Activity (last_event_at).
+      res.status(400).json({ error: 'Azure rejected the Teams bot credentials', detail: (err as Error).message })
+      return
+    }
+
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'msteams',
+        displayName: parsed.data.displayName ?? 'Microsoft Teams',
+        externalIdentity: { botUserId: info.botId },
+        defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+      })
+    } catch (err) {
+      const msg = (err as Error).message
+      console.error('[channels] msteams channel provisioning failed:', err)
+      if (msg.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    try {
+      const integration = await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'msteams',
+        teamId: parsed.data.tenantId,
+        teamName: parsed.data.displayName ?? 'Microsoft Teams',
+        botUserId: info.botId,
+        botUsername: null,
+        credentials: {
+          app_id: parsed.data.appId,
+          app_password: parsed.data.appPassword,
+          tenant_id: parsed.data.tenantId,
+        },
+        actingUserId: userId,
+      })
+      // Pair a connector_instance so passive ingest has a CI to route against.
+      // Idempotent on re-install; non-fatal (ingest degrades, chat is unaffected).
+      try {
+        await ensureMsTeamsConnectorInstance({ channelIntegrationId: integration.id, actingUserId: userId })
+      } catch (err) {
+        console.error('[channels] msteams CI provisioning failed:', err)
+      }
+    } catch (err) {
+      console.error('[channels] msteams integration upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    if (!channel) {
+      res.status(500).json({ error: 'Channel created but no longer visible' })
+      return
+    }
+    const integrations = await loadIntegrations(userId, workspaceId)
+    res.status(provisioned.reused ? 200 : 201).json({
+      channel: serializeChannel(channel, integrations.get(provisioned.channelId)),
+      reused: provisioned.reused,
+      // The messaging-endpoint URL the operator pastes into their Azure Bot.
+      webhookPath: `/webhook/msteams/${provisioned.channelId}`,
+      webhookUrl: opts.apiUrl ? `${opts.apiUrl}/webhook/msteams/${provisioned.channelId}` : null,
     })
   })
 

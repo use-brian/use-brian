@@ -19,6 +19,7 @@ function fakeStore(over: Partial<GoalStore> = {}): GoalStore {
     createdByUserId: null,
     confirmedAt: null,
     completionClaim: null,
+    brief: null,
     createdAt: new Date(0),
     updatedAt: new Date(0),
   })

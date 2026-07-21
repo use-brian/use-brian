@@ -34,7 +34,7 @@ import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email'
+export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams'
 export type ChannelClearance = 'public' | 'internal' | 'confidential'
 export type ChannelCapability = 'chat' | 'broadcast' | 'ingest'
 export type ChannelStatus = 'active' | 'revoked' | 'invalid'
@@ -88,6 +88,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   // Assistant inboxes converse (sender-gated) and ingest; there is no
   // broadcast surface (docs/architecture/integrations/agentmail.md).
   email: ['chat', 'ingest'],
+  // Microsoft Teams mirrors Slack: chat + broadcast + passive ingest
+  // (docs/architecture/channels/msteams.md).
+  msteams: ['chat', 'broadcast', 'ingest'],
 }
 
 /**
@@ -106,6 +109,9 @@ function modelAliasColumnFor(channelType: ChannelType): string | null {
       return 'whatsapp_model_alias'
     case 'discord':
     case 'email':
+    case 'msteams':
+      // No per-platform default column — fresh routing rows seed from 'pro'
+      // (migration 234), like Discord/email.
       return null
   }
 }

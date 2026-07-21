@@ -6,7 +6,7 @@ vi.mock('../transcribe.js', () => ({
 }))
 
 // Import after the mock so the preflight binds to the mocked export.
-const { transcribeFirstAudio } = await import('../preflight.js')
+const { transcribeFirstAudio, describeTranscriptionFailure } = await import('../preflight.js')
 const { transcribeAudio } = await import('../transcribe.js')
 const mockedTranscribe = vi.mocked(transcribeAudio)
 
@@ -93,5 +93,61 @@ describe('[COMP:media/preflight] transcribeFirstAudio', () => {
       { buffer: expect.any(Buffer), mime: 'audio/ogg' },
       { apiKey: 'k', model: 'm', timeoutMs: 1234, fetchFn: customFetch },
     )
+  })
+})
+
+// A swallowed transcription failure used to reach the model as a bare
+// "[voice note — transcription unavailable]", and it filled the gap by
+// inventing status ("the transcription isn't available yet, let me check the
+// recording status") and narrating tool calls at the user. The failure stays
+// swallowed — a bad voice note must not fail the turn — but the reason now
+// travels with it.
+describe('[COMP:media/preflight] transcription failure reporting', () => {
+  it('reports a reason through onFailure while still returning undefined', async () => {
+    mockedTranscribe.mockRejectedValueOnce(new Error('DashScope transcription failed (HTTP 400): The audio is too long'))
+    const seen: string[] = []
+    const out = await transcribeFirstAudio(
+      [{ buffer: Buffer.from('a'), mime: 'audio/mpeg', index: 0 } as MediaAttachment],
+      { enabled: true, apiKey: 'k', onFailure: (r) => seen.push(r) },
+    )
+    expect(out).toBeUndefined()
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toMatch(/too long/i)
+    expect(seen[0]).toMatch(/recording/i)
+  })
+
+  it('does not call onFailure on the success path', async () => {
+    mockedTranscribe.mockResolvedValueOnce({ text: 'hello', usage: null, model: 'm' } as never)
+    const seen: string[] = []
+    await transcribeFirstAudio(
+      [{ buffer: Buffer.from('a'), mime: 'audio/mpeg', index: 0 } as MediaAttachment],
+      { enabled: true, apiKey: 'k', onFailure: (r) => seen.push(r) },
+    )
+    expect(seen).toEqual([])
+  })
+})
+
+describe('[COMP:media/preflight] describeTranscriptionFailure', () => {
+  it('turns the duration cap into routing guidance', () => {
+    expect(describeTranscriptionFailure(new Error('<400> InvalidParameter: The audio is too long')))
+      .toMatch(/too long .*recording/i)
+  })
+
+  it('classifies a rejected format', () => {
+    expect(describeTranscriptionFailure(new Error("The dedicated task `asr` does not support this input")))
+      .toMatch(/rejected by the transcription provider/i)
+  })
+
+  it('classifies a timeout', () => {
+    expect(describeTranscriptionFailure(new Error('request aborted'))).toMatch(/timed out/i)
+  })
+
+  it('passes an unrecognised provider message through rather than inventing one', () => {
+    // Never dress up a failure we do not understand as something friendlier.
+    expect(describeTranscriptionFailure(new Error('quota exceeded for project'))).toBe('quota exceeded for project')
+  })
+
+  it('caps a runaway provider message', () => {
+    expect(describeTranscriptionFailure(new Error('x'.repeat(500))).length).toBeLessThanOrEqual(200)
   })
 })

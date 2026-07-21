@@ -39,7 +39,7 @@ export const setHomeDockInputSchema = z.object({
     .max(6)
     .optional()
     .describe(
-      'The "Needs you" action cards in priority order. Include only the kinds worth surfacing today; counts are filled in live, so a kind whose count is 0 is dropped automatically. The attention kinds (connector_attention, workflow_attention) are appended automatically while live even when omitted — list one only to change its position or caption.',
+      'The "Needs you" action cards in priority order. Include only the kinds worth surfacing today; counts are filled in live, so a kind whose count is 0 is dropped automatically. The attention and pending-you kinds (connector_attention, workflow_attention, approvals, autopilot, task_triage) are appended automatically while live even when omitted — list one only to change its position or caption.',
     ),
 })
 

@@ -427,6 +427,86 @@ describe('[COMP:doc/markdown-normalizer] List-item text lift (pre-validation)', 
     })
   })
 
+  describe('liftListItemText — stray table cells (repair #3)', () => {
+    // The exact cell shape the "Client Discovery: Expert Local Consultant"
+    // patchPage sent (page 78942466, autonomous session ab286573, 2026-07-21):
+    // every cell `{ "text": "…" }`. The open-record cell schema validated it
+    // and the block→PM bridge degraded every cell to an empty paragraph.
+    it('lifts `{ text }` cells into one-paragraph richText docs', () => {
+      const lifted = liftListItemText({
+        kind: 'table',
+        id: 'tmp-table-overview',
+        rows: [
+          [{ text: 'Business Dimension' }, { text: 'Details' }],
+          [{ text: 'Company Name' }, { text: 'Expert Local Consultant' }],
+        ],
+        hasHeaderRow: true,
+        hasHeaderColumn: false,
+      }) as { rows: unknown[][]; hasHeaderRow: boolean }
+      expect(lifted.hasHeaderRow).toBe(true)
+      expect(lifted.rows).toHaveLength(2)
+      expect(richPlain(lifted.rows[0][0])).toBe('Business Dimension')
+      expect(richPlain(lifted.rows[1][1])).toBe('Expert Local Consultant')
+    })
+
+    it('lifts plain-string cells, parsing inline marks', () => {
+      const lifted = liftListItemText({
+        kind: 'table',
+        id: 't1',
+        rows: [['**Metric**', 'Value']],
+      }) as { rows: unknown[][] }
+      const para = (lifted.rows[0][0] as { content: { content: unknown[] }[] }).content[0]
+      expect(para.content).toEqual([
+        { type: 'text', text: 'Metric', marks: [{ type: 'bold' }] },
+      ])
+      expect(richPlain(lifted.rows[0][1])).toBe('Value')
+    })
+
+    it('wraps a bare paragraph-node cell in a doc', () => {
+      const lifted = liftListItemText({
+        kind: 'table',
+        id: 't1',
+        rows: [[{ type: 'paragraph', content: [{ type: 'text', text: 'Cell' }] }]],
+      }) as { rows: { type: string; content: unknown[] }[][] }
+      expect(lifted.rows[0][0].type).toBe('doc')
+      expect(richPlain(lifted.rows[0][0])).toBe('Cell')
+    })
+
+    it('passes a canonical table through by reference', () => {
+      const canonical = {
+        kind: 'table',
+        id: 't1',
+        rows: [
+          [
+            { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'A' }] }] },
+          ],
+        ],
+        hasHeaderRow: true,
+      }
+      expect(liftListItemText(canonical)).toBe(canonical)
+    })
+
+    it('an add op with `{ text }` cells validates AND keeps the content', () => {
+      const ops = [
+        {
+          op: 'add',
+          block: {
+            id: 'tmp-table-overview',
+            kind: 'table',
+            rows: [[{ text: 'Business Dimension' }, { text: 'Details' }]],
+            hasHeaderRow: true,
+          },
+        },
+      ]
+      const result = opsSchema.safeParse(ops)
+      expect(result.success).toBe(true)
+      const add = (result as { data: Ops }).data[0] as Extract<Ops[number], { op: 'add' }>
+      const table = add.block as Extract<Block, { kind: 'table' }>
+      expect(richPlain(table.rows[0][0])).toBe('Business Dimension')
+      expect(richPlain(table.rows[0][1])).toBe('Details')
+    })
+  })
+
   describe('the patchPage add-op schema accepts the prod 81a56d8b toggle', () => {
     // The exact shape session 81a56d8b (2026-06-11) sent and that the raw
     // schema rejected `ops.N.block.children.0.text: Required`, trapping the

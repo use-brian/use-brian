@@ -31,6 +31,7 @@ import {
   createSlackAdapter,
   createTelegramAdapter,
   createWhatsAppAdapter,
+  createMsTeamsAdapter,
 } from '@use-brian/channels'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
 import { findOrCreateSession, addSessionMessage } from '../db/sessions.js'
@@ -119,6 +120,27 @@ export function createWorkflowChannelDelivery(
         threadRef ? { threadTs: threadRef } : undefined,
       )
       return { status: 'delivered', channelType, channelId, messageId: slackTs || undefined }
+    }
+
+    if (channelType === 'msteams') {
+      if (!options.integrationStore) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const integ = await options.integrationStore.getCredentialsForAssistantSystem(assistantId, 'msteams')
+      if (!integ) return { status: 'skipped', channelType, reason: 'no_integration' }
+      const creds = integ.credentials as { app_id: string; app_password: string; tenant_id: string }
+      // Teams proactive delivery needs a serviceUrl — there is no inbound
+      // Activity here. Use the last-seen one persisted on the integration config
+      // (msteams.md → "Outbound / proactive"); absent it, we cannot reach the
+      // conversation yet, so skip rather than fail.
+      const serviceUrl = integ.config?.msteamsServiceUrl
+      if (!serviceUrl) return { status: 'skipped', channelType, reason: 'no_recipient' }
+      const msgId = await createMsTeamsAdapter({
+        appId: creds.app_id,
+        appPassword: creds.app_password,
+        tenantId: creds.tenant_id,
+        serviceUrl,
+        botId: integ.botUserId ?? undefined,
+      }).sendMessage(channelId, { text: deliverable, format: 'markdown' })
+      return { status: 'delivered', channelType, channelId, messageId: msgId || undefined }
     }
 
     if (channelType === 'whatsapp') {

@@ -148,11 +148,26 @@ function PageDomainCard({
   t: ShareT;
   onChanged: () => Promise<void>;
 }) {
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+
   const href = row.isDefault
     ? `https://${row.hostname}`
     : row.slug
       ? `https://${row.hostname}/${row.slug}`
       : `https://${row.hostname}/p/${pageId}`;
+
+  async function copyHref() {
+    if (typeof window === "undefined") return;
+    try {
+      await navigator.clipboard.writeText(href);
+      setCopied(true);
+      setCopyFailed(false);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopyFailed(true);
+    }
+  }
 
   return (
     <div className="rounded-md border border-border p-3 space-y-2">
@@ -176,7 +191,20 @@ function PageDomainCard({
             {t.site.statusPending}
           </span>
         ) : null}
+        <button
+          type="button"
+          onClick={() => void copyHref()}
+          aria-label={t.copyLink}
+          className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          {copied ? (
+            <Check className="size-4 text-emerald-600 dark:text-emerald-400" aria-hidden />
+          ) : (
+            <Link2 className="size-4" aria-hidden />
+          )}
+        </button>
       </div>
+      {copyFailed ? <p className="break-all text-xs text-muted-foreground">{href}</p> : null}
       {row.isDefault ? null : (
         <SlugRow pageId={pageId} ctx={row} t={t} onChanged={onChanged} />
       )}
@@ -229,9 +257,10 @@ function PageDomainsSection({
   );
 }
 
-/** The page's pretty URL on a connected domain: `hostname/` prefix + slug
- *  input with a debounced availability check. Renames keep the old slug as a
- *  301 (the note under the field). */
+/** The page's pretty URL on a connected domain: a bare `/` prefix (the
+ *  hostname already shows once in the card header) + slug input with a
+ *  debounced availability check. Renames keep the old slug as a 301 (the note
+ *  under the field). */
 function SlugRow({
   pageId,
   ctx,
@@ -313,7 +342,7 @@ function SlugRow({
       <p className="text-xs font-medium text-muted-foreground">{t.site.pageLinkLabel}</p>
       <div className="flex items-center gap-2">
         <div className="flex min-w-0 flex-1 items-center rounded-md border border-border bg-background text-sm transition-[border-color,box-shadow] focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
-          <span className="shrink-0 pl-3 text-muted-foreground">{ctx.hostname}/</span>
+          <span className="shrink-0 pl-3 text-muted-foreground">/</span>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -355,10 +384,15 @@ export function ShareDialog({
   pageId,
   workspaceId,
   currentUser,
+  onPublishChanged,
 }: {
   pageId: string;
   workspaceId: string;
   currentUser: { id: string; name: string; avatarUrl?: string | null };
+  /** Raised after a successful publish/unpublish so the page header can
+   *  re-resolve its Published badge (the resolved state is cascade-aware,
+   *  so the header re-fetches rather than trusting the direct flag). */
+  onPublishChanged?: () => void;
 }) {
   const t = useT().docPage.share;
   const workspace = useWorkspaceContext();
@@ -512,6 +546,7 @@ export function ShareDialog({
     try {
       const next = await publishPage(pageId, publish.indexable);
       setPublish(next);
+      onPublishChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -525,6 +560,7 @@ export function ShareDialog({
     try {
       await unpublishPage(pageId);
       setPublish({ published: false, indexable: false });
+      onPublishChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

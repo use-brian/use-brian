@@ -6,7 +6,10 @@
  *   [ ⌂ Workspace › Ancestor › 📄 Current ]      [sync?] [avatars] [Share] [★] [⋯]
  *
  * Left: the location **breadcrumb** (workspace → ancestors → current page);
- * the current crumb is click-to-rename (`onRenameValue`). Right, an action
+ * the current crumb is click-to-rename (`onRenameValue`), followed by a
+ * **Published badge** when the page is currently live on the web (resolved,
+ * cascade-aware `view.published`; links to `/share/p/<id>`; refreshed via
+ * `getView` when the Share dialog reports a publish change). Right, an action
  * cluster that mirrors Notion:
  *   - **Sync pill** — `CollabStatusIndicator`, LEFTMOST so it only extends the
  *     right-anchored cluster into empty space when it appears; shown only
@@ -29,7 +32,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Check, Lock, MoreHorizontal, Star, Trash2 } from "lucide-react";
+import { Check, Globe, Lock, MoreHorizontal, Star, Trash2 } from "lucide-react";
 import type { HocuspocusProvider } from "@hocuspocus/provider";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { Switch } from "@/components/ui/switch";
@@ -44,6 +47,7 @@ import {
   deleteView,
   downloadPageExport,
   fetchPageMarkdown,
+  getView,
   importDocument,
   ingestViewToBrain,
   saveView,
@@ -138,6 +142,41 @@ export function PageHeader({
   const presence = usePresence(provider);
   const isSaved = view.state === "saved";
   const live = status === "connected" && synced;
+
+  // Published badge — the RESOLVED live-on-the-web state (cascade-aware: a
+  // published grant on this page or an ancestor). Header-local because the
+  // field rides only the canonical `GET /api/views/:id` payload: mutating
+  // endpoints omit it, and `onMutated` replaces the view wholesale, so
+  // reading `view.published` directly would blink the badge off on every
+  // save/unsave. A payload without the field keeps the last known state for
+  // the SAME page; a different page's field-less payload (e.g. a fresh draft
+  // response) resets to hidden until the canonical fetch lands.
+  const [published, setPublished] = useState(view.published === true);
+  const publishedViewIdRef = useRef(view.id);
+  useEffect(() => {
+    if (typeof view.published === "boolean") {
+      publishedViewIdRef.current = view.id;
+      setPublished(view.published);
+    } else if (publishedViewIdRef.current !== view.id) {
+      publishedViewIdRef.current = view.id;
+      setPublished(false);
+    }
+  }, [view.id, view.published]);
+
+  // Re-resolve after the Share dialog publishes/unpublishes. A full re-fetch
+  // (not the dialog's direct state) keeps the badge truthful under the
+  // subtree cascade: unpublishing a child of a published ancestor leaves the
+  // page publicly reachable, and only the server can answer that.
+  async function refreshPublished() {
+    try {
+      const fresh = await getView(view.id);
+      if (publishedViewIdRef.current === fresh.id) {
+        setPublished(fresh.published === true);
+      }
+    } catch {
+      // Keep the last known state; the next page load re-resolves.
+    }
+  }
 
   // Debounced "connecting" flag: surface the sync indicator only once the
   // connection has been unhealthy for >1s. A quick reconnect — notably a
@@ -281,6 +320,22 @@ export function PageHeader({
             onNavigate={onNavigate}
             onRenameCurrent={(name) => onRenameValue(view.id, name)}
           />
+          {/* Published badge — the page is live on the web (directly or via a
+              published ancestor), so edits here are publicly visible. Links
+              to the public view so an editor can see what others see. */}
+          {published ? (
+            <a
+              href={`/share/p/${view.id}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={t.publishedBadge}
+              title={t.publishedBadgeTitle}
+              className="ml-2 inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 transition-colors hover:bg-emerald-500/20 dark:text-emerald-400"
+            >
+              <Globe className="size-3" aria-hidden />
+              <span className="hidden sm:inline">{t.publishedBadge}</span>
+            </a>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -332,6 +387,7 @@ export function PageHeader({
             pageId={view.id}
             workspaceId={view.workspaceId}
             currentUser={currentUser}
+            onPublishChanged={() => void refreshPublished()}
           />
 
           {/* History — icon-only, grouped with the favorite star + overflow

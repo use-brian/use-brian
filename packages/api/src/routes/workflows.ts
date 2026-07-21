@@ -274,7 +274,15 @@ async function dependencyIssues(
 
   if (opts.validateDeliveryTarget) {
     for (const [i, step] of definition.steps.entries()) {
-      if (step.type !== 'assistant_call' || !step.deliver || step.deliver.channelType === 'web') continue
+      // Teams delivery targets have no channel-enumeration API to preflight
+      // against (listTeamsChannels is a P5 follow-up), so they skip reachability
+      // validation — the send attempts at run time. Mirrors workflow/tools.ts.
+      if (
+        step.type !== 'assistant_call' ||
+        !step.deliver ||
+        step.deliver.channelType === 'web' ||
+        step.deliver.channelType === 'msteams'
+      ) continue
       // The integration is attached to the delivering assistant — the step's
       // concrete target, or the workspace primary for the 'primary' sentinel.
       const assistantId = UUID_SHAPE.test(step.target.assistantId)

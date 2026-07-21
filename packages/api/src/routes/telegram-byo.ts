@@ -700,6 +700,11 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           // that signs initData. Forward the handle so the verifier picks
           // the right HMAC key.
           botUsername: botUsername ?? undefined,
+          // Open the connectors page in this bot's own workspace — the bare
+          // legacy path dead-ends on the picker for multi-workspace users.
+          // (Guarded non-null at the `findAssistantById` check above; the
+          // optional chain is only for the hoisted-closure narrowing reset.)
+          workspaceId: assistant?.workspaceId ?? undefined,
         })
         if (handled && message) {
           await adapter.sendMessage(incoming.channelId, message).catch((err) => {

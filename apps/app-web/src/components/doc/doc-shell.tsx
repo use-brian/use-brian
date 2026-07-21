@@ -111,6 +111,7 @@ import { templateExtractionFromBlocks } from "@/lib/blueprints";
 import { SuggestedView } from "./suggested-view";
 import { ApprovalsPanel } from "./panels/approvals-panel";
 import { AutopilotPanel } from "./panels/autopilot-panel";
+import { TriagePanel } from "./panels/triage-panel";
 import { RecordingsPanel } from "./panels/recordings-panel";
 import { requestChatSeed, type ChatSeed } from "@/lib/chat-seed";
 import { docChatRelay } from "@/lib/doc-chat-relay";
@@ -1140,6 +1141,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     const panelLabel: Record<PanelId, string> = {
       approvals: t.topbarPanelApprovals,
       goals: t.topbarPanelAutopilot,
+      triage: t.topbarPanelTriage,
       recordings: t.topbarPanelRecordings,
     };
     return tabsState.tabs.map((tab) => {
@@ -1244,6 +1246,7 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
                 {
                   approvals: <ApprovalsPanel />,
                   goals: <AutopilotPanel />,
+                  triage: <TriagePanel />,
                   recordings: <RecordingsPanel />,
                 } satisfies Record<PanelId, ReactNode>
               )[urlPanel]

@@ -31,10 +31,12 @@ export type GoalRow = {
   outcome: string;
   status: GoalStatus;
   host: { type: GoalHostType; id: string } | null;
+  /** The host task's title (list rows; null for non-task hosts). */
+  hostTitle?: string | null;
   parentGoalId: string | null;
   recipeId: string | null;
   blockerReason: string | null;
-  /** null = a DRAFT (auto-created for a task, unconfirmed). */
+  /** null = a DRAFT (judge-created for a task, unconfirmed). */
   confirmedAt: string | null;
   /** true once a workflow means is set (the goal is being worked / armed). */
   hasWorkflow: boolean;
@@ -48,6 +50,8 @@ export type ListGoalsOptions = {
   /** Filter to a specific host id (e.g. a task's goal). */
   hostId?: string;
   includeTerminal?: boolean;
+  /** Draft-vs-armed split (§8): false = triage drafts, true = confirmed. */
+  confirmed?: boolean;
 };
 
 // ── Goal detail (the board drill-down) ───────────────────────────────────────
@@ -90,6 +94,13 @@ type GoalMeans = {
  *  adversarial verifier passed a completion claim. */
 type GoalCompletionClaim = { because: string; verifiedAt: string };
 
+/** Triage brief (§8): present only on judge-drafted goals. */
+type GoalBrief = {
+  verification: string;
+  approach: string;
+  judgeReason: string;
+};
+
 /** The board row plus the full acceptance contract + completion claim. */
 export type GoalDetail = GoalRow & {
   doneWhen: DoneWhenNode;
@@ -97,6 +108,7 @@ export type GoalDetail = GoalRow & {
   budget: GoalBudget;
   policy: GoalPolicy;
   completionClaim: GoalCompletionClaim | null;
+  brief: GoalBrief | null;
 };
 
 /** List goals for the workspace, most-recently-updated first. Returns `[]` on
@@ -110,6 +122,7 @@ export async function listGoals(
   if (opts.hostType) q.set("hostType", opts.hostType);
   if (opts.hostId) q.set("hostId", opts.hostId);
   if (opts.includeTerminal) q.set("includeTerminal", "true");
+  if (opts.confirmed !== undefined) q.set("confirmed", opts.confirmed ? "true" : "false");
   const res = await authFetch(`${API_URL}/api/goals?${q.toString()}`);
   if (!res.ok) return [];
   const data = (await res.json()) as { goals?: GoalRow[] };
@@ -168,9 +181,18 @@ async function goalAction(
   return { ok: true, goal: data.goal };
 }
 
-/** Confirm (arm) a draft goal, optionally refining its outcome. */
-export function confirmGoal(goalId: string, outcome?: string): Promise<GoalActionResult> {
-  return goalAction(goalId, "confirm", { outcome });
+/** Confirm (arm) a draft goal, optionally refining its outcome and (§8) its
+ *  triage-brief verification / approach. */
+export function confirmGoal(
+  goalId: string,
+  outcome?: string,
+  brief?: { verification?: string; approach?: string },
+): Promise<GoalActionResult> {
+  return goalAction(goalId, "confirm", {
+    outcome,
+    verification: brief?.verification,
+    approach: brief?.approach,
+  });
 }
 
 /** Edit a goal's outcome text (draft or armed). Never confirms a draft; a

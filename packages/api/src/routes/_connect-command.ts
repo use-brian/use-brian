@@ -36,34 +36,57 @@ function findConnector(id: string): ConnectableInfo | null {
   return listConnectable().find((c) => c.id === id) ?? null
 }
 
-function miniAppUrl(appUrl: string, connectorId: string, botUsername?: string): string {
+function miniAppUrl(
+  appUrl: string,
+  connectorId: string,
+  botUsername?: string,
+  workspaceId?: string,
+): string {
   // `/tg-link` auto-logs the user in (initData-verified) and honours `?next=`
-  // to hand them off to /studio/connectors?connect=<id>, which auto-starts
-  // the OAuth / PAT flow on load. On BYO bots we also pass `?bot=<username>`
-  // so the verifier looks up that bot's token instead of the official one —
+  // to hand them off to the connectors page, which auto-starts the OAuth /
+  // PAT flow on load. On BYO bots we also pass `?bot=<username>` so the
+  // verifier looks up that bot's token instead of the official one —
   // initData is HMAC-signed by whichever bot launched the Mini App.
-  const next = `/studio/connectors?connect=${encodeURIComponent(connectorId)}`
+  //
+  // Prefer the WORKSPACE-SCOPED path. Every app-web route is `/w/<id>/...`;
+  // the bare `/studio/connectors` form only survives via the `[...legacy]`
+  // catch-all, which can resolve a workspace on its own ONLY when the user
+  // has exactly one. On 2026-07-21 a user with 8 workspaces tapped
+  // `/connect gmail` and landed on the `/teams` picker with the sub-path
+  // dropped — a dead end. The assistant is workspace-bound
+  // (`assistants.workspace_id` is NOT NULL), so the caller can hand us the
+  // right id and skip the guess entirely. The bare path stays as a fallback
+  // for callers that cannot resolve one; `[...legacy]` now carries it
+  // through the picker via `?next=` rather than dropping it.
+  const next = workspaceId
+    ? `/w/${encodeURIComponent(workspaceId)}/studio/connectors?connect=${encodeURIComponent(connectorId)}`
+    : `/studio/connectors?connect=${encodeURIComponent(connectorId)}`
   const botParam = botUsername ? `&bot=${encodeURIComponent(botUsername)}` : ''
   return `${appUrl}/tg-link?next=${encodeURIComponent(next)}${botParam}`
 }
 
-function renderMenu(appUrl: string, botUsername?: string): OutgoingMessage {
+function renderMenu(appUrl: string, botUsername?: string, workspaceId?: string): OutgoingMessage {
   const connectors = listConnectable()
   return {
     text: 'Which service would you like to connect?',
     actions: connectors.map((c) => ({
       kind: 'web_app' as const,
       label: c.name,
-      url: miniAppUrl(appUrl, c.id, botUsername),
+      url: miniAppUrl(appUrl, c.id, botUsername, workspaceId),
     })),
   }
 }
 
-function renderSingle(appUrl: string, c: ConnectableInfo, botUsername?: string): OutgoingMessage {
+function renderSingle(
+  appUrl: string,
+  c: ConnectableInfo,
+  botUsername?: string,
+  workspaceId?: string,
+): OutgoingMessage {
   return {
     text: `Tap below to authorize ${c.name}. Your connection is account-wide — per-assistant permissions are managed in Settings.`,
     actions: [
-      { kind: 'web_app', label: `Authorize ${c.name}`, url: miniAppUrl(appUrl, c.id, botUsername) },
+      { kind: 'web_app', label: `Authorize ${c.name}`, url: miniAppUrl(appUrl, c.id, botUsername, workspaceId) },
     ],
   }
 }
@@ -110,6 +133,12 @@ export type HandleConnectParams = {
    * token to check the initData HMAC. Omit on the official bot.
    */
   botUsername?: string
+  /**
+   * Workspace the Mini App should open in. The speaking assistant's
+   * `workspaceId` (NOT NULL in schema). Omit only when the caller cannot
+   * resolve one — the link then falls back to the bare legacy path.
+   */
+  workspaceId?: string
 }
 
 /**
@@ -126,10 +155,10 @@ export function handleConnectCommand(params: HandleConnectParams): ConnectComman
   if (!params.isLinked) return { message: renderNotLinked(), handled: true }
   if (!params.appUrl) return { message: renderNoAppUrl(), handled: true }
 
-  if (rest === '' ) return { message: renderMenu(params.appUrl, params.botUsername), handled: true }
+  if (rest === '' ) return { message: renderMenu(params.appUrl, params.botUsername, params.workspaceId), handled: true }
   if (/^(help|list|\?)$/i.test(rest)) return { message: renderHelp(), handled: true }
 
   const c = findConnector(rest.toLowerCase())
   if (!c) return { message: renderUnknown(rest), handled: true }
-  return { message: renderSingle(params.appUrl, c, params.botUsername), handled: true }
+  return { message: renderSingle(params.appUrl, c, params.botUsername, params.workspaceId), handled: true }
 }

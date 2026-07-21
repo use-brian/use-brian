@@ -115,8 +115,19 @@ describe('[COMP:channels/email] Email channel adapter', () => {
       expect(reply).toHaveBeenCalledWith({
         inReplyToMessageId: 'msg_1',
         text: 'Hello Sarah',
+        html: '<p>Hello Sarah</p>',
       })
       expect(id).toBe('out_1')
+    })
+
+    it('renders markdown into the multipart pair: stripped text + email HTML', async () => {
+      const { adapter, reply } = makeAdapter()
+      await adapter.sendMessage('thread_1', { text: 'Hi **Sarah**,\n\n- contract\n- invoice' })
+      const sent = reply.mock.calls[0][0]
+      expect(sent.text).toBe('Hi Sarah,\n\n• contract\n• invoice')
+      expect(sent.html).toContain('<strong>Sarah</strong>')
+      expect(sent.html).toContain('<li>contract</li>')
+      expect(sent.text).not.toContain('**')
     })
 
     it('maps outbound documents to base64 attachments', async () => {

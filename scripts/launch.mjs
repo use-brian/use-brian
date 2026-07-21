@@ -21,7 +21,7 @@
  */
 import { spawn } from 'node:child_process'
 import { connect } from 'node:net'
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, readdirSync, statSync, rmSync } from 'node:fs'
 import { homedir, platform, arch, userInfo } from 'node:os'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -266,6 +266,69 @@ function nextHasNativeSwc() {
     return true
   }
 }
+// Turbopack's persistent dev cache is keyed by a generation id (the Next
+// version, or a config hash). When that key changes — a Next bump, a
+// turbopack config edit — it starts a FRESH generation and never reclaims the
+// old one, so the cache grows monotonically across upgrades. Observed
+// 2026-07-21: 7.9 GB across two generations (5.5 GB active + 1.4 GB orphaned
+// five days earlier), which put next-server at 4.0 GB RSS *before compiling a
+// single route* and OOM-killed app-web against its 2048 MB heap cap. With a
+// cold cache the same server idles at 322 MB and peaks at 187 MB of V8 heap
+// after eight routes — so the cap was never the problem, the cache was.
+//
+// Prune conservatively: keep the most recently written generation (the live
+// one) and drop generations untouched for >7 days. Everything here is
+// regenerable build output; the worst case is one slower first compile.
+const CACHE_STALE_DAYS = 7
+const CACHE_WARN_BYTES = 4 * 1024 ** 3
+function dirSizeBytes(dir) {
+  let total = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, entry.name)
+    try { total += entry.isDirectory() ? dirSizeBytes(p) : statSync(p).size } catch { /* raced */ }
+  }
+  return total
+}
+function pruneTurbopackCache() {
+  const cacheDir = join(ROOT, 'apps/app-web/.next/dev/cache/turbopack')
+  if (!existsSync(cacheDir)) return
+  try {
+    const gens = readdirSync(cacheDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => {
+        const p = join(cacheDir, e.name)
+        let newest = 0
+        for (const f of readdirSync(p, { withFileTypes: true })) {
+          try { newest = Math.max(newest, statSync(join(p, f.name)).mtimeMs) } catch { /* raced */ }
+        }
+        return { name: e.name, path: p, newest }
+      })
+    if (gens.length === 0) return
+    gens.sort((a, b) => b.newest - a.newest)
+    const cutoff = Date.now() - CACHE_STALE_DAYS * 86_400_000
+    // gens[0] is the live generation — never a prune candidate, however old.
+    const stale = gens.slice(1).filter((g) => g.newest < cutoff)
+    let freed = 0
+    for (const g of stale) {
+      try { freed += dirSizeBytes(g.path); rmSync(g.path, { recursive: true, force: true }) } catch { /* best effort */ }
+    }
+    if (freed > 0) {
+      const human = freed >= 1024 ** 3 ? `${(freed / 1024 ** 3).toFixed(1)} GB` : `${Math.round(freed / 1024 ** 2)} MB`
+      console.log(`[launch] pruned ${stale.length} stale Turbopack cache generation(s), freed ${human}`)
+    }
+    const remaining = dirSizeBytes(cacheDir)
+    if (remaining > CACHE_WARN_BYTES) {
+      console.warn(
+        `[launch] Turbopack dev cache is ${(remaining / 1024 ** 3).toFixed(1)} GB (one live generation). ` +
+        `This inflates next-server RSS and can OOM app-web against its ${HEAP_MB['app-web']} MB heap cap — ` +
+        `run \`rm -rf apps/app-web/.next\` if app-web starts dying.`,
+      )
+    }
+  } catch (err) {
+    console.warn('[launch] could not inspect the Turbopack dev cache:', err?.message ?? err)
+  }
+}
+
 let shuttingDown = false
 function shutdown(code = 0) {
   if (shuttingDown) return
@@ -294,6 +357,7 @@ console.log('[launch] starting api (:4000), doc-sync (:8080), app-web (:3003) ..
 run('api', 'pnpm', ['--filter', '@use-brian/api-open', 'exec', 'tsx', 'src/index.ts'])
 run('doc-sync', 'pnpm', ['--filter', '@use-brian/doc-sync', 'exec', 'tsx', 'src/index.ts'],
   { PORT: String(PORTS.docSync) })
+pruneTurbopackCache()
 const forceWebpack = process.env.USEBRIAN_WEBPACK === '1' || !nextHasNativeSwc()
 if (forceWebpack) {
   console.log('[launch] native @next/swc binding for this platform not found — starting app-web with webpack (run `pnpm install` to restore Turbopack).')

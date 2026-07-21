@@ -49,12 +49,18 @@ const workspaceStore = {
   setDefaultRecordingBlueprint: vi.fn(),
   delete: vi.fn(),
   countFreeOwned: vi.fn(),
+  transferOwnership: vi.fn(),
 }
+
+const auditStore = { append: vi.fn(), list: vi.fn() }
 
 function app(userId?: string) {
   return createTestApp(
     '/api/workspaces',
-    workspaceRoutes({ workspaceStore: workspaceStore as never }),
+    workspaceRoutes({
+      workspaceStore: workspaceStore as never,
+      auditStore: auditStore as never,
+    }),
     userId ? { userId } : undefined,
   )
 }
@@ -212,6 +218,95 @@ describe('[COMP:api/workspaces-route] requireWorkspaceRole gate', () => {
       .post('/api/workspaces/ws-1/members')
       .send({ email: 'nobody@example.com' })
     expect(res.status).toBe(404)
+  })
+})
+
+describe('[COMP:api/workspaces-route] POST /:workspaceId/transfer-ownership', () => {
+  it('requires the owner role (admin → 403)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({ newOwnerUserId: 'u-2' })
+    expect(res.status).toBe(403)
+    expect(workspaceStore.transferOwnership).not.toHaveBeenCalled()
+  })
+
+  it('400s when newOwnerUserId is missing', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({})
+    expect(res.status).toBe(400)
+    expect(workspaceStore.transferOwnership).not.toHaveBeenCalled()
+  })
+
+  it('transfers for the owner and appends the audit event', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('transferred')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({ newOwnerUserId: 'u-2' })
+    expect(res.status).toBe(200)
+    expect(res.body.ok).toBe(true)
+    expect(workspaceStore.transferOwnership).toHaveBeenCalledWith('u-1', 'ws-1', 'u-2')
+    expect(auditStore.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: 'workspace.ownership_transferred',
+        actorUserId: 'u-1',
+        subjectId: 'u-2',
+        details: { fromUserId: 'u-1', toUserId: 'u-2' },
+      }),
+    )
+  })
+
+  it('maps personal_workspace to 400', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('personal_workspace')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-personal/transfer-ownership')
+      .send({ newOwnerUserId: 'u-2' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('personal_workspace_not_transferable')
+    expect(auditStore.append).not.toHaveBeenCalled()
+  })
+
+  it('maps not_a_member to 400', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('not_a_member')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({ newOwnerUserId: 'u-stranger' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('new_owner_not_member')
+  })
+
+  it('maps already_owner to 400', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('already_owner')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({ newOwnerUserId: 'u-1' })
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('already_owner')
+  })
+
+  it('maps the store not_owner re-check to 403', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('not_owner')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-1/transfer-ownership')
+      .send({ newOwnerUserId: 'u-2' })
+    expect(res.status).toBe(403)
+  })
+
+  it('maps recipient_free_cap to 403 plan_required', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('owner')
+    workspaceStore.transferOwnership.mockResolvedValueOnce('recipient_free_cap')
+    const res = await request(app('u-1'))
+      .post('/api/workspaces/ws-free/transfer-ownership')
+      .send({ newOwnerUserId: 'u-2' })
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('plan_required')
   })
 })
 

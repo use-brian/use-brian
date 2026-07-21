@@ -8,6 +8,7 @@ function signals(over: Partial<HomeSignals> = {}): HomeSignals {
     brainReviewCount: 5,
     approvalsCount: 2,
     autopilotCount: 0,
+    taskTriageCount: 0,
     connectorAttentionCount: 0,
     workflowAttentionCount: 0,
     upcomingWorkflows: [{ id: 'w1', name: 'Investor digest', nextRunAt: '2026-06-10T17:00:00Z' }],
@@ -84,10 +85,31 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     expect(dock.needsYou.map((n) => n.kind)).toEqual(['approvals'])
   })
 
-  it('surfaces the autopilot card when goals wait on a confirm/unblock', () => {
+  it('surfaces the autopilot card when goals wait on a kick-start/unblock', () => {
     const dock = mergeHomeDock(null, signals({ autopilotCount: 3 }))
     expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals', 'autopilot'])
     expect(dock.needsYou[2].count).toBe(3)
+  })
+
+  it('surfaces the task_triage card when judge-drafted goals await triage (§8)', () => {
+    const dock = mergeHomeDock(null, signals({ taskTriageCount: 4 }))
+    expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals', 'task_triage'])
+    expect(dock.needsYou[2].count).toBe(4)
+  })
+
+  it('appends a live task_triage the artifact omitted (a stale layout cannot hide pending triage)', () => {
+    const layout: HomeDockLayout = {
+      version: 1,
+      note: null,
+      needsYou: [{ kind: 'brain_review' }],
+      generatedAt: '2026-06-10T09:00:00Z',
+      generatedByAssistantId: 'a1',
+    }
+    const dock = mergeHomeDock(layout, signals({ taskTriageCount: 2 }))
+    const kinds = dock.needsYou.map((n) => n.kind)
+    expect(kinds[0]).toBe('brain_review')
+    expect(kinds).toContain('task_triage')
+    expect(dock.needsYou.find((n) => n.kind === 'task_triage')?.count).toBe(2)
   })
 
   it('leads the default order with live attention kinds (broken connector, failed runs)', () => {

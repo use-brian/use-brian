@@ -28,6 +28,7 @@ vi.mock('@use-brian/channels', () => ({
   validateSlackCredentials: vi.fn(),
   validateTelegramCredentials: vi.fn(),
   validateDiscordCredentials: vi.fn(),
+  validateMsTeamsCredentials: vi.fn(),
   createTelegramApi: vi.fn(),
   createSlackApi: vi.fn(),
   // The workspace channels route doesn't construct an adapter, but the
@@ -57,6 +58,7 @@ import {
   validateSlackCredentials,
   validateTelegramCredentials,
   validateDiscordCredentials,
+  validateMsTeamsCredentials,
   createTelegramApi,
   createSlackApi,
 } from '@use-brian/channels'
@@ -369,6 +371,46 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       .post('/api/workspaces/ws-1/channels/slack')
       .send({ botToken: 'xoxb-abc', signingSecret: 'longenough-secret-1234' })
     expect(res.status).toBe(503)
+  })
+
+  it('POST /msteams 201s, stores encrypted creds, and returns the webhook path', async () => {
+    vi.mocked(validateMsTeamsCredentials).mockResolvedValue({ appId: 'app-1', tenantId: 'tid-1', botId: '28:app-1' })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({ channelId: 'chan-mt', reused: false })
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-mt', channelType: 'msteams', displayName: 'Microsoft Teams' }),
+    )
+    const upsert = vi.fn()
+    const integrationStore = {
+      upsert,
+      listForWorkspace: vi.fn().mockResolvedValue([
+        makeIntegration({ id: 'int-mt', channelId: 'chan-mt', channelType: 'msteams' }),
+      ]),
+    } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore }))
+      .post('/api/workspaces/ws-1/channels/msteams')
+      .send({ appId: 'app-1', appPassword: 'secret', tenantId: 'tid-1' })
+    expect(res.status).toBe(201)
+    expect(res.body.channel.id).toBe('chan-mt')
+    expect(res.body.webhookPath).toBe('/webhook/msteams/chan-mt')
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channelType: 'msteams',
+        credentials: { app_id: 'app-1', app_password: 'secret', tenant_id: 'tid-1' },
+      }),
+    )
+  })
+
+  it('POST /msteams 400s when Azure rejects the credentials', async () => {
+    vi.mocked(validateMsTeamsCredentials).mockRejectedValue(new Error('AADSTS7000215: bad secret'))
+    const integrationStore = {
+      upsert: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    } as unknown as ChannelIntegrationStore
+    const res = await request(buildApp({ integrationStore }))
+      .post('/api/workspaces/ws-1/channels/msteams')
+      .send({ appId: 'app-1', appPassword: 'bad', tenantId: 'tid-1' })
+    expect(res.status).toBe(400)
+    expect(res.body.detail).toContain('AADSTS7000215')
   })
 
   it('POST /slack 400s when Slack rejects the credentials', async () => {

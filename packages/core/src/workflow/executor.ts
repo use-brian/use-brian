@@ -167,7 +167,7 @@ export type DeliverToChannel = (params: {
   assistantId: string
   /** Billing / delivery-session owner. */
   userId: string
-  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp'
+  channelType: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
   channelId: string
   text: string
   /**
@@ -361,7 +361,7 @@ export type ExecutorDeps = {
     approverUserId: string
     toolName: string
     arguments: Record<string, unknown>
-    deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp'
+    deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
     expiresAt: Date | null
   }) => Promise<void>
   /**
@@ -752,7 +752,7 @@ type StepDispatchResult =
       approverUserId: string
       toolName: string
       arguments: Record<string, unknown>
-      deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp'
+      deliveryChannel: 'web' | 'telegram' | 'slack' | 'whatsapp' | 'msteams'
       expiresAt: Date | null
     }
 

@@ -10,10 +10,13 @@
 // user for debugging the hosted edition locally. This one is the product — a
 // neutral owner identity, no email surfaced.
 //
-// Triple-dead outside a local oss run: 404s when `NODE_ENV === "production"`,
-// when `primaryAuthUrl()` resolves (a sub-app deploy where the primary owns
-// auth), or when the build is not the oss edition. The backend route is itself
-// gated on local + oss, so a token can never be minted in the cloud.
+// Dead outside an oss deploy: 404s when `primaryAuthUrl()` resolves (a sub-app
+// deploy where the primary owns auth) or when the build is not the oss edition.
+// The backend route is itself gated on local + oss, so a token can never be
+// minted in the cloud. We do NOT gate on NODE_ENV: a built self-host runs
+// `next start` (NODE_ENV="production"), so the edition + primary checks are the
+// real gate. Redirects use APP_URL because behind a reverse proxy request.url
+// resolves to the bound localhost address.
 //
 // Component-map tag: [COMP:app-web/local-session-route].
 
@@ -32,11 +35,12 @@ import { isOssEdition } from "@/lib/edition";
 const API_URL = process.env.API_URL ?? "http://localhost:4000";
 
 export async function GET(request: Request) {
-  if (
-    process.env.NODE_ENV === "production" ||
-    primaryAuthUrl() !== null ||
-    !isOssEdition()
-  ) {
+  // Behind a reverse proxy (Cloudflare Tunnel) Next resolves request.url to the
+  // bound address (localhost:PORT), so absolute redirects must be built from the
+  // configured public origin instead.
+  const appOrigin = process.env.APP_URL ?? request.url;
+
+  if (primaryAuthUrl() !== null || !isOssEdition()) {
     return new NextResponse("Not found", { status: 404 });
   }
 
@@ -47,7 +51,7 @@ export async function GET(request: Request) {
     if (!backendRes.ok) {
       console.error("[/api/auth/local-session] backend rejected:", backendRes.status);
       return NextResponse.redirect(
-        new URL("/login?error=local_session_failed", request.url),
+        new URL("/login?error=local_session_failed", appOrigin),
       );
     }
 
@@ -63,7 +67,7 @@ export async function GET(request: Request) {
 
     // Land on the app root, which resolves into the single-workspace redirect
     // in src/app/page.tsx — the same destination the OAuth callback uses.
-    const response = NextResponse.redirect(new URL("/", request.url));
+    const response = NextResponse.redirect(new URL("/", appOrigin));
     response.cookies.set(accessTokenCookie(data.accessToken));
     response.cookies.set(refreshTokenCookie(data.refreshToken));
     response.cookies.set(
@@ -81,7 +85,7 @@ export async function GET(request: Request) {
   } catch (err) {
     console.error("[/api/auth/local-session] error:", err);
     return NextResponse.redirect(
-      new URL("/login?error=local_session_failed", request.url),
+      new URL("/login?error=local_session_failed", appOrigin),
     );
   }
 }

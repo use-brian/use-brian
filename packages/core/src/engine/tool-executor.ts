@@ -4,6 +4,7 @@ import type { LoopDetector, LoopAction } from './loop-detector.js'
 import { FAIL_STREAK_LIMIT } from './loop-detector.js'
 import type { AwaitingApprovalEvent, ConfirmationResolver, ToolConfirmationRequest } from '../mcp/types.js'
 import type { PermissionGrantEvaluator } from '../workflow/permission-grants.js'
+import { alreadyDeclinedToolResult, declinedToolResult, timedOutToolResult } from './decline-copy.js'
 import { canRead, isSensitivity } from '../security/sensitivity.js'
 import { subsetCompartments } from '../security/compartments.js'
 import { capToolResultTokens } from '../providers/context-budget.js'
@@ -267,7 +268,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
         type: 'tool_result',
         toolUseId: t.id,
         name: t.name,
-        content: `ERROR: "${t.name}" was denied or timed out earlier. Capability unavailable for this conversation.`,
+        content: alreadyDeclinedToolResult(t.name),
         isError: true,
       }
       t.status = 'completed'
@@ -491,7 +492,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
             type: 'tool_result',
             toolUseId: t.id,
             name: t.name,
-            content: `ERROR: user denied "${t.name}". Capability unavailable for this conversation.`,
+            content: declinedToolResult(t.name),
             isError: true,
           }
           t.status = 'completed'
@@ -506,7 +507,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           type: 'tool_result',
           toolUseId: t.id,
           name: t.name,
-          content: `ERROR: confirmation timed out for "${t.name}". Tool was not executed. Capability unavailable for this conversation.`,
+          content: timedOutToolResult(t.name),
           isError: true,
         }
         t.status = 'completed'

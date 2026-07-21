@@ -1043,3 +1043,107 @@ describe('[COMP:engine/tool-executor] identifier-provenance write-gate', () => {
     expect(results[0]).toMatchObject({ type: 'tool_result', content: 'saveContact:ok' })
   })
 })
+
+// ── Declined-confirmation copy ─────────────────────────────────
+// Regression cover for the 2026-07-21 incident: a declined Gmail send left
+// "Capability unavailable for this conversation." in the transcript, and on
+// the NEXT turn (fresh `deniedTools`, Gmail re-injected and usable) the model
+// read that line, concluded the capability was gone, and told the user to run
+// `/connect gmail`. The block is per-turn; the copy must say so, must not
+// diagnose a connection problem, and must not invite a reconnect remedy.
+// Spec: docs/architecture/engine/tool-executor.md → "Declined confirmations".
+
+function makeResolverThatDenies(): ConfirmationResolver {
+  return { resolve: () => {}, waitForDecision: async () => 'deny' }
+}
+
+function makeResolverThatTimesOut(): ConfirmationResolver {
+  return {
+    resolve: () => {},
+    waitForDecision: async () => {
+      throw new Error('timeout')
+    },
+  }
+}
+
+/** Narrow a drained block to its tool_result content string. */
+function toolResultContent(block: ContentBlock): string {
+  if (block.type !== 'tool_result') {
+    throw new Error(`expected a tool_result block, got "${block.type}"`)
+  }
+  return String(block.content)
+}
+
+/** Every decline result must hold these three properties. */
+function expectHonestDeclineCopy(content: string, toolName: string): void {
+  expect(content).toContain(toolName)
+  // 1. True scope — the block lasts this turn, not the conversation.
+  expect(content).not.toContain('for this conversation')
+  expect(content).toContain('next turn')
+  // 2. Right diagnosis — not a connection/auth/setup failure.
+  expect(content).toContain('NOT a connection, authorization, or setup problem')
+  // 3. Right remedy — never send the user to reconnect or /connect.
+  expect(content).toContain('Do NOT tell the user to reconnect')
+  expect(content).toContain('/connect')
+}
+
+describe('[COMP:engine/decline-copy] Declined-confirmation tool_result copy', () => {
+  it('reports a denied confirmation as a per-turn decline, not a lost capability', async () => {
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context: ctx,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatDenies(),
+      onConfirmationRequired: () => {},
+    })
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    expect(results[0]).toMatchObject({ isError: true })
+    const content = toolResultContent(results[0])
+    expectHonestDeclineCopy(content, 'sensitiveTool')
+    expect(content).toContain('declined the confirmation prompt')
+  })
+
+  it('reports an expired confirmation the same way, naming the timeout', async () => {
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context: ctx,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatTimesOut(),
+      onConfirmationRequired: () => {},
+    })
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    expect(results[0]).toMatchObject({ isError: true })
+    const content = toolResultContent(results[0])
+    expectHonestDeclineCopy(content, 'sensitiveTool')
+    expect(content).toContain('expired')
+  })
+
+  it('refuses a re-call within the same turn without re-prompting or claiming disconnection', async () => {
+    const notify = vi.fn<(req: ToolConfirmationRequest) => void>()
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context: ctx,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatDenies(),
+      onConfirmationRequired: notify,
+    })
+    executor.addTool('call_1', 'sensitiveTool', {})
+    await drainResults(executor)
+    executor.addTool('call_2', 'sensitiveTool', {})
+    const second = await drainResults(executor)
+
+    // The user is prompted once, not once per retry.
+    expect(notify).toHaveBeenCalledTimes(1)
+    expect(second[0]).toMatchObject({ isError: true })
+    const content = toolResultContent(second[0])
+    expectHonestDeclineCopy(content, 'sensitiveTool')
+    expect(content).toContain('earlier in this same turn')
+  })
+})

@@ -108,8 +108,19 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect((calls[0] as never as { messages: [{ content: [unknown, { image_url: { url: string } }] }] })
       .messages[0].content[1].image_url.url).toMatch(/^data:image\/png;base64,/)
     expect(calls[1].model).toBe(DASHSCOPE_ASR_MODEL)
-    expect((calls[1] as never as { messages: [{ content: [unknown, { type: string; input_audio: { format: string } }] }] })
-      .messages[0].content[1].input_audio.format).toBe('ogg')
+    // Audio is the ONLY part: qwen3-asr-flash is a dedicated ASR task model and
+    // rejects the whole request when a text part rides along
+    // (`InternalError.Algo.InvalidParameter: The dedicated task 'asr' ... does
+    // not support this input`). Sending a prompt failed 100% of voice notes on
+    // a Qwen deployment, silently — the preflight swallows the error and the
+    // user just sees "I can't transcribe audio".
+    const audioContent = (calls[1] as never as {
+      messages: [{ content: Array<{ type: string; input_audio?: { format: string } }> }]
+    }).messages[0].content
+    expect(audioContent).toHaveLength(1)
+    expect(audioContent[0].type).toBe('input_audio')
+    expect(audioContent[0].input_audio?.format).toBe('ogg')
+    expect(audioContent.some((p) => p.type === 'text')).toBe(false)
   })
 
   it('refuses a PDF on DashScope rather than sending something Qwen-VL misreads', async () => {

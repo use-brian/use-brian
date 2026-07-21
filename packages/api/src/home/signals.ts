@@ -58,6 +58,7 @@ export async function assembleHomeSignals(
     review,
     approvalsCount,
     autopilotCount,
+    taskTriageCount,
     connectorAttentionCount,
     workflowAttentionCount,
     brain,
@@ -69,6 +70,7 @@ export async function assembleHomeSignals(
     safe(() => countBrainInbox(workspaceId).then((r) => r.total), 0),
     safe(() => countPendingApprovals(workspaceId), 0),
     safe(() => countAutopilotAttention(workspaceId), 0),
+    safe(() => countTaskTriage(workspaceId), 0),
     safe(() => countConnectorAttention(workspaceId), 0),
     safe(() => countWorkflowAttention(workspaceId), 0),
     safe(() => countBrainEntries(workspaceId), { total: 0, last7: 0 }),
@@ -85,6 +87,7 @@ export async function assembleHomeSignals(
     brainReviewCount: review,
     approvalsCount,
     autopilotCount,
+    taskTriageCount,
     connectorAttentionCount,
     workflowAttentionCount,
     upcomingWorkflows: computeUpcoming(workflows, now),
@@ -132,16 +135,32 @@ async function countPendingApprovals(workspaceId: string): Promise<number> {
   return Number.parseInt(res.rows[0]?.count ?? '0', 10)
 }
 
-/** Autopilot goals needing the user: unconfirmed drafts (may not act until
- *  confirmed) + blocked goals (clarity question / metering / budget). A
- *  confirmed goal sitting in `awaiting_approval` is already counted by
- *  `countPendingApprovals`, so it is excluded here — one item, one card. */
+/** Confirmed autopilot goals needing the user (task-goal-autopilot.md §8):
+ *  blocked (clarity question / metering / budget), or armed but not yet
+ *  working (no workflow started — ready to kick start). Drafts count under
+ *  `countTaskTriage`; a confirmed goal sitting in `awaiting_approval` is
+ *  already counted by `countPendingApprovals` — one item, one card. */
 async function countAutopilotAttention(workspaceId: string): Promise<number> {
   const res = await query<{ count: string }>(
     `SELECT COUNT(*)::text AS count FROM goals
      WHERE workspace_id = $1
        AND status NOT IN ('done', 'abandoned')
-       AND (confirmed_at IS NULL OR status = 'blocked')`,
+       AND confirmed_at IS NOT NULL
+       AND (status = 'blocked'
+            OR (status = 'active' AND (means ->> 'workflowId') IS NULL))`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
+/** Tasks assignable (§8): judge-drafted goals awaiting the user's triage —
+ *  unconfirmed, non-terminal. Backs the `task_triage` card. */
+async function countTaskTriage(workspaceId: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM goals
+     WHERE workspace_id = $1
+       AND status NOT IN ('done', 'abandoned')
+       AND confirmed_at IS NULL`,
     [workspaceId],
   )
   return Number.parseInt(res.rows[0]?.count ?? '0', 10)

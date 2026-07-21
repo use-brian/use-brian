@@ -119,7 +119,13 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
       to: recipientList,
       cc: z.array(z.string()).max(20).optional().describe('CC addresses.'),
       subject: z.string().describe('Email subject line.'),
-      body: z.string().describe('Plain text email body.'),
+      body: z
+        .string()
+        .describe(
+          'Email body. Markdown is supported and rendered into real email formatting before sending ' +
+          '(headings, bold, lists, links, and tables become proper HTML, with a plain-text version ' +
+          'generated automatically). Write it the way an email reads: greeting, short paragraphs, sign-off.',
+        ),
       fromInbox: z
         .string()
         .optional()
@@ -210,7 +216,13 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
       to: recipientList,
       cc: z.array(z.string()).max(20).optional().describe('CC addresses.'),
       subject: z.string().describe('Email subject line.'),
-      body: z.string().describe('Plain text email body.'),
+      body: z
+        .string()
+        .describe(
+          'Email body. Markdown is supported and rendered into real email formatting before sending ' +
+          '(headings, bold, lists, links, and tables become proper HTML, with a plain-text version ' +
+          'generated automatically). Write it the way an email reads: greeting, short paragraphs, sign-off.',
+        ),
       sendAt: z
         .string()
         .optional()

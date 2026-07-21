@@ -176,14 +176,20 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     //     owner-only so teammates can tune the assistant they work with. See
     //     docs/architecture/features/assistant-detail-page.md →
     //     "Settings tab — system prompt (shared editing right)".
+    //   - `name` (rename): the assistant owner, or an `admin` (a workspace
+    //     admin manages the shared assistant roster, so renaming is a team
+    //     right, not an owner-only one). 'owner'/'admin' are the privileged
+    //     values in both role vocabularies (assistant_members and
+    //     workspace_members), so `member.role` — resolved by verifyMembership
+    //     from whichever table applies — is authoritative here.
     //   - `clearance`: the assistant owner, or a team admin/owner of the
     //     assistant's workspace (policy is a team-wide concern — see
     //     docs/architecture/platform/sensitivity.md).
-    //   - everything else (name, bio, sharingMode, model aliases): owner only.
+    //   - everything else (bio, sharingMode, model aliases): owner only.
     // A non-owner request that bundles an owner-only field is rejected whole
     // (the strictest field in the request governs).
     const ownerOnlyFieldPresent =
-      name !== undefined || bio !== undefined || sharingMode !== undefined ||
+      bio !== undefined || sharingMode !== undefined ||
       slackModelAlias !== undefined || telegramModelAlias !== undefined ||
       whatsappModelAlias !== undefined
 
@@ -192,9 +198,15 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         res.status(403).json({ error: 'Only the owner can update assistant settings' })
         return
       }
-      // The request now touches only systemPrompt and/or clearance. A
-      // clearance change still requires team admin/owner; systemPrompt is
-      // open to any member who reached this far.
+      // Rename is owner-or-admin. Inside this branch member.role is 'admin' or
+      // 'member', so admins pass and members are rejected.
+      if (name !== undefined && member.role !== 'admin') {
+        res.status(403).json({ error: 'Only the owner or a workspace admin can rename this assistant' })
+        return
+      }
+      // The request now touches only systemPrompt, name (admin, allowed above)
+      // and/or clearance. A clearance change still requires team admin/owner;
+      // systemPrompt is open to any member who reached this far.
       if (clearance !== undefined) {
         const teamRole = await queryWithRLS<{ role: string }>(
           member.userId,

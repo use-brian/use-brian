@@ -73,6 +73,7 @@ import {
   connectSlackChannel,
   connectTelegramChannel,
   connectDiscordChannel,
+  connectMsTeamsChannel,
   listChannelAssistants,
   attachChannelAssistant,
   detachChannelAssistant,
@@ -127,6 +128,7 @@ const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   telegram: "✈",
   slack: "#",
   email: "@",
+  msteams: "T",
 };
 
 // Official Discord mark, monochrome — `fill-current` inherits the chip's
@@ -1520,7 +1522,7 @@ function AddChannelForm({
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "whatsapp" | "email"
+    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams"
   >("slack");
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
@@ -1549,6 +1551,7 @@ function AddChannelForm({
     | { kind: "telegram"; botUsername: string }
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
     | { kind: "email"; address: string }
+    | { kind: "msteams"; webhookUrl: string }
   >(null);
   const [copied, setCopied] = useState(false);
   const [inviteCopied, setInviteCopied] = useState(false);
@@ -1557,6 +1560,9 @@ function AddChannelForm({
   const [signingSecret, setSigningSecret] = useState("");
   const [tgBotToken, setTgBotToken] = useState("");
   const [dcBotToken, setDcBotToken] = useState("");
+  const [msAppId, setMsAppId] = useState("");
+  const [msAppPassword, setMsAppPassword] = useState("");
+  const [msTenantId, setMsTenantId] = useState("");
   const [emailUsername, setEmailUsername] = useState("");
   const [emailDomainId, setEmailDomainId] = useState<string>("__default__");
   const verifiedDomains = useMemo(
@@ -1628,6 +1634,21 @@ function AddChannelForm({
         await onCreated(result.channel);
         setSuccess({ kind: "telegram", botUsername: result.botUsername });
         setTgBotToken("");
+      } else if (platform === "msteams") {
+        const result = await connectMsTeamsChannel(workspaceId, {
+          appId: msAppId.trim(),
+          appPassword: msAppPassword,
+          tenantId: msTenantId.trim(),
+          defaultAssistantId: defaultAssistantId || null,
+        });
+        await onCreated(result.channel);
+        setSuccess({
+          kind: "msteams",
+          webhookUrl: result.webhookUrl ?? result.webhookPath,
+        });
+        setMsAppId("");
+        setMsAppPassword("");
+        setMsTenantId("");
       } else if (platform === "email") {
         const result = await createEmailInbox({
           workspaceId,
@@ -1671,12 +1692,14 @@ function AddChannelForm({
       ? slackBotToken.startsWith("xoxb-") && signingSecret.length >= 16
       : platform === "telegram"
         ? tgBotToken.length > 0
-        : platform === "email"
-          ? /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(emailUsername.trim().toLowerCase()) &&
-            defaultAssistantId.length > 0
-          : dcBotToken.length > 0);
+        : platform === "msteams"
+          ? msAppId.trim().length > 0 && msAppPassword.length > 0 && msTenantId.trim().length > 0
+          : platform === "email"
+            ? /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/.test(emailUsername.trim().toLowerCase()) &&
+              defaultAssistantId.length > 0
+            : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -1691,11 +1714,55 @@ function AddChannelForm({
   }
 
   function copyWebhook(): void {
-    if (success?.kind !== "slack") return;
+    if (success?.kind !== "slack" && success?.kind !== "msteams") return;
     void navigator.clipboard.writeText(success.webhookUrl).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
+  }
+
+  // Download a Teams app-package manifest.json for sideloading. The operator
+  // adds two icons + zips it (see the arch doc); the bot id is filled in.
+  function downloadTeamsManifest(): void {
+    const teamsManifest = {
+      $schema:
+        "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
+      manifestVersion: "1.16",
+      id: msAppId.trim() || "<AZURE_BOT_APP_ID>",
+      packageName: "ai.usebrian.assistant",
+      name: { short: "Use Brian", full: "Use Brian AI assistant" },
+      description: {
+        short: "AI assistant powered by Use Brian",
+        full: "AI assistant powered by Use Brian",
+      },
+      developer: {
+        name: "Use Brian",
+        websiteUrl: "https://usebrian.ai",
+        privacyUrl: "https://usebrian.ai/privacy",
+        termsOfUseUrl: "https://usebrian.ai/terms",
+      },
+      icons: { color: "color.png", outline: "outline.png" },
+      accentColor: "#1e293b",
+      bots: [
+        {
+          botId: msAppId.trim() || "<AZURE_BOT_APP_ID>",
+          scopes: ["personal", "team", "groupChat"],
+          supportsFiles: false,
+          isNotificationOnly: false,
+        },
+      ],
+      permissions: ["identity", "messageTeamMembers"],
+      validDomains: [],
+    };
+    const blob = new Blob([JSON.stringify(teamsManifest, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "manifest.json";
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   const TAB_BASE = "px-3 py-1.5 text-sm border-b-2 transition-colors -mb-px";
@@ -1721,9 +1788,10 @@ function AddChannelForm({
             "slack",
             "telegram",
             "discord",
+            "msteams",
             "whatsapp",
             ...(emailConfigured ? ["email"] : []),
-          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email">
+          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams">
         ).map((p) => (
           <button
             key={p}
@@ -1894,6 +1962,58 @@ function AddChannelForm({
             />
           </label>
         </div>
+      ) : platform === "msteams" ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-xs text-muted-foreground">{add.msteamsHint}</p>
+          <a
+            href="https://portal.azure.com/#create/Microsoft.AzureBot"
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-primary hover:underline self-start"
+          >
+            {add.msteamsPortalLink}
+          </a>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.appIdLabel}</span>
+            <input
+              type="text"
+              value={msAppId}
+              onChange={(e) => setMsAppId(e.target.value)}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.appPasswordLabel}</span>
+            <input
+              type="password"
+              value={msAppPassword}
+              onChange={(e) => setMsAppPassword(e.target.value)}
+              placeholder="••••••••••••••••"
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium">{add.tenantIdLabel}</span>
+            <input
+              type="text"
+              value={msTenantId}
+              onChange={(e) => setMsTenantId(e.target.value)}
+              placeholder="00000000-0000-0000-0000-000000000000"
+              disabled={submitting || !!success}
+              className={FIELD_INPUT}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={downloadTeamsManifest}
+            className="text-xs text-primary hover:underline self-start"
+          >
+            {add.downloadManifest}
+          </button>
+        </div>
       ) : (
         <div className="flex flex-col gap-3">
           <p className="text-xs text-muted-foreground">{add.discordHint}</p>
@@ -1968,6 +2088,33 @@ function AddChannelForm({
             {add.connectedSlack}
           </p>
           <p className="text-xs text-muted-foreground">{add.slackWebhookHint}</p>
+          <code className="text-xs bg-muted px-2 py-1.5 rounded font-mono break-all">
+            {success.webhookUrl}
+          </code>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={copyWebhook}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {copied ? add.copied : add.copyWebhook}
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.done}
+            </button>
+          </div>
+        </div>
+      )}
+      {success?.kind === "msteams" && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
+          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+            {add.connectedMsTeams}
+          </p>
+          <p className="text-xs text-muted-foreground">{add.msteamsWebhookHint}</p>
           <code className="text-xs bg-muted px-2 py-1.5 rounded font-mono break-all">
             {success.webhookUrl}
           </code>

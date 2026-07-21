@@ -28,7 +28,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -906,7 +906,15 @@ export function resolveStickyChannelId(
  */
 type GenerateTitleResult = { title: string | null; usage: TokenUsage | null; model: string | null }
 
-async function generateTitle(provider: LLMProvider, messages: Message[]): Promise<GenerateTitleResult> {
+/**
+ * The background-lane workhorse: extraction / classification / structured
+ * output, per docs/architecture/platform/cost-and-pricing.md → Model routing.
+ * Always pass this through `ensureServableModel` before use — on a deployment
+ * with no Google credential it is not servable and the routing provider throws.
+ */
+const BACKGROUND_MODEL = 'gemini-3.1-flash-lite'
+
+async function generateTitle(provider: LLMProvider, messages: Message[], model: string): Promise<GenerateTitleResult> {
   const filteredMessages = messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
     .map((m) => ({ role: m.role, text: extractPlainText(m.content) }))
@@ -927,9 +935,7 @@ async function generateTitle(provider: LLMProvider, messages: Message[]): Promis
   let rawTitle = ''
   let usage: TokenUsage | null = null
   for await (const chunk of provider.stream({
-    // Standard tier per docs/architecture/platform/cost-and-pricing.md
-    // → Model routing (extraction / classification / structured-output bucket).
-    model: 'gemini-3.1-flash-lite',
+    model,
     systemPrompt:
       'Summarize this conversation into a short descriptive title (3-6 words). The title should capture the specific topic being discussed. Output ONLY the title text — no markdown, quotes, or punctuation.\n\nRules:\n- Always 3-6 words\n- Rephrase questions into topic form (e.g. "what do you think about oil prices" → "Oil Price Analysis Today")\n- Include the specific subject, not just the category\n\nExamples:\nuser: what do you think about oil price today? → Oil Price Analysis Today\nuser: help me plan a trip to Japan → Planning a Trip to Japan\nuser: tell me about the latest crypto news → Latest Crypto Market News',
     messages: [{ role: 'user', content: excerpt }],
@@ -1950,6 +1956,9 @@ export function chatRoutes(options: WebChatOptions): Router {
               const match = file.content.match(/^data:[^;]+;base64,(.+)$/)
               const base64Data = match ? match[1] : file.content
               let transcription: TranscribeResult | undefined
+              // Why the transcript is missing, when we know. Without it the
+              // model receives a bare "unavailable" and invents an explanation.
+              let transcribeFailure: string | undefined
               if (options.voiceTranscription) {
                 const buffer = Buffer.from(base64Data, 'base64')
                 transcription = await transcribeFirstAudio(
@@ -1961,15 +1970,21 @@ export function chatRoutes(options: WebChatOptions): Router {
                       ? { backend: options.voiceTranscription.backend }
                       : {}),
                     model: options.voiceTranscription.model,
+                    onFailure: (reason) => { transcribeFailure = reason },
                   },
                 )
                 if (transcription) transcriptions.push(transcription)
+              } else {
+                transcribeFailure = 'voice transcription is disabled on this deployment (VOICE_TRANSCRIPTION_ENABLED)'
               }
               textParts.push(
                 transcription
                   ? `[voice] ${transcription.text}`
-                  : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[voice note — transcription unavailable]</attached_file>`,
+                  : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[voice note — transcription unavailable${transcribeFailure ? `: ${transcribeFailure}` : ''}. Tell the user this plainly; do NOT claim it is still processing or that you will retry.]</attached_file>`,
               )
+              if (!transcription && transcribeFailure) {
+                sendEvent('notice', { kind: 'transcription_unavailable', message: transcribeFailure })
+              }
             } else if (file.artifactFileId) {
               // The upload was silently promoted to a durable artifact
               // (large-content-artifacts §Phase 2.3): the turn carries a
@@ -2775,19 +2790,23 @@ export function chatRoutes(options: WebChatOptions): Router {
           'If you cannot save the file, say plainly that it could not be saved.'
       }
 
-      // Task autopilot nudge (task-goal-autopilot.md). Capability-gated + dynamic
-      // (post-`injectMcpTools`), so naming the goal tools here is allowed — they
-      // exist whenever this runs. Without this, the auto-drafted goal is a silent
-      // DB row the model never surfaces; this makes the model offer it + enforces
-      // the confirm-before-work contract.
+      // Task autopilot nudge (task-goal-autopilot.md §8). Capability-gated +
+      // dynamic (post-`injectMcpTools`), so naming the goal tools here is
+      // allowed — they exist whenever this runs. v2: task creation is triaged
+      // in the BACKGROUND (a judge drafts a goal only for tasks the assistant
+      // can honestly help with), so the model must NOT announce or pitch a
+      // goal per created task — the creating turn cannot know the verdict.
+      // What remains is the fails-safe contract: never work an unconfirmed
+      // goal.
       if (activeCapabilities.has('goals')) {
         fullSystemPrompt +=
           '\n\n# Goals for tasks\n' +
-          'Every top-level task you create is automatically given a DRAFT goal — a plan to drive that task to done. A draft goal does NOTHING on its own. ' +
-          'Right after you create a task, briefly tell the user the goal it was given and ask whether you should work it for them. ' +
-          'If they agree, confirm the goal (confirmGoal), then spin it up (workTask) so you complete the task autonomously. ' +
-          'NEVER start working a task whose goal is not confirmed: if you are about to work a task and its goal is still a draft, stop and confirm the outcome with the user first. ' +
-          'Use listGoals to find a task’s draft goal.'
+          'Some tasks are judged in the background as workable by you; those get a DRAFT goal (an outcome, verification criteria, and an approach) the user reviews on their Tasks-assignable surface. A draft goal does NOTHING on its own. ' +
+          'Do NOT announce or pitch goals when you create tasks — the judgment happens after creation and most tasks will not have one. ' +
+          'When the user asks you to work a task, find its goal with listGoals (filter by the task id). ' +
+          'If the goal is still a draft, review its outcome with the user, confirm it (confirmGoal), then spin it up (workTask). ' +
+          'If the task has NO goal, you may define one with the user explicitly before working it. ' +
+          'NEVER start working a task whose goal is not confirmed.'
       }
 
       // ── Doc outline injection (Lock #5/#6, §5.4) ────────────
@@ -5094,9 +5113,9 @@ export function chatRoutes(options: WebChatOptions): Router {
             .then((open: SessionStateRecord[]) =>
               runSessionStateDiff({
                 provider: options.provider,
-                // Standard tier per docs/architecture/platform/cost-and-pricing.md
-                // → Model routing (extraction / classification / structured-output bucket).
-                model: 'gemini-3.1-flash-lite',
+                model: options.configuredProviders
+                  ? ensureServableModel(BACKGROUND_MODEL, options.configuredProviders)
+                  : BACKGROUND_MODEL,
                 sessionId: session.id,
                 userId: user.id,
                 assistantId: assistant.id,
@@ -5394,7 +5413,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         // fires, the title write is still in flight — it'll land in DB and
         // show on the next sessions fetch, just without an in-stream
         // `title_update` event for this turn.
-        const AUTO_TITLE_TIMEOUT_MS = 10_000
+        // Resolved once: the same model drives the call and its latency budget,
+        // so a slower serving provider can never be given the Gemini deadline.
+        const autoTitleModel = options.configuredProviders
+          ? ensureServableModel(BACKGROUND_MODEL, options.configuredProviders)
+          : BACKGROUND_MODEL
+        const AUTO_TITLE_TIMEOUT_MS = backgroundLatencyBudgetMs(autoTitleModel)
         const autoTitle = (async () => {
           try {
             // Reload messages from DB so we get the assistant response that was
@@ -5404,7 +5428,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               role: m.role as 'user' | 'assistant' | 'system',
               content: m.content as Message['content'],
             }))
-            const titleResult = await generateTitle(options.provider, freshMessages)
+            const titleResult = await generateTitle(options.provider, freshMessages, autoTitleModel)
             // generateTitle returns `title: null` when it can't produce a
             // meaningful title (empty excerpt, model returned blank). Keep the
             // existing title in that case — overwriting with a generic fallback

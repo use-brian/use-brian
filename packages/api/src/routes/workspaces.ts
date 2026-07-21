@@ -11,6 +11,7 @@
  *   PATCH  /:workspaceId                                  — update workspace name
  *   DELETE /:workspaceId                                  — delete workspace (owner only, non-personal)
  *   DELETE /:workspaceId/data                             — flush all workspace data, keep the shell (owner only)
+ *   POST   /:workspaceId/transfer-ownership               — transfer ownership to another member (owner only, non-personal)
  *   POST   /:workspaceId/members                          — add member by email
  *   DELETE /:workspaceId/members/:userId                  — remove member
  *   PATCH  /:workspaceId/members/:userId                  — update member role
@@ -582,6 +583,78 @@ export function workspaceRoutes({
       }
       console.error('[workspaces] data flush failed:', err)
       res.status(500).json({ error: 'Failed to flush workspace data' })
+    }
+  })
+
+  // ── POST /:workspaceId/transfer-ownership — transfer to another member ──
+  //
+  // Owner-only, explicit, audited (workspaces.md → "Ownership transfer").
+  // The new owner must already be a workspace member. Personal workspaces
+  // are never transferable (tied to the owner's account lifecycle; the
+  // partial unique index permits at most one personal workspace per owner).
+  // On success the target becomes `owner`, the acting owner steps down to
+  // `admin`, and billing responsibility (the workspace's plan + Stripe
+  // state) rides with the workspace row — future billing actions belong to
+  // the new owner; an active subscription keeps charging the payment method
+  // it was set up with until the new owner updates billing.
+
+  router.post('/:workspaceId/transfer-ownership', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const role = await requireWorkspaceRole(req as any, res, 'owner')
+    if (!role) return
+
+    const { newOwnerUserId } = req.body as { newOwnerUserId?: string }
+    if (!newOwnerUserId || typeof newOwnerUserId !== 'string') {
+      res.status(400).json({ error: 'newOwnerUserId is required' })
+      return
+    }
+
+    try {
+      const { workspaceId } = req.params as { workspaceId: string }
+      const result = await workspaceStore.transferOwnership(userId, workspaceId, newOwnerUserId)
+      switch (result) {
+        case 'transferred':
+          if (auditStore) {
+            void auditStore.append({
+              workspaceId,
+              actorUserId: userId,
+              eventType: 'workspace.ownership_transferred',
+              subjectId: newOwnerUserId,
+              details: { fromUserId: userId, toUserId: newOwnerUserId },
+            })
+          }
+          res.json({ ok: true })
+          return
+        case 'not_owner':
+          res.status(403).json({ error: 'Only the workspace owner can transfer ownership' })
+          return
+        case 'personal_workspace':
+          res.status(400).json({
+            error: 'personal_workspace_not_transferable',
+            message: 'Personal workspaces are tied to your account and cannot be transferred.',
+          })
+          return
+        case 'already_owner':
+          res.status(400).json({ error: 'already_owner', message: 'You already own this workspace.' })
+          return
+        case 'not_a_member':
+          res.status(400).json({
+            error: 'new_owner_not_member',
+            message: 'The new owner must already be a member of this workspace.',
+          })
+          return
+        case 'recipient_free_cap':
+          res.status(403).json({
+            error: 'plan_required',
+            message: 'The new owner already owns the maximum number of free workspaces. Upgrade a workspace to a paid plan first.',
+          })
+          return
+      }
+    } catch (err) {
+      console.error('[workspaces] transfer ownership failed:', err)
+      res.status(500).json({ error: 'Failed to transfer ownership' })
     }
   })
 

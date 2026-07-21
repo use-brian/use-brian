@@ -55,6 +55,21 @@ export type DiscordCredentials = {
 }
 
 /**
+ * Microsoft Teams BYO credentials (single-tenant Azure Bot). Unlike Slack /
+ * Discord there is no static outbound token: `app_id` + `app_password` are the
+ * client-credentials pair used to mint a short-lived Bot Connector token per
+ * send, against the workspace's own `tenant_id`. The per-conversation
+ * `serviceUrl` is NOT a credential — it is captured from the inbound Activity
+ * (interactive) or `config.msteamsServiceUrl` (proactive). `app_id` doubles as
+ * the required inbound-JWT audience. See docs/architecture/channels/msteams.md.
+ */
+export type MsTeamsCredentials = {
+  app_id: string
+  app_password: string
+  tenant_id: string
+}
+
+/**
  * Threads (Meta) distribution credentials. Long-lived (60d) token from the
  * OAuth code → short-lived → long-lived exchange. Refreshed by a daily job
  * within 7 days of expiry. `platform_user_id` + `platform_handle` are
@@ -106,6 +121,7 @@ export type ChannelCredentials =
   | TelegramCredentials
   | WhatsAppCredentials
   | DiscordCredentials
+  | MsTeamsCredentials
   | ThreadsCredentials
   | TwitterCredentials
   | EmailCredentials
@@ -176,6 +192,15 @@ export type ChannelIntegrationConfig = {
    * `dm_and_groups`). The WhatsApp analogue of Telegram's per-chat overrides.
    */
   whatsappGroupOptIn?: string[]
+  /**
+   * Microsoft Teams only — the last-seen Bot Connector `serviceUrl` for this
+   * channel, refreshed opportunistically from inbound Activities. The
+   * interactive reply path reads `serviceUrl` off the inbound Activity
+   * directly; this stored value is the fallback for proactive / scheduled
+   * delivery (`workflow/channel-delivery.ts`), which has no inbound Activity.
+   * See docs/architecture/channels/msteams.md → "Outbound / proactive".
+   */
+  msteamsServiceUrl?: string
 }
 
 /** @deprecated Use ChannelIntegrationConfig — kept for backwards compatibility. */

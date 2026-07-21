@@ -137,7 +137,13 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
           'already configured in the connected Gmail account\'s settings — Gmail rejects the send if it is not.',
         ),
       subject: z.string().describe('Email subject line.'),
-      body: z.string().describe('Plain text email body.'),
+      body: z
+        .string()
+        .describe(
+          'Email body. Markdown is supported and rendered into real email formatting before sending ' +
+          '(headings, bold, lists, links, and tables become proper HTML, with a plain-text version ' +
+          'generated automatically). Write it the way an email reads: greeting, short paragraphs, sign-off.',
+        ),
       attachments: z
         .array(idOrPathShape)
         .max(MAX_EMAIL_ATTACHMENTS)

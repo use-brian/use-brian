@@ -13,16 +13,17 @@
  * pattern): entry is attention-routed via the home-dock `autopilot` needs-you
  * card and the Brain task panel's autopilot affordance.
  *
- * **Master-detail two-pane.** A goal is an acceptance *contract*, not just a
- * title, and most rows are auto-drafted (one per task, unconfirmed) — so the
- * board splits the list into "Needs your confirmation" (drafts) above "Active",
- * and the right pane renders the full contract (what "done" means, how it's
- * worked, budget, confirmation state) with no navigation. The draft stage is
- * where the pre-run affordances live: edit the outcome inline, then **Confirm &
- * arm** (clarity-gated) or **Discard** (reversible → `abandoned`) from a **top
- * action bar** (pinned above the scroll region, not a bottom footer — the
- * footer position collided with the bottom-right floating chat dock). A
- * confirmed goal offers **Work this**; a working / completed goal shows its state.
+ * **Master-detail two-pane, CONFIRMED goals only** (task-goal-autopilot.md §8).
+ * Drafts live on the Triage panel (`?panel=triage`, `triage-panel.tsx`) — this
+ * board lists goals that are armed and ready to kick start, working, blocked,
+ * or finished (`listGoals(..., confirmed: true)`). The right pane renders the
+ * full contract (what "done" means, how it's worked, budget, confirmation
+ * state) with no navigation, and its actions live in a **top action bar**
+ * (pinned above the scroll region, not a bottom footer — the footer position
+ * collided with the bottom-right floating chat dock): **Work this** for an
+ * armed goal, **Discard** while non-terminal; a working / completed goal shows
+ * its state. (The pane keeps a defensive draft branch for deep links to a
+ * draft id, but the board list never contains one.)
  *
  * app-web is single-workspace-per-route, so the board scopes to the route
  * workspace via `activeId` from `useWorkspaces()`.
@@ -31,7 +32,7 @@
  * [COMP:app-web/goals-board]
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { useWorkspaces } from "@/contexts/workspace-context";
@@ -92,8 +93,9 @@ export function AutopilotPanel() {
     setRows(null);
     const status = statusFilter === "all" ? undefined : statusFilter;
     // A specific status (incl. terminal done/abandoned) returns that status;
-    // "all" shows the non-terminal working set.
-    listGoals(activeId, { status, includeTerminal: statusFilter !== "all" })
+    // "all" shows the non-terminal working set. Confirmed only (§8) — drafts
+    // are triaged on the Triage panel, never listed here.
+    listGoals(activeId, { status, includeTerminal: statusFilter !== "all", confirmed: true })
       .then((g) => {
         if (!cancelled) setRows(g);
       })
@@ -121,17 +123,6 @@ export function AutopilotPanel() {
 
   const hostLabel = (host: GoalRow["host"]): string =>
     host ? t.goalsPage.host[host.type] : t.goalsPage.host.standalone;
-
-  // Split into the confirmation queue + everything else, but only for the
-  // default "all" view; a specific status filter renders a flat list.
-  const groups = useMemo(() => {
-    const list = rows ?? [];
-    if (statusFilter !== "all") return null;
-    return {
-      drafts: list.filter(isDraft),
-      active: list.filter((g) => !isDraft(g)),
-    };
-  }, [rows, statusFilter]);
 
   return (
     <div className="h-full w-full flex">
@@ -177,51 +168,17 @@ export function AutopilotPanel() {
           <EmptyState />
         ) : (
           <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
-            {groups ? (
-              <>
-                {groups.drafts.length > 0 && (
-                  <GoalGroup
-                    label={t.goalsPage.sections.needsConfirmation}
-                    count={groups.drafts.length}
-                  >
-                    {groups.drafts.map((g) => (
-                      <GoalListRow
-                        key={g.id}
-                        goal={g}
-                        hostLabel={hostLabel(g.host)}
-                        selected={g.id === selectedId}
-                        onSelect={() => setSelectedId(g.id)}
-                      />
-                    ))}
-                  </GoalGroup>
-                )}
-                {groups.active.length > 0 && (
-                  <GoalGroup label={t.goalsPage.sections.active} count={groups.active.length}>
-                    {groups.active.map((g) => (
-                      <GoalListRow
-                        key={g.id}
-                        goal={g}
-                        hostLabel={hostLabel(g.host)}
-                        selected={g.id === selectedId}
-                        onSelect={() => setSelectedId(g.id)}
-                      />
-                    ))}
-                  </GoalGroup>
-                )}
-              </>
-            ) : (
-              <ul className="flex flex-col gap-1.5">
-                {rows.map((g) => (
-                  <GoalListRow
-                    key={g.id}
-                    goal={g}
-                    hostLabel={hostLabel(g.host)}
-                    selected={g.id === selectedId}
-                    onSelect={() => setSelectedId(g.id)}
-                  />
-                ))}
-              </ul>
-            )}
+            <ul className="flex flex-col gap-1.5">
+              {rows.map((g) => (
+                <GoalListRow
+                  key={g.id}
+                  goal={g}
+                  hostLabel={hostLabel(g.host)}
+                  selected={g.id === selectedId}
+                  onSelect={() => setSelectedId(g.id)}
+                />
+              ))}
+            </ul>
           </div>
         )}
       </div>
@@ -272,27 +229,6 @@ function EmptyState() {
       <div className="font-medium">{t.goalsPage.emptyTitle}</div>
       <p className="text-sm text-muted-foreground max-w-md">{t.goalsPage.emptyBody}</p>
     </div>
-  );
-}
-
-/** A labelled section of the list ("Needs your confirmation" / "Active"). */
-function GoalGroup({
-  label,
-  count,
-  children,
-}: {
-  label: string;
-  count: number;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-1.5 px-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
-        <span className="text-muted-foreground/60">{count}</span>
-      </div>
-      <ul className="flex flex-col gap-1.5">{children}</ul>
-    </section>
   );
 }
 

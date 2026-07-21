@@ -31,6 +31,7 @@ import { buildTool, type Tool } from '../tools/types.js'
 import { classifyTool, defaultPolicy } from './classifier.js'
 import { mcpResultToToolResult } from './tool-result.js'
 import { jsonSchemaFromZod } from '../engine/query-loop.js'
+import { declinedToolResult, timedOutToolResult } from '../engine/decline-copy.js'
 import type { EngineHooks, PreToolUseDirective } from '../engine/hooks.js'
 import type { McpSettingsStore, McpServerConfig, McpToolInfo } from './types.js'
 
@@ -534,7 +535,7 @@ async function dispatchRemote(params: {
         if (decision === 'deny') {
           blockedTools.add(toolKey)
           return {
-            data: `ERROR: user denied "${tool}". Capability unavailable for this conversation.`,
+            data: declinedToolResult(tool),
             isError: true,
           }
         }
@@ -802,7 +803,7 @@ async function dispatchLocal(params: {
       if (decision === 'deny' || decision === 'always_deny') {
         blockedTools.add(toolKey)
         return {
-          data: `ERROR: user denied "${tool}". Capability unavailable for this conversation.`,
+          data: declinedToolResult(tool),
           isError: true,
         }
       }
@@ -820,7 +821,7 @@ async function dispatchLocal(params: {
     } catch {
       blockedTools.add(toolKey)
       return {
-        data: `Tool confirmation timed out for "${tool}". Execution skipped. Respond to the user with what you can do instead.`,
+        data: timedOutToolResult(tool),
         isError: true,
       }
     }

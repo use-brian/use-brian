@@ -21,6 +21,7 @@
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools, createAgentmailTools } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
+import { renderEmailBody } from '@use-brian/channels'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -1241,6 +1242,43 @@ async function injectInstanceVariants(opts: {
   }
 }
 
+/**
+ * `unavailable[]` copy for a connector that is NOT connected (or is disabled
+ * for this assistant).
+ *
+ * These notices state a FACT and name the surface that fixes it. They must
+ * never embed a quotable reply sentence: on 2026-07-21 the gdrive notice
+ * carried the script `reply: "I'll need Drive access first. Type /connect
+ * gdrive to authorize."`, and a model that had wrongly concluded Gmail was
+ * unavailable re-instantiated that template for Gmail, telling the user to
+ * run `/connect gmail` while `gmailSendMessage` sat injected and usable.
+ * A fill-in-the-blank refusal script in Layer 1 gets filled in.
+ *
+ * Point at Studio > Connectors, not at `/connect`: this text is read on
+ * every channel, and `/connect` only exists on Telegram.
+ *
+ * Spec: `docs/architecture/integrations/mcp.md` -> "Unavailable capabilities".
+ */
+function notConnectedNotice(displayName: string, capabilities: string): string {
+  return (
+    `${displayName}: not connected for this assistant, so ${capabilities} are unavailable this turn. ` +
+    'If the user asks for one, say so plainly in your own words and point them to Studio then Connectors to connect it. ' +
+    'Do not quote this notice back to them, and do not claim a tool call failed.'
+  )
+}
+
+/**
+ * `unavailable[]` copy for a connector that IS connected but whose stored
+ * credentials no longer work. Distinct from {@link notConnectedNotice}: here
+ * reconnecting genuinely is the remedy.
+ */
+function expiredCredentialsNotice(displayName: string): string {
+  return (
+    `${displayName}: connected, but its stored credentials expired or were revoked, so its tools are not loaded this turn. ` +
+    'Tell the user it needs reconnecting in Studio then Connectors. Do not offer any other cause.'
+  )
+}
+
 async function injectGoogleTools(
   connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
   connectorStore: ConnectorStore,
@@ -1424,9 +1462,9 @@ async function injectGoogleTools(
   const gcal = gcalRaw && !revokedConnectors.has('gcal') ? gcalRaw : undefined
   const gcalEnabled = gcal && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gcal'))
   if (revokedConnectors.has('gcal')) {
-    unavailable?.push('Google Calendar (credentials expired — tell the user to reconnect: "Type /connect gcal to re-authorize.")')
+    unavailable?.push(expiredCredentialsNotice('Google Calendar'))
   } else if (!gcal || !gcalEnabled) {
-    unavailable?.push('Google Calendar & Tasks (not connected or disabled for this assistant) — if the user asks to add/check tasks, calendar events, or reminders, reply: "I\'ll need Calendar access first. Type /connect gcal to authorize."')
+    unavailable?.push(notConnectedNotice('Google Calendar and Google Tasks', 'calendar events, tasks, and reminders'))
   }
   if (gcal && gcalEnabled) {
     try {
@@ -1632,9 +1670,9 @@ async function injectGoogleTools(
   const gmail = gmailRaw && !revokedConnectors.has('gmail') ? gmailRaw : undefined
   const gmailEnabled = gmail && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gmail'))
   if (revokedConnectors.has('gmail')) {
-    unavailable?.push('Gmail (credentials expired — tell the user: "Type /connect gmail to re-authorize.")')
+    unavailable?.push(expiredCredentialsNotice('Gmail'))
   } else if (!gmail || !gmailEnabled) {
-    unavailable?.push('Gmail (not connected or disabled for this assistant) — if the user asks to send or read email, reply: "I\'ll need Gmail access first. Type /connect gmail to authorize."')
+    unavailable?.push(notConnectedNotice('Gmail', 'sending and reading email'))
   }
   if (gmail && gmailEnabled) {
     try {
@@ -1817,9 +1855,9 @@ async function injectGoogleTools(
   const gdrive = gdriveRaw && !revokedConnectors.has('gdrive') ? gdriveRaw : undefined
   const gdriveEnabled = gdrive && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'gdrive'))
   if (revokedConnectors.has('gdrive')) {
-    unavailable?.push('Google Drive, Docs, Sheets & Slides (credentials expired — tell the user: "Type /connect gdrive to re-authorize.")')
+    unavailable?.push(expiredCredentialsNotice('Google Drive, Docs, Sheets and Slides'))
   } else if (!gdrive || !gdriveEnabled) {
-    unavailable?.push('Google Drive, Docs, Sheets & Slides (not connected or disabled for this assistant) — if the user asks to create or open a doc, slide, spreadsheet, or Excel file, reply: "I\'ll need Drive access first. Type /connect gdrive to authorize."')
+    unavailable?.push(notConnectedNotice('Google Drive, Docs, Sheets and Slides', 'creating or opening docs, slides, spreadsheets, and Excel files'))
   }
   if (gdrive && gdriveEnabled) {
     try {
@@ -2081,7 +2119,7 @@ async function injectGoogleTools(
 
   // Google Tasks — bundled with gcal (same OAuth credentials, Tasks scope added to gcal)
   if (revokedConnectors.has('gcal')) {
-    unavailable?.push('Google Tasks (credentials expired — tell the user: "Type /connect gcal to re-authorize.")')
+    unavailable?.push(expiredCredentialsNotice('Google Tasks'))
   }
   if (gcal && gcalEnabled) {
     try {
@@ -2253,7 +2291,7 @@ async function injectGitHubTools(
   const githubEnabled = github && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'github'))
 
   if (!github || !githubEnabled) {
-    unavailable?.push('GitHub (not connected or disabled for this assistant) — if the user asks about repos, issues, or PRs, reply: "I\'ll need GitHub access first. Type /connect github to authorize."')
+    unavailable?.push(notConnectedNotice('GitHub', 'repositories, issues, and pull requests'))
     return
   }
 
@@ -2346,7 +2384,7 @@ async function injectNotionTools(
   const notionEnabled = notion && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'notion'))
 
   if (!notion || !notionEnabled) {
-    unavailable?.push('Notion (not connected or disabled for this assistant) — if the user asks to search or update Notion pages/databases, reply: "I\'ll need Notion access first. Type /connect notion to authorize."')
+    unavailable?.push(notConnectedNotice('Notion', 'searching and updating Notion pages and databases'))
     return
   }
 
@@ -2447,7 +2485,7 @@ async function injectFathomTools(
   const fathomEnabled = fathom && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'fathom'))
 
   if (!fathom || !fathomEnabled) {
-    unavailable?.push('Fathom (not connected or disabled for this assistant) — if the user asks about meeting transcripts, summaries, or action items, reply: "I\'ll need Fathom access first. Type /connect fathom to authorize."')
+    unavailable?.push(notConnectedNotice('Fathom', 'meeting transcripts, summaries, and action items'))
     return
   }
 
@@ -2620,6 +2658,10 @@ async function injectAgentmailTools(params: {
         body_length: p.body.length,
         body: p.body,
       }
+      // The model composes `body` in markdown; render the
+      // multipart/alternative pair at this egress boundary (the audit
+      // payload above keeps the raw markdown for the classifier).
+      const rendered = renderEmailBody(p.body)
       return auditedEgress(
         'send_email',
         payload,
@@ -2628,7 +2670,8 @@ async function injectAgentmailTools(params: {
             to: p.to,
             cc: p.cc,
             subject: p.subject,
-            text: p.body,
+            text: rendered.text,
+            html: rendered.html,
           }),
         (r) => r.messageId,
       )
@@ -2662,6 +2705,9 @@ async function injectAgentmailTools(params: {
         body: p.body,
         send_at: p.sendAt ?? null,
       }
+      // Same markdown → text+html rendering as send — a draft (scheduled or
+      // human-sent) leaves as the exact bodies stored here.
+      const rendered = renderEmailBody(p.body)
       const draft = await auditedEgress(
         'draft_email',
         payload,
@@ -2670,7 +2716,8 @@ async function injectAgentmailTools(params: {
             to: p.to,
             cc: p.cc,
             subject: p.subject,
-            text: p.body,
+            text: rendered.text,
+            html: rendered.html,
             sendAt: p.sendAt,
             inReplyTo: p.inReplyTo,
           }),

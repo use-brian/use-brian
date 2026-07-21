@@ -67,6 +67,8 @@ export type WorkspaceAuditEventType =
   | 'file.deleted'
   // Workspace data flush (workspaces.md → "Workspace data flush")
   | 'workspace.data_flushed'
+  // Ownership transfer (workspaces.md → "Ownership transfer")
+  | 'workspace.ownership_transferred'
 
 export type WorkspaceAuditEvent = {
   id: string

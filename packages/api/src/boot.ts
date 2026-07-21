@@ -51,6 +51,8 @@ import {
   calculateCost,
   createGoalClarityAssessor,
   createGoalVerifier,
+  createTaskTriageJudge,
+  type TaskRecord,
   collectStream,
   createInterAssistantTools,
   createReportBugTool,
@@ -126,7 +128,7 @@ import {
   type SessionVault,
 } from '@use-brian/core'
 
-import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
+import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS } from '@use-brian/shared'
 
 // ── OPEN package imports (@use-brian/api) ──────────────────────────
 import { findAssistantById, isUserBlockedForAssistant, listAccessibleAssistants } from './db/users.js'
@@ -224,6 +226,7 @@ import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
 import { telegramByoRoutes } from './routes/telegram-byo.js'
 import { slackRoutes } from './routes/slack.js'
 import { discordRoutes } from './routes/discord.js'
+import { msteamsRoutes } from './routes/msteams.js'
 import { telegramLinkingRoutes } from './routes/telegram-linking.js'
 import { slackLinkingRoutes } from './routes/slack-linking.js'
 import { createDbChannelUserStore } from './db/channel-user-store.js'
@@ -250,6 +253,7 @@ import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STAT
 import { createGoalStallReaper } from './goals/reaper.js'
 import { createGoalWorkTools } from './goals/work-tools.js'
 import { gatherGoalEvidence } from './goals/evidence.js'
+import { listUsableWorkspaceConnectors } from './connectors/usable-connectors.js'
 import { type GoalDeliver } from './goals/writeback.js'
 import {
   tryClaimGoalForTick,
@@ -764,6 +768,8 @@ export interface BootOpenApiOptions {
 export interface ChannelHostHooks {
   /** Pipeline-C rules-engine ingest for Slack channel traffic (closed). */
   slackWebhookIngestor?: import('./routes/slack.js').SlackWebhookIngestor
+  /** Pipeline-C rules-engine ingest for Microsoft Teams channel traffic (closed). */
+  msteamsWebhookIngestor?: import('./routes/msteams.js').MsTeamsWebhookIngestor
   /** GCS channel-media intake for Slack pulled attachments (closed). */
   slackIngestChannelMediaRef?: Parameters<typeof slackRoutes>[0]['ingestChannelMediaRef']
   /** GCS channel-media intake for Discord attachments (closed). */
@@ -1040,23 +1046,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     goalStore,
     deliverGoalDone: (goal) => deliverGoalTerminal(goal, 'done', null),
   })
+  // Task autopilot v2 (task-goal-autopilot.md §8): a top-level task create no
+  // longer mints a templated draft. The triage judge (one background-tier LLM
+  // call: "can the assistant honestly help?") drafts a goal WITH a brief only
+  // on a pass. The judge needs the provider + usage stores, constructed later
+  // in boot, so the hook calls through this late-bound ref. Null (OSS keyless,
+  // or before wiring) = no drafting — fail-closed by design.
+  let judgeTaskForGoal: ((task: TaskRecord, userId: string) => void) | null = null
   const taskStore = createDbTaskStore({
     onTaskTerminal: goalRollup.onTaskTerminal,
-    // Task autopilot: a top-level task auto-drafts a curated, UNCONFIRMED goal
-    // bound to it (done when the task is done). The creator confirms it (chat /
-    // board) to arm it; it never acts until then. See task-goal-autopilot.md.
     onTaskCreate: (task, userId) => {
-      void goalStore
-        .create({
-          workspaceId: task.workspaceId,
-          host: { type: 'task', id: task.id },
-          outcome: `Complete: ${task.title}`,
-          doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
-          means: {},
-          confirmed: false, // draft
-          createdByUserId: userId,
-        })
-        .catch((err) => console.error('[goals] task auto-draft failed:', err))
+      judgeTaskForGoal?.(task, userId)
     },
   })
   const crmStore = createDbCrmStore()
@@ -2115,7 +2115,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         // Pass the host task + goal as run input so a "complete this task"
         // workflow can reference {{input.taskTitle}} / {{input.goalOutcome}}, and
         // a `verify` goal's agent can call markGoalComplete with {{input.goalId}}.
+        // The §8 triage brief rides along so the working assistant runs with its
+        // acceptance criteria ({{input.goalVerification}}) and plan sketch
+        // ({{input.goalApproach}}).
         const runInput: Record<string, unknown> = { goalOutcome: goal.outcome, goalId: goal.id }
+        if (goal.brief?.verification) runInput.goalVerification = goal.brief.verification
+        if (goal.brief?.approach) runInput.goalApproach = goal.brief.approach
         if (goal.host?.type === 'task') {
           const t = await query<{ title: string }>(
             `SELECT title FROM tasks WHERE id = $1 AND valid_to IS NULL`,
@@ -2195,7 +2200,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         'When — and only when — the outcome is genuinely achieved, call markGoalComplete with goal_id "{{input.goalId}}" ' +
         'and a concrete "because" stating what you did that satisfies it (an independent verifier will check the claim). ' +
         'If it cannot be finished yet, say what is blocking it and keep working next iteration.'
-      : 'Complete this task: {{input.taskTitle}}. Goal: {{input.goalOutcome}}. Use your tools to do the work, ' +
+      : 'Complete this task: {{input.taskTitle}}. Goal: {{input.goalOutcome}}. ' +
+        // §8 brief threading — reference the brief only when this goal carries
+        // one (dispatchRun sets the run-input keys from goal.brief).
+        (goal.brief?.approach ? 'Suggested approach: {{input.goalApproach}}. ' : '') +
+        (goal.brief?.verification ? 'How completion is checked: {{input.goalVerification}}. ' : '') +
+        'Use your tools to do the work, ' +
         'then close the task (mark it done) when it is complete. If it cannot be finished yet, say what is blocking it.'
     return buildOneStepReminderWorkflow(workflowStore, {
       userId,
@@ -2541,7 +2551,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }
   }
   const recordGoalOverheadUsage =
-    (source: 'overhead:goal-clarity' | 'overhead:goal-verify') =>
+    (source: 'overhead:goal-clarity' | 'overhead:goal-verify' | 'overhead:goal-triage', model = 'gemini-flash') =>
     (usage: TokenUsage, userId?: string): void => {
       if (!usageStore || !userId) return
       const store = usageStore
@@ -2551,12 +2561,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             userId,
             assistantId,
             sessionId: null,
-            model: 'gemini-flash',
+            model,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             cacheReadTokens: usage.cacheReadTokens,
             cacheWriteTokens: usage.cacheWriteTokens,
-            actualCostUsd: calculateCost('gemini-flash', usage),
+            actualCostUsd: calculateCost(model, usage),
             source,
           }),
         )
@@ -2578,6 +2588,67 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     model: 'gemini-flash',
     onUsage: recordGoalOverheadUsage('overhead:goal-verify'),
   })
+
+  // Task autopilot v2 triage judge (task-goal-autopilot.md §8) — one
+  // background-tier call per top-level task create: can the assistant honestly
+  // help, given what this workspace actually has connected? On pass, mint the
+  // draft goal with the generated brief; on fail/error, no draft (fail-closed).
+  // Wired only when a provider is configured, so keyless OSS never logs judge
+  // errors — tasks simply stay goal-free.
+  const TRIAGE_MODEL = 'gemini-3.1-flash-lite'
+  if (configuredProviders.size > 0) {
+    const taskTriageJudge = createTaskTriageJudge({
+      provider,
+      model: TRIAGE_MODEL,
+      onUsage: recordGoalOverheadUsage('overhead:goal-triage', TRIAGE_MODEL),
+    })
+    // What the assistant can actually do here: the static core surface plus
+    // the workspace's live connector grants (clearance-filtered). Grounds the
+    // judge so a drafted approach never names an unconnected capability
+    // (the CLAUDE.md tool-awareness rule, applied to triage).
+    const CORE_CAPABILITY_LINES = [
+      'Search and read the company brain: memories, knowledge entries, workspace files, recordings',
+      'Create and edit workspace doc pages (briefs, summaries, reports, research write-ups)',
+      'Manage CRM records: contacts, companies, deals',
+      'Create, update, and close tasks; schedule reminders and recurring jobs',
+      'Research on the public web and compile findings',
+    ]
+    const summariseWorkspaceCapabilities = async (userId: string, workspaceId: string): Promise<string[]> => {
+      try {
+        const usable = await listUsableWorkspaceConnectors({ connectorInstanceStore, connectorGrantStore, userId, workspaceId })
+        const byProvider = new Map<string, string>()
+        for (const u of usable) {
+          if (byProvider.has(u.instance.provider)) continue
+          const entry = OFFICIAL_CONNECTORS.find((c) => c.id === u.instance.provider)
+          const tools = (OFFICIAL_CONNECTOR_TOOLS[u.instance.provider] ?? []).map((t) => t.name)
+          const name = entry?.name ?? u.instance.label
+          byProvider.set(u.instance.provider, tools.length > 0 ? `${name} (${tools.slice(0, 8).join(', ')})` : name)
+        }
+        return [...CORE_CAPABILITY_LINES, ...byProvider.values()]
+      } catch (err) {
+        console.error('[goal-triage] capability summary failed; using core surface only:', err)
+        return CORE_CAPABILITY_LINES
+      }
+    }
+    judgeTaskForGoal = (task, userId) => {
+      void (async () => {
+        const capabilities = await summariseWorkspaceCapabilities(userId, task.workspaceId)
+        const attrs = Object.keys(task.attributes ?? {}).length > 0 ? JSON.stringify(task.attributes) : null
+        const brief = await taskTriageJudge({ title: task.title, description: attrs, capabilities, userId })
+        if (!brief) return
+        await goalStore.create({
+          workspaceId: task.workspaceId,
+          host: { type: 'task', id: task.id },
+          outcome: brief.outcome,
+          doneWhen: { kind: 'query', query: { description: 'task complete', predicate: { hostTaskDone: true } } },
+          means: {},
+          confirmed: false, // draft — triaged on the Tasks-assignable surface
+          createdByUserId: userId,
+          brief: { verification: brief.verification, approach: brief.approach, judgeReason: brief.judgeReason },
+        })
+      })().catch((err) => console.error('[goals] task triage draft failed:', err))
+    }
+  }
 
   // Task-autopilot spin-up tools (confirm a draft goal; work a task to done) +
   // the agentic completion signal (markGoalComplete). `gatherEvidence` hands the
@@ -5059,6 +5130,19 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
+      }))
+      // Microsoft Teams — public Bot Framework messaging endpoint, per-channel
+      // JWT-verified. No connector app (webhook transport). See
+      // docs/architecture/channels/msteams.md.
+      app.use('/webhook/msteams', msteamsRoutes({
+        provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
+        memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
+        integrationStore, channelUserStore,
+        workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+        connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
+        analytics, skillStore, pendingMessageStore,
+        episodicStore, sessionStateStore, artifactPromoter,
+        msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
       }))
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({

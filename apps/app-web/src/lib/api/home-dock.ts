@@ -19,6 +19,7 @@ export type ResolvedNeed = {
     | "brain_review"
     | "approvals"
     | "autopilot"
+    | "task_triage"
     | "connector_attention"
     | "workflow_attention";
   count: number;

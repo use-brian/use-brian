@@ -28,9 +28,14 @@ export type HomeSignals = {
   brainReviewCount: number
   /** Pending approvals for the workspace. */
   approvalsCount: number
-  /** Autopilot goals needing the user: unconfirmed drafts + blocked goals.
-   *  (A confirmed goal in `awaiting_approval` counts under `approvalsCount`.) */
+  /** Confirmed autopilot goals needing the user: blocked, or armed but not yet
+   *  working (ready to kick start). Drafts count under `taskTriageCount` — one
+   *  item, one card (task-goal-autopilot.md §8). A confirmed goal in
+   *  `awaiting_approval` counts under `approvalsCount`. */
   autopilotCount: number
+  /** Tasks assignable: judge-drafted goals awaiting triage (unconfirmed,
+   *  non-terminal). Opens the triage surface (task-goal-autopilot.md §8). */
+  taskTriageCount: number
   /** Workspace connectors whose credentials stopped working
    *  (`health_status = 'auth_failed'`) — ingestion/tools are dead until the
    *  user reconnects. 0 in the OSS edition (no connector surface). */
@@ -63,6 +68,7 @@ export const NEED_CARD_KINDS = [
   'brain_review',
   'approvals',
   'autopilot',
+  'task_triage',
   'connector_attention',
   'workflow_attention',
 ] as const
@@ -71,17 +77,19 @@ export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
 /** Kinds the merge ALWAYS surfaces while their signal is live, even when the
  *  artifact omits them. Two classes belong here: attention kinds
  *  (`connector_attention` / `workflow_attention` — silent breakage) and
- *  pending-you actions (`approvals` / `autopilot` — a new approval to action, or
- *  a goal draft awaiting your confirm). A stale artifact may reorder or caption
- *  any of these, but never hide it: a blocking item you must act on cannot wait
- *  on the next curation turn. Only `brain_review` (not a blocking action) stays
- *  fully curation-gated — the assistant's "include only the kinds worth
- *  surfacing" latitude applies to it alone. */
+ *  pending-you actions (`approvals` / `autopilot` / `task_triage` — a new
+ *  approval to action, a confirmed goal to kick start or unblock, or a
+ *  judge-drafted goal awaiting your triage). A stale artifact may reorder or
+ *  caption any of these, but never hide it: a blocking item you must act on
+ *  cannot wait on the next curation turn. Only `brain_review` (not a blocking
+ *  action) stays fully curation-gated — the assistant's "include only the
+ *  kinds worth surfacing" latitude applies to it alone. */
 export const URGENT_NEED_KINDS: ReadonlySet<NeedCardKind> = new Set([
   'connector_attention',
   'workflow_attention',
   'approvals',
   'autopilot',
+  'task_triage',
 ])
 
 export const homeDockLayoutSchema = z.object({

@@ -19,7 +19,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email";
+export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email" | "msteams";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 type ChannelStatus = "active" | "revoked" | "invalid";
@@ -300,6 +300,50 @@ export async function connectDiscordChannel(
     );
   }
   return (await res.json()) as ConnectDiscordResult;
+}
+
+export type ConnectMsTeamsInput = {
+  appId: string;
+  appPassword: string;
+  tenantId: string;
+  defaultAssistantId?: string | null;
+  displayName?: string;
+};
+export type ConnectMsTeamsResult = {
+  channel: Channel;
+  reused: boolean;
+  /** Messaging-endpoint path the operator pastes into their Azure Bot. */
+  webhookPath: string;
+  webhookUrl: string | null;
+};
+
+/**
+ * Create or refresh a Microsoft Teams channel for a workspace. Validates the
+ * Azure Bot credentials by minting a Bot Connector token, stores them
+ * encrypted, and returns the messaging-endpoint URL to register on the bot.
+ */
+export async function connectMsTeamsChannel(
+  workspaceId: string,
+  input: ConnectMsTeamsInput,
+): Promise<ConnectMsTeamsResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/msteams`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+    };
+    throw new Error(
+      data.detail ?? data.error ?? `Teams connect failed (${res.status})`,
+    );
+  }
+  return (await res.json()) as ConnectMsTeamsResult;
 }
 
 export async function listChannelAssistants(

@@ -72,6 +72,8 @@ export const OVERHEAD_SOURCES = [
   'overhead:goal-verify',
   // Migration 309 (2026-07-07): the workflow-lifecycle digest pass.
   'overhead:workflow-digest',
+  // Migration 348 (2026-07-22): the task-autopilot v2 triage judge.
+  'overhead:goal-triage',
 ] as const
 
 export type OverheadSource = typeof OVERHEAD_SOURCES[number]
