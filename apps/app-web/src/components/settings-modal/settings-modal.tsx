@@ -31,7 +31,6 @@ import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
-import { UsageSection } from "./sections/usage-section";
 import { BrowserProfilesSection } from "./sections/browser-profiles-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
@@ -93,18 +92,22 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
-  "ws-llm-key",
+  // ws-llm-key is absent here on purpose: hosted surfaces the BYO Gemini key
+  // block inside the Models section (everything model-related in one place).
+  // The OSS list below keeps the standalone section — it has no Models entry.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
   "ws-domains",
-  "ws-plan",
-  "ws-usage",
   // Metered model profiles (model-registry.md L15). Hosted-only: the lane
   // bills credits; the OSS list below omits it.
   "ws-models",
   // Computer-use Profile-Management (hosted-only: profiles + the vault are
   // closed platform halves, so the OSS list below omits it).
   "ws-browser-profiles",
+  // ws-usage is absent on purpose: the Usage block renders inside ws-plan
+  // ("Plan & usage") — the alias case below still routes old deep links.
+  // Billing sits last in the group: day-to-day workspace config first.
+  "ws-plan",
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
 // entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
@@ -348,10 +351,10 @@ function SectionBody({
       // dispatches openWorkspaceSettings('ws-plan') directly (the nav hides it).
       return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-usage":
-      // Usage is per-workspace (migration 143) — the monthly credit
-      // allowance + reset date for the active workspace. OSS has no billing;
-      // defensive upgrade pitch (the nav hides this section in OSS).
-      return isOssEdition() ? <HostedUpgradeSection /> : <UsageSection />;
+      // Alias: Usage merged into the Plan section ("Plan & usage"). Kept so
+      // openWorkspaceSettings("ws-usage") deep links still land somewhere
+      // sensible. OSS has no billing; defensive upgrade pitch.
+      return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-models":
       // Metered model profiles (model-registry.md L15). The lane is a
       // hosted billing construct; OSS nav hides the section, this is defensive.

@@ -832,20 +832,33 @@ export function FloatingChat({
   }, [workspaceId]);
 
   // Metered options: saved profiles first (named budgets), then the raw
-  // models at their default 100-round budget.
+  // models at their default 100-round budget. A profile some class names as
+  // its workspace default sorts to the top with a default sublabel — the
+  // default is prominence only, never a silent arm: picking it still runs
+  // the same estimate→confirm flow (L8).
   const meteredOptions = useMemo(() => {
     if (!modelMenu) return [];
     const models = modelMenu.classes["metered"] ?? [];
+    // Labels prefer the registry displayName ("DeepSeek V4 Pro") — aliases
+    // stay the technical identity the send body carries.
+    const nameFor = (alias: string) => models.find((m) => m.alias === alias)?.displayName ?? alias;
+    const defaultProfileIds = new Set(
+      (modelMenu.defaults ?? []).map((d) => d.meteredProfileId).filter(Boolean),
+    );
+    const profiles = [...modelMenu.profiles].sort(
+      (a, b) => Number(defaultProfileIds.has(b.id)) - Number(defaultProfileIds.has(a.id)),
+    );
     const opts: Array<{ key: string; label: string; sublabel: string }> = [];
-    for (const prof of modelMenu.profiles) {
+    for (const prof of profiles) {
+      const sub = t.meteredProfileSub.replace("{rounds}", String(prof.toolRounds));
       opts.push({
         key: `p:${prof.id}`,
-        label: `${prof.modelAlias} / ${prof.name}`,
-        sublabel: t.meteredProfileSub.replace("{rounds}", String(prof.toolRounds)),
+        label: `${nameFor(prof.modelAlias)} / ${prof.name}`,
+        sublabel: defaultProfileIds.has(prof.id) ? `${t.meteredDefaultTag} · ${sub}` : sub,
       });
     }
     for (const m of models) {
-      opts.push({ key: `m:${m.alias}`, label: m.alias, sublabel: t.meteredModelSub });
+      opts.push({ key: `m:${m.alias}`, label: m.displayName, sublabel: t.meteredModelSub });
     }
     return opts;
   }, [modelMenu, t]);
@@ -857,14 +870,16 @@ export function FloatingChat({
     (key: string | null) => {
       if (!key) { setMetered(null); return; }
       if (!workspaceId || !modelMenu) return;
+      const nameFor = (a: string) =>
+        (modelMenu.classes["metered"] ?? []).find((m) => m.alias === a)?.displayName ?? a;
       let alias: string; let profileId: string | null = null; let toolRounds = 100; let label: string;
       if (key.startsWith("p:")) {
         const prof = modelMenu.profiles.find((x) => x.id === key.slice(2));
         if (!prof) return;
         alias = prof.modelAlias; profileId = prof.id; toolRounds = prof.toolRounds;
-        label = `${prof.modelAlias} / ${prof.name}`;
+        label = `${nameFor(prof.modelAlias)} / ${prof.name}`;
       } else {
-        alias = key.slice(2); label = alias;
+        alias = key.slice(2); label = nameFor(alias);
       }
       void (async () => {
         let description = t.meteredConfirmNoBilling.replace("{model}", label).replace("{rounds}", String(toolRounds));

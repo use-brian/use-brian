@@ -14,10 +14,14 @@
  * Gemini default per class until a promotion verdict), so this section is
  * the metered lane only.
  *
+ * Also hosts the workspace's BYO Gemini key block (hosted edition): every
+ * model-related workspace setting lives in this one section. OSS keeps the
+ * standalone `ws-llm-key` section instead (no Models section there).
+ *
  * [COMP:app-web/models-settings]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Gauge, Pencil, Plus, Trash2 } from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -31,21 +35,33 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import {
+  SearchableSelect,
+  type SearchableSelectItem,
+} from "@/components/ui/searchable-select";
+import {
+  clearWorkspaceModelDefault,
   createMeteredProfile,
   deleteMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
+  setWorkspaceModelDefault,
   updateMeteredProfile,
   type MenuModel,
   type MeteredEstimate,
   type MeteredProfile,
+  type WorkspaceModelDefault,
 } from "@/lib/api/models";
+import { WorkspaceLlmKeyBlock } from "./llm-key-block";
+
+const DEFAULTABLE_CLASSES: WorkspaceModelDefault["modelClass"][] = ["standard-pro", "max", "research"];
 
 export function ModelsSection() {
   const t = useT().chrome.settingsModal.models;
   const { workspaceId } = useWorkspaceContext();
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<MenuModel[]>([]);
+  const [menuClasses, setMenuClasses] = useState<Record<string, MenuModel[]>>({});
+  const [defaults, setDefaults] = useState<WorkspaceModelDefault[]>([]);
   const [profiles, setProfiles] = useState<MeteredProfile[]>([]);
   const [billingAvailable, setBillingAvailable] = useState(false);
   const [estimates, setEstimates] = useState<Record<string, MeteredEstimate | null>>({});
@@ -62,6 +78,8 @@ export function ModelsSection() {
       const menu = await fetchModelMenu(workspaceId);
       const metered = menu.classes["metered"] ?? [];
       setModels(metered);
+      setMenuClasses(menu.classes);
+      setDefaults(menu.defaults ?? []);
       setProfiles(menu.profiles);
       setBillingAvailable(menu.meteredBillingAvailable);
       if (menu.meteredBillingAvailable) {
@@ -82,6 +100,15 @@ export function ModelsSection() {
 
   const clampRounds = (n: number) => Math.min(200, Math.max(10, Math.round(n) || 10));
 
+  // Alias -> human product name, from the served menu (registry displayName).
+  // Profiles store aliases; every label a user reads prefers the real name.
+  const displayNames = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const list of Object.values(menuClasses)) for (const m of list) map.set(m.alias, m.displayName);
+    return map;
+  }, [menuClasses]);
+  const nameFor = useCallback((alias: string) => displayNames.get(alias) ?? alias, [displayNames]);
+
   const onCreate = useCallback(async () => {
     if (!workspaceId || !newModel || !newName.trim()) return;
     setSaving(true);
@@ -100,11 +127,29 @@ export function ModelsSection() {
     }
   }, [workspaceId, newModel, newName, newRounds, reload, t]);
 
+  // Tier defaults (§4.4): "registry" = follow the registry (row deleted),
+  // `a:<alias>` = curated same-class pin, `p:<id>` = metered profile (picker
+  // prominence only; the L8 estimate→confirm still gates every metered
+  // spend). Writes are owner/admin server-side; a member's attempt surfaces
+  // the 403 inline.
+  const onDefaultChange = useCallback(async (cls: WorkspaceModelDefault["modelClass"], value: string) => {
+    if (!workspaceId) return;
+    setError(null);
+    try {
+      if (!value || value === "registry") await clearWorkspaceModelDefault(workspaceId, cls);
+      else if (value.startsWith("a:")) await setWorkspaceModelDefault(workspaceId, cls, { modelAlias: value.slice(2) });
+      else if (value.startsWith("p:")) await setWorkspaceModelDefault(workspaceId, cls, { meteredProfileId: value.slice(2) });
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.saveError);
+    }
+  }, [workspaceId, reload, t]);
+
   const onDelete = useCallback(async (profile: MeteredProfile) => {
     if (!workspaceId) return;
     const ok = await confirmDialog({
       title: t.deleteTitle,
-      description: t.deleteBody.replace("{name}", `${profile.modelAlias} / ${profile.name}`),
+      description: t.deleteBody.replace("{name}", `${nameFor(profile.modelAlias)} / ${profile.name}`),
       variant: "destructive",
       confirmLabel: t.deleteCta,
     });
@@ -128,6 +173,70 @@ export function ModelsSection() {
         <p className="rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive">{error}</p>
       ) : null}
 
+      {!loading ? (
+        <div className="space-y-2.5 rounded-lg border border-border/70 p-3">
+          <div>
+            <div className="text-[12.5px] font-medium">{t.defaultsTitle}</div>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.defaultsBlurb}</p>
+            {models.length > 0 && profiles.length === 0 ? (
+              <p className="mt-1.5 rounded-md bg-muted/40 px-2.5 py-1.5 text-[11.5px] text-muted-foreground">
+                {t.defaultsNoProfilesHint}
+              </p>
+            ) : null}
+          </div>
+          {DEFAULTABLE_CLASSES.map((cls) => {
+            const curated = menuClasses[cls] ?? [];
+            const current = defaults.find((d) => d.modelClass === cls);
+            const value = current?.meteredProfileId
+              ? `p:${current.meteredProfileId}`
+              : current?.modelAlias
+                ? `a:${current.modelAlias}`
+                : "registry";
+            const classLabel =
+              cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
+            // The follow-the-registry option shows the served model's human
+            // name (registry displayName — never the alias: billing labels
+            // like gemini-3-pro-research survive model upgrades and misread
+            // as stale versions) plus a small "default" badge.
+            const registryLabel = curated[0]?.displayName ?? "";
+            // A pin option only exists for a model that genuinely differs
+            // from the registry default (and from other pins) by wire id —
+            // standard-pro's two aliases are the standard/pro billing labels
+            // of ONE model, so they collapse into the registry-default entry
+            // instead of posing as choices. Pins appear the day a promotion
+            // adds a second real model to the class.
+            const seenWire = new Set(curated[0] ? [curated[0].apiModelId] : []);
+            const pins = curated.slice(1).filter((m) => {
+              if (seenWire.has(m.apiModelId)) return false;
+              seenWire.add(m.apiModelId);
+              return true;
+            });
+            const items: SearchableSelectItem[] = [
+              { value: "registry", label: registryLabel, badge: t.defaultBadge },
+              ...pins.map((m) => ({ value: `a:${m.alias}`, label: m.displayName })),
+              ...profiles.map((p) => ({
+                value: `p:${p.id}`,
+                label: `${nameFor(p.modelAlias)} / ${p.name}`,
+                hint: t.roundsLabel.replace("{rounds}", String(p.toolRounds)),
+              })),
+            ];
+            return (
+              <div key={cls} className="flex items-center gap-3">
+                <span className="w-28 shrink-0 text-[12.5px]">{classLabel}</span>
+                <SearchableSelect
+                  value={value}
+                  onValueChange={(v) => void onDefaultChange(cls, v)}
+                  items={items}
+                  placeholder={registryLabel}
+                  className="flex-1"
+                  aria-label={classLabel}
+                />
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
       {loading ? (
         <p className="text-[12.5px] text-muted-foreground">{t.loading}</p>
       ) : models.length === 0 ? (
@@ -136,6 +245,10 @@ export function ModelsSection() {
         </p>
       ) : (
         <>
+          <div className="pt-1">
+            <div className="text-[12.5px] font-medium">{t.profilesTitle}</div>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.profilesBlurb}</p>
+          </div>
           <ul className="space-y-2">
             {profiles.map((p) => {
               const est = estimates[p.id];
@@ -144,7 +257,7 @@ export function ModelsSection() {
                   <Gauge className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium">
-                      {p.modelAlias} / {p.name}
+                      {nameFor(p.modelAlias)} / {p.name}
                     </div>
                     <div className="text-[11.5px] text-muted-foreground">
                       {t.roundsLabel.replace("{rounds}", String(p.toolRounds))}
@@ -162,7 +275,7 @@ export function ModelsSection() {
                         if (!workspaceId) return;
                         const value = await promptDialog({
                           title: t.renameTitle,
-                          description: t.renameBody.replace("{name}", `${p.modelAlias} / ${p.name}`),
+                          description: t.renameBody.replace("{name}", `${nameFor(p.modelAlias)} / ${p.name}`),
                           defaultValue: p.name,
                           confirmLabel: t.renameCta,
                         });
@@ -196,11 +309,11 @@ export function ModelsSection() {
             <div className="flex flex-wrap items-center gap-2">
               <Select value={newModel} onValueChange={(v) => { if (v) setNewModel(v); }}>
                 <SelectTrigger size="sm" aria-label={t.modelLabel} className="min-w-40 text-xs">
-                  <span>{newModel || t.modelPlaceholder}</span>
+                  <span>{newModel ? nameFor(newModel) : t.modelPlaceholder}</span>
                 </SelectTrigger>
                 <SelectContent>
                   {models.map((m) => (
-                    <SelectItem key={m.alias} value={m.alias}>{m.alias}</SelectItem>
+                    <SelectItem key={m.alias} value={m.alias}>{m.displayName}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -231,6 +344,8 @@ export function ModelsSection() {
           </div>
         </>
       )}
+
+      <WorkspaceLlmKeyBlock />
     </div>
   );
 }

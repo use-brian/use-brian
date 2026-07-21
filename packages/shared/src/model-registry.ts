@@ -72,6 +72,10 @@ export type ModelCapabilities = {
 export type ModelRegistryRow = {
   /** Canonical selector/recording id. Unique across alias/idAliases/priceAliases. */
   alias: string
+  /** Human product name for user-facing pickers ("Gemini 3.1 Pro"). Aliases
+   * and wire ids stay the technical identities; every UI label prefers this.
+   * Alias rows of one underlying model share one displayName. */
+  displayName: string
   provider: ModelProvider
   /** The id sent on the wire — a dated snapshot where the vendor offers one (L13). */
   apiModelId: string
@@ -162,6 +166,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Standard chat tier — Flash 3, the same model as Pro, on a tighter
     // tool-round budget. Synthetic id keeps it billable-distinct from Pro.
     alias: 'gemini-3-flash-standard',
+    displayName: 'Gemini 3 Flash',
     provider: 'gemini',
     apiModelId: 'gemini-3-flash-preview',
     class: 'standard-pro',
@@ -179,6 +184,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   {
     // Pro tier — Gemini Flash 3. Records its resolved provider id.
     alias: 'gemini-flash-3',
+    displayName: 'Gemini 3 Flash',
     provider: 'gemini',
     apiModelId: 'gemini-3-flash-preview',
     class: 'standard-pro',
@@ -198,6 +204,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   {
     // Max tier default — Gemini Flash 3.5 (frontier intelligence at Flash speeds).
     alias: 'gemini-3.5-flash',
+    displayName: 'Gemini 3.5 Flash',
     provider: 'gemini',
     apiModelId: 'gemini-3.5-flash',
     class: 'max',
@@ -215,6 +222,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Research tier — Pro 3.1 on the deep budget. Synthetic id keeps it
     // billable-distinct from Max and from historical Pro-3.1-as-Max rows.
     alias: 'gemini-3-pro-research',
+    displayName: 'Gemini 3.1 Pro',
     provider: 'gemini',
     apiModelId: 'gemini-3.1-pro-preview',
     class: 'research',
@@ -237,6 +245,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Classifies Standard for analytics. The retired preview SKU rides along
     // so pre-2026-05-25 rows classify and price unchanged.
     alias: 'gemini-3.1-flash-lite',
+    displayName: 'Gemini 3.1 Flash Lite',
     provider: 'gemini',
     apiModelId: 'gemini-3.1-flash-lite',
     class: 'background',
@@ -256,6 +265,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // priceAlias, NOT an idAlias: rows recorded under it have always
     // classified 'other' and must keep doing so.
     alias: 'gemini-3.1-pro-preview',
+    displayName: 'Gemini 3.1 Pro',
     provider: 'gemini',
     apiModelId: 'gemini-3.1-pro-preview',
     class: 'max',
@@ -271,6 +281,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Retired chat model (pre-Gemini-3 era). Classifies 'other', priced for
     // historical rows.
     alias: 'gemini-2.5-flash',
+    displayName: 'Gemini 2.5 Flash',
     provider: 'gemini',
     apiModelId: 'gemini-2.5-flash',
     class: 'background',
@@ -286,6 +297,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Legacy Standard tier (superseded by Flash Lite). Always $0 (Google AI
     // Studio free tier) — kept so historical cost math still computes.
     alias: 'gemma-4-26b-a4b-it',
+    displayName: 'Gemma 4 26B',
     provider: 'gemini',
     apiModelId: 'gemma-4-26b-a4b-it',
     class: 'background',
@@ -304,6 +316,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // anthropic provider records the resolved snapshot id, so it rides along
     // as a priceAlias-equivalent via apiModelId pricing.
     alias: 'claude-haiku-4-5',
+    displayName: 'Claude Haiku 4.5',
     provider: 'anthropic',
     apiModelId: 'claude-haiku-4-5-20251001',
     class: 'standard-pro',
@@ -320,6 +333,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'claude-sonnet-4-6',
+    displayName: 'Claude Sonnet 4.6',
     provider: 'anthropic',
     apiModelId: 'claude-sonnet-4-6',
     class: 'max',
@@ -336,6 +350,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'claude-opus-4-6',
+    displayName: 'Claude Opus 4.6',
     provider: 'anthropic',
     apiModelId: 'claude-opus-4-6',
     class: 'research',
@@ -354,6 +369,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   // ── xAI (special-purpose X-search plumbing, not a chat provider) ──
   {
     alias: 'grok-4-1-fast',
+    displayName: 'Grok 4.1 Fast',
     provider: 'xai',
     apiModelId: 'grok-4-1-fast',
     class: 'background',
@@ -371,6 +387,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'grok-4-1-fast-non-reasoning',
+    displayName: 'Grok 4.1 Fast (non-reasoning)',
     provider: 'xai',
     apiModelId: 'grok-4-1-fast-non-reasoning',
     class: 'background',
@@ -405,6 +422,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // output rate (understates thinking-heavy turns — the metered estimate
     // notes this; revisit when usage decomposition lands).
     alias: 'qwen3.7-plus',
+    displayName: 'Qwen 3.7 Plus',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'qwen3.7-plus',
     class: 'metered',
@@ -428,6 +446,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // MCP-Atlas). Rig must probe the reported tool-chain decay past ~8
     // calls before any Pro promotion (plan §5.1).
     alias: 'deepseek-v4-flash',
+    displayName: 'DeepSeek V4 Flash',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'deepseek-v4-flash',
     class: 'metered',
@@ -449,6 +468,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // extraction-quality evals, not the chat rig — a background regression
     // poisons the brain silently. Nothing pins it until that verdict.
     alias: 'qwen3.5-flash',
+    displayName: 'Qwen 3.5 Flash',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'qwen3.5-flash',
     class: 'background',
@@ -469,6 +489,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // do not re-litigate). Its offering IS a metered profile at the honest
     // price. LIST rates, not the launch promo (L6). Snapshot-pinned (L13).
     alias: 'qwen3.7-max',
+    displayName: 'Qwen 3.7 Max',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'qwen3.7-max-2026-06-08',
     class: 'metered',
@@ -491,6 +512,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // its metered estimates stay truthful (the plan §5 counterexample for
     // why sticker classification is forbidden).
     alias: 'deepseek-v4-pro',
+    displayName: 'DeepSeek V4 Pro',
     provider: 'openai-compat:dashscope-intl',
     apiModelId: 'deepseek-v4-pro',
     class: 'metered',
@@ -515,6 +537,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // embedder's namespaced model_id prices here but classifies 'other'
     // (pre-existing behavior — those rows are overhead-excluded anyway).
     alias: 'gemini-embedding-001',
+    displayName: 'Gemini Embedding 001',
     provider: 'gemini',
     apiModelId: 'gemini-embedding-001',
     class: 'background',
@@ -534,6 +557,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     // Retired embedding endpoints — classification only, deliberately
     // unpriced (historical cost math used the unknown-model fallback).
     alias: 'text-embedding-004',
+    displayName: 'Text Embedding 004',
     provider: 'gemini',
     apiModelId: 'text-embedding-004',
     class: 'background',
@@ -545,6 +569,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
   {
     alias: 'text-embedding-005',
+    displayName: 'Text Embedding 005',
     provider: 'gemini',
     apiModelId: 'text-embedding-005',
     class: 'background',

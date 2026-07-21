@@ -7,6 +7,11 @@
 // workspace via the app-web `useWorkspaceContext()` (single-workspace per
 // route), mirroring the BillingSection — apps/web reads `useWorkspaces()`
 // because it is multi-workspace.
+//
+// Renders as an embedded block inside the Plan section
+// (`billing-section.tsx`, above Cancellation) — the standalone ws-usage nav
+// entry merged into ws-plan ("Plan & usage"); `openWorkspaceSettings("ws-usage")`
+// still lands there via the settings-modal alias case.
 
 import { useState, useEffect, useCallback } from "react";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -142,18 +147,6 @@ export function UsageSection() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">{t.settings.usage.title}</h2>
-        <span className="text-sm text-muted-foreground">
-          {plan === ""
-            ? ""
-            : plan.toLowerCase() === "free"
-              ? t.settings.billing.noPlanTitle
-              : plan.charAt(0).toUpperCase() + plan.slice(1)}
-        </span>
-      </div>
-
       {/* Monthly credit allowance */}
       <div className="border-t border-border pt-6">
         <div className="mb-6">
