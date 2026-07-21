@@ -31,7 +31,6 @@ import { AccountSection } from "./sections/account-section";
 import { GeneralSection } from "./sections/general-section";
 import { PrivacySection } from "./sections/privacy-section";
 import { BillingSection } from "./sections/billing-section";
-import { UsageSection } from "./sections/usage-section";
 import { BrowserProfilesSection } from "./sections/browser-profiles-section";
 import { ModelsSection } from "./sections/models-section";
 import { DomainsSection } from "./sections/domains-section";
@@ -99,8 +98,9 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
   "ws-domains",
+  // ws-usage is absent on purpose: the Usage block renders inside ws-plan
+  // ("Plan & usage") — the alias case below still routes old deep links.
   "ws-plan",
-  "ws-usage",
   // Metered model profiles (model-registry.md L15). Hosted-only: the lane
   // bills credits; the OSS list below omits it.
   "ws-models",
@@ -350,10 +350,10 @@ function SectionBody({
       // dispatches openWorkspaceSettings('ws-plan') directly (the nav hides it).
       return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-usage":
-      // Usage is per-workspace (migration 143) — the monthly credit
-      // allowance + reset date for the active workspace. OSS has no billing;
-      // defensive upgrade pitch (the nav hides this section in OSS).
-      return isOssEdition() ? <HostedUpgradeSection /> : <UsageSection />;
+      // Alias: Usage merged into the Plan section ("Plan & usage"). Kept so
+      // openWorkspaceSettings("ws-usage") deep links still land somewhere
+      // sensible. OSS has no billing; defensive upgrade pitch.
+      return isOssEdition() ? <HostedUpgradeSection /> : <BillingSection />;
     case "ws-models":
       // Metered model profiles (model-registry.md L15). The lane is a
       // hosted billing construct; OSS nav hides the section, this is defensive.

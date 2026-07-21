@@ -1667,7 +1667,7 @@ export const ja: Dictionary = {
         general: "全般",
         members: "メンバー",
         llmKey: "Gemini API キー",
-        plan: "プラン",
+        plan: "プランと使用状況",
         usage: "使用状況",
         browserProfiles: "ブラウザプロフィール",
         models: "モデル",

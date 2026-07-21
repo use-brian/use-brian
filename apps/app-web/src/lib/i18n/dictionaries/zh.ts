@@ -1655,7 +1655,7 @@ export const zh: Dictionary = {
         general: "一般",
         members: "成員",
         llmKey: "Gemini API 金鑰",
-        plan: "方案",
+        plan: "方案與用量",
         usage: "用量",
         browserProfiles: "瀏覽器身分",
         models: "模型",

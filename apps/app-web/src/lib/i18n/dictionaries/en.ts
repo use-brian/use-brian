@@ -1850,7 +1850,7 @@ export const en = {
         general: "General",
         members: "Members",
         llmKey: "Gemini API key",
-        plan: "Plan",
+        plan: "Plan & usage",
         usage: "Usage",
         browserProfiles: "Browser profiles",
         models: "Models",

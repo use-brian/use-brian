@@ -2,6 +2,8 @@
 
 // Ported from apps/web/src/app/(app)/settings/billing/page.tsx
 // — see docs/architecture/platform/cost-and-pricing.md
+// The "Plan & usage" section: plan tier, payment, invoices, plus the
+// embedded UsageSection block (the old standalone ws-usage entry).
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -16,6 +18,7 @@ import { useWorkspaceContext } from "@/lib/workspace-context";
 import { useT, useLocale } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n";
 import { webAppUrl } from "@/lib/primary-auth";
+import { UsageSection } from "./usage-section";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -666,6 +669,8 @@ export function BillingSection() {
           .
         </p>
       </div>
+
+      <UsageSection />
     </div>
   );
 }
