@@ -35,22 +35,33 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import {
+  SearchableSelect,
+  type SearchableSelectItem,
+} from "@/components/ui/searchable-select";
+import {
+  clearWorkspaceModelDefault,
   createMeteredProfile,
   deleteMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
+  setWorkspaceModelDefault,
   updateMeteredProfile,
   type MenuModel,
   type MeteredEstimate,
   type MeteredProfile,
+  type WorkspaceModelDefault,
 } from "@/lib/api/models";
 import { WorkspaceLlmKeyBlock } from "./llm-key-block";
+
+const DEFAULTABLE_CLASSES: WorkspaceModelDefault["modelClass"][] = ["standard-pro", "max", "research"];
 
 export function ModelsSection() {
   const t = useT().chrome.settingsModal.models;
   const { workspaceId } = useWorkspaceContext();
   const [error, setError] = useState<string | null>(null);
   const [models, setModels] = useState<MenuModel[]>([]);
+  const [menuClasses, setMenuClasses] = useState<Record<string, MenuModel[]>>({});
+  const [defaults, setDefaults] = useState<WorkspaceModelDefault[]>([]);
   const [profiles, setProfiles] = useState<MeteredProfile[]>([]);
   const [billingAvailable, setBillingAvailable] = useState(false);
   const [estimates, setEstimates] = useState<Record<string, MeteredEstimate | null>>({});
@@ -67,6 +78,8 @@ export function ModelsSection() {
       const menu = await fetchModelMenu(workspaceId);
       const metered = menu.classes["metered"] ?? [];
       setModels(metered);
+      setMenuClasses(menu.classes);
+      setDefaults(menu.defaults ?? []);
       setProfiles(menu.profiles);
       setBillingAvailable(menu.meteredBillingAvailable);
       if (menu.meteredBillingAvailable) {
@@ -105,6 +118,23 @@ export function ModelsSection() {
     }
   }, [workspaceId, newModel, newName, newRounds, reload, t]);
 
+  // Tier defaults (§4.4): "" = follow the registry, `a:<alias>` = curated
+  // same-class pin, `p:<id>` = metered profile (picker prominence only; the
+  // L8 estimate→confirm still gates every metered spend). Writes are
+  // owner/admin server-side; a member's attempt surfaces the 403 inline.
+  const onDefaultChange = useCallback(async (cls: WorkspaceModelDefault["modelClass"], value: string) => {
+    if (!workspaceId) return;
+    setError(null);
+    try {
+      if (!value) await clearWorkspaceModelDefault(workspaceId, cls);
+      else if (value.startsWith("a:")) await setWorkspaceModelDefault(workspaceId, cls, { modelAlias: value.slice(2) });
+      else if (value.startsWith("p:")) await setWorkspaceModelDefault(workspaceId, cls, { meteredProfileId: value.slice(2) });
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.saveError);
+    }
+  }, [workspaceId, reload, t]);
+
   const onDelete = useCallback(async (profile: MeteredProfile) => {
     if (!workspaceId) return;
     const ok = await confirmDialog({
@@ -133,6 +163,49 @@ export function ModelsSection() {
         <p className="rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive">{error}</p>
       ) : null}
 
+      {!loading ? (
+        <div className="space-y-2.5 rounded-lg border border-border/70 p-3">
+          <div>
+            <div className="text-[12.5px] font-medium">{t.defaultsTitle}</div>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.defaultsBlurb}</p>
+          </div>
+          {DEFAULTABLE_CLASSES.map((cls) => {
+            const curated = menuClasses[cls] ?? [];
+            const current = defaults.find((d) => d.modelClass === cls);
+            const value = current?.meteredProfileId
+              ? `p:${current.meteredProfileId}`
+              : current?.modelAlias
+                ? `a:${current.modelAlias}`
+                : "";
+            const classLabel =
+              cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
+            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.alias ?? "");
+            const items: SearchableSelectItem[] = [
+              { value: "", label: registryLabel },
+              ...curated.map((m) => ({ value: `a:${m.alias}`, label: m.alias })),
+              ...profiles.map((p) => ({
+                value: `p:${p.id}`,
+                label: `${p.modelAlias} / ${p.name}`,
+                hint: t.roundsLabel.replace("{rounds}", String(p.toolRounds)),
+              })),
+            ];
+            return (
+              <div key={cls} className="flex items-center gap-3">
+                <span className="w-28 shrink-0 text-[12.5px]">{classLabel}</span>
+                <SearchableSelect
+                  value={value}
+                  onValueChange={(v) => void onDefaultChange(cls, v)}
+                  items={items}
+                  placeholder={registryLabel}
+                  className="flex-1"
+                  aria-label={classLabel}
+                />
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
+
       {loading ? (
         <p className="text-[12.5px] text-muted-foreground">{t.loading}</p>
       ) : models.length === 0 ? (
@@ -141,6 +214,10 @@ export function ModelsSection() {
         </p>
       ) : (
         <>
+          <div className="pt-1">
+            <div className="text-[12.5px] font-medium">{t.profilesTitle}</div>
+            <p className="mt-0.5 text-[11.5px] text-muted-foreground">{t.profilesBlurb}</p>
+          </div>
           <ul className="space-y-2">
             {profiles.map((p) => {
               const est = estimates[p.id];

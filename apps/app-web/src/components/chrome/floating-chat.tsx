@@ -832,16 +832,26 @@ export function FloatingChat({
   }, [workspaceId]);
 
   // Metered options: saved profiles first (named budgets), then the raw
-  // models at their default 100-round budget.
+  // models at their default 100-round budget. A profile some class names as
+  // its workspace default sorts to the top with a default sublabel — the
+  // default is prominence only, never a silent arm: picking it still runs
+  // the same estimate→confirm flow (L8).
   const meteredOptions = useMemo(() => {
     if (!modelMenu) return [];
     const models = modelMenu.classes["metered"] ?? [];
+    const defaultProfileIds = new Set(
+      (modelMenu.defaults ?? []).map((d) => d.meteredProfileId).filter(Boolean),
+    );
+    const profiles = [...modelMenu.profiles].sort(
+      (a, b) => Number(defaultProfileIds.has(b.id)) - Number(defaultProfileIds.has(a.id)),
+    );
     const opts: Array<{ key: string; label: string; sublabel: string }> = [];
-    for (const prof of modelMenu.profiles) {
+    for (const prof of profiles) {
+      const sub = t.meteredProfileSub.replace("{rounds}", String(prof.toolRounds));
       opts.push({
         key: `p:${prof.id}`,
         label: `${prof.modelAlias} / ${prof.name}`,
-        sublabel: t.meteredProfileSub.replace("{rounds}", String(prof.toolRounds)),
+        sublabel: defaultProfileIds.has(prof.id) ? `${t.meteredDefaultTag} · ${sub}` : sub,
       });
     }
     for (const m of models) {

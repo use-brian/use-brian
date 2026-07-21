@@ -140,6 +140,7 @@ import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-cli
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import { menuForClass } from '@use-brian/shared/model-registry'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
+import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
@@ -1247,6 +1248,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const connectorGrantStore = createConnectorGrantStore()
   const workspaceStore = createWorkspaceStore({ connectorGrantStore, channelRouteStore })
   const meteredProfileStore = createMeteredProfileStore()
+  const modelDefaultsStore = createWorkspaceModelDefaultsStore()
 
   // ── KB sync-credential resolver ──
   // Resolves the GitHub PAT a synced knowledge source operates through, by
@@ -3700,6 +3702,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api', requireAuth(env.JWT_SECRET), modelMenuRoutes({
     workspaceStore,
     meteredProfileStore,
+    modelDefaultsStore,
     configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))

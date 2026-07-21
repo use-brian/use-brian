@@ -8,9 +8,11 @@ vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
 
 import { authFetch } from "@/lib/auth-fetch";
 import {
+  clearWorkspaceModelDefault,
   createMeteredProfile,
   fetchMeteredEstimate,
   fetchModelMenu,
+  setWorkspaceModelDefault,
   updateMeteredProfile,
   deleteMeteredProfile,
 } from "../models";
@@ -55,5 +57,25 @@ describe("[COMP:app-web/models-sdk] model menu SDK", () => {
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: "Not a metered model" }), { status: 400 }));
     await expect(createMeteredProfile("ws-1", { name: "x", modelAlias: "gemini-3.5-flash", toolRounds: 10 }))
       .rejects.toThrow("Not a metered model");
+  });
+
+  it("sets and clears workspace class defaults through the model-defaults routes", async () => {
+    mockFetch.mockImplementation(async () =>
+      ok({ default: { workspaceId: "ws-1", modelClass: "max", modelAlias: null, meteredProfileId: "p1", updatedAt: "now" } }),
+    );
+    const set = await setWorkspaceModelDefault("ws-1", "max", { meteredProfileId: "p1" });
+    await clearWorkspaceModelDefault("ws-1", "max");
+    const [setUrl, setInit] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(String(setUrl)).toContain("/api/workspaces/ws-1/model-defaults/max");
+    expect(setInit.method).toBe("PUT");
+    expect(JSON.parse(setInit.body as string)).toEqual({ meteredProfileId: "p1" });
+    expect(set.meteredProfileId).toBe("p1");
+    expect((mockFetch.mock.calls[1][1] as RequestInit).method).toBe("DELETE");
+  });
+
+  it("surfaces the role error on a member's default write", async () => {
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: "Owner or admin role required" }), { status: 403 }));
+    await expect(setWorkspaceModelDefault("ws-1", "max", { modelAlias: "gemini-3.5-flash" }))
+      .rejects.toThrow("Owner or admin role required");
   });
 });

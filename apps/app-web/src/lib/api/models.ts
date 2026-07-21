@@ -29,9 +29,18 @@ export type MeteredProfile = {
   thinking: boolean | null;
 };
 
+export type WorkspaceModelDefault = {
+  workspaceId: string;
+  modelClass: "standard-pro" | "max" | "research";
+  modelAlias: string | null;
+  meteredProfileId: string | null;
+  updatedAt: string;
+};
+
 export type ModelMenu = {
   classes: Record<string, MenuModel[]>;
   profiles: MeteredProfile[];
+  defaults: WorkspaceModelDefault[];
   meteredBillingAvailable: boolean;
 };
 
@@ -97,4 +106,34 @@ export async function deleteMeteredProfile(workspaceId: string, id: string): Pro
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`profile delete failed (${res.status})`);
+}
+
+export async function setWorkspaceModelDefault(
+  workspaceId: string,
+  modelClass: WorkspaceModelDefault["modelClass"],
+  target: { modelAlias: string } | { meteredProfileId: string },
+): Promise<WorkspaceModelDefault> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/model-defaults/${modelClass}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `default update failed (${res.status})`);
+  }
+  return ((await res.json()) as { default: WorkspaceModelDefault }).default;
+}
+
+export async function clearWorkspaceModelDefault(
+  workspaceId: string,
+  modelClass: WorkspaceModelDefault["modelClass"],
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}/model-defaults/${modelClass}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(body?.error ?? `default clear failed (${res.status})`);
+  }
 }
