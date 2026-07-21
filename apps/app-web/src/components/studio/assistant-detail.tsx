@@ -125,7 +125,7 @@ export function AssistantDetail({
 
     authFetch(`${API_URL}/api/assistants`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((data: { assistants?: { id: string; name: string; role: string; iconSeed?: number; description?: string | null; memoryCount?: number; workspaceId?: string | null; clearance?: Sensitivity; kind?: "standard" | "app" }[] } | null) => {
+      .then((data: { assistants?: { id: string; name: string; role: string; iconSeed?: number; description?: string | null; memoryCount?: number; workspaceId?: string | null; clearance?: Sensitivity; kind?: "standard" | "app" | "primary" }[] } | null) => {
         if (!data?.assistants?.length) return;
         setCachedAssistants(data.assistants as import("@/lib/sidebar-cache").Assistant[]);
         const match = data.assistants.find((a) => a.id === id);
@@ -316,6 +316,7 @@ export function AssistantDetail({
           <SettingsTab
             assistantId={id}
             role={assistant.role}
+            kind={assistant.kind}
             assistantName={assistant.name}
             workspaceId={assistant.workspaceId ?? null}
             onRenamed={(name) => setAssistant((a) => a ? { ...a, name } : a)}
@@ -1903,6 +1904,7 @@ function isModelAlias(v: unknown): v is ModelAlias {
 function SettingsTab({
   assistantId,
   role,
+  kind,
   assistantName,
   workspaceId,
   onRenamed,
@@ -1910,6 +1912,7 @@ function SettingsTab({
 }: {
   assistantId: string;
   role: string;
+  kind?: "standard" | "app" | "primary";
   assistantName: string;
   workspaceId: string | null;
   onRenamed: (name: string) => void;
@@ -2146,6 +2149,11 @@ function SettingsTab({
   }
 
   const isOwner = role === "owner";
+  // Primary assistants anchor their workspace and cannot be deleted
+  // (server enforces via 409 primary_not_deletable in
+  // packages/api/src/routes/assistants.ts). Surface that up front
+  // rather than letting the user type-to-confirm into a rejected call.
+  const isPrimary = kind === "primary";
 
   return (
     <div className="space-y-8">
@@ -2349,32 +2357,40 @@ function SettingsTab({
               <div className="text-[14px] font-medium text-foreground">
                 {t.assistant.settingsTab.deleteTitle}
               </div>
-              <p className="text-[12px] text-muted-foreground">
-                {t.assistant.settingsTab.deleteDesc}
-              </p>
-              <div>
-                <label className="text-[12px] text-muted-foreground block mb-1.5">
-                  {t.assistant.settingsTab.deleteConfirmLabelPrefix}{" "}
-                  <span className="font-medium text-foreground">{assistantName}</span>{" "}
-                  {t.assistant.settingsTab.deleteConfirmLabelSuffix}
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={deleteConfirm}
-                    onChange={(e) => setDeleteConfirm(e.target.value)}
-                    placeholder={assistantName}
-                    className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-destructive/50"
-                  />
-                  <button
-                    onClick={handleDelete}
-                    disabled={deleteConfirm !== assistantName || deleting}
-                    className="px-3 py-2 text-[13px] font-medium rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 disabled:opacity-50 disabled:pointer-events-none transition-colors"
-                  >
-                    {deleting ? t.assistant.settingsTab.deleting : t.assistant.settingsTab.deleteButton}
-                  </button>
-                </div>
-              </div>
+              {isPrimary ? (
+                <p className="text-[12px] text-muted-foreground">
+                  {t.assistant.settingsTab.primaryNotDeletable}
+                </p>
+              ) : (
+                <>
+                  <p className="text-[12px] text-muted-foreground">
+                    {t.assistant.settingsTab.deleteDesc}
+                  </p>
+                  <div>
+                    <label className="text-[12px] text-muted-foreground block mb-1.5">
+                      {t.assistant.settingsTab.deleteConfirmLabelPrefix}{" "}
+                      <span className="font-medium text-foreground">{assistantName}</span>{" "}
+                      {t.assistant.settingsTab.deleteConfirmLabelSuffix}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={deleteConfirm}
+                        onChange={(e) => setDeleteConfirm(e.target.value)}
+                        placeholder={assistantName}
+                        className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-destructive/50"
+                      />
+                      <button
+                        onClick={handleDelete}
+                        disabled={deleteConfirm !== assistantName || deleting}
+                        className="px-3 py-2 text-[13px] font-medium rounded-lg bg-destructive/10 text-destructive hover:bg-destructive/20 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+                      >
+                        {deleting ? t.assistant.settingsTab.deleting : t.assistant.settingsTab.deleteButton}
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </section>

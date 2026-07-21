@@ -153,6 +153,9 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [regenerating, setRegenerating] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [flushOpen, setFlushOpen] = useState(false);
+  const [flushResult, setFlushResult] = useState<number | null>(null);
+  const [flushError, setFlushError] = useState(false);
   const [editingPurpose, setEditingPurpose] = useState(false);
   const [purposeInput, setPurposeInput] = useState("");
   const [purposeSaving, setPurposeSaving] = useState(false);
@@ -323,6 +326,26 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       if (res.ok) onWorkspaceDeleted();
     } catch {
       // ignore
+    }
+  }
+
+  async function flushWorkspace() {
+    if (!data) return;
+    setFlushError(false);
+    try {
+      const res = await authFetch(`${API_URL}/api/workspaces/${data.id}/data`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        setFlushError(true);
+        return;
+      }
+      const body = (await res.json()) as { total?: number };
+      setFlushResult(body.total ?? 0);
+    } catch {
+      setFlushError(true);
+    } finally {
+      setFlushOpen(false);
     }
   }
 
@@ -539,9 +562,37 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
             {t.workspaceDetailInline.advanced}
           </button>
           {advancedOpen && (
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 space-y-6">
+              {/* Flush all workspace data. Works on every workspace including
+                  the Personal one (which can never be deleted) — this is its
+                  only full-reset path. */}
+              <div className="space-y-3">
+                <p className="text-[13px] text-muted-foreground">
+                  {t.workspaceDetailInline.flushDataDescription}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setFlushOpen(true)}
+                  className="text-sm font-medium border border-red-400/30 text-red-400 px-4 py-2 rounded-lg hover:bg-red-400/10 transition-colors"
+                >
+                  {t.workspaceDetailInline.flushDataTitle}
+                </button>
+                {flushResult !== null && (
+                  <p className="text-[13px] text-muted-foreground">
+                    {format(t.workspaceDetailInline.flushDataDone, {
+                      count: flushResult,
+                    })}
+                  </p>
+                )}
+                {flushError && (
+                  <p className="text-[13px] text-red-400">
+                    {t.workspaceDetailInline.flushDataFailed}
+                  </p>
+                )}
+              </div>
+
               {canDeleteWorkspace(data.role, data.isPersonal) ? (
-                <>
+                <div className="space-y-3">
                   <p className="text-[13px] text-muted-foreground">
                     {t.workspaceDetailInline.deleteWorkspaceDescription}
                   </p>
@@ -552,7 +603,7 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
                   >
                     {t.workspaceDetailInline.deleteWorkspace}
                   </button>
-                </>
+                </div>
               ) : (
                 <p className="text-[13px] text-muted-foreground">
                   {t.workspaceDetailInline.deleteWorkspacePersonalBlocked}
@@ -563,32 +614,51 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
         </div>
       )}
 
-      <DeleteWorkspaceDialog
+      <TypeToConfirmDialog
         open={deleteOpen}
         workspaceName={data.name}
+        title={t.workspaceDetailInline.deleteWorkspaceDialogTitle}
+        description={t.workspaceDetailInline.deleteWorkspaceConfirm}
+        confirmLabel={t.workspaceDetailInline.deleteWorkspace}
         onCancel={() => setDeleteOpen(false)}
         onConfirm={deleteWorkspace}
+      />
+      <TypeToConfirmDialog
+        open={flushOpen}
+        workspaceName={data.name}
+        title={t.workspaceDetailInline.flushDataDialogTitle}
+        description={t.workspaceDetailInline.flushDataConfirm}
+        confirmLabel={t.workspaceDetailInline.flushDataTitle}
+        onCancel={() => setFlushOpen(false)}
+        onConfirm={flushWorkspace}
       />
     </div>
   );
 }
 
-// Type-to-confirm dialog for the irreversible workspace delete. A portaled
-// base-ui AlertDialog layered above the settings modal (z-[60]); it
-// deliberately won't dismiss on outside-click, so the only ways out are an
-// explicit Cancel or a Delete unlocked by typing the exact workspace name.
+// Type-to-confirm dialog for the irreversible workspace-level destructive
+// actions (delete workspace, flush workspace data). A portaled base-ui
+// AlertDialog layered above the settings modal (z-[60]); it deliberately
+// won't dismiss on outside-click, so the only ways out are an explicit
+// Cancel or a confirm unlocked by typing the exact workspace name.
 //
 // Kept on base-ui AlertDialog rather than the app-web `confirmDialog`
 // primitive: that primitive is a plain yes/no with no text-input affordance,
-// and the type-to-confirm gate is load-bearing for this irreversible delete.
-function DeleteWorkspaceDialog({
+// and the type-to-confirm gate is load-bearing for these irreversible actions.
+function TypeToConfirmDialog({
   open,
   workspaceName,
+  title,
+  description,
+  confirmLabel,
   onCancel,
   onConfirm,
 }: {
   open: boolean;
   workspaceName: string;
+  title: string;
+  description: string;
+  confirmLabel: string;
   onCancel: () => void;
   onConfirm: () => Promise<void>;
 }) {
@@ -630,10 +700,10 @@ function DeleteWorkspaceDialog({
         <AlertDialog.Backdrop className="fixed inset-0 z-[60] bg-background/80 backdrop-blur-sm transition-opacity duration-150 data-[starting-style]:opacity-0 data-[ending-style]:opacity-0" />
         <AlertDialog.Popup className="fixed left-1/2 top-1/2 z-[60] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-background p-6 shadow-xl ring-1 ring-foreground/5 transition-all duration-150 data-[starting-style]:opacity-0 data-[starting-style]:scale-95 data-[ending-style]:opacity-0 data-[ending-style]:scale-95">
           <AlertDialog.Title className="text-base font-semibold text-foreground">
-            {t.workspaceDetailInline.deleteWorkspaceDialogTitle}
+            {title}
           </AlertDialog.Title>
           <AlertDialog.Description className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            {t.workspaceDetailInline.deleteWorkspaceConfirm}
+            {description}
           </AlertDialog.Description>
           <p className="mt-4 text-[13px] text-muted-foreground">
             {format(t.workspaceDetailInline.deleteWorkspaceTypePrompt, { name: workspaceName })}
@@ -659,7 +729,7 @@ function DeleteWorkspaceDialog({
               disabled={!matches || deleting}
               onClick={runDelete}
             >
-              {t.workspaceDetailInline.deleteWorkspace}
+              {confirmLabel}
             </Button>
           </div>
         </AlertDialog.Popup>

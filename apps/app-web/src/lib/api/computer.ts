@@ -308,3 +308,60 @@ export async function revokeProfileGrant(profileId: string, grantId: string): Pr
   );
   return res.ok;
 }
+
+// ── "My Browser" — local backend extension pairing ───────────────
+// Routes mounted at /api/browser-extension in boot.ts (my-browser.md).
+// The extension drives the user's own Chrome via the relay; pairing links
+// that Chrome to the caller's account with a short-lived token.
+
+export type BrowserExtensionStatus = {
+  /** The relay is configured on this deployment (BROWSER_RELAY_URL set). */
+  configured: boolean;
+  /** The caller's extension is currently connected to the relay. */
+  connected: boolean;
+};
+
+/** Poll target for the connect surface. Never throws — a status probe must
+ *  never take the Settings panel down. */
+export async function getBrowserExtensionStatus(): Promise<BrowserExtensionStatus> {
+  const res = await authFetch(`${API_URL}/api/browser-extension/status`).catch(() => null);
+  if (!res?.ok) return { configured: false, connected: false };
+  return (await res
+    .json()
+    .catch(() => ({ configured: false, connected: false }))) as BrowserExtensionStatus;
+}
+
+export type BrowserExtensionPairing = {
+  pairingToken: string;
+  relayUrl: string;
+  expiresInSeconds: number;
+};
+
+/**
+ * Mint a short-lived pairing token bound to {user, workspace}. The user pastes
+ * it (with `relayUrl`) into the extension popup once. Returns null when the
+ * relay is not configured on this deployment (503) or on any failure.
+ */
+export async function pairBrowserExtension(
+  workspaceId: string,
+): Promise<BrowserExtensionPairing | null> {
+  const res = await authFetch(`${API_URL}/api/browser-extension/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId }),
+  }).catch(() => null);
+  if (!res?.ok) return null;
+  return (await res.json().catch(() => null)) as BrowserExtensionPairing | null;
+}
+
+/** The workspace's active plan id — used only to gate the connect surface
+ *  (D3: hosted paid only). Returns null on any failure so the gate fails open
+ *  to "not gated" rather than blocking a paying user on a flaky fetch. */
+export async function getWorkspacePlan(workspaceId: string): Promise<string | null> {
+  const res = await authFetch(
+    `${API_URL}/api/billing/subscription?workspace_id=${encodeURIComponent(workspaceId)}`,
+  ).catch(() => null);
+  if (!res?.ok) return null;
+  const body = (await res.json().catch(() => null)) as { plan?: string } | null;
+  return body?.plan ?? null;
+}

@@ -620,6 +620,22 @@ export async function deleteWorkflow(workflowId: string): Promise<boolean> {
   return res.ok;
 }
 
+/**
+ * Bulk delete: every workflow in the workspace, archived included.
+ * Admin-gated server-side; a 403 resolves to `{ ok: false }`.
+ */
+export async function deleteAllWorkflows(
+  workspaceId: string,
+): Promise<{ ok: boolean; deleted: number }> {
+  const res = await authFetch(
+    `${API_URL}/api/workflows?workspaceId=${encodeURIComponent(workspaceId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) return { ok: false, deleted: 0 };
+  const body = (await res.json().catch(() => ({}))) as { deleted?: number };
+  return { ok: true, deleted: body.deleted ?? 0 };
+}
+
 export type RunWorkflowResult = {
   runId: string;
   status: WorkflowRunSummary["status"];

@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
+import { ConnectBrowserPanel } from "./connect-browser-panel";
 import { listAssistants, type StudioAssistantSummary } from "@/lib/api/studio";
 import {
   createBrowserProfile,
@@ -194,6 +195,11 @@ export function BrowserProfilesSection() {
 
   return (
     <div className="space-y-4">
+      {/* "My Browser" (local backend) connect surface (my-browser.md P1) sits
+          above the profile list: connect your own Chrome, then set a profile's
+          backend to My Browser to route browsing to it. */}
+      <ConnectBrowserPanel />
+
       <div>
         <h3 className="text-sm font-medium">{t.computer.profiles.title}</h3>
         <p className="mt-1 text-xs text-muted-foreground">{t.computer.profiles.description}</p>

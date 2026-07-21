@@ -471,17 +471,20 @@ function ScopeBadge({ scope, t }: { scope: BrainKeyScope; t: Dictionary }) {
   );
 }
 
-/** Localized label for a key's clearance cap; null = the primary governs. */
+/** Localized label for a key's clearance cap. Copy never surfaces the
+ *  primary-clearance concept: a NULL cap and an explicit 'confidential' cap
+ *  are equivalent (the cap only ever lowers the ceiling), so both render as
+ *  Confidential. */
 function clearanceLabel(value: BrainKeyClearance | null, t: Dictionary): string {
-  return value === null
-    ? t.programmaticAccess.clearance.followsPrimary
+  return value === null || value === "confidential"
+    ? t.programmaticAccess.clearance.confidential
     : t.programmaticAccess.clearance[value];
 }
 
 /** The per-key cap display: a static badge, or a compact select for
- *  owner/admins on active keys. Confidential is offered here (not in the
- *  create form) — an owner may deliberately opt a key up; the backend still
- *  applies min() with the primary assistant's clearance. */
+ *  owner/admins on active keys. Confidential (the top tier) writes NULL —
+ *  no cap; a stored explicit 'confidential' displays identically and is
+ *  normalized to NULL on the next change. */
 function ClearanceCapControl({
   value,
   t,
@@ -499,14 +502,15 @@ function ClearanceCapControl({
     );
   }
   const items = {
-    [CLEARANCE_FOLLOWS_PRIMARY]: t.programmaticAccess.clearance.followsPrimary,
-    public: t.programmaticAccess.clearance.public,
+    [CLEARANCE_FOLLOWS_PRIMARY]: t.programmaticAccess.clearance.confidential,
     internal: t.programmaticAccess.clearance.internal,
-    confidential: t.programmaticAccess.clearance.confidential,
+    public: t.programmaticAccess.clearance.public,
   };
+  const selected =
+    value === null || value === "confidential" ? CLEARANCE_FOLLOWS_PRIMARY : value;
   return (
     <Select
-      value={value ?? CLEARANCE_FOLLOWS_PRIMARY}
+      value={selected}
       items={items}
       onValueChange={(v) => {
         if (!v) return;
@@ -524,13 +528,10 @@ function ClearanceCapControl({
       </SelectTrigger>
       <SelectContent>
         <SelectItem value={CLEARANCE_FOLLOWS_PRIMARY}>
-          {t.programmaticAccess.clearance.followsPrimary}
-        </SelectItem>
-        <SelectItem value="public">{t.programmaticAccess.clearance.public}</SelectItem>
-        <SelectItem value="internal">{t.programmaticAccess.clearance.internal}</SelectItem>
-        <SelectItem value="confidential">
           {t.programmaticAccess.clearance.confidential}
         </SelectItem>
+        <SelectItem value="internal">{t.programmaticAccess.clearance.internal}</SelectItem>
+        <SelectItem value="public">{t.programmaticAccess.clearance.public}</SelectItem>
       </SelectContent>
     </Select>
   );

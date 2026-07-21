@@ -13,11 +13,7 @@ import { format } from "@/lib/i18n/format";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 type ConflictAssistant = { id: string; name: string; memberCount: number };
-
-type DeleteAccountError =
-  | { kind: "conflict"; assistants: ConflictAssistant[] }
-  | { kind: "unauthorized" }
-  | { kind: "server"; message: string };
+type ConflictTeam = { id: string; name: string; memberCount?: number };
 
 export function PrivacySection() {
   const t = useT();
@@ -157,6 +153,7 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
     | { kind: "confirming"; input: string }
     | { kind: "working" }
     | { kind: "conflict"; assistants: ConflictAssistant[] }
+    | { kind: "teamConflict"; teams: ConflictTeam[] }
     | { kind: "error"; message: string };
 
   const [state, setState] = useState<State>({ kind: "idle" });
@@ -190,8 +187,20 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
       }
 
       if (res.status === 409) {
-        const body = (await res.json()) as DeleteAccountError & { kind: "conflict" };
-        setState({ kind: "conflict", assistants: body.assistants ?? [] });
+        // Two conflict shapes: `transfer_ownership_required` lists shared
+        // assistants; `transfer_team_ownership_required` lists shared
+        // workspaces. Both need the user to act elsewhere first — the panel
+        // copy has to name the right object or the panel is a dead end.
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          assistants?: ConflictAssistant[];
+          teams?: ConflictTeam[];
+        };
+        if (body.error === "transfer_team_ownership_required") {
+          setState({ kind: "teamConflict", teams: body.teams ?? [] });
+        } else {
+          setState({ kind: "conflict", assistants: body.assistants ?? [] });
+        }
         return;
       }
 
@@ -248,6 +257,40 @@ function DeleteAccountRow({ userEmail }: { userEmail: string }) {
 
       {state.kind === "working" && (
         <div className="text-xs text-muted-foreground">{t.settings.privacy.deletingAccount}</div>
+      )}
+
+      {state.kind === "teamConflict" && (
+        <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
+          <div className="font-medium text-foreground">
+            {t.settings.privacy.teamConflictTitle}
+          </div>
+          <div className="text-muted-foreground">
+            {format(
+              state.teams.length === 1
+                ? t.settings.privacy.teamConflictDescOne
+                : t.settings.privacy.teamConflictDescMany,
+              { count: state.teams.length },
+            )}
+          </div>
+          <ul className="space-y-1">
+            {state.teams.map((w) => (
+              <li key={w.id} className="text-foreground">
+                {w.name}{" "}
+                {typeof w.memberCount === "number" && (
+                  <span className="text-muted-foreground">
+                    {format(t.settings.privacy.conflictMemberCount, { count: w.memberCount })}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+          <button
+            onClick={() => setState({ kind: "idle" })}
+            className="text-muted-foreground hover:text-foreground underline"
+          >
+            {t.settings.privacy.dismiss}
+          </button>
+        </div>
       )}
 
       {state.kind === "conflict" && (

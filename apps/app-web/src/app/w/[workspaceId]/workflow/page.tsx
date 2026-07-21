@@ -28,11 +28,14 @@ import { format } from "@/lib/i18n";
 import type { Dictionary } from "@/lib/i18n";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import {
+  deleteAllWorkflows,
+  deleteWorkflow,
   listWorkflows,
   restoreWorkflow,
   type WorkflowSummary,
   type WorkflowTrigger,
 } from "@/lib/api/workflow";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   WORKFLOW_REFRESH_EVENT,
   type WorkflowRefreshDetail,
@@ -47,6 +50,10 @@ export default function WorkflowPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  const [bulkMsg, setBulkMsg] = useState<
+    { kind: "done"; count: number } | { kind: "error" } | null
+  >(null);
+  const [bulkWorking, setBulkWorking] = useState(false);
 
   const reload = useCallback(async () => {
     if (!activeId) return;
@@ -93,6 +100,39 @@ export default function WorkflowPage() {
     if (ok) void reload();
   };
 
+  // Per-card delete — the same teardown the builder's Delete button runs,
+  // without making the user open each workflow first.
+  const onDelete = async (workflowId: string) => {
+    const ok = await confirmDialog({
+      title: t.workflowPage.builder.deleteConfirmTitle,
+      description: t.workflowPage.builder.deleteConfirmBody,
+      confirmLabel: t.workflowPage.builder.deleteConfirmAction,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    if (await deleteWorkflow(workflowId)) void reload();
+  };
+
+  const onDeleteAll = async () => {
+    if (!activeId || bulkWorking) return;
+    const count = (workflows ?? []).length;
+    const ok = await confirmDialog({
+      title: t.workflowPage.list.deleteAllConfirmTitle,
+      description: format(t.workflowPage.list.deleteAllConfirmBody, {
+        count: String(count),
+      }),
+      confirmLabel: t.workflowPage.list.deleteAllConfirmAction,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBulkWorking(true);
+    setBulkMsg(null);
+    const result = await deleteAllWorkflows(activeId);
+    setBulkWorking(false);
+    setBulkMsg(result.ok ? { kind: "done", count: result.deleted } : { kind: "error" });
+    if (result.ok) void reload();
+  };
+
   return (
     <div className="h-full w-full px-8 py-6 flex flex-col gap-5 overflow-y-auto">
       {/* max-md:pl-6 clears the chrome's fixed mobile hamburger (left-2
@@ -104,29 +144,58 @@ export default function WorkflowPage() {
             {t.workflowPage.description}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
+        <div className="shrink-0 flex items-center gap-3">
+          {(workflows?.length ?? 0) > 0 && (
+            <button
+              type="button"
+              onClick={() => void onDeleteAll()}
+              disabled={bulkWorking}
+              className="text-sm font-medium text-muted-foreground hover:text-red-400 transition-colors disabled:opacity-50"
+            >
+              {bulkWorking
+                ? t.workflowPage.list.deleteAllWorking
+                : t.workflowPage.list.deleteAll}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setCreateOpen(true)}
+            className={cn(
+              "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium",
+              "bg-primary text-primary-foreground hover:opacity-90 transition-opacity",
+            )}
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.25"
+              strokeLinecap="round"
+              aria-hidden
+            >
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            {t.workflowPage.list.createButton}
+          </button>
+        </div>
+      </header>
+
+      {bulkMsg && (
+        <p
           className={cn(
-            "shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium",
-            "bg-primary text-primary-foreground hover:opacity-90 transition-opacity",
+            "text-xs max-md:pl-6",
+            bulkMsg.kind === "error" ? "text-red-400" : "text-muted-foreground",
           )}
         >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.25"
-            strokeLinecap="round"
-            aria-hidden
-          >
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          {t.workflowPage.list.createButton}
-        </button>
-      </header>
+          {bulkMsg.kind === "error"
+            ? t.workflowPage.list.deleteAllFailed
+            : format(t.workflowPage.list.deleteAllDone, {
+                count: String(bulkMsg.count),
+              })}
+        </p>
+      )}
 
       {workflows === null ? (
         <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
@@ -175,6 +244,7 @@ export default function WorkflowPage() {
                 workflow={w}
                 workspaceId={activeId ?? ""}
                 t={t}
+                onDelete={() => void onDelete(w.id)}
               />
             ))}
           </div>
@@ -238,6 +308,14 @@ export default function WorkflowPage() {
                           ? t.workflowPage.lifecycle.restoring
                           : t.workflowPage.lifecycle.restore}
                       </button>
+                      <button
+                        type="button"
+                        onClick={() => void onDelete(w.id)}
+                        aria-label={t.workflowPage.builder.deleteBtn}
+                        className="shrink-0 px-2.5 py-1 rounded-md border border-red-400/30 text-xs font-medium text-red-400 hover:bg-red-400/10"
+                      >
+                        {t.workflowPage.builder.deleteConfirmAction}
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -258,10 +336,12 @@ function WorkflowCard({
   workflow,
   workspaceId,
   t,
+  onDelete,
 }: {
   workflow: WorkflowSummary;
   workspaceId: string;
   t: Dictionary;
+  onDelete: () => void;
 }) {
   const triggerKind = workflow.trigger.kind;
   return (
@@ -295,6 +375,33 @@ function WorkflowCard({
         <div className="min-w-0 flex-1">
           <div className="font-medium text-sm truncate">{workflow.name}</div>
         </div>
+        <button
+          type="button"
+          onClick={(e) => {
+            // The card is a Link; keep the delete tap from navigating.
+            e.preventDefault();
+            e.stopPropagation();
+            onDelete();
+          }}
+          aria-label={t.workflowPage.builder.deleteBtn}
+          title={t.workflowPage.builder.deleteBtn}
+          className="shrink-0 rounded-md p-1 text-muted-foreground/60 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-red-400 hover:bg-red-400/10 transition"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.85"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+            <path d="M10 11v6M14 11v6" />
+          </svg>
+        </button>
         {workflow.lifecycleState === "stale" && (
           <span
             title={workflow.lifecycleReason ?? undefined}
