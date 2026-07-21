@@ -93,7 +93,9 @@ const ACCOUNT_SECTIONS: SettingsSection[] = [
 const WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
-  "ws-llm-key",
+  // ws-llm-key is absent here on purpose: hosted surfaces the BYO Gemini key
+  // block inside the Models section (everything model-related in one place).
+  // The OSS list below keeps the standalone section — it has no Models entry.
   // Domains (custom-domains.md + platform-subdomains.md) — the workspace-level
   // manager for published-page hostnames. Open feature, so OSS keeps it too.
   "ws-domains",

@@ -14,6 +14,10 @@
  * Gemini default per class until a promotion verdict), so this section is
  * the metered lane only.
  *
+ * Also hosts the workspace's BYO Gemini key block (hosted edition): every
+ * model-related workspace setting lives in this one section. OSS keeps the
+ * standalone `ws-llm-key` section instead (no Models section there).
+ *
  * [COMP:app-web/models-settings]
  */
 
@@ -40,6 +44,7 @@ import {
   type MeteredEstimate,
   type MeteredProfile,
 } from "@/lib/api/models";
+import { WorkspaceLlmKeyBlock } from "./llm-key-block";
 
 export function ModelsSection() {
   const t = useT().chrome.settingsModal.models;
@@ -231,6 +236,8 @@ export function ModelsSection() {
           </div>
         </>
       )}
+
+      <WorkspaceLlmKeyBlock />
     </div>
   );
 }

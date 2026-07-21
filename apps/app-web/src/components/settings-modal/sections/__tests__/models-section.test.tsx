@@ -45,6 +45,15 @@ describe("[COMP:app-web/models-settings] Models section", () => {
     expect(html).toContain(tm.loading);
   });
 
+  it("embeds the workspace BYO Gemini key block (hosted home for ws-llm-key)", () => {
+    const html = renderToString(
+      <I18nProvider locale="en" dict={dict}>
+        <ModelsSection />
+      </I18nProvider>,
+    );
+    expect(html).toContain(en.workspaceLlmKey.heading);
+  });
+
   it("every user-facing string flows through the dictionary (i18n contract)", () => {
     // The three locales share the Dictionary shape — a missing key is a
     // compile error; this asserts the en copy carries no raw placeholders.
