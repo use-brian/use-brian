@@ -1573,7 +1573,6 @@ export const en = {
       reactivateDesc: "Your plan is scheduled to end on {date}. Click Reactivate to keep your plan.",
     },
     usage: {
-      title: "Plan usage limits",
       currentSession: "Current session",
       weeklyLimit: "Weekly limit",
       rollingWindow: "Rolling 7-day window",
@@ -1864,7 +1863,7 @@ export const en = {
         classStandardPro: "Standard / Pro",
         classMax: "Max",
         classResearch: "Research",
-        registryDefault: "Registry default ({alias})",
+        defaultBadge: "default",
         defaultsNoProfilesHint: "Pay-per-use models (like the DeepSeek and Qwen lineup) become pickable here once saved as a profile: create one under Metered model profiles below and it appears in these menus with its budget attached.",
         profilesTitle: "Metered model profiles",
         profilesBlurb: "Saved budgets over pay-per-use models. A profile fixes how many tool rounds a message may use; chat picks run an estimate and confirm at that budget before anything is charged.",

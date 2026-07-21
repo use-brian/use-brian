@@ -127,15 +127,16 @@ export function ModelsSection() {
     }
   }, [workspaceId, newModel, newName, newRounds, reload, t]);
 
-  // Tier defaults (§4.4): "" = follow the registry, `a:<alias>` = curated
-  // same-class pin, `p:<id>` = metered profile (picker prominence only; the
-  // L8 estimate→confirm still gates every metered spend). Writes are
-  // owner/admin server-side; a member's attempt surfaces the 403 inline.
+  // Tier defaults (§4.4): "registry" = follow the registry (row deleted),
+  // `a:<alias>` = curated same-class pin, `p:<id>` = metered profile (picker
+  // prominence only; the L8 estimate→confirm still gates every metered
+  // spend). Writes are owner/admin server-side; a member's attempt surfaces
+  // the 403 inline.
   const onDefaultChange = useCallback(async (cls: WorkspaceModelDefault["modelClass"], value: string) => {
     if (!workspaceId) return;
     setError(null);
     try {
-      if (!value) await clearWorkspaceModelDefault(workspaceId, cls);
+      if (!value || value === "registry") await clearWorkspaceModelDefault(workspaceId, cls);
       else if (value.startsWith("a:")) await setWorkspaceModelDefault(workspaceId, cls, { modelAlias: value.slice(2) });
       else if (value.startsWith("p:")) await setWorkspaceModelDefault(workspaceId, cls, { meteredProfileId: value.slice(2) });
       await reload();
@@ -190,14 +191,14 @@ export function ModelsSection() {
               ? `p:${current.meteredProfileId}`
               : current?.modelAlias
                 ? `a:${current.modelAlias}`
-                : "";
+                : "registry";
             const classLabel =
               cls === "standard-pro" ? t.classStandardPro : cls === "max" ? t.classMax : t.classResearch;
-            // Label with the human product name (registry displayName) —
-            // never the alias: aliases like gemini-3-pro-research are stable
-            // billing labels that survive model upgrades, so they misread as
-            // stale versions (research actually serves Gemini 3.1 Pro).
-            const registryLabel = t.registryDefault.replace("{alias}", curated[0]?.displayName ?? "");
+            // The follow-the-registry option shows the served model's human
+            // name (registry displayName — never the alias: billing labels
+            // like gemini-3-pro-research survive model upgrades and misread
+            // as stale versions) plus a small "default" badge.
+            const registryLabel = curated[0]?.displayName ?? "";
             // A pin option only exists for a model that genuinely differs
             // from the registry default (and from other pins) by wire id —
             // standard-pro's two aliases are the standard/pro billing labels
@@ -211,7 +212,7 @@ export function ModelsSection() {
               return true;
             });
             const items: SearchableSelectItem[] = [
-              { value: "", label: registryLabel },
+              { value: "registry", label: registryLabel, badge: t.defaultBadge },
               ...pins.map((m) => ({ value: `a:${m.alias}`, label: m.displayName })),
               ...profiles.map((p) => ({
                 value: `p:${p.id}`,

@@ -1396,7 +1396,6 @@ export const ja: Dictionary = {
       reactivateDesc: "プランは {date} に終了予定です。「再開」をクリックするとプランを継続できます。",
     },
     usage: {
-      title: "プラン使用上限",
       currentSession: "現在のセッション",
       weeklyLimit: "週ごとの上限",
       rollingWindow: "ローリング 7 日間",
@@ -1681,7 +1680,7 @@ export const ja: Dictionary = {
         classStandardPro: "Standard / Pro",
         classMax: "Max",
         classResearch: "Research",
-        registryDefault: "レジストリの既定 ({alias})",
+        defaultBadge: "既定",
         defaultsNoProfilesHint: "従量課金モデル(DeepSeek や Qwen など)は、プロファイルとして保存するとここで選べるようになります。下の「従量課金モデルのプロファイル」で作成すると、予算付きでこのメニューに表示されます。",
         profilesTitle: "従量課金モデルのプロファイル",
         profilesBlurb: "従量課金モデルに対する保存済み予算です。プロファイルは 1 メッセージで使えるツールラウンド数を固定し、チャットでの選択時にその予算で見積もりと確認を行ってから課金されます。",

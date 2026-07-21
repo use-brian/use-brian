@@ -1383,7 +1383,6 @@ export const zh: Dictionary = {
       reactivateDesc: "你的方案預計於 {date} 結束。點選「重新啟用」即可繼續使用。",
     },
     usage: {
-      title: "方案用量上限",
       currentSession: "目前工作階段",
       weeklyLimit: "每週上限",
       rollingWindow: "滾動 7 天區間",
@@ -1669,7 +1668,7 @@ export const zh: Dictionary = {
         classStandardPro: "Standard / Pro",
         classMax: "Max",
         classResearch: "Research",
-        registryDefault: "登錄檔預設 ({alias})",
+        defaultBadge: "預設",
         defaultsNoProfilesHint: "按量計費模型(如 DeepSeek 與 Qwen 系列)儲存為設定檔後即可在此選用: 請在下方「按量計費模型設定檔」建立,建立後會連同預算一起出現在這些選單中。",
         profilesTitle: "按量計費模型設定檔",
         profilesBlurb: "針對按量計費模型儲存的預算。設定檔固定每則訊息可用的工具回合數;在聊天中選用時會先以該預算進行估價與確認,才會產生費用。",

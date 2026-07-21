@@ -27,6 +27,8 @@ export type SearchableSelectItem = {
   value: string;
   label: string;
   hint?: string;
+  /** Small pill rendered after the label (trigger + list row), e.g. "default". */
+  badge?: string;
 };
 
 type SearchableSelectProps = {
@@ -85,7 +87,14 @@ export function SearchableSelect({
         <Combobox.Value>
           {(current: SearchableSelectItem | null) =>
             current ? (
-              <span className="flex-1 truncate">{current.label}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <span className="truncate">{current.label}</span>
+                {current.badge && (
+                  <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium leading-4 text-muted-foreground">
+                    {current.badge}
+                  </span>
+                )}
+              </span>
             ) : (
               <span className="flex-1 truncate text-muted-foreground">{placeholder}</span>
             )
@@ -137,7 +146,14 @@ export function SearchableSelect({
                     "data-disabled:pointer-events-none data-disabled:opacity-50",
                   )}
                 >
-                  <span className="flex-1 truncate">{item.label}</span>
+                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                    <span className="truncate">{item.label}</span>
+                    {item.badge && (
+                      <span className="shrink-0 rounded-full border border-border bg-muted px-1.5 py-px text-[10px] font-medium leading-4 text-muted-foreground">
+                        {item.badge}
+                      </span>
+                    )}
+                  </span>
                   {item.hint && (
                     <span className="shrink-0 text-[11px] text-muted-foreground">{item.hint}</span>
                   )}
