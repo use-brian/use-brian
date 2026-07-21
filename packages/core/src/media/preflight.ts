@@ -10,6 +10,7 @@
  *     (The silent-fail behavior is deliberate: a failed transcription should
  *     degrade to empty text, never block the whole message.)
  */
+import type { MediaBackend } from './backend.js'
 import { transcribeAudio, type TranscribeResult } from './transcribe.js'
 import type { MediaAttachment } from './types.js'
 
@@ -17,6 +18,8 @@ export type PreflightOptions = {
   /** `env.VOICE_TRANSCRIPTION_ENABLED`. When false, preflight no-ops. */
   enabled: boolean
   apiKey: string
+  /** Adapter backend; when set, takes precedence over `apiKey`. */
+  backend?: MediaBackend
   model?: string
   timeoutMs?: number
   fetchFn?: typeof fetch
@@ -45,7 +48,7 @@ export async function transcribeFirstAudio(
     const result = await transcribeAudio(
       { buffer: firstAudio.buffer, mime: firstAudio.mime },
       {
-        apiKey: options.apiKey,
+        ...(options.backend ? { backend: options.backend } : { apiKey: options.apiKey }),
         model: options.model,
         timeoutMs: options.timeoutMs,
         fetchFn: options.fetchFn,

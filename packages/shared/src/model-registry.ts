@@ -554,6 +554,30 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: false, vision: false, thinking: false },
   },
   {
+    // DashScope (Qwen) embeddings — used when a deployment has no Google
+    // credential (LLM adapter = alicloud). A distinct vector space from Gemini
+    // (not interchangeable), so it carries its own namespaced model_id; the
+    // embedding worker records + prices under this id. Classification-excluded
+    // like the other embedding rows; present so a Qwen-only deploy prices its
+    // embedding COGS instead of falling to the unknown-model rate.
+    alias: 'text-embedding-v3',
+    displayName: 'Qwen Text Embedding v3',
+    provider: 'openai-compat:dashscope-intl',
+    apiModelId: 'text-embedding-v3',
+    class: 'background',
+    tier: 'embedding',
+    status: 'active',
+    priceAliases: ['dashscope:text-embedding-v3'],
+    rates: {
+      brackets: [{ upToInputTokens: Infinity, inPerMTok: 0.07, outPerMTok: 0 }],
+      cacheReadPerMTok: 0,
+      cacheWritePerMTok: 0,
+    },
+    contextWindow: 8_192,
+    maxOutput: 0,
+    capabilities: { tools: false, vision: false, thinking: false },
+  },
+  {
     // Retired embedding endpoints — classification only, deliberately
     // unpriced (historical cost math used the unknown-model fallback).
     alias: 'text-embedding-004',

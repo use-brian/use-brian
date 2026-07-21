@@ -28,7 +28,7 @@ import {
   calculateCost,
   filterToolsByCapabilities,
   sanitize as sanitizeAnalytics,
-  stripUnsignedToolUses,
+  stripUnsignedToolUses, modelRequiresToolSignatures,
   modelToCompactionTier,
 } from '@use-brian/core'
 import type {
@@ -71,7 +71,7 @@ import {
 import type { ContentBlock, EngineHooks } from '@use-brian/core'
 import { sanitizeDeliveryText } from '@use-brian/shared'
 import { billingPartyForAssistant } from '../billing-party.js'
-import { resolveModel } from '../model-resolution.js'
+import { resolveModel, ensureServableModel } from '../model-resolution.js'
 import { checkUsageBudget, type CreditBudgetGate } from './route-helpers.js'
 import {
   parseAuthToken,
@@ -84,6 +84,9 @@ import { mergeShadowUser } from '../db/linked-accounts.js'
 
 export type PublicApiRouteOptions = {
   provider: LLMProvider
+  /** Provider names configured at boot — substitutes a servable model when the
+   *  resolved default (Gemini) has no key. See `ensureServableModel`. */
+  configuredProviders?: ReadonlySet<string>
   /**
    * Base tool map. MCP-discovered tools (mcp_search/mcp_call, granted
    * connectors) and KB tools are added per-request via `applyMcpInjection`
@@ -427,11 +430,12 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
           )
         }
       }
-      const model = resolveModel(
-        assistant.telegramModelAlias,
-        workspacePlan,
-        budgetStatus,
-      )
+      const model = options.configuredProviders
+        ? ensureServableModel(
+            resolveModel(assistant.telegramModelAlias, workspacePlan, budgetStatus),
+            options.configuredProviders,
+          )
+        : resolveModel(assistant.telegramModelAlias, workspacePlan, budgetStatus)
 
       // ── 7. Persist user message ──────────────────────────────
       const userContent: ContentBlock[] = [{ type: 'text', text: body.message }]
@@ -577,7 +581,12 @@ export function publicApiRoutes(options: PublicApiRouteOptions): Router {
         usageStore: options.usageStore,
         userMessageId: storedUserMsg.id,
       })
-      let messages: Message[] = stripUnsignedToolUses(compactionResult.messages)
+      // Gate on the serving provider (the `model` resolved above) — the strip
+      // is Gemini-only and would erase a Qwen turn's tool calls. See tool-pairing.ts.
+      let messages: Message[] = stripUnsignedToolUses(
+        compactionResult.messages,
+        modelRequiresToolSignatures(model),
+      )
 
       // Inject the retry/edit hint into the last user turn for the
       // model only — the persisted row stays clean. Mirrors

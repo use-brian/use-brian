@@ -95,6 +95,7 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
     ].sort())
     expect([...tierModelIds('embedding')].sort()).toEqual([
       'gemini-embedding-001', 'text-embedding-004', 'text-embedding-005',
+      'text-embedding-v3', // DashScope/Qwen embeddings (Google-free deploys)
     ].sort())
   })
 

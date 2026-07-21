@@ -25,6 +25,7 @@ export {
   synthesizeMissingToolResults,
   ensureToolResultPairing,
   stripUnsignedToolUses,
+  modelRequiresToolSignatures,
   SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
 } from './tool-pairing.js'
 export {

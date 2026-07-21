@@ -25,7 +25,27 @@
  * See `docs/architecture/engine/query-loop.md` for the invariant write-up.
  */
 
+import { registryRow } from '@use-brian/shared/model-registry'
 import type { ContentBlock, Message } from '../providers/types.js'
+
+/**
+ * Whether the provider serving `model` requires an opaque per-tool-call
+ * signature (`providerSignature`) round-tripped through history.
+ *
+ * True ONLY for the Gemini family: Gemini 3.x rejects a follow-up whose
+ * `functionCall` parts lost their `thoughtSignature`. Every other provider —
+ * the OpenAI-compatible (Qwen/DeepSeek) chat-completions path, Anthropic —
+ * pairs tool calls by plain id and emits no signature. This gates
+ * `stripUnsignedToolUses` so it never deletes those providers' tool calls from
+ * history (which it would, since they are structurally "unsigned").
+ *
+ * Unknown model → `true` (fail safe: over-strict never destroys a Gemini
+ * history; under-strict silently erases a Qwen one).
+ */
+export function modelRequiresToolSignatures(model: string): boolean {
+  const provider = registryRow(model)?.provider
+  return provider === undefined || provider === 'gemini'
+}
 
 /** Placeholder body for synthetic tool_results created by the repair pass. */
 export const SYNTHETIC_TOOL_RESULT_PLACEHOLDER =
@@ -257,8 +277,20 @@ export function ensureToolResultPairing(messages: Message[]): Message[] {
  * summarised into that text by the original response.
  *
  * Idempotent: histories with all-signed tool_uses pass through unchanged.
+ *
+ * **Gated on the serving provider.** This is a Gemini-family workaround, not a
+ * general invariant. Pass `requiresSignatures = modelRequiresToolSignatures(model)`
+ * for the turn's model: a signature-less provider (Qwen via openai-compat,
+ * Anthropic) must skip the strip entirely, or every tool call it made vanishes
+ * from history on the next request. Defaults to `true` so an un-updated caller
+ * keeps the original Gemini-safe behaviour.
  */
-export function stripUnsignedToolUses(messages: Message[]): Message[] {
+export function stripUnsignedToolUses(
+  messages: Message[],
+  requiresSignatures: boolean = true,
+): Message[] {
+  if (!requiresSignatures) return messages
+
   const droppedIds = new Set<string>()
   const out: Message[] = []
 

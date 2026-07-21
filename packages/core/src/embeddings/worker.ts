@@ -154,7 +154,16 @@ export type EmbeddingUsageRecorder = (batches: EmbeddingUsageBatch[]) => Promise
  * the group's `workspaceId` so the store's workspace-fallback attribution
  * resolves a representative assistant (see `UsageStore.recordUsage`).
  */
-export function createEmbeddingUsageRecorder(usage: UsageStore): EmbeddingUsageRecorder {
+/**
+ * @param modelId The active embedder's `model_id`, so a Vertex or DashScope
+ *   deployment records + prices the embeddings it actually produced rather than
+ *   always attributing them to AI Studio Gemini. Defaults to the Gemini id for
+ *   callers that don't pass one (back-compat).
+ */
+export function createEmbeddingUsageRecorder(
+  usage: UsageStore,
+  modelId: string = GEMINI_EMBEDDING_MODEL_ID,
+): EmbeddingUsageRecorder {
   return async (batches) => {
     for (const b of batches) {
       const tokens = { inputTokens: b.inputTokensEstimated, outputTokens: 0 }
@@ -163,9 +172,9 @@ export function createEmbeddingUsageRecorder(usage: UsageStore): EmbeddingUsageR
         assistantId: '',
         workspaceId: b.workspaceId,
         sessionId: null,
-        model: GEMINI_EMBEDDING_MODEL_ID,
+        model: modelId,
         ...tokens,
-        actualCostUsd: calculateCost(GEMINI_EMBEDDING_MODEL_ID, tokens),
+        actualCostUsd: calculateCost(modelId, tokens),
         source: 'overhead:embedding',
         triggerKey: 'embedding_batch',
       })

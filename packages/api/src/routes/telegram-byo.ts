@@ -39,7 +39,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
-import { transcribeFirstAudio, sanitize as sanitizeAnalytics } from '@use-brian/core'
+import { transcribeFirstAudio, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -131,6 +131,7 @@ type TelegramByoRouteOptions = {
   voiceTranscription?: {
     enabled: boolean
     apiKey: string
+    backend?: MediaBackend
     model?: string
   }
   /**
@@ -995,6 +996,7 @@ type ProcessMessageParams = {
   voiceTranscription?: {
     enabled: boolean
     apiKey: string
+    backend?: MediaBackend
     model?: string
   }
   /** Universal channel-media intake for document/video (large-content-artifacts §Phase 0.3). */
@@ -1088,6 +1090,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         {
           enabled: true,
           apiKey: params.voiceTranscription.apiKey,
+          ...(params.voiceTranscription.backend
+            ? { backend: params.voiceTranscription.backend }
+            : {}),
           model: params.voiceTranscription.model,
         },
       )

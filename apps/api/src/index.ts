@@ -22,9 +22,19 @@ import { buildEpisodeIngestors } from '@use-brian/api/build-episode-ingestors.js
 
 dotenv.config()
 
+// The `gemini` provider can be backed by AI Studio (GEMINI_API_KEY) or Vertex
+// (VERTEX_PROJECT_ID), and a deployment can run Qwen-only via DASHSCOPE_API_KEY.
+// Require at least one usable LLM credential rather than GEMINI_API_KEY
+// specifically — a region where Google blocks the AI Studio developer API
+// (e.g. Hong Kong) has no such key and reaches Gemini via Vertex instead.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
-if (!GEMINI_API_KEY) {
-  console.error('[api-open] GEMINI_API_KEY is required. Set it and restart.')
+const VERTEX_PROJECT_ID = process.env.VERTEX_PROJECT_ID
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY
+if (!GEMINI_API_KEY && !VERTEX_PROJECT_ID && !DASHSCOPE_API_KEY) {
+  console.error(
+    '[api-open] No LLM credential set. Provide GEMINI_API_KEY (AI Studio), ' +
+    'VERTEX_PROJECT_ID (Vertex AI), or DASHSCOPE_API_KEY (Qwen), then restart.',
+  )
   process.exit(1)
 }
 
@@ -35,6 +45,9 @@ const JWT_SECRET = process.env.JWT_SECRET || (await import('node:crypto')).rando
 
 const env: OpenApiEnv = {
   GEMINI_API_KEY,
+  VERTEX_PROJECT_ID,
+  VERTEX_LOCATION: process.env.VERTEX_LOCATION,
+  VERTEX_SERVICE_ACCOUNT_JSON: process.env.VERTEX_SERVICE_ACCOUNT_JSON,
   JWT_SECRET,
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
@@ -45,6 +58,7 @@ const env: OpenApiEnv = {
   FALLBACK_PROVIDER_ENABLED: process.env.FALLBACK_PROVIDER_ENABLED === 'true',
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
   DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY,
+  DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL,
   GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
   SKILLS_AUTO_GEN_ENABLED: process.env.SKILLS_AUTO_GEN_ENABLED === 'true',
   BROWSER_RELAY_URL: process.env.BROWSER_RELAY_URL,

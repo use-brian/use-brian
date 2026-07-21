@@ -8,6 +8,8 @@
  */
 import { providerAliasMap, recordedAliasIds, providerModelIds } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SendOptions, SessionOptions, StreamChunk, Message, ContentBlock, ThinkingLevel, ToolDefinition, StopReason, TokenUsage } from './types.js'
+import type { GoogleTransport } from './google-transport.js'
+import { aiStudioTransport } from './google-transport.js'
 
 /** Alias → real Google model id, derived from the model registry (each
  * gemini row's alias/idAliases vs its `apiModelId`). */
@@ -35,8 +37,6 @@ function resolveModel(model: string): string {
 function recordedModelId(requestModel: string, apiModelId: string): string {
   return SYNTHETIC_TIER_IDS.has(requestModel) ? requestModel : apiModelId
 }
-
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
 // ── Raw Gemini API types (preserving thoughtSignature) ─────────
 
@@ -351,12 +351,15 @@ export function stripLeadingRoleToken(firstTurnText: string): string {
 // ── SSE streaming via REST API ─────────────────────────────────
 
 async function* streamGeminiSSE(
-  apiKey: string,
+  transport: GoogleTransport,
   modelId: string,
   request: GeminiRequest,
   signal?: AbortSignal,
 ): AsyncGenerator<GeminiStreamChunk> {
-  const url = `${BASE_URL}/models/${modelId}:streamGenerateContent?alt=sse`
+  // AI Studio and Vertex speak the same wire format; only host + auth differ,
+  // and the injected transport owns both. Everything below here is identical.
+  const url = transport.endpoint(modelId, 'streamGenerateContent', { alt: 'sse' })
+  const headers = await transport.headers()
 
   // `signal` is plumbed all the way to `fetch` and survives onto the response
   // body's reader. Without this, a hung upstream call (Gemini taking >5min on
@@ -367,10 +370,7 @@ async function* streamGeminiSSE(
   const send = (body: GeminiRequest) =>
     fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
+      headers,
       body: JSON.stringify(body),
       signal,
     })
@@ -687,7 +687,21 @@ async function* convertStreamChunks(
 
 // ── Provider ───────────────────────────────────────────────────
 
-export function createGeminiProvider(apiKey: string): LLMProvider {
+/**
+ * Gemini-family provider over either Google transport.
+ *
+ * Accepts a bare AI Studio key (the default, unchanged for every existing
+ * caller) or an explicit `GoogleTransport` for Vertex. Both speak the same
+ * Gemini wire format, so the whole body below is shared — the registry still
+ * names this provider `gemini`, and a Vertex-backed instance serves the same
+ * `provider: 'gemini'` registry rows. The `undefined` case keeps construction
+ * total (boot may build before deciding a feature is on).
+ */
+export function createGeminiProvider(keyOrTransport: string | GoogleTransport | undefined): LLMProvider {
+  const transport: GoogleTransport =
+    typeof keyOrTransport === 'object' && keyOrTransport !== null
+      ? keyOrTransport
+      : aiStudioTransport(keyOrTransport)
   const toolCallCounter = { value: 0 }
 
   return {
@@ -700,7 +714,7 @@ export function createGeminiProvider(apiKey: string): LLMProvider {
       const recordId = recordedModelId(request.model, modelId) // billing/tier key recorded on the turn
       const contents = toGeminiContents(request.messages)
       const geminiRequest = buildRequest(contents, request, modelId)
-      const sseStream = streamGeminiSSE(apiKey, modelId, geminiRequest, request.signal)
+      const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, request.signal)
 
       for await (const { chunk } of convertStreamChunks(sseStream, recordId, toolCallCounter)) {
         yield chunk
@@ -758,7 +772,7 @@ export function createGeminiProvider(apiKey: string): LLMProvider {
           // letting it run to Cloud Run's 300s timeout.
           yield { type: 'message_start', model: recordId }
 
-          const sseStream = streamGeminiSSE(apiKey, modelId, geminiRequest, options.signal)
+          const sseStream = streamGeminiSSE(transport, modelId, geminiRequest, options.signal)
 
           let stopReason: StopReason = 'end_turn'
           let usage: TokenUsage = { inputTokens: 0, outputTokens: 0 }

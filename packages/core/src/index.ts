@@ -81,3 +81,20 @@ export {
   GEMINI_EMBEDDING_MODEL_ID,
   type Embedder,
 } from './embeddings/embedder.js'
+export {
+  createEmbedderForAdapter,
+  createVertexEmbedder,
+  createDashScopeEmbedder,
+  VERTEX_EMBEDDING_MODEL_ID,
+  DASHSCOPE_EMBEDDING_MODEL_ID,
+  type EmbedderAdapterConfig,
+} from './embeddings/adapters.js'
+export {
+  runMediaUnderstanding,
+  DASHSCOPE_VISION_MODEL,
+  DASHSCOPE_ASR_MODEL,
+  type MediaBackend,
+  type MediaModality,
+  type MediaRequest,
+  type MediaResult,
+} from './media/backend.js'
