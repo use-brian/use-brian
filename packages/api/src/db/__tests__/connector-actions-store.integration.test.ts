@@ -35,7 +35,7 @@ async function canConnect(): Promise<boolean> {
   } catch {
     return false
   }
-  pool = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
+  pool = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   return true
 }
 

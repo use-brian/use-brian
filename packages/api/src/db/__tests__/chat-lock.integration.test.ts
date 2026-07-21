@@ -3,7 +3,7 @@
  * `chat_turn_locks` lease row (migration 325). Component tag:
  * [COMP:channels/chat-lock].
  *
- * Requires a local PostgreSQL named `Use Brian` with the `chat_turn_locks`
+ * Requires a local PostgreSQL named `sidanclaw` with the `chat_turn_locks`
  * table. Skips silently when the DB is unavailable.
  *
  * What we verify:
@@ -39,7 +39,7 @@ process.env.PG_POOL_MAX = '1'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000, max: 2 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000, max: 2 })
   try {
     const client = await p.connect()
     // Migration 325 must be applied — bail cleanly if not so we don't

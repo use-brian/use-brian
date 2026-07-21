@@ -3,7 +3,7 @@ import pg from 'pg'
 
 /**
  * Integration test for the file_cache reaper (`createDbFileStore().sweepExpired`).
- * Requires a local PostgreSQL database named `Use Brian` with the open schema
+ * Requires a local PostgreSQL database named `sidanclaw` with the open schema
  * applied. Skips silently when the DB is unavailable (e.g. CI without a pg
  * service).
  *
@@ -13,7 +13,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

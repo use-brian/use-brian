@@ -10,14 +10,14 @@ import pg from 'pg'
  * `assistant_members` grant AND `workspace_members` — with *different* roles
  * in each — must appear exactly once, carrying the higher-privilege role.
  *
- * Requires a local PostgreSQL database named `Use Brian`. Skips silently
+ * Requires a local PostgreSQL database named `sidanclaw`. Skips silently
  * when the DB is unavailable. See docs/workflow/testing.md.
  */
 
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

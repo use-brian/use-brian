@@ -11,7 +11,7 @@ function ctxOf(userId: string, workspaceId: string, assistantId: string = userId
 /**
  * Integration test for createDbEntitiesStore + the entities schema
  * defined in migration 125 (company-brain WU-1.1). Requires a local
- * PostgreSQL database named `Use Brian` with that migration applied.
+ * PostgreSQL database named `sidanclaw` with that migration applied.
  * Skips silently when the DB is unavailable or the migration hasn't
  * been applied yet — WU-1.2 ships alongside WU-1.1 and tests come
  * alive once both land.
@@ -27,7 +27,7 @@ function ctxOf(userId: string, workspaceId: string, assistantId: string = userId
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

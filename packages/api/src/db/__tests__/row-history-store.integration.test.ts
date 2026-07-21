@@ -13,7 +13,7 @@ import type { RetrievalActor } from '@use-brian/core'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000 })
   try {
     const client = await p.connect()
     try {

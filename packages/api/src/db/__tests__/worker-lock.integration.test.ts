@@ -3,7 +3,7 @@
  * the old session-tied `pg_advisory_lock` pattern. Component tag:
  * [COMP:consolidation/worker-lock].
  *
- * Requires a local PostgreSQL named `Use Brian` with the `worker_locks`
+ * Requires a local PostgreSQL named `sidanclaw` with the `worker_locks`
  * table (migration 180). Skips silently when the DB is unavailable.
  *
  * What we verify:
@@ -28,7 +28,7 @@ import pg from 'pg'
 let pool: pg.Pool | undefined
 
 async function canConnect(): Promise<boolean> {
-  const p = new pg.Pool({ database: 'Use Brian', connectionTimeoutMillis: 2000, max: 5 })
+  const p = new pg.Pool({ database: 'sidanclaw', connectionTimeoutMillis: 2000, max: 5 })
   try {
     const client = await p.connect()
     // Migration 180 must be applied — bail cleanly if not so we don't
