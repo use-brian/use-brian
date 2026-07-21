@@ -486,6 +486,9 @@ export interface OpenApiEnv {
   // backend reports not_configured and routing falls back to local.
   E2B_API_KEY?: string
   E2B_TEMPLATE_ID?: string
+  // The watched browser-use exploration's model (§4 — the browser-grounding
+  // leg rides a cheap tier). Optional; defaults per available key below.
+  BROWSER_USE_MODEL?: string
   // Barrier 2 (§4.9): the deploy flag for the unattended acting path. The
   // flag is necessary but NOT sufficient — boot also requires live metering
   // (resolveUnattendedComputerUse). Ships dark.
@@ -2750,9 +2753,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : null
   // Cloud mode (§5): E2B behind the SandboxProvider seam. providers/e2b is
   // the only E2B-SDK importer; everything here talks to the interface.
+  // The watched exploration's LLM (browserExplore → provider runBrowserUse)
+  // threads from HERE — no model id lives in the sandbox tree (§4.14). The
+  // browser-grounding leg rides a cheap tier: Haiku when the Anthropic key
+  // exists, else the platform Gemini key on Flash. Without either config the
+  // provider refuses the lane honestly instead of argparse-dying in the VM.
+  const browserUseLlm = env.ANTHROPIC_API_KEY
+    ? {
+        apiKeyEnvName: 'ANTHROPIC_API_KEY' as const,
+        apiKey: env.ANTHROPIC_API_KEY,
+        model: env.BROWSER_USE_MODEL || 'claude-haiku-4-5-20251001',
+      }
+    : env.GEMINI_API_KEY
+      ? {
+          apiKeyEnvName: 'GOOGLE_API_KEY' as const,
+          apiKey: env.GEMINI_API_KEY,
+          // The REAL Google API id (browser-use bypasses our provider layer,
+          // so no alias resolution) — Flash 3, the cheap-leg tier.
+          model: env.BROWSER_USE_MODEL || 'gemini-3-flash-preview',
+        }
+      : undefined
   const sandboxProvider: SandboxProvider | null = env.E2B_API_KEY
     ? createE2bCloudProvider(
         createE2bRuntime({ apiKey: env.E2B_API_KEY, defaultTemplateId: env.E2B_TEMPLATE_ID }),
+        { browserUse: browserUseLlm },
       )
     : null
   // The §4.9 meter: all three COGS lines record through the usage spine, and

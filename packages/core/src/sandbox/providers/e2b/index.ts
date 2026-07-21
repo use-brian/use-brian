@@ -10,8 +10,11 @@
  *    (`unshare -rn`) in isolated mode (`python3 -I`) — egress-denied by
  *    construction, fail-closed when the template lacks `unshare`.
  *  - No ambient secrets: nothing from the host env is forwarded into the
- *    sandbox; the only credential a sandbox ever sees is the session bundle
- *    the orchestrator explicitly injects.
+ *    sandbox; the only credentials a sandbox ever sees are the session bundle
+ *    the orchestrator explicitly injects and — on the `runBrowserUse` lane
+ *    only — the exploration LLM key, set per-run on the driver exec (the
+ *    agentic loop runs inside the VM and must reach its LLM; documented on
+ *    `E2bCloudProviderConfig.browserUse`).
  *  - The BYOP proxy hook (§4.6) is agent-browser's `-p` flag, wired but
  *    dormant (set per-create, never a pool).
  */
@@ -32,6 +35,7 @@ import {
   type TakeoverInputEvent,
 } from '../../types.js'
 import { SANDBOX_SESSION_NAME, SANDBOX_VIEWPORT, chainCommands, cli, parseSnapshotOutput, sessionEnv, splitCommandParts } from './agent-browser-cli.js'
+import { BU_DRIVER_PY, mapBrowserUseHistory } from './bu-driver.js'
 import {
   TAKEOVER_INPUT_HELPER_MJS,
   TAKEOVER_INPUT_HELPER_PATH,
@@ -70,6 +74,19 @@ const MAX_DOWNLOAD_FILES = 20
 export type E2bCloudProviderConfig = {
   templateId?: string
   defaultMaxLifetimeSeconds?: number
+  /**
+   * The LLM the watched browser-use exploration drives (R2-1). Threaded from
+   * boot — the model id NEVER lives in this tree (plan §4.14 model routing),
+   * and the key is injected per-run onto the driver exec only, the one
+   * documented exception to the no-ambient-secrets contract (§8): the
+   * exploration's agentic loop runs inside the VM and must reach its LLM.
+   * Absent → `runBrowserUse` refuses with an honest configuration error.
+   */
+  browserUse?: {
+    apiKeyEnvName: 'ANTHROPIC_API_KEY' | 'GOOGLE_API_KEY' | 'OPENAI_API_KEY'
+    apiKey: string
+    model: string
+  }
 }
 
 type PerSandbox = {
@@ -438,36 +455,78 @@ export function createE2bCloudProvider(
 
     async runBrowserUse(sandboxId: string, req): Promise<BrowserUseRunResult> {
       // The watched agentic fallback (R2-1): browser-use runs INSIDE the
-      // micro-VM (the template bakes it — verify at template-build time,
-      // same caveat as the agent-browser verbs). The trace lands as JSON at
-      // a fixed path the distiller reads.
+      // micro-VM through its 0.13 Python API — the provider materializes a
+      // deterministic driver (bu-driver.ts) that attaches over CDP to the
+      // SAME Chromium agent-browser drives (so injected profile state
+      // applies), runs one Agent loop, and saves the history JSON that
+      // `mapBrowserUseHistory` turns into the distiller's trace. The old
+      // one-shot `browser-use run --task-file` CLI never existed in 0.13 —
+      // every prod run argparse-died with exit 2 (2026-07-21 incident).
+      const bu = config.browserUse
+      if (!bu) {
+        throw new Error(
+          'browser-use is not configured on this deployment: the sandbox provider has no LLM key for the exploration agent, so agentic browsing cannot run. The flat browser tools still work.',
+        )
+      }
       const handle = await handleFor(sandboxId)
+      const m = meta(sandboxId)
+      // The CDP endpoint of the warm daemon (auto-starts on first use) —
+      // same cache + invalidation discipline as the take-over input relay.
+      if (!m.cdpUrl) {
+        m.cdpUrl = (await runBrowserCommand(sandboxId, cli.getCdpUrl())).trim()
+        if (!m.cdpUrl) {
+          throw new Error('browser-use failed: the sandbox browser exposed no CDP endpoint')
+        }
+      }
       const goalPath = `${SCRATCH_DIR}/.bu/goal.txt`
-      const tracePath = `${SCRATCH_DIR}/.bu/trace.json`
+      const driverPath = `${SCRATCH_DIR}/.bu/driver.py`
+      const tracePath = `${SCRATCH_DIR}/.bu/history.json`
+      const outPath = `${SCRATCH_DIR}/.bu/output.txt`
       await handle.runCommand(`mkdir -p ${SCRATCH_DIR}/.bu`, { timeoutMs: 10_000 })
       await handle.writeFile(goalPath, new TextEncoder().encode(req.goal))
-      const maxSteps = req.maxSteps ?? 40
-      const res = await handle.runCommand(
-        `cd ${SCRATCH_DIR} && browser-use run --task-file ${goalPath} --max-steps ${maxSteps} --trace ${tracePath}`,
-        { timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS },
-      )
+      await handle.writeFile(driverPath, new TextEncoder().encode(BU_DRIVER_PY))
+      const res = await handle.runCommand(`cd ${SCRATCH_DIR} && python3 ${driverPath}`, {
+        timeoutMs: req.timeoutMs ?? SKILL_DEFAULT_TIMEOUT_MS,
+        envs: {
+          BU_CDP_URL: m.cdpUrl,
+          BU_GOAL_PATH: goalPath,
+          BU_TRACE_PATH: tracePath,
+          BU_OUT_PATH: outPath,
+          BU_MAX_STEPS: String(req.maxSteps ?? 40),
+          BU_MODEL: bu.model,
+          // Per-run key injection — the documented no-ambient-secrets
+          // exception (see E2bCloudProviderConfig.browserUse).
+          [bu.apiKeyEnvName]: bu.apiKey,
+          ANONYMIZED_TELEMETRY: 'false',
+          BROWSER_USE_CLOUD_SYNC: 'false',
+        },
+      })
       let trace: BuTraceStep[] = []
+      let mappedOutput = ''
       try {
         const bytes = await handle.readFile(tracePath)
-        const parsed = JSON.parse(Buffer.from(bytes).toString('utf8')) as unknown
-        if (Array.isArray(parsed)) trace = parsed as BuTraceStep[]
-        else if (Array.isArray((parsed as { steps?: unknown[] }).steps)) {
-          trace = (parsed as { steps: BuTraceStep[] }).steps
-        }
+        const mapped = mapBrowserUseHistory(JSON.parse(Buffer.from(bytes).toString('utf8')))
+        trace = mapped.trace
+        mappedOutput = mapped.output
       } catch {
         /* no trace → the distiller has nothing to compile; the output still returns */
       }
+      let output = ''
+      try {
+        output = Buffer.from(await handle.readFile(outPath)).toString('utf8').trim()
+      } catch {
+        /* fall back to the mapped done-text below */
+      }
       if (res.exitCode !== 0 && trace.length === 0) {
+        // A failed CDP attach could also mean the daemon relaunched under a
+        // new endpoint — drop the cache so the next attempt re-resolves.
+        m.cdpUrl = undefined
+        // Tail, not head: a Python traceback puts the real error LAST.
         throw new Error(
-          `browser-use failed: ${(res.stderr || res.stdout || 'unknown error').trim().slice(0, 500)}`,
+          `browser-use failed: ${(res.stderr || res.stdout || 'unknown error').trim().slice(-600)}`,
         )
       }
-      return { trace, output: res.stdout.trim() }
+      return { trace, output: output || mappedOutput }
     },
 
     async runSkill(sandboxId: string, req): Promise<BlockRunHandle> {

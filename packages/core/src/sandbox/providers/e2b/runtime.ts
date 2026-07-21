@@ -4,7 +4,7 @@
  * this thin runtime surface, so E2B Cloud → BYOC → self-host — or a swap to
  * a different sandbox vendor — never touches the orchestrator or tools.
  */
-import { Sandbox } from 'e2b'
+import { CommandExitError, Sandbox } from 'e2b'
 
 export type E2bCommandResult = { stdout: string; stderr: string; exitCode: number }
 
@@ -42,11 +42,26 @@ function wrap(sbx: Sandbox): E2bSandboxHandle {
   return {
     id: sbx.sandboxId,
     async runCommand(cmd, opts) {
-      const res = await sbx.commands.run(cmd, {
-        timeoutMs: opts?.timeoutMs,
-        envs: opts?.envs,
-      })
-      return { stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode }
+      try {
+        const res = await sbx.commands.run(cmd, {
+          timeoutMs: opts?.timeoutMs,
+          envs: opts?.envs,
+        })
+        return { stdout: res.stdout, stderr: res.stderr, exitCode: res.exitCode }
+      } catch (err) {
+        // The SDK THROWS CommandExitError on any non-zero exit (message is
+        // just "exit status N"). Normalize it into a result so the provider's
+        // exitCode checks — runPython, the unshare probe, runBrowserUse,
+        // runSkill — actually fire with real stderr instead of surfacing an
+        // opaque status line (the 2026-07-21 browserExplore incident: every
+        // prod run died as "ERROR: exit status 2" with the diagnostic lost).
+        // Timeouts and connection errors still throw — only a *completed*
+        // command with a non-zero code is a result, not an exception.
+        if (err instanceof CommandExitError) {
+          return { stdout: err.stdout, stderr: err.stderr, exitCode: err.exitCode }
+        }
+        throw err
+      }
     },
     async writeFile(path, bytes) {
       await sbx.files.write(path, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer)

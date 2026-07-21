@@ -396,7 +396,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
           'The site refused the connection before any page could load, so there is no page to see, watch, or take over. ' +
           "This is commonly an anti-bot edge (for example Akamai or DataDome) rejecting the cloud browser's datacenter network address; it can also be a transient network fault. " +
           'Do NOT offer the user a live-browser or take-over link for this, and do not retry the same address. ' +
-          'Report plainly that this site blocks automated browsing from this environment; the reliable way through a wall like this is browsing from a real browser on the user\'s own machine.',
+          'Report plainly that this site blocks automated browsing from this environment; the reliable way through a wall like this is to browse from a real browser on the user\'s own machine, which they can connect in Settings under Browser profiles ("My Browser").',
         isError: true,
         meta: { ...(code ? { code } : {}), connectionBlock: true },
       }
