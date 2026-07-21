@@ -180,8 +180,14 @@ async function runDashScope(
       throw new Error(`DashScope transcription expects an audio/* mime, got "${req.mime}".`)
     }
     model = DASHSCOPE_ASR_MODEL
+    // `qwen3-asr-flash` is a DEDICATED ASR task model, not a chat model with
+    // ears: any text part in the same message is rejected outright with
+    // `InternalError.Algo.InvalidParameter: The dedicated task 'asr' ... does
+    // not support this input`, whatever the audio is. So `req.prompt` is
+    // deliberately dropped here — there is no prompt channel to honour, and
+    // sending one fails 100% of transcriptions (verified 2026-07-21: audio-only
+    // 200, text+audio 400, at both 8s and 5min, `format` irrelevant).
     content = [
-      { type: 'text', text: req.prompt },
       // OpenAI-compatible audio part. `format` is the bare subtype
       // (`audio/ogg` → `ogg`), which is what the API expects.
       {
