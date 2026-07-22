@@ -3718,6 +3718,8 @@ export const ja: Dictionary = {
     detailKind: "タスク",
     detailTitleAria: "タスク名",
     closeDetail: "閉じる",
+    descriptionLabel: "説明",
+    descriptionPlaceholder: "説明を追加: 目的、背景、リンク、チェックリスト（マークダウン対応）",
     boardEmptyColumn: "タスクなし",
     savedViews: "ビュー",
     saveViewAria: "現在のビューを保存",
@@ -5380,7 +5382,9 @@ export const ja: Dictionary = {
     keptOnDevice:
       "この録音はこの端末に安全に保存されています。未完了の録音としてここに表示され、いつでもアップロードできます。",
     autoStopped:
-      "録音は3時間までのため、この録音は停止して端末に保存しました。録音を続けるには録音ボタンを押してください。",
+      "1回の録音は2時間までのため、この録音は停止して端末に保存しました。録音を続けるには録音ボタンを押してください。",
+    pauseStopped:
+      "1時間一時停止されていたため、この録音は停止して端末に保存しました。新しく録音するには録音ボタンを押してください。",
     micDenied: "マイクへのアクセスがブロックされています。ブラウザの設定で許可してからもう一度お試しください。",
     captureFailed: "録音に失敗しました。もう一度お試しください。",
     voiceFailed: "ボイスメッセージを送信できませんでした。もう一度お試しください。",

@@ -30,7 +30,12 @@ import {
 import { useT } from "@/lib/i18n/client";
 import { brainRowUrl } from "@/lib/brain-deep-link";
 import { type AdjustMemoryChanges } from "@/lib/api/brain-inbox";
-import { taskPriority, type TaskRow, type TaskStatus } from "@/lib/api/tasks";
+import {
+  taskDescription,
+  taskPriority,
+  type TaskRow,
+  type TaskStatus,
+} from "@/lib/api/tasks";
 import { taskProject, tagsWithProject } from "@/lib/tasks-view";
 import {
   memberDisplayName,
@@ -41,6 +46,7 @@ import {
 } from "@/components/brain/property-edit";
 import {
   DateProperty,
+  EditableBody,
   PageTitle,
   PersonProperty,
   SelectProperty,
@@ -237,6 +243,34 @@ export function TaskRecordDetail({
                 next === "__none__" ? null : next,
               );
               return commitField(row, { tags }, { tags });
+            }}
+          />
+        </div>
+
+        {/* Page body — the conventional `attributes.description` markdown
+            (frozen-v1: no typed column), the same section the Brain entry
+            page renders. */}
+        <div className="mt-4">
+          <EditableBody
+            label={drawerLabels.description ?? tp.descriptionLabel}
+            value={taskDescription(row)}
+            placeholder={tp.descriptionPlaceholder}
+            onCommit={(next) => {
+              const value = next.trim().length > 0 ? next : null;
+              return commitField(
+                row,
+                { description: value },
+                {
+                  attributes:
+                    value === null
+                      ? Object.fromEntries(
+                          Object.entries(row.attributes).filter(
+                            ([k]) => k !== "description",
+                          ),
+                        )
+                      : { ...row.attributes, description: value },
+                },
+              );
             }}
           />
         </div>

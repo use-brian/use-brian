@@ -184,6 +184,9 @@ export type AdjustMemoryChanges = {
   assignee_id?: string | null;
   /** task adjust — the conventional `attributes.priority` key; null clears. */
   priority?: "low" | "medium" | "high" | "urgent" | null;
+  /** task adjust — the conventional `attributes.description` page body
+   *  (markdown, ≤10k chars); null clears. */
+  description?: string | null;
   /** contact adjust — null clears. */
   email?: string | null;
   /** contact adjust — null clears. */

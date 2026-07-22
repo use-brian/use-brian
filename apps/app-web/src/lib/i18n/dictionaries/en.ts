@@ -3927,6 +3927,8 @@ export const en = {
     detailKind: "Task",
     detailTitleAria: "Task title",
     closeDetail: "Close",
+    descriptionLabel: "Description",
+    descriptionPlaceholder: "Add a description: goals, context, links, checklists (markdown works)",
     boardEmptyColumn: "No tasks",
     savedViews: "Views",
     saveViewAria: "Save the current view",
@@ -5595,7 +5597,9 @@ export const en = {
     keptOnDevice:
       "This recording is kept safely on this device. It will appear here as an unfinished recording, ready to upload whenever you are.",
     autoStopped:
-      "Recordings are limited to 3 hours, so this capture was stopped and saved on this device. Press the record button to keep capturing.",
+      "Recordings are limited to 2 hours per session, so this capture was stopped and saved on this device. Press the record button to keep capturing.",
+    pauseStopped:
+      "This recording was paused for an hour, so it was stopped and saved on this device. Press the record button to start a new one.",
     micDenied: "Microphone access is blocked. Allow it in your browser settings and try again.",
     captureFailed: "Recording failed. Please try again.",
     voiceFailed: "We could not send the voice message. Please try again.",

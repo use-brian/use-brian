@@ -131,6 +131,7 @@ import {
   type CommitResult,
   type PersonPropertyOption,
   type SelectPropertyOption,
+  EditableBody,
 } from "@/components/brain/property-field";
 import {
   applyChangesToBody,
@@ -238,7 +239,10 @@ const ENTITY_KINDS = new Set<EntityKind>([
 
 /** Attribute keys that render as dedicated rows, kept out of the generic
  *  attributes fold so they never show twice. */
-const TASK_DEDICATED_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set(["priority"]);
+const TASK_DEDICATED_ATTRIBUTE_KEYS: ReadonlySet<string> = new Set([
+  "priority",
+  "description",
+]);
 
 const SENSITIVITY_DOT_CLASS: Record<string, string> = {
   public: "bg-emerald-500",
@@ -1801,12 +1805,6 @@ function FileContentPreview({
 }
 
 /**
- * Click-to-edit page body for a memory's `detail` field — the Notion
- * "page content" analog beneath the property list. View mode renders
- * markdown; clicking it (or the pencil next to the heading) swaps in a
- * textarea. Blur or Cmd/Ctrl+Enter commits; Escape cancels.
- */
-/**
  * "Re-ingest to brain" on a stored file's drawer — the user-reachable recovery
  * for "this file never made it into the brain" (file-artifacts.md
  * §"Re-ingest"). The SERVER owns the double-ingestion guard: an
@@ -1878,122 +1876,6 @@ function FileReingestSection({
       {status === "in_flight" && <p className="text-xs text-muted-foreground">{labels.inFlight}</p>}
       {status === "failed" && <p className="text-xs text-red-500">{labels.failed}</p>}
     </div>
-  );
-}
-
-function MemoryDetailBody({
-  value,
-  onCommit,
-}: {
-  value: string | null;
-  onCommit: (next: string) => Promise<CommitResult>;
-}) {
-  const t = useT();
-  const labels = t.brainPage.detailDrawer;
-  const committed = value ?? "";
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(committed);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function commit() {
-    setEditing(false);
-    if (draft === committed) return;
-    setBusy(true);
-    setError(null);
-    const result = await onCommit(draft);
-    setBusy(false);
-    if (!result.ok) {
-      setDraft(committed);
-      setError(result.error ?? labels.saveFailed);
-    }
-  }
-
-  return (
-    <section className="flex flex-col gap-2 border-t border-border pt-4 mt-1">
-      <div className="flex items-center gap-1.5">
-        <h3 className="text-sm font-medium text-foreground/80">
-          {labels.propertyLabels.detail}
-        </h3>
-        {!editing && (
-          <button
-            type="button"
-            disabled={busy}
-            aria-label={format(labels.editValue, {
-              label: labels.propertyLabels.detail,
-            })}
-            onClick={() => {
-              setDraft(committed);
-              setError(null);
-              setEditing(true);
-            }}
-            className="h-5 w-5 rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground inline-flex items-center justify-center"
-          >
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden
-            >
-              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-            </svg>
-          </button>
-        )}
-      </div>
-      {editing ? (
-        <textarea
-          autoFocus
-          value={draft}
-          rows={6}
-          disabled={busy}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => void commit()}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void commit();
-            }
-            if (e.key === "Escape") {
-              e.stopPropagation();
-              setDraft(committed);
-              setEditing(false);
-            }
-          }}
-          className="w-full resize-y rounded-md bg-muted/50 px-2.5 py-2 text-sm leading-relaxed outline-none ring-1 ring-ring/40"
-        />
-      ) : (
-        <div
-          onClick={() => {
-            if (busy) return;
-            setDraft(committed);
-            setError(null);
-            setEditing(true);
-          }}
-          className={cn(
-            "rounded-md -mx-1.5 px-1.5 py-1 cursor-text transition-colors hover:bg-muted/40",
-            busy && "opacity-60",
-          )}
-        >
-          {committed.trim().length > 0 ? (
-            <div className="chat-markdown text-sm leading-relaxed break-words">
-              <Markdown>{committed}</Markdown>
-            </div>
-          ) : (
-            <span className="text-sm text-muted-foreground/60">
-              {labels.detailPlaceholder}
-            </span>
-          )}
-        </div>
-      )}
-      {error && (
-        <p className="text-xs text-red-500" role="alert">
-          {error}
-        </p>
-      )}
-    </section>
   );
 }
 
@@ -2139,6 +2021,17 @@ function PrimitiveSection({
   // schema has no typed column). Rendered as its own select row; the generic
   // attributes fold omits the key so it never shows twice.
   const taskPriority = isTask ? attributePriority(detail.body.attributes) : "";
+  // The task page body (conventional `attributes.description`).
+  const taskDescriptionValue = isTask
+    ? (() => {
+        const raw = detail.body.attributes;
+        const v =
+          raw && typeof raw === "object" && !Array.isArray(raw)
+            ? (raw as Record<string, unknown>).description
+            : undefined;
+        return typeof v === "string" ? v : null;
+      })()
+    : null;
   const taskPriorityLabels = t.brainPage.taskPriority as Record<string, string>;
 
   const [whyDetailsOpen, setWhyDetailsOpen] = useState(false);
@@ -2539,9 +2432,27 @@ function PrimitiveSection({
       )}
 
       {isMemory && (
-        <MemoryDetailBody
+        <EditableBody
+          label={labels.propertyLabels.detail}
           value={memoryDetail}
+          placeholder={labels.detailPlaceholder}
           onCommit={(next) => commitChanges({ detail: next })}
+        />
+      )}
+
+      {/* Task page body — the conventional `attributes.description` key
+          (frozen-v1: no typed column), same click-to-edit markdown section
+          the operator peek renders. */}
+      {isTask && (
+        <EditableBody
+          label={labels.propertyLabels.description}
+          value={taskDescriptionValue}
+          placeholder={t.tasksPage.descriptionPlaceholder}
+          onCommit={(next) =>
+            commitChanges({
+              description: next.trim().length > 0 ? next : null,
+            })
+          }
         />
       )}
 

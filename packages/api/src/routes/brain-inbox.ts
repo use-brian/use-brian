@@ -1340,20 +1340,22 @@ export function brainInboxRoutes({
 
     if (primitiveParam === 'task') {
       // Task adjust — the editable fields surfaced in the Brain detail
-      // panel: title, status, due date, tags, assignee, and priority.
-      // `assignee_id` must be a workspace_members row id in THIS workspace
-      // (null clears). `priority` is the conventional `attributes.priority`
-      // key (the frozen-v1 schema has no typed column — tasks.md decision
-      // #1), merged into the row's attributes (null removes the key). Each
-      // edit supersedes the row (a new bi-temporal id), so the preserved
-      // old row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags, assignee_id, priority } = req.body as {
+      // panel: title, status, due date, tags, assignee, priority, and
+      // description. `assignee_id` must be a workspace_members row id in
+      // THIS workspace (null clears). `priority` and `description` are
+      // conventional `attributes.*` keys (the frozen-v1 schema has no typed
+      // columns — tasks.md decision #1), merged into the row's attributes
+      // (null removes the key) so sibling keys survive. Each edit
+      // supersedes the row (a new bi-temporal id), so the preserved old
+      // row IS the audit trail — no brain_verification stamp here.
+      const { title, status, due_at, tags, assignee_id, priority, description } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
         tags?: unknown
         assignee_id?: unknown
         priority?: unknown
+        description?: unknown
       }
 
       const fields: TaskUpdateFields = {}
@@ -1429,9 +1431,24 @@ export function brainInboxRoutes({
         priorityChange = priority as string | null
       }
 
-      if (Object.keys(fields).length === 0 && priorityChange === undefined) {
+      // The task's page-body markdown (the peek/drawer "Description"
+      // section). Free-form; capped so a paste can't balloon the row.
+      let descriptionChange: string | null | undefined
+      if (description !== undefined) {
+        if (description === null) descriptionChange = null
+        else if (typeof description === 'string' && description.length <= 10_000) {
+          descriptionChange = description.trim().length > 0 ? description : null
+        } else {
+          res.status(400).json({
+            error: 'description must be a string of 10000 characters or less, or null to clear',
+          })
+          return
+        }
+      }
+
+      if (Object.keys(fields).length === 0 && priorityChange === undefined && descriptionChange === undefined) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags, assignee_id, priority) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, priority, description) is required',
         })
         return
       }
@@ -1466,14 +1483,20 @@ export function brainInboxRoutes({
           }
         }
 
-        if (priorityChange !== undefined) {
+        if (priorityChange !== undefined || descriptionChange !== undefined) {
           const raw = before.rows[0].attributes
           const attrs: Record<string, unknown> =
             raw && typeof raw === 'object' && !Array.isArray(raw)
               ? { ...(raw as Record<string, unknown>) }
               : {}
-          if (priorityChange === null) delete attrs.priority
-          else attrs.priority = priorityChange
+          if (priorityChange !== undefined) {
+            if (priorityChange === null) delete attrs.priority
+            else attrs.priority = priorityChange
+          }
+          if (descriptionChange !== undefined) {
+            if (descriptionChange === null) delete attrs.description
+            else attrs.description = descriptionChange
+          }
           fields.attributes = attrs
         }
 

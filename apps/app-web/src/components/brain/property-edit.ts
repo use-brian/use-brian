@@ -117,16 +117,23 @@ export function applyChangesToBody(
   if (changes.due_at !== undefined) next.due_at = changes.due_at;
   if (changes.tags !== undefined) next.tags = changes.tags;
   if (changes.assignee_id !== undefined) next.assignee_id = changes.assignee_id;
-  if (changes.priority !== undefined) {
-    // Mirrors the server: priority lives under the free-form `attributes`
-    // object (merge, never clobber siblings); null removes the key.
+  if (changes.priority !== undefined || changes.description !== undefined) {
+    // Mirrors the server: priority + description live under the free-form
+    // `attributes` object (merge, never clobber siblings); null removes
+    // the key.
     const raw = body.attributes;
     const attrs: Record<string, unknown> =
       raw && typeof raw === "object" && !Array.isArray(raw)
         ? { ...(raw as Record<string, unknown>) }
         : {};
-    if (changes.priority === null) delete attrs.priority;
-    else attrs.priority = changes.priority;
+    if (changes.priority !== undefined) {
+      if (changes.priority === null) delete attrs.priority;
+      else attrs.priority = changes.priority;
+    }
+    if (changes.description !== undefined) {
+      if (changes.description === null) delete attrs.description;
+      else attrs.description = changes.description;
+    }
     next.attributes = attrs;
   }
   if (changes.summary !== undefined) next.summary = changes.summary;

@@ -63,6 +63,12 @@ export function taskPriority(row: Pick<TaskRow, "attributes">): TaskPriority | n
     : null;
 }
 
+/** The conventional `attributes.description` page body, or null. */
+export function taskDescription(row: Pick<TaskRow, "attributes">): string | null {
+  const value = row.attributes?.description;
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
 export async function fetchWorkspaceTasks(
   workspaceId: string,
 ): Promise<TaskRow[]> {
