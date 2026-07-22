@@ -3136,6 +3136,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           host: sanitizeAnalytics(evt.host ?? ''),
           ok: evt.ok,
           ...(evt.code ? { code: sanitizeAnalytics(evt.code) } : {}),
+          // Per-action context cost. Numbers, not strings — sanitizeAnalytics
+          // is for free text, and these must stay numeric for the admin
+          // aggregate to SUM them. The local backend books no usage_tracking
+          // row of its own, so this is the ONLY per-action cost signal it has.
+          ...(evt.resultChars !== undefined ? { result_chars: evt.resultChars } : {}),
+          ...(evt.resultTokens !== undefined ? { result_tokens: evt.resultTokens } : {}),
         },
       })
     },

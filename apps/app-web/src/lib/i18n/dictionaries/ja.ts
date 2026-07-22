@@ -5269,6 +5269,9 @@ export const ja: Dictionary = {
       assistantsEmpty: "このワークスペースにはまだアシスタントがいません。",
       sessionsLabel: "サインイン済みサイト",
       sessionsEmpty: "サインイン済みのサイトはまだありません。ブラウザタスク中にサインインして保存してください。",
+      ownBrowserLabel: "ログイン情報はご自身のブラウザから取得されます",
+      ownBrowserHint:
+        "このプロファイルはご自身の Chrome で閲覧するため、そこですでにサインイン済みのサイトをそのまま利用します。ここには何も保存されません。",
       statusActive: "有効",
       statusDead: "サインアウト済み",
       lastUsed: "最終使用",
