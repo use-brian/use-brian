@@ -25,6 +25,18 @@ import {
 } from '@use-brian/shared/model-registry'
 
 /**
+ * The background-lane workhorse: extraction / classification / structured
+ * output, per docs/architecture/platform/cost-and-pricing.md → Model routing.
+ *
+ * Lives here rather than in each lane so there is ONE literal to change, and
+ * so `ensureServableModel` is the obvious next step at every read. Never send
+ * this to a provider unresolved — on a deployment with no Google credential it
+ * is not servable and the routing provider throws. Boot resolves it once
+ * against the configured providers and injects the result into every lane.
+ */
+export const BACKGROUND_MODEL = 'gemini-3.1-flash-lite'
+
+/**
  * Ensure the resolved model can actually be served by a configured provider,
  * substituting a configured chat model when it can't.
  *
@@ -73,6 +85,15 @@ export function ensureServableModel(
     if (rows.length > 0) return rows[0].alias
   }
   return model
+}
+
+/**
+ * The servable background-lane id for a request, given boot's configured
+ * providers. `undefined` providers (a caller with no boot context) keeps the
+ * literal, which is what the pre-substitution code did.
+ */
+export function backgroundModelFor(configuredProviders?: ReadonlySet<string>): string {
+  return configuredProviders ? ensureServableModel(BACKGROUND_MODEL, configuredProviders) : BACKGROUND_MODEL
 }
 
 /**
