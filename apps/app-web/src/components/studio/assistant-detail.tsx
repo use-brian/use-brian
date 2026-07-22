@@ -15,8 +15,8 @@ import { NetworkTab } from "@/components/network-tab";
 import { ApiKeysTab } from "@/components/api-keys-tab";
 import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-badge";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
-import { ConnectorToolList, type ToolPolicy } from "@/components/connectors/connector-tool-list";
-import { ConnectorActionGrants } from "@/components/connectors/connector-action-grants";
+import { type ToolPolicy } from "@/components/connectors/connector-tool-list";
+import { ConnectorToolGovernance } from "@/components/connectors/connector-tool-governance";
 import { RecordingUploadButton } from "@/components/recordings/recording-upload-button";
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
@@ -1335,6 +1335,10 @@ type UserConnector = {
   // credential, synthesized by the route so its per-assistant tool
   // policy is governable here.
   scope?: "personal" | "team-native" | "team-grant" | "builtin";
+  // Backing connector_instance id — team-native rows only. Keys the
+  // clearance-gated workspace tool-policy routes the governance table's
+  // Allow/Ask/Block edits for team-owned connectors.
+  instanceId?: string;
 };
 
 type ToolPerm = {
@@ -1710,8 +1714,14 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
               <div className={`grid transition-[grid-template-rows] duration-200 ease-out ${isExpanded && c.connected && c.enabled ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>
                 <div className="overflow-hidden">
                   <div className="px-5 pb-4 pt-1">
-                    <ConnectorToolList
+                    {/* Merged governance table (#4 in connector-actions.md):
+                        capability grants (per-assistant, every caller) ahead of
+                        confirmation policy (per-user). Built-in primitives and
+                        custom MCPs render policy-only inside the component. */}
+                    <ConnectorToolGovernance
+                      assistantId={assistantId}
                       connectorId={c.id}
+                      scope={c.scope}
                       loading={toolsMap[c.id]?.loading}
                       tools={(toolsMap[c.id]?.tools ?? []).map((tool) => ({
                         name: tool.name,
@@ -1723,14 +1733,9 @@ function ConnectorsTab({ assistantId, workspaceId }: { assistantId: string; work
                       onPolicyChange={(toolName, policy) =>
                         handlePolicyChange(c.id, toolsMap[c.id]?.serverName ?? c.id, toolName, policy)
                       }
+                      workspaceId={workspaceId}
+                      instanceId={c.instanceId}
                     />
-                    {/* Per-tool capability grants (#4 in connector-actions.md). Empty
-                        grants = no writes allowed. Not applicable to built-in
-                        primitives — their writes are governed by the per-tool
-                        policy above, not the connector-action grant table. */}
-                    {c.scope !== "builtin" && (
-                      <ConnectorActionGrants assistantId={assistantId} connectorId={c.id} />
-                    )}
                   </div>
                 </div>
               </div>

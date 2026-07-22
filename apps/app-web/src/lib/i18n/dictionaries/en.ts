@@ -5167,6 +5167,12 @@ export const en = {
     classWrite: "write",
     classDestructive: "destructive",
     classUnknown: "unknown",
+    colGranted: "Granted",
+    grantsHint: "Granted actions apply to everyone who uses this assistant, including scheduled jobs and other assistants. Ungranted write actions are blocked at the tool boundary; reading is always available. Allow, Ask, and Block are your personal setting for how granted tools run in your chats.",
+    grantsHintWorkspace: "Granted actions apply to everyone who uses this assistant, including scheduled jobs and other assistants. Ungranted write actions are blocked at the tool boundary; reading is always available. Allow, Ask, and Block are shared by the whole workspace for this team-owned connector.",
+    alwaysAvailable: "Always available",
+    notGranted: "Not granted",
+    salesPreset: "Sales preset",
   },
   sharingTab: {
     failedLoad: "Failed to load",
@@ -5278,13 +5284,6 @@ export const en = {
       noSkillsYet: "No skills available yet.",
       createCustomSkill: "Create a custom skill",
       loadingConnectors: "Loading connectors…",
-    },
-    actionGrants: {
-      title: "Write actions",
-      description: "Choose which write actions this assistant may perform. Unchecked actions are blocked at the tool boundary. The assistant can still read.",
-      salesPreset: "Sales preset",
-      loading: "Loading…",
-      destructive: "Destructive",
     },
     settings: {
       generalTitle: "General",
@@ -5609,7 +5608,7 @@ export const en = {
     keptOnDevice:
       "This recording is kept safely on this device. It will appear here as an unfinished recording, ready to upload whenever you are.",
     autoStopped:
-      "Recordings are limited to 2 hours per session, so this capture was stopped and saved on this device. Press the record button to keep capturing.",
+      "Recordings are limited to 2 hours per session. The first part was saved on this device and a new recording has started automatically.",
     pauseStopped:
       "This recording was paused for an hour, so it was stopped and saved on this device. Press the record button to start a new one.",
     micDenied: "Microphone access is blocked. Allow it in your browser settings and try again.",

@@ -60,6 +60,12 @@ export async function startRecordingUpload(params: {
   workspaceId: string;
   assistantId: string;
   file: File;
+  /**
+   * Caller-declared recording kind — routes the transcriber ladder
+   * (`recordings.kind`, default 'memo'). The dock live recorder passes
+   * 'meeting' for its long captures; picked-file uploads omit it.
+   */
+  kind?: "memo" | "meeting";
 }): Promise<{ recordingId: string }> {
   const mime = params.file.type || "audio/mpeg";
   const mintRes = await authFetch(`${API_URL}/api/recordings/upload-url`, {
@@ -70,6 +76,7 @@ export async function startRecordingUpload(params: {
       assistantId: params.assistantId,
       fileName: params.file.name,
       mime,
+      ...(params.kind ? { kind: params.kind } : {}),
     }),
   });
   if (!mintRes.ok) throw await asError(mintRes, "Could not start the upload");

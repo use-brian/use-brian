@@ -180,6 +180,78 @@ function SlackIcon() {
   );
 }
 
+function MsTeamsIcon() {
+  // Microsoft Teams mark, hand-inlined on the 24px grid like the rest of
+  // the official set: the deep-purple app tile with the white T, the large
+  // teammate silhouette behind it and the smaller one to the right — the
+  // official logo's colors (#4B53BC tile, #7B83EB / #5059C9 people),
+  // simplified for 18px rendering. Reached by both the msteams connector
+  // instance rows (provider `msteams`) and the Events rail.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <circle cx="19.6" cy="7.6" r="2.2" fill="#5059C9" />
+      <path
+        d="M17.2 11.2h5.1a.7.7 0 0 1 .7.7v2.3a3.9 3.9 0 0 1-3.9 3.9c-.7 0-1.36-.18-1.9-.5V11.2Z"
+        fill="#5059C9"
+      />
+      <circle cx="13.9" cy="6.9" r="3.2" fill="#7B83EB" />
+      <path
+        d="M6.6 11.2h10.7a.8.8 0 0 1 .8.8v2.6a5 5 0 0 1-5 5H6.6V11.2Z"
+        fill="#7B83EB"
+      />
+      <rect x="1" y="7.9" width="12.2" height="12.2" rx="1.5" fill="#4B53BC" />
+      <path d="M10.6 12.1H8v6.3H6.2v-6.3H3.6v-1.6h7v1.6Z" fill="#fff" />
+    </svg>
+  );
+}
+
+function S3Icon() {
+  // Amazon S3, in the official AWS Architecture-icon look: the Storage
+  // category's green gradient tile (#1B660F dark corner → #6CAE3E light,
+  // per AWS's published asset) with the white outlined bucket — open rim,
+  // tapered body, and the pivot-ball handle looping past the right wall.
+  // Hand-inlined on the 24px grid. Used by the S3-compatible storage
+  // connector (`s3`) — the glyph everyone recognises as "S3", even when
+  // the endpoint is MinIO / R2 / another S3-compatible store.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <defs>
+        <linearGradient
+          id="s3-tile-grad"
+          x1="0"
+          y1="24"
+          x2="24"
+          y2="0"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop stopColor="#1B660F" />
+          <stop offset="1" stopColor="#6CAE3E" />
+        </linearGradient>
+      </defs>
+      <rect width="24" height="24" rx="1.2" fill="url(#s3-tile-grad)" />
+      <path
+        d="M5.3 7.3 7.5 18.8c.04.8 1.8 1.45 4 1.45s3.96-.65 4-1.45L17.7 7.3"
+        stroke="#fff"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <ellipse cx="11.5" cy="7.3" rx="6.2" ry="2.2" stroke="#fff" strokeWidth="1.4" />
+      <circle cx="12.6" cy="10.7" r="1.15" fill="#fff" />
+      <path d="M13.7 11.15 18.1 13.5" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" />
+      <ellipse
+        cx="18.5"
+        cy="14.3"
+        rx="1.7"
+        ry="1"
+        transform="rotate(35 18.5 14.3)"
+        stroke="#fff"
+        strokeWidth="1.1"
+      />
+    </svg>
+  );
+}
+
 import type { ReactNode } from "react";
 
 export function ConnectorIcon({
@@ -204,6 +276,8 @@ export function ConnectorIcon({
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;
     case "gcs": return <GcsIcon />;
+    case "s3": return <S3Icon />;
+    case "msteams": return <MsTeamsIcon />;
     case "agentmail": return <AgentmailIcon />;
     default:
       if (iconUrl) {

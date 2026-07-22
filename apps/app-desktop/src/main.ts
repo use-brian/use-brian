@@ -29,6 +29,8 @@ import {
   safeStorage,
   dialog,
   powerMonitor,
+  screen,
+  systemPreferences,
   net,
   BrowserWindow,
   Tray,
@@ -77,7 +79,7 @@ import {
   shouldAttemptLocalMint,
 } from "./window-policy.js";
 import { resolveDeepLink } from "./deep-link.js";
-import { quickCaptureUrl } from "./quick-capture.js";
+import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import { buildAppMenu } from "./menu.js";
 import {
   buildUninstallScript,
@@ -333,8 +335,73 @@ function createWindow(): BrowserWindow {
   void loadApp(win);
   win.on("closed", () => {
     mainWindow = null;
+    // The capture lives in this window's renderer — with it gone the overlay
+    // has nothing to mirror or control.
+    destroyRecorderOverlay();
   });
   return win;
+}
+
+// ── Recorder overlay (docs/architecture/media/live-capture.md) ─────────
+//
+// A small frameless always-on-top window the shell shows while app-web has a
+// latched live recording (the renderer signals via the preload bridge's
+// `setRecording`). It loads app-web's `/recorder-overlay` page — the shell
+// serves NO UI of its own — and that page mirrors the recorder over a
+// same-origin BroadcastChannel, so this window needs no preload and no IPC
+// beyond its lifetime. Pinned to every workspace/fullscreen Space: the whole
+// point is staying visible while the user lives in their notes or browser
+// during the call.
+
+const OVERLAY_WIDTH = 340;
+const OVERLAY_HEIGHT = 56;
+let recorderOverlay: BrowserWindow | null = null;
+
+function showRecorderOverlay(): void {
+  if (recorderOverlay && !recorderOverlay.isDestroyed()) return;
+  const area = screen.getPrimaryDisplay().workArea;
+  const win = new BrowserWindow({
+    width: OVERLAY_WIDTH,
+    height: OVERLAY_HEIGHT,
+    x: area.x + area.width - OVERLAY_WIDTH - 24,
+    y: area.y + 24,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  // "floating" keeps it above normal windows without fighting the OS for
+  // system-level surfaces; visible on all Spaces incl. fullscreen apps.
+  win.setAlwaysOnTop(true, "floating");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // The same security spine as the main window, minimally: the overlay loads
+  // ONE app-origin page and must never become a browsing surface — no child
+  // windows, no off-origin navigation.
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, url) => {
+    if (!url.startsWith(cfg.appOrigin)) event.preventDefault();
+  });
+  win.once("ready-to-show", () => win.show());
+  win.on("closed", () => {
+    if (recorderOverlay === win) recorderOverlay = null;
+  });
+  void win.webContents.loadURL(`${cfg.appUrl}/recorder-overlay`);
+  recorderOverlay = win;
+}
+
+function destroyRecorderOverlay(): void {
+  if (recorderOverlay && !recorderOverlay.isDestroyed()) recorderOverlay.destroy();
+  recorderOverlay = null;
 }
 
 function handleNavigation(event: Event, url: string): void {
@@ -596,22 +663,42 @@ function bundledAvailable(): boolean {
  * the quick-capture surface. Until a bundle is packaged, `bundledAvailable()`
  * is false and this is byte-for-byte the prior `loadURL` behavior.
  */
-function loadApp(win: BrowserWindow, opts: { capture?: boolean } = {}): Promise<void> {
+function loadApp(win: BrowserWindow, opts: { capture?: boolean; record?: boolean } = {}): Promise<void> {
   if (bundledAvailable()) {
     // The bundled renderer loads from file://, so it has no env: hand it the API
-    // base (and the capture intent) via the query string. The client reads
+    // base (and the capture/record intent) via the query string. The client reads
     // `?api=` to know which backend to call with its Bearer token.
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
+    if (opts.record) query.record = "1";
     return win.webContents.loadFile(BUNDLE_INDEX, { query });
   }
-  return win.webContents.loadURL(opts.capture ? quickCaptureUrl(cfg.appUrl) : cfg.appUrl);
+  return win.webContents.loadURL(
+    opts.capture ? quickCaptureUrl(cfg.appUrl) : opts.record ? recordTargetUrl(cfg.appUrl) : cfg.appUrl,
+  );
 }
 
 function summonAndCapture(): void {
   const win = ensureWindow();
   focusWindow(win);
   void loadApp(win, { capture: true });
+}
+
+/**
+ * The record entry (tray / app menu / global hotkey / `usebrian://record`):
+ * summon the window and load with `?record=1` so app-web's dock recorder
+ * auto-starts a latched capture (docs/architecture/media/live-capture.md).
+ * On macOS the OS-level mic consent is requested FIRST — under the hardened
+ * runtime `getUserMedia` fails silently without it, and asking at the moment
+ * of record intent is exactly when the user expects the prompt.
+ */
+function summonAndRecord(): void {
+  if (process.platform === "darwin") {
+    void systemPreferences.askForMediaAccess("microphone").catch(() => {});
+  }
+  const win = ensureWindow();
+  focusWindow(win);
+  void loadApp(win, { record: true });
 }
 
 // ── Sign-in (RFC 8252 + PKCE) ──────────────────────────────────
@@ -1269,6 +1356,11 @@ function handleIncomingUrl(rawUrl: string): void {
   }
   const target = resolveDeepLink(rawUrl, cfg);
   if (target) {
+    // The record deep link needs the macOS mic consent BEFORE the page's
+    // getUserMedia — same as summonAndRecord.
+    if (process.platform === "darwin" && target === recordTargetUrl(cfg.appUrl)) {
+      void systemPreferences.askForMediaAccess("microphone").catch(() => {});
+    }
     const win = ensureWindow();
     focusWindow(win);
     void win.webContents.loadURL(target);
@@ -1328,6 +1420,7 @@ function refreshAppMenu(): void {
   Menu.setApplicationMenu(
     buildAppMenu({
       onQuickCapture: summonAndCapture,
+      onRecord: summonAndRecord,
       onSignIn: startSignIn,
       onSignOut: () => void signOut(),
       onUpdate: handleUpdateMenuClick,
@@ -1353,6 +1446,7 @@ function buildTrayMenu(): Menu {
   const template: MenuItemConstructorOptions[] = [
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
+    { label: "Start Recording", click: () => summonAndRecord() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
   if (cfg.target !== "local") {
@@ -1432,6 +1526,12 @@ if (!gotLock) {
 
   // The sign-in landing's button asks the main process to start the flow.
   ipcMain.on("Use Brian:sign-in", () => startSignIn());
+
+  // Dock live recording: show/close the floating overlay with the capture.
+  ipcMain.on("Use Brian:recording-state", (_event, on: unknown) => {
+    if (on === true) showRecorderOverlay();
+    else destroyRecorderOverlay();
+  });
 
   // The offline landing's "Retry" button asks the shell to reload the app now
   // (the watcher already auto-retries every few seconds; this is the manual
@@ -1518,6 +1618,20 @@ if (!gotLock) {
     }
 
     startSessionKeepalive();
+
+    // Chromium-level media (mic) permission: grant to the app's own origin
+    // only, so the dock recorder's `getUserMedia` never shows a browser-style
+    // permission prompt inside the shell (macOS OS-level consent is separate
+    // — `askForMediaAccess` in `summonAndRecord`). Everything else keeps
+    // Electron's default-allow, unchanged from the no-handler behavior.
+    session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+      if (permission === "media") {
+        callback(details.requestingUrl?.startsWith(cfg.appOrigin) ?? false);
+        return;
+      }
+      callback(true);
+    });
+
     // Before the first menu/tray build so their update item reflects the gate.
     startAutoUpdate();
     mainWindow = createWindow();
@@ -1526,6 +1640,8 @@ if (!gotLock) {
 
     const ok = globalShortcut.register(cfg.quickCaptureHotkey, summonAndCapture);
     if (!ok) console.warn(`Failed to register hotkey: ${cfg.quickCaptureHotkey}`);
+    const recOk = globalShortcut.register(cfg.recordHotkey, summonAndRecord);
+    if (!recOk) console.warn(`Failed to register hotkey: ${cfg.recordHotkey}`);
 
     if (pendingUrl) {
       handleIncomingUrl(pendingUrl);

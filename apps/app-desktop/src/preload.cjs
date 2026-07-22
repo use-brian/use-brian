@@ -47,6 +47,10 @@ const bridge = {
   runLocal: (url) =>
     ipcRenderer.invoke("Use Brian:run-local", typeof url === "string" ? url : null),
   useCloud: () => ipcRenderer.send("Use Brian:use-cloud"),
+  // Dock live recording (docs/architecture/media/live-capture.md): app-web
+  // signals a latched capture starting/ending so the shell can show/close the
+  // floating always-on-top recorder overlay window.
+  setRecording: (on) => ipcRenderer.send("Use Brian:recording-state", on === true),
 };
 
 if (process.argv.includes("--usebrian-bundled")) {

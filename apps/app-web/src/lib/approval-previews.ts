@@ -113,6 +113,26 @@ export function extractAttachmentLines(
     .map((l) => l.slice(prefix.length));
 }
 
+/**
+ * Prepare an email body for markdown rendering with send parity. The email
+ * renderer (`renderEmailBody`, packages/channels/src/email/markdown.ts)
+ * treats a single newline inside a paragraph as a hard break (`<br>`);
+ * standard markdown collapses it into a space, which would misrender the
+ * most common email shape (greeting / paragraphs / sign-off on their own
+ * lines). Harden each intra-paragraph newline into a markdown hard break
+ * (trailing two spaces). Fenced code spans are left untouched — the email
+ * renderer extracts them before its paragraph pass, so they carry no
+ * hard-break semantics.
+ */
+export function emailBodyPreviewMarkdown(body: string): string {
+  return body
+    .split(/(```[\s\S]*?```)/g)
+    .map((segment, i) =>
+      i % 2 === 1 ? segment : segment.replace(/(?<!\n)\n(?!\n)/g, "  \n"),
+    )
+    .join("");
+}
+
 /** Display name for a raw attachment ref — basename for paths, id as-is. */
 export function attachmentDisplayName(ref: string): string {
   const trimmed = ref.replace(/\/+$/, "");

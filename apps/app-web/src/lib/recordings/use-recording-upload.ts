@@ -97,11 +97,18 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      *   NOT the submitted slug. It seeds the dialog picker; the user's final
      *   in-dialog choice is what submits. Omit when the surface has no picker
      *   (chat dock, landing) — the seed falls to the workspace default.
+     * @param opts.kind Recording kind for the transcriber-ladder routing.
+     *   The dock live recorder passes 'meeting'; omitted → the server's
+     *   'memo' column default (picked-file uploads, unchanged).
      * @returns The queued recording (`recordingId`) on success, or `null` if the
      *   user cancelled the cost confirm or the upload failed. The chat dock reads
      *   this to reference the recording in its turn; state-only callers ignore it.
      */
-    async (file: File, blueprintSelection?: string): Promise<RecordingQueued | null> => {
+    async (
+      file: File,
+      blueprintSelection?: string,
+      opts?: { kind?: "memo" | "meeting" },
+    ): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
       try {
@@ -117,7 +124,12 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         // draft parent would drag the brief into the prune sweep with it. A
         // failed fetch degrades to root-only, never blocks the upload.
         const pagesPromise = listViews({ workspaceId, state: "saved" }).catch(() => []);
-        const { recordingId } = await startRecordingUpload({ workspaceId, assistantId, file });
+        const { recordingId } = await startRecordingUpload({
+          workspaceId,
+          assistantId,
+          file,
+          ...(opts?.kind ? { kind: opts.kind } : {}),
+        });
 
         // Server-authoritative duration + surcharge → confirm before any model call.
         const est = await estimateRecording(recordingId);

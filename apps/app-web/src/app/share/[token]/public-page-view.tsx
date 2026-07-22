@@ -18,6 +18,7 @@
  */
 
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -29,12 +30,15 @@ import { MessageSquare, X } from "lucide-react";
 import { isImageIcon } from "@use-brian/shared/page-icon";
 import {
   fetchPublicPageFor,
+  getPublicRecordingMediaUrl,
   publicStreamUrlFor,
   type PublicComment,
   type PublicPage,
   type PublicSource,
 } from "@/lib/api/public-share";
 import { ReadOnlyPageBlocks } from "@/components/doc/read-only-page-blocks";
+import { RecordingPlayerProvider } from "@/lib/recordings/recording-player-context";
+import { PublicRecordingChrome } from "@/components/recordings/public-recording-chrome";
 import { GuestComments } from "@/components/doc/guest-comments";
 import { useCommentThreadHover } from "@/components/doc/comment-hover";
 import {
@@ -397,6 +401,15 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [streamKey]);
 
+  // Playback URL for the page's recording, minted through the PUBLIC
+  // source-scoped endpoint (the share chain is the authorization; the player
+  // provider re-mints before expiry through this same closure).
+  const mintRecordingMediaUrl = useCallback(
+    () => getPublicRecordingMediaUrl(source),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [streamKey],
+  );
+
   if (unavailable) {
     return (
       <main className="mx-auto w-full max-w-3xl px-6 py-24 text-center text-sm text-muted-foreground">
@@ -407,6 +420,7 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
 
   const comments = page.comments ?? [];
   const activeThread = comments.find((c) => c.threadId === activeThreadId) ?? null;
+  const recording = page.recording ?? null;
 
   // Mobile tap-to-open: tapping a highlighted comment in the text opens the
   // bottom-sheet drawer for that thread. No-op at `xl+` — the always-on margin
@@ -418,6 +432,15 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
   };
 
   return (
+    // The player context wraps the WHOLE page so a `[H:MM:SS]` citation
+    // anywhere in the read-only blocks can drive the player chrome above them.
+    // Null recording → the provider is inert and citations render as plain
+    // prose, by construction (same default as the editor).
+    <RecordingPlayerProvider
+      recordingId={recording?.recordingId ?? null}
+      durationMs={recording?.durationMs ?? 0}
+      mintMediaUrl={mintRecordingMediaUrl}
+    >
     <div className="min-h-screen">
       {/* Top bar — breadcrumb (root → current, clickable) + acquisition CTA. */}
       <header className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-border bg-background/85 px-4 py-2 backdrop-blur">
@@ -478,6 +501,11 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
                 <h1 className="text-3xl font-bold tracking-tight">{page.title}</h1>
               </div>
             </header>
+            {/* The page's recording — player + transcript, same chrome slot
+                as the in-app brief (above the blocks, never a block). */}
+            {recording ? (
+              <PublicRecordingChrome source={source} recording={recording} title={page.title} />
+            ) : null}
             <ReadOnlyPageBlocks
               blocks={page.blocks}
               payload={page.payload}
@@ -503,5 +531,6 @@ export function PublicPageView({ source, initial }: { source: PublicSource; init
         <MobileCommentDrawer thread={activeThread} onClose={() => setActiveThreadId(null)} />
       ) : null}
     </div>
+    </RecordingPlayerProvider>
   );
 }

@@ -52,6 +52,8 @@ export interface MenuTemplateOptions {
 export interface MenuTemplateHandlers {
   /** Summon the window and jump to the quick-capture surface. */
   onQuickCapture: () => void;
+  /** Summon the window and start a latched live recording (`?record=1`). */
+  onRecord: () => void;
   /** Start the system-browser sign-in flow. */
   onSignIn: () => void;
   /** Clear the local session and return to the sign-in screen. */
@@ -99,6 +101,11 @@ export function buildMenuTemplate(
       label: "Quick Capture",
       accelerator: "CommandOrControl+Shift+Space",
       click: () => handlers.onQuickCapture(),
+    },
+    {
+      label: "Start Recording",
+      accelerator: "CommandOrControl+Shift+R",
+      click: () => handlers.onRecord(),
     },
   ];
   // A local target has no login (the shell mints the local-owner session), so

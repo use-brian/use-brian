@@ -14,6 +14,12 @@ describe("[COMP:app-desktop/deep-link] resolveDeepLink", () => {
     expect(resolveDeepLink("evil://open?path=/w/x", cfg)).toBeNull();
   });
 
+  it("resolves usebrian://record to the record URL", () => {
+    expect(resolveDeepLink("usebrian://record", cfg)).toBe(
+      "https://app.usebrian.ai/?record=1",
+    );
+  });
+
   it("resolves usebrian://capture to the quick-capture URL", () => {
     expect(resolveDeepLink("usebrian://capture", cfg)).toBe(
       "https://app.usebrian.ai/?capture=1",

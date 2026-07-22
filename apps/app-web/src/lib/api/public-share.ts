@@ -43,6 +43,16 @@ export type PublicComment = {
   messages: { author: string; avatar: string | null; body: string; createdAt: string }[];
 };
 
+/** The shared page's recording, when it carries one (synthesis anchor or a
+ *  manual link) — enough to mount the read-only player + transcript chrome.
+ *  The id keys the client player; every public read (media URL, transcript)
+ *  re-resolves the share chain server-side, so the id alone grants nothing. */
+export type PublicRecording = {
+  recordingId: string;
+  durationMs: number | null;
+  truncated: boolean;
+};
+
 export type PublicPage = {
   title: string;
   icon: string | null;
@@ -54,6 +64,8 @@ export type PublicPage = {
   payload: ViewPayload;
   /** Read-only existing comments on the page (member + guest), if any. */
   comments?: PublicComment[];
+  /** The page's recording (player + transcript + seekable citations), if any. */
+  recording?: PublicRecording | null;
   /** Ancestor chain (root → current). Published context: from the topmost
    *  published root, crumbs link to `/share/p/<pageId>`. Token sub-page
    *  context: from the token's root, crumbs link token-scoped
@@ -169,6 +181,73 @@ export function publicMediaUrlFor(source: PublicSource, blockId: string): string
   return source.kind === "link"
     ? publicMediaUrl(source.token, blockId, source.pageId)
     : publishedMediaUrl(source.pageId, blockId);
+}
+
+/** Base URL for the source's recording endpoints (`<base>/media-url`,
+ *  `<base>/transcript`). The recording is resolved server-side from the
+ *  PAGE's own pointer — no recording id rides the URL. */
+function publicRecordingBase(source: PublicSource): string {
+  if (source.kind === "site") {
+    return `${API_URL}/api/public/sites/${encodeURIComponent(source.host)}/recording`;
+  }
+  return source.kind === "link"
+    ? `${API_URL}/api/public/pages/${encodeURIComponent(source.token)}/recording`
+    : `${API_URL}/api/public/published/${encodeURIComponent(source.pageId)}/recording`;
+}
+
+/** `?page=` scope for a link/site sub-page view; published views never scope. */
+function publicRecordingScope(source: PublicSource): string {
+  return source.kind === "published" ? "" : pageScope(source.pageId);
+}
+
+/**
+ * Mint a playback URL for the shared page's recording — the anonymous twin of
+ * the authed `getRecordingMediaUrl`, same response contract so the one player
+ * provider consumes both. Plain fetch: access is the share source itself.
+ */
+export async function getPublicRecordingMediaUrl(
+  source: PublicSource,
+): Promise<{ url: string; expiresAt: string; mime: string; durationMs: number | null }> {
+  const res = await fetch(`${publicRecordingBase(source)}/media-url${publicRecordingScope(source)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error("Could not load the audio");
+  return (await res.json()) as { url: string; expiresAt: string; mime: string; durationMs: number | null };
+}
+
+/** One page of the shared recording's transcript (authed-route shape). */
+export async function getPublicRecordingTranscript(
+  source: PublicSource,
+  fromIndex = 0,
+): Promise<{
+  segments: {
+    segment_index: number;
+    start_ms: number;
+    end_ms: number;
+    speaker: string | null;
+    segment_text: string;
+  }[];
+  hasMore: boolean;
+  toIndex: number;
+}> {
+  const scope = publicRecordingScope(source);
+  const joiner = scope ? "&" : "?";
+  const res = await fetch(
+    `${publicRecordingBase(source)}/transcript${scope}${joiner}fromIndex=${fromIndex}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) throw new Error("Could not load the transcript");
+  return (await res.json()) as {
+    segments: {
+      segment_index: number;
+      start_ms: number;
+      end_ms: number;
+      speaker: string | null;
+      segment_text: string;
+    }[];
+    hasMore: boolean;
+    toIndex: number;
+  };
 }
 export function publicStreamUrlFor(source: PublicSource): string {
   if (source.kind === "site") return siteStreamUrl(source.host, source.pageId);

@@ -28,6 +28,12 @@ import { buildStorageKey } from '../files/gcs-client.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import { randomUUID } from 'node:crypto'
 import { renderPublicPage, type PublicRenderDeps } from './_public-render.js'
+import {
+  publicRecordingSummaryFor,
+  sendPublicRecordingMediaUrl,
+  sendPublicRecordingTranscript,
+  type ResolveRecordingReadClient,
+} from './_public-recording.js'
 import { addGuestComment, createGuestThread, listGuestComments } from '../db/guest-comment-store.js'
 import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
@@ -37,6 +43,8 @@ export type PublicShareRouteOptions = PublicRenderDeps & {
   pageGrantStore: PageGrantStore
   /** Null when no blob client is configured — media endpoint then 404s. */
   gcs: GcsFilesClient | null
+  /** BYO-storage signer for recording playback URLs; absent → `gcs` signs. */
+  resolveRecordingReadClient?: ResolveRecordingReadClient
 }
 
 // ── Minimal fixed-window per-IP rate limiter ──────────────────────────
@@ -86,11 +94,15 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
     try {
       const shareRootId = link.rootPageId ?? link.pageId
       const rendered = await renderPublicPage(opts, link.workspaceId, page ?? { blocks: [] }, shareRootId)
-      const [comments, breadcrumb] = await Promise.all([
+      const [comments, breadcrumb, recording] = await Promise.all([
         listPublicThreadsForPage(link.pageId),
         link.rootPageId
           ? getLinkBreadcrumb(link.pageId, link.rootPageId)
           : getPublicBreadcrumb(link.pageId),
+        // The page's recording chrome (player + transcript + seekable
+        // [H:MM:SS] citations) — resolved from the page's OWN pointer, so the
+        // shared view carries the same surface the brief page does in-app.
+        publicRecordingSummaryFor(link.pageId, link.workspaceId),
       ])
       // Light cache so polling clients don't hammer the render path.
       res.setHeader('Cache-Control', 'public, max-age=15')
@@ -104,6 +116,7 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
         payload: rendered.payload,
         comments,
         breadcrumb,
+        recording,
       })
     } catch (err) {
       console.error('[public-share] render failed:', err)
@@ -166,6 +179,43 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
       console.error('[public-share] media failed:', err)
       res.status(500).json({ error: 'Failed to load media' })
     }
+  })
+
+  // ── The shared page's recording (player + transcript) ────────────────
+  // Both resolve the recording from the PAGE's own pointer server-side —
+  // no recording id in the URL, so there is nothing to enumerate. `?page=`
+  // scopes to a sub-page exactly like the media route.
+
+  // GET /public/pages/:token/recording/media-url — JSON {url, expiresAt, ...}
+  // (authed-route contract, so the one player provider consumes both).
+  router.get('/public/pages/:token/recording/media-url', async (req, res) => {
+    const link = await resolveTokenTarget(req.params.token, req.query.page)
+    if (!link) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingMediaUrl(res, {
+      pageId: link.pageId,
+      workspaceId: link.workspaceId,
+      gcs,
+      ...(opts.resolveRecordingReadClient
+        ? { resolveReadClient: opts.resolveRecordingReadClient }
+        : {}),
+    })
+  })
+
+  // GET /public/pages/:token/recording/transcript?fromIndex= — one bounded
+  // page of transcript segments (authed-route response shape).
+  router.get('/public/pages/:token/recording/transcript', async (req, res) => {
+    const link = await resolveTokenTarget(req.params.token, req.query.page)
+    if (!link) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingTranscript(req, res, {
+      pageId: link.pageId,
+      workspaceId: link.workspaceId,
+    })
   })
 
   // ── Guest comments (Phase 2) — `comment` (or higher) link roles ──────
@@ -344,6 +394,37 @@ export function publicShareRoutes(opts: PublicShareRouteOptions): Router {
       console.error('[public-share] published media failed:', err)
       res.status(500).json({ error: 'Failed to load media' })
     }
+  })
+
+  // GET /public/published/:pageId/recording/media-url — published twin of the
+  // token route above; the publish grant is the authorization.
+  router.get('/public/published/:pageId/recording/media-url', async (req, res) => {
+    const link = await pageGrantStore.resolvePublishedPage(req.params.pageId)
+    if (!link) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingMediaUrl(res, {
+      pageId: link.pageId,
+      workspaceId: link.workspaceId,
+      gcs,
+      ...(opts.resolveRecordingReadClient
+        ? { resolveReadClient: opts.resolveRecordingReadClient }
+        : {}),
+    })
+  })
+
+  // GET /public/published/:pageId/recording/transcript?fromIndex=
+  router.get('/public/published/:pageId/recording/transcript', async (req, res) => {
+    const link = await pageGrantStore.resolvePublishedPage(req.params.pageId)
+    if (!link) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingTranscript(req, res, {
+      pageId: link.pageId,
+      workspaceId: link.workspaceId,
+    })
   })
 
   // GET /public/published/:pageId/stream — SSE live updates (change + tick).

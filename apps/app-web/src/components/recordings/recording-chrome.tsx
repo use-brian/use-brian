@@ -47,8 +47,19 @@ import { ActionItemsRail } from "./action-items-rail";
  * Dismisses on Escape and on its own close button. Deliberately NOT a modal:
  * the whole point is to read the transcript AGAINST the sentence that cited it,
  * so the brief must stay visible and interactive behind it.
+ *
+ * Exported for the shared-page chrome (`public-recording-chrome.tsx`), which
+ * passes its anonymous `fetchTranscriptPage` — the card itself is identical on
+ * both surfaces, so a second copy would drift.
  */
-function CitationTranscriptCard({ recordingId }: { recordingId: string }) {
+export function CitationTranscriptCard({
+  recordingId,
+  fetchTranscriptPage,
+}: {
+  recordingId: string;
+  /** Forwarded to `TranscriptPane` — absent means the authed read. */
+  fetchTranscriptPage?: Parameters<typeof TranscriptPane>[0]["fetchPage"];
+}) {
   const t = useT();
   const { transcriptFocus, clearTranscriptFocus } = useRecordingPlayer();
 
@@ -90,6 +101,7 @@ function CitationTranscriptCard({ recordingId }: { recordingId: string }) {
           recordingId={recordingId}
           focusMs={transcriptFocus.ms}
           focusNonce={transcriptFocus.nonce}
+          {...(fetchTranscriptPage ? { fetchPage: fetchTranscriptPage } : {})}
         />
       </div>
     </aside>

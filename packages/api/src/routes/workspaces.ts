@@ -38,6 +38,7 @@ import {
   getWorkspacePlan,
   getWorkspaceMembershipWithClearanceSystem,
   InvalidRecordingBlueprintError,
+  setWorkspaceTranscriptionPrefs,
 } from '../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { createConnectionStore } from '../db/connection-store.js'
@@ -410,7 +411,7 @@ export function workspaceRoutes({
     }
   })
 
-  // ── PATCH /:workspaceId — update workspace name and/or purpose / default blueprint ──
+  // ── PATCH /:workspaceId — update workspace name and/or purpose / default blueprint / transcription prefs ──
 
   // The default recording blueprint (migration 291) is a separate write path
   // (it routes to `setDefaultRecordingBlueprint`, which validates the template
@@ -419,6 +420,21 @@ export function workspaceRoutes({
   // leaves it untouched. See docs/architecture/brain/structural-synthesis.md §D4.
   const defaultBlueprintFieldSchema = z.object({
     defaultRecordingBlueprintId: z.string().uuid().nullable().optional(),
+  })
+
+  // Transcription preferences (migration 332) — the settings-modal surface
+  // covers `chineseScript` only; `languageCode` stays assistant-only (see
+  // workspaces.md → "Transcription preferences"). `.strict()` so a caller
+  // passing an unsupported key gets a 400 instead of a silent drop. Routed to
+  // `setWorkspaceTranscriptionPrefs`, which re-checks admin/owner itself
+  // (`workspaces` has no RLS — the setter is the enforcement point).
+  const transcriptionPrefsFieldSchema = z.object({
+    transcriptionPrefs: z
+      .object({
+        chineseScript: z.enum(['traditional', 'simplified']).nullable().optional(),
+      })
+      .strict()
+      .optional(),
   })
 
   router.patch('/:workspaceId', async (req, res) => {
@@ -438,6 +454,15 @@ export function workspaceRoutes({
       return
     }
     const hasBlueprintUpdate = 'defaultRecordingBlueprintId' in (req.body ?? {})
+
+    const prefsField = transcriptionPrefsFieldSchema.safeParse(req.body)
+    if (!prefsField.success) {
+      res.status(400).json({ error: "transcriptionPrefs supports only chineseScript: 'traditional' | 'simplified' | null" })
+      return
+    }
+    const hasPrefsUpdate =
+      prefsField.data.transcriptionPrefs !== undefined &&
+      'chineseScript' in prefsField.data.transcriptionPrefs
 
     if (name !== undefined) {
       if (typeof name !== 'string' || name.trim().length === 0) {
@@ -463,8 +488,8 @@ export function workspaceRoutes({
       updates.purpose = purpose.trim()
     }
 
-    if (Object.keys(updates).length === 0 && !hasBlueprintUpdate) {
-      res.status(400).json({ error: 'At least one of name, purpose, or defaultRecordingBlueprintId is required' })
+    if (Object.keys(updates).length === 0 && !hasBlueprintUpdate && !hasPrefsUpdate) {
+      res.status(400).json({ error: 'At least one of name, purpose, defaultRecordingBlueprintId, or transcriptionPrefs is required' })
       return
     }
 
@@ -488,14 +513,44 @@ export function workspaceRoutes({
               details: { defaultRecordingBlueprintId: blueprintField.data.defaultRecordingBlueprintId ?? null },
             })
           }
-          // No name/purpose to apply → return the blueprint-updated row.
-          if (Object.keys(updates).length === 0) { res.json(updated); return }
+          // Nothing else to apply → return the blueprint-updated row.
+          if (Object.keys(updates).length === 0 && !hasPrefsUpdate) { res.json(updated); return }
         } catch (err) {
           if (err instanceof InvalidRecordingBlueprintError) {
             res.status(400).json({ error: err.message })
             return
           }
           throw err
+        }
+      }
+
+      // Transcription preferences — routed to their own setter, which re-checks
+      // admin/owner membership itself (the `workspaces` table has no RLS, so
+      // the setter is the enforcement point). `null` clears back to Auto.
+      if (hasPrefsUpdate) {
+        const chineseScript = prefsField.data.transcriptionPrefs?.chineseScript ?? null
+        const result = await setWorkspaceTranscriptionPrefs(userId, req.params.workspaceId, {
+          chineseScript,
+        })
+        if (!result.ok) {
+          res.status(result.reason === 'not_found' ? 404 : 403).json({ error: result.message })
+          return
+        }
+        if (auditStore) {
+          void auditStore.append({
+            workspaceId: req.params.workspaceId,
+            actorUserId: userId,
+            eventType: 'workspace.settings_changed',
+            details: { transcriptionChineseScript: chineseScript },
+          })
+        }
+        // Nothing else to apply → return the fresh row (carries the updated
+        // `transcriptionPrefs` via WORKSPACE_COLUMNS).
+        if (Object.keys(updates).length === 0) {
+          const team = await workspaceStore.get(userId, req.params.workspaceId)
+          if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }
+          res.json(team)
+          return
         }
       }
 

@@ -14,12 +14,17 @@
  */
 
 import { Mail, Paperclip } from "lucide-react";
+import remarkGfm from "remark-gfm";
+import { ChatMarkdown } from "@use-brian/chat-ui";
 import { useT } from "@/lib/i18n/client";
 import {
   attachmentDisplayName,
+  emailBodyPreviewMarkdown,
   type EmailSendPreviewData,
   type ToolPreviewData,
 } from "@/lib/approval-previews";
+
+const EMAIL_BODY_REMARK_PLUGINS = [remarkGfm];
 
 export function ToolPreview({
   preview,
@@ -104,8 +109,15 @@ function EmailSendPreview({
           )}
         </EnvelopeRow>
       </div>
-      <div className="px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
-        {email.body}
+      {/* Rendered markdown, not the raw source — the send renders the body
+          too (renderEmailBody), so this is what the recipient will read.
+          emailBodyPreviewMarkdown keeps single-newline hard breaks in
+          parity with the email renderer's paragraph rule. */}
+      <div className="chat-markdown px-3 py-2.5 text-sm leading-relaxed break-words max-h-64 overflow-y-auto">
+        <ChatMarkdown
+          text={emailBodyPreviewMarkdown(email.body)}
+          remarkPlugins={EMAIL_BODY_REMARK_PLUGINS}
+        />
       </div>
       {attachments.length > 0 && (
         <div

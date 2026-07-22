@@ -94,11 +94,19 @@ const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 export function RecordingPlayerProvider({
   recordingId,
   durationMs: knownDurationMs = 0,
+  mintMediaUrl,
   children,
 }: {
   recordingId: string | null;
   /** The stored duration, so the scrubber has a range before metadata loads. */
   durationMs?: number | null;
+  /**
+   * Mint (or re-mint) the playback URL. Defaults to the authed
+   * `/api/recordings/:id/media-url` call; the anonymous shared-page surface
+   * passes the public source-scoped fetcher instead — same `{url, expiresAt}`
+   * contract, so the refresh-before-expiry machinery is shared.
+   */
+  mintMediaUrl?: () => Promise<{ url: string; expiresAt: string }>;
   children: ReactNode;
 }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -114,14 +122,16 @@ export function RecordingPlayerProvider({
   const mint = useCallback(async () => {
     if (!recordingId) return;
     try {
-      const media = await getRecordingMediaUrl(recordingId);
+      const media = mintMediaUrl
+        ? await mintMediaUrl()
+        : await getRecordingMediaUrl(recordingId);
       setUrl(media.url);
       setExpiresAt(Date.parse(media.expiresAt));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [recordingId]);
+  }, [recordingId, mintMediaUrl]);
 
   useEffect(() => {
     setUrl(null);

@@ -30,7 +30,7 @@ type Team = { id: string; name: string };
  * and a Google button that can never complete.
  */
 export default async function HomePage(props: {
-  searchParams: Promise<{ capture?: string }>;
+  searchParams: Promise<{ capture?: string; record?: string }>;
 }) {
   const jar = await cookies();
   const accessToken = jar.get("access_token")?.value;
@@ -38,12 +38,14 @@ export default async function HomePage(props: {
     redirect(ossSignedOutRedirect() ?? "/login");
   }
 
-  // Desktop quick-capture (`?capture=1`): preserve it through the single-
-  // workspace redirect so `doc-shell` can open a fresh draft. Multi-
-  // workspace users land on the picker (which drops it) — see
-  // docs/architecture/features/app-desktop.md → "quick-capture.ts".
-  const { capture } = await props.searchParams;
-  const captureSuffix = capture === "1" ? "?capture=1" : "";
+  // Desktop quick-capture (`?capture=1`) and record (`?record=1`, the
+  // `usebrian://record` deep link): preserve them through the single-
+  // workspace redirect so the web-side hook fires (`useDockRecorder` reads
+  // `record=1` and auto-starts a latched capture). Multi-workspace users
+  // land on the picker (which drops it) — see
+  // docs/architecture/features/app-desktop.md.
+  const { capture, record } = await props.searchParams;
+  const captureSuffix = capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : "";
 
   let teams: Team[] = [];
   try {
