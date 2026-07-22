@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px/1.5 -apple-system, system-ui, sans-serif; margin: 0; padding: 18px; color: #111; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      p { margin: 0 0 14px; color: #334155; }
+      .actions { display: flex; gap: 8px; }
+      button { padding: 8px 14px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-size: 13px; }
+      button.primary { background: #111; color: #fff; border-color: #111; }
+    </style>
+  </head>
+  <body>
+    <h1>Allow Use Brian to act in this tab?</h1>
+    <p id="detail">Your assistant wants to browse and act in the current tab for this task. You can stop it at any time from the extension.</p>
+    <div class="actions">
+      <button id="allow" class="primary">Allow this task</button>
+      <button id="deny">Deny</button>
+    </div>
+    <script type="module" src="allow.js"></script>
+  </body>
+</html>

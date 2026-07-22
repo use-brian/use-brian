@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font: 13px/1.45 -apple-system, system-ui, sans-serif; width: 320px; margin: 0; padding: 14px; color: #111; }
+      h1 { font-size: 14px; margin: 0 0 10px; }
+      .row { margin-bottom: 8px; }
+      label { display: block; font-weight: 600; margin-bottom: 3px; }
+      input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px; }
+      button { padding: 6px 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #fff; cursor: pointer; font-size: 12px; }
+      button.primary { background: #111; color: #fff; border-color: #111; }
+      button.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+      .status { padding: 6px 8px; border-radius: 6px; background: #f1f5f9; margin-bottom: 10px; }
+      .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 4px; margin-right: 6px; background: #94a3b8; }
+      .status.ready .dot { background: #16a34a; }
+      .actions { display: flex; gap: 6px; margin-top: 10px; }
+      .hint { color: #64748b; font-size: 11px; margin-top: 8px; }
+    </style>
+  </head>
+  <body>
+    <h1>Use Brian Browser Agent</h1>
+    <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
+    <div class="row">
+      <label for="relay-url">Relay URL</label>
+      <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />
+    </div>
+    <div class="row">
+      <label for="pairing-token">Pairing token</label>
+      <input id="pairing-token" placeholder="Paste from Settings > Browser extension" />
+    </div>
+    <div class="actions">
+      <button id="connect" class="primary">Connect</button>
+      <button id="disconnect">Disconnect</button>
+      <button id="stop" class="danger">Stop task</button>
+    </div>
+    <p class="hint">The assistant only acts in a tab you allow, one task at a time. Stop ends the current task immediately.</p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
