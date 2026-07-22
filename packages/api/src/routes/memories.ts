@@ -38,6 +38,7 @@ import {
 } from '../db/memories.js'
 import { query } from '../db/client.js'
 import { queryWithRLS } from '../db/client.js'
+import { resolveAssistantAccess } from '../db/users.js'
 import { getWorkspaceRoleSystem, resolveReadCeilingsSystem } from '../db/workspace-store.js'
 import { recordVerification } from '../db/memory-verifications-store.js'
 import { listMemoriesByRecentOutcome } from '../db/memory-recall-events-store.js'
@@ -93,8 +94,10 @@ export function memoryRoutes(): Router {
   const router = Router({ mergeParams: true })
 
   /**
-   * Verify the authenticated user is a member of this assistant.
+   * Verify the authenticated user can access this assistant.
    * Returns the userId or sends 401/403 and returns null.
+   *
+   * Delegates to `resolveAssistantAccess` — the single access predicate.
    */
   async function verifyMembership(
     req: { userId?: string; params: AssistantParams },
@@ -105,25 +108,8 @@ export function memoryRoutes(): Router {
       res.status(401).json({ error: 'Unauthorized' })
       return null
     }
-    const { assistantId } = req.params
 
-    const result = await queryWithRLS<{ ok: number }>(
-      userId,
-      // Personal: assistant_members. Team (post-089): workspace_members for
-      // the assistant's owning team.
-      `SELECT 1 AS ok
-       WHERE EXISTS (
-         SELECT 1 FROM assistant_members am
-         WHERE am.assistant_id = $1 AND am.user_id = $2
-       )
-       OR EXISTS (
-         SELECT 1 FROM assistants a
-         JOIN workspace_members tm ON tm.workspace_id = a.workspace_id
-         WHERE a.id = $1 AND tm.user_id = $2
-       )`,
-      [assistantId, userId],
-    )
-    if (result.rows.length === 0) {
+    if (!(await resolveAssistantAccess(userId, req.params.assistantId))) {
       res.status(403).json({ error: 'Not a member of this assistant' })
       return null
     }
@@ -131,15 +117,16 @@ export function memoryRoutes(): Router {
   }
 
   /**
-   * Verify access to team-scoped routes. Team-owned `kind='app'` assistants
-   * (e.g. the feed app) don't carry a row per team-member in
-   * `assistant_members` — access flows through `workspace_members`. Accept either
-   * direct assistant membership or team membership; fall back to 403 only
-   * when neither path matches.
+   * Verify access to team-scoped routes, returning the assistant's workspace.
    *
-   * Returns `{ userId, workspaceId }` on success (workspaceId is null when the
-   * assistant is not team-owned, in which case access required direct
-   * assistant membership). Sends 401/403/404 and returns null otherwise.
+   * Same predicate as `verifyMembership` (`resolveAssistantAccess`); this variant
+   * additionally hands back `workspaceId`, which the team-scoped handlers need.
+   *
+   * **403, never 404.** This used to `SELECT workspace_id FROM assistants` first
+   * and 404 when the id was unknown, which made a nonexistent assistant
+   * distinguishable from one the caller merely cannot reach — assistant-existence
+   * disclosure across workspace boundaries, and inconsistent with every sibling
+   * route. Both cases now collapse to 403.
    */
   async function verifyTeamAccess(
     req: { userId?: string; params: AssistantParams },
@@ -150,34 +137,13 @@ export function memoryRoutes(): Router {
       res.status(401).json({ error: 'Unauthorized' })
       return null
     }
-    const { assistantId } = req.params
 
-    const assistantResult = await query<{ workspaceId: string | null }>(
-      `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
-      [assistantId],
-    )
-    if (assistantResult.rows.length === 0) {
-      res.status(404).json({ error: 'Assistant not found' })
-      return null
-    }
-    const workspaceId = assistantResult.rows[0].workspaceId
-
-    if (workspaceId) {
-      const role = await getWorkspaceRoleSystem(userId, workspaceId)
-      if (role) return { userId, workspaceId }
-    }
-
-    const memberResult = await queryWithRLS<{ user_id: string }>(
-      userId,
-      `SELECT user_id FROM assistant_members
-       WHERE assistant_id = $1 AND user_id = $2`,
-      [assistantId, userId],
-    )
-    if (memberResult.rows.length === 0) {
+    const access = await resolveAssistantAccess(userId, req.params.assistantId)
+    if (!access) {
       res.status(403).json({ error: 'Not a member of this assistant or its team' })
       return null
     }
-    return { userId, workspaceId }
+    return { userId, workspaceId: access.assistant.workspaceId }
   }
 
   // ── List memories (paginated, filterable) ──────────────────────

@@ -3,7 +3,7 @@ import { createTokens, verifyRefreshToken } from '../auth/jwt.js'
 import { requireAuth } from '../auth/middleware.js'
 import { verifyTgLinkToken } from '../auth/tg-link-token.js'
 import { isValidTimezone } from '../auth/client-timezone.js'
-import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUserByEmail, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
+import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUserByEmail, getDefaultAssistant, getUserAssistant, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
 import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
 import type { ApiKeyStore } from '../db/api-key-store.js'
@@ -502,10 +502,23 @@ export function authRoutes(
    * official bot. Consumed by the Mini App `/tg-link/manage` page when a user
    * taps "switch to this assistant". See docs/architecture/channels/telegram-mini-app.md.
    *
-   * Preconditions: the user must own the target assistant, and they must have
-   * an existing `linked_accounts` row for `telegram` (i.e., they must have
-   * done the initial link via Mini App or 6-char code). A missing link means
-   * the user hit `/manage` without ever linking — 404 and direct them to /start.
+   * Preconditions: the user must be able to ACCESS the target assistant, and
+   * they must have an existing `linked_accounts` row for `telegram` (i.e., they
+   * must have done the initial link via Mini App or 6-char code). A missing link
+   * means the user hit `/manage` without ever linking — 404 and direct them
+   * to /start.
+   *
+   * The gate is access, NOT `assistants.owner_user_id`. After the migration-089
+   * ownership XOR flip that column is NULL for every workspace-owned assistant,
+   * so an `owner_user_id = $userId` predicate is unsatisfiable by any human for
+   * exactly the team assistants users most want on Telegram — it 403'd every
+   * Switch onto a workspace assistant while the picker happily listed them.
+   * `getUserAssistant` is the same `direct OR workspace` predicate the picker
+   * (`listAccessibleAssistants`) and the chat route already use; keep them
+   * aligned. Binding your own Telegram identity to an assistant you can already
+   * chat with on the web grants no new data access, so this is self-service for
+   * any member — provisioning the assistant is the admin-gated act, not this.
+   * See docs/architecture/channels/telegram-mini-app.md.
    */
   router.post('/telegram-link-update', requireAuth(jwtSecret), async (req, res) => {
     const userId = req.userId
@@ -524,12 +537,9 @@ export function authRoutes(
       return
     }
 
-    const assistantRow = await query<{ id: string; name: string }>(
-      `SELECT id, name FROM assistants WHERE id = $1 AND owner_user_id = $2`,
-      [assistantId, userId],
-    )
-    if (assistantRow.rows.length === 0) {
-      res.status(403).json({ error: 'Not the owner of that assistant' })
+    const assistant = await getUserAssistant(userId, assistantId)
+    if (!assistant) {
+      res.status(403).json({ error: 'No access to that assistant' })
       return
     }
 
@@ -563,7 +573,7 @@ export function authRoutes(
 
     res.json({
       ok: true,
-      assistant: { id: assistantRow.rows[0].id, name: assistantRow.rows[0].name },
+      assistant: { id: assistant.id, name: assistant.name },
     })
   })
 
@@ -816,14 +826,15 @@ async function tryLinkTelegram(
     return 'Telegram link token invalid or expired; please retry from Telegram'
   }
 
-  const assistantRow = await query<{ id: string }>(
-    `SELECT id FROM assistants
-     WHERE owner_user_id = $1
-     ORDER BY created_at ASC
-     LIMIT 1`,
-    [userId],
-  )
-  const assistantId = assistantRow.rows[0]?.id
+  // First-time link targets the user's Personal-workspace primary, resolved by
+  // `getDefaultAssistant` (workspace-anchored, with an `assistant_members`
+  // fallback). This used to be `SELECT id FROM assistants WHERE owner_user_id =
+  // $1 ORDER BY created_at ASC` — the same post-089 trap as the /switch commit
+  // gate: `owner_user_id` is NULL for every workspace-owned assistant, so a user
+  // whose personal primary predates the column being populated got "user has no
+  // assistant" and silently failed to link at all.
+  const defaultAssistant = await getDefaultAssistant(userId)
+  const assistantId = defaultAssistant?.id
   if (!assistantId) {
     return 'Telegram link skipped: user has no assistant'
   }

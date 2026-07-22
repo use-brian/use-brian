@@ -31,6 +31,13 @@ vi.mock('../../db/client.js', () => ({
   queryWithRLS: vi.fn(),
 }))
 
+// Both verifyMembership and verifyTeamAccess now resolve through the single
+// access predicate (`direct OR workspace`, one query, effective role) instead of
+// each spelling their own membership join. See [COMP:api/assistant-access].
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 vi.mock('../../db/workspace-store.js', () => ({
   getWorkspaceRoleSystem: vi.fn(),
   // Fused read-ceiling resolver — echo the assistant clearance + compartments
@@ -65,6 +72,7 @@ import {
   markVerifiedDirect,
 } from '../../db/memories.js'
 import { query, queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 import { getWorkspaceRoleSystem } from '../../db/workspace-store.js'
 import { recordVerification } from '../../db/memory-verifications-store.js'
 import { notifyBrainInboxChange } from '../../brain-stream/notify.js'
@@ -81,17 +89,22 @@ const mockListTeamMemories = vi.mocked(listWorkspaceMemories)
 const mockMarkVerifiedDirect = vi.mocked(markVerifiedDirect)
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockResolveAssistantAccess = vi.mocked(resolveAssistantAccess)
 const mockGetTeamRoleSystem = vi.mocked(getWorkspaceRoleSystem)
 const mockRecordVerification = vi.mocked(recordVerification)
 const mockNotifyBrainInboxChange = vi.mocked(notifyBrainInboxChange)
 
-/** Mock membership check — queryWithRLS for assistant_members. */
-function setupAuth() {
-  mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ user_id: 'u_1' }], rowCount: 1 } as never)
+/** Grant access for the next gate call — one `resolveAssistantAccess` hit. */
+function setupAuth(workspaceId: string | null = 'w_1', role: 'owner' | 'admin' | 'member' = 'owner') {
+  mockResolveAssistantAccess.mockResolvedValueOnce({
+    assistant: { id: 'a_1', name: 'A', workspaceId, telegramModelAlias: 'pro' },
+    role,
+  } as never)
 }
 
+/** Deny access — the predicate returns null for both "missing" and "no access". */
 function setupNoAuth() {
-  mockQueryWithRLS.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+  mockResolveAssistantAccess.mockResolvedValueOnce(null as never)
 }
 
 /**
@@ -627,10 +640,9 @@ describe('[COMP:api/memories-route] Memory routes', () => {
 
   describe('GET /team', () => {
     it('returns empty for assistant with no team', async () => {
-      // The route queries assistants table for workspace_id first
-      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: null }], rowCount: 1 } as never)
-      // Then falls back to assistant_members membership check
-      mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ user_id: 'u_1' }], rowCount: 1 } as never)
+      // Access granted via a direct assistant_members grant; the assistant
+      // carries no workspace, so the team route short-circuits to empty.
+      setupAuth(null)
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).get('/api/assistants/a_1/memories/team')
@@ -650,9 +662,11 @@ describe('[COMP:api/memories-route] Memory routes', () => {
       // assistant_members row for the team's distribution assistant.
       // After WU-4.2b the route also calls `resolveViewerCtx` to fetch
       // workspace + clearance for the universal predicate, so we prime
-      // a second `query` reply.
-      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 't_1' }], rowCount: 1 } as never)
-      mockGetTeamRoleSystem.mockResolvedValueOnce('admin')
+      // a `query` reply for it.
+      //
+      // The workspace arm is now inside `resolveAssistantAccess` itself — one
+      // predicate, one query, no assistant_members fallback round-trip.
+      setupAuth('t_1', 'admin')
       mockResolveViewerCtx('t_1')
       mockListTeamMemories.mockResolvedValueOnce({
         memories: [{ id: 'mem_1', summary: 'sign off with — the team' }],
@@ -664,19 +678,29 @@ describe('[COMP:api/memories-route] Memory routes', () => {
 
       expect(res.status).toBe(200)
       expect(res.body.memories).toHaveLength(1)
-      // queryWithRLS for assistant_members should NOT be consulted when team
-      // role is positive — no fallback mock was set, and the request still
-      // succeeded.
+      // The gate is a single predicate call — no separate assistant_members
+      // fallback query is issued at all.
       expect(mockQueryWithRLS).not.toHaveBeenCalled()
+      expect(mockResolveAssistantAccess).toHaveBeenCalledTimes(1)
     })
 
     it('returns 403 when user is neither team member nor assistant member', async () => {
-      mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 't_1' }], rowCount: 1 } as never)
-      mockGetTeamRoleSystem.mockResolvedValueOnce(null)
       setupNoAuth()
 
       const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
       const res = await request(app).get('/api/assistants/a_1/memories/team')
+
+      expect(res.status).toBe(403)
+    })
+
+    it('returns 403, not 404, for an assistant that does not exist', async () => {
+      // The predicate returns null for both "missing" and "exists but no
+      // access"; distinguishing them would disclose assistant existence across
+      // workspace boundaries. This route used to 404 here.
+      setupNoAuth()
+
+      const app = createTestApp('/api/assistants/:assistantId/memories', memoryRoutes(), { userId: 'u_1' })
+      const res = await request(app).get('/api/assistants/nope/memories/team')
 
       expect(res.status).toBe(403)
     })

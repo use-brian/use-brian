@@ -19,10 +19,19 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// verifyMembership now delegates to `resolveAssistantAccess` — the single access
+// predicate (see [COMP:api/assistant-access]). It is one call, not a route-local
+// membership join, so the gate is stubbed here instead of via queryWithRLS.
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const capabilityStore = {
   listActive: vi.fn(),
@@ -50,9 +59,9 @@ function makeApp(opts: { userId: string }) {
 
 describe("[COMP:api/primary-assistant-guard] DELETE /:assistantId refuses kind='primary'", () => {
   it('returns 409 primary_not_deletable when the assistant is the workspace primary', async () => {
+    // 1. verifyMembership: owner (the single access predicate)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQueryWithRLS
-      // 1. verifyMembership: owner
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
       // 2. kind lookup → primary
       .mockResolvedValueOnce({ rows: [{ kind: 'primary' }], rowCount: 1 } as never)
 
@@ -61,14 +70,15 @@ describe("[COMP:api/primary-assistant-guard] DELETE /:assistantId refuses kind='
     expect(res.status).toBe(409)
     expect(res.body.error).toBe('primary_not_deletable')
     // Critically the member-fan-out check + the DELETE must never have run.
-    // verifyMembership = 1 call, kind lookup = 1 call → 2 total.
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
+    // verifyMembership no longer spends a queryWithRLS (it delegates to the
+    // access predicate), so only the kind lookup remains → 1.
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
   })
 
   it("falls through to the regular delete flow when the assistant is kind='standard'", async () => {
+    // 1. verifyMembership: owner (the single access predicate)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQueryWithRLS
-      // 1. verifyMembership: owner
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
       // 2. kind lookup → standard (not primary)
       .mockResolvedValueOnce({ rows: [{ kind: 'standard' }], rowCount: 1 } as never)
       // 3. assistant_members fan-out: no other owners
@@ -92,6 +102,6 @@ describe("[COMP:api/primary-assistant-guard] DELETE /:assistantId refuses kind='
     expect(res.status).toBe(500)
     expect(res.body.error).not.toBe('primary_not_deletable')
     expect(res.body.error).not.toBe('transfer_ownership_required')
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(3)
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
   })
 })

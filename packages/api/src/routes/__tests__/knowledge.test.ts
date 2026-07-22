@@ -23,6 +23,14 @@ vi.mock('../../db/client.js', () => ({
 // The GitHub picker resolves the caller's clearance via this lookup; stub it
 // (effectiveReadClearance stays real). Deferred arrow dodges the hoist trap.
 const mockMembership = vi.fn()
+// The access gate is the single predicate now, not a route-local join. Mock it
+// explicitly so these tests drive authorization on purpose rather than through
+// whatever the generic `query` stub happens to return.
+// See [COMP:api/assistant-access].
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 vi.mock('../../db/workspace-store.js', async (io) => ({
   ...(await io<typeof import('../../db/workspace-store.js')>()),
   getWorkspaceMembershipWithClearanceSystem: (...a: unknown[]) => mockMembership(...a),
@@ -30,9 +38,11 @@ vi.mock('../../db/workspace-store.js', async (io) => ({
 
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from '../knowledge.js'
 import { query, queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const knowledgeStore = {
   search: vi.fn(),
@@ -87,6 +97,10 @@ beforeEach(() => {
     rowCount: 1,
   } as never)
   mockRls.mockResolvedValue({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+  mockAccess.mockResolvedValue({
+    assistant: { id: 'a-1', name: 'A', workspaceId: 'ws-1', clearance: 'internal' },
+    role: 'member',
+  } as never)
   knowledgeStore.listSources.mockResolvedValue([])
   knowledgeStore.listSourcesForAssistant.mockResolvedValue([])
   knowledgeStore.listDisabledSourceIds.mockResolvedValue([])
@@ -139,17 +153,18 @@ describe('[COMP:api/knowledge-route] GET /entries', () => {
     expect((await request(app()).get('/api/assistants/a-1/knowledge/entries')).status).toBe(401)
   })
 
-  it('returns 404 when the assistant does not exist', async () => {
-    mockQuery.mockReset()
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+  it('returns 403, not 404, when the assistant does not exist', async () => {
+    // The predicate returns null for both "missing" and "exists but no access",
+    // and callers must not distinguish them — a 404 here would disclose
+    // assistant existence across workspace boundaries. This route used to 404.
+    mockAccess.mockResolvedValue(null as never)
     expect(
       (await request(app('u-1')).get('/api/assistants/ghost/knowledge/entries')).status,
-    ).toBe(404)
+    ).toBe(403)
   })
 
   it('returns 403 when the caller is not a member of the assistant or its team', async () => {
-    mockRls.mockReset()
-    mockRls.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+    mockAccess.mockResolvedValue(null as never)
     expect(
       (await request(app('u-1')).get('/api/assistants/a-1/knowledge/entries')).status,
     ).toBe(403)

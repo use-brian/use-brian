@@ -16,6 +16,7 @@
 
 import { Router } from 'express'
 import { queryWithRLS, query, getPool } from '../db/client.js'
+import { resolveAssistantAccess } from '../db/users.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
@@ -53,14 +54,21 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
   const router = Router()
 
   /**
-   * Verify the authenticated user is a member of this assistant.
+   * Verify the authenticated user can access this assistant.
    * Returns { userId, role } or sends 401/403 and returns null.
    *
-   * Post-089 (team-connector promotion): team-owned assistants have no
-   * `assistant_members` rows — access flows through `workspace_members`. We
-   * check both paths and return the first that matches.
-   *   - Personal assistant: the user's `assistant_members.role`
-   *   - Team assistant:    the user's `workspace_members.role` (in the team)
+   * Delegates to `resolveAssistantAccess` — the single access predicate (see its
+   * docstring). `role` here is the caller's **effective** role, the higher of
+   * their direct (`assistant_members`) and workspace (`workspace_members`) roles.
+   *
+   * That determinism is the point, because every write below branches on this
+   * value. The previous spelling was a local `UNION … LIMIT 1` with no
+   * `ORDER BY`: when a user's two membership rows disagreed, the role returned
+   * was whichever the planner happened to emit first. A workspace admin carrying
+   * a legacy `assistant_members.role='member'` row could be denied a rename they
+   * were entitled to, and — the direction that matters — a workspace `member`
+   * carrying a legacy `role='owner'` row could non-deterministically clear the
+   * owner-only gate on `bio`, `sharing_mode`, and the model aliases.
    */
   async function verifyMembership(
     req: { userId?: string; params: AssistantParams },
@@ -71,26 +79,13 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
       res.status(401).json({ error: 'Unauthorized' })
       return null
     }
-    const { assistantId } = req.params
 
-    const result = await queryWithRLS<{ role: string }>(
-      userId,
-      `SELECT am.role
-         FROM assistant_members am
-        WHERE am.assistant_id = $1 AND am.user_id = $2
-       UNION
-       SELECT tm.role
-         FROM assistants a
-         JOIN workspace_members tm ON tm.workspace_id = a.workspace_id
-        WHERE a.id = $1 AND tm.user_id = $2 AND a.workspace_id IS NOT NULL
-       LIMIT 1`,
-      [assistantId, userId],
-    )
-    if (result.rows.length === 0) {
+    const access = await resolveAssistantAccess(userId, req.params.assistantId)
+    if (!access) {
       res.status(403).json({ error: 'Not a member of this assistant' })
       return null
     }
-    return { userId, role: result.rows[0].role }
+    return { userId, role: access.role }
   }
 
   // ── GET /:assistantId — single assistant detail ────────────────

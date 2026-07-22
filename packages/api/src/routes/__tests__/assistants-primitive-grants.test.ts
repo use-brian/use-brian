@@ -8,12 +8,21 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// verifyMembership now delegates to `resolveAssistantAccess` — the single access
+// predicate (see [COMP:api/assistant-access]). It is one call, not a route-local
+// membership join, so the gate is stubbed here instead of via queryWithRLS.
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { query, queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 import { DuplicateGrantError } from '@use-brian/core'
 
 const mockQuery = vi.mocked(query)
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const capabilityStore = {
   listActive: vi.fn<(id: string) => Promise<string[]>>(),
@@ -44,7 +53,7 @@ function makeApp(opts: { userId: string }) {
 // §17 — Tasks/CRM toggles. Workspace-member auth, idempotent grant/revoke.
 describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-grants', () => {
   it('returns enabled=true for capabilities the assistant carries', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.listActive.mockResolvedValueOnce(['tasks', 'crm', 'bug_triage'])
 
     const res = await request(makeApp({ userId: 'u-1' }))
@@ -60,7 +69,7 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
   })
 
   it('returns enabled=false for missing capabilities (default-off kind=app)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.listActive.mockResolvedValueOnce([])
 
     const res = await request(makeApp({ userId: 'u-1' }))
@@ -88,7 +97,7 @@ describe('[COMP:routes/assistants-primitive-grants] GET /:assistantId/primitive-
 
 describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitive-grants/:capability', () => {
   it('grants when enabled=true and no active grant exists', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.grant.mockResolvedValueOnce({ id: 'g-1' } as never)
     capabilityStore.listActive.mockResolvedValueOnce(['tasks'])
 
@@ -107,7 +116,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('treats DuplicateGrantError as a no-op (idempotent on)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.grant.mockRejectedValueOnce(new DuplicateGrantError('a-1', 'tasks'))
     capabilityStore.listActive.mockResolvedValueOnce(['tasks'])
 
@@ -120,7 +129,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('revokes the active grant when enabled=false', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'g-existing' }], rowCount: 1 } as never)
     capabilityStore.revoke.mockResolvedValueOnce({ id: 'g-existing' } as never)
     capabilityStore.listActive.mockResolvedValueOnce([])
@@ -139,7 +148,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('enabled=false is a no-op when no active grant exists', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     capabilityStore.listActive.mockResolvedValueOnce([])
 
@@ -152,7 +161,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('grants the goals primitive (default-on, member-toggleable)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.grant.mockResolvedValueOnce({ id: 'g-goals' } as never)
     capabilityStore.listActive.mockResolvedValueOnce(['tasks', 'crm', 'goals'])
 
@@ -171,7 +180,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('400 for an unknown capability name', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
 
     const res = await request(makeApp({ userId: 'u-1' }))
       .patch('/api/assistants/a-1/primitive-grants/bug_triage')
@@ -182,7 +191,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
   })
 
   it('400 when enabled is not a boolean', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
 
     const res = await request(makeApp({ userId: 'u-1' }))
       .patch('/api/assistants/a-1/primitive-grants/tasks')
@@ -197,7 +206,7 @@ describe('[COMP:routes/assistants-primitive-grants] PATCH /:assistantId/primitiv
 // Off by default, owner/admin-gated, never self-grantable.
 describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-gated)', () => {
   it('403 when a plain member toggles configure on', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
 
     const res = await request(makeApp({ userId: 'u-member' }))
       .patch('/api/assistants/a-1/primitive-grants/configure')
@@ -208,7 +217,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
   })
 
   it('403 when a plain member toggles configure off', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
 
     const res = await request(makeApp({ userId: 'u-member' }))
       .patch('/api/assistants/a-1/primitive-grants/configure')
@@ -219,7 +228,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
   })
 
   it('a workspace admin can grant configure (provenance-stamped reason)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'admin' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'admin' } as never)
     capabilityStore.grant.mockResolvedValueOnce({ id: 'g-conf' } as never)
     capabilityStore.listActive.mockResolvedValueOnce(['configure'])
 
@@ -238,7 +247,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
   })
 
   it('an owner can revoke configure', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQuery.mockResolvedValueOnce({ rows: [{ id: 'g-conf' }], rowCount: 1 } as never)
     capabilityStore.revoke.mockResolvedValueOnce({ id: 'g-conf' } as never)
     capabilityStore.listActive.mockResolvedValueOnce([])
@@ -257,7 +266,7 @@ describe('[COMP:routes/assistants-primitive-grants] configure capability (admin-
   })
 
   it('configure appears in the GET listing for any member (visible, not toggleable)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
     capabilityStore.listActive.mockResolvedValueOnce(['configure'])
 
     const res = await request(makeApp({ userId: 'u-member' }))

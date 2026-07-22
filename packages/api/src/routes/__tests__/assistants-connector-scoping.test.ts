@@ -8,10 +8,19 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// verifyMembership now delegates to `resolveAssistantAccess` — the single access
+// predicate (see [COMP:api/assistant-access]). It is one call, not a route-local
+// membership join, so the gate is stubbed here instead of via queryWithRLS.
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const connectorStore = { list: vi.fn() }
 const assistantConnectorStore = { listForAssistant: vi.fn() }
@@ -46,12 +55,18 @@ function makeApp(userId: string) {
   return app
 }
 
-// verifyMembership runs one queryWithRLS (role), then the endpoint runs a
-// second (the assistant's workspace_id). Queue both per request.
+// verifyMembership resolves through the access predicate (one call, no
+// queryWithRLS); the endpoint then runs a queryWithRLS for the assistant's
+// workspace_id. Queue both per request.
 function queueMembershipAndTeam(role: string, workspaceId: string | null) {
-  mockQueryWithRLS
-    .mockResolvedValueOnce({ rows: [{ role }], rowCount: 1 } as never) // membership
-    .mockResolvedValueOnce({ rows: [{ workspace_id: workspaceId }], rowCount: 1 } as never) // team
+  mockAccess.mockResolvedValueOnce({
+    assistant: { id: 'a-1', name: 'A', workspaceId },
+    role,
+  } as never)
+  mockQueryWithRLS.mockResolvedValueOnce({
+    rows: [{ workspace_id: workspaceId }],
+    rowCount: 1,
+  } as never) // team
 }
 
 describe('[COMP:routes/assistants-connector-scoping] GET /:assistantId/connectors workspace gate', () => {
