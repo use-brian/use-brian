@@ -11,12 +11,18 @@
 // neutral owner identity, no email surfaced.
 //
 // Dead outside an oss deploy: 404s when `primaryAuthUrl()` resolves (a sub-app
-// deploy where the primary owns auth) or when the build is not the oss edition.
-// The backend route is itself gated on local + oss, so a token can never be
+// deploy where the primary owns auth) or when this is not the oss edition. The
+// backend route is itself gated on oss + not-cloud, so a token can never be
 // minted in the cloud. We do NOT gate on NODE_ENV: a built self-host runs
 // `next start` (NODE_ENV="production"), so the edition + primary checks are the
-// real gate. Redirects use APP_URL because behind a reverse proxy request.url
+// real gate. `isOssEdition()` resolves the SERVER-side `USEBRIAN_EDITION` at
+// runtime as well as the build-inlined public var, so a prebuilt tree that was
+// compiled without the edition set still opens here when the deploy's env says
+// oss. Redirects use APP_URL because behind a reverse proxy request.url
 // resolves to the bound localhost address.
+//
+// Accepts an optional `?next=<path>` (same-origin absolute paths only) so a
+// signed-out deep link routed here by the proxy resumes where it was headed.
 //
 // Component-map tag: [COMP:app-web/local-session-route].
 
@@ -29,6 +35,7 @@ import {
 } from "@/lib/auth-cookies";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { isOssEdition } from "@/lib/edition";
+import { sanitizeNext } from "@/lib/oss-entry";
 
 // Same resolution as the app-web OAuth callback + refresh bridges:
 // server-side `API_URL`, defaulting to the local dev API.
@@ -39,6 +46,7 @@ export async function GET(request: Request) {
   // bound address (localhost:PORT), so absolute redirects must be built from the
   // configured public origin instead.
   const appOrigin = process.env.APP_URL ?? request.url;
+  const nextPath = sanitizeNext(new URL(request.url).searchParams.get("next"));
 
   if (primaryAuthUrl() !== null || !isOssEdition()) {
     return new NextResponse("Not found", { status: 404 });
@@ -65,9 +73,10 @@ export async function GET(request: Request) {
       };
     };
 
-    // Land on the app root, which resolves into the single-workspace redirect
-    // in src/app/page.tsx — the same destination the OAuth callback uses.
-    const response = NextResponse.redirect(new URL("/", appOrigin));
+    // Land on `next` (default `/`), which resolves into the single-workspace
+    // redirect in src/app/page.tsx — the same destination the OAuth callback
+    // uses.
+    const response = NextResponse.redirect(new URL(nextPath, appOrigin));
     response.cookies.set(accessTokenCookie(data.accessToken));
     response.cookies.set(refreshTokenCookie(data.refreshToken));
     response.cookies.set(
