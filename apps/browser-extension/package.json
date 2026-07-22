@@ -1,0 +1,17 @@
+{
+  "name": "@use-brian/browser-extension",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc && node scripts/assemble.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^20.19.39",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

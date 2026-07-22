@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Use Brian Browser Agent",
+  "version": "0.1.0",
+  "description": "Lets your Use Brian assistant act in your own browser: consent-gated, approval-gated sends, always stoppable.",
+  "permissions": ["debugger", "tabs", "storage"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Use Brian"
+  }
+}
