@@ -54,6 +54,10 @@ import {
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
+import {
+  ASSISTANT_REFRESH_EVENT,
+  type AssistantRefreshDetail,
+} from "@/lib/assistant-events";
 import { cn } from "@/lib/utils";
 import { listWorkspaceAssistants } from "@/lib/api/views";
 import { pickPrimaryAssistant } from "@/lib/primary-assistant";
@@ -178,21 +182,41 @@ export function WorkspaceChrome({
   // next message mints a new page. See docs/architecture/features/doc.md →
   // "One dock, every surface".
   const [chatAssistantId, setChatAssistantId] = useState<string | null>(null);
-  useEffect(() => {
+  const resolveChatAssistant = useCallback(() => {
     if (!workspaceId) return;
-    let cancelled = false;
     listWorkspaceAssistants(workspaceId)
       .then((list) => {
-        if (cancelled) return;
-        setChatAssistantId(pickPrimaryAssistant(list)?.id ?? null);
+        // Repair-only: seed when we have no interlocutor yet, or when the one
+        // we picked has left the workspace. Re-picking unconditionally would
+        // yank a live conversation to a different assistant whenever the
+        // roster reorders.
+        setChatAssistantId((current) =>
+          current && list.some((a) => a.id === current)
+            ? current
+            : (pickPrimaryAssistant(list)?.id ?? null),
+        );
       })
       .catch(() => {
         /* no list → no dock this load; a later workspace change retries */
       });
-    return () => {
-      cancelled = true;
-    };
   }, [workspaceId]);
+
+  useEffect(() => {
+    resolveChatAssistant();
+  }, [resolveChatAssistant]);
+
+  // Live refresh. This chrome never unmounts inside a workspace, so a
+  // first-ever assistant created after load would otherwise leave
+  // `chatAssistantId` null (no dock at all) until an app restart.
+  useEffect(() => {
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<AssistantRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      resolveChatAssistant();
+    };
+    window.addEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+  }, [workspaceId, resolveChatAssistant]);
 
   // Chat-seed routing — the default-viewer landing's chatter / inline AI box
   // hand the user into the dock with a pre-written prompt via the

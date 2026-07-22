@@ -41,6 +41,7 @@ import {
   setWorkspaceTranscriptionPrefs,
 } from '../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { createConnectionStore } from '../db/connection-store.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
@@ -1144,6 +1145,13 @@ export function workspaceRoutes({
         console.warn('[workspaces] seedWorkspacePrimaryFollows (create) failed:', err),
       )
 
+      // The workspace roster changed. Chrome that never unmounts (the
+      // FloatingChat switcher + WorkspaceChrome's default interlocutor) reads
+      // the roster on a `[workspaceId]` effect, so without this signal a new
+      // assistant stays invisible in every open tab until a full app restart.
+      // Fire-and-forget — the write already committed.
+      notifyWorkspaceChange(workspaceId, 'assistant', 'create', assistantId)
+
       res.status(201).json({
         id: assistantId,
         name: assistantName,
@@ -1181,6 +1189,8 @@ export function workspaceRoutes({
       await connectionStore.seedWorkspacePrimaryFollows(workspaceId).catch((err) =>
         console.warn('[workspaces] seedWorkspacePrimaryFollows (adopt) failed:', err),
       )
+      // Adoption widens the workspace roster exactly like a create.
+      notifyWorkspaceChange(workspaceId, 'assistant', 'create', assistantId)
       res.json({ ok: true })
     } catch (err) {
       console.error('[workspaces] adopt assistant failed:', err)
@@ -1237,6 +1247,9 @@ export function workspaceRoutes({
         res.status(400).json({ error: 'Assistant not found in this team' })
         return
       }
+      // Detach narrows the roster — chrome still holding the removed
+      // assistant as its selected interlocutor must re-resolve.
+      notifyWorkspaceChange(workspaceId, 'assistant', 'delete', assistantId)
       res.json({ ok: true })
     } catch (err) {
       console.error('[workspaces] remove assistant failed:', err)
