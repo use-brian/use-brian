@@ -193,8 +193,16 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
 
   // ── GET /:workspaceId/:id ───────────────────────────────────────
   // Resolve the row under workspace RLS, mint a short-lived signed object read
-  // URL, and 302-redirect to it. The signed URL is NEVER logged or returned
-  // in a body — only as the redirect Location header.
+  // URL, and 302-redirect to it. `?redirect=0` returns `{ url }` as JSON
+  // instead — for fetch()-based consumers (PageIcon, chat attachment
+  // downloads), which CANNOT follow the redirect: a CORS fetch redirected
+  // across origins (app → api → storage.googleapis.com) gets a tainted
+  // origin, the browser sends `Origin: null` on the storage leg, the bucket
+  // CORS config only matches the app origins, and the browser blocks the
+  // response. The client fetches the minted URL directly (single-hop CORS,
+  // real app origin) instead. Same auth, same RLS, same short-lived URL as
+  // the redirect — the Location header was always delivered to this caller
+  // anyway; the signed URL is still never logged.
   router.get('/:workspaceId/:id', async (req, res) => {
     const userId = req.userId
     if (!userId) {
@@ -226,6 +234,10 @@ export function docFilesRoutes(deps: DocFilesDeps): Router {
       // a `file://` URL a browser can't navigate to — stream the bytes through
       // the API instead so `<img src>` works in local dev.
       if (/^https?:\/\//i.test(url)) {
+        if (req.query.redirect === '0') {
+          res.json({ url })
+          return
+        }
         res.redirect(302, url)
         return
       }

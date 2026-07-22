@@ -44,6 +44,44 @@ export function durableReadUrlFor(ref: FileRef, workspaceId: string): string | n
 }
 
 /**
+ * Fetch a durable `workspace_files` doc file's bytes as a Blob, for
+ * fetch()-based consumers (the `PageIcon` image-icon loader, chat
+ * attachment downloads).
+ *
+ * These consumers must NOT follow the read route's default 302 to the
+ * signed storage URL: a CORS fetch redirected across origins
+ * (app → api → storage.googleapis.com) gets a tainted origin — the browser
+ * sends `Origin: null` on the storage leg, the bucket CORS config only
+ * matches the app origins, and the browser blocks the response. So we ask
+ * the route for the signed URL in a JSON body (`?redirect=0`) and fetch it
+ * directly — a single-hop CORS request carrying the real app origin, which
+ * the bucket config allows. The local-disk dev backend streams the bytes
+ * from the route itself (no signed URL); that arrives as a non-JSON
+ * response and is returned as-is.
+ *
+ * Plain `<img src>` / download-anchor consumers keep using
+ * `durableReadUrlFor` — a no-CORS load follows the redirect fine.
+ */
+export async function fetchDocFileBlob(
+  workspaceId: string,
+  fileId: string,
+): Promise<Blob> {
+  const res = await authFetch(
+    `${API_URL}/api/doc-files/${encodeURIComponent(workspaceId)}/${encodeURIComponent(fileId)}?redirect=0`,
+  );
+  if (!res.ok) throw new Error(`doc file fetch failed: HTTP ${res.status}`);
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const { url } = (await res.json()) as { url?: string };
+    if (!url) throw new Error("doc file fetch failed: no signed url");
+    const bytes = await fetch(url);
+    if (!bytes.ok) throw new Error(`doc file fetch failed: HTTP ${bytes.status}`);
+    return bytes.blob();
+  }
+  return res.blob();
+}
+
+/**
  * Resolve any supported `FileRef` to a browser-loadable URL. Durable refs
  * resolve immediately; a legacy `file_cache` ref triggers an authenticated
  * mint round-trip for a signed preview URL. Returns null when the ref's bucket

@@ -11,8 +11,10 @@
  * historical `<span>`; image tokens render an `<img>` whose bytes load
  * through `GET /api/doc-files/:workspaceId/:fileId` — that route is
  * Bearer-auth only (no cookie), so a plain `<img src>` can't reach it:
- * we `authFetch` the bytes (following the 302 to the signed GCS URL) and
- * hand the element a blob object-URL.
+ * `fetchDocFileBlob` (doc-file-url.ts) mints the signed storage URL via
+ * `?redirect=0` + fetches it directly (a CORS fetch can't follow the
+ * route's cross-origin 302 — see the helper's comment), and we hand the
+ * element a blob object-URL.
  *
  * Object-URLs are cached module-level by token — a sidebar of N rows for
  * the same page must not fetch N times, and re-mounts (tab switches,
@@ -29,9 +31,7 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import { parseImageIcon } from "@use-brian/shared/page-icon";
-import { authFetch } from "@/lib/auth-fetch";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { fetchDocFileBlob } from "@/components/doc/doc-file-url";
 
 /** token → resolved object-URL (or in-flight promise). Module-level. */
 const iconUrlCache = new Map<string, string | Promise<string>>();
@@ -39,11 +39,7 @@ const iconUrlCache = new Map<string, string | Promise<string>>();
 async function loadIconUrl(icon: string): Promise<string> {
   const parsed = parseImageIcon(icon);
   if (!parsed) throw new Error("not an image icon");
-  const res = await authFetch(
-    `${API_URL}/api/doc-files/${encodeURIComponent(parsed.workspaceId)}/${encodeURIComponent(parsed.fileId)}`,
-  );
-  if (!res.ok) throw new Error(`icon fetch failed: HTTP ${res.status}`);
-  const blob = await res.blob();
+  const blob = await fetchDocFileBlob(parsed.workspaceId, parsed.fileId);
   return URL.createObjectURL(blob);
 }
 
