@@ -101,15 +101,28 @@ function toLink(row: EntityLinkRow): EntityLinkRecord {
 // ── Raw SQL helpers ──────────────────────────────────────────────────
 
 /**
- * Insert a new link. The actor for RLS is derived from the caller:
- * `userId` if present, else `assistantId`-owner, else `workspaceId`-
- * member. Since the create path is invoked by routes that already
- * authenticated, the visibility-double caller is responsible for
- * supplying at least one of `userId` / `assistantId` (CHECK constraint
- * mirrors).
+ * Insert a new link — ASSERT-EXISTS, not append. The actor for RLS is
+ * derived from the caller: `userId` if present, else `assistantId`-
+ * owner, else `workspaceId`-member. Since the create path is invoked by
+ * routes that already authenticated, the visibility-double caller is
+ * responsible for supplying at least one of `userId` / `assistantId`
+ * (CHECK constraint mirrors).
  *
  * RLS is engaged using `userId` when supplied; otherwise the row is
  * written as system-internal under the workspace partition.
+ *
+ * Idempotency (migration 354): one ACTIVE row per (workspace, source,
+ * target, edge_type) — `idx_entity_links_active_identity`, partial on
+ * `valid_to IS NULL AND retracted_at IS NULL`. Re-asserting an edge
+ * that already exists returns the EXISTING row instead of inserting a
+ * duplicate. This is the seam that ended the 2026-07-22 incident where
+ * the chat-retrieval local-match re-minted the same `mentioned` edge on
+ * every recall (one edge 946x, 85% of the table duplicates): edge
+ * writers are fire-and-forget by design, so uniqueness must live here,
+ * by construction, not in caller discipline. A row created with an
+ * explicit `validTo` is born outside the partial index and inserts
+ * plainly — closed historical windows never collide, and a closed or
+ * retracted edge can always be re-opened as a fresh active row.
  */
 export async function createEntityLink(
   actorUserId: string,
@@ -119,41 +132,75 @@ export async function createEntityLink(
   // (`now()` / `NULL`) handles the "currently active" case. Explicit
   // values flow through for past-relationship encoding ("Kinson left
   // DeltaDeFi in August 2025" → validTo set on creation).
-  const result = await queryWithRLS<EntityLinkRow>(
-    actorUserId,
-    `INSERT INTO entity_links (
-       source_kind, source_id, target_kind, target_id, edge_type,
-       attributes, source,
-       sensitivity, workspace_id, user_id, assistant_id,
-       source_episode_id,
-       valid_from, valid_to
-     )
-     VALUES (
-       $1, $2, $3, $4, $5,
-       $6::jsonb, $7,
-       $8, $9, $10, $11,
-       $12,
-       COALESCE($13::timestamptz, now()), $14::timestamptz
-     )
-     RETURNING ${FULL_SELECT}`,
-    [
-      params.sourceKind,
-      params.sourceId,
-      params.targetKind,
-      params.targetId,
-      params.edgeType,
-      JSON.stringify(params.attributes ?? {}),
-      params.source,
-      params.sensitivity ?? 'internal',
-      params.workspaceId,
-      params.userId ?? null,
-      params.assistantId ?? null,
-      params.sourceEpisodeId ?? null,
-      params.validFrom ?? null,
-      params.validTo ?? null,
-    ],
+  //
+  // Two attempts: insert (ON CONFLICT DO NOTHING → no row on duplicate)
+  // then read the existing active row back. The loop covers the one
+  // race the pair leaves open — a concurrent retract landing between
+  // the conflict and the read-back — by re-inserting.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await queryWithRLS<EntityLinkRow>(
+      actorUserId,
+      `INSERT INTO entity_links (
+         source_kind, source_id, target_kind, target_id, edge_type,
+         attributes, source,
+         sensitivity, workspace_id, user_id, assistant_id,
+         source_episode_id,
+         valid_from, valid_to
+       )
+       VALUES (
+         $1, $2, $3, $4, $5,
+         $6::jsonb, $7,
+         $8, $9, $10, $11,
+         $12,
+         COALESCE($13::timestamptz, now()), $14::timestamptz
+       )
+       ON CONFLICT (workspace_id, source_kind, source_id, target_kind, target_id, edge_type)
+         WHERE valid_to IS NULL AND retracted_at IS NULL
+         DO NOTHING
+       RETURNING ${FULL_SELECT}`,
+      [
+        params.sourceKind,
+        params.sourceId,
+        params.targetKind,
+        params.targetId,
+        params.edgeType,
+        JSON.stringify(params.attributes ?? {}),
+        params.source,
+        params.sensitivity ?? 'internal',
+        params.workspaceId,
+        params.userId ?? null,
+        params.assistantId ?? null,
+        params.sourceEpisodeId ?? null,
+        params.validFrom ?? null,
+        params.validTo ?? null,
+      ],
+    )
+    if (result.rows[0]) return toLink(result.rows[0])
+
+    const existing = await queryWithRLS<EntityLinkRow>(
+      actorUserId,
+      `SELECT ${FULL_SELECT} FROM entity_links
+        WHERE workspace_id = $1
+          AND source_kind = $2 AND source_id = $3
+          AND target_kind = $4 AND target_id = $5
+          AND edge_type = $6
+          AND valid_to IS NULL AND retracted_at IS NULL
+        LIMIT 1`,
+      [
+        params.workspaceId,
+        params.sourceKind,
+        params.sourceId,
+        params.targetKind,
+        params.targetId,
+        params.edgeType,
+      ],
+    )
+    if (existing.rows[0]) return toLink(existing.rows[0])
+  }
+  throw new Error(
+    `entity_links: create raced a concurrent retract twice for ` +
+      `${params.sourceKind}:${params.sourceId} → ${params.targetKind}:${params.targetId} (${params.edgeType})`,
   )
-  return toLink(result.rows[0])
 }
 
 export async function getEntityLinkById(
