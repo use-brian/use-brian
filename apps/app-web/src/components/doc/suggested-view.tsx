@@ -29,6 +29,8 @@ import {
   ChevronRight,
   Clock,
   FileText,
+  HandCoins,
+  ListChecks,
   RefreshCw,
   Sparkles,
   Target,
@@ -555,6 +557,36 @@ function cardConfig(kind: ResolvedNeed["kind"], workspaceId: string, t: Suggeste
         title: t.taskTriageTitle,
         fallbackCaption: t.taskTriageCaption,
         cta: t.taskTriageCta,
+      };
+    case "task_cleanup":
+      // Stale task backlog (open, untouched 30+ days) — deep-links into the
+      // Tasks operator surface with the Stale preset pre-applied, the same
+      // definition the surface's quick-filter uses (tasks-operator-surface
+      // §4). An entry point, not the home: the surface is always reachable
+      // from the Home app-bar regardless of this card.
+      return {
+        accent: "review" as const,
+        Icon: ListChecks,
+        href: `/w/${workspaceId}/tasks?filter=stale`,
+        panel: null as PanelId | null,
+        title: t.taskCleanupTitle,
+        fallbackCaption: t.taskCleanupCaption,
+        cta: t.taskCleanupCta,
+      };
+    case "deal_attention":
+      // Overdue pipeline (open deals past their close date) — deep-links
+      // into the CRM operator surface with the Overdue preset pre-applied,
+      // the same definition the surface's quick-filter uses
+      // (crm-operator-surface §6). An entry point, not the home: the
+      // surface is always reachable from the Home app-bar.
+      return {
+        accent: "review" as const,
+        Icon: HandCoins,
+        href: `/w/${workspaceId}/crm?filter=overdue`,
+        panel: null as PanelId | null,
+        title: t.dealAttentionTitle,
+        fallbackCaption: t.dealAttentionCaption,
+        cta: t.dealAttentionCta,
       };
     case "connector_attention":
       // A connected tool's credentials died at call time (health_status =

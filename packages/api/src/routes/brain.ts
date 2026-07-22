@@ -33,9 +33,19 @@ import type {
   SearchResultRow,
   Sensitivity,
 } from '@use-brian/core'
+import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core'
 import { query } from '../db/client.js'
+import { listCompanies, listContacts, listDeals } from '../db/crm.js'
+import { listTasks as listWorkspaceTasks } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
+
+/** Format a pg-parsed DATE (local-midnight Date) back to its YYYY-MM-DD. */
+function formatDateOnly(d: Date): string {
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
 
 // ── Web-shape contract — keep in sync with apps/web/src/lib/api/brain.ts ─
 
@@ -621,6 +631,137 @@ export function brainRoutes(deps: {
     const results = merged.slice(0, limit)
 
     res.status(200).json({ results, nextCursor: null })
+  })
+
+  /**
+   * GET /tasks?workspaceId=X — flat task list for the Tasks operator
+   * surface (`/w/[id]/tasks` in app-web). Unlike `/list` (relevance-mixed
+   * browse, compact projection), this returns EVERY live task the viewer
+   * can see (capped 500, `updated_at DESC`) with the full operator fields:
+   * due, attributes (priority lives at `attributes.priority`), parentId,
+   * updatedAt. Filtering/grouping happens client-side — the surface needs
+   * the whole backlog to render cleanup counts. Access control rides the
+   * same viewpoint + access-predicate path as `/list`.
+   *
+   * Spec: docs/architecture/features/tasks.md → "Operator surface".
+   * [COMP:brain/tasks-list-http]
+   */
+  router.get('/tasks', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : null
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId query param is required' })
+      return
+    }
+    const ctx = await resolveWorkspaceViewpoint(userId, workspaceId, null)
+    if (ctx === null) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    try {
+      // `status: TASK_STATUSES` (every status incl. archived) — the surface
+      // owns the active/completed fold client-side, and soft-deleted rows
+      // (`valid_to IS NOT NULL`) are already excluded by the store.
+      const rows = await listWorkspaceTasks(ctx, {
+        status: [...TASK_RECORD_STATUSES],
+        limit: 500,
+      })
+      res.status(200).json({
+        tasks: rows.map((t) => ({
+          id: t.id,
+          title: t.title,
+          status: t.status,
+          assigneeId: t.assigneeId,
+          due: t.due ? t.due.toISOString() : null,
+          tags: t.tags,
+          parentId: t.parentId,
+          attributes: t.attributes,
+          updatedAt: t.updatedAt.toISOString(),
+        })),
+      })
+    } catch (err) {
+      console.error('[brain] tasks list failed:', err)
+      res.status(500).json({ error: 'Internal error' })
+    }
+  })
+
+  /**
+   * GET /crm?workspaceId=X — flat CRM read for the CRM operator surface
+   * (`/w/[id]/crm` in app-web). Unlike `/list` (relevance-mixed browse,
+   * compact projection), this returns EVERY live deal / contact / company
+   * the viewer can see (capped 500 per kind, `updated_at DESC`) with the
+   * full operator fields in ONE payload — the client joins display names
+   * by id (contacts/companies are needed anyway for section counts and the
+   * company picker), keeping the v1 "no server joins" rule intact.
+   * Filtering / grouping / preset counts happen client-side over the whole
+   * working set. Access control rides the same viewpoint + access-predicate
+   * path as `/list` (the crm.ts helpers embed `buildAccessPredicate`).
+   *
+   * Spec: docs/architecture/features/crm.md → "Operator surface".
+   * [COMP:brain/crm-list-http]
+   */
+  router.get('/crm', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) {
+      res.status(401).json({ error: 'Unauthorized' })
+      return
+    }
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : null
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId query param is required' })
+      return
+    }
+    const ctx = await resolveWorkspaceViewpoint(userId, workspaceId, null)
+    if (ctx === null) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    try {
+      const [deals, contacts, companies] = await Promise.all([
+        listDeals(ctx, { limit: 500 }),
+        listContacts(ctx, { limit: 500 }),
+        listCompanies(ctx, { limit: 500 }),
+      ])
+      res.status(200).json({
+        deals: deals.map((d) => ({
+          id: d.id,
+          name: d.name,
+          stage: d.stage,
+          amount: d.amount,
+          // A calendar date, not an instant (crm.md decision 4) — ship the
+          // bare YYYY-MM-DD. pg parses DATE columns to LOCAL-midnight JS
+          // Dates, so format from local components; toISOString() would
+          // shift the day on a UTC+ box.
+          closeDate: d.closeDate ? formatDateOnly(d.closeDate) : null,
+          contactId: d.contactId,
+          companyId: d.companyId,
+          updatedAt: d.updatedAt.toISOString(),
+        })),
+        contacts: contacts.map((c) => ({
+          id: c.id,
+          name: c.name,
+          email: c.email,
+          phone: c.phone,
+          companyId: c.companyId,
+          tags: c.tags,
+          updatedAt: c.updatedAt.toISOString(),
+        })),
+        companies: companies.map((c) => ({
+          id: c.id,
+          name: c.name,
+          domain: c.domain,
+          tags: c.tags,
+          updatedAt: c.updatedAt.toISOString(),
+        })),
+      })
+    } catch (err) {
+      console.error('[brain] crm list failed:', err)
+      res.status(500).json({ error: 'Internal error' })
+    }
   })
 
   /**

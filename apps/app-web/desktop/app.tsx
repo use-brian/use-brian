@@ -73,6 +73,10 @@ import StudioKnowledgePage from "@/app/w/[workspaceId]/studio/knowledge/page";
 import StudioMiniAppsPage from "@/app/w/[workspaceId]/studio/mini-apps/page";
 import ProgrammaticAccessPage from "@/app/w/[workspaceId]/studio/programmatic-access/page";
 import WorkflowPage from "@/app/w/[workspaceId]/workflow/page";
+// Tasks + CRM operator surfaces — thin Next wrappers by design (feed-port
+// rule); the SPA imports the client components directly.
+import { TasksSurface } from "@/components/tasks/tasks-surface";
+import { CrmSurface } from "@/components/crm/crm-surface";
 import WorkflowDetailPage from "@/app/w/[workspaceId]/workflow/[id]/page";
 import WorkflowRunDetailPage from "@/app/w/[workspaceId]/workflow/[id]/runs/[runId]/page";
 import KbGapsPage from "@/app/w/[workspaceId]/knowledge-base/gaps/page";
@@ -164,6 +168,12 @@ export function App() {
                   element={<WorkspaceRedirect to="brain?view=skills" />}
                 />
               </Route>
+
+              {/* Tasks — the Tasks operator surface (Home app-bar). */}
+              <Route path="tasks" element={<TasksRoute />} />
+
+              {/* CRM — the CRM operator surface (Home app-bar, 4th slot). */}
+              <Route path="crm" element={<CrmRoute />} />
 
               {/* Workflow */}
               <Route path="workflow" element={<WorkflowPage />} />
@@ -438,6 +448,18 @@ function DocSurface() {
       <Outlet />
     </DocSurfaceLayout>
   );
+}
+
+/** Tasks operator surface — the SPA analogue of `tasks/page.tsx`. */
+function TasksRoute() {
+  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
+  return <TasksSurface workspaceId={workspaceId} />;
+}
+
+/** CRM operator surface — the SPA analogue of `crm/page.tsx`. */
+function CrmRoute() {
+  const { workspaceId = "" } = useParams<{ workspaceId: string }>();
+  return <CrmSurface workspaceId={workspaceId} />;
 }
 
 /** Studio surface — its grouped sub-nav layout wraps the section `<Outlet/>`. */

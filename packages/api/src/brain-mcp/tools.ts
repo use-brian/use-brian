@@ -134,6 +134,8 @@ export type BrainTaskTools = {
   updateTask: Tool
   closeTask: Tool
   reopenTask: Tool
+  bulkUpdateTasks: Tool
+  archiveTasks: Tool
 }
 
 export type BrainMemoryTools = {
@@ -1302,6 +1304,11 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     bridgeCoreTool(opts.taskTools.updateTask, resolveCtx, workspaceId),
     bridgeCoreTool(opts.taskTools.closeTask, resolveCtx, workspaceId),
     bridgeCoreTool(opts.taskTools.reopenTask, resolveCtx, workspaceId),
+    // Bulk pair — filter-scoped mass mutation. On the chat surface these are
+    // confirmation-gated; here (as with every brain-MCP write) the
+    // `read_write` scope IS the authorization and execute() runs directly.
+    bridgeCoreTool(opts.taskTools.bulkUpdateTasks, resolveCtx, workspaceId),
+    bridgeCoreTool(opts.taskTools.archiveTasks, resolveCtx, workspaceId),
   ]
 
   // ── CRM bridges
@@ -1445,7 +1452,8 @@ export function buildBrainTools(opts: BuildOpts): BrainTool[] {
     ingestToBrain,
     ...taskBridges.filter((t) =>
       t.name === 'saveTask' || t.name === 'updateTask' ||
-      t.name === 'closeTask' || t.name === 'reopenTask',
+      t.name === 'closeTask' || t.name === 'reopenTask' ||
+      t.name === 'bulkUpdateTasks' || t.name === 'archiveTasks',
     ),
     ...crmBridges.filter((t) =>
       t.name === 'saveContact' || t.name === 'updateContact' ||

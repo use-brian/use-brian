@@ -81,6 +81,8 @@ const TASK_TOOLS_STUB: BrainTaskTools = {
   updateTask: stubCoreTool('updateTask'),
   closeTask: stubCoreTool('closeTask'),
   reopenTask: stubCoreTool('reopenTask'),
+  bulkUpdateTasks: stubCoreTool('bulkUpdateTasks'),
+  archiveTasks: stubCoreTool('archiveTasks'),
 }
 
 const CRM_TOOLS_STUB: BrainCrmTools = {
@@ -172,6 +174,8 @@ const READ_TOOL_NAMES = [
 
 const WRITE_TOOL_NAMES = [
   'advanceDealStage',
+  'archiveTasks',
+  'bulkUpdateTasks',
   'closeTask',
   'deleteMemory',
   'fileAppend',

@@ -104,7 +104,7 @@ function makeFakeStore(): CrmStore & { data: FakeData } {
       if (filters.companyId) rows = rows.filter((r) => r.companyId === filters.companyId)
       return rows.slice(0, filters.limit ?? 25).map((r) => ({
         id: r.id, workspaceId: r.workspaceId, entityId: r.entityId, name: r.name, email: r.email,
-        companyId: r.companyId, tags: r.tags, updatedAt: r.updatedAt,
+        phone: r.phone, companyId: r.companyId, tags: r.tags, updatedAt: r.updatedAt,
       }))
     },
     async updateContact(_userId, id, fields) {
@@ -145,6 +145,7 @@ function makeFakeStore(): CrmStore & { data: FakeData } {
         id: newId('33333333'),
         workspaceId: params.workspaceId,
         entityId: newId('e3333333'),
+        name: 'Deal',
         contactId: params.contactId ?? null,
         companyId: params.companyId ?? null,
         stage: params.stage ?? 'lead',
@@ -170,7 +171,8 @@ function makeFakeStore(): CrmStore & { data: FakeData } {
       if (filters.contactId) rows = rows.filter((r) => r.contactId === filters.contactId)
       if (filters.companyId) rows = rows.filter((r) => r.companyId === filters.companyId)
       return rows.slice(0, filters.limit ?? 25).map((r) => ({
-        id: r.id, workspaceId: r.workspaceId, entityId: r.entityId, contactId: r.contactId, companyId: r.companyId,
+        id: r.id, workspaceId: r.workspaceId, entityId: r.entityId, name: r.name,
+        contactId: r.contactId, companyId: r.companyId,
         stage: r.stage, amount: r.amount, closeDate: r.closeDate, updatedAt: r.updatedAt,
       }))
     },

@@ -336,7 +336,11 @@ export async function listTasks(ctx: AccessContext, filters: TaskListFilters): P
     idx++
   }
 
-  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
+  // DB-layer clamp is 500 for the Tasks operator surface's flat browse
+  // (`GET /api/brain/tasks`); the model-facing `listTasks` tool keeps its
+  // own zod clamp at 100 so chat payloads stay small (tasks.md → "Operator
+  // surface").
+  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 500)
   values.push(limit)
 
   const result = await queryGated<CompactRow>(

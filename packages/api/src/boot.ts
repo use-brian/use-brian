@@ -2534,6 +2534,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('updateTask', taskTools.updateTask)
   allTools.set('closeTask', taskTools.closeTask)
   allTools.set('reopenTask', taskTools.reopenTask)
+  // Bulk pair — confirmation-gated backlog cleanup ("clean up my tasks" as
+  // one instruction; tasks.md → "Bulk tools").
+  allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
+  allTools.set('archiveTasks', taskTools.archiveTasks)
 
   // ── Goal-seeker kickoff tools (default-on 'goals' capability) ──
   const goalTools = createGoalTools(goalStore, {
@@ -4064,6 +4068,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     entityKindClassifier,
     pendingClassificationStore: ports.pendingClassificationStore,
     filesApi,
+    entityLinks: entityLinksStore,
   }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
