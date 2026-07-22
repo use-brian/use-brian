@@ -62,6 +62,24 @@ describe("[COMP:app-web/block-data] translateCommit (move-card group field)", ()
   });
 });
 
+describe("[COMP:app-web/block-data] translateCommit (calendar reschedule)", () => {
+  it("maps a calendar day-drop onto the tasks due PATCH", () => {
+    // The Calendar fires `reschedule { dateField: 'due', date: 'YYYY-MM-DD' }`;
+    // the server's PATCH /tasks/:id parses the bare day via Date.parse.
+    expect(translateCommit("due", "2026-08-05")).toEqual({ due: "2026-08-05" });
+  });
+
+  it("unwraps a DateWidget value to its iso for a date field", () => {
+    expect(
+      translateCommit("due", { type: "date", iso: "2026-08-05T00:00:00.000Z", format: "relative" }),
+    ).toEqual({ due: "2026-08-05T00:00:00.000Z" });
+  });
+
+  it("clears the date on null", () => {
+    expect(translateCommit("due", null)).toEqual({ due: null });
+  });
+});
+
 describe("[COMP:app-web/block-data] applyOverrides", () => {
   const table: TableWidget = {
     type: "table",

@@ -30,6 +30,35 @@ describe('[COMP:views/schema] BindingConfig discriminated union', () => {
     expect(() => bindingConfigSchema.parse(cfg)).not.toThrow()
   })
 
+  it('accepts a tasks/calendar binding requiring due dateBy', () => {
+    const cfg: BindingConfig = {
+      entity: 'tasks',
+      viewType: 'calendar',
+      dateBy: 'due',
+    }
+    expect(() => bindingConfigSchema.parse(cfg)).not.toThrow()
+  })
+
+  it('accepts tasks/calendar with status/assignee/tag filters', () => {
+    const cfg: BindingConfig = {
+      entity: 'tasks',
+      viewType: 'calendar',
+      dateBy: 'due',
+      filters: { status: ['todo'], tag: 'marketing' },
+    }
+    expect(() => bindingConfigSchema.parse(cfg)).not.toThrow()
+  })
+
+  it('rejects tasks/calendar without dateBy', () => {
+    const bad = { entity: 'tasks', viewType: 'calendar' }
+    expect(() => bindingConfigSchema.parse(bad)).toThrow()
+  })
+
+  it('rejects deals/calendar (tasks-only in v1)', () => {
+    const bad = { entity: 'deals', viewType: 'calendar', dateBy: 'close_date' }
+    expect(() => bindingConfigSchema.parse(bad)).toThrow()
+  })
+
   it('rejects companies/board (no board support per locked decision)', () => {
     const bad = { entity: 'companies', viewType: 'board' }
     expect(() => bindingConfigSchema.parse(bad)).toThrow()

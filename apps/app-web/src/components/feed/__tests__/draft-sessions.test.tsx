@@ -92,12 +92,16 @@ function workspace(profiles: FeedProfile[]): FeedWorkspaceValue {
     canDraft: true,
     me: { id: "u-1" },
     profiles,
+    assistants: [],
     refresh: async () => {},
   };
 }
 
-function renderList(profiles: FeedProfile[]): string {
-  workspaceRef.current = workspace(profiles);
+function renderList(
+  profiles: FeedProfile[],
+  assistants: Array<{ id: string; name: string }> = [],
+): string {
+  workspaceRef.current = { ...workspace(profiles), assistants };
   paramsRef.current = { workspaceId: "ws-1", platform: "threads" };
   return renderToString(
     <I18nProvider locale="en" dict={dict}>
@@ -106,8 +110,11 @@ function renderList(profiles: FeedProfile[]): string {
   );
 }
 
-function renderDetail(profiles: FeedProfile[]): string {
-  workspaceRef.current = workspace(profiles);
+function renderDetail(
+  profiles: FeedProfile[],
+  assistants: Array<{ id: string; name: string }> = [],
+): string {
+  workspaceRef.current = { ...workspace(profiles), assistants };
   paramsRef.current = {
     workspaceId: "ws-1",
     platform: "threads",
@@ -136,11 +143,18 @@ describe("[COMP:app-web/feed-draft-sessions] Draft sessions", () => {
     expect(html).not.toContain('role="tablist"');
   });
 
-  it("list: no profile on the platform paints the connect-first gate linking to the feed home", () => {
-    const html = renderList([profile("twitter", "acme")]);
-    expect(html).toContain("Connect Threads first");
+  it("list: no brand voice at all paints the no-brand gate linking to the feed home", () => {
+    const html = renderList([]);
+    expect(html).toContain(td.noBrandTitle);
     expect(html).toContain("/w/ws-1/feed");
     expect(html).not.toContain(td.subtitle);
+  });
+
+  it("list: an unconnected platform still drafts via the brand assistant (feed-create-split D7/D8)", () => {
+    const html = renderList([], [{ id: "a-brand", name: "Brand EN" }]);
+    expect(html).toContain("Drafts · Threads");
+    expect(html).toContain(td.subtitle);
+    expect(html).toContain(td.newPost);
   });
 
   // ── Detail: static render contract ───────────────────────────
@@ -153,11 +167,16 @@ describe("[COMP:app-web/feed-draft-sessions] Draft sessions", () => {
     expect(html).not.toContain(td.chatEmptyPrefix);
   });
 
-  it("detail: no profile on the platform paints the not-connected gate", () => {
+  it("detail: no brand voice at all paints the no-brand gate", () => {
     const html = renderDetail([]);
-    expect(html).toContain("Threads not connected");
-    expect(html).toContain("Connect Threads");
+    expect(html).toContain(td.noBrandTitle);
     expect(html).not.toContain(td.loadingConversation);
+  });
+
+  it("detail: an unconnected platform still opens via the brand assistant", () => {
+    const html = renderDetail([], [{ id: "a-brand", name: "Brand EN" }]);
+    expect(html).toContain(td.loadingConversation);
+    expect(html).not.toContain(td.noBrandTitle);
   });
 
   // ── List: pure helpers ───────────────────────────────────────
@@ -195,8 +214,10 @@ describe("[COMP:app-web/feed-draft-sessions] Draft sessions", () => {
       rejected: number,
       deleted: number,
       draftText: string | null = null,
-    ) => ({ draftCounts: { pending, posted, rejected, deleted }, draftText });
+      ready = 0,
+    ) => ({ draftCounts: { pending, ready, posted, rejected, deleted }, draftText });
     expect(deriveStatus(counts(1, 2, 3, 4))).toBe("ready");
+    expect(deriveStatus(counts(0, 0, 0, 0, null, 1))).toBe("ready-to-post");
     expect(deriveStatus(counts(0, 1, 1, 1))).toBe("posted");
     expect(deriveStatus(counts(0, 0, 1, 1))).toBe("deleted");
     expect(deriveStatus(counts(0, 0, 1, 0))).toBe("resolved");
@@ -370,6 +391,37 @@ describe("[COMP:app-web/feed-draft-sessions] Draft sessions", () => {
       )?.permalink,
     ).toBe("https://www.threads.com/@a/post/ABC");
     expect(findParsedPostUrl("no links here")).toBeNull();
+  });
+
+  it("parsePostUrl: parses Instagram and XHS post URLs for reference tiles (D13)", () => {
+    expect(parsePostUrl("https://www.instagram.com/p/Abc12_-3/?igsh=x")).toEqual({
+      platform: "instagram",
+      handle: null,
+      shortcode: "Abc12_-3",
+      permalink: "https://www.instagram.com/p/Abc12_-3/",
+    });
+    expect(
+      parsePostUrl("https://www.instagram.com/someuser/reel/Xyz789"),
+    ).toMatchObject({ platform: "instagram", handle: "someuser", shortcode: "Xyz789" });
+    expect(
+      parsePostUrl("https://www.xiaohongshu.com/explore/66a1b2c3d4e5f607?xsec=1"),
+    ).toEqual({
+      platform: "xhs",
+      handle: null,
+      noteId: "66a1b2c3d4e5f607",
+      permalink: "https://www.xiaohongshu.com/explore/66a1b2c3d4e5f607",
+    });
+    expect(parsePostUrl("https://xhslink.com/AbC123")).toMatchObject({
+      platform: "xhs",
+      noteId: "AbC123",
+    });
+    // Non-post paths on the new hosts stay unparsed.
+    expect(parsePostUrl("https://www.instagram.com/someuser/")).toBeNull();
+    expect(parsePostUrl("https://www.xiaohongshu.com/user/profile/abc")).toBeNull();
+    // findParsedPostUrl picks the new hosts out of chat text too.
+    expect(
+      findParsedPostUrl("look at https://www.instagram.com/p/Abc123/ pls")?.platform,
+    ).toBe("instagram");
   });
 
   it("explainResolveFailure: maps the backend reason to operator copy", () => {

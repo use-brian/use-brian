@@ -92,6 +92,19 @@ const tasksBoardSchema = z.object({
   columns: z.array(z.enum(TASK_COLUMN_IDS)).optional(),
 })
 
+const tasksCalendarSchema = z.object({
+  entity: z.literal('tasks'),
+  viewType: z.literal('calendar'),
+  // Required literal, mirroring the board's `groupBy` — see types.ts.
+  dateBy: z.literal('due'),
+  filters: z.object({
+    status: z.array(z.enum(TASK_STATUSES)).optional(),
+    assigneeId: uuid.optional(),
+    tag: z.string().min(1).max(64).optional(),
+  }).optional(),
+  columns: z.array(z.enum(TASK_COLUMN_IDS)).optional(),
+})
+
 const contactsTableSchema = z.object({
   entity: z.literal('contacts'),
   viewType: z.literal('table'),
@@ -168,6 +181,7 @@ const customEntityTableSchema = z.object({
 export const bindingConfigSchema: z.ZodType<BindingConfig> = z.union([
   tasksTableSchema,
   tasksBoardSchema,
+  tasksCalendarSchema,
   contactsTableSchema,
   companiesTableSchema,
   dealsTableSchema,

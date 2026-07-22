@@ -454,6 +454,33 @@ async function buildTasksBoard(
   }
 }
 
+async function buildTasksCalendar(
+  config: Extract<BindingConfig, { entity: 'tasks'; viewType: 'calendar' }>,
+  deps: BindingDeps,
+): Promise<A2UIWidget> {
+  // The date axis column must be present for the renderer to place rows
+  // (`dateColumnId` must resolve against every row) — force-include `due`
+  // even when the caller's column subset omits it.
+  const requested = config.columns ?? DEFAULT_TASK_COLUMNS
+  const columns: TaskColumnId[] = requested.includes('due')
+    ? requested
+    : [...requested, 'due']
+  const rows = await deps.taskStore.list(bindingCtx(deps), {
+    assigneeId: config.filters?.assigneeId,
+    status: config.filters?.status,
+    tag: config.filters?.tag,
+  })
+  const memberMap = await resolveTaskMembers(rows, columns, deps)
+  return {
+    type: 'calendar',
+    columns: buildTaskColumns(columns),
+    rows: rows.map((r) => buildTaskRow(r, columns, memberMap)),
+    dateColumnId: config.dateBy,
+    rowAction: { id: 'open-entity', params: { entity: 'tasks' } },
+    initialView: 'month',
+  }
+}
+
 // ── Contacts bindings ─────────────────────────────────────────────────
 
 function contactCell(
@@ -951,7 +978,9 @@ export async function buildPayload(
     case 'tasks':
       root = config.viewType === 'table'
         ? await buildTasksTable(config, deps)
-        : await buildTasksBoard(config, deps)
+        : config.viewType === 'board'
+          ? await buildTasksBoard(config, deps)
+          : await buildTasksCalendar(config, deps)
       break
     case 'contacts':
       root = await buildContactsTable(config, deps)

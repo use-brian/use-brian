@@ -23,6 +23,7 @@ export type {
   ListWidget,
   BoardWidget,
   GalleryWidget,
+  CalendarWidget,
   TimelineWidget,
   KpiWidget,
   BarChartWidget,

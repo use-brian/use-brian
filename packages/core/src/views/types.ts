@@ -3,8 +3,8 @@
  * binding configs.
  *
  * The discriminated union on `BindingConfig` encodes the locked decisions
- * from docs/plans/company-brain.md §16:
- *   - tasks: table | board (group by status)
+ * from docs/plans/company-brain.md §16 (calendar added by migration 357):
+ *   - tasks: table | board (group by status) | calendar (dateBy due)
  *   - deals: table | board (group by stage)
  *   - contacts / companies / workflow_runs: table-only
  *
@@ -30,7 +30,7 @@ export const VIEW_ENTITIES = [
 ] as const
 export type ViewEntity = (typeof VIEW_ENTITIES)[number]
 
-export const VIEW_TYPES = ['table', 'board'] as const
+export const VIEW_TYPES = ['table', 'board', 'calendar'] as const
 export type ViewType = (typeof VIEW_TYPES)[number]
 
 // ── Per-entity column ids ─────────────────────────────────────────────
@@ -160,6 +160,23 @@ export type TasksBoardBinding = {
   columns?: TaskColumnId[]
 }
 
+export type TasksCalendarBinding = {
+  entity: 'tasks'
+  viewType: 'calendar'
+  /**
+   * Only `due` is a valid date axis in v1 — mirrors the board's required
+   * `groupBy` literal so the discriminator stays two explicit fields and a
+   * future deals calendar (`dateBy: 'close_date'`) is additive.
+   */
+  dateBy: 'due'
+  filters?: {
+    status?: TaskRecordStatus[]
+    assigneeId?: string
+    tag?: string
+  }
+  columns?: TaskColumnId[]
+}
+
 export type ContactsTableBinding = {
   entity: 'contacts'
   viewType: 'table'
@@ -246,6 +263,7 @@ type CustomEntityTableBinding = {
 export type BindingConfig =
   | TasksTableBinding
   | TasksBoardBinding
+  | TasksCalendarBinding
   | ContactsTableBinding
   | CompaniesTableBinding
   | DealsTableBinding

@@ -30,6 +30,7 @@ import type {
 import {
   Briefcase,
   Building2,
+  CalendarDays,
   CheckSquare,
   FileText,
   LayoutGrid,
@@ -49,7 +50,7 @@ export type ViewEntity =
   | "companies"
   | "deals"
   | "workflow_runs";
-export type ViewType = "table" | "board";
+export type ViewType = "table" | "board" | "calendar";
 export type ViewState = "draft" | "saved";
 
 /**
@@ -75,6 +76,8 @@ export type BindingConfig = {
   filters?: Record<string, unknown>;
   columns?: string[];
   groupBy?: string;
+  /** Calendar date axis (`'due'` for tasks/calendar) — mirrors core `dateBy`. */
+  dateBy?: string;
   /**
    * Notion-database per-view display state (column widths / order / hidden /
    * frozen-count / sort / filter chips). Migration-free: it rides on the data
@@ -1481,8 +1484,10 @@ export function derivePageIcon(params: {
     case "workflow_runs":
       return Workflow;
     default:
-      // No entity match — distinguish a board layout from a plain doc.
-      return params.viewType === "board" ? LayoutGrid : FileText;
+      // No entity match — distinguish a board/calendar layout from a plain doc.
+      if (params.viewType === "board") return LayoutGrid;
+      if (params.viewType === "calendar") return CalendarDays;
+      return FileText;
   }
 }
 

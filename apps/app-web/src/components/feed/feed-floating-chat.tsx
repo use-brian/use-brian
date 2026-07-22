@@ -44,12 +44,14 @@ import { useT } from "@/lib/i18n/client";
 type ChatAssistant = { id: string; name: string };
 
 export function FeedFloatingChat() {
-  const { workspaceId, profiles } = useFeedWorkspace();
+  const { workspaceId, profiles, assistants: brandAssistants } = useFeedWorkspace();
   const t = useT().feedPage.tuningChat;
 
   // One distinct assistant per id — a workspace may connect several
   // platforms, but they fan out from the same brand assistant. Dedupe so
-  // the picker (if shown) lists each assistant once.
+  // the picker (if shown) lists each assistant once. Unconnected brand
+  // voices (Create split, feed-create-split.md D7) join the list so the
+  // tuning chat works with zero connections.
   const assistants = useMemo<ChatAssistant[]>(() => {
     const seen = new Map<string, ChatAssistant>();
     for (const p of profiles) {
@@ -57,8 +59,13 @@ export function FeedFloatingChat() {
         seen.set(p.assistant.id, { id: p.assistant.id, name: p.assistant.name });
       }
     }
+    for (const a of brandAssistants) {
+      if (!seen.has(a.id)) {
+        seen.set(a.id, { id: a.id, name: a.name });
+      }
+    }
     return [...seen.values()];
-  }, [profiles]);
+  }, [profiles, brandAssistants]);
 
   const [expanded, setExpanded] = useState(false);
   const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
@@ -199,7 +206,7 @@ export function FeedFloatingChat() {
         tabIndex={expanded ? -1 : 0}
         className={cn(
           "inline-flex h-14 w-14 items-center justify-center rounded-full",
-          "bg-primary text-primary-foreground shadow-xl shadow-primary/30",
+          "bg-primary text-primary-foreground shadow-lg",
           "transition-[opacity,transform] duration-200 ease-out hover:bg-primary/90 active:scale-95",
           expanded ? "opacity-0 scale-90 pointer-events-none" : "opacity-100 scale-100",
         )}

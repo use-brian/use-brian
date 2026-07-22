@@ -36,7 +36,7 @@ import {
   type TaskRow,
   type TaskStatus,
 } from "@/lib/api/tasks";
-import { taskProject, tagsWithProject } from "@/lib/tasks-view";
+import { localIsoDay, taskProject, tagsWithProject } from "@/lib/tasks-view";
 import {
   memberDisplayName,
   resolveAssignee,
@@ -198,7 +198,7 @@ export function TaskRecordDetail({
           <DateProperty
             icon={<Calendar />}
             label={drawerLabels.due_at ?? tp.filterDue}
-            value={row.due ? row.due.slice(0, 10) : ""}
+            value={row.due ? localIsoDay(row.due) : ""}
             onCommit={(next) =>
               commitField(
                 row,

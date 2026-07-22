@@ -10,7 +10,12 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { buildMemoryContext, type VoiceRuleEntry } from '../context-builder.js'
+import {
+  buildMemoryContext,
+  voicePlatformFromDraftTitle,
+  VOICE_PLATFORM_TAGS,
+  type VoiceRuleEntry,
+} from '../context-builder.js'
 
 function rule(over: Partial<VoiceRuleEntry> = {}): VoiceRuleEntry {
   return {
@@ -51,6 +56,67 @@ describe('[COMP:memory/category-loader] buildMemoryContext voice rules', () => {
       teamVoiceRules: [rule({ detail: 'Avoid passive constructions.' })],
     })
     expect(out).toContain('[id:11111111] Use active voice\n  Avoid passive constructions.')
+  })
+
+  it('filters other-platform rules in a draft session targeting one platform', () => {
+    const out = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      voiceTargetPlatform: 'xhs',
+      teamVoiceRules: [
+        rule({ id: 'aaaaaaaa-1', summary: 'General warmth', tags: ['voice'] }),
+        rule({ id: 'bbbbbbbb-1', summary: 'Emoji-heavy hooks', tags: ['voice', 'xhs'] }),
+        rule({ id: 'cccccccc-1', summary: 'Terse and dry', tags: ['voice', 'twitter'] }),
+      ],
+    })
+    expect(out).toContain('General warmth')
+    expect(out).toContain('[xhs] Emoji-heavy hooks')
+    expect(out).not.toContain('Terse and dry')
+  })
+
+  it('renders every rule with platform labels when no target platform is set (tuning chat)', () => {
+    const out = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      teamVoiceRules: [
+        rule({ id: 'aaaaaaaa-1', summary: 'General warmth' }),
+        rule({ id: 'bbbbbbbb-1', summary: 'Emoji-heavy hooks', tags: ['voice', 'xhs'] }),
+        rule({ id: 'cccccccc-1', summary: 'Terse and dry', tags: ['voice', 'twitter', 'threads'] }),
+      ],
+    })
+    expect(out).toContain('[id:aaaaaaaa] General warmth')
+    expect(out).toContain('[xhs] Emoji-heavy hooks')
+    expect(out).toContain('[twitter, threads] Terse and dry')
+    expect(out).toContain('applies only when writing for that platform')
+  })
+
+  it('omits the platform-label preamble sentence when no rule is scoped', () => {
+    const out = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      teamVoiceRules: [rule({ tags: ['voice'] })],
+    })
+    expect(out).not.toContain('applies only when writing for that platform')
+  })
+
+  it('omits the block entirely when the target platform filters out every rule', () => {
+    const out = buildMemoryContext({
+      identityMemories: [],
+      memoryIndex: [],
+      voiceTargetPlatform: 'instagram',
+      teamVoiceRules: [rule({ tags: ['voice', 'twitter'] })],
+    })
+    expect(out).not.toContain('## Voice Rules')
+  })
+
+  it('voicePlatformFromDraftTitle reads the draft title prefix', () => {
+    expect(voicePlatformFromDraftTitle('[xhs] New draft')).toBe('xhs')
+    expect(voicePlatformFromDraftTitle('[twitter] Reply to @jane')).toBe('twitter')
+    expect(voicePlatformFromDraftTitle('[mastodon] New draft')).toBeNull()
+    expect(voicePlatformFromDraftTitle('New Chat')).toBeNull()
+    expect(voicePlatformFromDraftTitle(null)).toBeNull()
+    // The tag set mirrors the feed target platforms.
+    expect(VOICE_PLATFORM_TAGS).toEqual(['instagram', 'threads', 'twitter', 'xhs'])
   })
 
   it('places the Voice Rules block after the Team Context block', () => {

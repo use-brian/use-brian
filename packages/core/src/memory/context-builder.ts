@@ -48,12 +48,46 @@ export type IdentityMemory = {
   detail: string | null
 }
 
+/**
+ * Platform tags a voice rule may carry to scope itself to ONE target
+ * platform of the Feed Create split (docs/architecture/feed/voice-learning.md
+ * → "Per-platform voice"). Mirrors `FEED_TARGET_PLATFORMS`
+ * (`packages/api-platform/src/db/feed-store.ts`) and app-web's
+ * `FEED_PLATFORMS` — a cross-package drift test in api-platform asserts the
+ * mirror. A rule with none of these tags is the general brand voice.
+ */
+export const VOICE_PLATFORM_TAGS = ['instagram', 'threads', 'twitter', 'xhs'] as const
+export type VoicePlatformTag = (typeof VOICE_PLATFORM_TAGS)[number]
+
+export function isVoicePlatformTag(value: string): value is VoicePlatformTag {
+  return (VOICE_PLATFORM_TAGS as readonly string[]).includes(value)
+}
+
+/**
+ * The target platform of a draft session, read off its `[platform]` title
+ * prefix (the draft-session store's discriminator — see
+ * docs/architecture/feed/draft-sessions.md). Null when the title carries no
+ * known platform prefix (tuning chat, non-draft sessions, legacy titles).
+ */
+export function voicePlatformFromDraftTitle(
+  title: string | null | undefined,
+): VoicePlatformTag | null {
+  const m = /^\[([a-z0-9_-]+)\]/.exec(title ?? '')
+  return m && isVoicePlatformTag(m[1]) ? m[1] : null
+}
+
 export type VoiceRuleEntry = {
   id: string
   summary: string
   detail: string | null
   /** Confidence stamped by the voice-import skill (0.0–1.0). */
   confidence: number
+  /**
+   * The memory's free-form tags. Any `VOICE_PLATFORM_TAGS` member among
+   * them scopes the rule to that platform (multiple = applies to each);
+   * none = general brand voice. Optional for caller back-compat.
+   */
+  tags?: string[]
 }
 
 export function buildMemoryContext(params: {
@@ -72,6 +106,15 @@ export function buildMemoryContext(params: {
    * See docs/architecture/feed/voice-learning.md.
    */
   teamVoiceRules?: VoiceRuleEntry[]
+  /**
+   * The draft session's target platform (a `VOICE_PLATFORM_TAGS` member) —
+   * set only for `mode='draft'` sessions, from the `[platform]` title
+   * prefix. When set, platform-scoped voice rules for OTHER platforms are
+   * dropped from the block; when null/absent (tuning chat, ordinary
+   * sessions), every rule renders and platform-scoped ones carry their
+   * platform label so the operator's cross-platform view stays honest.
+   */
+  voiceTargetPlatform?: string | null
   /**
    * Team purpose — the grounding string the team owner set at creation.
    * When provided (truthy), the `## Team Context` block always renders
@@ -202,16 +245,33 @@ export function buildMemoryContext(params: {
   // Voice Rules block — team memories tagged category='voice'. Renders only
   // when at least one rule exists (so non-distribution assistants see no
   // dead block). Sits between Team Context and the personal memory index.
-  // See docs/architecture/feed/voice-learning.md.
-  const voiceRules = params.teamVoiceRules ?? []
+  // Platform-scoped rules (a VOICE_PLATFORM_TAGS member among the memory's
+  // tags) filter against `voiceTargetPlatform` in draft sessions and render
+  // labelled everywhere else. See docs/architecture/feed/voice-learning.md.
+  const allVoiceRules = params.teamVoiceRules ?? []
+  const voiceTarget = params.voiceTargetPlatform ?? null
+  const rulePlatforms = (rule: VoiceRuleEntry): VoicePlatformTag[] =>
+    (rule.tags ?? []).filter(isVoicePlatformTag)
+  const voiceRules = voiceTarget
+    ? allVoiceRules.filter((rule) => {
+        const platforms = rulePlatforms(rule)
+        return platforms.length === 0 || (platforms as string[]).includes(voiceTarget)
+      })
+    : allVoiceRules
   if (voiceRules.length > 0) {
+    const anyScoped = voiceRules.some((rule) => rulePlatforms(rule).length > 0)
     const voiceParts: string[] = [
       '## Voice Rules',
-      "These rules describe the brand's published voice. Apply them when drafting outbound posts and replies. They are persistent and team-scoped — every member sees the same rules. Do not narrate the rules back at the operator; let them shape the output silently.",
+      "These rules describe the brand's published voice. Apply them when drafting outbound posts and replies. They are persistent and team-scoped — every member sees the same rules. Do not narrate the rules back at the operator; let them shape the output silently." +
+        (anyScoped
+          ? ' A rule marked with a [platform] label applies only when writing for that platform.'
+          : ''),
     ]
     const lines: string[] = []
     for (const rule of voiceRules) {
-      const head = `- [id:${rule.id.slice(0, 8)}] ${rule.summary}`
+      const platforms = rulePlatforms(rule)
+      const scopeLabel = platforms.length > 0 ? `[${platforms.join(', ')}] ` : ''
+      const head = `- [id:${rule.id.slice(0, 8)}] ${scopeLabel}${rule.summary}`
       const detail = rule.detail?.trim()
       lines.push(detail ? `${head}\n  ${detail}` : head)
     }

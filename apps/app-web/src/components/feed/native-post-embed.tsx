@@ -18,6 +18,7 @@
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { FeedPlatform } from "@/lib/feed-nav";
+import { PlatformIcon } from "@/components/feed/platform-icon";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -95,6 +96,61 @@ import { format } from "@/lib/i18n/format";
  * needs to be repeated, or the user simply waits and refreshes.
  */
 export function NativeEmbed({
+  platform,
+  permalink,
+}: {
+  platform: FeedPlatform;
+  permalink: string;
+}) {
+  // Instagram/XHS have no embeddable script pipeline (XHS none at all;
+  // Instagram's requires an app token) — reference tiles for them render as
+  // a plain link card instead (feed-create-split.md D13). Hooks below this
+  // guard only ever run for the script-embeddable platforms.
+  if (platform === "instagram" || platform === "xhs") {
+    return <LinkRefCard platform={platform} permalink={permalink} />;
+  }
+  return <ScriptEmbed platform={platform} permalink={permalink} />;
+}
+
+/**
+ * Link-card reference tile for platforms without a native embed script —
+ * platform icon + trimmed permalink + open-in-new-tab, in the app card
+ * chrome. Deliberately quiet: the reference's content lives on the platform;
+ * the card just keeps the source one click away.
+ */
+function LinkRefCard({
+  platform,
+  permalink,
+}: {
+  platform: FeedPlatform;
+  permalink: string;
+}) {
+  const t = useT().feedPage;
+  const label = t.platformLabels[platform];
+  return (
+    <a
+      href={permalink}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="flex items-center gap-3 rounded-xl border border-border/60 bg-card px-4 py-3 shadow-xs hover:bg-accent/50 transition-colors"
+    >
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-foreground/70">
+        <PlatformIcon platform={platform} className="size-4" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[13px] font-medium">{label}</span>
+        <span className="block truncate text-[12px] text-muted-foreground">
+          {prettyPermalink(permalink)}
+        </span>
+      </span>
+      <span aria-hidden className="shrink-0 text-muted-foreground">
+        ↗
+      </span>
+    </a>
+  );
+}
+
+function ScriptEmbed({
   platform,
   permalink,
 }: {
@@ -746,7 +802,7 @@ export function PostDraftPreview({
     );
   }
   return (
-    <article className="rounded-2xl border border-border bg-card overflow-hidden">
+    <article className="rounded-xl border border-border/60 bg-card overflow-hidden shadow-xs">
       <div className="flex items-center gap-3 px-4 pt-3 pb-2 border-b border-border/60">
         <ProfileAvatar
           url={avatarUrl ?? null}

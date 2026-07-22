@@ -199,6 +199,8 @@ function providerDisplayName(provider: string): string {
       return 'Gmail'
     case 'gdrive':
       return 'Google Drive'
+    case 'imap':
+      return 'Company email (IMAP)'
     default:
       return provider
   }

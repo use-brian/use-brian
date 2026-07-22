@@ -75,6 +75,9 @@ import {
   connectTelegramChannel,
   connectDiscordChannel,
   connectMsTeamsChannel,
+  startWechatPairing,
+  getWechatPairingStatus,
+  submitWechatVerifyCode,
   listChannelAssistants,
   attachChannelAssistant,
   detachChannelAssistant,
@@ -130,6 +133,7 @@ const PLATFORM_GLYPH: Partial<Record<Channel["channelType"], string>> = {
   slack: "#",
   email: "@",
   msteams: "T",
+  wechat: "微",
 };
 
 // Official Discord mark, monochrome — `fill-current` inherits the chip's
@@ -792,6 +796,22 @@ function ChannelDetail({
         <WhatsappCardSection workspaceId={workspaceId} />
       )}
 
+      {/* WeChat — the iLink bot limits, stated plainly on the connected card
+          (bot contact, DMs only, no history, one connection). */}
+      {channel.channelType === "wechat" && (
+        <div className="flex flex-col gap-1.5 rounded-lg border border-border px-4 py-3">
+          <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+            {t.studioPage.channels.wechat.limitsTitle}
+          </div>
+          <ul className="flex flex-col gap-1 text-xs text-muted-foreground list-disc pl-4">
+            <li>{t.studioPage.channels.wechat.limitContact}</li>
+            <li>{t.studioPage.channels.wechat.limitDmsOnly}</li>
+            <li>{t.studioPage.channels.wechat.limitNoHistory}</li>
+            <li>{t.studioPage.channels.wechat.limitSingleConnection}</li>
+          </ul>
+        </div>
+      )}
+
       {/* Assistant inbox — address + the sender allowlist (fail-closed gate:
           only these senders, plus workspace members, converse with the
           assistant; everyone else lands in the brain + an attention card). */}
@@ -862,8 +882,9 @@ function ChannelDetail({
           </Select>
           {/* Surface routing is for multi-conversation channels (Slack channels,
               Telegram chats/topics). A WhatsApp number has one conversation
-              stream, so it just gets the default assistant. */}
-          {channel.channelType !== "whatsapp" && (
+              stream, so it just gets the default assistant — same for a WeChat
+              bot (operators don't know contacts' iLink ids). */}
+          {channel.channelType !== "whatsapp" && channel.channelType !== "wechat" && (
             <SurfaceInput
               channel={channel}
               value={attachSurface}
@@ -1523,7 +1544,7 @@ function AddChannelForm({
   const t = useT();
   const add = t.studioPage.channels.add;
   const [platform, setPlatform] = useState<
-    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams"
+    "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat"
   >("slack");
 
   // WhatsApp pairs via QR (no token submit). After the connect stream reports
@@ -1700,7 +1721,7 @@ function AddChannelForm({
               defaultAssistantId.length > 0
             : dcBotToken.length > 0);
 
-  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams"): void {
+  function pickPlatform(p: "slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat"): void {
     setPlatform(p);
     setSuccess(null);
     setError(null);
@@ -1772,8 +1793,9 @@ function AddChannelForm({
             "discord",
             "msteams",
             "whatsapp",
+            "wechat",
             ...(emailConfigured ? ["email"] : []),
-          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams">
+          ] as Array<"slack" | "telegram" | "discord" | "whatsapp" | "email" | "msteams" | "wechat">
         ).map((p) => (
           <button
             key={p}
@@ -1796,6 +1818,14 @@ function AddChannelForm({
         <WhatsappConnectTab
           workspaceId={workspaceId}
           onConnected={handleWhatsappConnected}
+        />
+      ) : platform === "wechat" ? (
+        <WechatConnectTab
+          workspaceId={workspaceId}
+          defaultAssistantId={defaultAssistantId || null}
+          onConnected={(channel) => {
+            if (channel) void onCreated(channel);
+          }}
         />
       ) : platform === "slack" ? (
         <div className="flex flex-col gap-3">
@@ -2050,7 +2080,7 @@ function AddChannelForm({
         </label>
       )}
 
-      {platform !== "whatsapp" && !success && (
+      {platform !== "whatsapp" && platform !== "wechat" && !success && (
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -2293,6 +2323,205 @@ function WhatsappConnectTab({
           className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
         >
           {wa.connectAction}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** WeChat QR pairing phases — inline in the Add-a-channel form. */
+type WechatConnectPhase =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "qr"; url: string }
+  | { kind: "scanned" }
+  | { kind: "verify"; rejected: boolean }
+  | { kind: "connected"; connectorError: string | null }
+  | { kind: "already_bound" }
+  | { kind: "expired" }
+  | { kind: "error"; message: string };
+
+/**
+ * WeChat connect tab — BYON iLink bot binding by QR. Poll-based (not SSE like
+ * WhatsApp) because iLink's login machine has a mid-flow input state: it can
+ * demand a pairing code (`need_verifycode`) that the user reads off their
+ * phone and types here. The QR may also refresh in place when a code expires.
+ * On `connected` the API already persisted the channel + started the
+ * long-poll, and returns the channel row for the rail. The iLink limits are
+ * stated inline — this connects a NEW bot contact, not the user's own WeChat.
+ */
+function WechatConnectTab({
+  workspaceId,
+  defaultAssistantId,
+  onConnected,
+}: {
+  workspaceId: string;
+  defaultAssistantId: string | null;
+  onConnected: (channel: Channel | null) => void;
+}) {
+  const t = useT();
+  const wc = t.studioPage.channels.add.wechat;
+  const limits = t.studioPage.channels.wechat;
+  const [phase, setPhase] = useState<WechatConnectPhase>({ kind: "idle" });
+  const [verifyCode, setVerifyCode] = useState("");
+  const pairingIdRef = useRef<string | null>(null);
+  const stopRef = useRef(false);
+
+  const poll = useCallback(
+    async (pairingId: string) => {
+      while (!stopRef.current && pairingIdRef.current === pairingId) {
+        try {
+          const status = await getWechatPairingStatus(workspaceId, pairingId);
+          if (stopRef.current || pairingIdRef.current !== pairingId) return;
+          if (status.status === "connected") {
+            setPhase({ kind: "connected", connectorError: status.connectorError ?? null });
+            onConnected(status.channel ?? null);
+            return;
+          }
+          if (status.status === "qr" && status.qrcodeUrl) {
+            setPhase({ kind: "qr", url: status.qrcodeUrl });
+          } else if (status.status === "scanned") {
+            setPhase({ kind: "scanned" });
+          } else if (status.status === "need_verifycode") {
+            setPhase({ kind: "verify", rejected: false });
+          } else if (status.status === "verify_code_rejected") {
+            setPhase({ kind: "verify", rejected: true });
+          } else if (status.status === "already_bound") {
+            setPhase({ kind: "already_bound" });
+            return;
+          } else if (status.status === "expired") {
+            setPhase({ kind: "expired" });
+            return;
+          } else if (status.status === "error") {
+            setPhase({ kind: "error", message: status.error ?? "" });
+            return;
+          }
+        } catch (e) {
+          if (stopRef.current || pairingIdRef.current !== pairingId) return;
+          setPhase({ kind: "error", message: (e as Error).message });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    },
+    [workspaceId, onConnected],
+  );
+
+  const start = useCallback(() => {
+    setPhase({ kind: "loading" });
+    setVerifyCode("");
+    void startWechatPairing(workspaceId, { defaultAssistantId })
+      .then((started) => {
+        pairingIdRef.current = started.pairingId;
+        setPhase({ kind: "qr", url: started.qrcodeUrl });
+        void poll(started.pairingId);
+      })
+      .catch((e: unknown) => {
+        setPhase({ kind: "error", message: (e as Error).message });
+      });
+  }, [workspaceId, defaultAssistantId, poll]);
+
+  const submitCode = useCallback(() => {
+    const pairingId = pairingIdRef.current;
+    const code = verifyCode.trim();
+    if (!pairingId || !code) return;
+    setPhase({ kind: "scanned" });
+    setVerifyCode("");
+    void submitWechatVerifyCode(workspaceId, pairingId, code).catch((e: unknown) => {
+      setPhase({ kind: "error", message: (e as Error).message });
+    });
+  }, [workspaceId, verifyCode]);
+
+  useEffect(
+    () => () => {
+      stopRef.current = true;
+    },
+    [],
+  );
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">{wc.hint}</p>
+      <ul className="flex flex-col gap-0.5 text-xs text-muted-foreground list-disc pl-4">
+        <li>{limits.limitContact}</li>
+        <li>{limits.limitDmsOnly}</li>
+        <li>{limits.limitNoHistory}</li>
+        <li>{limits.limitSingleConnection}</li>
+      </ul>
+
+      {phase.kind === "qr" ? (
+        <div className="flex flex-col items-center gap-2 self-center py-2">
+          <div className="rounded-lg bg-white p-3">
+            <QRCodeSVG value={phase.url} size={208} />
+          </div>
+          <p className="max-w-xs text-center text-xs text-muted-foreground">
+            {wc.scanHint}
+          </p>
+        </div>
+      ) : phase.kind === "loading" ? (
+        <p className="py-4 text-center text-sm text-muted-foreground">{wc.loading}</p>
+      ) : phase.kind === "scanned" ? (
+        <p className="py-4 text-center text-sm text-muted-foreground">{wc.verifying}</p>
+      ) : phase.kind === "verify" ? (
+        <div className="flex flex-col gap-2 self-center py-2">
+          <p className="max-w-xs text-center text-sm">
+            {phase.rejected ? wc.verifyRejected : wc.verifyPrompt}
+          </p>
+          <div className="flex items-center gap-2 self-center">
+            <input
+              type="text"
+              inputMode="numeric"
+              value={verifyCode}
+              onChange={(e) => setVerifyCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitCode();
+              }}
+              maxLength={8}
+              className="w-28 text-center text-sm rounded-md border border-border bg-background px-2 py-1.5 font-mono tracking-widest"
+            />
+            <button
+              type="button"
+              onClick={submitCode}
+              disabled={!verifyCode.trim()}
+              className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground disabled:opacity-50"
+            >
+              {wc.verifySubmit}
+            </button>
+          </div>
+        </div>
+      ) : phase.kind === "connected" ? (
+        <div className="flex flex-col gap-1">
+          <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+            {wc.connected}
+          </p>
+          {phase.connectorError && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              {wc.connectorWarning}
+            </p>
+          )}
+        </div>
+      ) : phase.kind === "already_bound" ? (
+        <p className="text-sm text-muted-foreground">{wc.alreadyBound}</p>
+      ) : phase.kind === "expired" || phase.kind === "error" ? (
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-destructive">
+            {phase.kind === "expired" ? wc.expired : wc.error}
+          </span>
+          <button
+            type="button"
+            onClick={start}
+            className="rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+          >
+            {wc.retry}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={start}
+          className="self-start rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground"
+        >
+          {wc.startAction}
         </button>
       )}
     </div>

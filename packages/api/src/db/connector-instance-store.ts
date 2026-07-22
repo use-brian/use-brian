@@ -205,6 +205,22 @@ export type ConnectorInstanceStore = {
   /** Every instance of a provider regardless of scope/connected. System-level. Drives the BYO storage staleness sweep. */
   listByProviderSystem(provider: string): Promise<ConnectorInstance[]>
 
+  /**
+   * Delete an instance with no acting user — for provider-driven compliance
+   * purges (Shopify `shop/redact` arrives ~48h after uninstall with no user
+   * session; see docs/architecture/integrations/shopify.md → "Compliance
+   * webhook receiver"). RLS bypass is correct here: the deletion is mandated
+   * by the provider, not initiated by a user.
+   */
+  deleteSystem(id: string): Promise<void>
+
+  /**
+   * Flip `connected` with no acting user — for provider-driven lifecycle
+   * signals (Shopify `app/uninstalled` marks the instance disconnected; no
+   * user session exists at delivery time).
+   */
+  setConnectedSystem(id: string, connected: boolean): Promise<void>
+
   /** Merge keys into the JSONB config with no acting user — for system workers (ingest pollers). */
   setConfigSystem(id: string, config: Record<string, unknown>): Promise<void>
 
@@ -583,6 +599,24 @@ export function createConnectorInstanceStore(encryptionKey: Buffer | null): Conn
         [provider],
       )
       return result.rows
+    },
+
+    async deleteSystem(id) {
+      await query(
+        `DELETE FROM connector_grant WHERE connector_instance_id = $1`,
+        [id],
+      )
+      await query(
+        `DELETE FROM connector_instance WHERE id = $1`,
+        [id],
+      )
+    },
+
+    async setConnectedSystem(id, connected) {
+      await query(
+        `UPDATE connector_instance SET connected = $2 WHERE id = $1`,
+        [id, connected],
+      )
     },
 
     async setConfigSystem(id, config) {

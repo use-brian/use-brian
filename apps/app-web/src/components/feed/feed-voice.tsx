@@ -47,6 +47,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
+import {
+  FEED_PLATFORMS,
+  defaultFeedPlatform,
+  isFeedPlatform,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -111,8 +117,56 @@ function sensitivityLabel(t: VoiceDict, sensitivity: string): string {
 export function FeedVoice() {
   const team = useFeedWorkspace();
   const feedT = useT().feedPage;
+
+  /**
+   * Platform-agnostic voice import (feed-create-split.md D4): the operator
+   * pastes past posts; the tuning chat analyzes them and proposes voice
+   * rules with the same propose-then-approve flow as the X import. The
+   * dialog hosts the textarea; this closure owns the value (the `content`
+   * contract in confirm-dialog.tsx). The samples ride a seeded tuning-chat
+   * message — no new backend tool.
+   */
+  async function importFromSamples() {
+    let samples = "";
+    // Platform-first (feed-create-split.md D12): the import scope defaults
+    // to the page's selected platform; "All platforms" stays one click away.
+    let platform: FeedPlatform | null =
+      voicePlatform === "all" ? null : voicePlatform;
+    const ok = await confirmDialog({
+      title: t.importSamplesTitle,
+      description: t.importSamplesBody,
+      confirmLabel: t.importSamplesCta,
+      content: (
+        <ImportSamplesContent
+          initialPlatform={platform}
+          onSamplesChange={(v) => {
+            samples = v;
+          }}
+          onPlatformChange={(p) => {
+            platform = p;
+          }}
+        />
+      ),
+    });
+    const trimmed = samples.trim().slice(0, 20_000);
+    if (!ok || !trimmed) return;
+    const base = format(t.importSamplesPrompt, { samples: trimmed });
+    // Platform-scoped import (per-platform voice): tell the assistant which
+    // platform the samples belong to and to tag proposed rules with it.
+    const chosen = platform as FeedPlatform | null;
+    const prefill = chosen
+      ? `${format(t.importSamplesPlatformNote, {
+          platform: feedT.platformLabels[chosen],
+          tag: chosen,
+        })}\n\n${base}`
+      : base;
+    requestFeedChatSeed({ prefill });
+  }
   const t = feedT.voice;
-  const primaryAssistant = team.profiles[0]?.assistant;
+  // Create split (feed-create-split.md D7): voice works with zero
+  // connections — fall back to the workspace's brand-voice assistant when
+  // no profile is connected.
+  const primaryAssistant = team.profiles[0]?.assistant ?? team.assistants[0];
   const isAdmin = team.role === "admin" || team.role === "owner";
 
   const [items, setItems] = useState<FeedVoiceMemory[]>([]);
@@ -120,6 +174,25 @@ export function FeedVoice() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
+
+  // Platform-first entry (feed-create-split.md D12): the page opens on one
+  // platform's view (baseline + that platform's rules — exactly what draft
+  // sessions inject) with "All" one chip away. The stored pick applies in an
+  // effect, not the initializer, so SSR/client first paints stay identical.
+  const [voicePlatform, setVoicePlatform] = useState<FeedPlatform | "all">(
+    FEED_PLATFORMS[0],
+  );
+  const pickAppliedRef = useRef(false);
+  useEffect(() => {
+    if (pickAppliedRef.current) return;
+    pickAppliedRef.current = true;
+    setVoicePlatform(
+      defaultFeedPlatform(
+        team.workspaceId,
+        team.profiles.map((p) => p.platform),
+      ),
+    );
+  }, [team.workspaceId, team.profiles]);
 
   // Add form
   const [showAdd, setShowAdd] = useState(false);
@@ -275,10 +348,69 @@ export function FeedVoice() {
     [items, filter],
   );
 
+  // Platform view (D12): show the baseline (no platform tag) + the selected
+  // platform's scoped rules — the exact set a draft session for that
+  // platform injects. Rules scoped only to other platforms live in their
+  // own platform's view.
+  const platformTagsOf = (m: FeedVoiceMemory) =>
+    (m.tags ?? []).filter(isFeedPlatform);
+  const visible = useMemo(() => {
+    if (voicePlatform === "all") return filtered;
+    return filtered.filter((m) => {
+      const scoped = platformTagsOf(m);
+      return scoped.length === 0 || scoped.includes(voicePlatform);
+    });
+  }, [filtered, voicePlatform]);
+  const baselineRules = useMemo(
+    () => visible.filter((m) => platformTagsOf(m).length === 0),
+    [visible],
+  );
+  const scopedRules = useMemo(
+    () => visible.filter((m) => platformTagsOf(m).length > 0),
+    [visible],
+  );
+
+  // One rule row — shared by the flat "All" grid and the platform view's
+  // two sections; the in-place edit card swaps in for the row being edited.
+  const renderRule = (m: FeedVoiceMemory) =>
+    editingId === m.id ? (
+      <li key={m.id} className="rounded-xl border border-border bg-card p-4 space-y-4 shadow-xs xl:col-span-2">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">{t.editTitle}</span>
+          <button
+            type="button"
+            onClick={() => { setEditingId(null); setEditError(null); }}
+            className="text-muted-foreground hover:text-foreground"
+          >
+            <XIcon />
+          </button>
+        </div>
+        <VoiceForm
+          form={editForm}
+          onChange={setEditForm}
+          error={editError}
+          busy={editBusy}
+          onSubmit={submitEdit}
+          onCancel={() => { setEditingId(null); setEditError(null); }}
+          submitLabel={t.saveChanges}
+        />
+      </li>
+    ) : (
+      <MemoryCard
+        key={m.id}
+        memory={m}
+        isAdmin={isAdmin}
+        deleting={deletingId === m.id}
+        onEdit={() => startEdit(m)}
+        onDelete={() => void deleteMemory(m.id)}
+        onDiscuss={() => discussMemory(m)}
+      />
+    );
+
   if (!primaryAssistant) {
     return (
-      <div className="px-8 py-10 max-w-2xl space-y-4">
-        <h1 className="text-xl font-semibold" style={{ fontFamily: "var(--font-rocknroll)" }}>
+      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+        <h1 className="text-[15px] font-semibold">
           {t.noVoiceTitle}
         </h1>
         <p className="text-sm text-muted-foreground">
@@ -286,7 +418,7 @@ export function FeedVoice() {
         </p>
         <Link
           href={feedPath(team.workspaceId)}
-          className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
         >
           {t.noVoiceCta}
         </Link>
@@ -296,22 +428,16 @@ export function FeedVoice() {
 
   return (
     <div className="relative h-screen overflow-hidden">
-      {/* Ambient gradient backdrop */}
-      <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
-        <div className="absolute -top-40 -left-40 h-[28rem] w-[28rem] rounded-full bg-primary/10 blur-3xl" />
-        <div className="absolute -bottom-40 right-10 h-[24rem] w-[24rem] rounded-full bg-fuchsia-500/[0.06] blur-3xl" />
-      </div>
-
       <div className="h-full overflow-y-auto">
         {/* Memories — full width; the tuning chat lives in the floating dock. */}
-        <div className="px-4 md:px-8 py-6 max-w-4xl mx-auto space-y-6 animate-fade-in">
+        <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
           <header className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
-                <h1 className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+                <h1 className="text-[15px] font-semibold">
                   {feedT.sections.voice}
                 </h1>
-                <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   {total === 1 ? t.ruleCountOne : format(t.ruleCount, { count: total })}
                 </span>
               </div>
@@ -319,17 +445,76 @@ export function FeedVoice() {
                 {t.subtitle}
               </p>
             </div>
-            {isAdmin && !showAdd ? (
-              <button
-                type="button"
-                onClick={() => setShowAdd(true)}
-                className="shrink-0 inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 h-9 text-sm font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 transition-colors press shadow-md shadow-primary/20"
-              >
-                <PlusIcon />
-                {t.injectRule}
-              </button>
-            ) : null}
+            <div className="flex shrink-0 items-center gap-2">
+              {isAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => void importFromSamples()}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent transition-colors"
+                >
+                  {t.importSamples}
+                </button>
+              ) : null}
+              {isAdmin && !showAdd ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    // New rules default their scope to the page's selected
+                    // platform (D12); the form's chips can widen/clear it.
+                    setAddForm({
+                      ...DEFAULT_FORM,
+                      tags: voicePlatform === "all" ? "" : voicePlatform,
+                    });
+                    setShowAdd(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 transition-colors press"
+                >
+                  <PlusIcon />
+                  {t.injectRule}
+                </button>
+              ) : null}
+            </div>
           </header>
+
+          {/* Platform switcher (D12) — the page is entered with a platform
+              selected; "All" shows every rule with its platform badges. */}
+          <nav
+            aria-label={t.platformSwitcherAria}
+            className="flex flex-wrap items-center gap-1.5"
+          >
+            {FEED_PLATFORMS.map((p) => {
+              const active = voicePlatform === p;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setVoicePlatform(p)}
+                  aria-pressed={active}
+                  className={
+                    "press h-8 rounded-full border px-3.5 text-[13px] font-medium transition-colors " +
+                    (active
+                      ? "border-transparent bg-foreground text-background"
+                      : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
+                  }
+                >
+                  {feedT.platformLabels[p]}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setVoicePlatform("all")}
+              aria-pressed={voicePlatform === "all"}
+              className={
+                "press h-8 rounded-full border px-3.5 text-[13px] font-medium transition-colors " +
+                (voicePlatform === "all"
+                  ? "border-transparent bg-foreground text-background"
+                  : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
+              }
+            >
+              {t.filterAllPlatforms}
+            </button>
+          </nav>
 
           {types.length > 2 ? (
             <div className="flex items-center gap-1 overflow-x-auto -mx-1 px-1 pb-1">
@@ -361,7 +546,7 @@ export function FeedVoice() {
           ) : null}
 
           {showAdd ? (
-            <div className="rounded-2xl border border-primary/30 bg-card p-5 space-y-4 animate-pop-in shadow-lg shadow-primary/10">
+            <div className="rounded-xl border border-border bg-card p-4 space-y-4 animate-pop-in shadow-xs">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">{t.addTitle}</span>
                 <button
@@ -388,54 +573,54 @@ export function FeedVoice() {
           {loading ? (
             <CardSkeletonList count={4} lines={2} />
           ) : items.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border bg-card/40 p-10 text-center space-y-2 animate-pop-in">
+            <div className="rounded-xl border border-dashed border-border bg-card/40 p-8 text-center space-y-2 animate-pop-in">
               <p className="text-sm font-medium">{t.emptyTitle}</p>
               <p className="text-xs text-muted-foreground max-w-sm mx-auto">
                 {t.emptyBodyBefore} <strong>{t.injectRule}</strong> {t.emptyBodyAfter}
               </p>
             </div>
-          ) : filtered.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border bg-card/40 p-8 text-center text-xs text-muted-foreground">
+          ) : visible.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border bg-card/40 p-8 text-center text-xs text-muted-foreground">
               {t.typeEmptyBefore} <strong>{typeLabel(t, filter)}</strong> {t.typeEmptyAfter}
             </div>
-          ) : (
+          ) : voicePlatform === "all" ? (
             <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger pb-4">
-              {filtered.map((m) =>
-                editingId === m.id ? (
-                  <li key={m.id} className="rounded-2xl border border-primary/30 bg-card p-5 space-y-4 xl:col-span-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium">{t.editTitle}</span>
-                      <button
-                        type="button"
-                        onClick={() => { setEditingId(null); setEditError(null); }}
-                        className="text-muted-foreground hover:text-foreground"
-                      >
-                        <XIcon />
-                      </button>
-                    </div>
-                    <VoiceForm
-                      form={editForm}
-                      onChange={setEditForm}
-                      error={editError}
-                      busy={editBusy}
-                      onSubmit={submitEdit}
-                      onCancel={() => { setEditingId(null); setEditError(null); }}
-                      submitLabel={t.saveChanges}
-                    />
-                  </li>
-                ) : (
-                  <MemoryCard
-                    key={m.id}
-                    memory={m}
-                    isAdmin={isAdmin}
-                    deleting={deletingId === m.id}
-                    onEdit={() => startEdit(m)}
-                    onDelete={() => void deleteMemory(m.id)}
-                    onDiscuss={() => discussMemory(m)}
-                  />
-                ),
-              )}
+              {visible.map(renderRule)}
             </ul>
+          ) : (
+            // Platform view (D12): baseline first (applies everywhere), then
+            // the selected platform's scoped rules — mirroring the injection
+            // order draft sessions use.
+            <div className="space-y-5 pb-4">
+              {baselineRules.length > 0 ? (
+                <section className="space-y-2">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {t.baselineSection}
+                  </h2>
+                  <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger">
+                    {baselineRules.map(renderRule)}
+                  </ul>
+                </section>
+              ) : null}
+              <section className="space-y-2">
+                <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {format(t.platformSection, {
+                    platform: feedT.platformLabels[voicePlatform],
+                  })}
+                </h2>
+                {scopedRules.length > 0 ? (
+                  <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger">
+                    {scopedRules.map(renderRule)}
+                  </ul>
+                ) : (
+                  <p className="rounded-xl border border-dashed border-border bg-card/40 p-5 text-center text-xs text-muted-foreground">
+                    {format(t.platformSectionEmpty, {
+                      platform: feedT.platformLabels[voicePlatform],
+                    })}
+                  </p>
+                )}
+              </section>
+            </div>
           )}
         </div>
       </div>
@@ -464,10 +649,22 @@ function VoiceForm({
   onCancel: () => void;
   submitLabel: string;
 }) {
-  const t = useT().feedPage.voice;
+  const feedT = useT().feedPage;
+  const t = feedT.voice;
+  const platformLabels = feedT.platformLabels;
+  const feedPlatforms = FEED_PLATFORMS;
   const set = (key: keyof FormState) => (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>,
   ) => onChange({ ...form, [key]: e.target.value });
+
+  // Platform tags ride the same comma string as free-form tags — the chips
+  // and the text input edit one source of truth.
+  const selectedPlatforms = parseTags(form.tags).filter(isFeedPlatform);
+  const togglePlatform = (p: FeedPlatform) => {
+    const tags = parseTags(form.tags);
+    const next = tags.includes(p) ? tags.filter((tag) => tag !== p) : [...tags, p];
+    onChange({ ...form, tags: next.join(", ") });
+  };
 
   return (
     <div className="space-y-3">
@@ -531,6 +728,35 @@ function VoiceForm({
         </div>
       </div>
 
+      {/* Platform scope — toggles platform tags inside the same comma
+          string the free-form field edits (per-platform voice; none
+          selected = the rule applies to every platform). */}
+      <div className="space-y-1">
+        <label className="text-xs text-muted-foreground">{t.platformScopeLabel}</label>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {feedPlatforms.map((p) => {
+            const active = selectedPlatforms.includes(p);
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => togglePlatform(p)}
+                aria-pressed={active}
+                className={
+                  "press h-7 rounded-full border px-3 text-xs font-medium transition-colors " +
+                  (active
+                    ? "border-transparent bg-foreground text-background"
+                    : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
+                }
+              >
+                {platformLabels[p]}
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[11px] text-muted-foreground">{t.platformScopeHint}</p>
+      </div>
+
       <div className="space-y-1">
         <label className="text-xs text-muted-foreground">{t.tagsLabel}</label>
         <input
@@ -585,10 +811,11 @@ function MemoryCard({
   onDelete: () => void;
   onDiscuss: () => void;
 }) {
-  const t = useT().feedPage.voice;
+  const feedT = useT().feedPage;
+  const t = feedT.voice;
+  const platformLabels = feedT.platformLabels;
   return (
-    <li className="group relative flex h-full flex-col rounded-2xl border border-border bg-card p-4 space-y-2 hover-lift transition-all hover:border-primary/40 hover:shadow-lg hover:shadow-primary/5">
-      <div aria-hidden className="pointer-events-none absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 bg-gradient-to-br from-primary/[0.04] via-transparent to-transparent transition-opacity" />
+    <li className="group relative flex h-full flex-col rounded-xl border border-border/60 bg-card p-4 space-y-2 shadow-xs transition-all hover:shadow-md">
 
       <div className="relative flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -600,6 +827,16 @@ function MemoryCard({
               {sensitivityLabel(t, m.sensitivity)}
             </span>
           ) : null}
+          {/* Platform scope — a platform tag narrows the rule to that
+              platform's drafts (per-platform voice); no badge = general. */}
+          {(m.tags ?? []).filter(isFeedPlatform).map((p) => (
+            <span
+              key={p}
+              className="rounded-full border border-border px-2 py-0.5 text-[10px] font-medium text-muted-foreground"
+            >
+              {platformLabels[p]}
+            </span>
+          ))}
         </div>
         <div className="flex items-center gap-1">
           <span className="text-[11px] text-muted-foreground mr-1 tabular-nums">
@@ -704,5 +941,60 @@ function ChatBubbleSmallIcon() {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
+  );
+}
+
+
+/**
+ * Paste-in voice-import dialog body — textarea + platform scope chips.
+ * Stateful so the chips highlight; the values flow OUT through the two
+ * callbacks into the caller's closure (the confirm-dialog `content`
+ * contract: the caller owns the values, the dialog hosts the node).
+ * "All platforms" = null platform = general brand voice, no tagging note.
+ */
+function ImportSamplesContent({
+  initialPlatform = null,
+  onSamplesChange,
+  onPlatformChange,
+}: {
+  /** Pre-selected scope — the Voice page's active platform (D12). */
+  initialPlatform?: FeedPlatform | null;
+  onSamplesChange: (v: string) => void;
+  onPlatformChange: (p: FeedPlatform | null) => void;
+}) {
+  const feedT = useT().feedPage;
+  const t = feedT.voice;
+  const [platform, setPlatform] = useState<FeedPlatform | null>(initialPlatform);
+  const pick = (p: FeedPlatform | null) => {
+    setPlatform(p);
+    onPlatformChange(p);
+  };
+  const chip = (active: boolean) =>
+    "press h-7 rounded-full border px-3 text-xs font-medium transition-colors " +
+    (active
+      ? "border-transparent bg-foreground text-background"
+      : "border-border bg-background/60 text-muted-foreground hover:bg-accent");
+  return (
+    <div className="space-y-3">
+      <textarea
+        rows={8}
+        placeholder={t.importSamplesPlaceholder}
+        onChange={(e) => onSamplesChange(e.target.value)}
+        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:border-primary/50 resize-y"
+      />
+      <div className="space-y-1">
+        <div className="text-xs text-muted-foreground">{t.importSamplesPlatformLabel}</div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button type="button" onClick={() => pick(null)} aria-pressed={platform === null} className={chip(platform === null)}>
+            {t.importSamplesAllPlatforms}
+          </button>
+          {FEED_PLATFORMS.map((p) => (
+            <button key={p} type="button" onClick={() => pick(p)} aria-pressed={platform === p} className={chip(platform === p)}>
+              {feedT.platformLabels[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }

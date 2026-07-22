@@ -305,7 +305,7 @@ export type ChannelPipelineParams = {
   checkCreditBudget?: CreditBudgetGate
 
   // ── Channel context ──
-  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams'
+  channelType: 'whatsapp' | 'telegram' | 'slack' | 'discord' | 'email' | 'msteams' | 'wechat'
   channelId: string
   /**
    * The acting user's channel-native id captured from the inbound webhook —

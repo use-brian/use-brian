@@ -25,7 +25,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, Kanban, ListChecks, Rows3 } from "lucide-react";
+import { ChevronRight, Kanban, Rows3 } from "lucide-react";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -454,54 +455,59 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   ];
 
   return (
-    // `relative`: the task peek panel floats over this box — it never
-    // reflows the table/board underneath.
-    <div className="relative flex h-full min-h-0 flex-col">
-      {/* Header — title + live counts + view toggle. */}
-      <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 max-md:pl-14">
-        <ListChecks className="size-[18px] text-muted-foreground" aria-hidden />
-        <h1 className="text-[15px] font-semibold">{t.title}</h1>
-        {rows !== null && (
-          <span className="text-[12.5px] text-muted-foreground">
-            {format(t.countSummary, {
-              total: String(all.length),
-              active: String(activeCount),
-            })}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            type="button"
-            aria-pressed={view.view === "table"}
-            aria-label={t.viewTable}
-            onClick={() => setView({ view: "table" })}
-            className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
-              view.view === "table"
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/60",
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Chrome — the shared operator top bar names the app; the count
+          summary + view toggle ride its right slot, replacing the old
+          icon+title header row ([COMP:app-web/operator-topbar]). */}
+      <OperatorTopbar
+        app="tasks"
+        right={
+          <>
+            {rows !== null && (
+              <span className="text-[12.5px] text-sidebar-foreground/70 max-sm:hidden">
+                {format(t.countSummary, {
+                  total: String(all.length),
+                  active: String(activeCount),
+                })}
+              </span>
             )}
-          >
-            <Rows3 className="size-3.5" aria-hidden />
-            {t.viewTable}
-          </button>
-          <button
-            type="button"
-            aria-pressed={view.view === "board"}
-            aria-label={t.viewBoard}
-            onClick={() => setView({ view: "board" })}
-            className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
-              view.view === "board"
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/60",
-            )}
-          >
-            <Kanban className="size-3.5" aria-hidden />
-            {t.viewBoard}
-          </button>
-        </div>
-      </div>
+            <button
+              type="button"
+              aria-pressed={view.view === "table"}
+              aria-label={t.viewTable}
+              onClick={() => setView({ view: "table" })}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                view.view === "table"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
+              )}
+            >
+              <Rows3 className="size-3.5" aria-hidden />
+              {t.viewTable}
+            </button>
+            <button
+              type="button"
+              aria-pressed={view.view === "board"}
+              aria-label={t.viewBoard}
+              onClick={() => setView({ view: "board" })}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                view.view === "board"
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
+              )}
+            >
+              <Kanban className="size-3.5" aria-hidden />
+              {t.viewBoard}
+            </button>
+          </>
+        }
+      />
+
+      {/* `relative`: the task peek panel floats over THIS box — it never
+          reflows the table/board underneath, and never covers the bar. */}
+      <div className="relative flex min-h-0 flex-1 flex-col">
 
       {/* Toolbar — cleanup presets + filters + search in ONE quiet strip
           (swaps for the bulk bar while rows are checked). The presets stay
@@ -826,18 +832,19 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         )}
       </div>
 
-      {/* Task peek panel — floats over the surface; Brain stays one click
-          away via its header link. */}
-      {openTask && (
-        <TaskRecordDetail
-          workspaceId={workspaceId}
-          row={openTask}
-          roster={roster}
-          projects={projects}
-          commitField={commitField}
-          onClose={() => setOpenTaskId(null)}
-        />
-      )}
+        {/* Task peek panel — floats over the surface; Brain stays one click
+            away via its header link. */}
+        {openTask && (
+          <TaskRecordDetail
+            workspaceId={workspaceId}
+            row={openTask}
+            roster={roster}
+            projects={projects}
+            commitField={commitField}
+            onClose={() => setOpenTaskId(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }

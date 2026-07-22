@@ -65,6 +65,13 @@ import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
+import { normalizeShopDomain, packShopifyTokens } from '../shopify/client.js'
+import { resolveMailboxPreset } from '../mailbox/presets.js'
+import { verifyMailboxConnection } from '../mailbox/verify.js'
+import { probeMailboxFolders } from '../mailbox/probe.js'
+import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState } from '../mailbox/sync-worker.js'
+import { countEmailArchiveMessages } from '../db/email-archive-store.js'
+import type { MailboxAccountSettings } from '../mailbox/types.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -116,6 +123,18 @@ type ConnectorRouteOptions = {
     requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
     /** Validate-on-connect override (test seam). Defaults to the real probe. */
     validate?: typeof validateS3ByoBinding
+  }
+  /**
+   * Test seams for the company-mailbox (`imap`) endpoints
+   * (`/imap/resolve`, `/imap/connect`). The routes always mount — the
+   * connector is outbound-only and edition-independent
+   * (docs/architecture/integrations/mailbox-imap.md); defaults hit the network.
+   */
+  imapMailbox?: {
+    verify?: typeof verifyMailboxConnection
+    resolvePreset?: typeof resolveMailboxPreset
+    probe?: typeof probeMailboxFolders
+    countArchive?: typeof countEmailArchiveMessages
   }
 }
 
@@ -415,6 +434,208 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
+  // ── Company mailbox (user-scoped `imap` connector) ─────────────
+  //
+  // Credential-entry connect with an MX-resolved preset (D1) and a LIVE
+  // IMAP login + SMTP verify BEFORE anything is stored — green check or a
+  // named error, never a stored-but-dead credential (plan §4). One mailbox
+  // per user (D11; `single_instance` in the registry). Generic
+  // `/:provider/disconnect` and `DELETE /:provider` cover teardown.
+  // See docs/architecture/integrations/mailbox-imap.md.
+
+  /** MX → preset resolution for the connect dialog's on-blur detection. */
+  router.post('/imap/resolve', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const email = typeof (req.body ?? {}).email === 'string' ? (req.body as { email: string }).email.trim() : ''
+    if (!email.includes('@')) { res.status(400).json({ error: 'Invalid email' }); return }
+    const resolvePreset = opts.imapMailbox?.resolvePreset ?? resolveMailboxPreset
+    const preset = await resolvePreset(email)
+    res.json({ preset })
+  })
+
+  router.post('/imap/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      email?: string
+      appPassword?: string
+      imapHost?: string
+      imapPort?: number
+      smtpHost?: string
+      smtpPort?: number
+    }
+    const email = typeof body.email === 'string' ? body.email.trim() : ''
+    const appPassword = typeof body.appPassword === 'string' ? body.appPassword : ''
+    if (!email.includes('@')) { res.status(400).json({ error: 'Invalid email' }); return }
+    if (!appPassword) { res.status(400).json({ error: 'Missing app password' }); return }
+
+    const validPort = (p: unknown): p is number => typeof p === 'number' && Number.isInteger(p) && p > 0 && p < 65536
+    let settings: MailboxAccountSettings
+    if (typeof body.imapHost === 'string' && body.imapHost.trim() && validPort(body.imapPort) &&
+        typeof body.smtpHost === 'string' && body.smtpHost.trim() && validPort(body.smtpPort)) {
+      settings = {
+        email, appPassword,
+        imapHost: body.imapHost.trim(), imapPort: body.imapPort,
+        smtpHost: body.smtpHost.trim(), smtpPort: body.smtpPort,
+      }
+    } else {
+      const resolvePreset = opts.imapMailbox?.resolvePreset ?? resolveMailboxPreset
+      const preset = await resolvePreset(email)
+      if (!preset) {
+        // Unrecognized MX and no explicit hosts — the dialog expands Advanced.
+        res.status(400).json({ error: 'hosts_required' })
+        return
+      }
+      settings = {
+        email, appPassword,
+        imapHost: preset.imapHost, imapPort: preset.imapPort,
+        smtpHost: preset.smtpHost, smtpPort: preset.smtpPort,
+      }
+    }
+
+    const verify = opts.imapMailbox?.verify ?? verifyMailboxConnection
+    const check = await verify(settings)
+    if (!check.ok) {
+      res.status(400).json({ error: 'verification_failed', code: check.code, message: check.message })
+      return
+    }
+
+    const credentials: ConnectorCredentials = { type: 'imap', ...settings }
+    try {
+      const existing = (await connectorInstanceStore.listByUser(userId, userId))
+        .find((i) => i.provider === 'imap')
+      if (existing) {
+        const updated = await connectorInstanceStore.update(userId, existing.id, {
+          connected: true,
+          connectedEmail: email,
+          credentials,
+          label: email,
+        })
+        res.json({ ok: true, connectorInstanceId: updated?.id ?? existing.id })
+        return
+      }
+      const created = await connectorInstanceStore.createUserInstance({
+        userId,
+        provider: 'imap',
+        label: email,
+        connectedEmail: email,
+        connected: true,
+        credentials,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' })
+        return
+      }
+      console.error('[connectors] imap connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect the mailbox' })
+    }
+  })
+
+  /** Resolve the caller's imap instance + decrypted settings, or null. */
+  async function resolveImapInstance(userId: string): Promise<
+    { instance: ConnectorInstance; settings: MailboxAccountSettings } | null
+  > {
+    const instance = (await connectorInstanceStore.listByUser(userId, userId))
+      .find((i) => i.provider === 'imap' && i.connected)
+    if (!instance) return null
+    const creds = await connectorInstanceStore.getAuthCredentialsSystem(instance.id)
+    if (!creds || creds.type !== 'imap') return null
+    const { type: _t, ...settings } = creds
+    return { instance, settings }
+  }
+
+  // Connected-card status: archive counts + sync/backfill cursor state. No
+  // IMAP round-trip — safe to poll.
+  router.get('/imap/sync-status', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const resolved = await resolveImapInstance(userId)
+      if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
+      const state = readMailboxSyncState(resolved.instance.config)
+      const countArchive = opts.imapMailbox?.countArchive ?? countEmailArchiveMessages
+      const counts = await countArchive(resolved.instance.id)
+      res.json({
+        email: resolved.instance.connectedEmail ?? resolved.settings.email,
+        archived: counts.total,
+        byFolder: counts.byFolder,
+        backfill: state.backfill ?? null,
+        lastSyncAt: state.lastSyncAt ?? null,
+        lastError: state.lastError ?? null,
+        ingestionEnabled: resolved.instance.ingestionEnabled,
+      })
+    } catch (err) {
+      console.error('[connectors] imap sync-status failed:', err)
+      res.status(500).json({ error: 'Failed to read sync status' })
+    }
+  })
+
+  // D9 pre-flight: cheap per-folder STATUS counts (~1s), never the expensive
+  // work. The consent dialog quotes these before any backfill is armed.
+  router.post('/imap/backfill/preflight', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const resolved = await resolveImapInstance(userId)
+      if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
+      const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
+      const result = await probe(resolved.settings)
+      res.json(result)
+    } catch (err) {
+      console.error('[connectors] imap backfill preflight failed:', err)
+      res.status(500).json({ error: 'Failed to probe the mailbox' })
+    }
+  })
+
+  // Arm the archive backfill AFTER the user confirmed a scope (D9). The sync
+  // worker walks it newest-first, checkpointed per folder; historical mail
+  // never reaches the brain (D6). Re-arming resets the per-folder
+  // checkpoints (idempotent inserts make a re-walk safe).
+  router.post('/imap/backfill', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const scope = (req.body ?? {}).scope as MailboxBackfillScope | undefined
+    if (scope !== '12m' && scope !== '2y' && scope !== 'all') {
+      res.status(400).json({ error: 'Invalid scope (12m | 2y | all)' })
+      return
+    }
+    try {
+      const resolved = await resolveImapInstance(userId)
+      if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
+      const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
+      const probed = await probe(resolved.settings)
+      const state = readMailboxSyncState(resolved.instance.config)
+      const next: MailboxSyncState = {
+        ...state,
+        folders: Object.fromEntries(
+          Object.entries(state.folders).map(([path, cursor]) => [
+            path,
+            { uidvalidity: cursor.uidvalidity, lastUid: cursor.lastUid },
+          ]),
+        ),
+        backfill: {
+          scope,
+          requestedAt: new Date().toISOString(),
+          status: 'running',
+          // Upper bound shown as "Syncing N of M" — per-scope exact counts
+          // would need per-folder date SEARCHes; the STATUS total is the
+          // cheap honest ceiling.
+          totalEstimate: probed.total,
+        },
+      }
+      await connectorInstanceStore.setConfigSystem(resolved.instance.id, { mailboxSync: next })
+      res.json({ ok: true, totalEstimate: probed.total })
+    } catch (err) {
+      console.error('[connectors] imap backfill arm failed:', err)
+      res.status(500).json({ error: 'Failed to start the backfill' })
+    }
+  })
+
   /** Group the caller's instances by provider, each list oldest-first. */
   async function instancesByProvider(userId: string): Promise<Map<string, ConnectorInstance[]>> {
     const instances = await connectorInstanceStore.listForUser(userId)
@@ -652,24 +873,60 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       pat?: string
       accessToken?: string
       token?: string
+      /**
+       * Shopify's structured tuple (docs/architecture/integrations/shopify.md):
+       * pasted static `shpat_` tokens and OAuth expiring tokens share one
+       * envelope, discriminated by the presence of refreshToken + expiresAt.
+       */
+      shopifyTokens?: { accessToken?: string; refreshToken?: string; expiresAt?: string; shopDomain?: string }
       email?: string
       label?: string
       instanceId?: string
       createNew?: boolean
-    }
-    const secret = (body.refreshToken ?? body.pat ?? body.accessToken ?? body.token ?? '').trim()
-    if (!secret) {
-      res.status(400).json({ error: 'Missing credential (refreshToken/pat/accessToken/token)' })
-      return
     }
     if (body.instanceId !== undefined && !UUID_RE.test(body.instanceId)) {
       res.status(400).json({ error: 'Invalid instanceId' })
       return
     }
 
-    const credentials = credentialsFor(secret)
-    const email = body.email ?? null
-    const label = body.label?.trim() || undefined
+    let credentials: ConnectorCredentials
+    let email = body.email ?? null
+    let label = body.label?.trim() || undefined
+    // Non-secret config stamped alongside the credentials (webhook → instance
+    // routing resolves Shopify instances by config.shopDomain).
+    let configPatch: Record<string, unknown> | null = null
+
+    if (provider === 'shopify') {
+      const t = body.shopifyTokens
+      const shopDomain = normalizeShopDomain(t?.shopDomain ?? '')
+      const accessToken = t?.accessToken?.trim()
+      if (!accessToken || !shopDomain) {
+        res.status(400).json({ error: 'Missing shopifyTokens.accessToken or a valid shopDomain (*.myshopify.com)' })
+        return
+      }
+      const managed = typeof t?.refreshToken === 'string' && typeof t?.expiresAt === 'string'
+      credentials = {
+        type: 'oauth',
+        client_id: accessToken.startsWith('shpat_') ? 'shopify_token' : 'shopify_oauth',
+        client_secret: packShopifyTokens({
+          accessToken,
+          shopDomain,
+          ...(managed ? { refreshToken: t?.refreshToken, expiresAt: t?.expiresAt } : {}),
+        }),
+      }
+      // The shop domain plays the connectedEmail role ("Connected:
+      // mystore.myshopify.com") and is the default instance label (D3).
+      email = email ?? shopDomain
+      label = label ?? shopDomain
+      configPatch = { shopDomain }
+    } else {
+      const secret = (body.refreshToken ?? body.pat ?? body.accessToken ?? body.token ?? '').trim()
+      if (!secret) {
+        res.status(400).json({ error: 'Missing credential (refreshToken/pat/accessToken/token)' })
+        return
+      }
+      credentials = credentialsFor(secret)
+    }
 
     try {
       // Multi-account "add another" — always a fresh instance.
@@ -681,6 +938,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           connectedEmail: email,
           connected: true,
           credentials,
+          ...(configPatch ? { config: configPatch } : {}),
         })
         res.json({ ok: true, connectorInstanceId: created.id })
         return
@@ -695,6 +953,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           ...(label ? { label } : {}),
         })
         if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+        if (configPatch) await connectorInstanceStore.setConfig(userId, updated.id, configPatch)
         res.json({ ok: true, connectorInstanceId: updated.id })
         return
       }
@@ -711,6 +970,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           credentials,
           ...(label ? { label } : {}),
         })
+        if (configPatch) await connectorInstanceStore.setConfig(userId, existing.id, configPatch)
         res.json({ ok: true, connectorInstanceId: updated?.id ?? existing.id })
         return
       }
@@ -722,6 +982,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         connectedEmail: email,
         connected: true,
         credentials,
+        ...(configPatch ? { config: configPatch } : {}),
       })
       res.json({ ok: true, connectorInstanceId: created.id })
     } catch (err) {

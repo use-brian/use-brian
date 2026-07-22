@@ -50,6 +50,10 @@ export const EMBEDDED_PRIMITIVES = [
   // of a large document/paste — heading-path-prefixed embed text via the
   // PRIMITIVE_CONFIGS entry. See docs/architecture/brain/file-artifacts.md.
   'file_segment',
+  // Email archive segments (mailbox-imap connector). The person-compartmented
+  // full-mailbox corpus — subject-prefixed embed text via the
+  // PRIMITIVE_CONFIGS entry. See docs/architecture/integrations/mailbox-imap.md.
+  'email_segment',
 ] as const
 
 export type EmbeddingPrimitive = typeof EMBEDDED_PRIMITIVES[number]

@@ -93,10 +93,47 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   fathomGetTranscript: 'Read meeting transcript',
   fathomGetSummary: 'Read meeting summary',
 
+  // Shopify
+  shopifyGetShop: 'View store info',
+  shopifyListProducts: 'List products',
+  shopifyGetProduct: 'View product',
+  shopifyListOrders: 'List orders',
+  shopifyGetOrder: 'View order',
+  shopifySearchCustomers: 'Search customers',
+  shopifyGetCustomer: 'View customer',
+  shopifyGetInventoryLevels: 'Check inventory',
+  shopifyListCollections: 'List collections',
+  shopifyListDraftOrders: 'List draft orders',
+  shopifyListDiscounts: 'List discount codes',
+  shopifyListAbandonedCheckouts: 'List abandoned checkouts',
+  shopifyGetPayoutsSummary: 'View payouts',
+  shopifyListDisputes: 'List disputes',
+  shopifyListContent: 'List store content',
+  shopifySalesReport: 'Run sales report',
+  shopifyUpdateProduct: 'Update product',
+  shopifyCreateProduct: 'Create product',
+  shopifyCreateDraftOrder: 'Create draft order',
+  shopifySendDraftOrderInvoice: 'Send draft order invoice',
+  shopifyAddTags: 'Add Shopify tags',
+  shopifyUpdateCustomer: 'Update customer',
+  shopifySetInventory: 'Set inventory',
+  shopifyCreateFulfillment: 'Fulfill order',
+  shopifyCreateDiscountCode: 'Create discount code',
+  shopifyCreateContent: 'Create store content',
+  shopifyCancelOrder: 'Cancel order',
+  shopifyRefundOrder: 'Refund order',
+  shopifyCompleteDraftOrder: 'Complete draft order',
+
   // Assistant Email (AgentMail) — the assistant's own mailbox
   agentmailSendMessage: 'Send email as the assistant',
   agentmailSearchThreads: 'Search the assistant\'s mailbox',
   agentmailCreateDraft: 'Draft email as the assistant',
+
+  // Company mailbox (IMAP/SMTP) — the user's own corporate mailbox
+  imapSearchMessages: 'Search company mailbox',
+  imapGetMessage: 'Read company email',
+  imapSendMessage: 'Send email from company mailbox',
+  searchEmailArchive: 'Search mailbox archive',
 
   // Workspace files (Q3 / company-brain §10)
   fileWrite: 'Save workspace file',

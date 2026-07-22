@@ -53,7 +53,10 @@ import {
   type OperatorAppKey,
 } from "@/lib/operator-apps";
 
-const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
+/** App key → glyph — shared with the operator top bar's tab chip
+ *  (`components/operator/operator-topbar.tsx`) so the app-bar entry and the
+ *  chip can never drift. */
+export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   page: FileText,
   tasks: CheckSquare,
   feed: Megaphone,

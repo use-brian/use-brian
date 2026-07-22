@@ -136,6 +136,7 @@ function formatBindingError(error: z.ZodError, input: unknown): string[] {
   return [
     prefix +
       'Valid combinations: tasks/table, tasks/board (groupBy:"status"), ' +
+      'tasks/calendar (dateBy:"due"), ' +
       'contacts/table, companies/table, deals/table, deals/board (groupBy:"stage"), ' +
       'workflow_runs/table (filters.workflowId required).',
   ]
@@ -173,26 +174,28 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
   return buildTool({
     name: 'renderView',
     description:
-      'Render a Table or Board of the workspace\'s primitives — tasks / contacts / companies / deals / workflow runs. ' +
-      'Use this when the user asks to "show me", "list", "kanban", or any visual request — instead of writing a Markdown table. ' +
-      'Result mounts inline in chat. When the session is anchored to a doc page, the table/board is appended to that page as a block; otherwise interactive chat persists it as a new draft page in the workspace\'s Pages sidebar (page URL: /w/<workspaceId>/p/<viewId>), and unanchored scheduled/automated sessions get the data only (no page is created). ' +
+      'Render a Table, Board, or Calendar of the workspace\'s primitives — tasks / contacts / companies / deals / workflow runs. ' +
+      'Use this when the user asks to "show me", "list", "kanban", a calendar/schedule of dated tasks, or any visual request — instead of writing a Markdown table. ' +
+      'Result mounts inline in chat. When the session is anchored to a doc page, the table/board/calendar is appended to that page as a block; otherwise interactive chat persists it as a new draft page in the workspace\'s Pages sidebar (page URL: /w/<workspaceId>/p/<viewId>), and unanchored scheduled/automated sessions get the data only (no page is created). ' +
       '\n\n' +
       'ONLY these exact (entity, viewType) combinations are valid. Pick one VERBATIM; the tool rejects anything else: ' +
       '\n  • tasks/table — optional filters.{status[],assigneeId,tag,dueBefore,dueAfter}' +
       '\n  • tasks/board — REQUIRED groupBy:"status" — optional filters.{assigneeId,tag}' +
+      '\n  • tasks/calendar — REQUIRED dateBy:"due" — optional filters.{status[],assigneeId,tag}. Month/week grid placing each task on its due date; tasks with no due date are not shown' +
       '\n  • contacts/table — optional filters.{query,tag,companyId}' +
       '\n  • companies/table — optional filters.{query,tag}' +
       '\n  • deals/table — optional filters.{stage[],contactId,companyId}' +
       '\n  • deals/board — REQUIRED groupBy:"stage" — optional filters.{contactId,companyId}' +
       '\n  • workflow_runs/table — REQUIRED filters.workflowId (UUID)' +
       '\n\n' +
-      'Do NOT invent other viewTypes (no "kanban", "list", "gallery"). Do NOT call without the REQUIRED fields above for board variants.',
+      'Do NOT invent other viewTypes (no "kanban", "list", "gallery"). Do NOT call without the REQUIRED fields above for board/calendar variants.',
     inputSchema: z
       .object({
         binding: z.unknown().describe(
           'BindingConfig object. Copy one of these shapes literally: ' +
           '{"entity":"tasks","viewType":"table"} | ' +
           '{"entity":"tasks","viewType":"board","groupBy":"status"} | ' +
+          '{"entity":"tasks","viewType":"calendar","dateBy":"due"} | ' +
           '{"entity":"contacts","viewType":"table"} | ' +
           '{"entity":"companies","viewType":"table"} | ' +
           '{"entity":"deals","viewType":"table"} | ' +
@@ -217,7 +220,8 @@ export function createRenderViewTool(deps: ViewToolDeps): Tool {
             errors: formatBindingError(parsed.error, input.binding),
             hint:
               'Locked decisions: contacts/companies/workflow_runs are TABLE-ONLY. ' +
-              'tasks/board requires groupBy:"status"; deals/board requires groupBy:"stage". ' +
+              'tasks/board requires groupBy:"status"; deals/board requires groupBy:"stage"; ' +
+              'tasks/calendar requires dateBy:"due". ' +
               'workflow_runs/table requires filters.workflowId.',
           },
           isError: true,

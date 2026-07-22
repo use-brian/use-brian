@@ -8,7 +8,12 @@ export type {
   MemoryRecallKind,
   MemoryRecallSink,
 } from './recall-buffer.js'
-export { buildMemoryContext } from './context-builder.js'
+export {
+  buildMemoryContext,
+  voicePlatformFromDraftTitle,
+  isVoicePlatformTag,
+  VOICE_PLATFORM_TAGS,
+} from './context-builder.js'
 export type { MemoryEntry, IdentityMemory } from './context-builder.js'
 export { createSelfProfileTool } from './self-profile-tool.js'
 export { runMemoryNudge } from './nudge.js'

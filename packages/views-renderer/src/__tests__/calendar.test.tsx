@@ -271,10 +271,21 @@ describe('[COMP:views/calendar] month grid rendering', () => {
     expect(matches).toHaveLength(35)
   })
 
-  it('highlights today with bg-[var(--accent)]/30', () => {
+  it('marks today with the filled-circle numeral (Notion treatment)', () => {
     const html = calendarHtml({ rows: SAMPLE_CALENDAR.rows })
     expect(html).toMatch(/data-calendar-today="true"/)
-    expect(html).toMatch(/bg-\[var\(--accent\)\]\/30/)
+    // The red circle wraps the numeral; the old whole-cell tint is gone.
+    expect(html).toMatch(/bg-red-500/)
+    expect(html).not.toMatch(/bg-\[var\(--accent\)\]\/30/)
+  })
+
+  it('labels the 1st of the month with its month abbreviation', () => {
+    // NOW is 2026-05-28 — the May grid contains May 1 (and the June 1
+    // trailing cell), so a "<Month> 1" label must appear.
+    const html = calendarHtml({ rows: SAMPLE_CALENDAR.rows })
+    const may1 = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
+      .format(new Date(2026, 4, 1))
+    expect(html).toContain(may1)
   })
 
   it('places row chips on the day they belong to (15 May → 2 chips)', () => {
@@ -349,6 +360,23 @@ describe('[COMP:views/calendar] click handlers', () => {
     expect(handler).toBeTypeOf('function')
     handler!({} as unknown as React.MouseEvent)
     expect(onAction).toHaveBeenCalledWith('date-clicked', { date: '2026-05-15' })
+  })
+
+  it('clicking a day cell "+" calls onAction with date-add + iso date', () => {
+    const onAction = vi.fn()
+    const el = renderPure({ onAction })
+    const handler = findAddClickHandler(el, '2026-05-15')
+    expect(handler).toBeTypeOf('function')
+    const stopProp = vi.fn()
+    handler!({ stopPropagation: stopProp } as unknown as React.MouseEvent)
+    expect(onAction).toHaveBeenCalledWith('date-add', { date: '2026-05-15' })
+    // The + must not double-fire the underlying day cell's date-clicked.
+    expect(stopProp).toHaveBeenCalled()
+  })
+
+  it('renders no "+" affordance without onAction', () => {
+    const el = renderPure({})
+    expect(findAddClickHandler(el, '2026-05-15')).toBeNull()
   })
 
   it('clicking a row chip calls onAction(rowAction.id, { rowId })', () => {
@@ -586,6 +614,13 @@ function findChipClickHandler(
   rowId: string,
 ): ((e: React.MouseEvent) => void) | null {
   return findClickHandler(el, (p) => p['data-calendar-chip'] === rowId)
+}
+
+function findAddClickHandler(
+  el: AnyEl,
+  isoKey: string,
+): ((e: React.MouseEvent) => void) | null {
+  return findClickHandler(el, (p) => p['data-calendar-add'] === isoKey)
 }
 
 /**

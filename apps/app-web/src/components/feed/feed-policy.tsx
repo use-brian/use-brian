@@ -147,7 +147,7 @@ export function FeedPolicy() {
   }
   if (loading) {
     return (
-      <div className="px-6 md:px-10 py-10 max-w-4xl mx-auto space-y-6 animate-fade-in">
+      <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
         <div className="space-y-2">
           <div className="skeleton h-6 w-56" />
           <div className="skeleton h-3 w-80" />
@@ -162,9 +162,9 @@ export function FeedPolicy() {
   }
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-4xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+        <h1 className="text-[15px] font-semibold">
           {format(t.policy.heading, { platform: platformLabel })}
         </h1>
         <p className="text-sm text-muted-foreground leading-relaxed">
@@ -189,7 +189,7 @@ export function FeedPolicy() {
             <label
               key={value}
               className={
-                "flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-all duration-200 hover-lift " +
+                "flex items-start gap-3 rounded-xl border p-3.5 cursor-pointer transition-all duration-200 " +
                 (autoReplyMode === value
                   ? "border-primary bg-primary/10 shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--primary)_30%,transparent)]"
                   : "border-border bg-card hover:border-primary/25 hover:bg-accent/40")
@@ -250,7 +250,7 @@ export function FeedPolicy() {
             type="button"
             onClick={save}
             disabled={saving}
-            className="rounded-xl bg-primary text-primary-foreground px-5 h-10 text-sm font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press shadow-md shadow-primary/20"
+            className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
           >
             {saving ? t.policy.saving : t.policy.saveCta}
           </button>
@@ -297,8 +297,8 @@ function EmptyState(props: {
   t: PolicyDict;
 }) {
   return (
-    <div className="px-8 py-10 max-w-2xl space-y-4">
-      <h1 className="text-xl font-semibold" style={{ fontFamily: "var(--font-rocknroll)" }}>
+    <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+      <h1 className="text-[15px] font-semibold">
         {format(props.t.notConnectedTitle, { platform: props.platformLabel })}
       </h1>
       <p className="text-sm text-muted-foreground">
@@ -306,7 +306,7 @@ function EmptyState(props: {
       </p>
       <Link
         href={feedPath(props.workspaceId)}
-        className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
       >
         {props.t.startSetup}
       </Link>

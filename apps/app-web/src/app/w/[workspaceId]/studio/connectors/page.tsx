@@ -64,6 +64,7 @@ import { PreflightHeadersSection } from "@/components/connectors/preflight-heade
 import { readPreflightHeaders } from "@/lib/connector-preflight-headers";
 import { ActorIdentityToggle } from "@/components/connectors/actor-identity-toggle";
 import { MediaTokenToggle } from "@/components/connectors/media-token-toggle";
+import { ImapSyncPanel } from "@/components/connectors/imap-sync-panel";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
@@ -74,6 +75,7 @@ import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
+import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -88,6 +90,9 @@ const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
 const FATHOM_AUTHORIZE_URL =
   process.env.NEXT_PUBLIC_FATHOM_AUTHORIZE_URL ??
   "https://fathom.video/oauth2/authorize";
+// Absent → the Shopify OAuth path stays dark and the connect form offers only
+// the pasted admin-token path (docs/architecture/integrations/shopify.md).
+const SHOPIFY_CLIENT_ID = process.env.NEXT_PUBLIC_SHOPIFY_CLIENT_ID ?? "";
 
 /**
  * Frontend shortcut: build the OAuth authorize URL client-side when the page
@@ -677,6 +682,35 @@ function ConnectorsList() {
   const [s3SecretKey, setS3SecretKey] = useState("");
   const [s3Error, setS3Error] = useState<string | null>(null);
 
+  // Company mailbox (imap) form state — one dialog with progressive
+  // disclosure: email (MX-resolves the preset on blur) + app password, with
+  // Advanced host/port fields for unrecognized servers. The server verifies
+  // the credential live (IMAP login + SMTP) before storing anything.
+  const [showImapForm, setShowImapForm] = useState<string | null>(null);
+  const [imapEmail, setImapEmail] = useState("");
+  const [imapPassword, setImapPassword] = useState("");
+  const [imapDetecting, setImapDetecting] = useState(false);
+  const [imapPreset, setImapPreset] = useState<{ presetId: string } | null>(null);
+  const [imapResolved, setImapResolved] = useState(false);
+  const [imapShowAdvanced, setImapShowAdvanced] = useState(false);
+  const [imapHostIn, setImapHostIn] = useState("");
+  const [imapPortIn, setImapPortIn] = useState("993");
+  const [imapSmtpHostIn, setImapSmtpHostIn] = useState("");
+  const [imapSmtpPortIn, setImapSmtpPortIn] = useState("465");
+  const [imapShowHelp, setImapShowHelp] = useState(false);
+  const [imapError, setImapError] = useState<string | null>(null);
+
+  // Shopify connect form state. The authorize URL is per-shop, so unlike
+  // Notion/Fathom the OAuth path needs the store domain BEFORE the redirect;
+  // the same form carries the pasted `shpat_` admin-token path (the only live
+  // path until the public app is registered). `shopifyConnectOpts` remembers
+  // the add-another / reconnect intent between opening the form and acting.
+  const [showShopifyForm, setShowShopifyForm] = useState<string | null>(null);
+  const [shopifyDomain, setShopifyDomain] = useState("");
+  const [shopifyToken, setShopifyToken] = useState("");
+  const [shopifyError, setShopifyError] = useState<string | null>(null);
+  const [shopifyConnectOpts, setShopifyConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
+
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
   const [addAnotherFor, setAddAnotherFor] = useState<string | null>(null);
@@ -1006,6 +1040,15 @@ function ConnectorsList() {
       return;
     }
 
+    // Company mailbox — email + app password with MX-detected hosts,
+    // verified live (IMAP login + SMTP) server-side before storing.
+    if (id === "imap") {
+      setShowImapForm(rid);
+      setImapError(null);
+      setConnecting(null);
+      return;
+    }
+
     // Notion OAuth — separate flow (different auth URL, no scopes). The
     // workspaceId is threaded through `state` so the server callback can
     // redirect back to this workspace-scoped route. `armConnectorOauthState`
@@ -1036,6 +1079,18 @@ function ConnectorsList() {
         state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
+      return;
+    }
+
+    // Shopify — the authorize host is per-shop, so collect the store domain
+    // first (form below). MUST stay ahead of the generic scopes branch:
+    // OFFICIAL_OAUTH_SCOPES has a shopify entry, and falling through would
+    // redirect a Shopify connect to the Google authorize URL.
+    if (id === "shopify") {
+      setShowShopifyForm(rid);
+      setShopifyConnectOpts(opts ?? null);
+      setShopifyError(null);
+      setConnecting(null);
       return;
     }
 
@@ -1196,6 +1251,70 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  // Shopify OAuth — redirect to the per-shop authorize URL. Only offered when
+  // NEXT_PUBLIC_SHOPIFY_CLIENT_ID is configured (P0 app registration).
+  function startShopifyOauth(c: Connector) {
+    const shopDomain = normalizeShopifyShopDomain(shopifyDomain);
+    if (!shopDomain) {
+      setShopifyError(tc.shopify.errDomain);
+      return;
+    }
+    const opts = shopifyConnectOpts;
+    const nonce = armConnectorOauthState();
+    const redirectUri = `${window.location.origin}/api/auth/callback/shopify`;
+    const sp = new URLSearchParams({
+      client_id: SHOPIFY_CLIENT_ID,
+      // Shopify scopes are comma-separated (Wave 1, from the shared registry).
+      scope: (OFFICIAL_OAUTH_SCOPES.shopify ?? []).join(","),
+      redirect_uri: redirectUri,
+      state: buildConnectorState({ connector: "shopify", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId ?? c.connectorInstanceId, nonce }),
+    });
+    window.location.href = `https://${shopDomain}/admin/oauth/authorize?${sp}`;
+  }
+
+  // Shopify pasted admin token (`shpat_...`) — the static-token path. Works
+  // with zero app registration (legacy custom apps, dev stores, self-host).
+  async function handleSaveShopifyToken(c: Connector) {
+    const shopDomain = normalizeShopifyShopDomain(shopifyDomain);
+    if (!shopDomain) {
+      setShopifyError(tc.shopify.errDomain);
+      return;
+    }
+    if (!shopifyToken.trim()) return;
+    const rid = rowId(c);
+    const opts = shopifyConnectOpts;
+    setConnecting(rid);
+    setShopifyError(null);
+    try {
+      const instanceId = opts?.instanceId ?? c.connectorInstanceId;
+      const res = await authFetch(`${API_URL}/api/connectors/shopify/store-credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shopifyTokens: { accessToken: shopifyToken.trim(), shopDomain },
+          // The shop domain plays the connectedEmail role in the Settings UI.
+          email: shopDomain,
+          ...(opts?.addAnother ? { createNew: true, label: shopDomain } : instanceId ? { instanceId } : {}),
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setShowShopifyForm(null);
+        setShopifyDomain(""); setShopifyToken(""); setShopifyConnectOpts(null);
+        setSelected(rid);
+        loadTools(c.id);
+        fetchConnectors();
+        setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
+      } else {
+        setShopifyError(tc.shopify.errSave);
+      }
+    } catch {
+      setShopifyError(tc.shopify.errSave);
+    }
+    setConnecting(null);
+  }
+
   // Connect the workspace's own GCS bucket. The server validates the key with
   // a write/read/delete probe before persisting, so a bad key surfaces here.
   async function handleSaveGcs(c: Connector) {
@@ -1233,6 +1352,97 @@ function ConnectorsList() {
       }
     } catch {
       setGcsError(tc.gcs.errGeneric);
+    }
+    setConnecting(null);
+  }
+
+  // Resolve the mail server from the address domain's MX records (on blur).
+  // A recognized preset shows "Detected: ..." with hosts collapsed under
+  // Advanced; an unrecognized one expands the host/port fields.
+  async function handleResolveImapPreset() {
+    const email = imapEmail.trim();
+    if (!email.includes("@")) return;
+    setImapDetecting(true);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/imap/resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        preset?: { presetId: string; imapHost: string; imapPort: number; smtpHost: string; smtpPort: number } | null;
+      };
+      const preset = res.ok ? data.preset ?? null : null;
+      setImapPreset(preset ? { presetId: preset.presetId } : null);
+      setImapResolved(true);
+      if (preset) {
+        setImapHostIn(preset.imapHost);
+        setImapPortIn(String(preset.imapPort));
+        setImapSmtpHostIn(preset.smtpHost);
+        setImapSmtpPortIn(String(preset.smtpPort));
+      } else {
+        setImapShowAdvanced(true);
+      }
+    } catch {
+      setImapPreset(null);
+      setImapResolved(true);
+      setImapShowAdvanced(true);
+    }
+    setImapDetecting(false);
+  }
+
+  // Connect the company mailbox. The server verifies the credential live
+  // (IMAP login + SMTP verify) before persisting, so a wrong password or an
+  // admin-gated account surfaces here as a NAMED error, and nothing dead is
+  // ever stored.
+  async function handleSaveImap(c: Connector) {
+    const email = imapEmail.trim();
+    if (!email.includes("@") || !imapPassword) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setImapError(null);
+    const explicitHosts =
+      imapHostIn.trim() && imapSmtpHostIn.trim()
+        ? {
+            imapHost: imapHostIn.trim(),
+            imapPort: Number(imapPortIn) || 993,
+            smtpHost: imapSmtpHostIn.trim(),
+            smtpPort: Number(imapSmtpPortIn) || 465,
+          }
+        : {};
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/imap/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, appPassword: imapPassword, ...explicitHosts }),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setSelected(rid);
+        setShowImapForm(null);
+        setImapEmail(""); setImapPassword(""); setImapPreset(null); setImapResolved(false);
+        setImapShowAdvanced(false); setImapShowHelp(false);
+        setImapHostIn(""); setImapPortIn("993"); setImapSmtpHostIn(""); setImapSmtpPortIn("465");
+        fetchConnectors();
+        // imap is single_instance (one mailbox per user), so the arm resolves.
+        setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        if (data.error === "hosts_required") {
+          setImapShowAdvanced(true);
+          setImapError(tc.imap.errHostsRequired);
+        } else {
+          setImapError(
+            data.code === "auth_failed" ? tc.imap.errAuth
+            : data.code === "access_disabled" ? tc.imap.errAccessDisabled
+            : data.code === "unreachable" ? tc.imap.errUnreachable
+            : tc.imap.errGeneric,
+          );
+        }
+      }
+    } catch {
+      setImapError(tc.imap.errGeneric);
     }
     setConnecting(null);
   }
@@ -2444,6 +2654,61 @@ function ConnectorsList() {
                   </div>
                 )}
 
+                {/* Shopify connect form — store domain first (the authorize
+                    URL is per-shop), then OAuth (when the app is registered)
+                    or a pasted shpat_ admin token. */}
+                {showShopifyForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.shopify.domainPlaceholder}
+                      value={shopifyDomain}
+                      onChange={(e) => setShopifyDomain(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    {SHOPIFY_CLIENT_ID && (
+                      <button
+                        onClick={() => startShopifyOauth(sel)}
+                        disabled={!shopifyDomain.trim()}
+                        className="w-full text-xs font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {tc.shopify.oauthBtn}
+                      </button>
+                    )}
+                    <p className="text-xs text-muted-foreground">{tc.shopify.orPasteToken}</p>
+                    <input
+                      type="password"
+                      placeholder={tc.shopify.tokenPlaceholder}
+                      value={shopifyToken}
+                      onChange={(e) => setShopifyToken(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleSaveShopifyToken(sel); }}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    {shopifyError && <p className="text-xs text-destructive">{shopifyError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setShowShopifyForm(null);
+                          setShopifyDomain(""); setShopifyToken("");
+                          setShopifyError(null); setShopifyConnectOpts(null);
+                        }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveShopifyToken(sel)}
+                        disabled={!shopifyDomain.trim() || !shopifyToken.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.savingBtn : tc.saveBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* GCS bring-your-own storage form — SA key + bucket, validated
                     server-side before the binding is saved. */}
                 {showGcsForm === rid && (
@@ -2552,6 +2817,120 @@ function ConnectorsList() {
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.s3.validatingBtn : tc.s3.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Company mailbox (imap) connected card — archive sync status
+                    + the D9 backfill consent (preflight counts, scope choices,
+                    Later first-class). */}
+                {sel.id === "imap" && sel.connected && <ImapSyncPanel />}
+
+                {/* Company mailbox (imap) form — one dialog, progressive
+                    disclosure: email resolves the MX preset on blur; Advanced
+                    expands host/port fields for unrecognized servers. Verified
+                    live server-side before anything is stored. */}
+                {showImapForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.imap.formHelp}</p>
+                    <input
+                      type="email"
+                      placeholder={tc.imap.emailPlaceholder}
+                      value={imapEmail}
+                      onChange={(e) => { setImapEmail(e.target.value); setImapResolved(false); setImapPreset(null); }}
+                      onBlur={() => { if (!imapResolved) void handleResolveImapPreset(); }}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    {imapDetecting && <p className="text-[11px] text-muted-foreground">{tc.imap.detecting}</p>}
+                    {!imapDetecting && imapPreset?.presetId === "alimail" && (
+                      <p className="text-[11px] text-primary">{tc.imap.detectedAlimail}</p>
+                    )}
+                    {!imapDetecting && imapResolved && !imapPreset && (
+                      <p className="text-[11px] text-muted-foreground">{tc.imap.notDetected}</p>
+                    )}
+                    <input
+                      type="password"
+                      placeholder={tc.imap.passwordPlaceholder}
+                      value={imapPassword}
+                      onChange={(e) => setImapPassword(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") handleSaveImap(sel); }}
+                      autoComplete="off"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <button
+                      onClick={() => setImapShowHelp((v) => !v)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.imap.passwordHelpTitle}
+                    </button>
+                    {imapShowHelp && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {imapPreset?.presetId === "alimail" ? tc.imap.passwordHelpAlimail : tc.imap.passwordHelpGeneric}
+                      </p>
+                    )}
+                    {!imapShowAdvanced && (
+                      <button
+                        onClick={() => setImapShowAdvanced(true)}
+                        className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                      >
+                        {tc.imap.advancedToggle}
+                      </button>
+                    )}
+                    {imapShowAdvanced && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          placeholder={tc.imap.imapHostPlaceholder}
+                          value={imapHostIn}
+                          onChange={(e) => setImapHostIn(e.target.value)}
+                          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder={tc.imap.imapPortPlaceholder}
+                          value={imapPortIn}
+                          onChange={(e) => setImapPortIn(e.target.value)}
+                          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="text"
+                          placeholder={tc.imap.smtpHostPlaceholder}
+                          value={imapSmtpHostIn}
+                          onChange={(e) => setImapSmtpHostIn(e.target.value)}
+                          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder={tc.imap.smtpPortPlaceholder}
+                          value={imapSmtpPortIn}
+                          onChange={(e) => setImapSmtpPortIn(e.target.value)}
+                          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                      </div>
+                    )}
+                    {imapError && <p className="text-xs text-destructive">{imapError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          setShowImapForm(null);
+                          setImapEmail(""); setImapPassword(""); setImapPreset(null); setImapResolved(false);
+                          setImapShowAdvanced(false); setImapShowHelp(false); setImapError(null);
+                          setImapHostIn(""); setImapPortIn("993"); setImapSmtpHostIn(""); setImapSmtpPortIn("465");
+                        }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveImap(sel)}
+                        disabled={!imapEmail.trim().includes("@") || !imapPassword || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.imap.verifyingBtn : tc.imap.connectBtn}
                       </button>
                     </div>
                   </div>

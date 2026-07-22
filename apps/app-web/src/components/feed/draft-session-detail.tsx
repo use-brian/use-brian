@@ -64,7 +64,11 @@ import {
   type FeedSavedDraft,
   type FeedSavedDraftStatus,
 } from "@/lib/api/feed";
-import { feedPath, type FeedPlatform } from "@/lib/feed-nav";
+import {
+  feedPath,
+  isConnectableFeedPlatform,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -120,6 +124,9 @@ type SeedCandidate = {
 type DraftAlternative = {
   text: string;
   label?: string;
+  /** Written brief of the visual for image-first platforms — proposed by
+   *  the model per draft, forwarded on save (feed-create-split.md D9). */
+  imageBrief?: string;
 };
 
 /** Operator-friendly explanation of why a Threads URL-paste failed to
@@ -141,7 +148,7 @@ export function explainResolveFailure(
 
 type ProposeDraftsInput = {
   rationale: string;
-  drafts: Array<{ index: number; text: string; label?: string }>;
+  drafts: Array<{ index: number; text: string; label?: string; imageBrief?: string }>;
 };
 
 type SSEEvent = { event: string; data: string };
@@ -160,7 +167,7 @@ export function applyProposeDrafts(
 ): Map<number, DraftAlternative> {
   const next = new Map(prev);
   for (const d of input.drafts) {
-    next.set(d.index, { text: d.text, label: d.label });
+    next.set(d.index, { text: d.text, label: d.label, imageBrief: d.imageBrief });
   }
   return next;
 }
@@ -188,6 +195,7 @@ export function parseProposeDraftsInput(raw: unknown): ProposeDraftsInput | null
       index,
       text,
       label: typeof item.label === "string" ? item.label : undefined,
+      imageBrief: typeof item.imageBrief === "string" ? item.imageBrief : undefined,
     });
   }
   if (out.length === 0) return null;
@@ -297,17 +305,35 @@ export function parseSeedFromFirstMessage(text: string): SeedCandidate | null {
 // client package because the rule is small and changes rarely.
 
 const POST_URL_PATTERN =
-  /https?:\/\/(?:www\.|mobile\.)?(?:threads\.(?:com|net)|x\.com|twitter\.com)\/[^\s<>"]+/gi;
+  /https?:\/\/(?:www\.|mobile\.)?(?:threads\.(?:com|net)|x\.com|twitter\.com|instagram\.com|xiaohongshu\.com|xhslink\.com)\/[^\s<>"]+/gi;
 
 type ParsedPostUrl =
   | { platform: "threads"; handle: string; shortcode: string; permalink: string }
-  | { platform: "twitter"; handle: string; statusId: string; permalink: string };
+  | { platform: "twitter"; handle: string; statusId: string; permalink: string }
+  | {
+      platform: "instagram";
+      handle: string | null;
+      shortcode: string;
+      permalink: string;
+    }
+  | { platform: "xhs"; handle: null; noteId: string; permalink: string };
+
+const IG_POST_KINDS: ReadonlySet<string> = new Set(["p", "reel", "reels", "tv"]);
 
 /**
- * Parse a single Threads/X post URL into a structured handle. Mirrors the
+ * Stable prefix of the server's link-seeded first message — the kickoff
+ * eligibility signal for `freeform` sessions (D13). Mirrors
+ * `LINK_SEED_MESSAGE_PREFIX` in the backend `draft-session-store.ts`; both
+ * sides treat it as a wire format.
+ */
+const LINK_SEED_MESSAGE_PREFIX = "Draft posts from this link:";
+
+/**
+ * Parse a single platform post URL into a structured handle. Mirrors the
  * backend `parsePostUrl` from `packages/api/src/feed/post-url-parser.ts` —
  * we duplicate it here rather than building a shared client package because
- * the rule is small and changes rarely.
+ * the rule is small and changes rarely. Instagram/XHS parse for reference
+ * tiles only (feed-create-split.md D13); replies stay Threads/X.
  */
 // exported for tests
 export function parsePostUrl(input: string): ParsedPostUrl | null {
@@ -337,6 +363,48 @@ export function parsePostUrl(input: string): ParsedPostUrl | null {
         handle: parts[idx - 1],
         statusId: parts[idx + 1],
         permalink: `https://x.com/${parts[idx - 1]}/status/${parts[idx + 1]}`,
+      };
+    }
+  }
+  if (/(?:^|\.)instagram\.com$/i.test(host)) {
+    const kindIdx = parts.findIndex((p) => IG_POST_KINDS.has(p));
+    const shortcode = kindIdx >= 0 ? parts[kindIdx + 1] : undefined;
+    if (shortcode && /^[A-Za-z0-9_-]+$/.test(shortcode)) {
+      const kind = parts[kindIdx] === "p" ? "p" : "reel";
+      return {
+        platform: "instagram",
+        handle: kindIdx === 1 ? parts[0] : null,
+        shortcode,
+        permalink: `https://www.instagram.com/${kind}/${shortcode}/`,
+      };
+    }
+    return null;
+  }
+  if (/(?:^|\.)xiaohongshu\.com$/i.test(host)) {
+    const noteId =
+      parts[0] === "explore"
+        ? parts[1]
+        : parts[0] === "discovery" && parts[1] === "item"
+          ? parts[2]
+          : undefined;
+    if (noteId && /^[a-f0-9]+$/i.test(noteId)) {
+      return {
+        platform: "xhs",
+        handle: null,
+        noteId,
+        permalink: `https://www.xiaohongshu.com/explore/${noteId}`,
+      };
+    }
+    return null;
+  }
+  if (/(?:^|\.)xhslink\.com$/i.test(host)) {
+    const code = parts[0];
+    if (code && /^[A-Za-z0-9]+$/.test(code)) {
+      return {
+        platform: "xhs",
+        handle: null,
+        noteId: code,
+        permalink: `https://xhslink.com/${code}`,
       };
     }
   }
@@ -382,6 +450,22 @@ export function DraftSessionDetail() {
     (accountId
       ? team.profiles.find((p) => p.assistantId === accountId)
       : undefined) ?? team.profiles.find((p) => p.platform === platform);
+  // Create split (feed-create-split.md D7/D8): drafting needs no connected
+  // profile. The acting assistant falls back to the `?account=` assistant
+  // (a brand voice created without OAuth) and then the workspace's first
+  // distribution assistant.
+  const brandFallbackId =
+    (accountId && team.assistants.find((a) => a.id === accountId)?.id) ||
+    team.assistants[0]?.id ||
+    null;
+  const assistantId = profile?.assistantId ?? brandFallbackId;
+  // Chat attribution identity — the assistant's own name/avatar, resolved
+  // from the profile when connected, else from the brand-voice assistant.
+  const assistantName =
+    profile?.assistant.name ??
+    team.assistants.find((a) => a.id === assistantId)?.name ??
+    "";
+  const assistantIconSeed = profile?.assistant.iconSeed ?? 0;
   const platformLabel = t.platformLabels[platform];
   const isAdmin = team.role === "admin" || team.role === "owner";
   // Draft-app interaction (save / approve / reject) — admin/owner OR a
@@ -595,9 +679,9 @@ export function DraftSessionDetail() {
           setMemberNames(next);
         }
       } catch { /* non-fatal */ }
-      if (!profile) return;
+      if (!assistantId) return;
       try {
-        const sessions = await fetchFeedDraftSessions(profile.assistantId, platform);
+        const sessions = await fetchFeedDraftSessions(assistantId, platform);
         if (!cancelled) {
           const found = sessions.find((s) => s.id === params.sessionId);
           if (found) {
@@ -615,7 +699,7 @@ export function DraftSessionDetail() {
     // We deliberately re-run only when the ids change; the function
     // captures `profile` lazily through the `if (!profile)` guard.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params.workspaceId, params.sessionId, profile?.assistantId]);
+  }, [params.workspaceId, params.sessionId, assistantId]);
 
   // Auto-scroll on new content. Depend on primitive lengths, not the array
   // reference — array identity churns even when content doesn't.
@@ -656,9 +740,12 @@ export function DraftSessionDetail() {
     // sessions stay reply; first-message URL paste also stays reply
     // (matches what the user saw before the migration). Brand-new
     // sessions never enter this branch because `seedKind` is set.
+    // Connectable platforms only — Instagram/XHS URLs became parseable for
+    // reference tiles (D13) and must not reclassify pre-107 rows.
     const firstUser = messages.find((m) => m.role === "user");
     if (seed && seed.source === "inspiration") return "reply";
-    if (firstUser && findParsedPostUrl(firstUser.text)) return "reply";
+    const parsed = firstUser ? findParsedPostUrl(firstUser.text) : null;
+    if (parsed && isConnectableFeedPlatform(parsed.platform)) return "reply";
     return "post";
   })();
 
@@ -672,9 +759,13 @@ export function DraftSessionDetail() {
     // freeform-reply / pre-107 URL paste: recover the candidate from the
     // first user message URL. Inspiration kinds are already covered by
     // `seed` (parsed in the history-load effect via parseSeedFromFirstMessage).
+    // Reply targets only ever live on connectable platforms (D13). The
+    // discriminant comparison (not the type-guard helper) narrows the
+    // parsed union so `shortcode`/`statusId` resolve below.
     const firstUser = messages.find((m) => m.role === "user");
     const parsed = firstUser ? findParsedPostUrl(firstUser.text) : null;
     if (!parsed) return null;
+    if (parsed.platform !== "threads" && parsed.platform !== "twitter") return null;
     return {
       authorHandle: parsed.handle,
       text: "",
@@ -736,7 +827,7 @@ export function DraftSessionDetail() {
   // `seenMessageIdsRef` so a duplicate `user_message_saved` /
   // `assistant_message_saved` from the bus is a no-op.
   useEffect(() => {
-    if (!profile) return;
+    if (!assistantId) return;
     const sessionId = params.sessionId;
     let cancelled = false;
     let abort = new AbortController();
@@ -925,7 +1016,7 @@ export function DraftSessionDetail() {
       const since = lastSequenceRef.current > 0 ? `?since=${lastSequenceRef.current}` : "";
       try {
         const res = await authFetch(
-          `${API_URL}/api/distribution/${profile.assistantId}/draft-sessions/${sessionId}/stream${since}`,
+          `${API_URL}/api/distribution/${assistantId}/draft-sessions/${sessionId}/stream${since}`,
           { signal: abort.signal },
         );
         if (!res.ok || !res.body) return;
@@ -967,7 +1058,7 @@ export function DraftSessionDetail() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.assistantId, params.sessionId, meId]);
+  }, [assistantId, params.sessionId, meId]);
 
   // Cardboard alternatives — sorted by index. Driven by tool calls from the
   // assistant; deterministic, no text parsing.
@@ -1014,7 +1105,7 @@ export function DraftSessionDetail() {
       text: string,
       opts: { truncateFromMessageId?: string } = {},
     ) => {
-      if (!profile) return;
+      if (!assistantId) return;
       const trimmed = text.trim();
       if (!trimmed) return;
 
@@ -1044,7 +1135,7 @@ export function DraftSessionDetail() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             message: trimmed,
-            assistantId: profile.assistantId,
+            assistantId: assistantId,
             sessionId: sessionIdRef.current ?? undefined,
             ...(opts.truncateFromMessageId
               ? { truncateFromMessageId: opts.truncateFromMessageId }
@@ -1314,15 +1405,21 @@ export function DraftSessionDetail() {
     if (historyLoading) return;
     if (isStreaming) return;
     if (kickoffFiredRef.current) return;
-    const seeded =
-      seedKind === "inspiration-reply" ||
-      seedKind === "inspiration-original" ||
-      seedKind === "freeform-reply";
-    if (!seeded) return;
     if (messages.length !== 1) return;
     const only = messages[0];
     if (only.role !== "user") return;
     if (only.id.startsWith("local-")) return; // a turn is already in flight
+    // Link-seeded freeform sessions (D13) share the `freeform` seed_kind
+    // with plain "+ New post" sessions (the seed_kind CHECK allows only the
+    // four legacy kinds), so eligibility is the seeded message's stable
+    // shape: only the server's link-seed prefix kicks off. An interrupted
+    // operator-typed freeform session never matches and keeps its history.
+    const seeded =
+      seedKind === "inspiration-reply" ||
+      seedKind === "inspiration-original" ||
+      seedKind === "freeform-reply" ||
+      (seedKind === "freeform" && only.text.startsWith(LINK_SEED_MESSAGE_PREFIX));
+    if (!seeded) return;
     const storageKey = `draft-kickoff-fired:${params.sessionId}`;
     try {
       if (sessionStorage.getItem(storageKey)) {
@@ -1491,17 +1588,17 @@ export function DraftSessionDetail() {
   // after they stop or on submit. NOTIFY only fires on transitions
   // server-side, so refresh-while-typing pings are cheap.
   useEffect(() => {
-    if (!profile) return;
+    if (!assistantId) return;
     const isTyping = input.trim().length > 0 && !isStreaming;
     if (!isTyping) {
       // No-op fire-and-forget for the off transition.
-      void sendFeedDraftTypingPing(profile.assistantId, params.sessionId, false);
+      void sendFeedDraftTypingPing(assistantId, params.sessionId, false);
       return;
     }
     let cancelled = false;
     const ping = () => {
       if (cancelled) return;
-      void sendFeedDraftTypingPing(profile.assistantId, params.sessionId, true);
+      void sendFeedDraftTypingPing(assistantId, params.sessionId, true);
     };
     ping();
     const timer = setInterval(ping, 3_000);
@@ -1512,14 +1609,14 @@ export function DraftSessionDetail() {
       clearInterval(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, isStreaming, profile?.assistantId, params.sessionId]);
+  }, [input, isStreaming, assistantId, params.sessionId]);
 
   // Reset the per-alternative "saved" badges whenever the underlying draft
   // Note: per-index save badges are reset inside the SSE tool_input handler
   // when an upsert touches that index — no global reset effect needed.
 
   async function saveAsDraft(index: number, text: string) {
-    if (!profile || savingIndex !== null) return;
+    if (!assistantId || savingIndex !== null) return;
     if (!text.trim()) {
       setError(td.noDraftTextYet);
       return;
@@ -1541,7 +1638,7 @@ export function DraftSessionDetail() {
       // saves the draft as a fresh thread, returning a `reply.reason`
       // we surface to the operator below.
       const result = await saveFeedSessionDraft(
-        profile.assistantId,
+        assistantId,
         params.sessionId,
         {
           text,
@@ -1553,6 +1650,13 @@ export function DraftSessionDetail() {
           ...(sessionIntent === "post" && platform === "threads" && topicTag.trim()
             ? { topicTag: topicTag.trim() }
             : {}),
+          // The visual brief riding the saved alternative (image-first
+          // platforms — feed-create-split.md D9). Keyed off the cardboard
+          // index being saved.
+          ...(() => {
+            const brief = draftMap.get(index)?.imageBrief?.trim();
+            return brief ? { imageBrief: brief } : {};
+          })(),
           ...(replyTarget
             ? {
                 reply: {
@@ -1601,8 +1705,8 @@ export function DraftSessionDetail() {
   // Called on mount and after every save / approve / reject so the inline
   // panel mirrors the audit trail without needing live SSE wiring.
   const loadSavedDrafts = useCallback(async () => {
-    if (!profile) return;
-    const drafts = await fetchFeedSavedDrafts(profile.assistantId, params.sessionId);
+    if (!assistantId) return;
+    const drafts = await fetchFeedSavedDrafts(assistantId, params.sessionId);
     // Non-fatal on error (null) — the panel just stays stale; the next
     // action will refresh it.
     if (drafts) setSavedDrafts(drafts);
@@ -1616,17 +1720,19 @@ export function DraftSessionDetail() {
   // an optional `text` body lets the operator approve an in-place edit
   // without bouncing to a separate review page.
   async function approveSavedDraft(draftId: string, editedText?: string) {
-    if (!profile || actingOnDraftId) return;
+    if (!assistantId || actingOnDraftId) return;
     const original = savedDrafts.find((d) => d.id === draftId);
     // Double-confirm the exact account before publishing — a workspace can
     // have several accounts and the reply/post is irreversible once it lands.
     const isReply = original?.platformReplyId != null;
     const confirmed = await confirmDialog({
       title: isReply ? td.approveReplyTitle : td.approvePostTitle,
-      description: format(td.approveDescription, {
-        handle: profile.platformHandle,
-        platform: platformLabel,
-      }),
+      description: profile
+        ? format(td.approveDescription, {
+            handle: profile.platformHandle,
+            platform: platformLabel,
+          })
+        : format(td.approveReadyDescription, { platform: platformLabel }),
       confirmLabel: isReply ? td.approveReplyLabel : td.approvePostLabel,
     });
     if (!confirmed) return;
@@ -1638,7 +1744,7 @@ export function DraftSessionDetail() {
         editedText.trim().length > 0 &&
         editedText !== original?.draftText;
       const result = await approveFeedDraft(
-        profile.assistantId,
+        assistantId,
         draftId,
         dirty ? { text: editedText } : {},
       );
@@ -1662,7 +1768,7 @@ export function DraftSessionDetail() {
   }
 
   async function rejectSavedDraft(draftId: string) {
-    if (!profile || actingOnDraftId) return;
+    if (!assistantId || actingOnDraftId) return;
     const ok = await confirmDialog({
       title: td.rejectTitle,
       description: td.rejectDescription,
@@ -1673,7 +1779,7 @@ export function DraftSessionDetail() {
     setActingOnDraftId(draftId);
     setError(null);
     try {
-      const result = await rejectFeedDraft(profile.assistantId, draftId);
+      const result = await rejectFeedDraft(assistantId, draftId);
       if (!result.ok) {
         throw new Error(result.error ?? td.rejectFailed);
       }
@@ -1693,7 +1799,7 @@ export function DraftSessionDetail() {
   // (status flips to `deleted` after a platform delete; the row disappears
   // after a record-only removal).
   async function deleteOrRemovePostedDraft(d: FeedSavedDraft) {
-    if (!profile || actingOnDraftId) return;
+    if (!assistantId || actingOnDraftId) return;
     setError(null);
     const isReply = d.platformReplyId != null;
     await chooseAsync(
@@ -1716,7 +1822,7 @@ export function DraftSessionDetail() {
         setActingOnDraftId(d.id);
         try {
           const result = await deleteFeedPublishedPost(
-            profile.assistantId,
+            assistantId,
             d.postedMediaId,
           );
           if (!result.ok) {
@@ -1734,7 +1840,7 @@ export function DraftSessionDetail() {
         setActingOnDraftId(d.id);
         try {
           const result = await removeFeedSavedDraftRecord(
-            profile.assistantId,
+            assistantId,
             d.id,
           );
           if (!result.ok) {
@@ -1759,7 +1865,7 @@ export function DraftSessionDetail() {
   // The app-root confirmDialog resolves before the action runs, so surface
   // any failure into local state from inside the action body.
   const discardSession = useCallback(async () => {
-    if (!profile || !canDiscardSession) return;
+    if (!assistantId || !canDiscardSession) return;
     const ok = await confirmDialog({
       title: td.discardTitle,
       description: td.discardDescription,
@@ -1769,7 +1875,7 @@ export function DraftSessionDetail() {
     if (!ok) return;
     setError(null);
     const result = await deleteFeedDraftSession(
-      profile.assistantId,
+      assistantId,
       params.sessionId,
     );
     if (!result.ok) {
@@ -1790,17 +1896,16 @@ export function DraftSessionDetail() {
     td.discardFailed,
   ]);
 
-  if (!profile) {
+  if (!assistantId) {
     return (
-      <div className="px-8 py-10 max-w-2xl space-y-4">
-        <h1 className="text-xl font-semibold">
-          {format(td.notConnectedTitle, { platform: platformLabel })}
-        </h1>
+      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+        <h1 className="text-[15px] font-semibold">{td.noBrandTitle}</h1>
+        <p className="text-sm text-muted-foreground">{td.noBrandBody}</p>
         <Link
           href={feedPath(params.workspaceId)}
-          className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
         >
-          {format(td.connectCta, { platform: platformLabel })}
+          {td.noBrandCta}
         </Link>
       </div>
     );
@@ -1840,7 +1945,7 @@ export function DraftSessionDetail() {
             // box-shadow ring (see globals.css) so editing the title
             // doesn't paint a ring over the header.
             className="text-sm font-semibold text-foreground bg-transparent border-b border-primary focus:outline-none focus-visible:shadow-none px-0.5 min-w-0 flex-shrink animate-fade-in transition-colors"
-            style={{ fontFamily: "var(--font-rocknroll)" }}
+           
           />
         ) : (
           <button
@@ -1852,7 +1957,7 @@ export function DraftSessionDetail() {
             className={`text-sm font-semibold text-foreground truncate text-left animate-fade-in transition-colors ${
               canRenameTitle ? "hover:text-primary cursor-text" : "cursor-default"
             }`}
-            style={{ fontFamily: "var(--font-rocknroll)" }}
+           
           >
             {title ?? format(td.defaultTitle, { platform: platformLabel })}
           </button>
@@ -1937,7 +2042,7 @@ export function DraftSessionDetail() {
                     <div className={`${isEditing ? "w-full max-w-2xl" : "max-w-[80%]"} space-y-2 transition-all duration-200`}>
                       {isEditing ? (
                         <div key="edit" className="w-full space-y-2 animate-fade-in">
-                          <div className="bg-muted border border-border rounded-2xl p-3 transition-colors">
+                          <div className="bg-muted border border-border rounded-xl p-3 transition-colors">
                             <textarea
                               value={editingMessageText}
                               onChange={(e) => setEditingMessageText(e.target.value)}
@@ -2033,13 +2138,13 @@ export function DraftSessionDetail() {
                       platform handle is just its outbound identity. */}
                   <div className="flex items-center gap-1.5 mb-1 ml-1">
                     <AssistantAvatar
-                      id={profile.assistant.id}
-                      name={profile.assistant.name}
-                      iconSeed={profile.assistant.iconSeed}
+                      id={assistantId}
+                      name={assistantName}
+                      iconSeed={assistantIconSeed}
                       size="sm"
                     />
                     <span className="text-[11px] text-muted-foreground font-medium">
-                      {profile.assistant.name}
+                      {assistantName}
                     </span>
                   </div>
                   <div className="max-w-[85%] text-[15px] leading-[1.6] space-y-2">
@@ -2074,13 +2179,13 @@ export function DraftSessionDetail() {
                     phase so the bubble doesn't pop in mid-stream. */}
                 <div className="flex items-center gap-1.5 mb-1 ml-1">
                   <AssistantAvatar
-                    id={profile.assistant.id}
-                    name={profile.assistant.name}
-                    iconSeed={profile.assistant.iconSeed}
+                    id={assistantId}
+                    name={assistantName}
+                    iconSeed={assistantIconSeed}
                     size="sm"
                   />
                   <span className="text-[11px] text-muted-foreground font-medium">
-                    {profile.assistant.name}
+                    {assistantName}
                   </span>
                 </div>
                 <div className="max-w-[85%] min-w-0 space-y-2">
@@ -2121,7 +2226,7 @@ export function DraftSessionDetail() {
         </div>
 
         {error ? (
-          <div className="px-5 py-2 text-sm text-destructive bg-destructive/10 border-t border-destructive/20 animate-rise-in">
+          <div className="px-5 py-2 text-sm text-destructive bg-destructive/10 border-t border-destructive/20">
             {error}
           </div>
         ) : null}
@@ -2147,7 +2252,7 @@ export function DraftSessionDetail() {
         ) : null}
 
         {activeOtherTurnUser ? (
-          <div className="px-5 py-2 text-xs text-muted-foreground bg-accent/40 border-t border-border animate-rise-in">
+          <div className="px-5 py-2 text-xs text-muted-foreground bg-accent/40 border-t border-border">
             <span className="font-medium text-foreground">
               @{memberNames.get(activeOtherTurnUser) ?? td.teammateCapitalized}
             </span>{" "}
@@ -2156,7 +2261,7 @@ export function DraftSessionDetail() {
         ) : null}
 
         <div className="border-t border-border bg-background px-3 py-4 md:px-6 md:py-5">
-          <div className="max-w-[780px] mx-auto rounded-2xl border border-border bg-card focus-within:ring-2 focus-within:ring-ring transition-shadow">
+          <div className="max-w-[780px] mx-auto rounded-xl border border-border bg-card focus-within:ring-2 focus-within:ring-ring transition-shadow">
             <textarea
               ref={inputRef}
               value={input}
@@ -2190,7 +2295,7 @@ export function DraftSessionDetail() {
                   key="stop"
                   type="button"
                   onClick={stopStream}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-card border border-border text-foreground px-4 h-10 text-sm font-medium hover:bg-accent transition-colors animate-fade-in"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-card border border-border text-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-accent transition-colors"
                 >
                   <Square size={14} />
                   {t.tuningChat.stop}
@@ -2201,7 +2306,7 @@ export function DraftSessionDetail() {
                   type="button"
                   onClick={() => void onSend()}
                   disabled={!input.trim() || Boolean(activeOtherTurnUser)}
-                  className="rounded-xl bg-primary text-primary-foreground px-5 h-10 text-sm font-medium hover:bg-primary/90 disabled:opacity-40 transition-all duration-200 animate-fade-in"
+                  className="rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 disabled:opacity-40 transition-colors"
                 >
                   {t.tuningChat.send}
                 </button>
@@ -2229,7 +2334,7 @@ export function DraftSessionDetail() {
                 ? parsePostUrl(replyTarget.permalink)?.platform ?? platform
                 : platform;
               return (
-                <section className="max-w-2xl mx-auto space-y-2 animate-rise-in">
+                <section className="max-w-2xl mx-auto space-y-2">
                   <div className="flex items-center justify-between">
                     <h3 className="text-[11px] uppercase tracking-wider text-muted-foreground">
                       {t.postEmbed.replyingTo}
@@ -2360,6 +2465,7 @@ export function DraftSessionDetail() {
                             index={alt.index}
                             text={alt.text}
                             label={alt.label}
+                            imageBrief={alt.imageBrief}
                             canDraft={canDraft}
                             saving={savingIndex === alt.index}
                             saved={savedIndices.has(alt.index)}
@@ -2539,7 +2645,7 @@ function PostPreview({
   // text/media. Outer chrome is fine here since there's no embed to
   // compete with.
   return (
-    <article className="rounded-2xl border border-border bg-card overflow-hidden">
+    <article className="rounded-xl border border-border/60 bg-card overflow-hidden shadow-xs">
       <div className="flex items-center gap-3 px-4 pt-3 pb-2 border-b border-border/60">
         <div
           className={`w-9 h-9 shrink-0 rounded-full ${
@@ -2606,6 +2712,7 @@ function DraftOptionCard({
   index,
   text,
   label,
+  imageBrief,
   canDraft,
   saving,
   saved,
@@ -2616,6 +2723,9 @@ function DraftOptionCard({
   index: number;
   text: string;
   label?: string;
+  /** Written brief of the visual (image-first platforms) — rendered as a
+   *  muted block under the caption and saved with it (D9). */
+  imageBrief?: string;
   canDraft: boolean;
   saving: boolean;
   saved: boolean;
@@ -2659,6 +2769,14 @@ function DraftOptionCard({
           />
         ) : null}
       </p>
+      {imageBrief ? (
+        <div className="mt-3 rounded-lg border border-border/60 bg-muted/30 p-2.5 space-y-1">
+          <div className="text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
+            {td.imageBriefLabel}
+          </div>
+          <p className="text-xs text-muted-foreground whitespace-pre-wrap">{imageBrief}</p>
+        </div>
+      ) : null}
       {canDraft ? (
         <div className="mt-4 flex justify-end">
           <button
@@ -2745,6 +2863,7 @@ function useTypewriter(target: string, enabled: boolean): string {
 
 const SAVED_STATUS_BADGE_CLASS: Record<FeedSavedDraftStatus, string> = {
   pending: "bg-primary/15 text-primary ring-1 ring-primary/30",
+  ready: "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30",
   posted: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30",
   rejected: "bg-muted text-muted-foreground ring-1 ring-border",
   expired: "bg-muted text-muted-foreground ring-1 ring-border",
@@ -2759,6 +2878,8 @@ function savedStatusLabel(
   switch (status) {
     case "pending":
       return td.statusReady;
+    case "ready":
+      return td.statusReadyManual;
     case "posted":
       return td.statusPosted;
     case "rejected":
@@ -2807,7 +2928,7 @@ function SavedDraftsPanel(props: {
   const pendingCount = props.drafts.filter((d) => d.status === "pending").length;
 
   return (
-    <section className="space-y-2 pt-2 border-t border-border animate-rise-in">
+    <section className="space-y-2 pt-2 border-t border-border">
       <div className="flex items-center justify-between">
         <h3 className="text-[11px] uppercase tracking-wider text-muted-foreground">
           {format(td.reviewHeading, { count: props.drafts.length })}
@@ -3177,7 +3298,8 @@ function ReferencesPanel(props: {
   activeIdx: number;
   onPick: (idx: number) => void;
 }) {
-  const td = useT().feedPage.draftSessions;
+  const t = useT().feedPage;
+  const td = t.draftSessions;
   const active = props.references[props.activeIdx];
   if (!active) return null;
   return (
@@ -3211,7 +3333,9 @@ function ReferencesPanel(props: {
                   }`}
                   title={r.permalink}
                 >
-                  @{r.handle}
+                  {/* IG `/p/` and XHS URLs carry no author handle — fall
+                      back to the platform label so the chip stays named. */}
+                  {r.handle ? `@${r.handle}` : t.platformLabels[r.platform]}
                 </button>
               </li>
             );

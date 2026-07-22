@@ -17,6 +17,7 @@
 import { useState } from "react";
 import { CalendarDays } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { localIsoDay } from "@/lib/tasks-view";
 import { useT } from "@/lib/i18n/client";
 import {
   Select,
@@ -261,7 +262,7 @@ export function DueCell({
   const t = useT().tasksPage;
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
-  const dateValue = value ? value.slice(0, 10) : "";
+  const dateValue = value ? localIsoDay(value) : "";
 
   function commit(next: string) {
     setEditing(false);

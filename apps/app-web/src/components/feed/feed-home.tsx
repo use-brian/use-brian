@@ -31,6 +31,7 @@ import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { Inbox, MessageSquare, Settings as SettingsIcon, ArrowUpRight, Plus } from "lucide-react";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
+import { authFetch } from "@/lib/auth-fetch";
 import {
   fetchFeedAssistantApprovals,
   fetchFeedAssistantEvents,
@@ -38,11 +39,21 @@ import {
   type FeedProfile,
 } from "@/lib/api/feed";
 import { openFeedStream } from "@/lib/feed-sse";
-import { feedPath, isFeedPlatform, type FeedPlatform } from "@/lib/feed-nav";
+import {
+  FEED_PLATFORMS,
+  feedPath,
+  getFeedPlatformPick,
+  isFeedPlatform,
+  setFeedPlatformPick,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import { CardSkeletonList, Skeleton } from "@/components/skeleton";
+import { PlatformIcon } from "@/components/feed/platform-icon";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 const RECENT_LIMIT = 12;
 
@@ -217,15 +228,13 @@ function DashboardHome(props: {
   );
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-7xl mx-auto space-y-10 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-7xl mx-auto space-y-6">
       <header className="space-y-1.5">
         <h1
-          className="text-3xl font-bold tracking-tight animate-rise-in"
-          style={{ fontFamily: "var(--font-rocknroll)" }}
-        >
+          className="text-3xl font-bold tracking-tight"        >
           {team.name}
         </h1>
-        <p className="text-sm text-muted-foreground animate-rise-in" style={{ animationDelay: "60ms" }}>
+        <p className="text-sm text-muted-foreground" style={{ animationDelay: "60ms" }}>
           {format(
             team.profiles.length === 1 ? t.home.subtitleOne : t.home.subtitle,
             { count: team.profiles.length, role: t.home.roles[team.role] },
@@ -321,19 +330,9 @@ function StatCard(props: {
   accent: "warn" | "muted";
   loading?: boolean;
 }) {
-  const valueColor = props.accent === "warn" ? "text-amber-300" : "text-foreground";
-  const accentRing =
-    props.accent === "warn"
-      ? "before:bg-gradient-to-br before:from-amber-400/30 before:to-transparent"
-      : "before:bg-gradient-to-br before:from-primary/20 before:to-transparent";
+  const valueColor = props.accent === "warn" ? "text-amber-500 dark:text-amber-300" : "text-foreground";
   return (
-    <div
-      className={
-        "relative rounded-xl border border-border bg-card p-4 overflow-hidden hover-lift " +
-        "before:content-[''] before:absolute before:inset-0 before:opacity-0 hover:before:opacity-100 before:transition-opacity before:duration-300 before:pointer-events-none " +
-        accentRing
-      }
-    >
+    <div className="relative rounded-xl border border-border/60 bg-card p-4 shadow-xs">
       <div className="relative">
         <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
           {props.label}
@@ -343,7 +342,7 @@ function StatCard(props: {
         ) : (
           <div
             className={`mt-2 text-3xl font-bold tabular-nums ${valueColor}`}
-            style={{ fontFamily: "var(--font-rocknroll)" }}
+           
           >
             {props.value}
           </div>
@@ -364,7 +363,7 @@ function PlatformCard(props: {
   const label = t.platformLabels[profile.platform];
   const isX = profile.platform === "twitter";
   return (
-    <li className="rounded-xl border border-border bg-card p-4 space-y-3 hover-lift hover:border-primary/30">
+    <li className="rounded-xl border border-border/60 bg-card p-4 space-y-3 shadow-xs transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span
@@ -372,7 +371,7 @@ function PlatformCard(props: {
               "inline-flex h-9 w-9 items-center justify-center rounded-xl text-xs font-semibold shrink-0 ring-1 ring-inset " +
               (isX
                 ? "bg-foreground text-background ring-foreground/20"
-                : "bg-primary/15 text-primary ring-primary/25")
+                : "bg-muted text-foreground/70 ring-border")
             }
           >
             {isX ? "X" : "@"}
@@ -513,33 +512,205 @@ function timeAgo(t: FeedPageDict["home"], iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/**
+ * Zero-profile home. Create-first (feed-create-split.md D7): with no brand
+ * voice yet, an admin names one and it's created via the plain assistants
+ * endpoint — the exact call the connect dialog makes before OAuth, minus the
+ * OAuth. With a brand voice but no connection, point at Drafts (drafting
+ * needs no connection); connecting stays available as the secondary path.
+ */
 function EmptyHome({ onConnect, canConnect }: { onConnect: () => void; canConnect: boolean }) {
   const t = useT().feedPage;
+  const team = useFeedWorkspace();
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const brand = team.assistants[0] ?? null;
+
+  // Guided first-run step 2 (feed-create-split.md D14): once the brand
+  // assistant exists, pick the platform(s) the brand posts on. The pick is a
+  // per-device localStorage default read by the Drafts/Voice pages; reading
+  // it in an effect keeps the SSR and first client paint identical.
+  const [picked, setPicked] = useState<FeedPlatform[]>([]);
+  const [pickState, setPickState] = useState<"loading" | "needed" | "done">(
+    "loading",
+  );
+  useEffect(() => {
+    setPickState(
+      getFeedPlatformPick(team.workspaceId).length > 0 ? "done" : "needed",
+    );
+  }, [team.workspaceId]);
+
+  function togglePicked(p: FeedPlatform) {
+    setPicked((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p],
+    );
+  }
+
+  function confirmPick(platforms: readonly FeedPlatform[]) {
+    setFeedPlatformPick(team.workspaceId, platforms);
+    setPickState("done");
+  }
+
+  async function createBrand() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError(t.home.emptyNameRequired);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/assistants`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: trimmed,
+          kind: "app",
+          appType: "distribution",
+          workspaceId: team.workspaceId,
+        }),
+      });
+      if (!res.ok) {
+        const b = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(b?.error ?? t.home.emptyCreateFailed);
+      }
+      await team.refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t.home.emptyCreateFailed);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="flex h-full min-h-[70vh] items-center justify-center px-6 animate-fade-in">
-      <div className="max-w-md space-y-5 text-center animate-rise-in">
-        <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/15 text-primary mx-auto ring-1 ring-primary/25 shadow-[0_8px_30px_-12px_color-mix(in_srgb,var(--primary)_60%,transparent)]">
+      <div className="max-w-md space-y-5 text-center">
+        <div className="inline-flex h-12 w-12 items-center justify-center rounded-xl bg-muted text-muted-foreground mx-auto ring-1 ring-border">
           <Inbox className="h-7 w-7" />
         </div>
-        <h1
-          className="text-2xl font-bold tracking-tight"
-          style={{ fontFamily: "var(--font-rocknroll)" }}
-        >
-          {t.home.emptyTitle}
-        </h1>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          {t.home.emptyBody}
-        </p>
-        {canConnect ? (
-          <button
-            type="button"
-            onClick={onConnect}
-            className="inline-flex items-center justify-center rounded-xl bg-primary px-5 h-11 text-sm font-semibold text-primary-foreground hover:bg-primary/90 active:bg-primary/85 transition-all duration-200 press shadow-lg shadow-primary/20"
-          >
-            {t.home.emptyCta}
-          </button>
+        {brand && pickState === "loading" ? null : brand &&
+          pickState === "needed" ? (
+          <>
+            <h1 className="text-[15px] font-semibold">{t.home.pickTitle}</h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              {t.home.pickBody}
+            </p>
+            <div className="flex flex-wrap justify-center gap-1.5">
+              {FEED_PLATFORMS.map((p) => {
+                const active = picked.includes(p);
+                return (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => togglePicked(p)}
+                    aria-pressed={active}
+                    className={
+                      "press inline-flex items-center gap-1.5 h-8 rounded-full border px-3.5 text-[13px] font-medium transition-colors " +
+                      (active
+                        ? "border-transparent bg-foreground text-background"
+                        : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
+                    }
+                  >
+                    <PlatformIcon platform={p} className="size-3.5" />
+                    {t.platformLabels[p]}
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={() => confirmPick(picked)}
+              disabled={picked.length === 0}
+              className="inline-flex w-full items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
+            >
+              {t.home.pickCta}
+            </button>
+            <button
+              type="button"
+              onClick={() => confirmPick(FEED_PLATFORMS)}
+              className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {t.home.pickSkip}
+            </button>
+          </>
+        ) : brand ? (
+          <>
+            <h1
+              className="text-[15px] font-semibold"            >
+              {brand.name}
+            </h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              {t.home.createdBanner}
+            </p>
+            <Link
+              href={feedPath(team.workspaceId, { segment: "drafts" })}
+              className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 transition-colors press"
+            >
+              {t.comingSoon.draftsCta}
+            </Link>
+            {canConnect ? (
+              <div className="space-y-2">
+                <p className="text-xs text-muted-foreground">{t.home.emptyOrConnect}</p>
+                <button
+                  type="button"
+                  onClick={onConnect}
+                  className="inline-flex items-center justify-center rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent transition-colors"
+                >
+                  {t.home.emptyConnectCta}
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : (
-          <p className="text-sm text-muted-foreground">{t.home.emptyAskAdmin}</p>
+          <>
+            <h1
+              className="text-[15px] font-semibold"            >
+              {t.home.emptyTitle}
+            </h1>
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              {t.home.emptyBody}
+            </p>
+            {canConnect ? (
+              <form
+                className="space-y-3"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void createBrand();
+                }}
+              >
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder={t.home.emptyNamePlaceholder}
+                  disabled={busy}
+                  className="w-full h-9 rounded-lg border border-border bg-background px-3 text-sm focus:outline-none focus:border-primary/50 disabled:opacity-50"
+                />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="inline-flex w-full items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
+                >
+                  {busy ? t.home.emptyCreating : t.home.emptyCta}
+                </button>
+                {error ? (
+                  <p className="text-sm text-destructive">{error}</p>
+                ) : null}
+                <p className="text-xs text-muted-foreground">{t.home.emptyOrConnect}</p>
+                <button
+                  type="button"
+                  onClick={onConnect}
+                  disabled={busy}
+                  className="inline-flex items-center justify-center rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent disabled:opacity-50 transition-colors"
+                >
+                  {t.home.emptyConnectCta}
+                </button>
+              </form>
+            ) : (
+              <p className="text-sm text-muted-foreground">{t.home.emptyAskAdmin}</p>
+            )}
+          </>
         )}
       </div>
     </div>

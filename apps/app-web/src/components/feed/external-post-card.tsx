@@ -487,7 +487,7 @@ function Avatar({
   return (
     <div
       className={`shrink-0 w-9 h-9 rounded-full ${
-        isX ? "bg-foreground text-background" : "bg-primary/15 text-primary"
+        isX ? "bg-foreground text-background" : "bg-muted text-foreground/70"
       } flex items-center justify-center text-sm font-semibold`}
       aria-hidden
     >

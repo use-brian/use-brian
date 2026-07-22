@@ -51,7 +51,11 @@ import {
   type FeedDraftSessionSummary,
   type FeedProfile,
 } from "@/lib/api/feed";
-import { feedPath, type FeedPlatform } from "@/lib/feed-nav";
+import {
+  feedPath,
+  isConnectableFeedPlatform,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 
@@ -135,6 +139,9 @@ export function parseReplyUrl(input: string): ParsedReplyUrl | null {
  */
 export type SessionStatus =
   | "ready"
+  /** A saved draft was approved for MANUAL posting and sits in the
+   *  ready-to-post queue (docs/plans/feed-create-split.md D2). */
+  | "ready-to-post"
   | "posted"
   | "deleted"
   | "resolved"
@@ -145,8 +152,9 @@ export type SessionStatus =
 export function deriveStatus(
   s: Pick<FeedDraftSessionSummary, "draftCounts" | "draftText">,
 ): SessionStatus {
-  const { pending, posted, rejected, deleted } = s.draftCounts;
+  const { pending, ready, posted, rejected, deleted } = s.draftCounts;
   if (pending > 0) return "ready";
+  if (ready > 0) return "ready-to-post";
   if (posted > 0) return "posted";
   if (deleted > 0) return "deleted";
   if (rejected > 0) return "resolved";
@@ -156,6 +164,7 @@ export function deriveStatus(
 
 const STATUS_BADGE_CLASS: Record<SessionStatus, string> = {
   ready: "bg-primary/15 text-primary ring-1 ring-primary/30",
+  "ready-to-post": "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30",
   drafting: "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30",
   "in-progress": "bg-muted text-muted-foreground ring-1 ring-border",
   posted: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30",
@@ -167,6 +176,8 @@ function statusLabel(t: FeedPageDict["draftSessions"], status: SessionStatus): s
   switch (status) {
     case "ready":
       return t.statusReady;
+    case "ready-to-post":
+      return t.statusReadyManual;
     case "drafting":
       return t.statusDrafting;
     case "in-progress":
@@ -192,6 +203,8 @@ function statusLabel(t: FeedPageDict["draftSessions"], status: SessionStatus): s
 const STATUS_CARD_CHROME: Record<SessionStatus, string> = {
   ready:
     "bg-primary/[0.06] border-primary/25 hover:bg-primary/[0.10] hover:border-primary/40",
+  "ready-to-post":
+    "bg-emerald-500/[0.05] border-emerald-500/20 hover:bg-emerald-500/[0.09] hover:border-emerald-500/35",
   drafting:
     "bg-amber-500/[0.05] border-amber-500/25 hover:bg-amber-500/[0.10] hover:border-amber-500/40",
   "in-progress": "bg-card border-border hover:bg-accent/40 hover:border-primary/30",
@@ -206,6 +219,7 @@ const STATUS_CARD_CHROME: Record<SessionStatus, string> = {
 const FILTER_ORDER: ReadonlyArray<"all" | SessionStatus> = [
   "all",
   "ready",
+  "ready-to-post",
   "drafting",
   "in-progress",
   "posted",
@@ -222,15 +236,25 @@ export function parseFilterParam(value: string | null): "all" | SessionStatus {
     : "all";
 }
 
-export function DraftSessionsList() {
+export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
   const params = useParams<{ workspaceId: string; platform: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
   const team = useFeedWorkspace();
   const t = useT().feedPage;
   const td = t.draftSessions;
-  const platform = params.platform as FeedPlatform;
+  // Platform comes from the prop when hosted by the workspace-level
+  // `/feed/drafts` page (platform chips), else from the legacy per-platform
+  // route segment (docs/plans/feed-create-split.md D8).
+  const platform = (props.platform ?? params.platform) as FeedPlatform;
   const profile = team.profiles.find((p) => p.platform === platform);
+  // Create split (D7/D8): drafting needs no connection. The acting
+  // assistant is the connected profile's when one exists, else the
+  // workspace's first distribution assistant (the brand voice).
+  const assistantId = profile?.assistantId ?? team.assistants[0]?.id ?? null;
+  // Reply drafting needs the platform API (inbound target resolution +
+  // publish) — hidden on create-only targets (instagram/xhs).
+  const replyEnabled = isConnectableFeedPlatform(platform);
   const canDraft = team.canDraft;
   const platformLabel = t.platformLabels[platform];
   const isAdmin = team.role === "admin" || team.role === "owner";
@@ -241,12 +265,18 @@ export function DraftSessionsList() {
   const [sessions, setSessions] = useState<FeedDraftSessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // `composing` covers both create flows. The reply flow uses a single
+  // `composing` covers all three create flows. The reply flow uses a single
   // input element that *is* the button (placeholder doubles as the label,
   // swapping to "Paste URL" on focus) — no expand/collapse toggle.
-  const [composing, setComposing] = useState<null | "post" | "reply">(null);
+  const [composing, setComposing] = useState<null | "post" | "reply" | "link">(
+    null,
+  );
   const [replyUrl, setReplyUrl] = useState("");
   const [replyFocused, setReplyFocused] = useState(false);
+  // Draft-from-link (feed-create-split.md D13) — same input-as-button
+  // pattern as the reply URL box, available on every target platform.
+  const [linkUrl, setLinkUrl] = useState("");
+  const [linkFocused, setLinkFocused] = useState(false);
   const [filter, setFilter] = useState<"all" | SessionStatus>(() =>
     parseFilterParam(searchParams.get("filter")),
   );
@@ -266,6 +296,7 @@ export function DraftSessionsList() {
   const statusCounts = useMemo(() => {
     const counts: Record<SessionStatus, number> = {
       ready: 0,
+      "ready-to-post": 0,
       drafting: 0,
       "in-progress": 0,
       posted: 0,
@@ -307,21 +338,21 @@ export function DraftSessionsList() {
 
   const loadFailedCopy = td.loadFailed;
   const load = useCallback(async () => {
-    if (!profile) {
+    if (!assistantId) {
       setLoading(false);
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const rows = await fetchFeedDraftSessions(profile.assistantId, platform);
+      const rows = await fetchFeedDraftSessions(assistantId, platform);
       setSessions(rows);
     } catch (err) {
       setError(err instanceof Error ? err.message : loadFailedCopy);
     } finally {
       setLoading(false);
     }
-  }, [profile, platform, loadFailedCopy]);
+  }, [assistantId, platform, loadFailedCopy]);
 
   useEffect(() => {
     void load();
@@ -335,11 +366,11 @@ export function DraftSessionsList() {
   // failure into local state from inside the action body.
   const discardSessionOnly = useCallback(
     async (s: FeedDraftSessionSummary) => {
-      if (!profile) return;
+      if (!assistantId) return;
       setDiscardingId(s.id);
       setError(null);
       try {
-        const result = await deleteFeedDraftSession(profile.assistantId, s.id);
+        const result = await deleteFeedDraftSession(assistantId, s.id);
         if (!result.ok) {
           const message = result.error ?? td.discardFailed;
           setError(message);
@@ -350,7 +381,7 @@ export function DraftSessionsList() {
         setDiscardingId(null);
       }
     },
-    [profile, td.discardFailed],
+    [assistantId, td.discardFailed],
   );
 
   // Take down every live post this session produced, then discard the
@@ -360,18 +391,18 @@ export function DraftSessionsList() {
   // surfaces an error but doesn't block discarding the session.
   const deletePostedAndDiscard = useCallback(
     async (s: FeedDraftSessionSummary) => {
-      if (!profile) return;
+      if (!assistantId) return;
       setDiscardingId(s.id);
       setError(null);
       try {
-        const drafts = await fetchFeedSavedDrafts(profile.assistantId, s.id);
+        const drafts = await fetchFeedSavedDrafts(assistantId, s.id);
         if (drafts) {
           const mediaIds = drafts
             .filter((d) => d.status === "posted" && d.postedMediaId)
             .map((d) => d.postedMediaId as string);
           for (const mediaId of mediaIds) {
             const del = await deleteFeedPublishedPost(
-              profile.assistantId,
+              assistantId,
               mediaId,
             );
             if (!del.ok) {
@@ -379,7 +410,7 @@ export function DraftSessionsList() {
             }
           }
         }
-        const result = await deleteFeedDraftSession(profile.assistantId, s.id);
+        const result = await deleteFeedDraftSession(assistantId, s.id);
         if (!result.ok) {
           const message = result.error ?? td.discardFailed;
           setError(message);
@@ -390,12 +421,12 @@ export function DraftSessionsList() {
         setDiscardingId(null);
       }
     },
-    [profile, td.couldntDeletePost, td.discardFailed],
+    [assistantId, td.couldntDeletePost, td.discardFailed],
   );
 
   const discardSession = useCallback(
     async (s: FeedDraftSessionSummary) => {
-      if (!profile) return;
+      if (!assistantId) return;
       // Sessions with live posts get the three-way choice: discard the
       // chat only, or also take the posted content down on the platform.
       if (s.draftCounts.posted > 0) {
@@ -430,7 +461,7 @@ export function DraftSessionsList() {
         // Error already surfaced into local state by the action body.
       }
     },
-    [profile, chooseAsync, deletePostedAndDiscard, discardSessionOnly, td],
+    [assistantId, chooseAsync, deletePostedAndDiscard, discardSessionOnly, td],
   );
 
   // Create a draft session and navigate to its detail page. The seed
@@ -455,9 +486,17 @@ export function DraftSessionsList() {
   async function resolveAccount(
     targetPlatform: FeedPlatform,
     intent: "post" | "reply",
-  ): Promise<FeedProfile | null> {
+  ): Promise<{ assistantId: string } | null> {
     const accounts = accountsOnPlatform(targetPlatform);
-    if (accounts.length === 0) return null;
+    if (accounts.length === 0) {
+      // No connected account on the target platform. Original posts still
+      // draft via the brand assistant (they resolve through the manual
+      // ready-to-post queue at approve time — feed-create-split.md D2);
+      // replies need the platform API, so the caller surfaces its
+      // no-account error.
+      if (intent === "reply") return null;
+      return assistantId ? { assistantId } : null;
+    }
     if (accounts.length === 1) return accounts[0];
     const label = t.platformLabels[targetPlatform];
     return pickAccount({
@@ -472,8 +511,8 @@ export function DraftSessionsList() {
 
   async function createSession(
     seed: FeedDraftSessionSeed | undefined,
-    label: "post" | "reply",
-    account: FeedProfile,
+    label: "post" | "reply" | "link",
+    account: { assistantId: string },
     targetPlatform: FeedPlatform,
   ) {
     if (composing) return;
@@ -504,10 +543,42 @@ export function DraftSessionsList() {
   async function startNewPost() {
     if (composing) return;
     const account = await resolveAccount(platform, "post");
-    if (!account) return; // page already guards: a tab platform always has ≥1 account
+    if (!account) return; // page already guards: assistantId is non-null here
     // Explicit `freeform` seed locks the session into post intent; pasted
     // URLs in chat will be References, not reply targets.
     void createSession({ kind: "freeform" }, "post", account, platform);
+  }
+
+  async function submitLinkUrl() {
+    if (composing) return;
+    const trimmed = linkUrl.trim();
+    if (!trimmed) {
+      setError(td.linkUrlRequired);
+      return;
+    }
+    // Any http(s) URL is a valid draft source (feed-create-split.md D13) —
+    // platform post links become reference tiles, everything else is source
+    // material the assistant reads before drafting. Mirrors the server-side
+    // `parseSeed` validation so a junk paste fails here, not with a 400.
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(trimmed);
+    } catch {
+      setError(td.linkUrlInvalid);
+      return;
+    }
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      setError(td.linkUrlInvalid);
+      return;
+    }
+    const account = await resolveAccount(platform, "post");
+    if (!account) return;
+    void createSession(
+      { kind: "freeform", link: trimmed.slice(0, 2048) },
+      "link",
+      account,
+      platform,
+    );
   }
 
   async function submitReplyUrl() {
@@ -556,32 +627,35 @@ export function DraftSessionsList() {
     void createSession(seed, "reply", account, targetPlatform);
   }
 
-  if (!profile) {
+  // Drafting no longer needs a connected platform (feed-create-split.md
+  // D7/D8) — only a brand voice. With neither a profile nor a distribution
+  // assistant, point at the feed home's create-brand zero state.
+  if (!assistantId) {
     return (
-      <div className="px-8 py-10 max-w-2xl space-y-4">
-        <h1 className="text-xl font-semibold" style={{ fontFamily: "var(--font-rocknroll)" }}>
-          {format(td.connectFirstTitle, { platform: platformLabel })}
+      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+        <h1 className="text-[15px] font-semibold">
+          {td.noBrandTitle}
         </h1>
         <p className="text-sm text-muted-foreground">
-          {format(td.connectFirstBody, { platform: platformLabel })}
+          {td.noBrandBody}
         </p>
         <Link
           href={feedPath(params.workspaceId)}
-          className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
         >
-          {format(td.connectCta, { platform: platformLabel })}
+          {td.noBrandCta}
         </Link>
       </div>
     );
   }
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-7xl mx-auto space-y-5">
       {choiceDialog}
       {accountDialog}
       <header className="flex items-center justify-between gap-4 flex-wrap">
         <div className="space-y-1.5">
-          <h1 className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+          <h1 className="text-[15px] font-semibold">
             {format(td.heading, { platform: platformLabel })}
           </h1>
           <p className="text-xs text-muted-foreground">
@@ -600,9 +674,12 @@ export function DraftSessionsList() {
           // single, consistent feel.
           <ReplyAndPostStack
             composing={composing}
+            replyEnabled={replyEnabled}
             replyUrl={replyUrl}
             replyFocused={replyFocused}
             platform={platform}
+            linkUrl={linkUrl}
+            linkFocused={linkFocused}
             onReplyChange={setReplyUrl}
             onReplyFocus={() => setReplyFocused(true)}
             onReplyBlur={() => setReplyFocused(false)}
@@ -610,6 +687,14 @@ export function DraftSessionsList() {
             onReplyCancel={() => {
               setReplyUrl("");
               setReplyFocused(false);
+            }}
+            onLinkChange={setLinkUrl}
+            onLinkFocus={() => setLinkFocused(true)}
+            onLinkBlur={() => setLinkFocused(false)}
+            onLinkSubmit={submitLinkUrl}
+            onLinkCancel={() => {
+              setLinkUrl("");
+              setLinkFocused(false);
             }}
             onNewPost={startNewPost}
           />
@@ -680,9 +765,12 @@ export function DraftSessionsList() {
             <div className="flex justify-center pt-1">
               <ReplyAndPostStack
                 composing={composing}
+                replyEnabled={replyEnabled}
                 replyUrl={replyUrl}
                 replyFocused={replyFocused}
                 platform={platform}
+                linkUrl={linkUrl}
+                linkFocused={linkFocused}
                 onReplyChange={setReplyUrl}
                 onReplyFocus={() => setReplyFocused(true)}
                 onReplyBlur={() => setReplyFocused(false)}
@@ -690,6 +778,14 @@ export function DraftSessionsList() {
                 onReplyCancel={() => {
                   setReplyUrl("");
                   setReplyFocused(false);
+                }}
+                onLinkChange={setLinkUrl}
+                onLinkFocus={() => setLinkFocused(true)}
+                onLinkBlur={() => setLinkFocused(false)}
+                onLinkSubmit={submitLinkUrl}
+                onLinkCancel={() => {
+                  setLinkUrl("");
+                  setLinkFocused(false);
                 }}
                 onNewPost={startNewPost}
               />
@@ -745,7 +841,7 @@ export function DraftSessionsList() {
                 <Link
                   href={`${feedPath(params.workspaceId, { platform, segment: "draft-sessions" })}/${s.id}`}
                   className={
-                    "block h-full rounded-xl border p-3 space-y-2.5 shadow-sm hover:shadow-md hover-lift transition-colors " +
+                    "block h-full rounded-xl border p-3 space-y-2.5 shadow-sm hover:shadow-md transition-colors " +
                     STATUS_CARD_CHROME[status]
                   }
                 >
@@ -758,9 +854,9 @@ export function DraftSessionsList() {
                   </div>
                   <SessionPreviewTile
                     session={s}
-                    assistantId={profile.assistantId}
-                    teamHandle={profile.platformHandle}
-                    teamAvatarUrl={profile.profilePictureUrl}
+                    assistantId={assistantId}
+                    teamHandle={profile?.platformHandle ?? ""}
+                    teamAvatarUrl={profile?.profilePictureUrl ?? null}
                   />
                   <div className="flex items-center justify-between gap-2 pt-0.5">
                     <span className="text-[11px] text-muted-foreground/80 truncate">
@@ -867,15 +963,25 @@ function timeAgo(t: FeedPageDict["home"], ms: number): string {
  * shared timing across hover/focus/disabled states so nothing judders.
  */
 function ReplyAndPostStack(props: {
-  composing: null | "post" | "reply";
+  composing: null | "post" | "reply" | "link";
   replyUrl: string;
   replyFocused: boolean;
   platform: FeedPlatform;
+  /** False on platforms without inbound integration (instagram/xhs) —
+   *  the reply-URL input is hidden; only the link input + "New post" render. */
+  replyEnabled: boolean;
+  linkUrl: string;
+  linkFocused: boolean;
   onReplyChange: (v: string) => void;
   onReplyFocus: () => void;
   onReplyBlur: () => void;
   onReplySubmit: () => void;
   onReplyCancel: () => void;
+  onLinkChange: (v: string) => void;
+  onLinkFocus: () => void;
+  onLinkBlur: () => void;
+  onLinkSubmit: () => void;
+  onLinkCancel: () => void;
   onNewPost: () => void;
 }) {
   const {
@@ -883,20 +989,30 @@ function ReplyAndPostStack(props: {
     replyUrl,
     replyFocused,
     platform,
+    replyEnabled,
+    linkUrl,
+    linkFocused,
     onReplyChange,
     onReplyFocus,
     onReplyBlur,
     onReplySubmit,
     onReplyCancel,
+    onLinkChange,
+    onLinkFocus,
+    onLinkBlur,
+    onLinkSubmit,
+    onLinkCancel,
     onNewPost,
   } = props;
   const td = useT().feedPage.draftSessions;
   const disabled = composing !== null;
   const replyActive = replyFocused || replyUrl.length > 0;
+  const linkActive = linkFocused || linkUrl.length > 0;
   const focusedPlaceholder =
     platform === "threads" ? td.pasteThreadsUrl : td.pasteXUrl;
   return (
     <div className="flex flex-col items-stretch gap-1.5 w-60">
+      {replyEnabled ? (
       <form
         onSubmit={(e) => {
           e.preventDefault();
@@ -950,6 +1066,60 @@ function ReplyAndPostStack(props: {
           }
         >
           {composing === "reply" ? (
+            <SpinnerIcon />
+          ) : (
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <polyline points="12 5 19 12 12 19" />
+            </svg>
+          )}
+        </button>
+      </form>
+      ) : null}
+
+      {/* Draft-from-link (D13) — same input-as-button pattern as the reply
+          box, on every target platform. Any http(s) URL is accepted. */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          onLinkSubmit();
+        }}
+        className="relative"
+      >
+        <input
+          type="url"
+          value={linkUrl}
+          onChange={(e) => onLinkChange(e.target.value)}
+          onFocus={onLinkFocus}
+          onBlur={onLinkBlur}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.currentTarget.blur();
+              onLinkCancel();
+            }
+          }}
+          placeholder={linkActive ? td.pasteLinkUrl : td.newFromLink}
+          disabled={disabled}
+          aria-label={td.linkAria}
+          className={
+            "w-full h-9 rounded-lg text-[13px] border bg-card transition-all duration-150 ease-out focus:outline-none disabled:opacity-50 " +
+            (linkActive
+              ? "text-left pl-3 pr-8 border-primary/50 shadow-sm text-foreground font-normal placeholder:text-muted-foreground placeholder:font-normal"
+              : "text-center px-3 border-foreground/15 shadow-sm text-foreground hover:border-foreground/30 hover:bg-accent/50 hover:shadow cursor-text placeholder:text-foreground placeholder:font-medium")
+          }
+        />
+        <button
+          type="submit"
+          disabled={disabled || !linkUrl.trim()}
+          aria-label={composing === "link" ? td.creating : td.startFromLink}
+          className={
+            "absolute right-2 top-1/2 -translate-y-1/2 h-6 w-6 inline-flex items-center justify-center rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all duration-150 ease-out disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-muted-foreground " +
+            (linkActive
+              ? "opacity-100 translate-x-0 pointer-events-auto"
+              : "opacity-0 translate-x-1 pointer-events-none")
+          }
+        >
+          {composing === "link" ? (
             <SpinnerIcon />
           ) : (
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" aria-hidden>

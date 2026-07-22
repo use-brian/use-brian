@@ -449,6 +449,9 @@ type FeedReplyTargetSummary = {
 
 export type FeedSavedDraftStatus =
   | "pending"
+  /** Approved for MANUAL posting — sits in the ready-to-post queue until
+   *  the operator marks it posted (docs/plans/feed-create-split.md D2). */
+  | "ready"
   | "posted"
   | "rejected"
   | "expired"
@@ -471,7 +474,12 @@ export type FeedDraftSeedKind =
  * the scan returned (for Threads, the Graph API media id).
  */
 export type FeedDraftSessionSeed =
-  | { kind: "freeform" }
+  | {
+      kind: "freeform";
+      /** Draft-from-link (feed-create-split.md D13): http(s) URL the session
+       *  is seeded from; materializes as the seeded first message. */
+      link?: string;
+    }
   | {
       kind: "freeform-reply";
       candidate: {
@@ -514,6 +522,8 @@ export type FeedDraftSessionSummary = {
   selectedDraft: { text: string; status: FeedSavedDraftStatus } | null;
   draftCounts: {
     pending: number;
+    /** Approved for manual posting — in the ready-to-post queue. */
+    ready: number;
     posted: number;
     rejected: number;
     /** Posted, then the live post was taken down. */
@@ -658,6 +668,8 @@ export async function saveFeedSessionDraft(
     text: string;
     platform: FeedPlatform;
     topicTag?: string;
+    /** Written brief of the visual for image-first platforms (D9). */
+    imageBrief?: string;
     reply?: {
       externalId: string;
       authorHandle: string;
@@ -1134,6 +1146,102 @@ export async function updateFeedMemberDraftPermission(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ canDraft }),
     },
+  );
+  if (res.ok) return { ok: true };
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return { ok: false, error: data.error ?? null };
+}
+
+// ── Ready-to-post queue (docs/plans/feed-create-split.md D2/D6) ──────────
+
+/**
+ * One ready-to-post row — an `approved / ready-manual` distribution event.
+ * The caption is `finalText` (edits-on-approve included); `imageBrief` is
+ * the written visual brief for image-first platforms, when the draft
+ * carried one.
+ */
+export type FeedReadyPost = {
+  id: string;
+  platform: FeedPlatform;
+  finalText: string;
+  imageBrief: string | null;
+  approvedBy: string | null;
+  sessionId: string | null;
+  createdAt: string;
+};
+
+type ReadyEventRow = {
+  id: string;
+  platform: string;
+  metadata?: {
+    finalText?: unknown;
+    imageBrief?: unknown;
+    approvedBy?: unknown;
+    sessionId?: unknown;
+  } | null;
+  createdAt: string;
+};
+
+/**
+ * The assistant's ready-to-post queue
+ * (`GET /:assistantId/ready-posts`). Returns `[]` on any non-OK response —
+ * the page treats a failed load as an inline error via a separate probe.
+ */
+export async function fetchFeedReadyPosts(
+  assistantId: string,
+): Promise<FeedReadyPost[] | null> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/ready-posts`,
+  );
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => ({}))) as {
+    ready?: ReadyEventRow[];
+  };
+  return (body.ready ?? []).map((e) => {
+    const meta = e.metadata ?? {};
+    return {
+      id: e.id,
+      platform: e.platform as FeedPlatform,
+      finalText: typeof meta.finalText === "string" ? meta.finalText : "",
+      imageBrief: typeof meta.imageBrief === "string" ? meta.imageBrief : null,
+      approvedBy: typeof meta.approvedBy === "string" ? meta.approvedBy : null,
+      sessionId: typeof meta.sessionId === "string" ? meta.sessionId : null,
+      createdAt: e.createdAt,
+    };
+  });
+}
+
+/**
+ * Mark a ready post as posted by hand
+ * (`POST /:assistantId/ready-posts/:eventId/mark-posted`). The optional
+ * permalink is the live URL the operator pasted after posting.
+ */
+export async function markFeedReadyPostPosted(
+  assistantId: string,
+  eventId: string,
+  opts: { permalink?: string } = {},
+): Promise<FeedDraftMutationResult> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/ready-posts/${eventId}/mark-posted`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts.permalink ? { permalink: opts.permalink } : {}),
+    },
+  );
+  if (res.ok) return { ok: true };
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return { ok: false, error: data.error ?? null };
+}
+
+/** Drop a ready post from the queue (`POST .../ready-posts/:eventId/discard`). */
+export async function discardFeedReadyPost(
+  assistantId: string,
+  eventId: string,
+): Promise<FeedDraftMutationResult> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/ready-posts/${eventId}/discard`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
   );
   if (res.ok) return { ok: true };
   const data = (await res.json().catch(() => ({}))) as { error?: string };

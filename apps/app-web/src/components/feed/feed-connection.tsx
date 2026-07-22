@@ -26,10 +26,12 @@
  */
 
 import { useState } from "react";
+import Link from "next/link";
 import { authFetch } from "@/lib/auth-fetch";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { disconnectFeedProfile } from "@/lib/api/feed";
 import { buildAuthorizeUrl } from "@/lib/feed-connect-account";
+import { feedPath, isConnectableFeedPlatform } from "@/lib/feed-nav";
 import type { FeedPlatform } from "@/lib/feed-nav";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -55,7 +57,31 @@ export function FeedConnection() {
 
   const isAdmin = team.role === "admin" || team.role === "owner";
 
+  // Coming-soon stub for create-only targets (instagram/xhs) — no OAuth
+  // integration yet; drafting + the ready queue already work for them
+  // (docs/plans/feed-create-split.md D11).
+  if (!isConnectableFeedPlatform(platform)) {
+    return (
+      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
+        <h1
+          className="text-[15px] font-semibold"        >
+          {format(t.comingSoon.title, { platform: platformLabel })}
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          {format(t.comingSoon.body, { platform: platformLabel })}
+        </p>
+        <Link
+          href={feedPath(params.workspaceId, { segment: "drafts" })}
+          className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          {t.comingSoon.draftsCta}
+        </Link>
+      </div>
+    );
+  }
+
   async function startConnect(targetAssistantId: string) {
+    if (!isConnectableFeedPlatform(platform)) return;
     setBusy(true);
     setError(null);
     try {
@@ -112,10 +138,10 @@ export function FeedConnection() {
 
   if (!profile) {
     return (
-      <div className="px-8 py-10 max-w-2xl space-y-6">
+      <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
         {connectDialog}
         <header>
-          <h1 className="text-xl font-semibold" style={{ fontFamily: "var(--font-rocknroll)" }}>
+          <h1 className="text-[15px] font-semibold">
             {format(t.connection.notConnectedTitle, { platform: platformLabel })}
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
@@ -126,7 +152,7 @@ export function FeedConnection() {
           <button
             type="button"
             onClick={openConnect}
-            className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
           >
             {t.connection.connectCta}
           </button>
@@ -138,9 +164,9 @@ export function FeedConnection() {
   }
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-4xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+        <h1 className="text-[15px] font-semibold">
           {format(t.connection.heading, { platform: platformLabel })}
         </h1>
         <p className="text-sm text-muted-foreground leading-relaxed">
@@ -154,7 +180,7 @@ export function FeedConnection() {
         </div>
       ) : null}
 
-      <section className="rounded-xl border border-border bg-card p-5 space-y-4 hover-lift">
+      <section className="rounded-xl border border-border bg-card p-5 space-y-4">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -191,7 +217,7 @@ export function FeedConnection() {
             type="button"
             onClick={() => startConnect(profile.assistantId)}
             disabled={busy}
-            className="rounded-xl border border-border bg-card px-4 h-10 text-sm hover:bg-accent hover:border-primary/40 active:bg-accent/80 disabled:opacity-50 transition-colors press"
+            className="rounded-lg border border-border bg-card px-3 h-8 text-[12.5px] font-medium hover:bg-accent active:bg-accent/80 disabled:opacity-50 transition-colors press"
           >
             {busy ? t.connection.reconnecting : t.connection.reconnect}
           </button>
@@ -199,7 +225,7 @@ export function FeedConnection() {
             type="button"
             onClick={disconnect}
             disabled={busy}
-            className="rounded-xl border border-destructive/40 text-destructive px-4 h-10 text-sm hover:bg-destructive/10 active:bg-destructive/15 disabled:opacity-50 transition-colors press"
+            className="rounded-lg border border-destructive/40 text-destructive px-3 h-8 text-[12.5px] font-medium hover:bg-destructive/10 active:bg-destructive/15 disabled:opacity-50 transition-colors press"
           >
             {t.connection.disconnect}
           </button>

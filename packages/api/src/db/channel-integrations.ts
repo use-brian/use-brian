@@ -115,6 +115,23 @@ export type EmailCredentials = {
   webhook_secret?: string
 }
 
+/**
+ * WeChat (iLink bot) credentials — the entire auth state from a QR-login
+ * confirm. `bot_token` is the bearer secret; `base_url` is the per-bot API
+ * base iLink assigned at login; `ilink_bot_id` is the bot's own identity
+ * (e.g. `a5ace6fd482e@im.bot`); `bound_user_id` is the WeChat user who
+ * scanned. `get_updates_buf` is the long-poll cursor the wechat-connector
+ * persists between polls so a bridge restart resumes without message loss.
+ * See docs/architecture/channels/wechat.md.
+ */
+export type WechatCredentials = {
+  bot_token: string
+  base_url: string
+  ilink_bot_id: string
+  bound_user_id?: string
+  get_updates_buf?: string
+}
+
 /** Credential maps for every BYO channel we support. */
 export type ChannelCredentials =
   | SlackCredentials
@@ -125,6 +142,7 @@ export type ChannelCredentials =
   | ThreadsCredentials
   | TwitterCredentials
   | EmailCredentials
+  | WechatCredentials
 
 /**
  * Access control mode for who can interact with the bot.
@@ -413,6 +431,20 @@ export type ChannelIntegrationStore = {
   listActiveWithCredentialsSystem(
     channelType: string,
   ): Promise<Array<{ channelId: string; botUserId: string | null; credentials: ChannelCredentials }>>
+
+  /**
+   * System-level credentials merge by `channel_id` (no RLS): decrypt, apply
+   * `mutate`, re-encrypt, write back. The credentials analogue of
+   * `mergeConfigSystem`, for connector-maintained state that rides the
+   * credentials blob — today the WeChat long-poll cursor (`get_updates_buf`),
+   * which the wechat-connector persists via `POST /internal/wechat/cursor`.
+   * No-op when no active row matches.
+   */
+  mergeCredentialsSystem(
+    channelId: string,
+    channelType: string,
+    mutate: (current: ChannelCredentials) => ChannelCredentials,
+  ): Promise<void>
 }
 
 // Columns that are safe to expose (no credentials blob).
@@ -707,6 +739,21 @@ export function createDbChannelIntegrationStore(key: Buffer): ChannelIntegration
         botUserId: row.botUserId,
         credentials: decryptCredentials(row.credentials, key),
       }))
+    },
+
+    async mergeCredentialsSystem(channelId, channelType, mutate) {
+      const current = await query<{ id: string; credentials: Buffer }>(
+        `SELECT id, credentials FROM channel_integrations
+         WHERE channel_id = $1 AND channel_type = $2 AND status = 'active'
+         LIMIT 1`,
+        [channelId, channelType],
+      )
+      if (current.rows.length === 0) return
+      const next = mutate(decryptCredentials(current.rows[0].credentials, key))
+      await query(
+        `UPDATE channel_integrations SET credentials = $2, updated_at = now() WHERE id = $1`,
+        [current.rows[0].id, encryptCredentials(next, key)],
+      )
     },
   }
 }

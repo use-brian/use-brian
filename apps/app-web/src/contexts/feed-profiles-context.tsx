@@ -54,6 +54,14 @@ export type FeedWorkspaceValue = {
   /** Per-platform connection summary; drives the sidebar platform pill and
    *  every per-platform page's assistant resolution. */
   profiles: FeedProfile[];
+  /**
+   * The workspace's distribution assistants (`kind='app'`,
+   * `appType='distribution'`) regardless of connection state. The Create
+   * surfaces (drafts / ready / voice) resolve their assistant from HERE, so
+   * a brand voice created without any OAuth connection is fully usable
+   * (docs/plans/feed-create-split.md D7).
+   */
+  assistants: Array<{ id: string; name: string }>;
   /** Re-fetch profiles + membership (after an OAuth connect / disconnect). */
   refresh: () => Promise<void>;
 };
@@ -114,6 +122,26 @@ async function loadWorkspace(workspaceId: string): Promise<{
   return { name: team.name, role: team.role, myUserId, canDraft };
 }
 
+async function loadDistributionAssistants(
+  workspaceId: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const res = await authFetch(
+    `${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`,
+  );
+  if (!res.ok) return [];
+  const body = (await res.json().catch(() => ({}))) as {
+    assistants?: Array<{
+      id: string;
+      name: string;
+      kind?: string;
+      appType?: string;
+    }>;
+  };
+  return (body.assistants ?? [])
+    .filter((a) => a.kind === "app" && a.appType === "distribution")
+    .map((a) => ({ id: a.id, name: a.name }));
+}
+
 export function FeedProfilesProvider(props: {
   workspaceId: string;
   children: ReactNode;
@@ -124,12 +152,16 @@ export function FeedProfilesProvider(props: {
   });
 
   const load = useCallback(async (): Promise<void> => {
-    const [team, profiles] = await Promise.all([
+    const [team, profiles, assistants] = await Promise.all([
       loadWorkspace(workspaceId),
       // Profiles failure ≠ surface failure: an OSS/creds-less backend 404s
       // the whole /api/distribution family — render the zero-profile
       // onboarding state instead of an error.
       fetchFeedTeamProfiles(workspaceId).catch(() => [] as FeedProfile[]),
+      // Same degrade: the Create surfaces just see no brand voice yet.
+      loadDistributionAssistants(workspaceId).catch(
+        () => [] as Array<{ id: string; name: string }>,
+      ),
     ]);
     setState({
       status: "ready",
@@ -140,6 +172,7 @@ export function FeedProfilesProvider(props: {
         canDraft: team.canDraft,
         me: { id: team.myUserId },
         profiles,
+        assistants,
         refresh: async () => {
           await load();
         },

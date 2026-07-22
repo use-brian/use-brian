@@ -2,6 +2,14 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* Tailwind v4 auto-detection stops at this app's own tree — it never walks
+   the workspace symlink to @use-brian/views-renderer, whose widgets render
+   inside our DOM with their own utility classes. Without this @source, a
+   renderer class only works when it coincidentally also appears in app-web
+   source (the Calendar's `grid-cols-7` was the first to have no overlap and
+   collapsed to one column). */
+@source "../../../../packages/views-renderer/src";
+
 @custom-variant dark (&:is(.dark *));
 
 :root {

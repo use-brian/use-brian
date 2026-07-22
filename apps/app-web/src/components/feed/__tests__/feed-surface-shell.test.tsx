@@ -12,6 +12,17 @@ import { describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 
 vi.mock("@/lib/auth-fetch", () => ({ authFetch: vi.fn() }));
+// The shell mounts the operator top bar above the gate; its router + layout
+// sidebar state don't exist under bare SSR, so mock the hooks it reads.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
+}));
+vi.mock("@/components/doc/doc-sidebar-data", () => ({
+  useSidebarData: () => ({
+    sidebarCollapsed: false,
+    setSidebarCollapsed: vi.fn(),
+  }),
+}));
 
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -31,5 +42,18 @@ describe("[COMP:app-web/feed-surface-shell] FeedSurfaceShell", () => {
     );
     expect(html).toContain(en.feedPage.shell.loading);
     expect(html).not.toContain("data-feed-page");
+  });
+
+  it("mounts the operator top bar ABOVE the gate (chrome on every state)", () => {
+    const html = renderToString(
+      <I18nProvider locale="en" dict={dict}>
+        <FeedSurfaceShell workspaceId="ws-1">
+          <div data-feed-page>gated</div>
+        </FeedSurfaceShell>
+      </I18nProvider>,
+    );
+    // Still loading, yet the Feed tab chip + chrome row already render.
+    expect(html).toContain(en.operatorBar.feed);
+    expect(html).toContain("data-doc-topbar");
   });
 });

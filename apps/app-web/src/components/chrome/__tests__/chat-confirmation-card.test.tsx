@@ -124,6 +124,69 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(text).not.toContain("• To:");
   });
 
+  it("renders a shopifyRefundOrder as a full-refund card with the order id and the Shopify-amount note", () => {
+    renderCard(
+      confirmation({
+        toolName: "shopifyRefundOrder",
+        displayName: "Refund order",
+        input: { orderId: "gid://shopify/Order/12345", notify: true },
+        description: "Refund a Shopify order. This moves real money.",
+      }),
+    );
+    const text = host!.textContent ?? "";
+    expect(text).toContain("gid://shopify/Order/12345");
+    expect(text).toContain("Full refund");
+    // The amount is never invented — the card states Shopify computes it.
+    expect(text).toContain("Shopify's suggested refund");
+    // The model-facing tool description is suppressed by the preview.
+    expect(text).not.toContain("This moves real money");
+  });
+
+  it("summarises a partial shopifyRefundOrder by line-item count", () => {
+    renderCard(
+      confirmation({
+        toolName: "shopifyRefundOrder",
+        displayName: "Refund order",
+        input: {
+          orderId: "1",
+          lineItems: [
+            { lineItemId: "li-1", quantity: 1 },
+            { lineItemId: "li-2", quantity: 3 },
+          ],
+        },
+      }),
+    );
+    const text = host!.textContent ?? "";
+    expect(text).toContain("2 line item(s)");
+    expect(text).not.toContain("Full refund");
+  });
+
+  it("renders a shopifyCancelOrder with the reason and explicit yes/no flag rows", () => {
+    renderCard(
+      confirmation({
+        toolName: "shopifyCancelOrder",
+        displayName: "Cancel order",
+        input: {
+          orderId: "1002",
+          reason: "FRAUD",
+          restock: false,
+          refund: true,
+          notifyCustomer: false,
+        },
+        description: "Cancel a Shopify order.",
+      }),
+    );
+    const text = host!.textContent ?? "";
+    expect(text).toContain("1002");
+    expect(text).toContain("Fraud");
+    expect(text).toContain("Restock items");
+    expect(text).toContain("Refund payment");
+    expect(text).toContain("Notify customer");
+    // Refund flag is on, restock + notify are off — both states render.
+    expect(text).toContain("Yes");
+    expect(text).toContain("No");
+  });
+
   it("falls back to description + displayLines for unrecognised tools", () => {
     renderCard(
       confirmation({

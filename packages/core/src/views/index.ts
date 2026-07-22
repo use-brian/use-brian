@@ -96,6 +96,7 @@ export {
   type BindingConfig,
   type TasksTableBinding,
   type TasksBoardBinding,
+  type TasksCalendarBinding,
   type ContactsTableBinding,
   type CompaniesTableBinding,
   type DealsTableBinding,

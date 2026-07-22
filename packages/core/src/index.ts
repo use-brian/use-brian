@@ -53,10 +53,18 @@ export * from './ingest/index.js'
 // packages/api/src/google/client.ts.)
 export * from './ingest/adapters/slack/index.js'
 export * from './ingest/adapters/github/index.js'
+export * from './ingest/adapters/shopify/index.js'
 export * from './ingest/adapters/calendar/index.js'
 export * from './ingest/adapters/fathom/index.js'
 export * from './ingest/adapters/whatsapp/index.js'
 export * from './ingest/adapters/email/index.js'
+export {
+  mailboxFilterImplementations,
+  isMachineSenderAddress,
+  normalizeMailboxMessage,
+  mailboxEpisodeText,
+} from './ingest/adapters/mailbox/index.js'
+export type { MailboxIngestMessage } from './ingest/adapters/mailbox/index.js'
 
 // Embedding worker surface — the worker factory + Gemini embedder are the
 // boot-time public API (started from `apps/api`); `EMBEDDED_PRIMITIVES` is

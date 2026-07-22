@@ -24,6 +24,10 @@
  *
  * Interactions:
  *   - Click a day cell → `onAction('date-clicked', { date: 'YYYY-MM-DD' })`
+ *   - Hover a day cell → a "+" affordance fades in (top-left, the Notion
+ *     add-entry gesture); clicking it → `onAction('date-add', { date })`.
+ *     The host owns what "add" means (the doc host creates a task due
+ *     that day).
  *   - Click a row chip → `onAction(rowAction.id, { ...rowAction.params, rowId })`
  *   - Drag a row chip onto a different day cell → optimistic local move
  *     plus `onAction('reschedule', { rowId, date: '<newIso>', dateField })`.
@@ -31,18 +35,20 @@
  *     payload re-render if the write fails. Mirrors Board's card-move
  *     shape (optimistic local state + a single action callback; no
  *     backend call from the renderer).
- *   - Navigation arrows (◀ / ▶) move the cursor one month (month view),
- *     one week (week view), or one day (day view). The "Today" button
- *     resets the cursor.
+ *   - Navigation (‹ Today ›) moves the cursor one month (month view),
+ *     one week (week view), or one day (day view); "Today" resets it.
  *
- * Day cells render the day-of-month numeral and up to 3 row chips
- * (title-column text, truncated). When a day holds more rows than the
- * chip budget allows, the surplus is summarised as a "+N more" pill
- * (currently inert — no popover; click goes to the day cell itself).
+ * Day cells render the day-of-month numeral (top-right, Notion-style;
+ * the 1st of each month renders as "Jul 1" so month boundaries read at
+ * a glance) and up to 3 row chips (title-column text, truncated, styled
+ * as bordered cards). When a day holds more rows than the chip budget
+ * allows, the surplus is summarised as a "+N more" pill (currently
+ * inert — no popover; click goes to the day cell itself).
  *
- * Today is highlighted with `bg-[var(--accent)]/30` per the doc-v1
- * spec. Days outside the cursor's month are tinted muted so the user
- * can still see the leading/trailing-week context without losing focus.
+ * Today is marked with a filled red circle around the numeral (the
+ * Notion treatment — `bg-red-500 text-white`), replacing the earlier
+ * whole-cell `bg-[var(--accent)]/30` tint. Days outside the cursor's
+ * month keep the same cell background with a muted numeral.
  *
  * [COMP:views/calendar]
  */
@@ -325,6 +331,12 @@ export function renderCalendar(props: RenderCalendarProps): JSX.Element {
     props.onAction('date-clicked', { date: toIsoDate(cell) })
   }
 
+  const handleAddClick = (cell: Date, e: React.MouseEvent): void => {
+    if (!props.onAction) return
+    e.stopPropagation()
+    props.onAction('date-add', { date: toIsoDate(cell) })
+  }
+
   const handleChipClick = (rowId: string, e: React.MouseEvent): void => {
     if (!props.rowAction || !props.onAction) return
     e.stopPropagation()
@@ -387,6 +399,8 @@ export function renderCalendar(props: RenderCalendarProps): JSX.Element {
               onDayClick={handleDayClick}
               onChipClick={handleChipClick}
               chippable={Boolean(props.rowAction && props.onAction)}
+              addable={Boolean(props.onAction)}
+              onAddClick={handleAddClick}
               draggable={draggable}
               onDropOnDay={handleDropOnDay}
             />
@@ -425,54 +439,62 @@ function CalendarHeader(props: {
 }): JSX.Element {
   const label = headerLabel(props.cursor, props.view)
 
+  // Notion layout: the month label reads top-left; the controls (view
+  // switcher + ‹ Today › nav) sit together on the right as quiet chrome.
   return (
     <div className="flex items-center justify-between">
-      <div className="flex items-center gap-1">
-        <button
-          type="button"
-          aria-label="Previous"
-          onClick={() => props.onNavigate(-1)}
-          className="rounded-sm border border-border bg-background px-2 py-1 text-sm text-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
-        >
-          {'◀'}
-        </button>
-        <button
-          type="button"
-          onClick={props.onToday}
-          className="rounded-sm border border-border bg-background px-2 py-1 text-xs text-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
-        >
-          Today
-        </button>
-        <button
-          type="button"
-          aria-label="Next"
-          onClick={() => props.onNavigate(1)}
-          className="rounded-sm border border-border bg-background px-2 py-1 text-sm text-foreground hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
-        >
-          {'▶'}
-        </button>
-      </div>
-      <div className="text-sm font-medium text-foreground" data-calendar-label>
+      <div className="text-sm font-semibold text-foreground" data-calendar-label>
         {label}
       </div>
-      <div className="flex items-center gap-1" role="tablist" aria-label="View">
-        {VIEW_TABS.map((tab) => (
+      <div className="flex items-center gap-2">
+        <div
+          className="flex items-center gap-0.5 rounded-md border border-border/70 bg-muted/40 p-0.5"
+          role="tablist"
+          aria-label="View"
+        >
+          {VIEW_TABS.map((tab) => (
+            <button
+              key={tab.view}
+              type="button"
+              role="tab"
+              aria-selected={props.view === tab.view}
+              data-calendar-tab={tab.view}
+              onClick={() => props.onSwitchView(tab.view)}
+              className={`rounded-[5px] px-2 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 ${
+                props.view === tab.view
+                  ? 'bg-background text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center">
           <button
-            key={tab.view}
             type="button"
-            role="tab"
-            aria-selected={props.view === tab.view}
-            data-calendar-tab={tab.view}
-            onClick={() => props.onSwitchView(tab.view)}
-            className={`rounded-sm border px-2 py-1 text-xs ${
-              props.view === tab.view
-                ? 'border-primary bg-accent/40 text-foreground'
-                : 'border-border bg-background text-muted-foreground hover:bg-accent/40'
-            }`}
+            aria-label="Previous"
+            onClick={() => props.onNavigate(-1)}
+            className="rounded-md px-1.5 py-0.5 text-base leading-5 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
           >
-            {tab.label}
+            {'‹'}
           </button>
-        ))}
+          <button
+            type="button"
+            onClick={props.onToday}
+            className="rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
+          >
+            Today
+          </button>
+          <button
+            type="button"
+            aria-label="Next"
+            onClick={() => props.onNavigate(1)}
+            className="rounded-md px-1.5 py-0.5 text-base leading-5 text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40"
+          >
+            {'›'}
+          </button>
+        </div>
       </div>
     </div>
   )
@@ -480,9 +502,9 @@ function CalendarHeader(props: {
 
 function CalendarWeekHeader(): JSX.Element {
   return (
-    <div className="grid grid-cols-7 gap-px text-xs font-medium text-muted-foreground">
+    <div className="grid grid-cols-7 gap-px text-xs text-muted-foreground">
       {WEEKDAY_LABELS.map((label, idx) => (
-        <div key={label + idx} className="px-2 py-1 text-center">
+        <div key={label + idx} className="px-2 py-1 text-right">
           {label}
         </div>
       ))}
@@ -556,6 +578,9 @@ function CalendarDayCell(props: {
   onDayClick: (cell: Date) => void
   onChipClick: (rowId: string, e: React.MouseEvent) => void
   chippable: boolean
+  /** When true, the hover "+" affordance renders and fires `date-add`. */
+  addable: boolean
+  onAddClick: (cell: Date, e: React.MouseEvent) => void
   /** When true, chips are draggable and this cell is a drop target. */
   draggable: boolean
   onDropOnDay: (cell: Date, e: React.DragEvent) => void
@@ -563,11 +588,20 @@ function CalendarDayCell(props: {
   const visibleChips = props.rowsForDay.slice(0, MAX_CHIPS_PER_DAY)
   const overflow = props.rowsForDay.length - visibleChips.length
   const isoKey = toIsoDate(props.cell)
+  const dayNum = props.cell.getDate()
+  // The 1st of a month reads "Jul 1" (Notion) so month boundaries are
+  // visible inside the padded grid — except under the today circle,
+  // which only fits the numeral.
+  const dayLabel =
+    dayNum === 1 && !props.isToday
+      ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' }).format(props.cell)
+      : String(dayNum)
 
   // Hook-free on purpose: the unit-test tree walker invokes this
   // component directly to find click handlers, so it must not call
   // useState. Drag-over highlight is left to native browser cues + the
-  // optimistic move; a hover ring would force a reconciler.
+  // optimistic move; a hover ring would force a reconciler. Hover
+  // affordances (the "+" button) reveal via group-hover CSS only.
   const dropProps = props.draggable
     ? {
         onDragOver: (e: React.DragEvent) => {
@@ -587,20 +621,32 @@ function CalendarDayCell(props: {
       data-calendar-today={props.isToday ? 'true' : undefined}
       onClick={() => props.onDayClick(props.cell)}
       {...dropProps}
-      className={[
-        'flex min-h-20 flex-col gap-1 bg-background p-1 text-left transition-colors',
-        'cursor-pointer hover:bg-accent/40',
-        props.isToday ? 'bg-[var(--accent)]/30' : '',
-        props.inMonth ? '' : 'text-muted-foreground',
-      ]
-        .join(' ')
-        .trim()}
+      className="group/day flex min-h-28 flex-col gap-1 bg-background p-1.5 text-left transition-colors hover:bg-muted/30"
     >
-      <div className="flex items-center justify-between">
+      <div className="flex min-h-5 items-start justify-between">
+        {props.addable ? (
+          <button
+            type="button"
+            data-calendar-add={isoKey}
+            aria-label={`Add · ${isoKey}`}
+            onClick={(e) => props.onAddClick(props.cell, e)}
+            className="grid size-5 place-items-center rounded-[4px] border border-border/70 bg-background text-sm leading-none text-muted-foreground opacity-0 shadow-sm transition-opacity hover:text-foreground focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40 group-hover/day:opacity-100"
+          >
+            +
+          </button>
+        ) : (
+          <span />
+        )}
         <span
-          className={`text-xs ${props.isToday ? 'font-semibold text-foreground' : ''}`}
+          className={
+            props.isToday
+              ? 'grid size-5 place-items-center rounded-full bg-red-500 text-[11px] font-medium text-white'
+              : `pt-0.5 text-xs tabular-nums ${
+                  props.inMonth ? 'text-muted-foreground' : 'text-muted-foreground/50'
+                }`
+          }
         >
-          {props.cell.getDate()}
+          {dayLabel}
         </span>
       </div>
       <div className="flex flex-col gap-0.5">
@@ -621,10 +667,10 @@ function CalendarDayCell(props: {
                 : undefined}
               onClick={(e) => props.onChipClick(rowId, e)}
               disabled={!props.chippable && !props.draggable}
-              className={`truncate rounded-sm border border-border bg-muted/60 px-1.5 py-0.5 text-left text-xs text-foreground ${
+              className={`w-full truncate rounded-[4px] border border-border/70 bg-background px-1.5 py-[3px] text-left text-xs leading-4 text-foreground shadow-sm transition-colors ${
                 props.draggable ? 'cursor-grab active:cursor-grabbing ' : ''
               }${
-                props.chippable ? 'hover:bg-accent/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40' : props.draggable ? '' : 'cursor-default'
+                props.chippable ? 'hover:border-border hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40' : props.draggable ? '' : 'cursor-default'
               }`}
               title={title}
             >
@@ -635,7 +681,7 @@ function CalendarDayCell(props: {
         {overflow > 0 ? (
           <div
             data-calendar-overflow
-            className="text-[10px] text-muted-foreground"
+            className="px-0.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
           >
             +{overflow} more
           </div>
