@@ -24,7 +24,17 @@ const nextConfig: NextConfig = {
   },
   env: {
     NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
-    API_URL: API_URL,
+    // The un-blanked origin for URLs DISPLAYED to users — see lib/display-api-url.ts.
+    // This is deliberately inlined: client components render it.
+    //
+    // `API_URL` is NOT inlined here. Server-side machine-to-machine callers
+    // (proxy.ts, /api/auth/*, lib/server-fetch.ts) must resolve it at RUNTIME so
+    // a deploy can point them at a private origin (localhost) while the browser
+    // keeps dialing the public one. Inlining froze both to the same public URL,
+    // which sent app-web's own sign-in fetch out through the CDN — where
+    // Cloudflare Access answered with an HTML login page and the handler died on
+    // JSON.parse. Same freezing trap as NODE_ENV in PR #66.
+    NEXT_PUBLIC_DISPLAY_API_URL: API_URL,
     // Dev defaults to "" (browser uses the /api rewrite). But the dev rewrite
     // BUFFERS gzip SSE responses, so streaming endpoints (WhatsApp QR connect)
     // hang. An explicit NEXT_PUBLIC_API_URL override lets dev hit the API
