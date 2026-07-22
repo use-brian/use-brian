@@ -237,6 +237,45 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     })
   })
 
+  it('task adjust merges description into attributes and clears with null', async () => {
+    // The page-body key rides the same merge as priority — siblings survive.
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { priority: 'high' } }],
+    } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'new-task-id' } as never)
+
+    let res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ description: 'Deep context\n\n- [ ] step one' })
+
+    expect(res.status).toBe(200)
+    expect(mockUpdateTask).toHaveBeenCalledWith('u_caller', ROW, {
+      attributes: { priority: 'high', description: 'Deep context\n\n- [ ] step one' },
+    })
+
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ workspaceId: WS, attributes: { priority: 'high', description: 'old' } }],
+    } as never)
+    mockUpdateTask.mockResolvedValueOnce({ id: 'newer-task-id' } as never)
+
+    res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ description: null })
+
+    expect(res.status).toBe(200)
+    expect(mockUpdateTask).toHaveBeenLastCalledWith('u_caller', ROW, {
+      attributes: { priority: 'high' },
+    })
+  })
+
+  it('task adjust rejects an over-length description', async () => {
+    const res = await request(makeApp())
+      .post(`/api/brain-inbox/${WS}/task/${ROW}/adjust`)
+      .send({ description: 'x'.repeat(10_001) })
+    expect(res.status).toBe(400)
+    expect(mockUpdateTask).not.toHaveBeenCalled()
+  })
+
   it('task adjust returns 404 when the task is absent', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     const res = await request(makeApp())

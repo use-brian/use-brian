@@ -9,6 +9,8 @@ function signals(over: Partial<HomeSignals> = {}): HomeSignals {
     approvalsCount: 2,
     autopilotCount: 0,
     taskTriageCount: 0,
+    taskCleanupCount: 0,
+    dealAttentionCount: 0,
     connectorAttentionCount: 0,
     workflowAttentionCount: 0,
     upcomingWorkflows: [{ id: 'w1', name: 'Investor digest', nextRunAt: '2026-06-10T17:00:00Z' }],
@@ -89,6 +91,24 @@ describe('[COMP:home/merge] mergeHomeDock', () => {
     const dock = mergeHomeDock(null, signals({ autopilotCount: 3 }))
     expect(dock.needsYou.map((n) => n.kind)).toEqual(['brain_review', 'approvals', 'autopilot'])
     expect(dock.needsYou[2].count).toBe(3)
+  })
+
+  it('surfaces the task_cleanup card in the default order, but keeps it curation-gated', () => {
+    // Default (no artifact): a live stale-backlog count renders the card.
+    const dock = mergeHomeDock(null, signals({ taskCleanupCount: 12, brainReviewCount: 0, approvalsCount: 0 }))
+    expect(dock.needsYou.map((n) => n.kind)).toContain('task_cleanup')
+    expect(dock.needsYou.find((n) => n.kind === 'task_cleanup')?.count).toBe(12)
+    // Curated artifact omitting it: hidden (hygiene, not a blocking action —
+    // same latitude as brain_review, unlike the URGENT kinds).
+    const layout: HomeDockLayout = {
+      version: 1,
+      note: null,
+      needsYou: [{ kind: 'brain_review' }],
+      generatedAt: '2026-07-22T00:00:00Z',
+      generatedByAssistantId: 'a1',
+    }
+    const curated = mergeHomeDock(layout, signals({ taskCleanupCount: 12 }))
+    expect(curated.needsYou.map((n) => n.kind)).not.toContain('task_cleanup')
   })
 
   it('surfaces the task_triage card when judge-drafted goals await triage (§8)', () => {

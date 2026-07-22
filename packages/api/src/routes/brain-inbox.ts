@@ -54,10 +54,11 @@ import {
   removeEntityAlias,
   type PromoteEntityToCrmParams,
 } from '../db/entities-store.js'
-import { SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@use-brian/core'
+import { DEAL_STAGES, SYSTEM_ENTITY_KINDS, TASK_STATUSES } from '@use-brian/core'
+import { setDealStage, updateCompany, updateContact, updateDeal } from '../db/crm.js'
 import { updateWorkspaceFileMeta } from '../db/workspace-files.js'
 import { updateTask } from '../db/tasks.js'
-import type { FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
+import type { DealStage, EntityLinksStore, FilesApi, FilesContext, TaskRecordStatus, TaskUpdateFields } from '@use-brian/core'
 import { notifyBrainInboxChange } from '../brain-stream/notify.js'
 
 type RouteOptions = {
@@ -90,6 +91,14 @@ type RouteOptions = {
    * returns 501 and the drawer falls back to a metadata-only card.
    */
   filesApi?: FilesApi | null
+  /**
+   * Entity-links store — threaded into the crm.ts update helpers so a
+   * CRM adjust that re-links a contact's company repoints the best-effort
+   * `works_at` graph edge. Optional: absent, the FK in `attributes` (the
+   * record's source of truth) still updates and only the graph projection
+   * lags.
+   */
+  entityLinks?: EntityLinksStore
 }
 
 const VALID_PRIMITIVES: BrainInboxPrimitive[] = [
@@ -107,6 +116,21 @@ function isValidPrimitive(s: string): s is BrainInboxPrimitive {
   return (VALID_PRIMITIVES as string[]).includes(s)
 }
 
+/**
+ * The `brain_verifications.target_kind` CHECK allows `entity | entity_link |
+ * task | workspace_file` only — it predates the CRM→entity unification.
+ * Post-unification a contact/company/deal row IS its entity (same id), so
+ * CRM audits record under `entity`. Passing the CRM primitive raw violates
+ * the CHECK and 500s the response AFTER the store write already persisted
+ * (found 2026-07-22 via the CRM operator surface's inline edits; the same
+ * latent bug sat under CRM verify/delete/name-adjust since unification).
+ */
+function auditKind(primitive: BrainInboxPrimitive): BrainInboxPrimitive {
+  return primitive === 'contact' || primitive === 'company' || primitive === 'deal'
+    ? 'entity'
+    : primitive
+}
+
 /** Accepted values for the conventional `attributes.priority` key (the
  *  frozen-v1 tasks schema has no typed priority column — tasks.md design
  *  decision #1). Validated here at the REST boundary only; the store layer
@@ -118,6 +142,7 @@ export function brainInboxRoutes({
   entityKindClassifier,
   pendingClassificationStore,
   filesApi,
+  entityLinks,
 }: RouteOptions): Router {
   const router = Router()
 
@@ -492,7 +517,7 @@ export function brainInboxRoutes({
         )
       } else {
         await appendBrainVerification({
-          targetKind: primitiveParam,
+          targetKind: auditKind(primitiveParam),
           targetId: rowId,
           workspaceId,
           verifiedByUserId: userId,
@@ -871,19 +896,135 @@ export function brainInboxRoutes({
     }
 
     if (primitiveParam === 'company' || primitiveParam === 'contact' || primitiveParam === 'deal') {
-      // CRM-row adjust — supports `display_name` (mapped to the
-      // companies/contacts/deals `name` column) + `sensitivity` (which
-      // flows through the linked entity since that's the canonical
-      // source). For company-specific `domain` and other kind-specific
-      // fields, the chat tools (updateCompany / updateContact /
-      // updateDeal) remain the surface. Both row + entity updates
-      // happen so the list view (which reads the CRM row) and the
-      // graph view (which reads the entity row) stay in sync.
-      const { display_name, sensitivity, reason } = req.body as {
+      // CRM-row adjust — the shared fields (`display_name`, `sensitivity`)
+      // plus the kind-typed fields the CRM operator surface edits inline
+      // (crm.md → "Operator surface"):
+      //   - contact : email / phone / company_id (nullable-clear) + tags
+      //   - company : domain (nullable-clear) + tags
+      //   - deal    : amount / close_date (nullable-clear) + stage
+      // Typed fields apply through the access-scoped crm.ts helpers
+      // (updateContact / updateCompany / updateDeal), with `stage` routed
+      // ONLY through setDealStage — the canonical stage-transition verb and
+      // the future sync cut-point (crm.md decision 13). A field that does
+      // not belong to the primitive kind is a 400, not a silent drop.
+      const { display_name, sensitivity, reason, email, phone, company_id, tags, domain, stage, amount, close_date } = req.body as {
         display_name?: unknown
         sensitivity?: unknown
         reason?: unknown
+        email?: unknown
+        phone?: unknown
+        company_id?: unknown
+        tags?: unknown
+        domain?: unknown
+        stage?: unknown
+        amount?: unknown
+        close_date?: unknown
       }
+
+      // Kind-mismatch guard: reject typed fields sent to the wrong kind.
+      const TYPED_FIELDS_BY_KIND: Record<'contact' | 'company' | 'deal', readonly string[]> = {
+        contact: ['email', 'phone', 'company_id', 'tags'],
+        company: ['domain', 'tags'],
+        deal: ['stage', 'amount', 'close_date'],
+      }
+      const allowedTyped = TYPED_FIELDS_BY_KIND[primitiveParam]
+      const sentTyped = (
+        [
+          ['email', email], ['phone', phone], ['company_id', company_id], ['tags', tags],
+          ['domain', domain], ['stage', stage], ['amount', amount], ['close_date', close_date],
+        ] as const
+      ).filter(([, v]) => v !== undefined)
+      const misplaced = sentTyped.find(([key]) => !allowedTyped.includes(key))
+      if (misplaced) {
+        res.status(400).json({
+          error: `${misplaced[0]} is not a valid field for ${primitiveParam}`,
+        })
+        return
+      }
+
+      /** Validate a nullable short-string field (null clears; trimmed). */
+      const nullableStr = (
+        value: unknown,
+        label: string,
+        maxLen: number,
+      ): { ok: true; value: string | null | undefined } | { ok: false; error: string } => {
+        if (value === undefined) return { ok: true, value: undefined }
+        if (value === null) return { ok: true, value: null }
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return { ok: false, error: `${label} must be a non-empty string or null` }
+        }
+        if (value.length > maxLen) {
+          return { ok: false, error: `${label} must be ${maxLen} characters or less` }
+        }
+        return { ok: true, value: value.trim() }
+      }
+
+      const emailV = nullableStr(email, 'email', 320)
+      if (!emailV.ok) { res.status(400).json({ error: emailV.error }); return }
+      const phoneV = nullableStr(phone, 'phone', 64)
+      if (!phoneV.ok) { res.status(400).json({ error: phoneV.error }); return }
+      const domainV = nullableStr(domain, 'domain', 256)
+      if (!domainV.ok) { res.status(400).json({ error: domainV.error }); return }
+
+      let nextCompanyId: string | null | undefined
+      if (company_id !== undefined) {
+        if (company_id === null) nextCompanyId = null
+        else if (typeof company_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(company_id)) {
+          nextCompanyId = company_id
+        } else {
+          res.status(400).json({ error: 'company_id must be an entity id or null' })
+          return
+        }
+      }
+
+      let nextTags: string[] | undefined
+      if (tags !== undefined) {
+        if (!Array.isArray(tags) || tags.some((t) => typeof t !== 'string')) {
+          res.status(400).json({ error: 'tags must be an array of strings' })
+          return
+        }
+        nextTags = (tags as string[]).map((t) => t.trim()).filter((t) => t.length > 0).slice(0, 50)
+      }
+
+      let nextStage: DealStage | undefined
+      if (stage !== undefined) {
+        if (typeof stage !== 'string' || !(DEAL_STAGES as readonly string[]).includes(stage)) {
+          res.status(400).json({ error: `stage must be one of: ${DEAL_STAGES.join(', ')}` })
+          return
+        }
+        nextStage = stage as DealStage
+      }
+
+      let nextAmount: number | null | undefined
+      if (amount !== undefined) {
+        if (amount === null) nextAmount = null
+        else if (typeof amount === 'number' && Number.isFinite(amount) && amount >= 0) {
+          nextAmount = amount
+        } else {
+          res.status(400).json({ error: 'amount must be a non-negative number or null' })
+          return
+        }
+      }
+
+      let nextCloseDate: Date | null | undefined
+      if (close_date !== undefined) {
+        if (close_date === null) nextCloseDate = null
+        else if (typeof close_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(close_date)) {
+          // UTC-midnight parse — the store writes back toISOString().slice(0,10),
+          // so the calendar date round-trips exactly.
+          const d = new Date(close_date)
+          if (isNaN(d.getTime())) {
+            res.status(400).json({ error: 'close_date must be a valid YYYY-MM-DD date or null' })
+            return
+          }
+          nextCloseDate = d
+        } else {
+          res.status(400).json({ error: 'close_date must be a valid YYYY-MM-DD date or null' })
+          return
+        }
+      }
+
+      const hasTypedChange = sentTyped.length > 0
 
       let nextName: string | undefined
       if (display_name !== undefined) {
@@ -911,9 +1052,9 @@ export function brainInboxRoutes({
         nextSensitivity = sensitivity
       }
 
-      if (nextName === undefined && nextSensitivity === undefined) {
+      if (nextName === undefined && nextSensitivity === undefined && !hasTypedChange) {
         res.status(400).json({
-          error: 'At least one field (display_name, sensitivity) is required',
+          error: 'At least one field (display_name, sensitivity, or a kind-typed field) is required',
         })
         return
       }
@@ -926,9 +1067,10 @@ export function brainInboxRoutes({
           name: string | null
           sensitivity: 'public' | 'internal' | 'confidential'
           entityId: string | null
+          attributes: Record<string, unknown> | null
         }>(
           `SELECT workspace_id AS "workspaceId", display_name AS name, sensitivity,
-                  id AS "entityId"
+                  id AS "entityId", attributes
              FROM entities
             WHERE id = $1 AND valid_to IS NULL`,
           [rowId],
@@ -955,12 +1097,83 @@ export function brainInboxRoutes({
           }, { workspaceId, userId, assistantId: '', assistantKind: 'primary' })
         }
 
+        // Kind-typed fields go through the access-scoped crm.ts helpers —
+        // the target resolves under the same viewer projection as the reads
+        // (the 2026-07-07 write-scope rule), so a projection miss updates
+        // nothing and answers 404 exactly like the read path. In-place
+        // writes: the id is stable, edges stay valid.
+        if (hasTypedChange) {
+          const access = {
+            workspaceId, userId, assistantId: '', assistantKind: 'primary',
+          } as const
+          if (primitiveParam === 'contact') {
+            const updated = await updateContact(userId, rowId, {
+              ...(emailV.value !== undefined ? { email: emailV.value } : {}),
+              ...(phoneV.value !== undefined ? { phone: phoneV.value } : {}),
+              ...(nextCompanyId !== undefined ? { companyId: nextCompanyId } : {}),
+              ...(nextTags !== undefined ? { tags: nextTags } : {}),
+            }, entityLinks, access)
+            if (!updated) {
+              res.status(404).json({ error: 'Row not found' })
+              return
+            }
+          } else if (primitiveParam === 'company') {
+            const updated = await updateCompany(userId, rowId, {
+              ...(domainV.value !== undefined ? { domain: domainV.value } : {}),
+              ...(nextTags !== undefined ? { tags: nextTags } : {}),
+            }, access)
+            if (!updated) {
+              res.status(404).json({ error: 'Row not found' })
+              return
+            }
+          } else {
+            if (nextAmount !== undefined || nextCloseDate !== undefined) {
+              const updated = await updateDeal(userId, rowId, {
+                ...(nextAmount !== undefined ? { amount: nextAmount } : {}),
+                ...(nextCloseDate !== undefined ? { closeDate: nextCloseDate } : {}),
+              }, entityLinks, access)
+              if (!updated) {
+                res.status(404).json({ error: 'Row not found' })
+                return
+              }
+            }
+            // Stage is LAST and only via setDealStage — the canonical
+            // stage-transition verb (crm.md decision 13; never updateDeal).
+            if (nextStage !== undefined) {
+              const updated = await setDealStage(userId, rowId, nextStage, access)
+              if (!updated) {
+                res.status(404).json({ error: 'Row not found' })
+                return
+              }
+            }
+          }
+        }
+
         const reasonText = typeof reason === 'string' ? reason.slice(0, 500) : undefined
         const writes: Promise<unknown>[] = []
+        if (hasTypedChange) {
+          const beforeAttrs = prev.attributes ?? {}
+          writes.push(
+            appendBrainVerification({
+              targetKind: auditKind(primitiveParam),
+              targetId: rowId,
+              workspaceId,
+              verifiedByUserId: userId,
+              action: 'adjust_attributes',
+              modelValue: Object.fromEntries(
+                sentTyped.map(([k]) => [k, beforeAttrs[k] ?? null]),
+              ),
+              userValue: Object.fromEntries(
+                sentTyped.map(([k, v]) => [k, v ?? null]),
+              ),
+              reason: reasonText,
+            }),
+          )
+        }
         if (nextName !== undefined && nextName !== prev.name) {
           writes.push(
             appendBrainVerification({
-              targetKind: primitiveParam,
+              targetKind: auditKind(primitiveParam),
               targetId: rowId,
               workspaceId,
               verifiedByUserId: userId,
@@ -974,7 +1187,7 @@ export function brainInboxRoutes({
         if (nextSensitivity !== undefined && nextSensitivity !== prev.sensitivity) {
           writes.push(
             appendBrainVerification({
-              targetKind: primitiveParam,
+              targetKind: auditKind(primitiveParam),
               targetId: rowId,
               workspaceId,
               verifiedByUserId: userId,
@@ -998,6 +1211,17 @@ export function brainInboxRoutes({
         res.json({ ok: true, stamped: true })
       } catch (err) {
         console.error(`[brain-inbox] ${primitiveParam} adjust failed:`, err)
+        // App-layer frozen-v1 constraint violations (crm.ts) are caller
+        // errors, not server faults: surface them as 400s.
+        const message = err instanceof Error ? err.message : String(err)
+        if (
+          message.includes('deals_stage_check')
+          || message.includes('deals_amount_check')
+          || message.includes('same workspace')
+        ) {
+          res.status(400).json({ error: message })
+          return
+        }
         res.status(500).json({ error: `Failed to adjust ${primitiveParam}` })
       }
       return
@@ -1116,20 +1340,22 @@ export function brainInboxRoutes({
 
     if (primitiveParam === 'task') {
       // Task adjust — the editable fields surfaced in the Brain detail
-      // panel: title, status, due date, tags, assignee, and priority.
-      // `assignee_id` must be a workspace_members row id in THIS workspace
-      // (null clears). `priority` is the conventional `attributes.priority`
-      // key (the frozen-v1 schema has no typed column — tasks.md decision
-      // #1), merged into the row's attributes (null removes the key). Each
-      // edit supersedes the row (a new bi-temporal id), so the preserved
-      // old row IS the audit trail — no brain_verification stamp here.
-      const { title, status, due_at, tags, assignee_id, priority } = req.body as {
+      // panel: title, status, due date, tags, assignee, priority, and
+      // description. `assignee_id` must be a workspace_members row id in
+      // THIS workspace (null clears). `priority` and `description` are
+      // conventional `attributes.*` keys (the frozen-v1 schema has no typed
+      // columns — tasks.md decision #1), merged into the row's attributes
+      // (null removes the key) so sibling keys survive. Each edit
+      // supersedes the row (a new bi-temporal id), so the preserved old
+      // row IS the audit trail — no brain_verification stamp here.
+      const { title, status, due_at, tags, assignee_id, priority, description } = req.body as {
         title?: unknown
         status?: unknown
         due_at?: unknown
         tags?: unknown
         assignee_id?: unknown
         priority?: unknown
+        description?: unknown
       }
 
       const fields: TaskUpdateFields = {}
@@ -1205,9 +1431,24 @@ export function brainInboxRoutes({
         priorityChange = priority as string | null
       }
 
-      if (Object.keys(fields).length === 0 && priorityChange === undefined) {
+      // The task's page-body markdown (the peek/drawer "Description"
+      // section). Free-form; capped so a paste can't balloon the row.
+      let descriptionChange: string | null | undefined
+      if (description !== undefined) {
+        if (description === null) descriptionChange = null
+        else if (typeof description === 'string' && description.length <= 10_000) {
+          descriptionChange = description.trim().length > 0 ? description : null
+        } else {
+          res.status(400).json({
+            error: 'description must be a string of 10000 characters or less, or null to clear',
+          })
+          return
+        }
+      }
+
+      if (Object.keys(fields).length === 0 && priorityChange === undefined && descriptionChange === undefined) {
         res.status(400).json({
-          error: 'At least one field (title, status, due_at, tags, assignee_id, priority) is required',
+          error: 'At least one field (title, status, due_at, tags, assignee_id, priority, description) is required',
         })
         return
       }
@@ -1242,14 +1483,20 @@ export function brainInboxRoutes({
           }
         }
 
-        if (priorityChange !== undefined) {
+        if (priorityChange !== undefined || descriptionChange !== undefined) {
           const raw = before.rows[0].attributes
           const attrs: Record<string, unknown> =
             raw && typeof raw === 'object' && !Array.isArray(raw)
               ? { ...(raw as Record<string, unknown>) }
               : {}
-          if (priorityChange === null) delete attrs.priority
-          else attrs.priority = priorityChange
+          if (priorityChange !== undefined) {
+            if (priorityChange === null) delete attrs.priority
+            else attrs.priority = priorityChange
+          }
+          if (descriptionChange !== undefined) {
+            if (descriptionChange === null) delete attrs.description
+            else attrs.description = descriptionChange
+          }
           fields.attributes = attrs
         }
 
@@ -1631,6 +1878,168 @@ export function brainInboxRoutes({
     }
   })
 
+  // ── POST /:workspaceId/tasks/bulk ───────────────────────────────
+  //
+  // One-round-trip bulk task mutation for the Tasks operator surface's
+  // LARGE selections (the surface client-loops small ones for per-row
+  // retry UX — tasks-operator-surface §1.6/§6 Phase 4). Body:
+  //   { action: 'update', ids: string[], set: { status?, assignee_id?,
+  //     priority?, due_at? } }  |  { action: 'delete', ids: string[] }
+  // Server-side it loops the SAME per-row primitives the single-row
+  // endpoints use: `updateTask` supersession for updates (priority merged
+  // into each row's live attributes), soft-delete + brain_verifications
+  // audit for deletes. Per-id outcomes come back so the client can keep
+  // failed rows selected. Capped at 200 ids per call.
+  //
+  // [COMP:api/tasks-bulk-route]
+  router.post('/:workspaceId/tasks/bulk', async (req, res) => {
+    const role = await requireWorkspaceMember(req as any, res)
+    if (!role) return
+    const { workspaceId } = req.params as { workspaceId: string }
+    const userId = (req as any).userId as string
+
+    const { action, ids, set } = req.body as {
+      action?: unknown
+      ids?: unknown
+      set?: unknown
+    }
+    if (action !== 'update' && action !== 'delete') {
+      res.status(400).json({ error: "action must be 'update' or 'delete'" })
+      return
+    }
+    if (
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      ids.length > 200 ||
+      ids.some((id) => typeof id !== 'string' || id.length === 0)
+    ) {
+      res.status(400).json({ error: 'ids must be 1-200 task ids' })
+      return
+    }
+
+    // Validate the uniform change ONCE (the per-row loop only re-reads
+    // attributes for the priority merge).
+    const fields: TaskUpdateFields = {}
+    let priorityChange: string | null | undefined
+    if (action === 'update') {
+      const body = (set ?? {}) as {
+        status?: unknown
+        assignee_id?: unknown
+        priority?: unknown
+        due_at?: unknown
+      }
+      if (body.status !== undefined) {
+        if (!TASK_STATUSES.includes(body.status as TaskRecordStatus)) {
+          res.status(400).json({ error: `status must be one of ${TASK_STATUSES.join(', ')}` })
+          return
+        }
+        fields.status = body.status as TaskRecordStatus
+      }
+      if (body.assignee_id !== undefined) {
+        if (body.assignee_id !== null && (typeof body.assignee_id !== 'string' || body.assignee_id.length === 0)) {
+          res.status(400).json({ error: 'assignee_id must be a workspace member id or null' })
+          return
+        }
+        if (typeof body.assignee_id === 'string') {
+          const member = await query(
+            `SELECT id FROM workspace_members WHERE id = $1 AND workspace_id = $2`,
+            [body.assignee_id, workspaceId],
+          )
+          if (member.rows.length === 0) {
+            res.status(400).json({ error: 'assignee_id is not a member of this workspace' })
+            return
+          }
+        }
+        fields.assigneeId = body.assignee_id as string | null
+      }
+      if (body.due_at !== undefined) {
+        if (body.due_at === null) fields.due = null
+        else if (typeof body.due_at === 'string') {
+          const parsed = new Date(body.due_at)
+          if (Number.isNaN(parsed.getTime())) {
+            res.status(400).json({ error: 'due_at must be an ISO date string or null' })
+            return
+          }
+          fields.due = parsed
+        } else {
+          res.status(400).json({ error: 'due_at must be an ISO date string or null' })
+          return
+        }
+      }
+      if (body.priority !== undefined) {
+        if (body.priority !== null && !TASK_PRIORITIES.includes(body.priority as (typeof TASK_PRIORITIES)[number])) {
+          res.status(400).json({ error: `priority must be one of ${TASK_PRIORITIES.join(', ')}, or null to clear` })
+          return
+        }
+        priorityChange = body.priority as string | null
+      }
+      if (Object.keys(fields).length === 0 && priorityChange === undefined) {
+        res.status(400).json({
+          error: 'set must include at least one of status, assignee_id, priority, due_at',
+        })
+        return
+      }
+    }
+
+    const results: { id: string; ok: boolean; newId?: string }[] = []
+    for (const id of ids as string[]) {
+      try {
+        // Per-row ownership pre-check (same contract as the single-row
+        // endpoints): live version, in THIS workspace. Carries attributes
+        // for the priority merge.
+        const before = await query<{ workspace_id: string; attributes: unknown }>(
+          `SELECT workspace_id, attributes FROM tasks WHERE id = $1 AND valid_to IS NULL`,
+          [id],
+        )
+        if (before.rows.length === 0 || before.rows[0].workspace_id !== workspaceId) {
+          results.push({ id, ok: false })
+          continue
+        }
+        if (action === 'delete') {
+          await query(
+            `UPDATE tasks SET valid_to = now(), updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
+            [id],
+          )
+          await appendBrainVerification({
+            targetKind: 'task',
+            targetId: id,
+            workspaceId,
+            verifiedByUserId: userId,
+            action: 'delete',
+          })
+          results.push({ id, ok: true })
+        } else {
+          const rowFields: TaskUpdateFields = { ...fields }
+          if (priorityChange !== undefined) {
+            const raw = before.rows[0].attributes
+            const attrs: Record<string, unknown> =
+              raw && typeof raw === 'object' && !Array.isArray(raw)
+                ? { ...(raw as Record<string, unknown>) }
+                : {}
+            if (priorityChange === null) delete attrs.priority
+            else attrs.priority = priorityChange
+            rowFields.attributes = attrs
+          }
+          const updated = await updateTask(userId, id, rowFields)
+          if (updated) results.push({ id, ok: true, newId: updated.id })
+          else results.push({ id, ok: false })
+        }
+      } catch (err) {
+        console.error('[brain-inbox] tasks bulk row failed:', err)
+        results.push({ id, ok: false })
+      }
+    }
+
+    // One repaint signal for the batch (clients refetch wholesale).
+    void notifyBrainInboxChange(
+      workspaceId,
+      'task',
+      (ids as string[])[0],
+      action === 'delete' ? 'delete' : 'update',
+    )
+    res.json({ ok: results.every((r) => r.ok), results })
+  })
+
   // ── DELETE /:workspaceId/:primitive/:rowId ──────────────────────
   //
   // Soft delete — sets valid_to = now() on the active version.
@@ -1686,7 +2095,7 @@ export function brainInboxRoutes({
         )
       } else {
         await appendBrainVerification({
-          targetKind: primitiveParam,
+          targetKind: auditKind(primitiveParam),
           targetId: rowId,
           workspaceId,
           verifiedByUserId: userId,

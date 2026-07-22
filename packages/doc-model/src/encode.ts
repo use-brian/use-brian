@@ -10,10 +10,35 @@
  */
 
 import * as Y from 'yjs'
-import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror'
+import {
+  prosemirrorJSONToYDoc,
+  prosemirrorJSONToYXmlFragment,
+  yDocToProsemirrorJSON,
+} from 'y-prosemirror'
 import type { Page } from '@use-brian/core/dist/views/blocks.js'
 import { docSchema, FRAGMENT_FIELD, META_MAP } from './schema.js'
 import { blocksToPMDoc, pageToPlaintext, pmDocToBlocks, type PMDoc } from './block-mapping.js'
+
+/**
+ * The fixed Yjs `clientID` every legacy-page seed is authored under.
+ *
+ * A Y.Doc built by `new Y.Doc()` picks a RANDOM clientID, so two encodings of
+ * the same page are two different CRDT *authors* writing the same text — and
+ * `Y.applyUpdate`ing both into one doc keeps BOTH (that is the whole point of a
+ * CRDT: concurrent inserts by distinct clients never dedupe). That is how a
+ * page seeded twice ends up with its entire body duplicated end-to-end
+ * (prod incident 2026-07-21, pages fdd1b6eb / b2e1f6ef — `saved_views.page`
+ * held 37 blocks while `documents.snapshot_json` held 74).
+ *
+ * Pinning the seed to ONE clientID makes re-seeding idempotent: the second
+ * update carries the same `(client, clock)` pairs as the first, so Yjs
+ * recognizes them as already-integrated and drops them. The seed becomes
+ * convergent no matter how many times, or from how many processes, it runs.
+ *
+ * Reserved for seeds only — live editors keep their random ids. See
+ * `docs/architecture/features/doc.md` → "Real-time collaboration".
+ */
+export const LEGACY_SEED_CLIENT_ID = 1
 
 /** Build a fresh Y.Doc from a page (body fragment + title in meta). */
 export function pageToYDoc(page: Page, title: string): Y.Doc {
@@ -23,9 +48,24 @@ export function pageToYDoc(page: Page, title: string): Y.Doc {
   return ydoc
 }
 
-/** Encoded initial state for a page — what the sync service seeds + persists. */
+/**
+ * Encoded initial state for a page — what the sync service seeds + persists.
+ *
+ * Deterministic: same `(page, title)` in, byte-identical update out, authored
+ * under `LEGACY_SEED_CLIENT_ID`. Applying it to a doc that already holds this
+ * seed is a no-op. Built fragment-first (rather than via `pageToYDoc`) because
+ * the clientID must be pinned BEFORE any content is written — ops are stamped
+ * with the doc's clientID as they are created.
+ */
 export function pageToYDocUpdate(page: Page, title: string): Uint8Array {
-  const ydoc = pageToYDoc(page, title)
+  const ydoc = new Y.Doc()
+  ydoc.clientID = LEGACY_SEED_CLIENT_ID
+  prosemirrorJSONToYXmlFragment(
+    docSchema(),
+    blocksToPMDoc(page.blocks),
+    ydoc.getXmlFragment(FRAGMENT_FIELD),
+  )
+  ydoc.getMap(META_MAP).set('title', title)
   const update = Y.encodeStateAsUpdate(ydoc)
   ydoc.destroy()
   return update

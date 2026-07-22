@@ -144,14 +144,35 @@ const hocuspocus = new Hocuspocus({
   },
 
   async onLoadDocument(data) {
-    const update = await loadPageUpdate({ pageId: data.documentName, query: sysQuery })
-    if (update) Y.applyUpdate(data.document, update)
+    const loaded = await loadPageUpdate({ pageId: data.documentName, query: sysQuery })
+    const ydoc = data.document as unknown as Y.Doc
+    if (loaded) {
+      // A `legacy-seed` is a fresh encoding of `saved_views.page`, not this
+      // doc's own history — applying one to a doc that ALREADY has body content
+      // appends a second copy of the whole page rather than reconciling with
+      // it. `pageToYDocUpdate` is authored under a fixed clientID so a repeat
+      // seed is normally an idempotent no-op, but that only holds while the
+      // CAS blocks are byte-identical; if `saved_views.page` changed between
+      // the two loads (the synthesis / blueprint-projection path CAS-writes it
+      // behind the sync service's back) the clocks diverge and both copies
+      // survive. Emptiness is the invariant that holds either way: only ever
+      // seed a blank doc. Prod incident 2026-07-21 — pages fdd1b6eb /
+      // b2e1f6ef came back with their entire body twice.
+      const seedable =
+        loaded.origin === 'persisted' || ydoc.getXmlFragment(FRAGMENT_FIELD).length === 0
+      if (seedable) {
+        Y.applyUpdate(ydoc, loaded.update)
+      } else {
+        console.warn(
+          `[doc-sync] skipped legacy seed for ${data.documentName}: document already holds content`,
+        )
+      }
+    }
     // Stamp missing blockIds (and heal forks) the moment the doc becomes
     // live, before any client or AI read derives ids from it — editor-created
     // nodes carry `blockId: null` and would otherwise get a different
     // fabricated id on every conversion. See healBlockIds + the same call in
     // storePageSnapshot.
-    const ydoc = data.document as unknown as Y.Doc
     ydoc.transact(() => healBlockIds(ydoc.getXmlFragment(FRAGMENT_FIELD)))
     return data.document
   },

@@ -16,6 +16,8 @@
  * [COMP:app-web/brain-property-fields]
  */
 
+import Markdown from "react-markdown";
+import { Pencil } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -763,6 +765,10 @@ export function PageTitle({
 
   async function commit() {
     if (!onCommit) return;
+    // In-flight guard: Enter commits AND blurs, and the blur's commit call
+    // races the first (committedRef only updates after the await) — without
+    // this, one edit supersedes the row twice (duplicate live rows).
+    if (busy) return;
     const next = draft.trim();
     if (next === committedRef.current) {
       setDraft(committedRef.current);
@@ -888,5 +894,132 @@ export function MoreProperties({
           : format(t.brainPage.detailDrawer.moreProperties, { count })}
       </button>
     </>
+  );
+}
+
+// ── Page body (click-to-edit markdown) ─────────────────────────────
+
+/**
+ * Click-to-edit page body — the Notion "page content" analog beneath the
+ * property list (a memory's `detail`, a task's `attributes.description`).
+ * View mode renders markdown; clicking it (or the pencil next to the
+ * heading) swaps in a textarea. Blur or Cmd/Ctrl+Enter commits; Escape
+ * cancels. Shared by the Brain entry drawer and the operator peek panels
+ * so a record body reads identically on both surfaces.
+ */
+export function EditableBody({
+  label,
+  value,
+  placeholder,
+  onCommit,
+}: {
+  label: string;
+  value: string | null;
+  placeholder: string;
+  onCommit: CommitFn<string>;
+}) {
+  const t = useT();
+  const labels = t.brainPage.detailDrawer;
+  const committed = value ?? "";
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(committed);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function commit() {
+    setEditing(false);
+    // In-flight guard — Cmd/Ctrl+Enter commits and the textarea then blurs;
+    // the blur's commit call must not race the first into a double write.
+    if (busy || draft === committed) return;
+    setBusy(true);
+    setError(null);
+    const result = await onCommit(draft);
+    setBusy(false);
+    if (!result.ok) {
+      setDraft(committed);
+      setError(result.error ?? labels.saveFailed);
+    }
+  }
+
+  return (
+    <section className="mt-1 flex flex-col gap-2 border-t border-border pt-4">
+      <div className="flex items-center gap-1.5">
+        <h3 className="text-sm font-medium text-foreground/80">{label}</h3>
+        {!editing && (
+          <button
+            type="button"
+            disabled={busy}
+            aria-label={format(labels.editValue, { label })}
+            onClick={() => {
+              setDraft(committed);
+              setError(null);
+              setEditing(true);
+            }}
+            className="inline-flex h-5 w-5 items-center justify-center rounded text-muted-foreground/50 hover:bg-muted hover:text-foreground"
+          >
+            <Pencil className="size-[11px]" aria-hidden />
+          </button>
+        )}
+      </div>
+      {editing ? (
+        // Seamless page-body editing (the PageTitle treatment): no border,
+        // no ring, no resize grip — same typography as the rendered view,
+        // auto-growing, with the soft background swap as the focus cue.
+        <textarea
+          autoFocus
+          value={draft}
+          rows={3}
+          disabled={busy}
+          placeholder={placeholder}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => void commit()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              void commit();
+            }
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              setDraft(committed);
+              setEditing(false);
+            }
+          }}
+          className={cn(
+            "w-full resize-none field-sizing-content min-h-20 bg-transparent",
+            "text-sm leading-relaxed break-words",
+            "-mx-1.5 rounded-md px-1.5 py-1 outline-none focus-visible:shadow-none",
+            "hover:bg-muted/40 focus:bg-muted/40 transition-colors",
+            "placeholder:text-muted-foreground/50",
+            busy && "opacity-60",
+          )}
+        />
+      ) : (
+        <div
+          onClick={() => {
+            if (busy) return;
+            setDraft(committed);
+            setError(null);
+            setEditing(true);
+          }}
+          className={cn(
+            "-mx-1.5 cursor-text rounded-md px-1.5 py-1 transition-colors hover:bg-muted/40",
+            busy && "opacity-60",
+          )}
+        >
+          {committed.trim().length > 0 ? (
+            <div className="chat-markdown text-sm leading-relaxed break-words">
+              <Markdown>{committed}</Markdown>
+            </div>
+          ) : (
+            <span className="text-sm text-muted-foreground/60">{placeholder}</span>
+          )}
+        </div>
+      )}
+      {error && (
+        <p className="text-xs text-red-500" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }

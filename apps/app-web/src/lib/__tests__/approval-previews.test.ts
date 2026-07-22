@@ -7,6 +7,7 @@
 import { describe, it, expect } from "vitest";
 import {
   attachmentDisplayName,
+  emailBodyPreviewMarkdown,
   extractAttachmentLines,
   parseEmailSendArgs,
   parseToolPreview,
@@ -93,5 +94,26 @@ describe("[COMP:app-web/approvals] attachment helpers", () => {
   it("uses the basename for path refs and the raw ref otherwise", () => {
     expect(attachmentDisplayName("/reports/q2.pdf")).toBe("q2.pdf");
     expect(attachmentDisplayName("file-abc-123")).toBe("file-abc-123");
+  });
+});
+
+describe("[COMP:app-web/approvals] emailBodyPreviewMarkdown", () => {
+  it("hardens single newlines into markdown hard breaks (send parity)", () => {
+    expect(emailBodyPreviewMarkdown("Hi Sarah,\nThanks for the call.")).toBe(
+      "Hi Sarah,  \nThanks for the call.",
+    );
+  });
+
+  it("leaves paragraph breaks (blank lines) untouched", () => {
+    expect(emailBodyPreviewMarkdown("Para one.\n\nPara two.")).toBe(
+      "Para one.\n\nPara two.",
+    );
+  });
+
+  it("does not touch newlines inside fenced code blocks", () => {
+    const body = "See:\n```\nline1\nline2\n```\nBye";
+    expect(emailBodyPreviewMarkdown(body)).toBe(
+      "See:  \n```\nline1\nline2\n```  \nBye",
+    );
   });
 });

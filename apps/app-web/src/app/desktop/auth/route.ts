@@ -28,7 +28,7 @@ import { loopbackRedirectBase } from "@/lib/desktop-loopback";
  * Component tag: [COMP:app-web/desktop-auth-bridge].
  */
 
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 const SCHEME = "usebrian";
 const CHALLENGE_RE = /^[A-Za-z0-9_-]{16,256}$/;
 const STATE_RE = /^[A-Za-z0-9_-]{8,128}$/;

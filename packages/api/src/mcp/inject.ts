@@ -27,6 +27,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
+import { gateToolsOnActionGrants } from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
@@ -280,8 +281,10 @@ export async function injectMcpTools(params: {
   connectorActionAudit?: ConnectorActionAudit
   /**
    * Per-assistant capability grants store (#4 in `connector-actions.md`).
-   * Forwarded to `injectGoogleTools` so Gmail/GCal write callbacks
-   * gate on `assertActionAllowed` before executing.
+   * Threaded into every built-in injector; `gateToolsOnActionGrants`
+   * wraps each registry-classified write/destructive tool so its
+   * execute runs `assertActionAllowed` first. Absent → no enforcement
+   * (legacy call sites, tests).
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
   /**
@@ -680,8 +683,8 @@ export async function injectMcpTools(params: {
     : undefined
 
   // ── Built-in connectors ─────────────────────────────────────
-  await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth })
-  await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth })
+  await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
+  await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth)
 
@@ -748,9 +751,9 @@ export async function injectMcpTools(params: {
           return creds?.client_secret ?? null
         }
         if (p === 'github') {
-          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
+          await injectGitHubTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
         } else if (p === 'notion') {
-          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id })
+          await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
@@ -836,6 +839,7 @@ export async function injectMcpTools(params: {
             undefined,
             undefined,
             { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore,
           )
         } else if (p === 'notion') {
           await injectNotionTools(
@@ -854,6 +858,7 @@ export async function injectMcpTools(params: {
             undefined,
             undefined,
             { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore,
           )
         } else if (p === 'fathom') {
           // Fathom team-native is intentionally deferred: refresh tokens are
@@ -930,6 +935,7 @@ export async function injectMcpTools(params: {
             tools,
             unavailable,
             connectorActionAudit,
+            assistantConnectorGrantsStore,
           })
         } else if (inboxInstances.length === 0) {
           unavailable.push(
@@ -1313,11 +1319,12 @@ async function injectGoogleTools(
   connectorActionAudit?: ConnectorActionAudit,
   /**
    * Per-assistant capability grants store (#4 in
-   * `connector-actions.md`). When set, the Gmail / GCal write callbacks
-   * call `assertActionAllowed` BEFORE the network call. On rejection
-   * the tool throws a structured error and writes NO audit row (the
-   * action never started). Absent → no enforcement (back-compat with
-   * legacy boot configurations).
+   * `connector-actions.md`). When set, every registry-classified
+   * write/destructive tool in this injector's Google sets is wrapped by
+   * `gateToolsOnActionGrants` so `assertActionAllowed` runs BEFORE the
+   * network call. On rejection the tool throws a structured error and
+   * writes NO audit row (the action never started). Absent → no
+   * enforcement (back-compat with legacy boot configurations).
    */
   assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
   /**
@@ -1486,18 +1493,6 @@ async function injectGoogleTools(
         return allInternal ? 'internal' : 'public'
       }
 
-      async function gateGcalAction(actionKind: string): Promise<void> {
-        if (!assistantConnectorGrantsStore) return
-        const { assertActionAllowed } = await import('../safety/assert-action-allowed.js')
-        const allowed = await assertActionAllowed(
-          assistantConnectorGrantsStore,
-          assistantId,
-          'gcal',
-          actionKind,
-        )
-        if (!allowed.ok) throw new Error(allowed.details)
-      }
-
       type GCalEventLike = {
         id?: string | null
         summary?: string | null
@@ -1540,7 +1535,7 @@ async function injectGoogleTools(
       // primary (canonical names) and once per extra account (suffixed
       // variants). The audit emitters, action gates, and sendUpdates config
       // are provider-level and intentionally shared across accounts.
-      const buildCalTools = (getToken: () => Promise<string>) => createGoogleCalendarTools({
+      const buildCalTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleCalendarTools({
         listEvents: async (params) => {
           const token = await getToken()
           return listCalendarEvents(token, params)
@@ -1550,7 +1545,6 @@ async function injectGoogleTools(
           return getCalendarEvent(token, eventId, calendarId)
         },
         createEvent: async (event) => {
-          await gateGcalAction('googleCalendarCreateEvent')
           const token = await getToken()
           const audience = deriveAudienceFromAttendees(event.attendees)
           const auditPayload: Record<string, unknown> = {
@@ -1575,7 +1569,6 @@ async function injectGoogleTools(
           }
         },
         updateEvent: async (eventId, updates) => {
-          await gateGcalAction('googleCalendarUpdateEvent')
           const token = await getToken()
           const attendeeEmails = updates.attendees
           const audience = deriveAudienceFromAttendees(attendeeEmails)
@@ -1596,7 +1589,6 @@ async function injectGoogleTools(
           }
         },
         deleteEvent: async (eventId, calendarId) => {
-          await gateGcalAction('googleCalendarDeleteEvent')
           const token = await getToken()
           // Snapshot the event BEFORE delete so the audit captures
           // what was removed (delete is the first DESTRUCTIVE
@@ -1636,7 +1628,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, userTimezone)
+      }, userTimezone), 'gcal', assistantConnectorGrantsStore, assistantId)
       const calTools = buildCalTools(() => getAccessToken('gcal'))
       for (const tool of calTools) {
         if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1680,7 +1672,7 @@ async function injectGoogleTools(
       // variants, same shape as the gcal builder above). The grants gate,
       // audit wrap, and classifier preflight are provider-level — shared
       // across accounts by design.
-      const buildGmailToolSet = (getToken: () => Promise<string>) => createGmailTools({
+      const buildGmailToolSet = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGmailTools({
         listMessages: async (params) => {
           const token = await getToken()
           return listGmailMessages(token, params)
@@ -1690,23 +1682,6 @@ async function injectGoogleTools(
           return getGmailMessage(token, messageId)
         },
         sendMessage: async (params) => {
-          // Per-assistant capability gate (#4) — `assertActionAllowed`
-          // throws a structured envelope when the assistant has no
-          // grant for `send_email`. No audit row written (action never
-          // started); the model surfaces the error to the user.
-          if (assistantConnectorGrantsStore) {
-            const { assertActionAllowed } = await import('../safety/assert-action-allowed.js')
-            const allowed = await assertActionAllowed(
-              assistantConnectorGrantsStore,
-              assistantId,
-              'gmail',
-              'gmailSendMessage',
-            )
-            if (!allowed.ok) {
-              throw new Error(allowed.details)
-            }
-          }
-
           const token = await getToken()
           // Connector-action audit wrap (per `connector-actions.md`).
           // With the payload classifier (#3) in place, the email body
@@ -1822,7 +1797,7 @@ async function injectGoogleTools(
             throw err
           }
         },
-      }, { filesApi })
+      }, { filesApi }), 'gmail', assistantConnectorGrantsStore, assistantId)
       const gmailTools = buildGmailToolSet(() => getAccessToken('gmail'))
       for (const tool of gmailTools) {
         if (await applyPolicyOrSkip(tool, 'gmail', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1917,7 +1892,7 @@ async function injectGoogleTools(
       // families. `gdriveAuthorizedFiles`, `recordCreated`, and `syncOnRead`
       // are per-USER state (Picker consent + created-file index),
       // intentionally shared across accounts.
-      const buildDriveTools = (getToken: () => Promise<string>) => createGoogleDriveTools({
+      const buildDriveTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleDriveTools({
         listFiles: async (params) => {
           const token = await getToken()
           return listDriveFiles(token, params)
@@ -1938,7 +1913,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return updateDriveFileContent(token, fileId, params)
         },
-      }, gdriveAuthorizedFiles)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
       const driveTools = buildDriveTools(() => getAccessToken('gdrive'))
       for (const tool of driveTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1947,7 +1922,7 @@ async function injectGoogleTools(
       }
 
       // Docs tools
-      const buildDocsTools = (getToken: () => Promise<string>) => createGoogleDocsTools({
+      const buildDocsTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleDocsTools({
         getContent: async (documentId) => {
           const token = await getToken()
           const doc = await getDocContent(token, documentId)
@@ -1968,7 +1943,7 @@ async function injectGoogleTools(
           recordCreated('doc', doc.documentId, doc.title, doc.url, 'application/vnd.google-apps.document')
           return doc
         },
-      }, gdriveAuthorizedFiles)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
       const docsTools = buildDocsTools(() => getAccessToken('gdrive'))
       for (const tool of docsTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -1977,7 +1952,7 @@ async function injectGoogleTools(
       }
 
       // Sheets tools
-      const buildSheetsTools = (getToken: () => Promise<string>) => createGoogleSheetsTools({
+      const buildSheetsTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleSheetsTools({
         getSpreadsheetInfo: async (spreadsheetId) => {
           const token = await getToken()
           const info = await getSpreadsheetInfo(token, spreadsheetId)
@@ -2010,7 +1985,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return batchUpdateSpreadsheet(token, spreadsheetId, requests)
         },
-      }, gdriveAuthorizedFiles)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
       const sheetsTools = buildSheetsTools(() => getAccessToken('gdrive'))
       for (const tool of sheetsTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -2020,7 +1995,7 @@ async function injectGoogleTools(
 
       // Slides tools — structured read + placeholder-targeted, atomic write.
       // See docs/architecture/integrations/google-slides.md.
-      const buildSlidesTools = (getToken: () => Promise<string>) => createGoogleSlidesTools({
+      const buildSlidesTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleSlidesTools({
         getPresentationInfo: async (presentationId) => {
           const token = await getToken()
           const info = await getPresentationInfo(token, presentationId)
@@ -2069,7 +2044,7 @@ async function injectGoogleTools(
           recordCreated('slide', pres.presentationId, pres.title, pres.url, 'application/vnd.google-apps.presentation')
           return pres
         },
-      }, gdriveAuthorizedFiles)
+      }, gdriveAuthorizedFiles), 'gdrive', assistantConnectorGrantsStore, assistantId)
       const slidesTools = buildSlidesTools(() => getAccessToken('gdrive'))
       for (const tool of slidesTools) {
         if (await applyPolicyOrSkip(tool, 'gdrive', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -2123,7 +2098,7 @@ async function injectGoogleTools(
   }
   if (gcal && gcalEnabled) {
     try {
-      const buildTasksTools = (getToken: () => Promise<string>) => createGoogleTasksTools({
+      const buildTasksTools = (getToken: () => Promise<string>) => gateToolsOnActionGrants(createGoogleTasksTools({
         listTaskLists: async (params) => {
           const token = await getToken()
           return listTaskLists(token, params)
@@ -2148,7 +2123,7 @@ async function injectGoogleTools(
           const token = await getToken()
           return deleteGoogleTask(token, taskListId, taskId)
         },
-      })
+      }), 'gcal', assistantConnectorGrantsStore, assistantId)
       const tasksTools = buildTasksTools(() => getAccessToken('gcal'))
       for (const tool of tasksTools) {
         if (await applyPolicyOrSkip(tool, 'gcal', settingsStore, assistantId, userId, unavailable) === 'include') {
@@ -2286,6 +2261,8 @@ async function injectGitHubTools(
    * carries no id. See mcp/connector-health.ts.
    */
   healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
 ): Promise<void> {
   const github = connectors.find((c) => c.connectorId === 'github' && c.connected)
   const githubEnabled = github && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'github'))
@@ -2298,7 +2275,7 @@ async function injectGitHubTools(
   // Build the GitHub tool set bound to a given PAT source. Reused for the
   // primary instance and (renamed) for each extra account.
   function buildTools(getPat: () => Promise<string>): Tool[] {
-    return createGitHubTools({
+    return gateToolsOnActionGrants(createGitHubTools({
       searchRepositories: async (params) => searchRepositories(await getPat(), params),
       getRepository: async (owner, repo) => getRepository(await getPat(), owner, repo),
       listIssues: async (owner, repo, params) => listIssues(await getPat(), owner, repo, params),
@@ -2309,7 +2286,7 @@ async function injectGitHubTools(
       createIssueComment: async (owner, repo, issueNumber, body) => createIssueComment(await getPat(), owner, repo, issueNumber, body),
       getFileContents: async (owner, repo, path, ref) => getFileContents(await getPat(), owner, repo, path, ref),
       createOrUpdateFile: async (owner, repo, params) => createOrUpdateFile(await getPat(), owner, repo, params),
-    })
+    }), 'github', assistantConnectorGrantsStore, assistantId)
   }
 
   async function getPat(): Promise<string> {
@@ -2377,6 +2354,8 @@ async function injectNotionTools(
   resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
   /** Call-time liveness probe (migration 294). See `injectGitHubTools`. */
   healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
 ): Promise<void> {
   if (!getConnectorConfig('notion')) return
 
@@ -2391,7 +2370,7 @@ async function injectNotionTools(
   // Notion uses a long-lived access token stored in client_secret. Build the
   // tool set bound to a given token source — reused per account.
   function buildTools(getAccessToken: () => Promise<string>): Tool[] {
-    return createNotionTools({
+    return gateToolsOnActionGrants(createNotionTools({
       search: async (params) => searchNotion(await getAccessToken(), params),
       getPage: async (pageId) => getNotionPage(await getAccessToken(), pageId),
       getDatabase: async (databaseId) => getNotionDatabase(await getAccessToken(), databaseId),
@@ -2399,7 +2378,7 @@ async function injectNotionTools(
       createPage: async (params) => createNotionPage(await getAccessToken(), params),
       updatePage: async (pageId, params) => updateNotionPage(await getAccessToken(), pageId, params),
       appendBlocks: async (pageId, content) => appendNotionBlocks(await getAccessToken(), pageId, content),
-    })
+    }), 'notion', assistantConnectorGrantsStore, assistantId)
   }
 
   async function getAccessToken(): Promise<string> {
@@ -2586,8 +2565,10 @@ async function injectAgentmailTools(params: {
   tools: Map<string, Tool>
   unavailable?: string[]
   connectorActionAudit?: ConnectorActionAudit
+  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
 }): Promise<void> {
-  const { provider, inboxes, settingsStore, userId, assistantId, tools, unavailable, connectorActionAudit } = params
+  const { provider, inboxes, settingsStore, userId, assistantId, tools, unavailable, connectorActionAudit, assistantConnectorGrantsStore } = params
 
   const auditedEgress = async <T>(
     actionKind: 'send_email' | 'draft_email',
@@ -2728,7 +2709,7 @@ async function injectAgentmailTools(params: {
   }
 
   try {
-    for (const tool of createAgentmailTools(api)) {
+    for (const tool of gateToolsOnActionGrants(createAgentmailTools(api), 'agentmail', assistantConnectorGrantsStore, assistantId)) {
       if (await applyPolicyOrSkip(tool, 'agentmail', settingsStore, assistantId, userId, unavailable) === 'include') {
         tools.set(tool.name, tool)
       }

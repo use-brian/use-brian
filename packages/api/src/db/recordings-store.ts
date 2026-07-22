@@ -259,6 +259,24 @@ export async function updateRecording(
     truncated?: boolean
     lastError?: string | null
     deleteAfter?: Date | null
+    /**
+     * Transcription language observability (migration 354). Every field is
+     * nullable and NULL means NOT MEASURED — in particular a null density is
+     * not a zero one: null is "no CJK present, the ratio is undefined", zero
+     * is "Chinese, carrying no Cantonese markers", which is precisely the
+     * silent Mandarin-normalization the metric exists to surface. Recordings
+     * processed before this shipped stay NULL, so a backfill gap can never be
+     * read as a measurement.
+     *
+     * Spec: docs/architecture/media/transcription.md → "Language signal".
+     */
+    detectedLanguage?: string | null
+    detectedLanguageConfidence?: number | null
+    cantoDensityPerK?: number | null
+    cantoMarkerCount?: number | null
+    cjkCount?: number | null
+    latinTokens?: number | null
+    chineseVariant?: string | null
   },
 ): Promise<Recording | null> {
   const sets: string[] = []
@@ -281,6 +299,16 @@ export async function updateRecording(
   // once bounded.
   if (patch.lastError !== undefined) put('last_error', patch.lastError?.slice(0, 2000) ?? null)
   if (patch.deleteAfter !== undefined) put('delete_after', patch.deleteAfter)
+  // Language signal — `!== undefined` (not a truthiness check) because 0 is a
+  // real reading for every one of these counts.
+  if (patch.detectedLanguage !== undefined) put('detected_language', patch.detectedLanguage)
+  if (patch.detectedLanguageConfidence !== undefined)
+    put('detected_language_confidence', patch.detectedLanguageConfidence)
+  if (patch.cantoDensityPerK !== undefined) put('canto_density_per_k', patch.cantoDensityPerK)
+  if (patch.cantoMarkerCount !== undefined) put('canto_marker_count', patch.cantoMarkerCount)
+  if (patch.cjkCount !== undefined) put('cjk_count', patch.cjkCount)
+  if (patch.latinTokens !== undefined) put('latin_tokens', patch.latinTokens)
+  if (patch.chineseVariant !== undefined) put('chinese_variant', patch.chineseVariant)
 
   if (sets.length === 0) return getRecordingSystem(id)
 

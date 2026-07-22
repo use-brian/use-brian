@@ -70,3 +70,9 @@ export {
   parseTranscriptionPrefs,
   type WorkspaceTranscriptionPrefs,
 } from './transcription-prefs.js'
+export {
+  languageSignal,
+  CANTO_MARKER_CHARS,
+  type LanguageSignal,
+} from './language-signal.js'
+export { judgeChineseVariant, type ChineseVariant } from './canto-filter.js'

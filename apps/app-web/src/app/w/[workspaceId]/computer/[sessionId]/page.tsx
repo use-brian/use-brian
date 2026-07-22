@@ -14,6 +14,10 @@
  *      shown as "Delayed view", with periodic re-mint attempts to climb
  *      back up the ladder.
  *
+ * Whichever rung is live, frames land through one `createFrameGate`: decoded
+ * off-screen first, committed to the <img> second, so the view never blanks
+ * between frames (a raw `src` swap discards what the element already painted).
+ *
  * Clicks and keys forward into the page scaled to the real viewport (the
  * password never leaves the sandbox page); the first wheel tick of a scroll
  * relays immediately; a click shows a local ripple so the ocean round-trip
@@ -36,6 +40,7 @@ import { useT } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   LOCAL_ONLY_KEYS,
+  createFrameGate,
   createWheelForwarder,
   mapClickToFrame,
   normalizeNavigateUrl,
@@ -65,6 +70,29 @@ const REMINT_INTERVAL_MS = 20_000;
 const REMINT_MAX_ATTEMPTS = 3;
 
 type StreamMode = "connecting" | "ws" | "sse" | "poll";
+
+/**
+ * Decode a frame off-screen so the visible <img> only ever swaps to a picture
+ * the browser can paint immediately. `decode()` is the fast path; a browser
+ * that rejects it (or lacks it) falls back to the load event, so a frame is
+ * never stuck behind a decode quirk.
+ */
+function decodeFrame(src: string): Promise<void> {
+  const probe = new Image();
+  probe.decoding = "async";
+  probe.src = src;
+  const settled = () =>
+    new Promise<void>((resolve, reject) => {
+      if (probe.complete) {
+        if (probe.naturalWidth > 0) resolve();
+        else reject(new Error("frame decode failed"));
+        return;
+      }
+      probe.onload = () => resolve();
+      probe.onerror = () => reject(new Error("frame decode failed"));
+    });
+  return typeof probe.decode === "function" ? probe.decode().catch(settled) : settled();
+}
 
 export default function ComputerTakeoverPage(props: {
   params: Promise<{ workspaceId: string; sessionId: string }>;
@@ -105,6 +133,23 @@ export default function ComputerTakeoverPage(props: {
   const streamRef = useRef<TakeoverStreamSession | null>(null);
   streamRef.current = stream;
 
+  // Every transport pushes frames through one gate: decode first, commit
+  // second. Handing a fresh `src` straight to the <img> clears what it has
+  // already painted until the new JPEG decodes — one blank frame per arrival,
+  // which is the flicker on a damage-driven stream. The gate also owns the
+  // object-url lifetime, so a url is freed only once it is off screen.
+  const gateRef = useRef<ReturnType<typeof createFrameGate> | null>(null);
+  if (!gateRef.current) {
+    gateRef.current = createFrameGate({
+      decode: decodeFrame,
+      commit: setFrameSrc,
+      release: (src) => {
+        if (src.startsWith("blob:")) URL.revokeObjectURL(src);
+      },
+    });
+  }
+  useEffect(() => () => gateRef.current?.dispose(), []);
+
   // Arrival = the Take-Over begins: resolve the task and resume the paused
   // sandbox (§4.8 pauses it during the wait, not during the takeover).
   useEffect(() => {
@@ -143,8 +188,8 @@ export default function ComputerTakeoverPage(props: {
   }, [task, sessionId]);
 
   // Rung 1 - duplex WebSocket: binary JPEG frames in, input out on the same
-  // socket. Frames render via short-lived object URLs (no base64 inflation).
-  const blobUrls = useRef<string[]>([]);
+  // socket. Frames render via short-lived object URLs (no base64 inflation);
+  // the gate holds each one until it decodes and frees it once superseded.
   useEffect(() => {
     if (!task || task === "loading" || mode !== "ws" || !stream?.wsUrl) return;
     let cancelled = false;
@@ -162,12 +207,7 @@ export default function ComputerTakeoverPage(props: {
       ws.onmessage = (ev) => {
         if (!(ev.data instanceof Blob)) return;
         setStalled(false);
-        const url = URL.createObjectURL(ev.data);
-        blobUrls.current.push(url);
-        // Keep one frame of slack so the <img> currently decoding is never
-        // revoked out from under it.
-        while (blobUrls.current.length > 2) URL.revokeObjectURL(blobUrls.current.shift() as string);
-        setFrameSrc(url);
+        gateRef.current?.push(URL.createObjectURL(ev.data));
       };
       const drop = () => {
         if (wsRef.current === ws) wsRef.current = null;
@@ -194,13 +234,6 @@ export default function ComputerTakeoverPage(props: {
       }
     };
   }, [task, mode, stream]);
-  useEffect(
-    () => () => {
-      for (const url of blobUrls.current) URL.revokeObjectURL(url);
-      blobUrls.current = [];
-    },
-    [],
-  );
 
   // Rung 2 - SSE from the bridge. Frames are JSON with a base64 JPEG in
   // `data`; the stream is damage-driven, so a static page sending nothing is
@@ -214,7 +247,7 @@ export default function ComputerTakeoverPage(props: {
       setStalled(false);
       try {
         const parsed = JSON.parse(String(ev.data)) as { data?: string };
-        if (parsed.data) setFrameSrc(`data:image/jpeg;base64,${parsed.data}`);
+        if (parsed.data) gateRef.current?.push(`data:image/jpeg;base64,${parsed.data}`);
       } catch {
         /* malformed frame - keep the last good one */
       }
@@ -246,7 +279,7 @@ export default function ComputerTakeoverPage(props: {
       const frame = await getComputerFrame(sessionId).catch(() => null);
       if (cancelled) return;
       if (frame) {
-        setFrameSrc(`data:${frame.mimeType};base64,${frame.data}`);
+        gateRef.current?.push(`data:${frame.mimeType};base64,${frame.data}`);
         setStalled(false);
       } else {
         setStalled(true);

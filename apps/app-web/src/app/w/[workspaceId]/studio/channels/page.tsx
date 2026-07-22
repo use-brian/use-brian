@@ -38,6 +38,7 @@ import { cn } from "@/lib/utils";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { authFetch } from "@/lib/auth-fetch";
 import { buildManifest } from "@/components/slack-setup-inline";
+import { buildTeamsAppPackage } from "@/lib/teams-app-package";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
 import {
   groupChannelRail,
@@ -1721,48 +1722,29 @@ function AddChannelForm({
     });
   }
 
-  // Download a Teams app-package manifest.json for sideloading. The operator
-  // adds two icons + zips it (see the arch doc); the bot id is filled in.
-  function downloadTeamsManifest(): void {
-    const teamsManifest = {
-      $schema:
-        "https://developer.microsoft.com/en-us/json-schemas/teams/v1.16/MicrosoftTeams.schema.json",
-      manifestVersion: "1.16",
-      id: msAppId.trim() || "<AZURE_BOT_APP_ID>",
-      packageName: "ai.usebrian.assistant",
-      name: { short: "Use Brian", full: "Use Brian AI assistant" },
-      description: {
-        short: "AI assistant powered by Use Brian",
-        full: "AI assistant powered by Use Brian",
-      },
-      developer: {
-        name: "Use Brian",
-        websiteUrl: "https://usebrian.ai",
-        privacyUrl: "https://usebrian.ai/privacy",
-        termsOfUseUrl: "https://usebrian.ai/terms",
-      },
-      icons: { color: "color.png", outline: "outline.png" },
-      accentColor: "#1e293b",
-      bots: [
-        {
-          botId: msAppId.trim() || "<AZURE_BOT_APP_ID>",
-          scopes: ["personal", "team", "groupChat"],
-          supportsFiles: false,
-          isNotificationOnly: false,
-        },
-      ],
-      permissions: ["identity", "messageTeamMembers"],
-      validDomains: [],
-    };
-    const blob = new Blob([JSON.stringify(teamsManifest, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "manifest.json";
-    a.click();
-    URL.revokeObjectURL(url);
+  // Download the ready-to-upload Teams app package: manifest.json (bot id
+  // pre-filled) + the brand color/outline icons, zipped client-side.
+  async function downloadTeamsPackage(): Promise<void> {
+    setError(null);
+    try {
+      const [colorPng, outlinePng] = await Promise.all(
+        ["/icon-192.png", "/teams/outline.png"].map(async (path) => {
+          const res = await fetch(path);
+          if (!res.ok) throw new Error(`icon fetch failed: ${path}`);
+          return new Uint8Array(await res.arrayBuffer());
+        }),
+      );
+      const zip = buildTeamsAppPackage(msAppId, colorPng, outlinePng);
+      const blob = new Blob([zip], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "use-brian-teams.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError(add.packageError);
+    }
   }
 
   const TAB_BASE = "px-3 py-1.5 text-sm border-b-2 transition-colors -mb-px";
@@ -2008,10 +1990,10 @@ function AddChannelForm({
           </label>
           <button
             type="button"
-            onClick={downloadTeamsManifest}
+            onClick={() => void downloadTeamsPackage()}
             className="text-xs text-primary hover:underline self-start"
           >
-            {add.downloadManifest}
+            {add.downloadPackage}
           </button>
         </div>
       ) : (
@@ -2118,6 +2100,7 @@ function AddChannelForm({
           <code className="text-xs bg-muted px-2 py-1.5 rounded font-mono break-all">
             {success.webhookUrl}
           </code>
+          <p className="text-xs text-muted-foreground">{add.msteamsUploadHint}</p>
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -2125,6 +2108,13 @@ function AddChannelForm({
               className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
             >
               {copied ? add.copied : add.copyWebhook}
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadTeamsPackage()}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.downloadPackage}
             </button>
             <button
               type="button"

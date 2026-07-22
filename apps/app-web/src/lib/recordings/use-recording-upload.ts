@@ -17,6 +17,13 @@
  * The blueprint roster + workspace default are fetched in parallel with the
  * upload so the dialog never waits on them.
  *
+ * The dialog also carries the brief's DESTINATION (migration 353) — which page
+ * it is filed under. Saved pages are fetched alongside the roster; the row only
+ * renders once a blueprint is picked, since ingest-only authors no page. The
+ * choice rides `recording_jobs.parent_page_id` to the worker and lands as the
+ * brief page's `nest_parent_id`; the root sentinel submits null. Before this,
+ * every brief was created at the workspace root with no way to say otherwise.
+ *
  * When the roster is EMPTY the picker also offers the meeting starter
  * (`RECORDING_INSTALL_STARTER`): otherwise a workspace that has authored no
  * blueprint can only pick ingest-only, and the recording lands with no brief
@@ -37,7 +44,7 @@ import {
   RecordingApiError,
   type RecordingQueued,
 } from "@/lib/api/recordings";
-import { listCustomPageTemplates, createCustomPageTemplate } from "@/lib/api/views";
+import { listCustomPageTemplates, createCustomPageTemplate, listViews } from "@/lib/api/views";
 import { getWorkspaceDefaultBlueprint } from "@/lib/api/workspaces";
 import {
   buildBlueprintPickerItems,
@@ -48,7 +55,10 @@ import {
   RECORDING_INGEST_ONLY,
   RECORDING_INSTALL_STARTER,
 } from "@/lib/blueprints";
-import { BlueprintConfirmPicker } from "@/components/recordings/blueprint-confirm-picker";
+import {
+  RecordingConfirmPicker,
+  DESTINATION_ROOT,
+} from "@/components/recordings/recording-confirm-picker";
 import type { SearchableSelectItem } from "@/components/ui/searchable-select";
 
 export type RecordingUploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
@@ -87,11 +97,18 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
      *   NOT the submitted slug. It seeds the dialog picker; the user's final
      *   in-dialog choice is what submits. Omit when the surface has no picker
      *   (chat dock, landing) — the seed falls to the workspace default.
+     * @param opts.kind Recording kind for the transcriber-ladder routing.
+     *   The dock live recorder passes 'meeting'; omitted → the server's
+     *   'memo' column default (picked-file uploads, unchanged).
      * @returns The queued recording (`recordingId`) on success, or `null` if the
      *   user cancelled the cost confirm or the upload failed. The chat dock reads
      *   this to reference the recording in its turn; state-only callers ignore it.
      */
-    async (file: File, blueprintSelection?: string): Promise<RecordingQueued | null> => {
+    async (
+      file: File,
+      blueprintSelection?: string,
+      opts?: { kind?: "memo" | "meeting" },
+    ): Promise<RecordingQueued | null> => {
       setResult(null);
       setMessage("");
       try {
@@ -103,11 +120,24 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
         const defaultPromise = getWorkspaceDefaultBlueprint(workspaceId)
           .then((ws) => ws?.defaultRecordingBlueprintId ?? null)
           .catch(() => null);
-        const { recordingId } = await startRecordingUpload({ workspaceId, assistantId, file });
+        // Candidate destinations for the brief page. Saved pages only — a
+        // draft parent would drag the brief into the prune sweep with it. A
+        // failed fetch degrades to root-only, never blocks the upload.
+        const pagesPromise = listViews({ workspaceId, state: "saved" }).catch(() => []);
+        const { recordingId } = await startRecordingUpload({
+          workspaceId,
+          assistantId,
+          file,
+          ...(opts?.kind ? { kind: opts.kind } : {}),
+        });
 
         // Server-authoritative duration + surcharge → confirm before any model call.
         const est = await estimateRecording(recordingId);
-        const [roster, workspaceDefault] = await Promise.all([rosterPromise, defaultPromise]);
+        const [roster, workspaceDefault, pages] = await Promise.all([
+          rosterPromise,
+          defaultPromise,
+          pagesPromise,
+        ]);
         const rosterItems = buildBlueprintPickerItems(roster);
         const items: SearchableSelectItem[] = [
           { value: RECORDING_INGEST_ONLY, label: t.recordings.blueprintAuto },
@@ -119,9 +149,14 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
             ? [{ value: RECORDING_INSTALL_STARTER, label: t.recordings.starterName }]
             : []),
         ];
-        // The user's live in-dialog selection. The picker component owns the
-        // rendered state; this slot is what the hook reads after confirm.
+        const destinationItems: SearchableSelectItem[] = [
+          { value: DESTINATION_ROOT, label: t.recordings.destinationRoot },
+          ...pages.map((p) => ({ value: p.id, label: p.name })),
+        ];
+        // The user's live in-dialog selections. The picker component owns the
+        // rendered state; these slots are what the hook reads after confirm.
         let chosen = seedRecordingBlueprint(blueprintSelection, workspaceDefault);
+        let destination = DESTINATION_ROOT;
         const minutes = Math.max(1, Math.round(est.durationSeconds / 60));
         const ok = await confirmDialog({
           title: t.recordings.confirmTitle,
@@ -132,13 +167,19 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
                   .replace("{credits}", String(est.surchargeCredits))
               : t.recordings.confirmFree,
           confirmLabel: t.recordings.confirmAction,
-          // The blueprint half of the pre-flight confirm (the hook is a .ts
-          // file, so the node is built with createElement, not JSX).
-          content: createElement(BlueprintConfirmPicker, {
+          // The blueprint + destination half of the pre-flight confirm (the
+          // hook is a .ts file, so the node is built with createElement, not
+          // JSX).
+          content: createElement(RecordingConfirmPicker, {
             items,
             initial: chosen,
             onChange: (v: string) => {
               chosen = v;
+            },
+            destinationItems,
+            initialDestination: destination,
+            onDestinationChange: (v: string) => {
+              destination = v;
             },
           }),
         });
@@ -155,7 +196,13 @@ export function useRecordingUpload(workspaceId: string, assistantId: string) {
           chosen === RECORDING_INSTALL_STARTER
             ? await installStarter()
             : recordingBlueprintToSlug(chosen);
-        const res = await processRecording(recordingId, slug);
+        // The root sentinel is a UI value, not a page id — send null so the
+        // server files at the workspace root.
+        const res = await processRecording(
+          recordingId,
+          slug,
+          destination === DESTINATION_ROOT ? null : destination,
+        );
         setResult(res);
         setStatus("done");
         // The 202 means QUEUED — the worker transcribes in the background.

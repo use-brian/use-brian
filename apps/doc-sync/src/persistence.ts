@@ -4,9 +4,11 @@
  * injected query is the bare `query()` (system-bypass) shape.
  *
  *   - `loadPageUpdate` — read `documents.ydoc`; if absent (a page that
- *     predates collab or the migration missed), encode an initial Y.Doc from
- *     the legacy `saved_views.page` block JSON. Returns null only when the
- *     page row itself is gone.
+ *     predates collab, the migration missed, or a server-side CAS write
+ *     created), encode an initial Y.Doc from the legacy `saved_views.page`
+ *     block JSON. Returns null only when the page row itself is gone, and
+ *     tags which of the two it returned (`origin`) — the caller must never
+ *     stack a `legacy-seed` onto a doc that already holds body content.
  *   - `storePageSnapshot` — encode the live Y.Doc to the binary + a derived
  *     `snapshot_json` block list (so server reads never instantiate a Y.Doc),
  *     bump `seq`, and mirror the title to `saved_views.name`.
@@ -170,17 +172,28 @@ export async function notifyPageUpdated(params: {
   }
 }
 
+/**
+ * What `loadPageUpdate` found. The caller MUST distinguish the two: a
+ * `persisted` update is the doc's own history and is always safe to apply,
+ * while a `legacy-seed` is a fresh encoding of `saved_views.page` that must
+ * never stack onto a doc that already holds body content. See `onLoadDocument`.
+ */
+export type LoadedPageUpdate = {
+  update: Uint8Array
+  origin: 'persisted' | 'legacy-seed'
+}
+
 export async function loadPageUpdate(params: {
   pageId: string
   query: SysQuery
-}): Promise<Uint8Array | null> {
+}): Promise<LoadedPageUpdate | null> {
   const { pageId, query } = params
   const docRows = await query<{ ydoc: Buffer | null }>(
     `SELECT ydoc FROM documents WHERE page_id = $1`,
     [pageId],
   )
   const existing = docRows[0]?.ydoc
-  if (existing) return new Uint8Array(existing)
+  if (existing) return { update: new Uint8Array(existing), origin: 'persisted' }
 
   // Fallback: encode an initial Y.Doc from the legacy block JSON.
   const svRows = await query<{ page: Page | null; name: string | null }>(
@@ -189,7 +202,10 @@ export async function loadPageUpdate(params: {
   )
   const sv = svRows[0]
   if (!sv) return null
-  return pageToYDocUpdate(sv.page ?? { blocks: [] }, sv.name ?? '')
+  return {
+    update: pageToYDocUpdate(sv.page ?? { blocks: [] }, sv.name ?? ''),
+    origin: 'legacy-seed',
+  }
 }
 
 export async function storePageSnapshot(params: {

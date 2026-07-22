@@ -5,10 +5,12 @@
  *
  * Each card soft-references a durable `workspace_files` row
  * (`session_messages.attachments`, migration 273). Clicking downloads
- * through the authed signed-URL route — `authFetch` carries the Bearer
- * token, the API 302s to a signed GCS URL (or streams bytes in local-disk
- * dev), and the blob is handed to the browser as a named download. A plain
- * `<a href>` can't be used here: the route is `requireAuth` (header-only).
+ * through `fetchDocFileBlob` (doc-file-url.ts) — signed-URL mint via
+ * `?redirect=0` + direct storage fetch (a CORS fetch can't follow the
+ * route's cross-origin 302 — see the helper's comment; local-disk dev
+ * streams the bytes) — and the blob is handed to the browser as a named
+ * download. A plain `<a href>` can't be used here: the route is
+ * `requireAuth` (header-only).
  *
  * See docs/architecture/channels/adapter-pattern.md → "Outbound documents"
  * and docs/architecture/features/files.md → "sendFile".
@@ -18,11 +20,9 @@
 import { useState } from "react";
 import type { ChatFileAttachment } from "@use-brian/chat-ui";
 import { Download, FileText, Loader2 } from "lucide-react";
-import { authFetch } from "@/lib/auth-fetch";
+import { fetchDocFileBlob } from "@/components/doc/doc-file-url";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 /** Mirrors `formatBytes` in `components/doc/block-file.tsx` (module-private there). */
 function formatBytes(n: number): string {
@@ -33,13 +33,7 @@ function formatBytes(n: number): string {
 }
 
 async function downloadAttachment(att: ChatFileAttachment): Promise<void> {
-  const res = await authFetch(
-    `${API_URL}/api/doc-files/${encodeURIComponent(att.workspaceId)}/${encodeURIComponent(att.fileId)}`,
-  );
-  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-  // fetch followed the 302 to the signed GCS URL (CORS allows *.usebrian.ai;
-  // local dev streams same-origin bytes) — hand the blob over as a named save.
-  const blob = await res.blob();
+  const blob = await fetchDocFileBlob(att.workspaceId, att.fileId);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

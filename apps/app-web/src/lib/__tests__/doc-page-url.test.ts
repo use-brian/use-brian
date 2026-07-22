@@ -164,6 +164,12 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
     expect(surfaceFromPathname("/w/w1/feed")).toBe("feed");
     expect(surfaceFromPathname("/w/w1/feed/inbox")).toBe("feed");
     expect(surfaceFromPathname("/w/w1/feed/threads/insights")).toBe("feed");
+    // The Tasks operator surface (Home app-bar).
+    expect(surfaceFromPathname("/w/w1/tasks")).toBe("tasks");
+    expect(surfaceFromPathname("/w/w1/tasks?filter=stale")).toBe("tasks");
+    // The CRM operator surface (Home app-bar, 4th slot).
+    expect(surfaceFromPathname("/w/w1/crm")).toBe("crm");
+    expect(surfaceFromPathname("/w/w1/crm?filter=overdue")).toBe("crm");
     expect(surfaceFromPathname("/w/w1/approvals")).toBe("approvals");
     // The single-recording detail route a `[H:MM:SS]` citation deep-links into.
     // The recordings BOARD is a panel under `/p`, so it classifies as "p".

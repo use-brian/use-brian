@@ -20,3 +20,15 @@
 export function quickCaptureUrl(appUrl: string): string {
   return `${appUrl}/?capture=1`;
 }
+
+/**
+ * The canvas URL the record entry points navigate to.
+ *
+ * `?record=1` is read by app-web's dock recorder (`useDockRecorder`), which
+ * auto-starts a latched live capture and strips the param — see
+ * docs/architecture/media/live-capture.md. The root page preserves it
+ * through the single-workspace redirect, same as `?capture=1`.
+ */
+export function recordTargetUrl(appUrl: string): string {
+  return `${appUrl}/?record=1`;
+}

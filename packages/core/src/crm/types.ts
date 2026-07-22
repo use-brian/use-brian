@@ -88,7 +88,7 @@ export type ContactRecord = {
 
 export type ContactListRow = Pick<
   ContactRecord,
-  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'companyId' | 'tags' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'email' | 'phone' | 'companyId' | 'tags' | 'updatedAt'
 >
 
 export type ContactListFilters = {
@@ -117,6 +117,9 @@ export type DealRecord = {
   workspaceId: string
   /** Underlying entity row id — see CompanyRecord.entityId for context. */
   entityId: string | null
+  /** The deal entity's `display_name` (e.g. "Deal - Acme"), the row's title
+   *  on operator surfaces. */
+  name: string
   contactId: string | null
   companyId: string | null
   stage: DealStage
@@ -129,7 +132,7 @@ export type DealRecord = {
 
 export type DealListRow = Pick<
   DealRecord,
-  'id' | 'workspaceId' | 'entityId' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
+  'id' | 'workspaceId' | 'entityId' | 'name' | 'contactId' | 'companyId' | 'stage' | 'amount' | 'closeDate' | 'updatedAt'
 >
 
 export type DealListFilters = {

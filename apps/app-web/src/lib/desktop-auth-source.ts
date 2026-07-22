@@ -61,6 +61,13 @@ interface DesktopBridge {
   getRefreshToken?: () => string | null;
   setTokens?: (tokens: DesktopTokens) => void;
   clear?: () => void;
+  /**
+   * Live-recording signal (docs/architecture/media/live-capture.md →
+   * "Desktop floating overlay"): the dock recorder tells the shell a
+   * latched capture started/ended so it can show/close the always-on-top
+   * overlay window. Absent on the web and in older shells.
+   */
+  setRecording?: (on: boolean) => void;
 }
 
 declare global {

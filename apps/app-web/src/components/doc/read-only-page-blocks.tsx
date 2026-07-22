@@ -20,14 +20,83 @@
  * [COMP:app-web/share-dialog]
  */
 
-import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import { FileText } from "lucide-react";
 import { renderWidget } from "@use-brian/views-renderer";
 import type { A2UIWidget, ViewPayload } from "@use-brian/views-renderer";
+import { scanStamps } from "@use-brian/shared";
 import type { PublicBlock, PublicComment } from "@/lib/api/public-share";
 import { publicMediaUrlFor, type PublicSource } from "@/lib/api/public-share";
+import { useRecordingPlayer } from "@/lib/recordings/recording-player-context";
 
 const noop = () => {};
+
+// ── `[H:MM:SS]` citations → seek links ────────────────────────────────
+//
+// The EDITOR linkifies citations with a ProseMirror decoration
+// (`timecode-decoration.ts`); this renderer has no ProseMirror, so the same
+// parse (`scanStamps` — the one shared scanner the transcriber / transcript
+// file / synthesis prompt already agree on) runs over each text run at render.
+// The chips are real anchors (`#t=<seconds>` — the Fathom convention the
+// decoration also uses) styled by the same `.doc-timecode` CSS, and a click
+// seeks the page's player AND pops the transcript card, mirroring the
+// editor's `onSeek`. On a page with no recording (`useRecordingPlayer()`
+// outside a provider, or a provider with a null id) the text renders as plain
+// prose by construction — the same inert default as the editor.
+
+/** One run of a text split on its citations. Pure + exported for the unit
+ *  test (app-web's vitest is node-only; the component stays thin over it). */
+export type TimecodeSegment =
+  | { kind: "text"; text: string }
+  | { kind: "stamp"; text: string; ms: number };
+
+export function timecodeSegments(text: string): TimecodeSegment[] {
+  const out: TimecodeSegment[] = [];
+  let cursor = 0;
+  for (const hit of scanStamps(text)) {
+    if (hit.index > cursor) out.push({ kind: "text", text: text.slice(cursor, hit.index) });
+    out.push({ kind: "stamp", text: hit.text, ms: hit.ms });
+    cursor = hit.index + hit.length;
+  }
+  if (out.length === 0) return [{ kind: "text", text }];
+  if (cursor < text.length) out.push({ kind: "text", text: text.slice(cursor) });
+  return out;
+}
+
+/** A text run with its `[H:MM:SS]` citations rendered as seek chips. */
+function TimecodeText({ text }: { text: string }) {
+  const { recordingId, seekTo, showTranscriptAt } = useRecordingPlayer();
+  if (!recordingId || !text) return <>{text}</>;
+  const segments = timecodeSegments(text);
+  if (segments.length === 1 && segments[0].kind === "text") return <>{text}</>;
+  const onClick = (ms: number) => (e: MouseEvent<HTMLAnchorElement>) => {
+    // A modified click keeps browser behavior (the href is real).
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    seekTo(ms);
+    showTranscriptAt(ms);
+  };
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.kind === "stamp" ? (
+          <a
+            key={i}
+            href={`#t=${Math.floor(seg.ms / 1000)}`}
+            className="doc-timecode"
+            role="button"
+            data-timecode-ms={seg.ms}
+            onClick={onClick(seg.ms)}
+          >
+            {seg.text}
+          </a>
+        ) : (
+          <Fragment key={i}>{seg.text}</Fragment>
+        ),
+      )}
+    </>
+  );
+}
 
 // ── Minimal Tiptap-JSON → React (mentions already stripped server-side) ──
 
@@ -46,7 +115,9 @@ function plainText(node: TipNode | undefined): string {
 }
 
 function renderInline(node: TipNode, key: string): ReactNode {
-  let el: ReactNode = node.text ?? "";
+  // Citations linkify at the innermost level so a bolded `[0:47:21]` still
+  // seeks; inert (plain text) whenever the page carries no recording.
+  let el: ReactNode = <TimecodeText text={node.text ?? ""} />;
   for (const mark of node.marks ?? []) {
     if (mark.type === "bold") el = <strong>{el}</strong>;
     else if (mark.type === "italic") el = <em>{el}</em>;
@@ -282,10 +353,10 @@ export function commentAnchorsByBlock(
  *  aligns each card to; `data-thread-id` wires the linked hover (comment-hover.ts).
  *  Mirrors the editor's inline highlight over a text-bearing block. */
 function commentedText(text: string, threadId: string | undefined): ReactNode {
-  if (!threadId || !text) return text;
+  if (!threadId || !text) return <TimecodeText text={text} />;
   return (
     <span data-comment-thread={threadId} data-thread-id={threadId} className="doc-comment-hl">
-      {text}
+      <TimecodeText text={text} />
     </span>
   );
 }

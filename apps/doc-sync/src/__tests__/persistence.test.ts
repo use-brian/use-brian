@@ -14,9 +14,10 @@ describe('[COMP:doc-sync/persistence] loadPageUpdate', () => {
     const bytes = Buffer.from(Y.encodeStateAsUpdate(ydoc))
     const query: SysQuery = async (sql) =>
       (sql.includes('documents') ? [{ ydoc: bytes }] : []) as never[]
-    const update = await loadPageUpdate({ pageId: 'p', query })
-    expect(update).toBeInstanceOf(Uint8Array)
-    expect(snapshotFromUpdate(update!).title).toBe('T')
+    const loaded = await loadPageUpdate({ pageId: 'p', query })
+    expect(loaded!.update).toBeInstanceOf(Uint8Array)
+    expect(loaded!.origin).toBe('persisted')
+    expect(snapshotFromUpdate(loaded!.update).title).toBe('T')
   })
 
   it('falls back to encoding from saved_views.page when no stored ydoc', async () => {
@@ -24,9 +25,12 @@ describe('[COMP:doc-sync/persistence] loadPageUpdate', () => {
       (sql.includes('documents')
         ? [{ ydoc: null }]
         : [{ page: { blocks: [{ kind: 'text', id: 'x', text: 'fallback' }] }, name: 'Legacy' }]) as never[]
-    const update = await loadPageUpdate({ pageId: 'p', query })
-    expect(update).not.toBeNull()
-    expect(snapshotFromUpdate(update!).title).toBe('Legacy')
+    const loaded = await loadPageUpdate({ pageId: 'p', query })
+    expect(loaded).not.toBeNull()
+    // Tagged so `onLoadDocument` can refuse to stack it onto a populated doc —
+    // the 2026-07-21 whole-body duplication.
+    expect(loaded!.origin).toBe('legacy-seed')
+    expect(snapshotFromUpdate(loaded!.update).title).toBe('Legacy')
   })
 
   it('returns null when the page row is gone', async () => {

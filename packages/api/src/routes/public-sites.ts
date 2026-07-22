@@ -25,6 +25,12 @@ import type { PageDomain, PageDomainStore } from '../db/page-domain-store.js'
 import { buildStorageKey } from '../files/gcs-client.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
 import { renderPublicPage, type PublicRenderDeps } from './_public-render.js'
+import {
+  publicRecordingSummaryFor,
+  sendPublicRecordingMediaUrl,
+  sendPublicRecordingTranscript,
+  type ResolveRecordingReadClient,
+} from './_public-recording.js'
 import { listPublicThreadsForPage } from '../db/comment-thread-store.js'
 import { subscribeToPageShareChanges } from '../page-share-fanout.js'
 import { getLinkBreadcrumb } from '../db/page-grant-store.js'
@@ -33,6 +39,8 @@ export type PublicSiteRouteOptions = PublicRenderDeps & {
   pageDomainStore: PageDomainStore
   /** Null when no blob client is configured — media endpoint then 404s. */
   gcs: GcsFilesClient | null
+  /** BYO-storage signer for recording playback URLs; absent → `gcs` signs. */
+  resolveRecordingReadClient?: ResolveRecordingReadClient
 }
 
 // Same minimal fixed-window per-IP limiter as public-share.ts.
@@ -93,9 +101,11 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
         page ?? { blocks: [] },
         rootPageId,
       )
-      const [comments, breadcrumb] = await Promise.all([
+      const [comments, breadcrumb, recording] = await Promise.all([
         listPublicThreadsForPage(target.pageId),
         getLinkBreadcrumb(target.pageId, rootPageId),
+        // The page's recording chrome — same surface the brief carries in-app.
+        publicRecordingSummaryFor(target.pageId, target.workspaceId),
       ])
       const paths = await buildSitePaths(pageDomainStore, domain, rendered.blocks, breadcrumb)
       res.setHeader('Cache-Control', 'public, max-age=15')
@@ -109,6 +119,7 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
         payload: rendered.payload,
         comments,
         breadcrumb,
+        recording,
         pageId: target.pageId,
         canonicalPath,
         paths,
@@ -157,6 +168,45 @@ export function publicSiteRoutes(opts: PublicSiteRouteOptions): Router {
       console.error('[public-sites] media failed:', err)
       res.status(500).json({ error: 'Failed to load media' })
     }
+  })
+
+  // ── The shared page's recording (player + transcript) ────────────────
+  // `?page=` scopes to a sub-page of the domain root, like the media route.
+  // The recording resolves from the PAGE's own pointer server-side — no
+  // recording id in the URL, nothing to enumerate.
+
+  // GET /public/sites/:host/recording/media-url — JSON {url, expiresAt, ...}
+  router.get('/public/sites/:host/recording/media-url', async (req, res) => {
+    const host = normalizeHostParam(req.params.host)
+    const pageParam = typeof req.query.page === 'string' && req.query.page ? req.query.page : null
+    const resolved = await pageDomainStore.resolveSitePage(host, pageParam)
+    if (!resolved) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingMediaUrl(res, {
+      pageId: resolved.target.pageId,
+      workspaceId: resolved.target.workspaceId,
+      gcs,
+      ...(opts.resolveRecordingReadClient
+        ? { resolveReadClient: opts.resolveRecordingReadClient }
+        : {}),
+    })
+  })
+
+  // GET /public/sites/:host/recording/transcript?fromIndex=
+  router.get('/public/sites/:host/recording/transcript', async (req, res) => {
+    const host = normalizeHostParam(req.params.host)
+    const pageParam = typeof req.query.page === 'string' && req.query.page ? req.query.page : null
+    const resolved = await pageDomainStore.resolveSitePage(host, pageParam)
+    if (!resolved) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    await sendPublicRecordingTranscript(req, res, {
+      pageId: resolved.target.pageId,
+      workspaceId: resolved.target.workspaceId,
+    })
   })
 
   // GET /public/sites/:host/stream — SSE change/tick. Subscribes to the

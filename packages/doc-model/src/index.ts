@@ -120,6 +120,7 @@ export {
 } from '@use-brian/core/dist/doc/blueprint-record.js'
 
 export {
+  LEGACY_SEED_CLIENT_ID,
   pageToYDoc,
   pageToYDocUpdate,
   yDocToSnapshot,

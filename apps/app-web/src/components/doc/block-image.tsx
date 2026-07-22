@@ -19,10 +19,12 @@
  * *page* is durable, so its backing image must be too. The stored ref is
  * `{ bucket: 'workspace_files', path: <fileId>, mimeType, sizeBytes, name }`.
  * `resolveFileRefUrl()` (`doc-file-url.ts`) resolves a `workspace_files` ref
- * through `GET /api/doc-files/:workspaceId/:id`, which 302-redirects to a signed
- * GCS URL (the signed URL never lands in the doc). The `file_cache` branch is
- * kept only as a legacy fallback for any pre-existing refs, and now resolves
- * through the signed preview-URL mint (WS3 #8).
+ * through the authenticated `GET /api/doc-files/:workspaceId/:id?redirect=0`
+ * mint to a short-lived signed storage URL for the `<img src>` (the route is
+ * Bearer-only, so its own URL 401s as a plain src; the signed URL never
+ * lands in the doc). The `file_cache` branch is kept only as a legacy
+ * fallback for any pre-existing refs, and resolves through the signed
+ * preview-URL mint (WS3 #8).
  *
  * Per the agent brief, this component intentionally accepts the
  * richer `(block, blockId, readOnly, onChange, onAction)` prop set
@@ -35,7 +37,6 @@ import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
 import {
-  durableReadUrlFor,
   resolveFileRefUrl,
   type FileRef,
 } from "./doc-file-url";
@@ -69,24 +70,17 @@ export function BlockImage({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Resolved `<img src>`. Durable `workspace_files` refs resolve synchronously
-  // (seed to dodge a flash of the fallback); a legacy `file_cache` ref needs an
-  // async signed-URL mint, filled in by the effect below.
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(() =>
-    block.ref ? durableReadUrlFor(block.ref, workspaceId) : null,
-  );
+  // Resolved `<img src>`. Both ref kinds resolve through an authenticated
+  // mint round-trip (`resolveFileRefUrl`): durable `workspace_files` refs
+  // yield the short-lived signed storage URL — the read route is Bearer-only,
+  // so its URL can never be used as a plain `<img src>` (no Authorization
+  // header → 401) — and legacy `file_cache` refs yield the signed preview
+  // URL. Guarded against out-of-order settles + unmount.
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
-  // Resolve the ref's browser URL. Durable refs are set synchronously above;
-  // this covers the legacy `file_cache` signed-mint round-trip and re-resolves
-  // if the ref changes. Guarded against out-of-order settles + unmount.
   useEffect(() => {
     if (!block.ref) {
       setResolvedUrl(null);
-      return;
-    }
-    const durable = durableReadUrlFor(block.ref, workspaceId);
-    if (durable) {
-      setResolvedUrl(durable);
       return;
     }
     let cancelled = false;

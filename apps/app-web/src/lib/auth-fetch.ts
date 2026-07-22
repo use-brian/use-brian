@@ -15,6 +15,7 @@
 
 import { getUserInfo, setUserInfoCache } from "@/lib/user";
 import { primaryAuthUrl } from "@/lib/primary-auth";
+import { ossSignedOutRedirect } from "@/lib/oss-entry";
 import {
   isDesktopAuth,
   desktopAuthSource,
@@ -231,6 +232,17 @@ function redirectToLogin(): void {
   }
   if (window.location.pathname.startsWith("/login")) return;
   authRedirectInFlight = true;
+  // Open edition: there is no login to send anyone to, so an aged-out session
+  // re-mints the local-owner one and resumes where it was. Without this, an
+  // OSS session that outlives its refresh token eventually strands the owner
+  // on a Google button that can never complete.
+  const ossEntry = ossSignedOutRedirect(
+    window.location.pathname + window.location.search,
+  );
+  if (ossEntry) {
+    window.location.href = ossEntry;
+    return;
+  }
   const primary = primaryAuthUrl();
   if (primary) {
     const loginUrl = new URL("/login", primary);

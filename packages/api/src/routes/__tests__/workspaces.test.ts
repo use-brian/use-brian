@@ -28,16 +28,27 @@ vi.mock('../../db/workspace-flush.js', () => {
     WorkspaceFlushNotOwnerError,
   }
 })
+// Partial mock: only the transcription-prefs setter is stubbed (the route
+// calls it as a free function, not via the injected store); everything else
+// (InvalidRecordingBlueprintError, the free helper functions) stays real.
+vi.mock('../../db/workspace-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../db/workspace-store.js')>()
+  return { ...actual, setWorkspaceTranscriptionPrefs: vi.fn() }
+})
 
 import { workspaceRoutes } from '../workspaces.js'
 import { query, queryWithRLS } from '../../db/client.js'
 import { findUserById } from '../../db/users.js'
-import { InvalidRecordingBlueprintError } from '../../db/workspace-store.js'
+import {
+  InvalidRecordingBlueprintError,
+  setWorkspaceTranscriptionPrefs,
+} from '../../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../../db/workspace-flush.js'
 
 const mockQuery = vi.mocked(query)
 const mockRls = vi.mocked(queryWithRLS)
 const mockFindUser = vi.mocked(findUserById)
+const mockSetTranscriptionPrefs = vi.mocked(setWorkspaceTranscriptionPrefs)
 
 const workspaceStore = {
   getRole: vi.fn(),
@@ -369,5 +380,96 @@ describe('[COMP:api/workspaces-route] PATCH /:workspaceId default recording blue
       .send({ defaultRecordingBlueprintId: BP })
     expect(res.status).toBe(403)
     expect(workspaceStore.setDefaultRecordingBlueprint).not.toHaveBeenCalled()
+  })
+})
+
+describe('[COMP:api/workspaces-route] PATCH /:workspaceId transcription preferences (migration 332)', () => {
+  it('sets the Chinese script (200, routed to the store setter, fresh row returned)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    mockSetTranscriptionPrefs.mockResolvedValueOnce({
+      ok: true,
+      prefs: { chineseScript: 'traditional' },
+    })
+    workspaceStore.get.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', transcriptionPrefs: { chineseScript: 'traditional' },
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ transcriptionPrefs: { chineseScript: 'traditional' } })
+    expect(res.status).toBe(200)
+    expect(res.body.transcriptionPrefs).toEqual({ chineseScript: 'traditional' })
+    expect(mockSetTranscriptionPrefs).toHaveBeenCalledWith('u-1', 'ws-1', {
+      chineseScript: 'traditional',
+    })
+    // The name/purpose update path is not touched when only the prefs change.
+    expect(workspaceStore.update).not.toHaveBeenCalled()
+  })
+
+  it('clears back to Auto with null (200)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    mockSetTranscriptionPrefs.mockResolvedValueOnce({ ok: true, prefs: {} })
+    workspaceStore.get.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', transcriptionPrefs: {},
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ transcriptionPrefs: { chineseScript: null } })
+    expect(res.status).toBe(200)
+    expect(res.body.transcriptionPrefs).toEqual({})
+    expect(mockSetTranscriptionPrefs).toHaveBeenCalledWith('u-1', 'ws-1', {
+      chineseScript: null,
+    })
+  })
+
+  it('400s an unknown script value at the boundary, never hitting the setter', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ transcriptionPrefs: { chineseScript: 'kanji' } })
+    expect(res.status).toBe(400)
+    expect(mockSetTranscriptionPrefs).not.toHaveBeenCalled()
+  })
+
+  it('400s unsupported keys (languageCode is assistant-only)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ transcriptionPrefs: { languageCode: 'yue' } })
+    expect(res.status).toBe(400)
+    expect(mockSetTranscriptionPrefs).not.toHaveBeenCalled()
+  })
+
+  it('requires at least an admin role (member → 403)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('member')
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({ transcriptionPrefs: { chineseScript: 'traditional' } })
+    expect(res.status).toBe(403)
+    expect(mockSetTranscriptionPrefs).not.toHaveBeenCalled()
+  })
+
+  it('applies both the blueprint and the prefs when sent together (no early return)', async () => {
+    workspaceStore.getRole.mockResolvedValueOnce('admin')
+    workspaceStore.setDefaultRecordingBlueprint.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', defaultRecordingBlueprintId: null,
+    })
+    mockSetTranscriptionPrefs.mockResolvedValueOnce({
+      ok: true,
+      prefs: { chineseScript: 'simplified' },
+    })
+    workspaceStore.get.mockResolvedValueOnce({
+      id: 'ws-1', name: 'WS', transcriptionPrefs: { chineseScript: 'simplified' },
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1')
+      .send({
+        defaultRecordingBlueprintId: null,
+        transcriptionPrefs: { chineseScript: 'simplified' },
+      })
+    expect(res.status).toBe(200)
+    expect(workspaceStore.setDefaultRecordingBlueprint).toHaveBeenCalled()
+    expect(mockSetTranscriptionPrefs).toHaveBeenCalledWith('u-1', 'ws-1', {
+      chineseScript: 'simplified',
+    })
   })
 })

@@ -22,7 +22,7 @@
  *     hardcoded, so adding a connector surfaces it here for free. Imported via
  *     the `@use-brian/shared/builtin-connectors` subpath (not the barrel) to
  *     keep the server-only `env.js` module out of the client bundle — the same
- *     rule `connector-action-grants.tsx` follows.
+ *     rule `connector-tool-governance.tsx` follows.
  *
  * Spec: docs/architecture/features/workflow.md → "Web builder UI".
  * [COMP:app-web/workflow-tools]

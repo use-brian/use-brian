@@ -478,6 +478,11 @@ export function createBlueprintRecordTools(deps: BlueprintRecordToolDeps): Tool[
                 anchorKey: record.anchorKey,
                 originPrompt: `blueprint record: ${record.subject}`,
                 nestParentId: input.parentPageId ?? null,
+                // Born saved — same durability contract as the recording /
+                // generate briefs (structural-synthesis.md → "Brief
+                // durability"). A projected record page is a deliberate
+                // artifact; the 30-day draft TTL would delete it silently.
+                state: 'saved',
                 writtenBy: 'system',
               })
               pageId = draft.id

@@ -177,7 +177,13 @@ export function scribeTranscriber(opts: ScribeTranscriberOptions): RecordingTran
 
       return {
         utterances,
-        usages: [{ usage: null, model: name, costUsd: hours * rate }],
+        // `audioSeconds` is what makes this row comparable to a token-billed
+        // transcriber: the cost below is already derived from duration, so
+        // reporting the duration too costs nothing and gives the admin
+        // rollup a $/audio-hour denominator.
+        usages: [
+          { usage: null, model: name, costUsd: hours * rate, audioSeconds: req.durationMs / 1000 },
+        ],
         windows: 1,
         truncated: coverageTruncated(utterances, req.durationMs),
         // Single-shot file provider: no windowed continuation, so no degeneration guard runs.

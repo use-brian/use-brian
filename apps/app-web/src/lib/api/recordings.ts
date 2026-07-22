@@ -60,6 +60,12 @@ export async function startRecordingUpload(params: {
   workspaceId: string;
   assistantId: string;
   file: File;
+  /**
+   * Caller-declared recording kind — routes the transcriber ladder
+   * (`recordings.kind`, default 'memo'). The dock live recorder passes
+   * 'meeting' for its long captures; picked-file uploads omit it.
+   */
+  kind?: "memo" | "meeting";
 }): Promise<{ recordingId: string }> {
   const mime = params.file.type || "audio/mpeg";
   const mintRes = await authFetch(`${API_URL}/api/recordings/upload-url`, {
@@ -70,6 +76,7 @@ export async function startRecordingUpload(params: {
       assistantId: params.assistantId,
       fileName: params.file.name,
       mime,
+      ...(params.kind ? { kind: params.kind } : {}),
     }),
   });
   if (!mintRes.ok) throw await asError(mintRes, "Could not start the upload");
@@ -109,11 +116,21 @@ export async function estimateRecording(recordingId: string): Promise<RecordingE
 export async function processRecording(
   recordingId: string,
   blueprintSlug?: string,
+  /**
+   * Where to file the synthesized brief (`nest_parent_id`). Omitted → the
+   * workspace root, the behaviour before the pre-flight destination picker.
+   * The server re-checks it under the caller's RLS and 400s an id they cannot
+   * see, so this is a convenience, never the access boundary.
+   */
+  parentPageId?: string | null,
 ): Promise<RecordingQueued> {
   const res = await authFetch(`${API_URL}/api/recordings/${recordingId}/process`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(blueprintSlug ? { blueprintSlug } : {}),
+    body: JSON.stringify({
+      ...(blueprintSlug ? { blueprintSlug } : {}),
+      ...(parentPageId ? { parentPageId } : {}),
+    }),
   });
   if (!res.ok) throw await asError(res, "Transcription failed");
   return res.json();

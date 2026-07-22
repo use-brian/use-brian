@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LOCAL_ONLY_KEYS,
+  createFrameGate,
   createWheelForwarder,
   mapClickToFrame,
   normalizeNavigateUrl,
@@ -79,6 +80,122 @@ describe("[COMP:app-web/sandbox-takeover] Take-Over click mapping", () => {
     fwd.add(10);
     expect(sent).toEqual([80, 10]); // post-dispose add opens a fresh gesture
     fwd.dispose();
+  });
+});
+
+describe("[COMP:app-web/sandbox-takeover] Frame commit gate", () => {
+  it("holds a frame back until it decodes, so the <img> never swaps to an undecoded src", async () => {
+    const committed: string[] = [];
+    let finishDecode!: () => void;
+    const gate = createFrameGate({
+      decode: () =>
+        new Promise<void>((resolve) => {
+          finishDecode = resolve;
+        }),
+      commit: (src) => committed.push(src),
+    });
+
+    gate.push("frame-1");
+    await Promise.resolve();
+    expect(committed).toEqual([]); // mid-decode — swapping now is the blank frame
+
+    finishDecode();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(committed).toEqual(["frame-1"]);
+
+    gate.dispose();
+  });
+
+  it("drops a frame whose decode lands after a newer one already committed", async () => {
+    const committed: string[] = [];
+    const finishers = new Map<string, () => void>();
+    const gate = createFrameGate({
+      decode: (src) =>
+        new Promise<void>((resolve) => {
+          finishers.set(src, resolve);
+        }),
+      commit: (src) => committed.push(src),
+    });
+
+    gate.push("frame-1");
+    gate.push("frame-2");
+
+    finishers.get("frame-2")!(); // the newer frame wins the decode race
+    await new Promise((r) => setTimeout(r, 0));
+    expect(committed).toEqual(["frame-2"]);
+
+    finishers.get("frame-1")!(); // the stale decode lands late
+    await new Promise((r) => setTimeout(r, 0));
+    expect(committed).toEqual(["frame-2"]); // never rewinds to an older picture
+
+    gate.dispose();
+  });
+
+  it("releases a frame's object url only once a newer frame has replaced it on screen", async () => {
+    const committed: string[] = [];
+    const released: string[] = [];
+    const gate = createFrameGate({
+      decode: () => Promise.resolve(),
+      commit: (src) => committed.push(src),
+      release: (src) => released.push(src),
+    });
+
+    gate.push("blob:1");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(committed).toEqual(["blob:1"]);
+    expect(released).toEqual([]); // blob:1 IS the picture — revoking it blanks the view
+
+    gate.push("blob:2");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(committed).toEqual(["blob:1", "blob:2"]);
+    expect(released).toEqual(["blob:1"]); // only now is it off screen
+
+    gate.dispose();
+  });
+
+  it("releases frames that never reach the screen, so the socket path cannot leak urls", async () => {
+    const committed: string[] = [];
+    const released: string[] = [];
+    const finishers = new Map<string, (ok: boolean) => void>();
+    const gate = createFrameGate({
+      decode: (src) =>
+        new Promise<void>((resolve, reject) => {
+          finishers.set(src, (ok) => (ok ? resolve() : reject(new Error("corrupt"))));
+        }),
+      commit: (src) => committed.push(src),
+      release: (src) => released.push(src),
+    });
+
+    gate.push("blob:stale");
+    gate.push("blob:winner");
+    finishers.get("blob:winner")!(true);
+    await new Promise((r) => setTimeout(r, 0));
+
+    finishers.get("blob:stale")!(true); // decodes late, loses the race
+    gate.push("blob:corrupt");
+    finishers.get("blob:corrupt")!(false); // never decodes at all
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(committed).toEqual(["blob:winner"]);
+    expect(released.sort()).toEqual(["blob:corrupt", "blob:stale"]);
+
+    gate.dispose();
+  });
+
+  it("releases the on-screen frame on dispose", async () => {
+    const released: string[] = [];
+    const gate = createFrameGate({
+      decode: () => Promise.resolve(),
+      commit: () => {},
+      release: (src) => released.push(src),
+    });
+
+    gate.push("blob:last");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(released).toEqual([]);
+
+    gate.dispose();
+    expect(released).toEqual(["blob:last"]); // unmount frees the final frame
   });
 });
 

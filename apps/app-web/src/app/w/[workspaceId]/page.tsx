@@ -12,11 +12,13 @@ import { redirect } from "next/navigation";
  */
 export default async function WorkspaceRootPage(props: {
   params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ capture?: string }>;
+  searchParams: Promise<{ capture?: string; record?: string }>;
 }) {
   const { workspaceId } = await props.params;
   // Preserve the desktop quick-capture hint into the `/p` index so the shell
-  // can open a fresh draft (see app-desktop.md → "quick-capture.ts").
-  const { capture } = await props.searchParams;
-  redirect(`/w/${workspaceId}/p${capture === "1" ? "?capture=1" : ""}`);
+  // can open a fresh draft (see app-desktop.md → "quick-capture.ts"), and the
+  // record hint so the dock recorder auto-starts (live-capture.md).
+  const { capture, record } = await props.searchParams;
+  const suffix = capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : "";
+  redirect(`/w/${workspaceId}/p${suffix}`);
 }

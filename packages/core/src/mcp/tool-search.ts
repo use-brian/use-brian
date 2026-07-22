@@ -530,7 +530,13 @@ async function dispatchRemote(params: {
 
       try {
         const timeoutMs = context?.confirmationTimeoutMs ?? 300_000
-        const decision = await resolver.waitForDecision(confirmId, timeoutMs)
+        // Wait outside the executor's exclusive slot so sibling mcp_calls in
+        // the same turn can start and raise their own prompts. See
+        // ToolContext.parkForConfirmation.
+        const awaitDecision = () => resolver.waitForDecision(confirmId, timeoutMs)
+        const decision = context.parkForConfirmation
+          ? await context.parkForConfirmation(awaitDecision)
+          : await awaitDecision()
 
         if (decision === 'deny') {
           blockedTools.add(toolKey)
@@ -798,7 +804,15 @@ async function dispatchLocal(params: {
     })
 
     try {
-      const decision = await resolver.waitForDecision(confirmId, timeoutMs)
+      // Wait outside the executor's exclusive slot so sibling mcp_calls in
+      // the same turn can start and raise their own prompts. This is the path
+      // every first-party built-in write takes (googleCalendarCreateEvent and
+      // friends), so without it a multi-write turn shows exactly one card.
+      // See ToolContext.parkForConfirmation.
+      const awaitDecision = () => resolver.waitForDecision(confirmId, timeoutMs)
+      const decision = context.parkForConfirmation
+        ? await context.parkForConfirmation(awaitDecision)
+        : await awaitDecision()
 
       if (decision === 'deny' || decision === 'always_deny') {
         blockedTools.add(toolKey)

@@ -6,8 +6,11 @@
  * Top to bottom:
  *  - Workspace switcher (existing pill).
  *  - Top nav — a horizontal Notion-style icon toolbar, left to right: Home
- *    (→ `/w/[id]/p`), then the SURFACE rows Brain (→ `/w/[id]/brain`), Studio
- *    (→ `/studio`), Workflow (→ `/workflow`), then the utilities
+ *    (→ the workspace's persisted operator app — Page / Tasks / Feed — via
+ *    `homeHref`; the Home hub's app-bar in the content pane switches between
+ *    them, see `operator-app-bar.tsx`), then the SURFACE rows Brain
+ *    (→ `/w/[id]/brain`), Studio (→ `/studio`), Workflow (→ `/workflow`),
+ *    then the utilities
  *    Inbox (toggles the left-anchored Inbox flyout panel — owned by the chrome —
  *    with an unread-count badge) and Search (toggles a client-side title filter).
  *    Items are icon-only with a hover/focus tooltip (name + ⌘ shortcut); exactly
@@ -65,7 +68,6 @@ import {
   GitBranch,
   Home,
   Inbox,
-  Megaphone,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -75,6 +77,8 @@ import {
   Users,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
+import { operatorAppFromSurface } from "@/lib/operator-apps";
+import { OperatorAppBar } from "./operator-app-bar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -121,6 +125,8 @@ import { BrainSidebarPanel } from "./sidebar-panels/brain-sidebar-panel";
 import { StudioSidebarPanel } from "./sidebar-panels/studio-sidebar-panel";
 import { WorkflowSidebarPanel } from "./sidebar-panels/workflow-sidebar-panel";
 import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
+import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
+import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -193,10 +199,17 @@ type Props = {
   /** Dismiss the Studio nudge (persists per workspace in localStorage). */
   onDismissStudioNudge: () => void;
   /**
-   * Whether the Feed surface is available for this workspace (hosted edition
-   * AND at least one connected distribution profile — the `feedProfiles`
-   * probe in `DocSidebarDataProvider`). Gates the Feed nav row; the routes
-   * themselves stay deep-linkable for trial onboarding.
+   * The Home destination — the workspace's persisted operator app's route
+   * (Page by default; Tasks / Feed after a visit), resolved by the chrome
+   * from `lib/operator-apps.ts`. The Home icon navigates here so it resumes
+   * the user's last operator app.
+   */
+  homeHref: string;
+  /**
+   * Whether the Feed operator app is available (hosted edition AND ≥1
+   * connected distribution profile — the `feedProfiles` probe in
+   * `DocSidebarDataProvider`). Gates the Feed entry in the operator
+   * app-bar; the routes stay deep-linkable regardless.
    */
   feedEnabled: boolean;
 };
@@ -287,6 +300,11 @@ export function DocSidebar(props: Props) {
   const surfaceActive = (s: WorkspaceSurface) => props.activeSurface === s;
   /** True when surface `s` should render as the labeled pill (no utility owns it). */
   const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
+  /** Home is the operator hub: it lights up for ANY operator-app surface
+   *  (Page / Tasks / Feed) — the app-bar row below shows which. */
+  const activeOperatorApp = operatorAppFromSurface(props.activeSurface);
+  const homeActive = activeOperatorApp !== null;
+  const homePill = homeActive && !utilityPillOpen;
   const matches = useCallback(
     (row: ViewListRow) => !q || row.name.toLowerCase().includes(q),
     [q],
@@ -560,12 +578,12 @@ export function DocSidebar(props: Props) {
             reserves ⌘+digit for tab switching), Ctrl+n elsewhere. */}
         <Tooltip label={t.iconHome} shortcut={surfaceShortcutLabel(1)}>
           <Link
-            href={`/w/${workspaceId}/p`}
+            href={props.homeHref}
             aria-label={t.iconHomeAria}
-            className={navItemCls(surfaceActive("p"), !utilityPillOpen)}
+            className={navItemCls(homeActive, !utilityPillOpen)}
           >
             <Home className="size-[17px] shrink-0" />
-            {surfacePill("p") ? (
+            {homePill ? (
               <span className="whitespace-nowrap">{t.iconHome}</span>
             ) : null}
           </Link>
@@ -616,26 +634,13 @@ export function DocSidebar(props: Props) {
             ) : null}
           </Link>
         </Tooltip>
-        {/* Feed — the ported feed-web operator app. Hosted-only and shown only
-            when the workspace has a connected distribution profile
-            (`feedEnabled`); the routes stay deep-linkable regardless. */}
-        {props.feedEnabled ? (
-          <Tooltip label={t.iconFeed} shortcut="⌘5">
-            <Link
-              href={`/w/${workspaceId}/feed`}
-              aria-label={t.iconFeedAria}
-              className={navItemCls(surfaceActive("feed"), !utilityPillOpen)}
-            >
-              <Megaphone className="size-[17px] shrink-0" />
-              {surfacePill("feed") ? (
-                <span className="whitespace-nowrap">{t.iconFeed}</span>
-              ) : null}
-            </Link>
-          </Tooltip>
-        ) : null}
-        {/* Goals board (`/goals`) deliberately has NO nav slot — like Approvals,
-            it is attention-routed: the home-dock Autopilot card + the Brain task
-            panel are its entry points (docs/architecture/features/goals.md). */}
+        {/* Feed has NO top-row icon: it re-parented into the Home operator
+            app-bar (Page / Tasks / Feed — `operator-app-bar.tsx`), still
+            gated on connected distribution profiles there. The routes stay
+            deep-linkable regardless. Goals board (`/goals`) deliberately has
+            NO nav slot either — like Approvals, it is attention-routed: the
+            home-dock Autopilot card + the Brain task panel are its entry
+            points (docs/architecture/features/goals.md). */}
 
         {/* Utilities — Inbox (toggles the flyout) + Search (client-side filter).
             Either expands to its full label when open (and owns the single pill). */}
@@ -685,6 +690,19 @@ export function DocSidebar(props: Props) {
         )}
       </nav>
 
+      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / Feed),
+          between the icon row and the surface body. Shown only while an
+          operator app is active; clicking a pill navigates AND persists the
+          per-workspace selection the Home icon resumes. See
+          operator-app-bar.tsx / lib/operator-apps.ts. */}
+      {activeOperatorApp && (
+        <OperatorAppBar
+          workspaceId={workspaceId}
+          active={activeOperatorApp}
+          feedEnabled={props.feedEnabled}
+        />
+      )}
+
       {/* Search input — revealed by the Search icon (Home only). */}
       {searchOpen && props.activeSurface === "p" && (
         <div className="px-2 pb-2">
@@ -713,6 +731,10 @@ export function DocSidebar(props: Props) {
           <WorkflowSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "feed" ? (
           <FeedSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "tasks" ? (
+          <TasksSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "crm" ? (
+          <CrmSidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (

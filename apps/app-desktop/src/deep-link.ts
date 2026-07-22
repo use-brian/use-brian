@@ -8,12 +8,13 @@
  * Supported links:
  *   usebrian://open?path=/w/<ws>/p/<page>  -> ${appUrl}/w/<ws>/p/<page>
  *   usebrian://capture                      -> quickCaptureUrl(appUrl)
+ *   usebrian://record                       -> recordTargetUrl(appUrl)
  *
  * Spec: docs/architecture/features/app-desktop.md → "deep-link.ts"
  * [COMP:app-desktop/deep-link]
  */
 
-import { quickCaptureUrl } from "./quick-capture.js";
+import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 
 interface DeepLinkConfig {
   readonly appUrl: string;
@@ -42,6 +43,10 @@ export function resolveDeepLink(rawUrl: string, cfg: DeepLinkConfig): string | n
 
   if (command === "capture") {
     return quickCaptureUrl(cfg.appUrl);
+  }
+
+  if (command === "record") {
+    return recordTargetUrl(cfg.appUrl);
   }
 
   if (command === "open") {

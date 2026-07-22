@@ -36,6 +36,19 @@ export type HomeSignals = {
   /** Tasks assignable: judge-drafted goals awaiting triage (unconfirmed,
    *  non-terminal). Opens the triage surface (task-goal-autopilot.md §8). */
   taskTriageCount: number
+  /** Stale task backlog: open tasks (todo/in_progress/blocked) untouched for
+   *  30+ days — the Tasks operator surface's "Stale" cleanup preset count
+   *  (tasks-operator-surface §4). The card deep-links `/tasks?filter=stale`;
+   *  the 30-day window must match `STALE_AFTER_DAYS` in app-web's
+   *  `tasks-view.ts` so the card and the surface agree on "needs cleanup". */
+  taskCleanupCount: number
+  /** Overdue pipeline: live deals whose close_date has passed while the
+   *  stage is still open (not won/lost) — the CRM operator surface's
+   *  "Overdue close" preset count (crm-operator-surface §6). The card
+   *  deep-links `/crm?filter=overdue`; the definition must match
+   *  `matchesDealQuickFilter('overdue')` in app-web's `crm-view.ts` so the
+   *  card and the landed list always agree. */
+  dealAttentionCount: number
   /** Workspace connectors whose credentials stopped working
    *  (`health_status = 'auth_failed'`) — ingestion/tools are dead until the
    *  user reconnects. 0 in the OSS edition (no connector surface). */
@@ -69,6 +82,8 @@ export const NEED_CARD_KINDS = [
   'approvals',
   'autopilot',
   'task_triage',
+  'task_cleanup',
+  'deal_attention',
   'connector_attention',
   'workflow_attention',
 ] as const
@@ -81,9 +96,10 @@ export type NeedCardKind = (typeof NEED_CARD_KINDS)[number]
  *  approval to action, a confirmed goal to kick start or unblock, or a
  *  judge-drafted goal awaiting your triage). A stale artifact may reorder or
  *  caption any of these, but never hide it: a blocking item you must act on
- *  cannot wait on the next curation turn. Only `brain_review` (not a blocking
- *  action) stays fully curation-gated — the assistant's "include only the
- *  kinds worth surfacing" latitude applies to it alone. */
+ *  cannot wait on the next curation turn. Only `brain_review`, `task_cleanup`,
+ *  and `deal_attention` (backlog/pipeline hygiene, not blocking actions) stay
+ *  fully curation-gated — the assistant's "include only the kinds worth
+ *  surfacing" latitude applies to those three alone. */
 export const URGENT_NEED_KINDS: ReadonlySet<NeedCardKind> = new Set([
   'connector_attention',
   'workflow_attention',

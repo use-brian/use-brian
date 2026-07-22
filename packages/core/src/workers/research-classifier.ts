@@ -69,6 +69,12 @@ export type ResearchClassifyOptions = {
   message: string
   /** Override the short-message bypass; defaults to 40 chars. */
   minMessageLength?: number
+  /**
+   * Background-lane model. Callers with boot context (the API routes) pass an
+   * id already checked servable against the configured providers; the default
+   * keeps standalone/test use on the historical literal.
+   */
+  model?: string
 }
 
 export type ResearchClassifyResult = {
@@ -143,6 +149,7 @@ export async function classifyResearchIntent(
   options: ResearchClassifyOptions,
 ): Promise<ResearchClassifyResult> {
   const { provider, message, minMessageLength = MIN_MESSAGE_LENGTH } = options
+  const model = options.model ?? CLASSIFIER_MODEL
 
   // Operate-site fast-path — before the length check (site operations are
   // length-independent) and before the LLM call (zero classifier cost).
@@ -159,7 +166,7 @@ export async function classifyResearchIntent(
 
   try {
     const stream = provider.stream({
-      model: CLASSIFIER_MODEL,
+      model: model,
       systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: message }],
       maxTokens: 128,
@@ -174,7 +181,7 @@ export async function classifyResearchIntent(
 
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { research: false, operateSite: false, reason: null, usage: response.usage, model: CLASSIFIER_MODEL }
+      return { research: false, operateSite: false, reason: null, usage: response.usage, model: model }
     }
 
     const parsed = JSON.parse(jsonMatch[0]) as {
@@ -188,7 +195,7 @@ export async function classifyResearchIntent(
         operateSite: parsed.operate_site === true,
         reason: parsed.operate_site === true ? 'operate_site_classifier' : null,
         usage: response.usage,
-        model: CLASSIFIER_MODEL,
+        model: model,
       }
     }
     return {
@@ -196,7 +203,7 @@ export async function classifyResearchIntent(
       operateSite: false,
       reason: typeof parsed.reason === 'string' ? parsed.reason : null,
       usage: response.usage,
-      model: CLASSIFIER_MODEL,
+      model: model,
     }
   } catch {
     // Any failure → safe default, no research. Usage is lost because the

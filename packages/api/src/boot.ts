@@ -142,6 +142,8 @@ import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
 import { menuForClass } from '@use-brian/shared/model-registry'
+import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
+import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
@@ -210,7 +212,6 @@ import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
 import { createWorkflowLifecycleWorker } from './workers/workflow-lifecycle-worker.js'
 import {
   createGeminiWorkflowDigestLLM,
-  WORKFLOW_DIGEST_MODEL,
 } from './workers/workflow-digest-llm.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
@@ -268,7 +269,7 @@ import { goalsRoutes } from './routes/goals.js'
 import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
-import { createGcsFilesClient } from './files/gcs-client.js'
+import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
@@ -553,6 +554,14 @@ export interface OpenApiEnv {
  */
 export interface EpisodeIngestorDeps {
   provider: LLMProvider
+  /**
+   * The background lane's servable model id, resolved once at boot against the
+   * configured providers. Absent = the caller had no boot context (tests, the
+   * platform factory pre-dating this) and the ingestor keeps its own default.
+   */
+  backgroundModel?: string
+  /** Same, for the chat-class extraction model Pipeline B runs episodes through. */
+  extractionModel?: string
   crmStore: ReturnType<typeof createDbCrmStore>
   entitiesStore: ReturnType<typeof createDbEntitiesStore>
   entityLinksStore: ReturnType<typeof createDbEntityLinksStore>
@@ -720,6 +729,28 @@ export interface OpenApiPorts {
   whatsappScheduledBatching?: boolean
   /** A later closed router owns the hosted shared-number fallback. */
   whatsappOfficialFallback?: boolean
+  /**
+   * Resolves the official WhatsApp bot's number for Settings → Account →
+   * Connected accounts. Hosted-only (the number lives behind the closed
+   * official-bot plumbing), and its absence is what 503s the WhatsApp
+   * link-code route in OSS. See docs/architecture/channels/whatsapp.md →
+   * "Account linking".
+   */
+  getWhatsappOfficialNumber?: () => Promise<string | null>
+
+  /**
+   * BYO-storage signer for the PUBLIC shared-page recording playback URL
+   * (`<source>/recording/media-url` on the public share/site routes). A
+   * recording carrying a `storage_uri` must be signed by that bucket's own
+   * client — the platform client would mint a URL for the wrong bucket.
+   * Hosted passes its files-resolver-backed implementation (the same seam the
+   * authed recordings route uses); open build leaves it unset → the platform
+   * blob client signs everything, which is correct for single-bucket OSS.
+   */
+  resolveRecordingReadClient?: (
+    workspaceId: string,
+    storageUri: string | null | undefined,
+  ) => Promise<Pick<GcsFilesClient, 'signedReadUrl'>>
 
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
@@ -819,6 +850,12 @@ export interface BootContext {
   connectorGrantStore: Awaited<ReturnType<typeof import('./db/connector-grant-store.js').createConnectorGrantStore>>
   connectorActionStore: ReturnType<typeof createDbConnectorActionStore>
   workspaceFilesStore: ReturnType<typeof createDbWorkspaceFilesStore>
+  /**
+   * The doc page store. Exposed so a closed route can resolve a page under the
+   * CALLER's RLS — e.g. the recordings `/process` route verifying the brief's
+   * destination page before the (system-level) worker files into it.
+   */
+  savedViewStore: ReturnType<typeof createDbSavedViewStore>
   knowledgeStore: ReturnType<typeof createDbKnowledgeStore>
   capabilityStore: ReturnType<typeof createDbCapabilityStore>
   apiKeyStore: ReturnType<typeof createDbApiKeyStore>
@@ -1170,6 +1207,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const meteredModelsAvailable: ReadonlySet<string> = new Set(
     menuForClass('metered', configuredProviders).map((r) => r.alias),
   )
+  // The background lane is internal routing with no menu, so L12 can't drop a
+  // keyless model out of it the way it does for chat: the id is baked into the
+  // call sites. Resolve it once here and inject the result, or a deployment
+  // without a Google credential loses every background job — auto-title, memory
+  // splitting, classification, digests, themes, skill review. Logged because
+  // this lane spends real money and shapes what the brain extracts, so which
+  // model serves it should never be implicit.
+  const backgroundModel = configuredProviders.size > 0
+    ? ensureServableModel(BACKGROUND_MODEL, configuredProviders)
+    : BACKGROUND_MODEL
+  if (backgroundModel !== BACKGROUND_MODEL) {
+    console.log(`[provider] background lane: ${backgroundModel} (${BACKGROUND_MODEL} not servable)`)
+  }
+  // Pipeline B's extraction model is chat-class, not background-class, but it
+  // is hardcoded the same way and dies the same way without a Google key.
+  const extractionModel = configuredProviders.size > 0
+    ? ensureServableModel(EXTRACTION_MODEL, configuredProviders)
+    : EXTRACTION_MODEL
+  if (extractionModel !== EXTRACTION_MODEL) {
+    console.log(`[provider] extraction: ${extractionModel} (${EXTRACTION_MODEL} not servable)`)
+  }
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
     analytics: {
       onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
@@ -1443,6 +1501,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     tools.set('stopWorker', stopWorker)
 
     const { createScheduledJob, updateScheduledJob, searchScheduledJobs, deleteScheduledJob } = createSchedulingTools({
+      backgroundModel,
       jobStore,
       workflowStore,
       provider,
@@ -1578,6 +1637,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const builtIngestors = ports.buildEpisodeIngestors?.({
     provider, crmStore, entitiesStore, entityLinksStore, memoryStore, taskStore, episodesStore, analytics,
     usageStore,
+    backgroundModel,
+    extractionModel,
     ingestCharge: ports.ingestCharge,
   })
   const chatEpisodeIngestor: ChatEpisodeIngestor =
@@ -2514,6 +2575,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('updateTask', taskTools.updateTask)
   allTools.set('closeTask', taskTools.closeTask)
   allTools.set('reopenTask', taskTools.reopenTask)
+  // Bulk pair — confirmation-gated backlog cleanup ("clean up my tasks" as
+  // one instruction; tasks.md → "Bulk tools").
+  allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
+  allTools.set('archiveTasks', taskTools.archiveTasks)
 
   // ── Goal-seeker kickoff tools (default-on 'goals' capability) ──
   const goalTools = createGoalTools(goalStore, {
@@ -2595,7 +2660,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // draft goal with the generated brief; on fail/error, no draft (fail-closed).
   // Wired only when a provider is configured, so keyless OSS never logs judge
   // errors — tasks simply stay goal-free.
-  const TRIAGE_MODEL = 'gemini-3.1-flash-lite'
+  const TRIAGE_MODEL = backgroundModel
   if (configuredProviders.size > 0) {
     const taskTriageJudge = createTaskTriageJudge({
       provider,
@@ -3103,6 +3168,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           host: sanitizeAnalytics(evt.host ?? ''),
           ok: evt.ok,
           ...(evt.code ? { code: sanitizeAnalytics(evt.code) } : {}),
+          // Per-action context cost. Numbers, not strings — sanitizeAnalytics
+          // is for free text, and these must stay numeric for the admin
+          // aggregate to SUM them. The local backend books no usage_tracking
+          // row of its own, so this is the ONLY per-action cost signal it has.
+          ...(evt.resultChars !== undefined ? { result_chars: evt.resultChars } : {}),
+          ...(evt.resultTokens !== undefined ? { result_tokens: evt.resultTokens } : {}),
         },
       })
     },
@@ -3511,6 +3582,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     linkedAccountStore,
     linkCodeStore,
     getTelegramBotUsername,
+    getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
     blobClient: filesBlobClient ?? undefined,
   }))
 
@@ -3752,6 +3824,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore,
     gcs: filesBlobClient,
+    ...(ports.resolveRecordingReadClient
+      ? { resolveRecordingReadClient: ports.resolveRecordingReadClient }
+      : {}),
   }))
 
   // Custom-domain site render — PUBLIC, same containment as publicShareRoutes
@@ -3764,6 +3839,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowRunStore,
     workspaceDirectory: workspaceDirectoryStore,
     gcs: filesBlobClient,
+    ...(ports.resolveRecordingReadClient
+      ? { resolveRecordingReadClient: ports.resolveRecordingReadClient }
+      : {}),
   }))
 
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
@@ -4014,7 +4092,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api', requireAuth(env.JWT_SECRET), docEntitiesRoutes({ docEntityStore, workspaceStore }))
 
-  app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({ docThemesStore, workspaceStore, provider }))
+  app.use('/api', requireAuth(env.JWT_SECRET), docThemesRoutes({ docThemesStore, workspaceStore, provider, backgroundModel }))
 
   const commentThreadStore = createDbCommentThreadStore()
   const docNotificationsStore = createDbDocNotificationsStore()
@@ -4038,6 +4116,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     entityKindClassifier,
     pendingClassificationStore: ports.pendingClassificationStore,
     filesApi,
+    entityLinks: entityLinksStore,
   }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
@@ -4449,7 +4528,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   // ── Skill-review worker ──
-  const SKILL_REVIEW_MODEL = 'gemini-3.1-flash-lite'
+  const SKILL_REVIEW_MODEL = backgroundModel
   const skillReviewLLM = createGeminiSkillReviewLLM(
     async ({ systemPrompt, prompt, maxTokens, attribution }) => {
       const response = await collectStream(provider.stream({
@@ -4503,13 +4582,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const workflowDigestLLM = createGeminiWorkflowDigestLLM(
     async ({ systemPrompt, prompt, maxTokens, attribution }) => {
       const response = await collectStream(provider.stream({
-        model: WORKFLOW_DIGEST_MODEL,
+        model: backgroundModel,
         messages: [{ role: 'user', content: prompt }],
         systemPrompt,
         maxTokens,
       }))
       if (response.usage && usageStore) {
-        const cost = calculateCost(WORKFLOW_DIGEST_MODEL, response.usage)
+        const cost = calculateCost(backgroundModel, response.usage)
         usageStore.recordUsage({
           userId: attribution.userId,
           // Blank assistant + workspace fallback — the mig-305 attribution
@@ -4517,7 +4596,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           assistantId: '',
           workspaceId: attribution.workspaceId,
           sessionId: null,
-          model: WORKFLOW_DIGEST_MODEL,
+          model: backgroundModel,
           inputTokens: response.usage.inputTokens,
           outputTokens: response.usage.outputTokens,
           cacheReadTokens: response.usage.cacheReadTokens,
@@ -4934,6 +5013,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorGrantStore,
     connectorActionStore,
     workspaceFilesStore,
+    savedViewStore,
     knowledgeStore,
     capabilityStore,
     apiKeyStore,
@@ -5029,6 +5109,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         runPipeline: async ({ ctx: channel, input, hooks, abortController }) => {
           if (!channel.assistantId) return
           await processChannelMessage({
+            backgroundModel,
             userId: channel.ownerUserId,
             ownerId: channel.ownerUserId,
             assistant: {
@@ -5106,6 +5187,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // JWT guard. All gated on the integration store (CHANNEL_CREDENTIAL_KEY).
     if (integrationStore) {
       app.use('/webhook/telegram', telegramByoRoutes({
+        backgroundModel,
         provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
@@ -5119,6 +5201,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         artifactPromoter, fileStore,
       }))
       app.use('/webhook/slack', slackRoutes({
+        backgroundModel,
         ingestChannelMediaRef: channelHosts.slackIngestChannelMediaRef,
         artifactPromoter,
         provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
@@ -5135,6 +5218,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       // JWT-verified. No connector app (webhook transport). See
       // docs/architecture/channels/msteams.md.
       app.use('/webhook/msteams', msteamsRoutes({
+        backgroundModel,
         provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         integrationStore, channelUserStore,
@@ -5146,6 +5230,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       }))
       if (env.DISCORD_CONNECTOR_SECRET) {
         app.use('/internal/discord', discordRoutes({
+        backgroundModel,
           ingestChannelMediaRef: channelHosts.discordIngestChannelMediaRef,
           artifactPromoter,
           connectorSecret: env.DISCORD_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,

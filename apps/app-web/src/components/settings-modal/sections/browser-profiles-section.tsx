@@ -43,6 +43,25 @@ function normalizeLoginUrl(raw: string): string | null {
   }
 }
 
+/**
+ * Which surfaces a profile card shows, by backend.
+ *
+ * A profile is "ONE cookie jar" only on the CLOUD backend, where the session
+ * vault holds its logins. A `local` ("My Browser") profile rides the logins
+ * already in the user's real Chrome — nothing is captured and the vault is
+ * never read — so the sign-in box and the signed-in-sites list would both
+ * mislead: they imply the user must sign in through us, and that a profile
+ * with working logins has none. Tested as a decision table.
+ */
+export function profileSurfaces(profile: BrowserProfile): {
+  signIn: boolean;
+  vaultSessions: boolean;
+  ownBrowserNote: boolean;
+} {
+  const local = profile.defaultBackend === "local";
+  return { signIn: !local, vaultSessions: !local, ownBrowserNote: local };
+}
+
 const CLEARANCES: BrowserProfileClearance[] = ["confidential", "internal", "public"];
 const BACKENDS: BrowserBackend[] = ["cloud", "local"];
 
@@ -258,8 +277,23 @@ export function BrowserProfilesSection() {
                     </button>
                   </div>
 
+                  {/* A My Browser profile has no vault to fill — it rides the
+                      logins already in the user's real Chrome. */}
+                  {profileSurfaces(profile).ownBrowserNote ? (
+                    <div className="mt-3">
+                      <p className="text-[11px] font-medium text-muted-foreground">
+                        {t.computer.profiles.ownBrowserLabel}
+                      </p>
+                      <p className="mt-1 text-[11px] text-muted-foreground">
+                        {t.computer.profiles.ownBrowserHint}
+                      </p>
+                    </div>
+                  ) : null}
+
                   {/* "Sign in to a site" (§7): user-initiated login capture —
-                      opens the Take-Over live view on the site's login page. */}
+                      opens the Take-Over live view on the site's login page.
+                      Cloud only: capture exists only in the cloud sandbox. */}
+                  {profileSurfaces(profile).signIn ? (
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.loginLabel}
@@ -295,6 +329,7 @@ export function BrowserProfilesSection() {
                       {t.computer.profiles.loginHint}
                     </p>
                   </div>
+                  ) : null}
 
                   {/* Clearance rung (top rung = owner-only; lower = shared) */}
                   <div className="mt-3">
@@ -416,7 +451,11 @@ export function BrowserProfilesSection() {
                     </div>
                   ) : null}
 
-                  {/* Per-site sessions inside the cookie jar */}
+                  {/* Per-site sessions inside the cookie jar. Cloud only: a My
+                      Browser profile never captures into the vault, so an
+                      empty list here would read as "no logins" when the real
+                      Chrome is signed in. */}
+                  {profileSurfaces(profile).vaultSessions ? (
                   <div className="mt-3">
                     <p className="text-[11px] font-medium text-muted-foreground">
                       {t.computer.profiles.sessionsLabel}
@@ -466,6 +505,7 @@ export function BrowserProfilesSection() {
                       </ul>
                     )}
                   </div>
+                  ) : null}
                 </li>
               ))}
             </ul>

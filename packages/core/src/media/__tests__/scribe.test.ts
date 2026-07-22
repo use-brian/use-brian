@@ -152,8 +152,16 @@ describe('[COMP:media/transcriber-scribe] scribeTranscriber', () => {
     const t = scribeTranscriber({ apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch })
 
     const plain = await t.transcribe({ buffer: Buffer.from('x'), mime: 'audio/aac', durationMs: HOUR_MS })
+    // `audioSeconds` rides along with the flat-rate cost so the billing
+    // ledger keeps the denominator this cost was derived from — without it
+    // a per-audio-hour provider cannot be compared to a token-billed one.
     expect(plain.usages).toEqual([
-      { usage: null, model: 'elevenlabs:scribe_v2', costUsd: SCRIBE_USD_PER_AUDIO_HOUR },
+      {
+        usage: null,
+        model: 'elevenlabs:scribe_v2',
+        costUsd: SCRIBE_USD_PER_AUDIO_HOUR,
+        audioSeconds: HOUR_MS / 1000,
+      },
     ])
 
     const biased = await t.transcribe({

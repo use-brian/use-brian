@@ -117,16 +117,23 @@ export function applyChangesToBody(
   if (changes.due_at !== undefined) next.due_at = changes.due_at;
   if (changes.tags !== undefined) next.tags = changes.tags;
   if (changes.assignee_id !== undefined) next.assignee_id = changes.assignee_id;
-  if (changes.priority !== undefined) {
-    // Mirrors the server: priority lives under the free-form `attributes`
-    // object (merge, never clobber siblings); null removes the key.
+  if (changes.priority !== undefined || changes.description !== undefined) {
+    // Mirrors the server: priority + description live under the free-form
+    // `attributes` object (merge, never clobber siblings); null removes
+    // the key.
     const raw = body.attributes;
     const attrs: Record<string, unknown> =
       raw && typeof raw === "object" && !Array.isArray(raw)
         ? { ...(raw as Record<string, unknown>) }
         : {};
-    if (changes.priority === null) delete attrs.priority;
-    else attrs.priority = changes.priority;
+    if (changes.priority !== undefined) {
+      if (changes.priority === null) delete attrs.priority;
+      else attrs.priority = changes.priority;
+    }
+    if (changes.description !== undefined) {
+      if (changes.description === null) delete attrs.description;
+      else attrs.description = changes.description;
+    }
     next.attributes = attrs;
   }
   if (changes.summary !== undefined) next.summary = changes.summary;
@@ -243,3 +250,28 @@ export function resolveAssignee(
 export function memberDisplayName(m: AssignableMember): string | null {
   return m.userName || m.email || null;
 }
+
+// ── Value-pill state dots (shared by the Brain drawer + the operator peek
+//    panels, so a task reads identically on both surfaces) ──────────────
+
+/** State-dot tints for the Notion-style value pills (muted pill, colored
+ *  dot, sentence-case label). Live work earns colour; terminal states stay
+ *  neutral. */
+export const TASK_STATUS_DOT_CLASS: Record<string, string> = {
+  todo: "bg-muted-foreground/40",
+  in_progress: "bg-primary",
+  blocked: "bg-amber-500",
+  done: "bg-emerald-500",
+  archived: "bg-muted-foreground/30",
+};
+
+/** Priority tints — urgency earns heat; "none" stays neutral. Values live
+ *  under `attributes.priority` (the frozen-v1 tasks schema has no typed
+ *  column). */
+export const TASK_PRIORITY_DOT_CLASS: Record<string, string> = {
+  none: "bg-muted-foreground/30",
+  low: "bg-sky-500",
+  medium: "bg-amber-500",
+  high: "bg-orange-500",
+  urgent: "bg-red-500",
+};

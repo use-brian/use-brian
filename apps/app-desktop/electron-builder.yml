@@ -24,6 +24,14 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  # Dock live recording: macOS shows this string on the one-time microphone
+  # consent prompt (askForMediaAccess). Without the key the prompt never
+  # appears and mic capture silently fails under the hardened runtime.
+  # Pairs with com.apple.security.device.audio-input in the entitlements.
+  extendInfo:
+    NSMicrophoneUsageDescription: >-
+      Use Brian records meetings and voice notes you start, so it can
+      transcribe them and file the key facts to your workspace brain.
   # Notarization is ON. The packaging machine/CI must supply the credentials via
   # environment (electron-builder reads them automatically — never commit them):
   #   CSC_LINK                     base64 (or path) of the Developer ID Application .p12

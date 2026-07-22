@@ -8,6 +8,7 @@ import {
 
 const handlers: MenuTemplateHandlers = {
   onQuickCapture: () => {},
+  onRecord: () => {},
   onSignIn: () => {},
   onSignOut: () => {},
   onUpdate: () => {},
@@ -62,6 +63,14 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
       const t = buildMenuTemplate(opts({ isMac }), handlers);
       const capture = allItems(t).find((i) => i.label === "Quick Capture");
       expect(capture?.accelerator).toBe("CommandOrControl+Shift+Space");
+    }
+  });
+
+  it("exposes Start Recording beside Quick Capture on both platforms", () => {
+    for (const isMac of [true, false]) {
+      const t = buildMenuTemplate(opts({ isMac }), handlers);
+      const record = allItems(t).find((i) => i.label === "Start Recording");
+      expect(record?.accelerator).toBe("CommandOrControl+Shift+R");
     }
   });
 

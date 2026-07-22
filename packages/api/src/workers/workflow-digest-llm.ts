@@ -15,9 +15,6 @@
 
 import { z } from 'zod'
 
-/** Cheap non-thinking background tier — same as the skill-review worker. */
-export const WORKFLOW_DIGEST_MODEL = 'gemini-3.1-flash-lite'
-
 /** Ceiling for one plan call (a candidate carries a full skill body). */
 export const WORKFLOW_DIGEST_MAX_TOKENS = 8192
 

@@ -500,6 +500,16 @@ export interface EntityStore {
 }
 
 export interface EntityLinksStore {
+  /**
+   * Assert an edge exists — idempotent, NOT append. One ACTIVE row per
+   * (workspace, source, target, edge_type); re-asserting an existing
+   * active edge returns the EXISTING row. Edge writers are
+   * fire-and-forget throughout the codebase, so uniqueness is the
+   * store's job by construction — no caller pre-checks. Closed
+   * (`validTo`) and retracted rows are outside the identity: histories
+   * never collide, and an ended relationship can re-open as a fresh
+   * row. See `docs/architecture/brain/data-model.md` → "Edge identity".
+   */
   create(params: EntityLinkCreateParams): Promise<EntityLinkRecord>
 
   getById(ctx: AccessContext, id: string): Promise<EntityLinkRecord | null>

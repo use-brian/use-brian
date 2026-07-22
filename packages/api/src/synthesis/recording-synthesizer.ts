@@ -28,7 +28,7 @@ import {
   type WorkflowRunStore,
   type WorkspaceDirectoryStore,
 } from '@use-brian/core'
-import { buildCitationIndex, formatTranscript } from '@use-brian/shared'
+import { buildCitationIndex, formatTranscript, recordingAnchorKey } from '@use-brian/shared'
 import { createSearchRecordingTool } from '../recordings/recording-search-tool.js'
 import { readRecordingRange, type RecordingSegmentHit } from '../db/retrieval-store.js'
 import type { RetrievalActor } from '@use-brian/core'
@@ -80,6 +80,12 @@ export type RecordingSynthesisArgs = {
   assistantId: string
   sensitivity: string
   blueprintSlug: string
+  /**
+   * Where to file the brief page (the pre-flight destination picker's choice,
+   * carried on `recording_jobs.parent_page_id`). Omitted / null ⇒ workspace
+   * root. Only applies when this run CREATES the page.
+   */
+  parentPageId?: string | null
 }
 
 /** The callback the recording ingestor's `synthesize` infra field holds. */
@@ -299,11 +305,12 @@ export function createRecordingSynthesizer(deps: RecordingSynthesizerDeps): Reco
       },
       blueprint,
       {
-        anchorKey: `recording-synthesis:${args.recordingId}`,
+        anchorKey: recordingAnchorKey(args.recordingId),
         // Recording fills always render the brief page (per-surface default);
         // the record rides underneath as the typed artifact.
         renderPage: true,
         recordSubject: `${blueprint.title ?? titleFor(args.blueprintSlug)} recording ${args.recordingId.slice(0, 8)}`,
+        parentPageId: args.parentPageId ?? null,
       },
       {
         provider: deps.provider,

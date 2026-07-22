@@ -494,9 +494,15 @@ export function createDbSavedViewStore(
       return result.rows.length > 0
     },
 
-    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId }) {
+    async createDraft({ userId, workspaceId, name, nameOrigin, icon, entity, viewType, binding, page, nestParentId, autoPruneDays, originPrompt, anchorKey, writtenBy, deferCreatedEvent, teamspaceId, state }) {
+      // Born-saved rows are durable artifacts (a paid synthesis brief), not
+      // speculative renders: no prune date at all, so neither the daily prune
+      // worker nor a later `unsave` can strand them on an expired timestamp.
+      // The worker's WHERE already requires `state='draft'`; the NULL is the
+      // second lock. See CreateDraftInput.state.
+      const bornState: ViewState = state ?? 'draft'
       const days = autoPruneDays ?? DEFAULT_DRAFT_TTL_DAYS
-      const autoPruneAt = addDays(new Date(), days)
+      const autoPruneAt = bornState === 'saved' ? null : addDays(new Date(), days)
       // Snapshot the genesis prompt (migration 231). Trim + cap so a pasted
       // wall of text can't bloat the page row — the History card only previews
       // it. Empty / whitespace-only → NULL (no origin entry shown).
@@ -537,7 +543,7 @@ export function createDbSavedViewStore(
         // see (the policy WITH CHECK backstops that anyway).
         `INSERT INTO saved_views
            (workspace_id, created_by, name, name_origin, description, icon, entity, view_type, binding, page, state, nest_parent_id, position, origin_prompt, auto_prune_at, anchor_key, created_event_pending, teamspace_id)
-         VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, 'draft', $9,
+         VALUES ($1, $2, $3, $4, NULL, $10, $5, $6, $7, $8, $17, $9,
            (SELECT COALESCE(MAX(position) + 1, 0) FROM saved_views
               WHERE nest_parent_id IS NOT DISTINCT FROM $9 AND workspace_id = $1),
            $11, $12, $13, $14,
@@ -564,6 +570,7 @@ export function createDbSavedViewStore(
           deferCreatedEvent === true,
           teamspaceId !== undefined,
           teamspaceId ?? null,
+          bornState,
         ],
       )
       const view = rowToFull(result.rows[0])
@@ -990,6 +997,27 @@ export async function getPageSystem(id: string): Promise<Page | null> {
     [id],
   )
   return result.rows[0]?.page ?? null
+}
+
+/**
+ * System-side read of a page's recording pointer — the two ways a page carries
+ * a recording (`anchor_key = 'recording-synthesis:<id>'` for a synthesis
+ * brief, `linked_recording_id` for a manual link, migration 339). Used by the
+ * anonymous public-share render to surface the page's recording chrome; access
+ * is already gated by the link/publish/site resolver before this is called.
+ *
+ * [COMP:doc/public-recording]
+ */
+export async function getPageRecordingPointerSystem(
+  id: string,
+): Promise<{ anchorKey: string | null; linkedRecordingId: string | null } | null> {
+  const result = await query<{ anchorKey: string | null; linkedRecordingId: string | null }>(
+    `SELECT anchor_key AS "anchorKey", linked_recording_id AS "linkedRecordingId"
+       FROM saved_views
+      WHERE id = $1`,
+    [id],
+  )
+  return result.rows[0] ?? null
 }
 
 /** How a `child_page` target is reachable from a shared page (doc.md "Subtree

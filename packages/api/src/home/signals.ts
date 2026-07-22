@@ -59,6 +59,8 @@ export async function assembleHomeSignals(
     approvalsCount,
     autopilotCount,
     taskTriageCount,
+    taskCleanupCount,
+    dealAttentionCount,
     connectorAttentionCount,
     workflowAttentionCount,
     brain,
@@ -71,6 +73,8 @@ export async function assembleHomeSignals(
     safe(() => countPendingApprovals(workspaceId), 0),
     safe(() => countAutopilotAttention(workspaceId), 0),
     safe(() => countTaskTriage(workspaceId), 0),
+    safe(() => countTaskCleanup(workspaceId), 0),
+    safe(() => countDealAttention(workspaceId), 0),
     safe(() => countConnectorAttention(workspaceId), 0),
     safe(() => countWorkflowAttention(workspaceId), 0),
     safe(() => countBrainEntries(workspaceId), { total: 0, last7: 0 }),
@@ -88,6 +92,8 @@ export async function assembleHomeSignals(
     approvalsCount,
     autopilotCount,
     taskTriageCount,
+    taskCleanupCount,
+    dealAttentionCount,
     connectorAttentionCount,
     workflowAttentionCount,
     upcomingWorkflows: computeUpcoming(workflows, now),
@@ -161,6 +167,45 @@ async function countTaskTriage(workspaceId: string): Promise<number> {
      WHERE workspace_id = $1
        AND status NOT IN ('done', 'abandoned')
        AND confirmed_at IS NULL`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
+/** Stale task backlog for the `task_cleanup` card — open tasks
+ *  (todo/in_progress/blocked, live version only) untouched for 30+ days.
+ *  The window mirrors `STALE_AFTER_DAYS` in app-web's `tasks-view.ts` (the
+ *  surface's "Stale" preset) so the card's count and the deep-linked
+ *  `/tasks?filter=stale` list always agree (tasks-operator-surface §4). */
+async function countTaskCleanup(workspaceId: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM tasks
+     WHERE workspace_id = $1
+       AND valid_to IS NULL
+       AND status IN ('todo', 'in_progress', 'blocked')
+       AND updated_at < now() - interval '30 days'`,
+    [workspaceId],
+  )
+  return Number.parseInt(res.rows[0]?.count ?? '0', 10)
+}
+
+/** Overdue pipeline for the `deal_attention` card — live deal entities whose
+ *  close_date has passed while the stage is still open (not won/lost; a
+ *  missing stage defaults to 'lead' — the same COALESCE the crm.ts read
+ *  path applies). Mirrors `matchesDealQuickFilter('overdue')` in app-web's
+ *  `crm-view.ts` (the surface's "Overdue close" preset) so the card's count
+ *  and the deep-linked `/crm?filter=overdue` list always agree
+ *  (crm-operator-surface §6). */
+async function countDealAttention(workspaceId: string): Promise<number> {
+  const res = await query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM entities
+     WHERE workspace_id = $1
+       AND kind = 'deal'
+       AND valid_to IS NULL
+       AND retracted_at IS NULL
+       AND COALESCE(attributes->>'stage', 'lead') NOT IN ('won', 'lost')
+       AND (attributes->>'close_date') IS NOT NULL
+       AND (attributes->>'close_date')::date < CURRENT_DATE`,
     [workspaceId],
   )
   return Number.parseInt(res.rows[0]?.count ?? '0', 10)

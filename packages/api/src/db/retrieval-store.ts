@@ -32,7 +32,7 @@ import {
   vectorRankedList,
 } from '@use-brian/core'
 import { buildAccessPredicate } from './access-predicate.js'
-import { queryWithRLS } from './client.js'
+import { query, queryWithRLS } from './client.js'
 
 /**
  * `retrieval-store.ts` — WS-5 / WU-5.3.
@@ -2220,6 +2220,44 @@ export async function readRecordingRange(
         AND ts.segment_index BETWEEN $${fromIdx} AND $${toIdx}
       ORDER BY ts.segment_index`,
     values,
+  )
+  return res.rows.map(toRecordingHit)
+}
+
+/**
+ * Anonymous public-share transcript read — the shared-page twin of
+ * `readRecordingRange`. `[COMP:doc/public-recording]`
+ *
+ * A DELIBERATE system-side read (bare `query()`, no RLS, no sensitivity
+ * predicate), and it cannot be the member path: the public viewer's synthetic
+ * principal is not a workspace member (RLS → zero rows), and transcript
+ * segments inherit the recording's sensitivity (default `'internal'`), so the
+ * pinned `clearance:'public'` predicate would blank every transcript on every
+ * shared brief. The authorization is the SHARE CHAIN the route already
+ * resolved — token / publish / site-domain grant → page → the page's own
+ * recording pointer — exactly the posture of the public media route, which
+ * serves any file on a shared page on the strength of that chain alone.
+ * Callers must pass the resolved link's `workspaceId` and a recording id
+ * derived server-side from the page row (never from client input).
+ */
+export async function readRecordingRangePublic(
+  workspaceId: string,
+  recordingId: string,
+  input: { fromIndex: number; toIndex: number },
+): Promise<RecordingSegmentHit[]> {
+  const from = Math.max(0, Math.floor(input.fromIndex))
+  const to = Math.max(from, Math.floor(input.toIndex))
+  const res = await query<RecordingRow>(
+    `SELECT ts.segment_index, ts.start_ms, ts.end_ms, ts.speaker, ts.segment_text
+       FROM transcript_segments ts
+      WHERE ts.workspace_id = $1
+        AND ts.recording_id = $2
+        AND ts.retracted_at IS NULL
+        AND ts.valid_from <= now()
+        AND (ts.valid_to IS NULL OR ts.valid_to > now())
+        AND ts.segment_index BETWEEN $3 AND $4
+      ORDER BY ts.segment_index`,
+    [workspaceId, recordingId, from, to],
   )
   return res.rows.map(toRecordingHit)
 }

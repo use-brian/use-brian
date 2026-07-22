@@ -96,8 +96,12 @@ export function pageIdFromInAppHref(
  *   - `'studio'`        `/studio/...`
  *   - `'workflow'`      `/workflow` (+ `/workflow/<id>`)
  *   - `'feed'`          `/feed/...` — the ported feed-web operator app
- *                       (hosted-only; the nav row shows only when the
- *                       workspace has connected distribution profiles)
+ *                       (hosted-only; shown in the Home operator app-bar
+ *                       only when the workspace has connected distribution
+ *                       profiles — see `lib/operator-apps.ts`)
+ *   - `'tasks'`         `/tasks` — the Tasks operator surface (filter /
+ *                       bulk-clean the workspace task backlog); an operator
+ *                       app under Home, like `'p'` and `'feed'`
  *   - `'goals'`         `/goals` (+ `/goals/<goalId>`) — attention-routed
  *                       (home-dock Autopilot card / Brain task panel), no
  *                       sidebar slot, same pattern as `'approvals'`
@@ -118,6 +122,8 @@ export type WorkspaceSurface =
   | "studio"
   | "workflow"
   | "feed"
+  | "tasks"
+  | "crm"
   | "goals"
   | "approvals"
   | "recordings"
@@ -133,6 +139,8 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "studio",
   "workflow",
   "feed",
+  "tasks",
+  "crm",
   "goals",
   "approvals",
   "recordings",

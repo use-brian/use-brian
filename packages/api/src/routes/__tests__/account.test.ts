@@ -184,6 +184,109 @@ describe('[COMP:api/account-route] Account routes', () => {
     expect(res.status).toBe(503)
   })
 
+  // ── POST /whatsapp/link-code ─────────────────────────────────
+  // Settings -> Account -> Connected accounts, WhatsApp row. Same shape as the
+  // Telegram route, but the official number is resolved BEFORE minting so a
+  // user never holds a code with nowhere to send it.
+
+  function waLinkCodeStore(code = 'WA1234') {
+    return {
+      create: vi.fn().mockResolvedValue({
+        code,
+        expiresAt: new Date('2026-06-10T00:05:00Z'),
+      }),
+      findValidCode: vi.fn(),
+      claim: vi.fn(),
+      getByUserAndAssistant: vi.fn(),
+    }
+  }
+
+  it('mints a whatsapp link code with the official number to message', async () => {
+    const linkCodeStore = waLinkCodeStore()
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({
+        linkCodeStore: linkCodeStore as never,
+        getWhatsappOfficialNumber: async () => '+85261234567',
+      }),
+      { userId: 'u_1' },
+    )
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 'a_first' }], rowCount: 1 } as never)
+
+    const res = await request(app).post('/api/account/whatsapp/link-code')
+    expect(res.status).toBe(200)
+    expect(res.body.code).toBe('WA1234')
+    expect(res.body.officialNumber).toBe('+85261234567')
+    expect(linkCodeStore.create).toHaveBeenCalledWith({ userId: 'u_1', assistantId: 'a_first' })
+  })
+
+  it('returns 503 official_bot_unavailable and mints nothing when unpaired', async () => {
+    const linkCodeStore = waLinkCodeStore()
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({
+        linkCodeStore: linkCodeStore as never,
+        getWhatsappOfficialNumber: async () => null,
+      }),
+      { userId: 'u_1' },
+    )
+
+    const res = await request(app).post('/api/account/whatsapp/link-code')
+    expect(res.status).toBe(503)
+    expect(res.body.error).toBe('official_bot_unavailable')
+    // The whole point: no dangling code the user cannot deliver.
+    expect(linkCodeStore.create).not.toHaveBeenCalled()
+  })
+
+  it('treats a throwing number resolver as unavailable, not a 500', async () => {
+    const linkCodeStore = waLinkCodeStore()
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({
+        linkCodeStore: linkCodeStore as never,
+        getWhatsappOfficialNumber: async () => {
+          throw new Error('connector down')
+        },
+      }),
+      { userId: 'u_1' },
+    )
+
+    const res = await request(app).post('/api/account/whatsapp/link-code')
+    expect(res.status).toBe(503)
+    expect(linkCodeStore.create).not.toHaveBeenCalled()
+  })
+
+  it('returns 503 in OSS, where no official-number resolver is injected', async () => {
+    const linkCodeStore = waLinkCodeStore()
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({ linkCodeStore: linkCodeStore as never }),
+      { userId: 'u_1' },
+    )
+
+    const res = await request(app).post('/api/account/whatsapp/link-code')
+    expect(res.status).toBe(503)
+    expect(linkCodeStore.create).not.toHaveBeenCalled()
+  })
+
+  it('returns 409 no_assistant when the user owns no assistant', async () => {
+    const linkCodeStore = waLinkCodeStore()
+    const app = createTestApp(
+      '/api/account',
+      accountRoutes({
+        linkCodeStore: linkCodeStore as never,
+        getWhatsappOfficialNumber: async () => '+85261234567',
+      }),
+      { userId: 'u_1' },
+    )
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+
+    const res = await request(app).post('/api/account/whatsapp/link-code')
+    expect(res.status).toBe(409)
+    expect(res.body.error).toBe('no_assistant')
+    expect(linkCodeStore.create).not.toHaveBeenCalled()
+  })
+
   // ── PATCH /timezone ─────────────────────────────────────────
 
   it('updates timezone with valid IANA value', async () => {

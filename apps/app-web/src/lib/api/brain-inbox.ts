@@ -173,7 +173,7 @@ export type AdjustMemoryChanges = {
   summary?: string;
   detail?: string;
   display_name?: string;
-  /** workspace_file + task adjust — replace the tag set. */
+  /** workspace_file + task + contact/company adjust — replace the tag set. */
   tags?: string[];
   /** task adjust — the editable doc-like fields. */
   title?: string;
@@ -184,6 +184,24 @@ export type AdjustMemoryChanges = {
   assignee_id?: string | null;
   /** task adjust — the conventional `attributes.priority` key; null clears. */
   priority?: "low" | "medium" | "high" | "urgent" | null;
+  /** task adjust — the conventional `attributes.description` page body
+   *  (markdown, ≤10k chars); null clears. */
+  description?: string | null;
+  /** contact adjust — null clears. */
+  email?: string | null;
+  /** contact adjust — null clears. */
+  phone?: string | null;
+  /** contact adjust — the linked company entity id; null unlinks. */
+  company_id?: string | null;
+  /** company adjust — null clears. */
+  domain?: string | null;
+  /** deal adjust — routed through `setDealStage` server-side (crm.md
+   *  decision 13); never combined with other write verbs client-side. */
+  stage?: "lead" | "qualified" | "proposal" | "negotiation" | "won" | "lost";
+  /** deal adjust — null clears. */
+  amount?: number | null;
+  /** deal adjust — calendar date `YYYY-MM-DD`; null clears. */
+  close_date?: string | null;
   reason?: string;
 };
 

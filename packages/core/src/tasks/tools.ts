@@ -24,8 +24,11 @@ import {
 
 /**
  * Tools that let the primary assistant manage workspace-scoped tasks via
- * chat. Six tools: saveTask, getTask, listTasks, updateTask, closeTask,
- * reopenTask. See docs/architecture/features/tasks.md.
+ * chat. Eight tools: saveTask, getTask, listTasks, updateTask, closeTask,
+ * reopenTask, plus the confirmation-gated bulk pair bulkUpdateTasks /
+ * archiveTasks ("clean up my tasks" as one instruction — the agent-native
+ * lane of the Tasks operator surface, tasks-operator-surface §6 Phase 4).
+ * See docs/architecture/features/tasks.md.
  *
  * Every tool requires `ctx.workspaceId`. Without a workspace there is no
  * place for tasks to live; the tool returns an isError result rather than
@@ -200,6 +203,8 @@ export function createTaskTools(
   updateTask: Tool
   closeTask: Tool
   reopenTask: Tool
+  bulkUpdateTasks: Tool
+  archiveTasks: Tool
 } {
   const saveTask = buildTool({
     name: 'saveTask',
@@ -544,5 +549,181 @@ export function createTaskTools(
     },
   })
 
-  return { saveTask, getTask, listTasks, updateTask, closeTask, reopenTask }
+  // ── Bulk pair — filter-scoped mass mutation, confirmation-gated ───────
+  //
+  // The agent-native cleanup lane: "close every stale unassigned todo"
+  // becomes one confirmed call instead of N updateTask round-trips. Both
+  // tools resolve their filter to at most BULK_CAP live rows via the same
+  // access-scoped `store.list` read path `listTasks` uses, then loop the
+  // per-row supersession update. `requiresConfirmation: true` (the
+  // parent-CASCADE caution in tasks.md) — the user sees the filter + change
+  // before anything moves.
+
+  const BULK_CAP = 100
+
+  const bulkFilterSchema = z
+    .object({
+      status: statusEnum.or(z.array(statusEnum)).optional(),
+      assignee_id: idShape.optional(),
+      unassigned: tolerantBoolean()
+        .optional()
+        .describe('Match only tasks with no assignee.'),
+      tag: z.string().min(1).max(64).optional(),
+      updated_before: isoDateOrDateTime
+        .optional()
+        .describe('Match tasks last touched BEFORE this instant — the staleness filter (e.g. 30 days ago).'),
+      due_before: isoDateOrDateTime.optional(),
+      ids: z
+        .array(idShape)
+        .max(BULK_CAP)
+        .optional()
+        .describe('Explicit task ids to target (combined with the other filter fields, all must match).'),
+    })
+    .refine((f) => Object.values(f).some((v) => v !== undefined), {
+      message: 'Pass at least one filter field — an empty filter would sweep the whole backlog.',
+    })
+
+  type BulkFilter = z.infer<typeof bulkFilterSchema>
+
+  /** Resolve a bulk filter to its matching live rows (capped). */
+  async function resolveBulkRows(
+    context: Parameters<Tool['execute']>[1],
+    filter: BulkFilter,
+  ): Promise<TaskListRow[]> {
+    const statuses = filter.status
+    const includeArchived = Array.isArray(statuses)
+      ? statuses.includes('archived')
+      : statuses === 'archived'
+    let rows = await store.list(
+      ctxFor({
+        userId: context.userId,
+        assistantId: context.assistantId,
+        workspaceId: context.workspaceId!,
+        assistantKind: context.assistantKind,
+        clearance: context.clearance,
+        compartments: context.compartments,
+      }),
+      {
+        assigneeId: filter.assignee_id,
+        status: filter.status,
+        tag: filter.tag,
+        dueBefore: filter.due_before ? new Date(filter.due_before) : undefined,
+        includeArchived,
+        limit: BULK_CAP,
+      },
+    )
+    if (filter.unassigned) rows = rows.filter((r) => r.assigneeId === null)
+    if (filter.updated_before) {
+      const cutoff = new Date(filter.updated_before).getTime()
+      rows = rows.filter((r) => r.updatedAt.getTime() < cutoff)
+    }
+    if (filter.ids) {
+      const wanted = new Set(filter.ids)
+      rows = rows.filter((r) => wanted.has(r.id))
+    }
+    return rows
+  }
+
+  /** Loop the per-row supersession update over resolved rows. */
+  async function applyBulk(
+    context: Parameters<Tool['execute']>[1],
+    rows: TaskListRow[],
+    fieldsFor: (row: TaskListRow) => Parameters<TaskStore['update']>[2],
+  ): Promise<{ updated: number; failed: number }> {
+    let updated = 0
+    let failed = 0
+    for (const row of rows) {
+      try {
+        const result = await store.update(context.userId, row.id, fieldsFor(row), {
+          writtenBy: 'system',
+        })
+        if (result) {
+          updated++
+          opts?.onEvent?.(
+            { type: 'task_updated', taskId: result.id, fields: Object.keys(fieldsFor(row)) },
+            eventCtx(context),
+          )
+        } else failed++
+      } catch {
+        failed++
+      }
+    }
+    return { updated, failed }
+  }
+
+  function bulkSummary(verb: string, rows: TaskListRow[], updated: number, failed: number): string {
+    const lines = rows
+      .slice(0, 15)
+      .map((r) => `- ${r.title}`)
+      .join('\n')
+    const more = rows.length > 15 ? `\n…and ${rows.length - 15} more` : ''
+    const failNote = failed > 0 ? ` (${failed} failed — every edit mints a new id; re-run listTasks to re-resolve)` : ''
+    return `${verb} ${updated} task(s)${failNote}:\n${lines}${more}`
+  }
+
+  const bulkUpdateTasks = buildTool({
+    name: 'bulkUpdateTasks',
+    requiresCapability: 'tasks',
+    requiresConfirmation: true,
+    description:
+      'Update MANY tasks in one confirmed call: everything matching `filter` gets `set` applied (status / assignee / due / priority). The backlog-cleanup verb — e.g. filter `{status: "todo", unassigned: true, updated_before: <30 days ago>}` with set `{status: "archived"}` clears the stale unassigned backlog. ' +
+      `Caps at ${BULK_CAP} tasks per call; requires at least one filter field (an empty filter is rejected). For archiving, \`archiveTasks\` is the shorthand. Every update supersedes its row (new task ids).`,
+    inputSchema: z.object({
+      filter: bulkFilterSchema,
+      set: z
+        .object({
+          status: statusEnum.optional(),
+          assignee_id: idShape.nullable().optional().describe('workspace_members id; null unassigns.'),
+          due: isoDateOrDateTime.nullable().optional().describe('null clears the due date.'),
+          priority: z
+            .enum(['low', 'medium', 'high', 'urgent'])
+            .nullable()
+            .optional()
+            .describe('Merged into `attributes.priority`; null clears it.'),
+        })
+        .refine((s) => Object.values(s).some((v) => v !== undefined), {
+          message: 'Pass at least one field to set.',
+        }),
+    }),
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      const rows = await resolveBulkRows(context, input.filter)
+      if (rows.length === 0) return { data: 'No tasks match that filter — nothing to update.' }
+      const { updated, failed } = await applyBulk(context, rows, (row) => {
+        const fields: Parameters<TaskStore['update']>[2] = {}
+        if (input.set.status !== undefined) fields.status = input.set.status
+        if (input.set.assignee_id !== undefined) fields.assigneeId = input.set.assignee_id
+        if (input.set.due !== undefined) fields.due = input.set.due === null ? null : new Date(input.set.due)
+        if (input.set.priority !== undefined) {
+          const attrs = { ...row.attributes }
+          if (input.set.priority === null) delete attrs.priority
+          else attrs.priority = input.set.priority
+          fields.attributes = attrs
+        }
+        return fields
+      })
+      return { data: bulkSummary('Updated', rows, updated, failed) }
+    },
+  })
+
+  const archiveTasks = buildTool({
+    name: 'archiveTasks',
+    requiresCapability: 'tasks',
+    requiresConfirmation: true,
+    description:
+      'Archive MANY tasks in one confirmed call — the soft-delete sweep (`status: "archived"`; archived tasks leave every default list but stay recoverable). Shorthand for `bulkUpdateTasks` with `set: {status: "archived"}`. ' +
+      `Same filter shape and ${BULK_CAP}-task cap; requires at least one filter field.`,
+    inputSchema: z.object({ filter: bulkFilterSchema }),
+    async execute(input, context) {
+      const gate = workspaceGate(context.workspaceId)
+      if (gate) return gate
+      const rows = await resolveBulkRows(context, input.filter)
+      if (rows.length === 0) return { data: 'No tasks match that filter — nothing to archive.' }
+      const { updated, failed } = await applyBulk(context, rows, () => ({ status: 'archived' }))
+      return { data: bulkSummary('Archived', rows, updated, failed) }
+    },
+  })
+
+  return { saveTask, getTask, listTasks, updateTask, closeTask, reopenTask, bulkUpdateTasks, archiveTasks }
 }

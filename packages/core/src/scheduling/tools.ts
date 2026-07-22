@@ -63,6 +63,8 @@ export type SchedulingToolDeps = {
    * scheduling tools degrade silently to the placeholder.
    */
   provider?: LLMProvider
+  /** Servable background-lane model for the auto-titler; omitted = its default. */
+  backgroundModel?: string
   /**
    * Optional — resolves a job's stored `(channelType, channelId)` into a
    * human-readable delivery target the tools echo back as `deliveryTarget`,
@@ -337,6 +339,7 @@ export function createSchedulingTools(deps: SchedulingToolDeps): {
               timezone,
             },
             ac.signal,
+            deps.backgroundModel,
           )
           if (result.title) {
             const written = await workflowStore.updateAutoName(

@@ -18,6 +18,8 @@ import { buildMenuTemplate } from "./menu-template.js";
 export interface MenuHandlers {
   /** Summon the window and jump to the quick-capture surface. */
   onQuickCapture: () => void;
+  /** Summon the window and start a latched live recording (`?record=1`). */
+  onRecord: () => void;
   /** Start the system-browser sign-in flow. */
   onSignIn: () => void;
   /** Clear the local session and return to the sign-in screen. */

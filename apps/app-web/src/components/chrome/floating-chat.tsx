@@ -42,8 +42,11 @@
  *
  * Tool-confirmation flow: server emits `tool_confirmation_required` with
  * `{toolCallId, toolName, displayName, input, description, displayLines}`.
- * We render an inline approval card. Approve/Deny POSTs
- * `/api/chat/confirm` and the server resumes the stream.
+ * We render an inline approval card (`ChatConfirmationCard`,
+ * chat-confirmation-card.tsx — recognised tools show a rich per-tool
+ * preview parsed from `input`, e.g. an email send as a proofreadable
+ * email). Approve/Deny POSTs `/api/chat/confirm` and the server resumes
+ * the stream.
  *
  * askQuestion suspend-resume: when the assistant asks a clarifying
  * question the engine suspends the session (persists a `kind='question'`
@@ -130,6 +133,7 @@ import {
 } from "@use-brian/chat-ui";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
+import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
 import {
   ChatActivityFeed,
   ChatActivitySummary,
@@ -190,6 +194,13 @@ import {
   useFileAttachments,
 } from "@/lib/use-file-attachments";
 import { useRecordingUpload } from "@/lib/recordings/use-recording-upload";
+import { useDockRecorder } from "@/lib/recorder/use-dock-recorder";
+import {
+  DockRecorderButton,
+  DockRecorderNotice,
+  DockRecorderRecovery,
+  DockRecorderStrip,
+} from "@/components/chrome/dock-recorder";
 import { useFileDrop } from "@/lib/use-file-drop";
 import { useAutoGrowTextarea } from "@/lib/use-auto-grow-textarea";
 import { AttachmentChips, FileDropOverlay } from "@/components/doc/attachment-chips";
@@ -448,6 +459,7 @@ export function FloatingChat({
   const tRun = useT().docPage.assistantRun;
   const tAttach = useT().attachments;
   const tRec = useT().recordings;
+  const tRecorder = useT().recorder;
   const router = useRouter();
   const pathname = usePathname();
   const [expanded, setExpanded] = useState(false);
@@ -2201,6 +2213,24 @@ export function FloatingChat({
     [selectedAssistantId, workspaceId, origin, isDocOrigin, model, metered, researchMode, session, stream, t, resetTurnBuffers, pendingQuestion, att],
   );
 
+  // ── Dock live recording (docs/architecture/media/live-capture.md) ──────
+  // ONE recorder instance serves both render sites (the collapsed launcher
+  // row and the expanded composer), so a capture started collapsed keeps
+  // running when the panel opens. The stop fork lands on the same two lanes
+  // a dropped file takes: short → voice-clip auto-send on THIS chat; long →
+  // the recording ingestion flow (`rec.run`, the full cost + blueprint +
+  // destination confirm), stamped kind='meeting' — a recorder-originated
+  // long capture is a meeting, and kind routes the transcriber ladder.
+  const recorder = useDockRecorder({
+    enabled: !!workspaceId && !!activeAssistantId,
+    workspaceId,
+    assistantId: activeAssistantId,
+    captureNamePrefix: tRecorder.captureName,
+    getSessionId: () => sessionIdRef.current ?? undefined,
+    sendVoiceClip: (fileId: string) => sendMessage("", { fileIds: [fileId] }),
+    onMeetingCapture: (file: File) => rec.run(file, undefined, { kind: "meeting" }),
+  });
+
   // ── Chat-seed: apply a prompt handed in from another surface ───────────
   // The default-viewer landing's chatter routes here through the shell
   // (see lib/chat-seed.ts). Nonce-gated so the same prompt re-fires.
@@ -2718,7 +2748,7 @@ export function FloatingChat({
 
           {/* Pending confirmation cards — always visible regardless of stream state */}
           {visiblePending.map((conf) => (
-            <PendingConfirmationBubble
+            <ChatConfirmationCard
               key={conf.toolCallId}
               confirmation={conf}
               approveLabel={t.confirmationApprove}
@@ -2828,6 +2858,11 @@ export function FloatingChat({
             sendLabel={t.send}
             slotAttachments={
               <>
+                {/* Live-recording chrome (expanded mode) — same shared
+                    recorder instance as the collapsed pill. */}
+                <DockRecorderRecovery rec={recorder} className="mb-1.5" />
+                <DockRecorderNotice rec={recorder} className="mb-1.5" />
+                <DockRecorderStrip rec={recorder} className="mb-1.5" />
                 <AttachmentChips attachments={att.attachments} onRemove={att.remove} />
                 {rec.status !== "idle" ? (
                   <p
@@ -2874,6 +2909,7 @@ export function FloatingChat({
                 >
                   <Paperclip className="size-[18px]" aria-hidden />
                 </button>
+                <DockRecorderButton rec={recorder} disabled={!!pendingQuestion} />
               </>
             }
             // Hide the built-in Send button while streaming so the
@@ -2941,12 +2977,28 @@ export function FloatingChat({
         </div>
       </div>
 
+      {/* Live-recording chrome (collapsed mode) — the recovery banner, the
+          first-use/error notice, and the active recorder strip stack ABOVE
+          the launcher row; while a capture runs the strip IS the pill (the
+          launcher hides below). See docs/architecture/media/live-capture.md. */}
+      {!isSidePanel && !expanded ? (
+        <>
+          <DockRecorderRecovery rec={recorder} />
+          <DockRecorderNotice rec={recorder} />
+          <DockRecorderStrip rec={recorder} />
+        </>
+      ) : null}
       {/* Launcher — floating mode only. A compact pill: the doc assistant's
           small avatar (its creature icon) beside a short text nudge; fades +
           scales out when the panel expands. While a turn runs it tints to
           primary and the nudge mirrors the live tool / stream label. Falls back
-          to a chat glyph until the identity resolves. */}
-      {!isSidePanel && (
+          to a chat glyph until the identity resolves. Hidden while a LATCHED
+          recording's strip owns the pill (the record button itself stays
+          mounted through arming/holding — it anchors the live press gesture);
+          the record-dot button rides beside it otherwise. */}
+      {!isSidePanel &&
+        !((recorder.phase.kind === "latched" || recorder.phase.kind === "finishing") && !expanded) && (
+      <div className="flex items-center gap-2">
       <button
         type="button"
         onClick={() => setExpanded(true)}
@@ -2991,6 +3043,16 @@ export function FloatingChat({
           {isActive ? activeLabel : idlePlaceholder}
         </span>
       </button>
+      <DockRecorderButton
+        rec={recorder}
+        className={cn(
+          "h-10 w-10 rounded-full border border-border bg-background/90 shadow-lg backdrop-blur",
+          "text-foreground/70 hover:bg-accent",
+          "transition-[opacity,transform] duration-200 ease-out",
+          expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
+        )}
+      />
+      </div>
       )}
     </div>
   );
@@ -3561,74 +3623,6 @@ function CitationList({
             +{hidden}
           </button>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-/** Inline approval card while a tool is awaiting user confirmation. */
-function PendingConfirmationBubble({
-  confirmation,
-  approveLabel,
-  denyLabel,
-  approvingLabel,
-  onApprove,
-  onDeny,
-}: {
-  confirmation: ConfirmationWithFailure;
-  approveLabel: string;
-  denyLabel: string;
-  approvingLabel: string;
-  onApprove: (toolCallId: string) => void;
-  onDeny: (toolCallId: string) => void;
-}) {
-  const title = confirmation.displayName ?? confirmation.toolName;
-  const isInFlight = confirmation.status === "approving";
-  return (
-    <div className="flex gap-2.5">
-      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 ring-1 ring-amber-500/25">
-        <TriangleAlert className="size-3.5" aria-hidden />
-      </div>
-      <div className="flex-1 min-w-0 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
-        <div className="text-[13px] font-medium text-foreground">{title}</div>
-        {confirmation.description ? (
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            {confirmation.description}
-          </p>
-        ) : null}
-        {confirmation.displayLines && confirmation.displayLines.length > 0 ? (
-          <ul className="text-xs text-muted-foreground space-y-0.5">
-            {confirmation.displayLines.map((line, i) => (
-              <li key={i} className="break-words">
-                {line}
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={() => onApprove(confirmation.toolCallId)}
-            disabled={isInFlight}
-            className={cn(
-              "rounded-md bg-primary px-3 py-1 text-[12px] font-medium text-primary-foreground",
-              "transition-colors hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
-            )}
-          >
-            {isInFlight ? approvingLabel : approveLabel}
-          </button>
-          <button
-            type="button"
-            onClick={() => onDeny(confirmation.toolCallId)}
-            disabled={isInFlight}
-            className={cn(
-              "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",
-              "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
-            )}
-          >
-            {denyLabel}
-          </button>
-        </div>
       </div>
     </div>
   );

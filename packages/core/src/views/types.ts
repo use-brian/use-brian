@@ -510,8 +510,23 @@ export type CreateDraftInput = {
    *    section's create). See docs/architecture/features/teamspaces.md.
    */
   teamspaceId?: string | null
-  /** Defaults to 30 days. */
+  /** Defaults to 30 days. Ignored when `state` is `'saved'` (never prunes). */
   autoPruneDays?: number
+  /**
+   * Lifecycle state the row is BORN in. Defaults to `'draft'` — the
+   * chat-rendered-view contract: ephemeral, `auto_prune_at` 30 days out, the
+   * prune worker deletes it unless the user saves it or files it under a saved
+   * ancestor.
+   *
+   * Pass `'saved'` for a page that is a **durable artifact of an explicit,
+   * paid action** rather than a speculative render — a blueprint/synthesis
+   * brief is the case this exists for. Such a page is born with
+   * `auto_prune_at = NULL`, so no prune path can reach it, and it appears in
+   * the default (`state='saved'`) sidebar listing immediately.
+   *
+   * See docs/architecture/brain/structural-synthesis.md → "Brief durability".
+   */
+  state?: ViewState
   /**
    * Stable cross-run identity (migration 279). Set by the workflow executor's
    * `page.reuse === 'per-workflow'` path to `<workflowId>:<stepId>` so a

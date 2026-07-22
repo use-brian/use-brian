@@ -320,7 +320,14 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       expect(started.status).toBe(200)
       expect(started.body.site).toBe('instagram.com')
       const sessionId = started.body.sessionId as string
-      expect(sessionId.startsWith('plogin_')).toBe(true)
+      // A BARE uuid — `sandbox_tasks.session_id` is `uuid NOT NULL` (closed
+      // migration 315), so a decorated id (the old synthetic `plogin_<uuid>`)
+      // makes the task insert throw `invalid input syntax for type uuid` and
+      // the route 502s. The in-memory task store accepts any string, so this
+      // shape assertion is the only place the DB contract is enforced in test.
+      expect(sessionId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+      )
 
       // The synthetic-session task is owned by the caller and pre-bound to
       // the profile — the Take-Over live view + capture work on it unchanged.

@@ -7,6 +7,7 @@
 // See packages/shared/CLAUDE.md → "Subpath exports".
 export * from './transcript-format.js'
 export * from './transcript-citations.js'
+export * from './recording-anchor.js'
 export * from './connector-registry.js'
 export * from './builtin-connectors.js'
 export * from './tool-display-names.js'

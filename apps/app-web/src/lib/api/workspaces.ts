@@ -3,10 +3,12 @@
  *
  * Wraps `GET /api/workspaces/:workspaceId` (the detail fetch) and
  * `PATCH /api/workspaces/:workspaceId` (settings update). The fields surfaced
- * here are the subset other modules need a typed handle on — today the
+ * here are the subset other modules need a typed handle on — the
  * `defaultRecordingBlueprintId` (migration 291): the workspace's default
  * recording blueprint that the recording upload picker pre-selects and the
- * settings modal sets.
+ * settings modal sets — and the transcript Chinese-script preference
+ * (`transcription_prefs.chineseScript`, migration 332) the settings modal
+ * General section sets.
  *
  * The settings/members sections still fetch the broader detail shape inline via
  * `authFetch`; this client is the typed seam for the blueprint-default round-
@@ -78,4 +80,32 @@ export async function setWorkspaceDefaultBlueprint(
     id: body.id ?? workspaceId,
     defaultRecordingBlueprintId: body.defaultRecordingBlueprintId ?? null,
   };
+}
+
+/** The Chinese-script half of `workspaces.transcription_prefs` (migration 332). */
+export type ChineseScriptPref = "traditional" | "simplified";
+
+/**
+ * PATCH the workspace's transcript Chinese-script preference. `script` is
+ * `'traditional' | 'simplified'`, or `null` to clear back to Auto (provider
+ * default). Admin/owner only — the backend enforces and 403s otherwise,
+ * surfaced as a `WorkspaceApiError`. Returns the persisted value.
+ */
+export async function setWorkspaceTranscriptionScript(
+  workspaceId: string,
+  script: ChineseScriptPref | null,
+): Promise<ChineseScriptPref | null> {
+  const res = await authFetch(`${API_URL}/api/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transcriptionPrefs: { chineseScript: script } }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new WorkspaceApiError(body.error ?? "Could not update the workspace", res.status);
+  }
+  const body = (await res.json()) as {
+    transcriptionPrefs?: { chineseScript?: ChineseScriptPref };
+  };
+  return body.transcriptionPrefs?.chineseScript ?? null;
 }

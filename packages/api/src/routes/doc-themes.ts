@@ -41,6 +41,8 @@ export type DocThemesRouteOptions = {
   workspaceStore: WorkspaceStore
   /** Optional — when unset, POST (the only model-using route) returns 503. */
   provider?: LLMProvider
+  /** Servable background-lane model, resolved at boot. */
+  backgroundModel?: string
 }
 
 const createSchema = z.object({ prompt: z.string().trim().min(1).max(600) })
@@ -111,7 +113,7 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
 
     let generated
     try {
-      generated = await generateCustomTheme({ provider: opts.provider, prompt: parsed.data.prompt })
+      generated = await generateCustomTheme({ provider: opts.provider, prompt: parsed.data.prompt, model: opts.backgroundModel })
     } catch (err) {
       if (err instanceof ThemeGenerationError) {
         return res.status(422).json({ error: err.message })
@@ -180,6 +182,7 @@ export function docThemesRoutes(opts: DocThemesRouteOptions): Router {
     try {
       refined = await refineCustomTheme({
         provider: opts.provider,
+        model: opts.backgroundModel,
         currentSeed: theme.seed,
         instruction: parsed.data.instruction,
       })

@@ -79,6 +79,16 @@ export type Workspace = {
    * docs/architecture/brain/structural-synthesis.md.
    */
   defaultRecordingBlueprintId: string | null
+  /**
+   * Workspace transcription preferences (migration 332), shape
+   * `{ languageCode?, chineseScript? }`. Written only through
+   * `setWorkspaceTranscriptionPrefs` (which validates via
+   * `parseTranscriptionPrefs`), so the raw JSONB echo here is already
+   * shape-valid. Surfaced so the settings modal can pre-select the
+   * Chinese-script picker from the detail fetch. See
+   * docs/architecture/platform/workspaces.md → "Transcription preferences".
+   */
+  transcriptionPrefs: WorkspaceTranscriptionPrefs
   createdAt: Date
   updatedAt: Date
 }
@@ -146,6 +156,7 @@ const WORKSPACE_COLUMNS = `
   is_personal AS "isPersonal",
   plan,
   default_recording_blueprint_id AS "defaultRecordingBlueprintId",
+  transcription_prefs AS "transcriptionPrefs",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const

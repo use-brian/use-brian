@@ -28,7 +28,9 @@ import { authFetch } from "@/lib/auth-fetch";
 import { WorkspaceLlmKeyBlock } from "./sections/llm-key-block";
 import {
   setWorkspaceDefaultBlueprint,
+  setWorkspaceTranscriptionScript,
   WorkspaceApiError,
+  type ChineseScriptPref,
 } from "@/lib/api/workspaces";
 import { listCustomPageTemplates } from "@/lib/api/views";
 import { buildBlueprintPickerItems } from "@/lib/blueprints";
@@ -62,6 +64,10 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 /** Sentinel for "ingest only / no default" in the recording-default picker —
  *  threaded to the backend as `null`. */
 const BLUEPRINT_INGEST_ONLY = "__ingest_only__";
+
+/** Sentinel for "Auto (provider default)" in the transcript Chinese-script
+ *  picker — threaded to the backend as `null` (clears the preference). */
+const SCRIPT_AUTO = "__auto__";
 
 type Member = {
   userId: string;
@@ -103,6 +109,12 @@ type WorkspaceDetail = {
    * none (ingest-only). Spread from the full workspace row by the detail route.
    */
   defaultRecordingBlueprintId?: string | null;
+  /**
+   * Workspace transcription preferences (migration 332), spread from the
+   * workspace row by the detail route. Only `chineseScript` is surfaced in
+   * the UI; the language hint stays assistant-only.
+   */
+  transcriptionPrefs?: { chineseScript?: "traditional" | "simplified" };
   members: Member[];
 };
 
@@ -169,11 +181,18 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
   const [blueprintSaving, setBlueprintSaving] = useState(false);
   const [blueprintError, setBlueprintError] = useState("");
 
+  // Transcript Chinese-script preference (migration 332). The picker value is
+  // the script, or the Auto sentinel for "no preference" (provider default).
+  const [scriptPref, setScriptPref] = useState<string>(SCRIPT_AUTO);
+  const [scriptSaving, setScriptSaving] = useState(false);
+  const [scriptError, setScriptError] = useState("");
+
   useEffect(() => {
     if (data) {
       setNameInput(data.name);
       setPurposeInput(data.purpose ?? "");
       setBlueprintId(data.defaultRecordingBlueprintId ?? BLUEPRINT_INGEST_ONLY);
+      setScriptPref(data.transcriptionPrefs?.chineseScript ?? SCRIPT_AUTO);
     }
   }, [data]);
 
@@ -294,6 +313,33 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
       );
     } finally {
       setBlueprintSaving(false);
+    }
+  }
+
+  // Persist the transcript Chinese-script preference. Same immediate-persist
+  // pattern as the blueprint picker; the Auto sentinel clears to `null`.
+  async function changeScriptPref(next: string) {
+    if (!data || scriptSaving) return;
+    const value = next || SCRIPT_AUTO;
+    const prev = scriptPref;
+    setScriptPref(value);
+    setScriptError("");
+    if (value === (data.transcriptionPrefs?.chineseScript ?? SCRIPT_AUTO)) return;
+    setScriptSaving(true);
+    try {
+      await setWorkspaceTranscriptionScript(
+        data.id,
+        value === SCRIPT_AUTO ? null : (value as ChineseScriptPref),
+      );
+      await refetch();
+    } catch (e) {
+      // Roll the selection back so the picker doesn't lie about persisted state.
+      setScriptPref(prev);
+      setScriptError(
+        e instanceof WorkspaceApiError ? e.message : t.transcriptionScript.saveFailed,
+      );
+    } finally {
+      setScriptSaving(false);
     }
   }
 
@@ -563,6 +609,40 @@ export function WorkspaceGeneralSection({ onWorkspaceDeleted }: { onWorkspaceDel
           </div>
           {blueprintError && (
             <div className="text-[12px] text-red-400">{blueprintError}</div>
+          )}
+        </div>
+      )}
+
+      {/* Transcript Chinese-script preference (migration 332) — how Chinese is
+          written in future recording transcripts. Admins set it; the picker
+          change persists immediately. Auto = provider default (no conversion). */}
+      {isAdmin && (
+        <div className="border-t border-border pt-6 space-y-2">
+          <h3 className="text-sm font-medium">{t.transcriptionScript.heading}</h3>
+          <p className="text-[12px] text-muted-foreground">
+            {t.transcriptionScript.description}
+          </p>
+          <div className="pt-1">
+            <Select
+              value={scriptPref}
+              onValueChange={(v) => void changeScriptPref(v ?? SCRIPT_AUTO)}
+              disabled={scriptSaving}
+            >
+              <SelectTrigger
+                className="bg-muted/50 w-56"
+                aria-label={t.transcriptionScript.heading}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={SCRIPT_AUTO}>{t.transcriptionScript.auto}</SelectItem>
+                <SelectItem value="traditional">{t.transcriptionScript.traditional}</SelectItem>
+                <SelectItem value="simplified">{t.transcriptionScript.simplified}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {scriptError && (
+            <div className="text-[12px] text-red-400">{scriptError}</div>
           )}
         </div>
       )}

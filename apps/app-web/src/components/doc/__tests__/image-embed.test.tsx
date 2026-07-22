@@ -5,9 +5,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 
-// Legacy `file_cache` refs resolve through an authenticated signed-URL mint
-// (`GET /api/files/:id/preview-url`) — stub `authFetch` so the resolver returns
-// a deterministic signed URL without a network call.
+// Both ref kinds resolve through an authenticated mint (`?redirect=0` on the
+// Bearer-only doc-files route for durable refs — its raw URL 401s as a plain
+// `<img src>`; `GET /api/files/:id/preview-url` for legacy `file_cache`
+// refs) — stub `authFetch` so the resolver returns a deterministic signed URL
+// without a network call.
 const mockAuthFetch = vi.fn();
 vi.mock("@/lib/auth-fetch", () => ({
   authFetch: (...args: unknown[]) => mockAuthFetch(...args),
@@ -20,10 +22,11 @@ import { BlockFile } from "../block-file";
  * The `image` / `file` embed cases (`node-views/embed-view.tsx`) mount these
  * components with the active `workspaceId`. Empty (`ref: null`) shows the
  * upload picker; a durable `workspace_files` ref resolves through the
- * signed-read endpoint `GET /api/doc-files/:workspaceId/:id` and renders an
- * `<img>` (image) or a download `<a>` (file). A legacy `file_cache` ref instead
- * resolves through the signed preview-URL mint (WS3 #8). Mounted with raw
- * `createRoot` + `act` (app-web has no `@testing-library/react`).
+ * authenticated `?redirect=0` mint (`resolveDocFileSrc`) to the signed
+ * storage URL and renders an `<img>` (image) or a download `<a>` (file). A
+ * legacy `file_cache` ref instead resolves through the signed preview-URL
+ * mint (WS3 #8). Mounted with raw `createRoot` + `act` (app-web has no
+ * `@testing-library/react`).
  *
  * [COMP:app-web/image-embed]
  */
@@ -69,7 +72,12 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
     expect(container.textContent).toContain(en.docPage.mediaBlock.uploadImage);
   });
 
-  it("renders an <img> pointing at the signed-read endpoint for a workspace_files ref", () => {
+  it("renders an <img> at the minted signed URL for a workspace_files ref", async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ url: "https://signed.example/ws_1/wf_1?sig=abc" }),
+    });
     mount(
       <BlockImage
         block={{ kind: "image", id: "b1", ref: wsRef }}
@@ -77,12 +85,24 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
         workspaceId="ws_1"
       />,
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Minted via ?redirect=0 — the Bearer-only endpoint URL is never the src.
+    expect(mockAuthFetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/doc-files/ws_1/wf_1?redirect=0"),
+    );
     const img = container.querySelector("img");
     expect(img).not.toBeNull();
-    expect(img?.getAttribute("src")).toContain("/api/doc-files/ws_1/wf_1");
+    expect(img?.getAttribute("src")).toBe("https://signed.example/ws_1/wf_1?sig=abc");
   });
 
-  it("renders a download link to the signed-read endpoint for a file block", () => {
+  it("renders a download link at the minted signed URL for a file block", async () => {
+    mockAuthFetch.mockResolvedValueOnce({
+      ok: true,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ url: "https://signed.example/ws_1/wf_2?sig=abc" }),
+    });
     mount(
       <BlockFile
         block={{
@@ -94,9 +114,12 @@ describe("[COMP:app-web/image-embed] Durable image/file embed render", () => {
         workspaceId="ws_1"
       />,
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     const anchor = container.querySelector("a");
     expect(anchor).not.toBeNull();
-    expect(anchor?.getAttribute("href")).toContain("/api/doc-files/ws_1/wf_2");
+    expect(anchor?.getAttribute("href")).toBe("https://signed.example/ws_1/wf_2?sig=abc");
     expect(anchor?.hasAttribute("download")).toBe(true);
     expect(container.textContent).toContain("spec.pdf");
   });

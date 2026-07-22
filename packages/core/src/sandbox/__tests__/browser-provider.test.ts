@@ -93,6 +93,20 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     expect((err as BrowserBackendError).code).toBe('stopped')
   })
 
+  it('passes through the extension refusal codes instead of flattening them', async () => {
+    // `detached` (Chrome ended the CDP session) and `consent_denied` (the user
+    // said no in the Allow window) are both actionable states with distinct
+    // recoveries. Collapsing them into `backend_error` is what let a prod
+    // browse read as a site problem: the model told the user Luma was blocking
+    // automation when Chrome had simply dropped the debugger.
+    for (const code of ['detached', 'consent_denied'] as const) {
+      const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
+      const provider = createLocalBrowserProvider({ transport })
+      const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+      expect((err as BrowserBackendError).code).toBe(code)
+    }
+  })
+
   it('rejects a malformed snapshot payload at the zod boundary', async () => {
     const { transport } = transportRecording(() => ({ ok: true, data: { nodes: 'nope' } }))
     const provider = createLocalBrowserProvider({ transport })

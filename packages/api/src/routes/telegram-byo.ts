@@ -76,6 +76,9 @@ export type ChannelRecordingIngest = {
 // getConnectorUserId now used inside channel-pipeline.ts
 
 type TelegramByoRouteOptions = {
+  /** Servable background-lane model, resolved at boot; forwarded to the
+   * channel pipeline so its background calls work without a Google key. */
+  backgroundModel?: string
   provider: LLMProvider
   systemPrompt: string
   tools: Map<string, Tool>
@@ -862,6 +865,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
       // 6. Sequentialize per chat via Postgres advisory lock
       await withChatLock(`tg-byo:${incoming.channelId}`, () =>
         processMessage({
+          backgroundModel: options.backgroundModel,
           adapter,
           incoming,
           assistant: routedAssistant,
@@ -955,6 +959,8 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 // ── Per-message handler ─────────────────────────────────────────
 
 type ProcessMessageParams = {
+  /** Servable background-lane model, threaded from the route options. */
+  backgroundModel?: string
   adapter: ReturnType<typeof createTelegramAdapter>
   incoming: IncomingMessage
   assistant: { id: string; name: string; ownerUserId: string; telegramModelAlias: string; workspaceId: string | null; systemPrompt: string | null; clearance: 'public' | 'internal' | 'confidential'; kind: 'primary' | 'standard' | 'app' }
@@ -1082,7 +1088,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // treats it as plain text. Mutates the input by design — same pattern
   // as packages/api/src/routes/telegram.ts. See
   // docs/architecture/media/transcription.md.
-  let voiceTranscriptionUsage: { usage: TokenUsage | null; model: string } | null = null
+  let voiceTranscriptionUsage:
+    | { usage: TokenUsage | null; model: string; audioSeconds?: number }
+    | null = null
   if (
     incoming.mediaType === 'voice' &&
     incoming.mediaUrl &&
@@ -1091,7 +1099,19 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     try {
       const { buffer, mime } = await adapter.downloadVoice(incoming.mediaUrl)
       const result = await transcribeFirstAudio(
-        [{ buffer, mime, index: 0 }],
+        [
+          {
+            buffer,
+            mime,
+            index: 0,
+            // Telegram puts `voice.duration` on the webhook payload, so this
+            // is the one transcription path that can price itself per audio
+            // hour. Absent (older payloads) stays absent, not 0.
+            ...(incoming.mediaDurationSec !== undefined
+              ? { durationSeconds: incoming.mediaDurationSec }
+              : {}),
+          },
+        ],
         {
           enabled: true,
           apiKey: params.voiceTranscription.apiKey,
@@ -1102,7 +1122,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         },
       )
       if (result) {
-        voiceTranscriptionUsage = { usage: result.usage, model: result.model }
+        voiceTranscriptionUsage = {
+          usage: result.usage,
+          model: result.model,
+          ...(result.audioSeconds !== undefined ? { audioSeconds: result.audioSeconds } : {}),
+        }
         incoming.text = incoming.text
           ? `[voice] ${result.text}\n\n${incoming.text}`
           : `[voice] ${result.text}`
@@ -1239,6 +1263,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // users with no @username). Same raw access as the allowlist check above.
   const byoUsername = (incoming.raw as { from?: { username?: string } }).from?.username
   await processChannelMessage({
+    backgroundModel: params.backgroundModel,
     userId: channelUserId,
     ownerId,
     assistant: { ...assistant, ownerUserId: ownerId },

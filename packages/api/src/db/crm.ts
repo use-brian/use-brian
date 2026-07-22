@@ -103,6 +103,14 @@ function dedupeAccessContext(
   return { workspaceId, userId, assistantId: '', assistantKind: 'primary' }
 }
 
+/** Db-layer list cap. 500 (not 100) so the CRM operator surface's flat
+ *  route can read the whole working set in one shot — the model-facing
+ *  `list*` chat tools keep their own zod clamp at 100, so model payloads
+ *  are unchanged (the same split the tasks `listTasks` clamp uses). */
+function clampListLimit(limit: number | undefined): number {
+  return Math.min(Math.max(limit ?? 25, 1), 500)
+}
+
 function assertValidStage(stage: DealStage | undefined): void {
   if (stage !== undefined && !VALID_STAGES.includes(stage)) {
     throw new Error(`deals_stage_check: invalid deal stage "${stage}"`)
@@ -162,6 +170,7 @@ function dealFromEntity(e: EntityRecord): DealRecord {
   const closeDate = a.close_date
   return {
     id: e.id, workspaceId: e.workspaceId, entityId: e.id,
+    name: e.displayName,
     contactId: attrStr(a, 'contact_id'),
     companyId: attrStr(a, 'company_id'),
     stage: (attrStr(a, 'stage') as DealStage) ?? 'lead',
@@ -314,7 +323,7 @@ export async function listCompanies(ctx: AccessContext, filters: CompanyListFilt
     wheres.push(`e.attributes->'tags' ? $${idx}`)
     values.push(filters.tag); idx++
   }
-  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
+  const limit = clampListLimit(filters.limit)
   values.push(limit)
 
   const result = await queryGated<CompanyRow>(
@@ -546,7 +555,7 @@ export async function listContacts(ctx: AccessContext, filters: ContactListFilte
     wheres.push(`e.attributes->>'company_id' = $${idx}`)
     values.push(filters.companyId); idx++
   }
-  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
+  const limit = clampListLimit(filters.limit)
   values.push(limit)
 
   const result = await queryGated<ContactRow>(
@@ -601,6 +610,7 @@ type DealRow = Omit<DealRecord, 'amount' | 'externalRef'> & {
 }
 const DEAL_SELECT = `
   e.id, e.id AS "entityId", e.workspace_id AS "workspaceId",
+  e.display_name AS name,
   e.attributes->>'contact_id' AS "contactId",
   e.attributes->>'company_id' AS "companyId",
   COALESCE(e.attributes->>'stage', 'lead') AS stage,
@@ -731,7 +741,7 @@ export async function listDeals(ctx: AccessContext, filters: DealListFilters): P
   if (filters.companyId) {
     wheres.push(`e.attributes->>'company_id' = $${idx}`); values.push(filters.companyId); idx++
   }
-  const limit = Math.min(Math.max(filters.limit ?? 25, 1), 100)
+  const limit = clampListLimit(filters.limit)
   values.push(limit)
 
   const result = await queryGated<DealRow>(

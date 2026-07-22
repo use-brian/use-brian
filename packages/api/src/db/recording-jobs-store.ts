@@ -24,6 +24,12 @@ export type RecordingJob = {
   workspaceId: string
   actingUserId: string
   blueprintSlug: string | null
+  /**
+   * Destination page for the synthesized brief — becomes the brief page's
+   * `nest_parent_id` (migration 353). NULL files it at the workspace root,
+   * which is what every caller got before the pre-flight destination picker.
+   */
+  parentPageId: string | null
   status: RecordingJobStatus
   attempts: number
   lastError: string | null
@@ -39,6 +45,7 @@ const RETURNING = `
   workspace_id   AS "workspaceId",
   acting_user_id AS "actingUserId",
   blueprint_slug AS "blueprintSlug",
+  parent_page_id AS "parentPageId",
   status,
   attempts,
   last_error     AS "lastError"
@@ -54,13 +61,21 @@ export async function enqueueRecordingJob(input: {
   workspaceId: string
   actingUserId: string
   blueprintSlug?: string | null
+  /** Destination page for the brief (migration 353). Omit → workspace root. */
+  parentPageId?: string | null
 }): Promise<{ enqueued: boolean; jobId: string | null }> {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO recording_jobs (recording_id, workspace_id, acting_user_id, blueprint_slug)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO recording_jobs (recording_id, workspace_id, acting_user_id, blueprint_slug, parent_page_id)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT DO NOTHING
      RETURNING id`,
-    [input.recordingId, input.workspaceId, input.actingUserId, input.blueprintSlug ?? null],
+    [
+      input.recordingId,
+      input.workspaceId,
+      input.actingUserId,
+      input.blueprintSlug ?? null,
+      input.parentPageId ?? null,
+    ],
   )
   return rows[0] ? { enqueued: true, jobId: rows[0].id } : { enqueued: false, jobId: null }
 }

@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { ossSignedOutRedirect } from "@/lib/oss-entry";
 
 // `||` not `??`: an empty-string NEXT_PUBLIC_API_URL (e.g. inlined as "" by the
 // bundler when unset at build) must also fall back, else this server-side fetch
@@ -20,22 +21,31 @@ type Team = { id: string; name: string };
  * /teams, which re-fetches and renders real workspaces (or bounces to
  * /login). A genuinely empty list is effectively unreachable — every
  * user has a Personal workspace auto-created at signup.
+ *
+ * Signed out, the destination depends on the edition — see
+ * `lib/oss-entry.ts`. The hosted edition goes to /login for Google OAuth;
+ * the open edition has no login, so its root IS the local-owner session.
+ * This path is not proxy-guarded (`/` is absent from GUARDED_PREFIXES), so
+ * this redirect is the only thing standing between a self-hosted visitor
+ * and a Google button that can never complete.
  */
 export default async function HomePage(props: {
-  searchParams: Promise<{ capture?: string }>;
+  searchParams: Promise<{ capture?: string; record?: string }>;
 }) {
   const jar = await cookies();
   const accessToken = jar.get("access_token")?.value;
   if (!accessToken) {
-    redirect("/login");
+    redirect(ossSignedOutRedirect() ?? "/login");
   }
 
-  // Desktop quick-capture (`?capture=1`): preserve it through the single-
-  // workspace redirect so `doc-shell` can open a fresh draft. Multi-
-  // workspace users land on the picker (which drops it) — see
-  // docs/architecture/features/app-desktop.md → "quick-capture.ts".
-  const { capture } = await props.searchParams;
-  const captureSuffix = capture === "1" ? "?capture=1" : "";
+  // Desktop quick-capture (`?capture=1`) and record (`?record=1`, the
+  // `usebrian://record` deep link): preserve them through the single-
+  // workspace redirect so the web-side hook fires (`useDockRecorder` reads
+  // `record=1` and auto-starts a latched capture). Multi-workspace users
+  // land on the picker (which drops it) — see
+  // docs/architecture/features/app-desktop.md.
+  const { capture, record } = await props.searchParams;
+  const captureSuffix = capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : "";
 
   let teams: Team[] = [];
   try {

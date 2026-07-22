@@ -77,8 +77,12 @@ export function buildEpisodeIngestors(deps: EpisodeIngestorDeps): {
   // per call so the closure stays stateless (the stores themselves are shared).
   const pipelineDeps = (): PipelineBDeps => ({
     provider: deps.provider,
-    model: EXTRACTION_MODEL,
-    classifierModel: CLASSIFIER_MODEL,
+    // Both fall back to their literals when boot supplied nothing (tests, a
+    // platform factory that predates the injection). Boot passes ids it has
+    // already checked are servable, so a Google-free deploy extracts instead
+    // of throwing on every episode.
+    model: deps.extractionModel ?? EXTRACTION_MODEL,
+    classifierModel: deps.backgroundModel ?? CLASSIFIER_MODEL,
     crm: deps.crmStore,
     entities: deps.entitiesStore,
     entityLinks: deps.entityLinksStore,

@@ -28,6 +28,8 @@ import type { DocThemeStore } from '../db/doc-themes-store.js'
 import { refineCustomTheme, ThemeGenerationError } from './theme-generator.js'
 
 export type RefineActiveThemeDeps = {
+  /** Servable background-lane model; omitted = the generator's own default. */
+  model?: string
   /** The custom theme the user currently has applied (from turn context). */
   themeId: string
   provider: LLMProvider
@@ -73,6 +75,7 @@ export function createRefineActiveThemeTool(deps: RefineActiveThemeDeps): Tool {
       try {
         refined = await refineCustomTheme({
           provider: deps.provider,
+          model: deps.model,
           currentSeed: theme.seed,
           instruction: input.instruction,
         })

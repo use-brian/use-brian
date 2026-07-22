@@ -112,6 +112,14 @@ export type SynthesisTarget = {
   renderPage?: boolean
   /** What the record is ABOUT (seeds `blueprint_records.subject`). Defaults to the blueprint title. */
   recordSubject?: string
+  /**
+   * Where to file a newly-created brief page in the sidebar tree — becomes its
+   * `nest_parent_id`. Omitted / null ⇒ workspace root (the behaviour before the
+   * pre-flight destination picker). Applies ONLY to a page this run creates:
+   * an existing page resolved via `pageId` or `anchorKey` is never re-parented,
+   * so a re-run cannot yank a page the user has since moved.
+   */
+  parentPageId?: string | null
 }
 
 export type SynthesisResult = {
@@ -394,6 +402,14 @@ export async function synthesizeFromSource(
           page: { blocks: [] },
           anchorKey: target.anchorKey,
           originPrompt: `synthesis: ${blueprint.slug}`,
+          // The user's pre-flight destination choice. Only ever applied to a
+          // page created HERE — a reused page keeps wherever it already lives.
+          nestParentId: target.parentPageId ?? null,
+          // Born saved, never pruned. A synthesis brief is the durable artifact
+          // of an explicit, credit-charged run, not a speculative chat render:
+          // the default 30-day draft TTL would silently delete work the user
+          // paid for. See structural-synthesis.md → "Brief durability".
+          state: 'saved',
         })
         pageId = draft.id
       } catch (err) {

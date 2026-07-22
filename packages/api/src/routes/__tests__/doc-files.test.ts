@@ -6,8 +6,10 @@ import { docFilesRoutes, type DocFilesDeps } from '../doc-files.js'
 /**
  * Durable doc-block media routes. The route writes straight to the
  * permanent `workspace_files` primitive under a reserved `/doc/` path and
- * serves reads via a signed-GCS redirect (streaming the bytes only in the
- * local-disk dev fallback). Every endpoint is workspace-membership gated.
+ * serves reads via a signed-GCS redirect — or the signed URL as JSON under
+ * `?redirect=0` for fetch()-based consumers (streaming the bytes only in
+ * the local-disk dev fallback). Every endpoint is workspace-membership
+ * gated.
  *
  * [COMP:api/doc-files]
  */
@@ -109,6 +111,40 @@ describe('[COMP:api/doc-files] Doc-block media routes', () => {
     expect(res.status).toBe(302)
     expect(res.headers.location).toBe('https://signed.example/ws_1/wf_1?sig=abc')
     expect(deps.gcs.readBlob).not.toHaveBeenCalled()
+  })
+
+  it('returns the signed URL as JSON when ?redirect=0 (fetch-based consumers)', async () => {
+    // A CORS fetch can't follow the cross-origin 302 (tainted origin →
+    // `Origin: null` → bucket CORS mismatch); PageIcon + attachment
+    // downloads mint the URL here and fetch storage directly.
+    const deps = makeDeps()
+    vi.mocked(deps.store.getById).mockResolvedValue({ id: 'wf_1', mime: 'image/png' } as never)
+    vi.mocked(deps.gcs.signedReadUrl).mockResolvedValue('https://signed.example/ws_1/wf_1?sig=abc')
+
+    const app = createTestApp('/api/doc-files', docFilesRoutes(deps), { userId: 'u_1' })
+    const res = await request(app).get('/api/doc-files/ws_1/wf_1?redirect=0')
+
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ url: 'https://signed.example/ws_1/wf_1?sig=abc' })
+    expect(deps.gcs.readBlob).not.toHaveBeenCalled()
+  })
+
+  it('still streams local-disk bytes under ?redirect=0 (no file:// in a body)', async () => {
+    const deps = makeDeps()
+    vi.mocked(deps.store.getById).mockResolvedValue({ id: 'wf_1', mime: 'image/png' } as never)
+    vi.mocked(deps.gcs.signedReadUrl).mockResolvedValue('file:///tmp/sidanclaw-files/ws_1/wf_1')
+    vi.mocked(deps.gcs.readBlob).mockResolvedValue({
+      bytes: Buffer.from([1, 2, 3]),
+      mime: 'image/png',
+      metadata: { workspaceId: 'ws_1' },
+    } as never)
+
+    const app = createTestApp('/api/doc-files', docFilesRoutes(deps), { userId: 'u_1' })
+    const res = await request(app).get('/api/doc-files/ws_1/wf_1?redirect=0')
+
+    expect(res.status).toBe(200)
+    expect(res.headers['content-type']).toBe('image/png')
+    expect(Buffer.from(res.body)).toEqual(Buffer.from([1, 2, 3]))
   })
 
   it('routes a signed read through the backend recorded in storageUri', async () => {

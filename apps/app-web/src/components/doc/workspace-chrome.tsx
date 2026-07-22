@@ -41,6 +41,15 @@ import { useT } from "@/lib/i18n/client";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
+import {
+  DEFAULT_OPERATOR_APP,
+  OPERATOR_APP_KEYS,
+  operatorAppFromSurface,
+  operatorAppPath,
+  readOperatorApp,
+  writeOperatorApp,
+  type OperatorAppKey,
+} from "@/lib/operator-apps";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
@@ -250,9 +259,35 @@ export function WorkspaceChrome({
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
 
   // Feed availability — hosted workspaces with a connected distribution
-  // profile get the nav row + ⌘5 (the probe lives in the sidebar-data
-  // provider; see `feedProfiles` there).
+  // profile get the Feed entry in the operator app-bar (the probe lives in
+  // the sidebar-data provider; see `feedProfiles` there).
   const feedEnabled = (feedProfiles?.length ?? 0) > 0;
+
+  // ── Operator app-bar + sticky Home resolution (operator-apps.ts) ───────
+  // The active surface's operator app (Page / Tasks / Feed), or null on
+  // Brain / Studio / Workflow / etc. Visiting an operator app persists it
+  // per workspace, and the top-row Home icon + ⌘/Ctrl+1 resolve to the
+  // persisted app — Home resumes your last app, never a hard-coded `/p`.
+  const activeOperatorApp = operatorAppFromSurface(activeSurface);
+  useEffect(() => {
+    if (activeOperatorApp && (activeOperatorApp !== "feed" || feedEnabled)) {
+      writeOperatorApp(workspaceId, activeOperatorApp);
+    }
+  }, [activeOperatorApp, workspaceId, feedEnabled]);
+  // localStorage is client-only; render the SSR-safe default first and
+  // resolve after mount (and whenever a visit updates the cache).
+  const [homeApp, setHomeApp] = useState<OperatorAppKey>(DEFAULT_OPERATOR_APP);
+  useEffect(() => {
+    const enabled = OPERATOR_APP_KEYS.filter(
+      (key) => key !== "feed" || feedEnabled,
+    );
+    if (activeOperatorApp && enabled.includes(activeOperatorApp)) {
+      setHomeApp(activeOperatorApp);
+    } else {
+      setHomeApp(readOperatorApp(workspaceId, enabled));
+    }
+  }, [workspaceId, activeOperatorApp, feedEnabled]);
+  const homeHref = operatorAppPath(workspaceId, homeApp);
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
     try {
@@ -264,8 +299,10 @@ export function WorkspaceChrome({
 
   // ⌘/Ctrl+1/2/3/4 jump to Home / Brain / Studio / Workflow — preserving the web
   // PageToggle's shortcuts now that the toggle is dropped (§4). Numbered left to
-  // right in toolbar order: ⌘1 is Home (the `/p` page surface), then Brain /
-  // Studio / Workflow on 2 / 3 / 4. Ignored while typing in an
+  // right in toolbar order: ⌘1 is Home — which resolves to the workspace's
+  // persisted operator app (Page by default; see `operator-apps.ts`) — then
+  // Brain / Studio / Workflow on 2 / 3 / 4. Feed's old ⌘5 died with its
+  // top-row icon: it lives in the Home app-bar now. Ignored while typing in an
   // input/textarea/contenteditable so it never hijacks editor or form keystrokes;
   // Shift/Alt-modified combos are left alone too. The modifier is
   // browser-dependent (`surfaceShortcutModifierPressed`): Firefox reserves
@@ -275,17 +312,16 @@ export function WorkspaceChrome({
   useEffect(() => {
     if (typeof window === "undefined") return;
     const SURFACE_BY_KEY: Record<string, string> = {
-      "1": "p",
       "2": "brain",
       "3": "studio",
       "4": "workflow",
-      // ⌘5 only while the Feed nav row is visible — a hidden surface
-      // shouldn't have a live shortcut.
-      ...(feedEnabled ? { "5": "feed" } : {}),
     };
     const onKey = (e: KeyboardEvent) => {
       if (!surfaceShortcutModifierPressed(e)) return;
-      const surface = SURFACE_BY_KEY[e.key];
+      const surface =
+        e.key === "1"
+          ? homeHref.slice(`/w/${workspaceId}/`.length)
+          : SURFACE_BY_KEY[e.key];
       if (!surface) return;
       const el = document.activeElement as HTMLElement | null;
       if (
@@ -302,7 +338,7 @@ export function WorkspaceChrome({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [router, workspaceId, feedEnabled]);
+  }, [router, workspaceId, homeHref]);
 
   return (
     <div className="relative flex h-full w-full overflow-hidden">
@@ -381,6 +417,7 @@ export function WorkspaceChrome({
           activeSurface={activeSurface}
           studioNudge={studioNudge}
           onDismissStudioNudge={onDismissStudioNudge}
+          homeHref={homeHref}
           feedEnabled={feedEnabled}
         />
       </div>
@@ -430,7 +467,8 @@ export function WorkspaceChrome({
 
       {/* The surface — the doc page shell on `/p`, or a folded-in surface
           (Brain / Studio / Workflow / …) on its own route. Each owns its inner
-          chrome; the sidebar is shared here. */}
+          chrome; the sidebar (which hosts the Home operator app-bar) is
+          shared here. */}
       <div className="relative flex h-full min-w-0 flex-1 flex-col">
         {children}
       </div>

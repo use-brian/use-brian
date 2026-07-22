@@ -33,6 +33,7 @@ export function TranscriptPane({
   className = "",
   focusMs = null,
   focusNonce = 0,
+  fetchPage,
 }: {
   recordingId: string;
   className?: string;
@@ -43,6 +44,17 @@ export function TranscriptPane({
   focusMs?: number | null;
   /** Bumped per request so re-clicking the same citation re-scrolls. */
   focusNonce?: number;
+  /**
+   * One page of transcript. Defaults to the authed
+   * `/api/recordings/:id/transcript` read; the anonymous shared-page surface
+   * passes the public source-scoped fetcher — same response shape, so the
+   * paging / follow / citation-focus machinery is shared.
+   */
+  fetchPage?: (fromIndex: number) => Promise<{
+    segments: TranscriptSegment[];
+    hasMore: boolean;
+    toIndex: number;
+  }>;
 }) {
   const t = useT();
   const { seekTo, currentMs } = useRecordingPlayer();
@@ -60,7 +72,9 @@ export function TranscriptPane({
     async (from: number) => {
       setLoading(true);
       try {
-        const page = await getRecordingTranscript(recordingId, from);
+        const page = fetchPage
+          ? await fetchPage(from)
+          : await getRecordingTranscript(recordingId, from);
         setSegments((prev) => (from === 0 ? page.segments : [...prev, ...page.segments]));
         setHasMore(page.hasMore);
         setNextFrom(page.toIndex + 1);
@@ -70,7 +84,7 @@ export function TranscriptPane({
         setLoading(false);
       }
     },
-    [recordingId],
+    [recordingId, fetchPage],
   );
 
   useEffect(() => {

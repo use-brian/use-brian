@@ -111,6 +111,42 @@ describe('[COMP:api/synthesize] structural-synthesis runner', () => {
     expect(createDraft.mock.calls[0][0]).toMatchObject({ anchorKey: 'recording-synthesis:rec-1' })
   })
 
+  // A brief is the durable artifact of an explicit, credit-charged run. Born as
+  // a default 30-day draft, the prune worker would silently delete work the
+  // user paid for. See structural-synthesis.md → "Brief durability".
+  it('creates the brief page BORN SAVED so the 30-day prune can never reach it', async () => {
+    const { deps, createDraft } = build()
+    await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
+    expect(createDraft.mock.calls[0][0]).toMatchObject({ state: 'saved' })
+  })
+
+  it('files the brief under the requested destination page', async () => {
+    const { deps, createDraft } = build()
+    await synthesizeFromSource(SOURCE, BLUEPRINT, { ...TARGET, parentPageId: 'page-parent' }, deps)
+    expect(createDraft.mock.calls[0][0]).toMatchObject({ nestParentId: 'page-parent' })
+  })
+
+  it('defaults the brief to the workspace root when no destination is given', async () => {
+    const { deps, createDraft } = build()
+    await synthesizeFromSource(SOURCE, BLUEPRINT, TARGET, deps)
+    expect(createDraft.mock.calls[0][0]).toMatchObject({ nestParentId: null })
+  })
+
+  // A re-run must never yank a page the user has since moved: the destination
+  // applies to page CREATION only.
+  it('does not re-parent an existing anchor page', async () => {
+    const { deps, createDraft, findIdByAnchorKey } = build()
+    findIdByAnchorKey.mockResolvedValue('page-existing')
+    const res = await synthesizeFromSource(
+      SOURCE,
+      BLUEPRINT,
+      { ...TARGET, parentPageId: 'page-parent' },
+      deps,
+    )
+    expect(createDraft).not.toHaveBeenCalled()
+    expect(res.pageId).toBe('page-existing')
+  })
+
   it('is idempotent: an existing anchor page is reused, not duplicated', async () => {
     const { deps, createDraft, findIdByAnchorKey } = build()
     findIdByAnchorKey.mockResolvedValue('page-existing')

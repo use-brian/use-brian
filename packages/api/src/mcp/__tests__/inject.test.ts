@@ -745,6 +745,79 @@ describe('[COMP:api/mcp-inject] multi-account Google built-ins', () => {
   })
 })
 
+describe('[COMP:api/mcp-inject] per-assistant write-grant gate', () => {
+  // The registry-derived `gateToolsOnActionGrants` wrapper must ride the
+  // REAL injection path for every built-in with write tools — a missing
+  // wire here is exactly the dead-checkbox drift (Studio shows grant
+  // boxes the runtime never enforces). Deny paths only: the gate throws
+  // before any network client is reached, so no HTTP mocks are needed.
+  const grantsStore = {
+    getForAssistantSystem: vi.fn(),
+    listForAssistant: vi.fn(),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+  }
+
+  beforeEach(() => {
+    grantsStore.getForAssistantSystem.mockReset().mockResolvedValue(null)
+    getConnectorConfig.mockImplementation((provider: string) =>
+      provider === 'google' ? { clientId: 'app-id', clientSecret: 'app-secret' } : undefined,
+    )
+  })
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  async function injectWith(connectorRows: unknown[]) {
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: {
+        list: vi.fn().mockResolvedValue(connectorRows),
+        getCredentials: vi.fn().mockResolvedValue({ client_id: 'google_refresh', client_secret: 'refresh-or-pat' }),
+        getConfig: vi.fn().mockResolvedValue({}),
+        setConnected: vi.fn(),
+      } as never,
+      settingsStore: settingsStoreStub() as never,
+      assistantConnectorGrantsStore: grantsStore as never,
+      keepBuiltinsDirect: true,
+    })
+    return tools
+  }
+
+  it('denies an ungranted gmailSendMessage at the tool boundary', async () => {
+    const tools = await injectWith([
+      { id: 'ci-gm1', connectorId: 'gmail', name: 'Gmail', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ])
+    const send = tools.get('gmailSendMessage') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    expect(send).toBeTruthy()
+    await expect(send.execute({ to: 'x@example.com', subject: 's', body: 'b' }, {})).rejects.toThrow(/no grant for gmail/)
+    expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'gmail')
+  })
+
+  it('denies an ungranted googleTasksCreateTask (gcal-connector write) at the tool boundary', async () => {
+    const tools = await injectWith([
+      { id: 'ci-gc1', connectorId: 'gcal', name: 'Google Calendar', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ])
+    const create = tools.get('googleTasksCreateTask') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    expect(create).toBeTruthy()
+    await expect(create.execute({ title: 't' }, {})).rejects.toThrow(/no grant for gcal/)
+  })
+
+  it('denies an ungranted githubCreateIssue at the tool boundary', async () => {
+    const tools = await injectWith([
+      { id: 'ci-gh1', connectorId: 'github', name: 'GitHub', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+    ])
+    const create = tools.get('githubCreateIssue') as { execute: (i: unknown, c: unknown) => Promise<unknown> }
+    expect(create).toBeTruthy()
+    await expect(create.execute({ owner: 'o', repo: 'r', title: 't' }, {})).rejects.toThrow(/no grant for github/)
+    expect(grantsStore.getForAssistantSystem).toHaveBeenCalledWith('a-1', 'github')
+  })
+})
+
 describe('[COMP:api/mcp-inject] grant overlay instance binding', () => {
   // Incident 2026-07-08 (fls.com.hk): a workspace assistant sent mail from a
   // PERSONAL Gmail that was never exposed to the workspace. The team-grant

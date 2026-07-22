@@ -26,6 +26,7 @@ export const PROTOCOL_SCHEME = "usebrian";
 // overrides for dev (the app-web port, http://localhost:3003); the persisted
 // target record (target-store.ts) is the consumer mechanism.
 const DEFAULT_QUICK_CAPTURE_HOTKEY = "CommandOrControl+Shift+Space";
+const DEFAULT_RECORD_HOTKEY = "CommandOrControl+Shift+R";
 
 export interface DesktopConfig {
   /** Base URL the shell loads (no trailing slash). */
@@ -55,6 +56,8 @@ export interface DesktopConfig {
   readonly envTargetOverride: boolean;
   /** Accelerator string for the global quick-capture hotkey. */
   readonly quickCaptureHotkey: string;
+  /** Accelerator string for the global start-recording hotkey. */
+  readonly recordHotkey: string;
   /** Custom URL scheme for deep links + the auth callback. */
   readonly protocolScheme: string;
   /**
@@ -93,6 +96,7 @@ export interface DesktopConfig {
  *   API the web app talks to, and the desktop app must exchange it against the
  *   *same* API — a mismatch is a 404.
  * - `USEBRIAN_QUICK_CAPTURE_HOTKEY` overrides the global hotkey accelerator.
+ * - `USEBRIAN_RECORD_HOTKEY` overrides the global start-recording accelerator.
  * - `USEBRIAN_BUNDLED` (`1`/`true`) turns on bundled mode (Bearer/`safeStorage`
  *   auth + the preload token bridge). Off by default — the thin shell stays on
  *   cookies.
@@ -118,6 +122,7 @@ export function resolveConfig(
   );
   const quickCaptureHotkey =
     env.USEBRIAN_QUICK_CAPTURE_HOTKEY?.trim() || DEFAULT_QUICK_CAPTURE_HOTKEY;
+  const recordHotkey = env.USEBRIAN_RECORD_HOTKEY?.trim() || DEFAULT_RECORD_HOTKEY;
   const bundledFlag = env.USEBRIAN_BUNDLED?.trim().toLowerCase();
   const bundled = bundledFlag === "1" || bundledFlag === "true";
   const noUpdateFlag = env.USEBRIAN_DISABLE_AUTO_UPDATE?.trim().toLowerCase();
@@ -134,6 +139,7 @@ export function resolveConfig(
       : target?.label ?? "Use Brian Cloud",
     envTargetOverride: Boolean(envAppUrl),
     quickCaptureHotkey,
+    recordHotkey,
     protocolScheme: PROTOCOL_SCHEME,
     bundled,
     autoUpdate,

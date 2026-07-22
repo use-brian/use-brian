@@ -109,3 +109,27 @@ export async function createTelegramLinkCode(): Promise<TelegramLinkCode | null>
     return null;
   }
 }
+
+export type WhatsappLinkCode = {
+  code: string;
+  expiresAt: string;
+  /** The official number to send the code to — always present on success. */
+  officialNumber: string;
+};
+
+/**
+ * Mint a WhatsApp link code. Resolves `null` on failure, including the
+ * hosted-only 503 (OSS) and the 503 raised when the official bot isn't paired
+ * — in both cases there is nowhere to send a code, so there is no code.
+ */
+export async function createWhatsappLinkCode(): Promise<WhatsappLinkCode | null> {
+  try {
+    const res = await authFetch(`${API_URL}/api/account/whatsapp/link-code`, {
+      method: "POST",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as WhatsappLinkCode;
+  } catch {
+    return null;
+  }
+}

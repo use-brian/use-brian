@@ -14,10 +14,11 @@
  * is `{ bucket: 'workspace_files', path: <fileId>, … }`.
  *
  * Download flow: the filled-state pill is an anchor pointing at the resolved
- * read URL with the `download` attribute set so the browser saves rather than
- * navigates. A `workspace_files` ref resolves through
- * `GET /api/doc-files/:workspaceId/:id` (302 → signed GCS URL); the
- * `file_cache` preview route is kept only as a legacy fallback.
+ * read URL with the `download` attribute set. A `workspace_files` ref
+ * resolves through the authenticated `?redirect=0` mint to a short-lived
+ * signed storage URL (the read route is Bearer-only, so its own URL 401s as
+ * a plain href — see `doc-file-url.ts`); the `file_cache` preview route is
+ * kept only as a legacy fallback.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -25,7 +26,6 @@ import { useT, format } from "@/lib/i18n/client";
 import { authFetch } from "@/lib/auth-fetch";
 import { hasPendingMediaUpload, takeMediaUpload } from "./doc-media-uploads";
 import {
-  durableReadUrlFor,
   resolveFileRefUrl,
   type FileRef,
 } from "./doc-file-url";
@@ -102,23 +102,17 @@ export function BlockFile({ block, workspaceId, readOnly, onChange }: Props) {
   const [uploading, setUploading] = useState(() => hasPendingMediaUpload(block.id));
   const [uploadingName, setUploadingName] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Resolved download URL. Durable `workspace_files` refs resolve synchronously;
-  // a legacy `file_cache` ref needs an async signed-URL mint (WS3 #8), filled
-  // in by the effect below.
-  const [resolvedUrl, setResolvedUrl] = useState<string | null>(() =>
-    block.ref ? durableReadUrlFor(block.ref, workspaceId) : null,
-  );
+  // Resolved download URL. Both ref kinds resolve through an authenticated
+  // mint round-trip (`resolveFileRefUrl`): durable `workspace_files` refs
+  // yield the short-lived signed storage URL — the read route is Bearer-only,
+  // so its URL can never be used as a plain anchor href (no Authorization
+  // header → 401) — and legacy `file_cache` refs yield the signed preview
+  // URL (WS3 #8). Guarded against out-of-order settles + unmount.
+  const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
-  // Resolve the ref's browser URL (durable synchronous; legacy `file_cache`
-  // via signed mint). Guarded against out-of-order settles + unmount.
   useEffect(() => {
     if (!block.ref) {
       setResolvedUrl(null);
-      return;
-    }
-    const durable = durableReadUrlFor(block.ref, workspaceId);
-    if (durable) {
-      setResolvedUrl(durable);
       return;
     }
     let cancelled = false;

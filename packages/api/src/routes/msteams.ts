@@ -76,6 +76,9 @@ export type MsTeamsWebhookIngestor = {
 }
 
 export type MsTeamsRouteOptions = {
+  /** Servable background-lane model, resolved at boot; forwarded to the
+   * channel pipeline so its background calls work without a Google key. */
+  backgroundModel?: string
   provider: LLMProvider
   systemPrompt: string
   tools: Map<string, Tool>
@@ -367,6 +370,7 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
     const abortController = new AbortController()
 
     await processChannelMessage({
+      backgroundModel: options.backgroundModel,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

@@ -56,6 +56,8 @@ const DEFAULT_NEEDS: ReadonlyArray<{ kind: NeedCardKind; caption?: string }> = [
   { kind: 'approvals' },
   { kind: 'task_triage' },
   { kind: 'autopilot' },
+  { kind: 'task_cleanup' },
+  { kind: 'deal_attention' },
 ]
 
 function countFor(kind: NeedCardKind, signals: HomeSignals): number {
@@ -68,6 +70,10 @@ function countFor(kind: NeedCardKind, signals: HomeSignals): number {
       return signals.autopilotCount
     case 'task_triage':
       return signals.taskTriageCount
+    case 'task_cleanup':
+      return signals.taskCleanupCount
+    case 'deal_attention':
+      return signals.dealAttentionCount
     case 'connector_attention':
       return signals.connectorAttentionCount
     case 'workflow_attention':

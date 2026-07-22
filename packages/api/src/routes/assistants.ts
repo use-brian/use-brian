@@ -653,6 +653,14 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         category?: 'official' | 'community'
         scope: 'personal' | 'team-native' | 'team-grant' | 'builtin'
         grantedByUserId?: string
+        /**
+         * The backing connector_instance id — team-native rows only. Lets the
+         * assistant Tools tab edit the SHARED allow/ask/block through the
+         * clearance-gated workspace tool-policy routes
+         * (`/:instanceId/tool-policies`, `/:instanceId/tools/:toolName/policy`)
+         * instead of showing dead per-user toggles the runtime ignores.
+         */
+        instanceId?: string
       }
       const byKey = new Map<string, Entry>()
 
@@ -673,6 +681,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
             icon_url: entry?.icon_url,
             category: entry?.category,
             scope: 'team-native',
+            instanceId: inst.id,
           })
         }
       }

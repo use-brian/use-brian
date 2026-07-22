@@ -699,3 +699,92 @@ describe('[COMP:tasks/tools] depends_on edge wiring', () => {
     expect(store.updateDependsOn[0]).toBeUndefined()
   })
 })
+
+// ── Bulk pair (tasks-operator-surface §6 Phase 4) ────────────────────────
+//
+// Filter-scoped mass mutation: "clean up my tasks" as one confirmed call.
+// The safety posture IS the contract here: confirmation-gated, capability-
+// gated, empty-filter rejected, workspace required.
+
+describe('[COMP:tasks/tools-bulk] bulkUpdateTasks / archiveTasks', () => {
+  it('are confirmation-gated and capability-gated', () => {
+    const { bulkUpdateTasks, archiveTasks } = createTaskTools(makeFakeStore())
+    expect(bulkUpdateTasks.requiresConfirmation).toBe(true)
+    expect(archiveTasks.requiresConfirmation).toBe(true)
+    expect(bulkUpdateTasks.requiresCapability).toBe('tasks')
+    expect(archiveTasks.requiresCapability).toBe('tasks')
+  })
+
+  it('rejects an empty filter (would sweep the whole backlog) and an empty set', () => {
+    const { bulkUpdateTasks } = createTaskTools(makeFakeStore())
+    expect(
+      bulkUpdateTasks.inputSchema.safeParse({ filter: {}, set: { status: 'archived' } }).success,
+    ).toBe(false)
+    expect(
+      bulkUpdateTasks.inputSchema.safeParse({ filter: { status: 'todo' }, set: {} }).success,
+    ).toBe(false)
+    expect(
+      bulkUpdateTasks.inputSchema.safeParse({ filter: { status: 'todo' }, set: { status: 'archived' } }).success,
+    ).toBe(true)
+  })
+
+  it('errors without a workspace', async () => {
+    const { archiveTasks } = createTaskTools(makeFakeStore())
+    const result = await archiveTasks.execute({ filter: { status: 'todo' } }, ctxNoWorkspace)
+    expect(result.isError).toBe(true)
+  })
+
+  it('updates only the rows matching the filter (incl. the unassigned + staleness post-filters)', async () => {
+    const store = makeFakeStore()
+    const { saveTask, bulkUpdateTasks } = createTaskTools(store)
+    await saveTask.execute({ title: 'Stale unassigned' }, ctx)
+    await saveTask.execute({ title: 'Stale but assigned' }, ctx)
+    await saveTask.execute({ title: 'Fresh unassigned' }, ctx)
+    store.rows[1].assigneeId = '33333333-3333-3333-3333-333333333333'
+    // Backdate the first two past the cutoff; keep the third fresh.
+    store.rows[0].updatedAt = new Date('2026-06-01T00:00:00Z')
+    store.rows[1].updatedAt = new Date('2026-06-01T00:00:00Z')
+    store.rows[2].updatedAt = new Date('2026-07-21T00:00:00Z')
+
+    const result = await bulkUpdateTasks.execute(
+      {
+        filter: { status: 'todo', unassigned: true, updated_before: '2026-06-22T00:00:00Z' },
+        set: { status: 'archived' },
+      },
+      ctx,
+    )
+    expect(result.isError).toBeUndefined()
+    expect(String(result.data)).toContain('Updated 1 task(s)')
+    expect(store.rows[0].status).toBe('archived')
+    expect(store.rows[1].status).toBe('todo')
+    expect(store.rows[2].status).toBe('todo')
+  })
+
+  it('merges a priority set into each row\'s attributes without clobbering siblings', async () => {
+    const store = makeFakeStore()
+    const { saveTask, bulkUpdateTasks } = createTaskTools(store)
+    await saveTask.execute({ title: 'A', attributes: { estimate_days: 3, priority: 'low' } }, ctx)
+    await bulkUpdateTasks.execute(
+      { filter: { status: 'todo' }, set: { priority: 'urgent' } },
+      ctx,
+    )
+    expect(store.rows[0].attributes).toEqual({ estimate_days: 3, priority: 'urgent' })
+    // And null clears the key, leaving siblings alone.
+    await bulkUpdateTasks.execute(
+      { filter: { status: 'todo' }, set: { priority: null } },
+      ctx,
+    )
+    expect(store.rows[0].attributes).toEqual({ estimate_days: 3 })
+  })
+
+  it('archiveTasks is the archive shorthand and reports a no-match cleanly', async () => {
+    const store = makeFakeStore()
+    const { saveTask, archiveTasks } = createTaskTools(store)
+    await saveTask.execute({ title: 'Done thing', status: 'done' }, ctx)
+    const miss = await archiveTasks.execute({ filter: { status: 'blocked' } }, ctx)
+    expect(String(miss.data)).toContain('No tasks match')
+    const hit = await archiveTasks.execute({ filter: { status: 'done' } }, ctx)
+    expect(String(hit.data)).toContain('Archived 1 task(s)')
+    expect(store.rows[0].status).toBe('archived')
+  })
+})

@@ -17,7 +17,7 @@
  * [COMP:app-web/decks]
  */
 
-import type { CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import {
   DECK_PAGE_H,
   DECK_PAGE_W,
@@ -25,8 +25,7 @@ import {
   type DeckPrimitive,
   type DeckSlideLayout,
 } from "@use-brian/shared/decks";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+import { resolveDocFileSrc } from "@/components/doc/doc-file-url";
 
 export function deckSlideHeightPx(widthPx: number): number {
   return (widthPx * DECK_PAGE_H) / DECK_PAGE_W;
@@ -68,6 +67,40 @@ export function DeckSlide({
       ))}
     </div>
   );
+}
+
+/**
+ * `<img>` over a durable `workspace_files` doc file. The doc-files read
+ * route is Bearer-only — its URL 401s as a plain `<img src>` — so the src
+ * is the short-lived signed storage URL from the authenticated
+ * `resolveDocFileSrc` mint, resolved per mount. Nothing renders while the
+ * mint is in flight or after a failure (a deck image has no fallback box).
+ */
+function DocFileImage({
+  workspaceId,
+  fileId,
+  style,
+}: {
+  workspaceId: string;
+  fileId: string;
+  style: CSSProperties;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    resolveDocFileSrc(workspaceId, fileId).then(
+      (url) => {
+        if (!cancelled) setSrc(url);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, fileId]);
+  if (!src) return null;
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src={src} alt="" style={style} />;
 }
 
 function boxStyle(box: DeckBox, scale: number): CSSProperties {
@@ -159,20 +192,19 @@ function Primitive({
       );
     }
     case "image": {
-      const src = p.source.url
-        ? p.source.url
-        : p.source.path
-          ? `${API_URL}/api/doc-files/${workspaceId}/${encodeURIComponent(p.source.path)}`
-          : null;
-      if (!src) return null;
-      return (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={src}
-          alt=""
-          style={{ ...boxStyle(p.frame, scale), objectFit: "contain" }}
-        />
-      );
+      const style: CSSProperties = { ...boxStyle(p.frame, scale), objectFit: "contain" };
+      if (p.source.url) {
+        return (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={p.source.url} alt="" style={style} />
+        );
+      }
+      if (p.source.path) {
+        return (
+          <DocFileImage workspaceId={workspaceId} fileId={p.source.path} style={style} />
+        );
+      }
+      return null;
     }
     default:
       return null;
