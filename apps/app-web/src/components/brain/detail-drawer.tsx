@@ -144,6 +144,8 @@ import {
   memberDisplayName,
   resolveAssignee,
   type AssignableMember,
+  TASK_PRIORITY_DOT_CLASS,
+  TASK_STATUS_DOT_CLASS,
 } from "@/components/brain/property-edit";
 import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
 
@@ -226,27 +228,9 @@ const ENTITY_KINDS = new Set<EntityKind>([
 // Body-field visibility (hidden plumbing + per-primitive dedicated keys)
 // lives in property-edit.ts alongside the rest of the property-page logic.
 
-/** State-dot tints for the Notion-style value pills (muted pill, colored
- *  dot, sentence-case label). Live work earns colour; terminal states stay
- *  neutral. */
-const TASK_STATUS_DOT_CLASS: Record<string, string> = {
-  todo: "bg-muted-foreground/40",
-  in_progress: "bg-primary",
-  blocked: "bg-amber-500",
-  done: "bg-emerald-500",
-  archived: "bg-muted-foreground/30",
-};
-
-/** Priority tints for the task Priority row — urgency earns heat; "none"
- *  stays neutral. Values live under `attributes.priority` (the frozen-v1
- *  tasks schema has no typed column). */
-const TASK_PRIORITY_DOT_CLASS: Record<string, string> = {
-  none: "bg-muted-foreground/30",
-  low: "bg-sky-500",
-  medium: "bg-amber-500",
-  high: "bg-orange-500",
-  urgent: "bg-red-500",
-};
+// TASK_STATUS_DOT_CLASS / TASK_PRIORITY_DOT_CLASS moved to
+// property-edit.ts — shared with the operator peek panels so a task reads
+// identically on both surfaces.
 
 /** Attribute keys that render as dedicated rows, kept out of the generic
  *  attributes fold so they never show twice. */

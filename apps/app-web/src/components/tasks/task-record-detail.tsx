@@ -2,10 +2,13 @@
 
 /**
  * Task peek panel — clicking a task row/card opens THIS floating editor
- * over the surface (the CRM record-detail pattern), not a bounce into the
- * Brain view: title + every operator field edit in place through the same
- * inline cells the table uses; "Open in Brain" remains the doorway to the
- * full entry page (source, thread, sensitivity).
+ * over the surface, not a bounce into the Brain view. Built from the SAME
+ * property-page primitives the Brain entry page uses
+ * (`brain/property-field.tsx`: big muted kind icon + `PageTitle`,
+ * icon-led `PropertyRow`s, Notion-style dot-pill values, "Empty"
+ * placeholders) so a task reads identically here and in Brain — the peek
+ * is the entry page's field block in side-panel size. "Open in Brain"
+ * remains the doorway to the full page (source, thread, sensitivity).
  *
  * A floating overlay, never a flex sibling — opening a task must not
  * reflow the table/board underneath.
@@ -14,21 +17,36 @@
  */
 
 import Link from "next/link";
-import { ExternalLink, X } from "lucide-react";
+import {
+  Calendar,
+  CircleDashed,
+  ExternalLink,
+  Flag,
+  Folder,
+  SquareCheckBig,
+  UserRound,
+  X,
+} from "lucide-react";
 import { useT } from "@/lib/i18n/client";
 import { brainRowUrl } from "@/lib/brain-deep-link";
 import { type AdjustMemoryChanges } from "@/lib/api/brain-inbox";
-import { taskPriority, type TaskRow } from "@/lib/api/tasks";
+import { taskPriority, type TaskRow, type TaskStatus } from "@/lib/api/tasks";
 import { taskProject, tagsWithProject } from "@/lib/tasks-view";
-import { type AssignableMember } from "@/components/brain/property-edit";
-import { EditableTitle } from "@/components/operator/editable-title";
 import {
-  AssigneeCell,
-  DueCell,
-  PriorityCell,
-  ProjectCell,
-  StatusCell,
-} from "./task-cells";
+  memberDisplayName,
+  resolveAssignee,
+  TASK_PRIORITY_DOT_CLASS,
+  TASK_STATUS_DOT_CLASS,
+  type AssignableMember,
+} from "@/components/brain/property-edit";
+import {
+  DateProperty,
+  PageTitle,
+  PersonProperty,
+  SelectProperty,
+  type PersonPropertyOption,
+  type SelectPropertyOption,
+} from "@/components/brain/property-field";
 
 export function TaskRecordDetail({
   workspaceId,
@@ -50,111 +68,178 @@ export function TaskRecordDetail({
   ) => Promise<{ ok: boolean; error?: string }>;
   onClose: () => void;
 }) {
-  const t = useT().tasksPage;
+  const t = useT();
+  const tp = t.tasksPage;
+  const statusLabels = t.brainPage.taskStatus as Record<string, string>;
+  const priorityLabels = t.brainPage.taskPriority as Record<string, string>;
+  const memberRoleLabels = t.brainPage.detailDrawer.memberRole as Record<
+    string,
+    string
+  >;
+  const drawerLabels = t.brainPage.detailDrawer.propertyLabels as Record<
+    string,
+    string
+  >;
+
+  const statusOptions: SelectPropertyOption[] = (
+    ["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]
+  ).map((s) => ({
+    value: s,
+    label: statusLabels[s] ?? s,
+    dotClassName: TASK_STATUS_DOT_CLASS[s],
+  }));
+
+  // "none" is a select-only sentinel — the wire clears with null.
+  const priorityOptions: SelectPropertyOption[] = (
+    ["none", "low", "medium", "high", "urgent"] as const
+  ).map((p) => ({
+    value: p,
+    label: priorityLabels[p] ?? p,
+    dotClassName: TASK_PRIORITY_DOT_CLASS[p],
+  }));
+
+  const projectOptions: SelectPropertyOption[] = [
+    { value: "__none__", label: tp.noProject },
+    ...projects.map((p) => ({ value: p, label: p })),
+  ];
+
+  const assigneeMember =
+    row.assigneeId && roster ? resolveAssignee(roster, row.assigneeId) : null;
+  const assigneeOptions: PersonPropertyOption[] = (roster ?? []).map((m) => ({
+    id: m.id,
+    name: memberDisplayName(m) ?? tp.memberUnknown,
+    email: m.email,
+    avatarUrl: m.avatarUrl,
+    roleLabel: memberRoleLabels[m.role] ?? null,
+  }));
+
+  const priority = taskPriority(row) ?? "none";
+  const project = taskProject(row);
 
   return (
-    <aside className="absolute inset-y-0 right-0 z-20 flex w-[380px] max-w-[92vw] flex-col border-l border-border/60 bg-background shadow-2xl animate-in slide-in-from-right-4 fade-in duration-200">
-      {/* Header */}
-      <div className="flex items-start gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0 flex-1">
-          <div className="mb-0.5 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
-            {t.detailKind}
-          </div>
-          <EditableTitle
-            value={row.title}
-            ariaLabel={t.detailTitleAria}
-            onCommit={(title) => commitField(row, { title }, { title })}
-          />
-        </div>
+    <aside className="absolute inset-y-0 right-0 z-20 flex w-[420px] max-w-[94vw] flex-col border-l border-border/60 bg-background shadow-2xl animate-in slide-in-from-right-4 fade-in duration-200">
+      {/* Slim action toolbar — the Brain entry page's top-row shape. */}
+      <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
         <Link
           href={brainRowUrl("", workspaceId, row.id, "task")}
-          title={t.openInBrain}
-          className="mt-0.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          title={tp.openInBrain}
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
         >
           <ExternalLink className="size-4" aria-hidden />
         </Link>
         <button
           type="button"
-          aria-label={t.closeDetail}
+          aria-label={tp.closeDetail}
           onClick={onClose}
-          className="mt-0.5 rounded-md p-1 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+          className="rounded-md p-1.5 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
         >
           <X className="size-4" aria-hidden />
         </button>
       </div>
 
-      {/* Fields — the same inline cells the table rows use. */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        <FieldRow label={t.filterStatus}>
-          <StatusCell
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        {/* Big muted kind icon leading the editable page title. */}
+        <PageTitle
+          value={row.title}
+          editable
+          onCommit={(title) => commitField(row, { title }, { title })}
+          icon={<SquareCheckBig />}
+        />
+
+        {/* Property list — the entry page's field block. */}
+        <div className="mt-3 flex flex-col">
+          <SelectProperty
+            icon={<CircleDashed />}
+            label={drawerLabels.status ?? tp.filterStatus}
             value={row.status}
-            onCommit={(status) => commitField(row, { status }, { status })}
-          />
-        </FieldRow>
-        <FieldRow label={t.filterAssignee}>
-          <AssigneeCell
-            assigneeId={row.assigneeId}
-            roster={roster}
-            onCommit={(assigneeId) =>
-              commitField(row, { assignee_id: assigneeId }, { assigneeId })
-            }
-          />
-        </FieldRow>
-        <FieldRow label={t.filterPriority}>
-          <PriorityCell
-            value={taskPriority(row)}
-            onCommit={(priority) =>
+            options={statusOptions}
+            onCommit={(status) =>
               commitField(
                 row,
-                { priority },
+                { status: status as TaskStatus },
+                { status: status as TaskStatus },
+              )
+            }
+          />
+          <SelectProperty
+            icon={<Flag />}
+            label={drawerLabels.priority ?? tp.filterPriority}
+            value={priority}
+            options={priorityOptions}
+            onCommit={(next) =>
+              commitField(
+                row,
+                {
+                  priority:
+                    next === "none"
+                      ? null
+                      : (next as "low" | "medium" | "high" | "urgent"),
+                },
                 {
                   attributes:
-                    priority === null
+                    next === "none"
                       ? Object.fromEntries(
                           Object.entries(row.attributes).filter(
                             ([k]) => k !== "priority",
                           ),
                         )
-                      : { ...row.attributes, priority },
+                      : { ...row.attributes, priority: next },
                 },
               )
             }
           />
-        </FieldRow>
-        <FieldRow label={t.filterDue}>
-          <DueCell
-            value={row.due}
-            onCommit={(due) => commitField(row, { due_at: due }, { due })}
+          <DateProperty
+            icon={<Calendar />}
+            label={drawerLabels.due_at ?? tp.filterDue}
+            value={row.due ? row.due.slice(0, 10) : ""}
+            onCommit={(next) =>
+              commitField(
+                row,
+                { due_at: next.length > 0 ? next : null },
+                { due: next.length > 0 ? next : null },
+              )
+            }
           />
-        </FieldRow>
-        <FieldRow label={t.filterProject}>
-          <ProjectCell
-            value={taskProject(row)}
-            projects={projects}
-            onCommit={(project) => {
-              const tags = tagsWithProject(row.tags, project);
+          <PersonProperty
+            icon={<UserRound />}
+            label={drawerLabels.assignee_id ?? tp.filterAssignee}
+            value={
+              assigneeMember
+                ? {
+                    name: memberDisplayName(assigneeMember) ?? tp.memberUnknown,
+                    email: assigneeMember.email,
+                    avatarUrl: assigneeMember.avatarUrl,
+                    roleLabel:
+                      memberRoleLabels[assigneeMember.role] ?? null,
+                  }
+                : null
+            }
+            loading={roster === null}
+            unknownLabel={
+              row.assigneeId && !assigneeMember ? tp.memberUnknown : null
+            }
+            options={assigneeOptions}
+            currentId={row.assigneeId}
+            clearLabel={tp.unassignedOption}
+            onCommit={(assigneeId) =>
+              commitField(row, { assignee_id: assigneeId }, { assigneeId })
+            }
+          />
+          <SelectProperty
+            icon={<Folder />}
+            label={tp.filterProject}
+            value={project ?? "__none__"}
+            options={projectOptions}
+            onCommit={(next) => {
+              const tags = tagsWithProject(
+                row.tags,
+                next === "__none__" ? null : next,
+              );
               return commitField(row, { tags }, { tags });
             }}
           />
-        </FieldRow>
+        </div>
       </div>
     </aside>
-  );
-}
-
-function FieldRow({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex min-h-8 items-center gap-2">
-      <span className="w-20 shrink-0 text-[12px] text-muted-foreground">
-        {label}
-      </span>
-      <div className="min-w-0 flex-1">{children}</div>
-    </div>
   );
 }
