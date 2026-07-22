@@ -729,6 +729,14 @@ export interface OpenApiPorts {
   whatsappScheduledBatching?: boolean
   /** A later closed router owns the hosted shared-number fallback. */
   whatsappOfficialFallback?: boolean
+  /**
+   * Resolves the official WhatsApp bot's number for Settings → Account →
+   * Connected accounts. Hosted-only (the number lives behind the closed
+   * official-bot plumbing), and its absence is what 503s the WhatsApp
+   * link-code route in OSS. See docs/architecture/channels/whatsapp.md →
+   * "Account linking".
+   */
+  getWhatsappOfficialNumber?: () => Promise<string | null>
 
   // ── Extension hook: the platform mounts its closed routes/workers ──
   mountExtraRoutes?: (app: Express, ctx: BootContext) => void | Promise<void>
@@ -3544,6 +3552,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     linkedAccountStore,
     linkCodeStore,
     getTelegramBotUsername,
+    getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
     blobClient: filesBlobClient ?? undefined,
   }))
 

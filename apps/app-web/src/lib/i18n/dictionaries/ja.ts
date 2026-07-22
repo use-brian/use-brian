@@ -1318,6 +1318,18 @@ export const ja: Dictionary = {
       generateNewCode: "新しいコードを生成",
       telegramLinked: "Telegram を連携しました。",
       telegramUnlinked: "Telegram の連携を解除しました。",
+      whatsapp: "WhatsApp",
+      whatsappConnected: "連携済み",
+      connectWhatsappHint:
+        "このコードを WhatsApp で {number} に送信すると、アカウントが連携されます。",
+      openWhatsapp: "WhatsApp を開く",
+      whatsappLinked: "WhatsApp を連携しました。",
+      whatsappUnlinked: "WhatsApp の連携を解除しました。",
+      whatsappUnavailable:
+        "現在 WhatsApp の連携はご利用いただけません。しばらくしてからお試しください。",
+      disconnectWhatsappTitle: "WhatsApp の連携を解除しますか？",
+      disconnectWhatsappConfirm:
+        "アシスタントはこの WhatsApp 番号への返信を停止し、ボットを追加したグループの読み取りも停止します。",
       connectError: "問題が発生しました。もう一度お試しください。",
     },
     privacy: {

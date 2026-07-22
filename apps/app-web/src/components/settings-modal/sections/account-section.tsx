@@ -24,17 +24,20 @@ import {
   listLinkedAccounts,
   unlinkAccount,
   createTelegramLinkCode,
+  createWhatsappLinkCode,
   MAX_AVATAR_BYTES,
   type LinkedAccount,
   type TelegramLinkCode,
+  type WhatsappLinkCode,
 } from "@/lib/api/account";
 import {
   buildTelegramDeepLink,
   linkCodeSecondsLeft,
   formatCountdown,
 } from "@/lib/telegram-link";
+import { buildWhatsappDeepLink } from "@/lib/whatsapp-link";
 import { format } from "@/lib/i18n/format";
-import { isOssEdition } from "@/lib/edition";
+import { isOssEdition, isHostedEdition } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -439,6 +442,229 @@ function ConnectedAccountsSection() {
                 className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 {t.settings.account.openTelegram}
+              </a>
+            )}
+            {expired && (
+              <button
+                type="button"
+                onClick={() => void onConnect()}
+                disabled={busy}
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {busy ? "…" : t.settings.account.generateNewCode}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setState({ kind: "unlinked" })}
+              className="text-sm text-muted-foreground hover:text-foreground"
+            >
+              {t.settings.common.cancel}
+            </button>
+          </div>
+          <p className="text-[11px] text-muted-foreground">
+            {expired
+              ? t.settings.account.codeExpired
+              : format(t.settings.account.codeExpiresIn, {
+                  time: formatCountdown(secondsLeft),
+                })}
+          </p>
+        </div>
+      )}
+
+      {notice && (
+        <p
+          className={
+            notice.kind === "success"
+              ? "text-[12px] text-primary"
+              : "text-[12px] text-red-400"
+          }
+        >
+          {notice.text}
+        </p>
+      )}
+
+      <WhatsappLinkRow />
+    </div>
+  );
+}
+
+/**
+ * WhatsApp link to the official bot — the sibling of the Telegram row above.
+ *
+ * Connect mints a 6-char code (`POST /api/account/whatsapp/link-code`, bound
+ * server-side to the first-owned assistant) and returns the official number to
+ * send it to; the row then polls the linked-accounts list until the bot redeems
+ * it (`whatsapp.ts` → "Step A: Link code detection"). Unlike Telegram there is
+ * no bot @username, so the deep link is `wa.me/<digits>?text=<code>` — which
+ * also prefills the message, making the whole handshake two taps.
+ *
+ * Hosted-only: the official bot is a hosted concept and the API 503s the route
+ * in OSS, so the row is gated behind `isHostedEdition()` the same way the
+ * Studio official-bot card is.
+ *
+ * Linking matters beyond DMs: an unlinked user who adds the official bot to a
+ * group has no resolvable identity, so the bot silently leaves
+ * (`whatsapp-group-event.ts` → `reason: 'no-account'`).
+ *
+ * See docs/architecture/channels/whatsapp.md → "Account linking".
+ * Component tag: [COMP:app-web/whatsapp-link].
+ */
+type WhatsappLinkState =
+  | { kind: "loading" }
+  | { kind: "unlinked" }
+  | { kind: "linked"; account: LinkedAccount }
+  | { kind: "connecting"; code: WhatsappLinkCode };
+
+function WhatsappLinkRow() {
+  const t = useT();
+  const [state, setState] = useState<WhatsappLinkState>({ kind: "loading" });
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<Status>(null);
+  const [secondsLeft, setSecondsLeft] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listLinkedAccounts().then((accounts) => {
+      if (cancelled) return;
+      const wa = accounts.find((a) => a.provider === "whatsapp");
+      setState(wa ? { kind: "linked", account: wa } : { kind: "unlinked" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // While a code is pending: 1s countdown tick + 3s poll for the bot-side
+  // redemption. Both stop when the row leaves the connecting state; the poll
+  // also stops firing once the code expires.
+  useEffect(() => {
+    if (state.kind !== "connecting") return;
+    const expiresAt = state.code.expiresAt;
+    setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    const tick = setInterval(() => {
+      setSecondsLeft(linkCodeSecondsLeft(expiresAt));
+    }, 1000);
+    const poll = setInterval(() => {
+      if (linkCodeSecondsLeft(expiresAt) <= 0) return;
+      void listLinkedAccounts().then((accounts) => {
+        const wa = accounts.find((a) => a.provider === "whatsapp");
+        if (wa) {
+          setState({ kind: "linked", account: wa });
+          setNotice({ kind: "success", text: t.settings.account.whatsappLinked });
+        }
+      });
+    }, 3000);
+    return () => {
+      clearInterval(tick);
+      clearInterval(poll);
+    };
+  }, [state, t]);
+
+  async function onConnect() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const code = await createWhatsappLinkCode();
+      if (!code) {
+        // Covers both "not hosted" and "official bot not paired" — from the
+        // user's side these are the same thing: nowhere to send a code.
+        setNotice({ kind: "error", text: t.settings.account.whatsappUnavailable });
+        return;
+      }
+      setState({ kind: "connecting", code });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    if (state.kind !== "linked") return;
+    const ok = await confirmDialog({
+      title: t.settings.account.disconnectWhatsappTitle,
+      description: t.settings.account.disconnectWhatsappConfirm,
+      confirmLabel: t.settings.account.disconnect,
+      cancelLabel: t.settings.common.cancel,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const removed = await unlinkAccount(state.account.id);
+      if (!removed) {
+        setNotice({ kind: "error", text: t.settings.account.connectError });
+        return;
+      }
+      setState({ kind: "unlinked" });
+      setNotice({ kind: "success", text: t.settings.account.whatsappUnlinked });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // The official bot is hosted-only; OSS has no number to link against.
+  if (!isHostedEdition()) return null;
+
+  const expired = state.kind === "connecting" && secondsLeft <= 0;
+  const deepLink =
+    state.kind === "connecting" && !expired
+      ? buildWhatsappDeepLink(state.code.officialNumber, state.code.code)
+      : null;
+
+  return (
+    <div className="space-y-4 pt-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{t.settings.account.whatsapp}</div>
+          <div className="text-xs text-muted-foreground truncate">
+            {state.kind === "loading" && t.settings.common.loading}
+            {state.kind === "unlinked" && t.settings.account.notConnected}
+            {state.kind === "connecting" && t.settings.account.notConnected}
+            {state.kind === "linked" && t.settings.account.whatsappConnected}
+          </div>
+        </div>
+        {state.kind === "unlinked" && (
+          <button
+            type="button"
+            onClick={() => void onConnect()}
+            disabled={busy}
+            className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.connect}
+          </button>
+        )}
+        {state.kind === "linked" && (
+          <button
+            type="button"
+            onClick={() => void onDisconnect()}
+            disabled={busy}
+            className="text-sm font-medium border border-border px-4 py-2 rounded-lg hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {busy ? "…" : t.settings.account.disconnect}
+          </button>
+        )}
+      </div>
+
+      {state.kind === "connecting" && (
+        <div className="rounded-lg border border-border bg-muted/30 p-4 space-y-3">
+          <div className="text-2xl font-mono tracking-[0.3em] text-center select-all">
+            {state.code.code}
+          </div>
+          <p className="text-[12px] text-muted-foreground">
+            {format(t.settings.account.connectWhatsappHint, {
+              number: state.code.officialNumber,
+            })}
+          </p>
+          <div className="flex items-center gap-3">
+            {deepLink && (
+              <a
+                href={deepLink}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-medium px-4 py-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {t.settings.account.openWhatsapp}
               </a>
             )}
             {expired && (

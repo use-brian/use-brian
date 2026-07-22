@@ -1493,6 +1493,18 @@ export const en = {
       generateNewCode: "Generate new code",
       telegramLinked: "Telegram connected.",
       telegramUnlinked: "Telegram disconnected.",
+      whatsapp: "WhatsApp",
+      whatsappConnected: "Connected",
+      connectWhatsappHint:
+        "Send this code to {number} on WhatsApp to connect your account.",
+      openWhatsapp: "Open WhatsApp",
+      whatsappLinked: "WhatsApp connected.",
+      whatsappUnlinked: "WhatsApp disconnected.",
+      whatsappUnavailable:
+        "WhatsApp linking isn't available right now. Please try again later.",
+      disconnectWhatsappTitle: "Disconnect WhatsApp?",
+      disconnectWhatsappConfirm:
+        "Your assistant will stop replying to this WhatsApp number, and groups you added the bot to will stop being read.",
       connectError: "Something went wrong. Please try again.",
     },
     privacy: {
