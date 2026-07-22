@@ -962,11 +962,15 @@ export function EditableBody({
         )}
       </div>
       {editing ? (
+        // Seamless page-body editing (the PageTitle treatment): no border,
+        // no ring, no resize grip — same typography as the rendered view,
+        // auto-growing, with the soft background swap as the focus cue.
         <textarea
           autoFocus
           value={draft}
-          rows={6}
+          rows={3}
           disabled={busy}
+          placeholder={placeholder}
           onChange={(e) => setDraft(e.target.value)}
           onBlur={() => void commit()}
           onKeyDown={(e) => {
@@ -980,7 +984,14 @@ export function EditableBody({
               setEditing(false);
             }
           }}
-          className="w-full resize-y rounded-md bg-muted/50 px-2.5 py-2 text-sm leading-relaxed outline-none ring-1 ring-ring/40"
+          className={cn(
+            "w-full resize-none field-sizing-content min-h-20 bg-transparent",
+            "text-sm leading-relaxed break-words",
+            "-mx-1.5 rounded-md px-1.5 py-1 outline-none focus-visible:shadow-none",
+            "hover:bg-muted/40 focus:bg-muted/40 transition-colors",
+            "placeholder:text-muted-foreground/50",
+            busy && "opacity-60",
+          )}
         />
       ) : (
         <div
