@@ -5494,6 +5494,9 @@ export const en = {
       assistantsEmpty: "No assistants in this workspace yet.",
       sessionsLabel: "Signed-in sites",
       sessionsEmpty: "No sites signed in yet. Sign in during a browser task and save the session here.",
+      ownBrowserLabel: "Logins come from your own browser",
+      ownBrowserHint:
+        "This profile browses in your own Chrome, so it uses the sites you are already signed into there. Nothing is captured or stored here.",
       statusActive: "Active",
       statusDead: "Signed out",
       lastUsed: "Last used",

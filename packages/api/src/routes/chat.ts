@@ -2254,6 +2254,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           model: t.model,
           usage: t.usage,
           source: 'overhead:transcription',
+          // Same source as a recording upload, different workload — tag it
+          // so the two can be priced and migrated independently.
+          triggerKey: 'voice_message_transcription',
+          ...(t.audioSeconds !== undefined ? { audioSeconds: t.audioSeconds } : {}),
         })
       }
 

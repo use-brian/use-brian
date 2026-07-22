@@ -17,6 +17,7 @@ import { z } from 'zod'
 import { buildTool, type Tool, type ToolContext, type ToolResult } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
 import type { Sensitivity } from '../security/sensitivity.js'
+import { estimateStringTokens } from '../compaction/compact.js'
 import {
   looksLikeCaptcha,
   looksLikeConnectionBlock,
@@ -57,6 +58,32 @@ export type ComputerToolEvent = {
   host: string | null
   ok: boolean
   code?: string
+  /**
+   * What this action ADDED TO CONTEXT — the only per-action cost signal a
+   * browse has. The LOCAL backend books no sandbox-seconds and writes no
+   * `usage_tracking` row of its own (metering is orchestrator-gated, and the
+   * local provider bypasses the orchestrator), so a local browse's entire cost
+   * is the tokens its results occupy inside the parent turn's single
+   * `main_response` row — unattributable without this.
+   *
+   * Size only: a char count and a token ESTIMATE, never content. The estimate
+   * is `estimateStringTokens` (CJK-aware) rather than chars/4, which
+   * undercounts a CJK page roughly twofold. Both are recorded so the estimate
+   * stays auditable against the raw length.
+   *
+   * Measured pre-cap, i.e. what the tool returned; `tool-executor.ts` may then
+   * clamp it to `maxResultSizeChars` (24_000 for browser tools) or to
+   * `MAX_TOOL_RESULT_TOKENS`. Absent on failure paths, which return no result.
+   *
+   * **Each event carries only the bytes ITS OWN operation contributed, so the
+   * events of a turn sum to that turn's browser bytes without double counting.**
+   * `navigate` and `click` fold in a follow-up snapshot and emit a PAIRED
+   * `snapshot` event (same timestamp) that carries those bytes — so their own
+   * event is deliberately unsized, since its non-snapshot text is a ~30-char
+   * prefix. Read "what did a navigate cost" as the pair, not the row.
+   */
+  resultChars?: number
+  resultTokens?: number
 }
 
 // ── Send gate ──────────────────────────────────────────────────
@@ -346,6 +373,14 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     }
   }
 
+  /**
+   * Size of a tool result, for the audit event. Mirrors `doc/context-meter.ts`
+   * (which does this for doc-page tools) — observability, never billing.
+   */
+  function sized(data: string): { resultChars: number; resultTokens: number } {
+    return { resultChars: data.length, resultTokens: estimateStringTokens(data) }
+  }
+
   function emit(event: ComputerToolEvent, context: ToolContext): void {
     try {
       opts.onEvent?.(event, context)
@@ -500,8 +535,22 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     try {
       const snapshot = await providerFor(backend).snapshot(callCtx(context, state))
       state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
-      emit({ type: 'browser_action', op: 'snapshot', backend, host: hostOf(snapshot.url), ok: true }, context)
-      return { snapshot, rendered: renderSnapshot(snapshot) }
+      const rendered = renderSnapshot(snapshot)
+      // This is the expensive one: navigate and click fold their follow-up
+      // snapshot in here to save a model turn, so they cost snapshot-sized
+      // context even though they read like cheap actions.
+      emit(
+        {
+          type: 'browser_action',
+          op: 'snapshot',
+          backend,
+          host: hostOf(snapshot.url),
+          ok: true,
+          ...sized(rendered),
+        },
+        context,
+      )
+      return { snapshot, rendered }
     } catch {
       return null
     }
@@ -663,11 +712,19 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state))
         gate.state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
-        emit({ type: 'browser_action', op: 'snapshot', backend, host: hostOf(snapshot.url), ok: true }, context)
-        return {
-          data: renderSnapshot(snapshot) + pageAdvice(context, gate.state, snapshot),
-          meta: { backend, nodes: snapshot.nodes.length },
-        }
+        const data = renderSnapshot(snapshot) + pageAdvice(context, gate.state, snapshot)
+        emit(
+          {
+            type: 'browser_action',
+            op: 'snapshot',
+            backend,
+            host: hostOf(snapshot.url),
+            ok: true,
+            ...sized(data),
+          },
+          context,
+        )
+        return { data, meta: { backend, nodes: snapshot.nodes.length } }
       } catch (err) {
         emit(
           {
@@ -784,8 +841,11 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       try {
         await providerFor(backend).type(callCtx(context, gate.state), input.ref, input.text)
         gate.state.lastTyped = input.text
-        emit({ type: 'browser_action', op: 'type', backend, host: null, ok: true }, context)
-        return { data: `Typed ${input.text.length} characters into ${input.ref}.`, meta: { backend } }
+        // No inline snapshot here, so `type` is near-free next to navigate and
+        // click. Recording the size is what makes that asymmetry visible.
+        const data = `Typed ${input.text.length} characters into ${input.ref}.`
+        emit({ type: 'browser_action', op: 'type', backend, host: null, ok: true, ...sized(data) }, context)
+        return { data, meta: { backend } }
       } catch (err) {
         emit(
           {
@@ -821,8 +881,19 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const backend = gate.state.backend
       try {
         const res = await providerFor(backend).currentUrl(callCtx(context, gate.state))
-        emit({ type: 'browser_action', op: 'currentUrl', backend, host: hostOf(res.url), ok: true }, context)
-        return { data: `URL: ${res.url}\nTitle: ${res.title || '(untitled)'}`, meta: { backend } }
+        const data = `URL: ${res.url}\nTitle: ${res.title || '(untitled)'}`
+        emit(
+          {
+            type: 'browser_action',
+            op: 'currentUrl',
+            backend,
+            host: hostOf(res.url),
+            ok: true,
+            ...sized(data),
+          },
+          context,
+        )
+        return { data, meta: { backend } }
       } catch (err) {
         emit(
           {
@@ -938,22 +1009,45 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
             // a sign-in, and other workers may need the sandbox next. The
             // URL itself is the deliverable — same posture as urlReader's
             // auth-walled short-circuit.
-            emit({ type: 'browser_action', op: 'readPage', backend: 'cloud', host: hostOf(res.url), ok: true }, context)
-            return {
-              data:
-                `This page sits behind a login (${res.url}), and this reader cannot sign in. ` +
-                `Report the URL as the finding and note it needs a signed-in session — the user can open it from a normal chat turn, where sign-in is possible. Do not retry this URL.`,
-              meta: { backend: 'cloud', loginWall: true },
-            }
+            // Sized like every other returning branch. This one still hands
+            // the model ~250 chars, so leaving it unsized under-reports the
+            // turn's browser cost — and unlike `navigate`/`click`, no paired
+            // `snapshot` event carries the bytes on its behalf.
+            const data =
+              `This page sits behind a login (${res.url}), and this reader cannot sign in. ` +
+              `Report the URL as the finding and note it needs a signed-in session — the user can open it from a normal chat turn, where sign-in is possible. Do not retry this URL.`
+            emit(
+              {
+                type: 'browser_action',
+                op: 'readPage',
+                backend: 'cloud',
+                host: hostOf(res.url),
+                ok: true,
+                ...sized(data),
+              },
+              context,
+            )
+            return { data, meta: { backend: 'cloud', loginWall: true } }
           }
           const snapshot = await opts.cloud.snapshot(ctx)
-          emit({ type: 'browser_action', op: 'readPage', backend: 'cloud', host: hostOf(snapshot.url), ok: true }, context)
           // Same posture as the login wall: a headless worker cannot solve a
           // challenge — the URL is the deliverable, never a retry loop.
           const challenge = looksLikeCaptcha(snapshot)
             ? '\n\nNOTE: this page is showing a human-verification challenge (captcha), which this reader cannot solve. Report the URL as the finding and move on — do not retry it.'
             : ''
-          return { data: renderReadPage(snapshot) + challenge, meta: { backend: 'cloud', nodes: snapshot.nodes.length } }
+          const data = renderReadPage(snapshot) + challenge
+          emit(
+            {
+              type: 'browser_action',
+              op: 'readPage',
+              backend: 'cloud',
+              host: hostOf(snapshot.url),
+              ok: true,
+              ...sized(data),
+            },
+            context,
+          )
+          return { data, meta: { backend: 'cloud', nodes: snapshot.nodes.length } }
         } catch (err) {
           emit(
             {

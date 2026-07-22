@@ -157,6 +157,25 @@ export type ToolContext = {
   notifyConfirmationRequired?: (request: ToolConfirmationRequest) => void
   /** Timeout for inner confirmation prompts in ms. */
   confirmationTimeoutMs?: number
+  /**
+   * Run `wait` OUTSIDE the executor's exclusive execution slot, then
+   * re-acquire the slot before returning.
+   *
+   * A gateway tool raises its confirmation prompt inside `execute()`, by
+   * which point it already holds the slot. Holding it across a human wait
+   * stops the executor from starting any sibling — and since each sibling's
+   * prompt lives inside its own `execute()`, those siblings can never prompt
+   * at all, so they expire against `confirmationTimeoutMs` unseen. Wrapping
+   * the wait in this port hands the slot back for the duration, which is what
+   * gives the MCP path the same prompt-in-parallel / execute-in-series
+   * ordering the executor applies to its own confirmation gate.
+   *
+   * Absent outside the tool executor (smoke tests, workflow steps) — callers
+   * must fall back to awaiting directly. See
+   * docs/architecture/engine/tool-executor.md → "Gateway tools confirm
+   * inside `execute()`".
+   */
+  parkForConfirmation?: <T>(wait: () => Promise<T>) => Promise<T>
 
   // ── Sensitivity enforcement ──────────────────────────────────
   // See docs/architecture/platform/sensitivity.md.

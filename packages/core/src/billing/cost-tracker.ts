@@ -169,6 +169,19 @@ export type UsageStore = {
      */
     triggerKey?: string
     /**
+     * Seconds of audio this row processed (speech-to-text, TTS).
+     *
+     * Transcription providers bill in incompatible units — Gemini per input
+     * token, ElevenLabs Scribe and Azure per audio hour — so audio duration
+     * is the only denominator that makes them comparable. Recorders that
+     * know the duration must pass it; everything else leaves it undefined
+     * (recorded as NULL, which the admin rollup reports as an unknown rate
+     * rather than a free one).
+     *
+     * Optional — null on non-audio rows and on rows pre-migration 347.
+     */
+    audioSeconds?: number
+    /**
      * Which API key drove the LLM call: the platform's (`platform`, the
      * default) or the workspace's bring-your-own key (`user`). BYO turns are
      * recorded with `actualCostUsd = 0` because the workspace pays its provider

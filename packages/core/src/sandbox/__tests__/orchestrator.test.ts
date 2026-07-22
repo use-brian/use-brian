@@ -46,6 +46,22 @@ describe('[COMP:sandbox/orchestrator] Sandbox task orchestration', () => {
     expect(provider.sandboxes.size).toBe(2) // a different session = a different task
   })
 
+  it('kills the sandbox when the task row cannot be persisted (never orphans a micro-VM)', async () => {
+    const { provider, taskStore, browser } = build()
+    // The real shape of this failure: `sandbox_tasks.session_id` is `uuid NOT
+    // NULL`, so a malformed session id rejects AFTER the micro-VM is already
+    // running. Anything thrown between create() and the task row must still
+    // take the sandbox down — an orphan bills until its max-lifetime reaper.
+    taskStore.create = async () => {
+      throw new Error('invalid input syntax for type uuid')
+    }
+
+    await expect(browser.navigate(ctx('s1'), 'https://github.com/')).rejects.toThrow(/uuid/)
+
+    expect(provider.sandboxes.size).toBe(1)
+    expect([...provider.sandboxes.values()].map((s) => s.status)).toEqual(['killed'])
+  })
+
   it('lists a workspace\'s live tasks for discovery and drops completed ones (§5)', async () => {
     const { orchestrator, browser } = build()
     await browser.navigate(ctx('s1'), 'https://github.com/')

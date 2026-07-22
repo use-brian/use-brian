@@ -37,6 +37,14 @@ export type TranscribeResult = {
   text: string
   usage: TokenUsage | null
   model: string
+  /**
+   * Duration of the transcribed audio, when the caller knew it (Telegram
+   * voice notes carry it on the message payload; a raw upload does not).
+   * Feeds `usage_tracking.audio_seconds` so this token-billed path can be
+   * priced per audio hour against flat-rate providers. Undefined is
+   * recorded as NULL — an unknown rate, never a free one.
+   */
+  audioSeconds?: number
 }
 
 const DEFAULT_MODEL = 'gemini-2.5-flash'

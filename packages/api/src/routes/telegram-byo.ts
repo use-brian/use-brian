@@ -1088,7 +1088,9 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   // treats it as plain text. Mutates the input by design — same pattern
   // as packages/api/src/routes/telegram.ts. See
   // docs/architecture/media/transcription.md.
-  let voiceTranscriptionUsage: { usage: TokenUsage | null; model: string } | null = null
+  let voiceTranscriptionUsage:
+    | { usage: TokenUsage | null; model: string; audioSeconds?: number }
+    | null = null
   if (
     incoming.mediaType === 'voice' &&
     incoming.mediaUrl &&
@@ -1097,7 +1099,19 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     try {
       const { buffer, mime } = await adapter.downloadVoice(incoming.mediaUrl)
       const result = await transcribeFirstAudio(
-        [{ buffer, mime, index: 0 }],
+        [
+          {
+            buffer,
+            mime,
+            index: 0,
+            // Telegram puts `voice.duration` on the webhook payload, so this
+            // is the one transcription path that can price itself per audio
+            // hour. Absent (older payloads) stays absent, not 0.
+            ...(incoming.mediaDurationSec !== undefined
+              ? { durationSeconds: incoming.mediaDurationSec }
+              : {}),
+          },
+        ],
         {
           enabled: true,
           apiKey: params.voiceTranscription.apiKey,
@@ -1108,7 +1122,11 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         },
       )
       if (result) {
-        voiceTranscriptionUsage = { usage: result.usage, model: result.model }
+        voiceTranscriptionUsage = {
+          usage: result.usage,
+          model: result.model,
+          ...(result.audioSeconds !== undefined ? { audioSeconds: result.audioSeconds } : {}),
+        }
         incoming.text = incoming.text
           ? `[voice] ${result.text}\n\n${incoming.text}`
           : `[voice] ${result.text}`

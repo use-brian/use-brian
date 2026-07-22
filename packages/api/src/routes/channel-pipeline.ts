@@ -450,7 +450,12 @@ export type ChannelPipelineParams = {
    * Usage is recorded here as `overhead:transcription` once we have a
    * stored user_message_id.
    */
-  voiceTranscriptionUsage?: { usage: TokenUsage | null; model: string } | null
+  voiceTranscriptionUsage?: {
+    usage: TokenUsage | null
+    model: string
+    /** Duration of the voice note, when the channel handler measured it. */
+    audioSeconds?: number
+  } | null
 }
 
 // ── Large-paste intercept ────────────────────────────────────────
@@ -799,6 +804,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       model: voiceTranscriptionUsage.model,
       usage: voiceTranscriptionUsage.usage,
       source: 'overhead:transcription',
+      // Distinguishes an inbound voice message from a recording upload:
+      // both are `overhead:transcription`, but they have different volumes,
+      // different latency budgets, and would migrate to a new provider
+      // independently.
+      triggerKey: 'voice_message_transcription',
+      ...(voiceTranscriptionUsage.audioSeconds !== undefined
+        ? { audioSeconds: voiceTranscriptionUsage.audioSeconds }
+        : {}),
     })
   }
 

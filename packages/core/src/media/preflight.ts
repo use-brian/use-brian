@@ -85,7 +85,13 @@ export async function transcribeFirstAudio(
       },
     )
     firstAudio.alreadyTranscribed = true
-    return result
+    // The transcriber posts bytes and never learns the duration, so the
+    // caller's value is the only source. Spread conditionally: an absent
+    // duration must stay absent so it records as NULL (unknown rate) rather
+    // than 0 (free transcription of zero-length audio).
+    return firstAudio.durationSeconds !== undefined
+      ? { ...result, audioSeconds: firstAudio.durationSeconds }
+      : result
   } catch (err) {
     console.warn('[media/preflight] transcription failed:', err instanceof Error ? err.message : err)
     options.onFailure?.(describeTranscriptionFailure(err))

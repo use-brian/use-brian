@@ -141,8 +141,14 @@ export type RecordingTranscriptionResult = {
   utterances: TranscribedUtterance[]
   /** One entry per generate window, for COGS attribution via recordUsage.
    *  Flat-rate (per-audio-hour) providers set `costUsd` directly; token-billed
-   *  providers leave it unset and the factory prices `usage` instead. */
-  usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number }>
+   *  providers leave it unset and the factory prices `usage` instead.
+   *
+   *  `audioSeconds` is the duration THIS entry covers — per window, not per
+   *  file, so a windowed transcriber's entries sum to the file duration
+   *  instead of multiplying it. Providers that cannot attribute duration to a
+   *  window leave it unset; the ingest path then falls back to the file
+   *  duration only when there is exactly one entry to attribute it to. */
+  usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number; audioSeconds?: number }>
   /** Number of continuation windows used (1 = no continuation). */
   windows: number
   /** True when the last utterance fell short of the audio end (coverage gap). */
