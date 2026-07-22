@@ -22,6 +22,7 @@ import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { getEntity, type EntityRollup } from "@/lib/api/brain";
 import { brainRowUrl } from "@/lib/brain-deep-link";
+import { EditableTitle } from "@/components/operator/editable-title";
 import {
   isOpenStage,
   type CrmCompanyRow,
@@ -48,6 +49,8 @@ export type CrmRecordRef =
 
 /** Field-commit callbacks the surface wires to its adjust helpers. */
 export type RecordCommits = {
+  /** Rename any record (`display_name` through the shared adjust path). */
+  rename: (ref: CrmRecordRef) => CellCommit<string>;
   dealStage: (row: CrmDealRow) => CellCommit<DealStage>;
   dealAmount: (row: CrmDealRow) => CellCommit<number | null>;
   dealClose: (row: CrmDealRow) => CellCommit<string | null>;
@@ -95,12 +98,7 @@ export function CrmRecordDetail({
     };
   }, [record.row.id, workspaceId]);
 
-  const name =
-    record.kind === "deal"
-      ? record.row.name
-      : record.kind === "contact"
-        ? record.row.name
-        : record.row.name;
+  const name = record.row.name;
 
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
@@ -109,10 +107,14 @@ export function CrmRecordDetail({
       {/* Header */}
       <div className="flex items-start gap-2 border-b border-border px-4 py-3">
         <div className="min-w-0 flex-1">
-          <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
+          <div className="mb-0.5 px-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/60">
             {kindLabels[record.kind] ?? record.kind}
           </div>
-          <h2 className="truncate text-[15px] font-semibold">{name}</h2>
+          <EditableTitle
+            value={name}
+            ariaLabel={t.nameLabel}
+            onCommit={commits.rename(record)}
+          />
         </div>
         <Link
           href={brainRowUrl("", workspaceId, record.row.id, record.kind)}

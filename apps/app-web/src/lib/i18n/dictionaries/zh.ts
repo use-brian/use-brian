@@ -3608,6 +3608,11 @@ export const zh: Dictionary = {
     dealCount: "{count} 筆商機",
   },
 
+  filterBar: {
+    filter: "篩選",
+    clearFilter: "清除篩選",
+    view: "檢視",
+  },
   tasksPage: {
     title: "任務",
     countSummary: "共 {total} 項，{active} 項進行中",
@@ -3672,6 +3677,10 @@ export const zh: Dictionary = {
     empty: "沒有符合目前篩選的任務。",
     emptyAll: "還沒有任務。請你的助理開始追蹤工作吧。",
     openInBrain: "在大腦中開啟",
+    openRecord: "開啟任務",
+    detailKind: "任務",
+    detailTitleAria: "任務名稱",
+    closeDetail: "關閉",
     boardEmptyColumn: "沒有任務",
     savedViews: "檢視",
     saveViewAria: "儲存目前檢視",

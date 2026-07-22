@@ -39,7 +39,7 @@ import Link from "next/link";
 import {
   CheckSquare,
   FileText,
-  Handshake,
+  Users,
   Megaphone,
   type LucideIcon,
 } from "lucide-react";
@@ -57,7 +57,7 @@ const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   page: FileText,
   tasks: CheckSquare,
   feed: Megaphone,
-  crm: Handshake,
+  crm: Users,
 };
 
 export function OperatorAppBar({

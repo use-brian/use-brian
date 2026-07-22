@@ -3644,6 +3644,11 @@ export const ja: Dictionary = {
     dealCount: "商談 {count}",
   },
 
+  filterBar: {
+    filter: "フィルター",
+    clearFilter: "フィルターを解除",
+    view: "表示",
+  },
   tasksPage: {
     title: "タスク",
     countSummary: "全{total}件、進行中{active}件",
@@ -3708,6 +3713,10 @@ export const ja: Dictionary = {
     empty: "現在のフィルターに一致するタスクはありません。",
     emptyAll: "タスクはまだありません。アシスタントに追跡を頼んでみましょう。",
     openInBrain: "ブレインで開く",
+    openRecord: "タスクを開く",
+    detailKind: "タスク",
+    detailTitleAria: "タスク名",
+    closeDetail: "閉じる",
     boardEmptyColumn: "タスクなし",
     savedViews: "ビュー",
     saveViewAria: "現在のビューを保存",

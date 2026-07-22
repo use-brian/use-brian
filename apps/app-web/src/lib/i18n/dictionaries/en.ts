@@ -3851,6 +3851,12 @@ export const en = {
     dealCount: "{count} deals",
   },
 
+  // ── Operator filter bar ([COMP:app-web/operator-filter-bar]) ──
+  filterBar: {
+    filter: "Filter",
+    clearFilter: "Clear filter",
+    view: "View",
+  },
   // ── Tasks operator surface ([COMP:app-web/tasks-surface]) ──
   tasksPage: {
     title: "Tasks",
@@ -3916,6 +3922,10 @@ export const en = {
     empty: "No tasks match the current filters.",
     emptyAll: "No tasks yet. Ask your assistant to track something.",
     openInBrain: "Open in Brain",
+    openRecord: "Open task",
+    detailKind: "Task",
+    detailTitleAria: "Task title",
+    closeDetail: "Close",
     boardEmptyColumn: "No tasks",
     savedViews: "Views",
     saveViewAria: "Save the current view",
@@ -5566,7 +5576,7 @@ export const en = {
     chatQueuedChip: "Recording queued: {name}",
     linkError: "We could not load your recordings.",
   },
-  // Dock live recording (docs/architecture/media/live-capture.md) — the
+  // Dock live recording (docs/architecture/media/live-capture.md): the
   // record button + live strip + crash-recovery banner on the chat dock.
   recorder: {
     start: "Record",

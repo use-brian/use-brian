@@ -24,26 +24,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import {
-  ChevronRight,
-  Kanban,
-  ListChecks,
-  Rows3,
-  Search,
-} from "lucide-react";
+import { ChevronRight, Kanban, ListChecks, Rows3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from "@/components/ui/select";
 import {
   adjustBrainRow,
   deleteBrainRow,
@@ -90,6 +77,13 @@ import {
   STATUS_DOT,
 } from "./task-cells";
 import { TaskBoard } from "./task-board";
+import { TaskRecordDetail } from "./task-record-detail";
+import {
+  FilterBar,
+  ViewOptionRow,
+  ViewOptionSection,
+  type FilterDef,
+} from "@/components/operator/filter-bar";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import {
   DropdownMenu,
@@ -102,7 +96,6 @@ import {
  *  (one round-trip) instead of the per-row client loop. */
 const SERVER_BULK_THRESHOLD = 50;
 
-const ANY = "__any__";
 const NONE = "__none__";
 
 export function TasksSurface({ workspaceId }: { workspaceId: string }) {
@@ -200,6 +193,13 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     });
   }, []);
 
+  // ── Peek panel — clicking a row opens the in-place editor, not Brain ──
+  const [openTaskId, setOpenTaskId] = useState<string | null>(null);
+  const openTask = useMemo(
+    () => (rows ?? []).find((r) => r.id === openTaskId) ?? null,
+    [rows, openTaskId],
+  );
+
   // ── Mutations (supersession-aware) ────────────────────────────────────
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
@@ -238,6 +238,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       const result = await adjustBrainRow(workspaceId, "task", row.id, changes);
       if (!result.ok) return { ok: false, error: result.error };
       patchRow(row.id, result.newId, patch);
+      // Keep the peek panel anchored across the supersession id swap.
+      setOpenTaskId((cur) =>
+        cur === row.id ? (result.newId ?? row.id) : cur,
+      );
       return { ok: true };
     },
     [workspaceId, patchRow],
@@ -394,8 +398,65 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
 
   const hasSelection = selectedVisible.length > 0;
 
+  // Property → value defs for the FilterBar (Notion-style funnel picker).
+  const filterDefs: FilterDef[] = [
+    {
+      key: "assignee",
+      label: t.filterAssignee,
+      options: [
+        { value: "none", label: t.unassignedOption },
+        ...(roster ?? []).map((m) => ({
+          value: m.id,
+          label: memberDisplayName(m) ?? t.memberUnknown,
+        })),
+      ],
+    },
+    {
+      key: "status",
+      label: t.filterStatus,
+      options: (
+        ["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]
+      ).map((sKey) => ({
+        value: sKey,
+        label: statusLabels[sKey] ?? sKey,
+        dot: STATUS_DOT[sKey],
+      })),
+    },
+    {
+      key: "priority",
+      label: t.filterPriority,
+      options: [
+        { value: "none", label: priorityLabels.none ?? "None" },
+        ...(["low", "medium", "high", "urgent"] as TaskPriority[]).map((pKey) => ({
+          value: pKey,
+          label: priorityLabels[pKey] ?? pKey,
+        })),
+      ],
+    },
+    {
+      key: "project",
+      label: t.filterProject,
+      options: [
+        { value: "none", label: t.noProject },
+        ...projects.map((pName) => ({ value: pName, label: pName })),
+      ],
+    },
+    {
+      key: "due",
+      label: t.filterDue,
+      options: [
+        { value: "overdue", label: t.dueOverdue },
+        { value: "week", label: t.dueWeek },
+        { value: "month", label: t.dueMonth },
+        { value: "none", label: t.noDate },
+      ],
+    },
+  ];
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    // `relative`: the task peek panel floats over this box — it never
+    // reflows the table/board underneath.
+    <div className="relative flex h-full min-h-0 flex-col">
       {/* Header — title + live counts + view toggle. */}
       <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 max-md:pl-14">
         <ListChecks className="size-[18px] text-muted-foreground" aria-hidden />
@@ -592,10 +653,10 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                   setView({ quick: active ? null : f, statuses: [] })
                 }
                 className={cn(
-                  "inline-flex h-7 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium transition-colors",
+                  "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
                   active
-                    ? "bg-primary/10 text-foreground ring-1 ring-primary/40"
-                    : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
                   count === 0 && !active && "opacity-40",
                 )}
               >
@@ -605,121 +666,67 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             );
           })}
           <span className="mx-1 hidden h-4 w-px bg-border sm:block" aria-hidden />
-          <FilterSelect
-            label={t.filterAssignee}
-            value={view.assignee ?? ANY}
-            items={{
-              [ANY]: t.anyOption,
-              none: t.unassignedOption,
-              ...Object.fromEntries(
-                (roster ?? []).map((m) => [m.id, memberDisplayName(m) ?? t.memberUnknown]),
-              ),
+          <FilterBar
+            defs={filterDefs}
+            active={{
+              assignee: view.assignee,
+              status: view.quick ? null : (view.statuses[0] ?? null),
+              priority: view.priority,
+              project: view.project,
+              due: view.due,
             }}
-            onChange={(v) => setView({ assignee: v === ANY ? null : (v as string) })}
-          />
-          <FilterSelect
-            label={t.filterStatus}
-            value={view.quick ? ANY : view.statuses[0] ?? ANY}
-            items={{
-              [ANY]: t.anyOption,
-              ...Object.fromEntries(
-                (["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]).map(
-                  (s) => [s, statusLabels[s] ?? s],
-                ),
-              ),
+            onSet={(key, value) => {
+              if (key === "assignee") setView({ assignee: value });
+              else if (key === "status")
+                setView({ quick: null, statuses: value ? [value as TaskStatus] : [] });
+              else if (key === "priority")
+                setView({ priority: value as TasksViewState["priority"] });
+              else if (key === "project") setView({ project: value });
+              else if (key === "due") setView({ due: value as TasksViewState["due"] });
             }}
-            onChange={(v) =>
-              setView({
-                quick: null,
-                statuses: v === ANY ? [] : [v as TaskStatus],
-              })
+            search={view.q}
+            onSearch={(q) => setView({ q })}
+            searchPlaceholder={t.searchPlaceholder}
+            viewOptions={
+              <>
+                {view.view === "table" && (
+                  <>
+                    <ViewOptionSection label={t.groupBy}>
+                      {GROUP_KEYS.map((g) => (
+                        <ViewOptionRow
+                          key={g}
+                          label={groupLabels[g] ?? g}
+                          selected={view.group === g}
+                          onPick={() => setView({ group: g })}
+                        />
+                      ))}
+                    </ViewOptionSection>
+                    <ViewOptionSection label={t.sortLabel}>
+                      {SORT_KEYS.map((sKey) => (
+                        <ViewOptionRow
+                          key={sKey}
+                          label={sortLabels[sKey] ?? sKey}
+                          selected={view.sort === sKey}
+                          onPick={() => setView({ sort: sKey })}
+                        />
+                      ))}
+                    </ViewOptionSection>
+                  </>
+                )}
+                <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted">
+                  <Checkbox
+                    checked={view.completed}
+                    onCheckedChange={(checked) => setView({ completed: checked })}
+                    aria-label={t.showCompleted}
+                  />
+                  {t.showCompleted}
+                  {completedCount > 0 && (
+                    <span className="tabular-nums">({completedCount})</span>
+                  )}
+                </label>
+              </>
             }
           />
-          <FilterSelect
-            label={t.filterPriority}
-            value={view.priority ?? ANY}
-            items={{
-              [ANY]: t.anyOption,
-              none: priorityLabels.none ?? "None",
-              ...Object.fromEntries(
-                (["low", "medium", "high", "urgent"] as TaskPriority[]).map((p) => [
-                  p,
-                  priorityLabels[p] ?? p,
-                ]),
-              ),
-            }}
-            onChange={(v) =>
-              setView({ priority: v === ANY ? null : (v as TaskPriority | "none") })
-            }
-          />
-          <FilterSelect
-            label={t.filterProject}
-            value={view.project ?? ANY}
-            items={{
-              [ANY]: t.anyOption,
-              none: t.noProject,
-              ...Object.fromEntries(projects.map((p) => [p, p])),
-            }}
-            onChange={(v) => setView({ project: v === ANY ? null : (v as string) })}
-          />
-          <FilterSelect
-            label={t.filterDue}
-            value={view.due ?? ANY}
-            items={{
-              [ANY]: t.anyOption,
-              overdue: t.dueOverdue,
-              week: t.dueWeek,
-              month: t.dueMonth,
-              none: t.noDate,
-            }}
-            onChange={(v) =>
-              setView({ due: v === ANY ? null : (v as TasksViewState["due"]) })
-            }
-          />
-          <label className="relative ml-auto">
-            <Search
-              className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
-              aria-hidden
-            />
-            <input
-              type="text"
-              value={view.q}
-              onChange={(e) => setView({ q: e.target.value })}
-              placeholder={t.searchPlaceholder}
-              aria-label={t.searchPlaceholder}
-              className="h-7 w-44 rounded-md border border-border bg-background pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-            />
-          </label>
-        </div>
-      )}
-
-      {/* Group-by / sort / completed strip (table view only — the board is
-          always grouped by status). */}
-      {view.view === "table" && (
-        <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-1.5 text-[12.5px]">
-          <FilterSelect
-            label={t.groupBy}
-            value={view.group}
-            items={Object.fromEntries(GROUP_KEYS.map((g) => [g, groupLabels[g] ?? g]))}
-            onChange={(v) => setView({ group: v as TasksViewState["group"] })}
-          />
-          <FilterSelect
-            label={t.sortLabel}
-            value={view.sort}
-            items={Object.fromEntries(SORT_KEYS.map((s) => [s, sortLabels[s] ?? s]))}
-            onChange={(v) => setView({ sort: v as TasksViewState["sort"] })}
-          />
-          <label className="ml-auto inline-flex cursor-pointer items-center gap-1.5 text-muted-foreground">
-            <Checkbox
-              checked={view.completed}
-              onCheckedChange={(checked) => setView({ completed: checked })}
-              aria-label={t.showCompleted}
-            />
-            {t.showCompleted}
-            {completedCount > 0 && (
-              <span className="tabular-nums">({completedCount})</span>
-            )}
-          </label>
         </div>
       )}
 
@@ -754,7 +761,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             onStatusDrop={(row, status) =>
               void commitField(row, { status }, { status })
             }
-            workspaceId={workspaceId}
+            onOpenRecord={(row) => setOpenTaskId(row.id)}
           />
         ) : (
           <div className="min-w-[640px]">
@@ -794,11 +801,11 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
                     <TaskTableRow
                       key={row.id}
                       row={row}
-                      workspaceId={workspaceId}
                       roster={roster}
                       projects={projects}
                       selected={selected.has(row.id)}
                       onToggle={toggle}
+                      onOpen={(r) => setOpenTaskId(r.id)}
                       commitField={commitField}
                     />
                   ))}
@@ -818,27 +825,39 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         )}
       </div>
+
+      {/* Task peek panel — floats over the surface; Brain stays one click
+          away via its header link. */}
+      {openTask && (
+        <TaskRecordDetail
+          workspaceId={workspaceId}
+          row={openTask}
+          roster={roster}
+          projects={projects}
+          commitField={commitField}
+          onClose={() => setOpenTaskId(null)}
+        />
+      )}
     </div>
   );
 }
 
-/** One table row: checkbox + title (links into the Brain drawer for deep
- *  edits) + the inline cells. */
+/** One table row: checkbox + title (opens the peek editor) + inline cells. */
 function TaskTableRow({
   row,
-  workspaceId,
   roster,
   projects,
   selected,
   onToggle,
+  onOpen,
   commitField,
 }: {
   row: TaskRow;
-  workspaceId: string;
   roster: AssignableMember[] | null;
   projects: string[];
   selected: boolean;
   onToggle: (id: string) => void;
+  onOpen: (row: TaskRow) => void;
   commitField: (
     row: TaskRow,
     changes: AdjustMemoryChanges,
@@ -862,13 +881,14 @@ function TaskTableRow({
           !selected && "opacity-0 group-hover/task:opacity-100 group-focus-within/task:opacity-100",
         )}
       />
-      <Link
-        href={`/w/${workspaceId}/brain?row=${encodeURIComponent(row.id)}&kind=task`}
-        title={t.openInBrain}
-        className="truncate py-1 text-[13.5px] font-medium text-foreground hover:underline"
+      <button
+        type="button"
+        onClick={() => onOpen(row)}
+        title={t.openRecord}
+        className="truncate py-1 text-left text-[13.5px] font-medium text-foreground hover:underline"
       >
         {row.title}
-      </Link>
+      </button>
       <StatusCell
         value={row.status}
         onCommit={(status) => commitField(row, { status }, { status })}
@@ -913,43 +933,6 @@ function TaskTableRow({
   );
 }
 
-/** Quiet labeled `Select` for the filter strip. */
-function FilterSelect({
-  label,
-  value,
-  items,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  items: Record<string, string>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <Select
-      value={value}
-      onValueChange={(v) => {
-        if (typeof v === "string") onChange(v);
-      }}
-      items={items}
-    >
-      <SelectTrigger
-        aria-label={label}
-        className="h-7 w-auto gap-1 border-border bg-transparent px-2 text-[12.5px] shadow-none dark:bg-transparent"
-      >
-        <span className="text-muted-foreground">{label}:</span>
-        <span className="max-w-32 truncate font-medium">{items[value] ?? value}</span>
-      </SelectTrigger>
-      <SelectContent alignItemWithTrigger={false}>
-        {Object.entries(items).map(([v, label]) => (
-          <SelectItem key={v} value={v}>
-            {label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
 
 /** Action menu for the bulk bar — always shows its action label; picking
  *  an item fires `onPick` over the whole selection (a menu, not a value

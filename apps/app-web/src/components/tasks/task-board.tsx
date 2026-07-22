@@ -14,7 +14,6 @@
  */
 
 import { useState } from "react";
-import Link from "next/link";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { UserAvatar } from "@/components/ui/user-avatar";
@@ -42,14 +41,14 @@ export function TaskBoard({
   roster,
   showCompleted,
   onStatusDrop,
-  workspaceId,
+  onOpenRecord,
 }: {
   rows: TaskRow[];
   roster: AssignableMember[] | null;
   /** Reveal the done/archived columns. */
   showCompleted: boolean;
   onStatusDrop: (row: TaskRow, status: TaskStatus) => void;
-  workspaceId: string;
+  onOpenRecord: (row: TaskRow) => void;
 }) {
   const t = useT().tasksPage;
   const statusLabels = useT().brainPage.taskStatus as Record<string, string>;
@@ -122,13 +121,14 @@ export function TaskBoard({
                       dragId === row.id && "opacity-50",
                     )}
                   >
-                    <Link
-                      href={`/w/${workspaceId}/brain?row=${encodeURIComponent(row.id)}&kind=task`}
-                      className="block text-[13px] font-medium leading-snug text-foreground hover:underline"
+                    <button
+                      type="button"
+                      onClick={() => onOpenRecord(row)}
+                      className="block w-full text-left text-[13px] font-medium leading-snug text-foreground hover:underline"
                       draggable={false}
                     >
                       {row.title}
-                    </Link>
+                    </button>
                     <div className="mt-2 flex items-center gap-1.5">
                       {priority && (
                         <span

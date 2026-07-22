@@ -25,17 +25,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Handshake, Kanban, Rows3, Search } from "lucide-react";
+import { Users, Kanban, Rows3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from "@/components/ui/select";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -84,9 +78,16 @@ import {
   CloseDateCell,
   CompanyCell,
   StageCell,
+  STAGE_DOT,
   TagsCell,
   TextFieldCell,
 } from "./crm-cells";
+import {
+  FilterBar,
+  ViewOptionRow,
+  ViewOptionSection,
+  type FilterDef,
+} from "@/components/operator/filter-bar";
 import { CrmBoard } from "./crm-board";
 import {
   CrmRecordDetail,
@@ -94,7 +95,6 @@ import {
   type RecordCommits,
 } from "./crm-record-detail";
 
-const ANY = "__any__";
 const NONE = "__none__";
 
 type CrmPrimitive = "deal" | "contact" | "company";
@@ -299,6 +299,12 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
 
   const commits: RecordCommits = useMemo(
     () => ({
+      rename: (ref) => (name) =>
+        commitField(ref.kind, ref.row.id, { display_name: name }, () => {
+          if (ref.kind === "deal") patchDeal(ref.row.id, { name });
+          else if (ref.kind === "contact") patchContact(ref.row.id, { name });
+          else patchCompany(ref.row.id, { name });
+        }),
       dealStage: (row) => (stage) =>
         commitField("deal", row.id, { stage }, () =>
           patchDeal(row.id, { stage }),
@@ -412,6 +418,45 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const hasSelection = selectedVisible.length > 0 && view.view === "table";
   const today = localDateStr(now);
 
+  // Property → value defs for the FilterBar (Notion-style funnel picker),
+  // section-scoped like the old dropdowns were.
+  const filterDefs: FilterDef[] = [
+    ...(view.section === "deals"
+      ? [
+          {
+            key: "stage",
+            label: t.filterStage,
+            options: DEAL_STAGES.map((sKey) => ({
+              value: sKey,
+              label: stageLabels[sKey] ?? sKey,
+              dot: STAGE_DOT[sKey],
+            })),
+          },
+        ]
+      : []),
+    ...(view.section !== "companies"
+      ? [
+          {
+            key: "company",
+            label: t.filterCompany,
+            options: [
+              { value: "none", label: t.noCompany },
+              ...companies.map((c) => ({ value: c.id, label: c.name })),
+            ],
+          },
+        ]
+      : []),
+    ...(view.section !== "deals"
+      ? [
+          {
+            key: "tag",
+            label: t.filterTag,
+            options: tagOptions.map((tag) => ({ value: tag, label: tag })),
+          },
+        ]
+      : []),
+  ];
+
   return (
     // `relative`: the record-detail peek panel positions against this box
     // and floats OVER the content — it never squeezes the middle pane.
@@ -419,7 +464,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
       <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
         {/* Header — title + section switch + view toggle. */}
         <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 max-md:pl-14">
-          <Handshake className="size-[18px] text-muted-foreground" aria-hidden />
+          <Users className="size-[18px] text-muted-foreground" aria-hidden />
           <h1 className="text-[15px] font-semibold">{t.title}</h1>
           <div className="flex items-center gap-0.5 rounded-lg bg-muted/50 p-0.5">
             {CRM_SECTIONS.map((section) => (
@@ -552,10 +597,10 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                     setView({ quick: active ? null : f, stages: [] })
                   }
                   className={cn(
-                    "inline-flex h-7 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium transition-colors",
+                    "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs transition-colors",
                     active
-                      ? "bg-primary/10 text-foreground ring-1 ring-primary/40"
-                      : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+                      ? "border-foreground bg-foreground text-background"
+                      : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
                     count === 0 && !active && "opacity-40",
                   )}
                 >
@@ -567,85 +612,49 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
             {sectionQuicks.length > 0 && (
               <span className="mx-1 hidden h-4 w-px bg-border sm:block" aria-hidden />
             )}
-            {view.section === "deals" && (
-              <FilterSelect
-                label={t.filterStage}
-                value={view.quick ? ANY : (view.stages[0] ?? ANY)}
-                items={{
-                  [ANY]: t.anyOption,
-                  ...Object.fromEntries(
-                    DEAL_STAGES.map((s) => [s, stageLabels[s] ?? s]),
-                  ),
-                }}
-                onChange={(v) =>
-                  setView({
-                    quick: null,
-                    stages: v === ANY ? [] : [v as DealStage],
-                  })
-                }
-              />
-            )}
-            {view.section !== "companies" && (
-              <FilterSelect
-                label={t.filterCompany}
-                value={view.company ?? ANY}
-                items={{
-                  [ANY]: t.anyOption,
-                  none: t.noCompany,
-                  ...Object.fromEntries(companies.map((c) => [c.id, c.name])),
-                }}
-                onChange={(v) =>
-                  setView({ company: v === ANY ? null : (v as string) })
-                }
-              />
-            )}
-            {view.section !== "deals" && (
-              <FilterSelect
-                label={t.filterTag}
-                value={view.tag ?? ANY}
-                items={{
-                  [ANY]: t.anyOption,
-                  ...Object.fromEntries(tagOptions.map((tag) => [tag, tag])),
-                }}
-                onChange={(v) => setView({ tag: v === ANY ? null : (v as string) })}
-              />
-            )}
-            {view.section === "deals" && view.view === "table" && (
-              <>
-                <FilterSelect
-                  label={t.sortLabel}
-                  value={view.sort}
-                  items={Object.fromEntries(
-                    DEAL_SORT_KEYS.map((s) => [s, sortLabels[s] ?? s]),
-                  )}
-                  onChange={(v) =>
-                    setView({ sort: v as CrmViewState["sort"] })
-                  }
-                />
-                <label className="inline-flex cursor-pointer items-center gap-1.5 text-[12.5px] text-muted-foreground">
-                  <Checkbox
-                    checked={view.closed}
-                    onCheckedChange={(checked) => setView({ closed: checked })}
-                    aria-label={t.showClosed}
-                  />
-                  {t.showClosed}
-                </label>
-              </>
-            )}
-            <label className="relative ml-auto">
-              <Search
-                className="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
-                aria-hidden
-              />
-              <input
-                type="text"
-                value={view.q}
-                onChange={(e) => setView({ q: e.target.value })}
-                placeholder={t.searchPlaceholder}
-                aria-label={t.searchPlaceholder}
-                className="h-7 w-44 rounded-md border border-border bg-background pl-7 pr-2 text-[13px] outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring/40"
-              />
-            </label>
+            <FilterBar
+              defs={filterDefs}
+              active={
+                view.section === "deals"
+                  ? { stage: view.quick ? null : (view.stages[0] ?? null), company: view.company }
+                  : view.section === "contacts"
+                    ? { company: view.company, tag: view.tag }
+                    : { tag: view.tag }
+              }
+              onSet={(key, value) => {
+                if (key === "stage")
+                  setView({ quick: null, stages: value ? [value as DealStage] : [] });
+                else if (key === "company") setView({ company: value });
+                else if (key === "tag") setView({ tag: value });
+              }}
+              search={view.q}
+              onSearch={(q) => setView({ q })}
+              searchPlaceholder={t.searchPlaceholder}
+              viewOptions={
+                view.section === "deals" && view.view === "table" ? (
+                  <>
+                    <ViewOptionSection label={t.sortLabel}>
+                      {DEAL_SORT_KEYS.map((sKey) => (
+                        <ViewOptionRow
+                          key={sKey}
+                          label={sortLabels[sKey] ?? sKey}
+                          selected={view.sort === sKey}
+                          onPick={() => setView({ sort: sKey })}
+                        />
+                      ))}
+                    </ViewOptionSection>
+                    <label className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-muted-foreground transition-colors hover:bg-muted">
+                      <Checkbox
+                        checked={view.closed}
+                        onCheckedChange={(checked) => setView({ closed: checked })}
+                        aria-label={t.showClosed}
+                      />
+                      {t.showClosed}
+                    </label>
+                  </>
+                ) : undefined
+              }
+            />
           </div>
         )}
 
@@ -1137,45 +1146,6 @@ function SelectAllFooter({
   );
 }
 
-/** Quiet labeled `Select` for the filter strip (the tasks-surface pattern). */
-function FilterSelect({
-  label,
-  value,
-  items,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  items: Record<string, string>;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <Select
-      value={value}
-      onValueChange={(v) => {
-        if (typeof v === "string") onChange(v);
-      }}
-      items={items}
-    >
-      <SelectTrigger
-        aria-label={label}
-        className="h-7 w-auto gap-1 border-border bg-transparent px-2 text-[12.5px] shadow-none dark:bg-transparent"
-      >
-        <span className="text-muted-foreground">{label}:</span>
-        <span className="max-w-32 truncate font-medium">
-          {items[value] ?? value}
-        </span>
-      </SelectTrigger>
-      <SelectContent alignItemWithTrigger={false}>
-        {Object.entries(items).map(([v, itemLabel]) => (
-          <SelectItem key={v} value={v}>
-            {itemLabel}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  );
-}
 
 /** The bulk bar — swaps in for the filter row while table rows are checked.
  *  Actions are section-scoped: deals set stage (incl. mark won/lost);
