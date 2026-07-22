@@ -160,27 +160,53 @@ export function PeekResizeHandle({
 export function ResizablePeek({
   storageKey,
   ariaLabel,
+  onDismiss,
   children,
 }: {
   storageKey: string;
   ariaLabel: string;
+  /** Close on outside click / Escape — the Brain drawer's dismiss
+   *  contract: a dimmed backdrop covers the surface behind the panel and
+   *  a click on it (or Escape anywhere an editor hasn't claimed it)
+   *  collapses the peek. */
+  onDismiss?: () => void;
   children: React.ReactNode;
 }) {
   const { width, resizing, handleProps } = usePeekResize(storageKey);
+
+  // Escape closes (editors stopPropagation their own Escape first).
+  useEffect(() => {
+    if (!onDismiss) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onDismiss();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onDismiss]);
+
   return (
-    <aside
-      aria-label={ariaLabel}
-      style={width !== null ? { width } : undefined}
-      className={cn(
-        "absolute inset-y-0 right-0 z-20 flex max-w-[100vw] flex-col border-l border-border/60 bg-background shadow-2xl",
-        width === null && PEEK_DEFAULT_WIDTH_CLASS,
-        // The slide-in is skipped mid-resize so the panel tracks the pointer.
-        !resizing && "animate-in slide-in-from-right-4 fade-in duration-200",
-        resizing && "select-none",
+    <>
+      {onDismiss && (
+        <div
+          className="absolute inset-0 z-10 bg-background/40 backdrop-blur-[2px] animate-in fade-in-0 duration-200"
+          onClick={onDismiss}
+          aria-hidden
+        />
       )}
-    >
-      <PeekResizeHandle resizing={resizing} {...handleProps} />
-      {children}
-    </aside>
+      <aside
+        aria-label={ariaLabel}
+        style={width !== null ? { width } : undefined}
+        className={cn(
+          "absolute inset-y-0 right-0 z-20 flex max-w-[100vw] flex-col border-l border-border/60 bg-background shadow-2xl",
+          width === null && PEEK_DEFAULT_WIDTH_CLASS,
+          // The slide-in is skipped mid-resize so the panel tracks the pointer.
+          !resizing && "animate-in slide-in-from-right-4 fade-in duration-200",
+          resizing && "select-none",
+        )}
+      >
+        <PeekResizeHandle resizing={resizing} {...handleProps} />
+        {children}
+      </aside>
+    </>
   );
 }

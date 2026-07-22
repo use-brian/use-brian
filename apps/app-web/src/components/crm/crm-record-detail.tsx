@@ -128,7 +128,7 @@ export function CrmRecordDetail({
   return (
     // A floating peek panel, NOT a flex sibling — it overlays the content
     // pane so opening a record never reflows the table/board underneath.
-    <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name}>
+    <ResizablePeek storageKey="operator:peek-width" ariaLabel={record.row.name} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
         <Link

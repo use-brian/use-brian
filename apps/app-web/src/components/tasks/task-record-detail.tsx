@@ -124,7 +124,7 @@ export function TaskRecordDetail({
   const project = taskProject(row);
 
   return (
-    <ResizablePeek storageKey="operator:peek-width" ariaLabel={row.title}>
+    <ResizablePeek storageKey="operator:peek-width" ariaLabel={row.title} onDismiss={onClose}>
       {/* Slim action toolbar — the Brain entry page's top-row shape. */}
       <div className="flex items-center justify-end gap-1 border-b border-border/60 px-3 py-2">
         <Link
