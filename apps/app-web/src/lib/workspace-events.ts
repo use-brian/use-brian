@@ -18,6 +18,10 @@
  *   workflow, workflow_run → WORKFLOW_REFRESH_EVENT (detail carries primitive + rowId)
  *   skill           → SKILL_REFRESH_EVENT
  *   scheduled_job   → SCHEDULED_JOB_REFRESH_EVENT (no consumer yet — P2 surfaces)
+ *   assistant       → ASSISTANT_REFRESH_EVENT (the roster surfaces in chrome:
+ *                     WorkspaceChrome's default interlocutor + the FloatingChat
+ *                     switcher, both of which live in the never-unmounting
+ *                     workspace layout and so cannot self-heal on navigation)
  *
  * Catch-up without replay: on every EventSource `open` (first connect AND
  * each auto-reconnect) and on `visibilitychange → visible`, all domain
@@ -56,6 +60,10 @@ import {
   type WorkflowRefreshDetail,
 } from "@/lib/workflow-events";
 import { DECK_REFRESH_EVENT, type DeckRefreshDetail } from "@/lib/deck-events";
+import {
+  ASSISTANT_REFRESH_EVENT,
+  type AssistantRefreshDetail,
+} from "@/lib/assistant-events";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -75,7 +83,8 @@ type WorkspacePrimitive =
   | "approval"
   | "skill"
   | "scheduled_job"
-  | "deck";
+  | "deck"
+  | "assistant";
 
 export type WorkspaceChangePayload = {
   workspaceId: string;
@@ -174,6 +183,16 @@ export function routeWorkspaceChange(
           } satisfies DeckRefreshDetail,
         },
       ];
+    case "assistant":
+      return [
+        {
+          event: ASSISTANT_REFRESH_EVENT,
+          detail: {
+            workspaceId: payload.workspaceId,
+            rowId: payload.rowId,
+          } satisfies AssistantRefreshDetail,
+        },
+      ];
     default:
       return [];
   }
@@ -188,6 +207,7 @@ export function allDomainDispatches(workspaceId: string): DomainDispatch[] {
     { event: SKILL_REFRESH_EVENT, detail: { workspaceId } },
     { event: SCHEDULED_JOB_REFRESH_EVENT, detail: { workspaceId } },
     { event: DECK_REFRESH_EVENT, detail: { workspaceId } },
+    { event: ASSISTANT_REFRESH_EVENT, detail: { workspaceId } },
   ];
 }
 

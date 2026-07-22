@@ -25,7 +25,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Users, Kanban, Rows3 } from "lucide-react";
+import { Kanban, Rows3 } from "lucide-react";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -458,15 +459,15 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   ];
 
   return (
-    // `relative`: the record-detail peek panel positions against this box
-    // and floats OVER the content — it never squeezes the middle pane.
-    <div className="relative flex h-full min-h-0">
-      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
-        {/* Header — title + section switch + view toggle. */}
-        <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 max-md:pl-14">
-          <Users className="size-[18px] text-muted-foreground" aria-hidden />
-          <h1 className="text-[15px] font-semibold">{t.title}</h1>
-          <div className="flex items-center gap-0.5 rounded-lg bg-muted/50 p-0.5">
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Chrome — the shared operator top bar names the app; the section
+          switch rides its center slot, the deals count + view toggle its
+          right slot, replacing the old icon+title header row
+          ([COMP:app-web/operator-topbar]). */}
+      <OperatorTopbar
+        app="crm"
+        center={
+          <div className="flex shrink-0 items-center gap-0.5 rounded-lg bg-sidebar-accent/60 p-0.5">
             {CRM_SECTIONS.map((section) => (
               <button
                 key={section}
@@ -479,7 +480,7 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                   "inline-flex h-6.5 items-center gap-1.5 rounded-md px-2 text-[12.5px] transition-colors",
                   view.section === section
                     ? "bg-background font-medium shadow-sm"
-                    : "text-muted-foreground hover:text-foreground",
+                    : "text-sidebar-foreground/70 hover:text-sidebar-accent-foreground",
                 )}
               >
                 {sectionLabels[section]}
@@ -491,15 +492,17 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
               </button>
             ))}
           </div>
-          {view.section === "deals" && data !== null && (
-            <span className="text-[12.5px] text-muted-foreground max-lg:hidden">
-              {format(t.dealCountSummary, {
-                open: String(openDealCount),
-              })}
-            </span>
-          )}
-          {view.section === "deals" && (
-            <div className="ml-auto flex items-center gap-1">
+        }
+        right={
+          view.section === "deals" ? (
+            <>
+              {data !== null && (
+                <span className="text-[12.5px] text-sidebar-foreground/70 max-lg:hidden">
+                  {format(t.dealCountSummary, {
+                    open: String(openDealCount),
+                  })}
+                </span>
+              )}
               <button
                 type="button"
                 aria-pressed={view.view === "board"}
@@ -508,8 +511,8 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 className={cn(
                   "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
                   view.view === "board"
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-accent/60",
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
                 )}
               >
                 <Kanban className="size-3.5" aria-hidden />
@@ -523,16 +526,23 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
                 className={cn(
                   "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
                   view.view === "table"
-                    ? "bg-accent text-accent-foreground"
-                    : "text-muted-foreground hover:bg-accent/60",
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
                 )}
               >
                 <Rows3 className="size-3.5" aria-hidden />
                 {t.viewTable}
               </button>
-            </div>
-          )}
-        </div>
+            </>
+          ) : undefined
+        }
+      />
+
+      {/* `relative`: the record-detail peek panel positions against THIS box
+          and floats OVER the content — it never squeezes the middle pane,
+          and never covers the bar. */}
+      <div className="relative flex min-h-0 flex-1">
+        <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col">
 
         {/* Toolbar — attention presets + filters + search in ONE quiet strip
             (it swaps for the bulk bar while table rows are checked). */}
@@ -745,17 +755,18 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
         </div>
       </div>
 
-      {/* Master-detail record pane. */}
-      {record && data && (
-        <CrmRecordDetail
-          workspaceId={workspaceId}
-          record={record}
-          data={data}
-          commits={commits}
-          onClose={() => setOpenRecord(null)}
-          onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
-        />
-      )}
+        {/* Master-detail record pane. */}
+        {record && data && (
+          <CrmRecordDetail
+            workspaceId={workspaceId}
+            record={record}
+            data={data}
+            commits={commits}
+            onClose={() => setOpenRecord(null)}
+            onOpenRecord={(ref) => setOpenRecord({ kind: ref.kind, id: ref.row.id })}
+          />
+        )}
+      </div>
     </div>
   );
 }

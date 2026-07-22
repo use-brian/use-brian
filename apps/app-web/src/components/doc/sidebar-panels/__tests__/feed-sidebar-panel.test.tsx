@@ -4,9 +4,9 @@
  * vitest in app-web is node-only — `renderToString` + module mocks
  * (next/navigation, the sidebar-data provider). Effects never run, so the
  * inbox badge (an effect-driven fetch) stays at zero here; what's asserted
- * is the nav structure: team rows always, the platform group only with a
- * connected profile, hrefs built through `feedPath`, and the URL-derived
- * active platform winning over profile order.
+ * is the nav structure: Create rows always, one Platforms row per target
+ * platform (connected → insights + expanded sub-rows inside its path,
+ * unconnected → connection / coming-soon), hrefs built through `feedPath`.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -61,39 +61,46 @@ function render(profiles: FeedProfile[] | null, pathname: string): string {
 }
 
 describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
-  it("renders the team rows with feedPath hrefs", () => {
+  it("renders the Create rows with feedPath hrefs", () => {
     const html = render([profile("threads", "acme")], "/w/ws-1/feed");
     expect(html).toContain('href="/w/ws-1/feed"');
-    expect(html).toContain('href="/w/ws-1/feed/inbox"');
     expect(html).toContain('href="/w/ws-1/feed/voice"');
+    expect(html).toContain('href="/w/ws-1/feed/drafts"');
+    expect(html).toContain('href="/w/ws-1/feed/inbox"');
+    expect(html).toContain('href="/w/ws-1/feed/ready"');
   });
 
-  it("renders platform rows for the first profile by default", () => {
+  it("renders one row per target platform: connected to insights, unconnected to connection", () => {
     const html = render([profile("threads", "acme")], "/w/ws-1/feed");
+    // Connected Threads → insights + handle.
     expect(html).toContain('href="/w/ws-1/feed/threads/insights"');
-    expect(html).toContain('href="/w/ws-1/feed/threads/draft-sessions"');
-    expect(html).toContain('href="/w/ws-1/feed/threads/settings"');
-    // Single profile → static pill (SSR splits `@{handle}` with a comment
-    // node, so match the handle alone), no picker trigger.
     expect(html).toContain("acme");
-    expect(html).not.toContain(en.feedPage.platformPickerAria);
+    // Unconnected connectable (X) → connection page.
+    expect(html).toContain('href="/w/ws-1/feed/twitter/connection"');
+    // Create-only targets → connection page (coming-soon stub) + label.
+    expect(html).toContain('href="/w/ws-1/feed/instagram/connection"');
+    expect(html).toContain('href="/w/ws-1/feed/xhs/connection"');
+    expect(html).toContain(en.feedPage.platformStatusComingSoon);
   });
 
-  it("the URL's platform wins over profile order", () => {
-    const html = render(
+  it("expands sub-rows only inside a connected platform's path", () => {
+    const home = render([profile("threads", "acme")], "/w/ws-1/feed");
+    expect(home).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
+    const inside = render(
       [profile("threads", "acme"), profile("twitter", "acmex")],
       "/w/ws-1/feed/twitter/insights",
     );
-    expect(html).toContain('href="/w/ws-1/feed/twitter/inspiration"');
-    expect(html).toContain("acmex");
-    // Two profiles → the picker trigger renders.
-    expect(html).toContain(en.feedPage.platformPickerAria);
+    expect(inside).toContain('href="/w/ws-1/feed/twitter/inspiration"');
+    expect(inside).toContain('href="/w/ws-1/feed/twitter/settings"');
+    // The other platform stays collapsed.
+    expect(inside).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
   });
 
-  it("hides the platform group entirely with no connected profiles", () => {
+  it("still renders the platform rows with no connected profiles", () => {
     const html = render([], "/w/ws-1/feed");
-    expect(html).toContain('href="/w/ws-1/feed/inbox"');
-    expect(html).not.toContain("/feed/threads/");
-    expect(html).not.toContain(en.feedPage.groups.platform);
+    expect(html).toContain('href="/w/ws-1/feed/drafts"');
+    expect(html).toContain('href="/w/ws-1/feed/threads/connection"');
+    expect(html).toContain(en.feedPage.platformStatusNotConnected);
+    expect(html).toContain(en.feedPage.platformStatusComingSoon);
   });
 });

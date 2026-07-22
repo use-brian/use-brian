@@ -656,12 +656,54 @@ export async function getWorkspacePrimaryAssistant(
   return result.rows[0] ?? null
 }
 
-/** Look up a specific assistant the user can access.
- *  Standard assistants: checked via assistant_members.
- *  Team assistants (workspace_id IS NOT NULL): checked via workspace_members.
- *  Returns null if the assistant doesn't exist or the user has no access. */
-export async function getUserAssistant(userId: string, assistantId: string): Promise<UserAssistantView | null> {
-  const result = await query<UserAssistantView>(
+/** The caller's effective role on an assistant, by precedence owner > admin > member. */
+export type AssistantRole = 'owner' | 'admin' | 'member'
+
+/** What `resolveAssistantAccess` returns: the assistant plus the caller's effective role. */
+export type AssistantAccess = {
+  assistant: UserAssistantView
+  role: AssistantRole
+}
+
+/**
+ * **The** assistant access predicate. Every "can this user use / see / edit this
+ * assistant" decision resolves here — do not hand-roll the membership join at a
+ * call site.
+ *
+ * A user reaches an assistant two ways: a direct `assistant_members` grant
+ * (legacy, and the Personal-workspace primary) or membership in the assistant's
+ * workspace (`workspace_members`, canonical post-089). The gate is
+ * `direct OR workspace`, and the returned `role` is the **effective** role — the
+ * higher-privilege of the two paths, by owner > admin > member.
+ *
+ * Never gate on `assistants.owner_user_id`. After the migration-089 ownership
+ * XOR flip that column is NULL for every workspace-owned assistant, so an
+ * `owner_user_id = $userId` predicate is unsatisfiable by any human for exactly
+ * the team assistants that matter most. That defect shipped twice: the Telegram
+ * `/switch` commit gate, and the unguarded Telegram link-code routes.
+ *
+ * The effective-role CASE is load-bearing and mirrors `listAccessibleAssistants`.
+ * The earlier per-route spelling was `UNION … LIMIT 1` with no `ORDER BY`, so
+ * when a user's direct and workspace roles disagreed the resolved role was
+ * whatever the planner emitted first — nondeterministic, on the path that gates
+ * every assistant write. Both membership tables key on `(…, user_id)`, so the
+ * LEFT JOINs match at most one row each: no fan-out, exactly one row out.
+ *
+ * System read (bare `query`): the membership JOINs are themselves the access
+ * gate, so no RLS context is needed — same pattern as `listAccessibleAssistants`.
+ *
+ * Returns null when the assistant does not exist OR the caller cannot reach it.
+ * Callers must not distinguish the two (a 404 on "exists but no access" leaks
+ * assistant existence across workspaces); respond 403 for both.
+ *
+ * See docs/architecture/platform/workspaces.md → "The assistant list" and
+ * component `[COMP:api/assistant-access]`.
+ */
+export async function resolveAssistantAccess(
+  userId: string,
+  assistantId: string,
+): Promise<AssistantAccess | null> {
+  const result = await query<UserAssistantView & { role: AssistantRole }>(
     `SELECT a.id, a.name, a.telegram_model_alias as "telegramModelAlias",
             a.workspace_id as "workspaceId",
             a.system_prompt as "systemPrompt",
@@ -670,26 +712,37 @@ export async function getUserAssistant(userId: string, assistantId: string): Pro
             a.blocked_user_ids as "blockedUserIds",
             a.clearance,
             a.compartments,
-            a.default_compartments as "defaultCompartments"
-     FROM assistants a
-     WHERE a.id = $2
-       AND (
-         EXISTS (
-           SELECT 1 FROM assistant_members am
-           WHERE am.assistant_id = a.id AND am.user_id = $1
-         )
-         OR (
-           a.workspace_id IS NOT NULL
-           AND EXISTS (
-             SELECT 1 FROM workspace_members tm
-             WHERE tm.workspace_id = a.workspace_id AND tm.user_id = $1
-           )
-         )
-       )
-     LIMIT 1`,
+            a.default_compartments as "defaultCompartments",
+            CASE
+              WHEN am.role = 'owner' OR wm.role = 'owner' THEN 'owner'
+              WHEN am.role = 'admin' OR wm.role = 'admin' THEN 'admin'
+              ELSE 'member'
+            END AS role
+       FROM assistants a
+       LEFT JOIN assistant_members am
+         ON am.assistant_id = a.id AND am.user_id = $1
+       LEFT JOIN workspace_members wm
+         ON wm.workspace_id = a.workspace_id AND wm.user_id = $1
+      WHERE a.id = $2
+        AND (
+              am.user_id IS NOT NULL
+              OR (a.workspace_id IS NOT NULL AND wm.user_id IS NOT NULL)
+            )
+      LIMIT 1`,
     [userId, assistantId],
   )
-  return result.rows[0] ?? null
+  const row = result.rows[0]
+  if (!row) return null
+  const { role, ...assistant } = row
+  return { assistant, role }
+}
+
+/** Look up a specific assistant the user can access, discarding the role.
+ *  Thin wrapper over `resolveAssistantAccess` — the predicate lives there, so
+ *  this can never drift from the role-aware path. Returns null if the assistant
+ *  doesn't exist or the user has no access. */
+export async function getUserAssistant(userId: string, assistantId: string): Promise<UserAssistantView | null> {
+  return (await resolveAssistantAccess(userId, assistantId))?.assistant ?? null
 }
 
 /**
@@ -789,7 +842,7 @@ export async function listAccessibleAssistants(
  * user is known, e.g. Slack BYO where the assistant_id comes from the URL
  * and the Slack user hasn't been mapped to a Use Brian user yet).
  */
-export type AssistantKind = 'standard' | 'app' | 'primary' | 'primary'
+export type AssistantKind = 'standard' | 'app' | 'primary'
 
 /**
  * App variant. Non-null iff `kind='app'`, per the constraint in migration 081

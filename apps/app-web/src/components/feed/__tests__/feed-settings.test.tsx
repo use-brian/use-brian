@@ -79,6 +79,7 @@ function workspace(
     canDraft: true,
     me: { id: "u-1" },
     profiles,
+    assistants: [],
     refresh: async () => {},
   };
 }

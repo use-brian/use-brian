@@ -15,6 +15,8 @@ const SOURCES: readonly IngestSourceProvider[] = [
   'calendar',
   'fathom',
   'email',
+  'imap',
+  'shopify',
 ]
 
 const UNIVERSAL_FILTERS = [
@@ -33,6 +35,8 @@ const SOURCE_SPECIFIC_FILTERS: Record<IngestSourceProvider, readonly string[]> =
   fathom: ['meeting_subject_contains', 'attendee_match'],
   whatsapp: ['group_match', 'sender_match', 'is_dm'],
   email: ['gate_match', 'subject_match', 'domain_match'],
+  imap: ['is_noreply', 'is_bulk'],
+  shopify: ['event_type', 'order_value_gte'],
 }
 
 const VALID_TEMPLATE_KEYS = [

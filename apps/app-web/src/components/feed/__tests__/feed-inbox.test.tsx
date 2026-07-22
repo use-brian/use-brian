@@ -61,6 +61,7 @@ function workspace(profiles: FeedProfile[]): FeedWorkspaceValue {
     canDraft: true,
     me: { id: "u-1" },
     profiles,
+    assistants: [],
     refresh: async () => {},
   };
 }

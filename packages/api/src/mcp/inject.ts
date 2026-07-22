@@ -18,10 +18,13 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createKnowledgeTools, createAgentmailTools } from '@use-brian/core'
+import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
+import { createMailboxApi } from '../mailbox/mailbox-api.js'
+import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
+import type { MailboxAccountSettings } from '../mailbox/types.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -63,6 +66,39 @@ import {
   unpackFathomTokens, packFathomTokens,
   type FathomTokens,
 } from '../fathom/client.js'
+import {
+  createShopifyTokenManager,
+  unpackShopifyTokens, packShopifyTokens,
+  getShop as getShopifyShop,
+  listProducts as listShopifyProducts,
+  getProduct as getShopifyProduct,
+  listOrders as listShopifyOrders,
+  getOrder as getShopifyOrder,
+  searchCustomers as searchShopifyCustomers,
+  getCustomer as getShopifyCustomer,
+  getInventoryLevels as getShopifyInventoryLevels,
+  listCollections as listShopifyCollections,
+  listDraftOrders as listShopifyDraftOrders,
+  listDiscounts as listShopifyDiscounts,
+  listAbandonedCheckouts as listShopifyAbandonedCheckouts,
+  getPayoutsSummary as getShopifyPayoutsSummary,
+  listDisputes as listShopifyDisputes,
+  listContent as listShopifyContent,
+  fetchOrdersRange as fetchShopifyOrdersRange,
+  updateProduct as updateShopifyProduct,
+  createProduct as createShopifyProduct,
+  createDraftOrder as createShopifyDraftOrder,
+  sendDraftOrderInvoice as sendShopifyDraftOrderInvoice,
+  addTags as addShopifyTags,
+  updateCustomer as updateShopifyCustomer,
+  setInventoryQuantity as setShopifyInventoryQuantity,
+  createFulfillment as createShopifyFulfillment,
+  createDiscountCode as createShopifyDiscountCode,
+  createContent as createShopifyContent,
+  cancelOrder as cancelShopifyOrder,
+  refundOrder as refundShopifyOrder,
+  completeDraftOrder as completeShopifyDraftOrder,
+} from '../shopify/client.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
@@ -208,10 +244,47 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'fathomGetTranscript',
     'fathomGetSummary',
   ],
+  shopify: [
+    'shopifyGetShop',
+    'shopifyListProducts',
+    'shopifyGetProduct',
+    'shopifyListOrders',
+    'shopifyGetOrder',
+    'shopifySearchCustomers',
+    'shopifyGetCustomer',
+    'shopifyGetInventoryLevels',
+    'shopifyListCollections',
+    'shopifyListDraftOrders',
+    'shopifyListDiscounts',
+    'shopifyListAbandonedCheckouts',
+    'shopifyGetPayoutsSummary',
+    'shopifyListDisputes',
+    'shopifyListContent',
+    'shopifySalesReport',
+    'shopifyUpdateProduct',
+    'shopifyCreateProduct',
+    'shopifyCreateDraftOrder',
+    'shopifySendDraftOrderInvoice',
+    'shopifyAddTags',
+    'shopifyUpdateCustomer',
+    'shopifySetInventory',
+    'shopifyCreateFulfillment',
+    'shopifyCreateDiscountCode',
+    'shopifyCreateContent',
+    'shopifyCancelOrder',
+    'shopifyRefundOrder',
+    'shopifyCompleteDraftOrder',
+  ],
   agentmail: [
     'agentmailSendMessage',
     'agentmailSearchThreads',
     'agentmailCreateDraft',
+  ],
+  imap: [
+    'imapSearchMessages',
+    'imapGetMessage',
+    'imapSendMessage',
+    'searchEmailArchive',
   ],
 }
 
@@ -686,6 +759,12 @@ export async function injectMcpTools(params: {
   await injectGitHubTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('github'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
+  await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
+  await injectMailboxTools({
+    connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
+    connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
+    healthProbe: { report: reportHealth },
+  })
   const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth)
 
   // ── Team overlays (Stage 4/5 of the team-connector promotion) ──
@@ -756,6 +835,32 @@ export async function injectMcpTools(params: {
           await injectNotionTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined, boundGrantCreds, undefined, undefined, { report: reportHealth, instanceId: g.instance.id }, assistantConnectorGrantsStore)
         } else if (p === 'fathom') {
           await injectFathomTools(grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined)
+        } else if (p === 'shopify') {
+          // Rotated tuples persist back into the EXPOSED instance row (the
+          // Fathom team-path deferral doesn't apply: updateCredentialsSystem
+          // gives us the system-level writer the rotation needs).
+          await injectShopifyTools(
+            grantorConnectors, connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined,
+            boundGrantCreds,
+            async (encoded) => {
+              if (!connectorInstanceStore) throw new Error('Shopify token rotation needs the instance store')
+              await connectorInstanceStore.updateCredentialsSystem(g.instance.id, { client_id: 'shopify_oauth', client_secret: encoded })
+            },
+            undefined, undefined, undefined,
+            { report: reportHealth, instanceId: g.instance.id },
+            assistantConnectorGrantsStore,
+          )
+        } else if (p === 'imap') {
+          // The user's corporate mailbox exposed to the workspace. Bind to
+          // the EXACT exposed instance (the typed 'imap' credentials blob) —
+          // the same instance-binding rule as the incident-2026-07-08 fix.
+          await injectMailboxTools({
+            connectors: grantorConnectors, settingsStore, userId: g.grantedByUserId, assistantId,
+            assistantConnectorStore, tools,
+            connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
+            instanceIdOverride: g.instance.id,
+            healthProbe: { report: reportHealth },
+          })
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
           // Scope the injector to the GRANTED provider only. `injectGoogleTools`
           // injects every connected Google provider it sees in `connectors`, so
@@ -869,6 +974,29 @@ export async function injectMcpTools(params: {
           // writer lands. User-scoped Fathom continues to work via the main
           // built-in path above.
           continue
+        } else if (p === 'shopify') {
+          await injectShopifyTools(
+            syntheticConnectors,
+            connectorStore,
+            teamPolicyStore,     // team-owned: policy from workspace_tool_policy
+            userId,
+            assistantId,
+            assistantConnectorStore,
+            tools,
+            undefined,
+            async () => {
+              const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+              return creds?.client_secret ?? null
+            },
+            // Rotated tuples persist back into the team-scoped row via the
+            // system-level writer (the Fathom deferral above predates it).
+            async (encoded) => {
+              await connectorInstanceStore.updateCredentialsSystem(inst.id, { client_id: 'shopify_oauth', client_secret: encoded })
+            },
+            undefined, undefined, undefined,
+            { report: reportHealth, instanceId: inst.id },
+            assistantConnectorGrantsStore,
+          )
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
           googleOverrides[p] = async () => {
             const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
@@ -2542,6 +2670,299 @@ async function injectFathomTools(
     console.debug(`[mcp-inject] Fathom: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra account(s))` : ''}`)
   } catch (err) {
     console.error('[mcp-inject] Fathom injection failed:', err)
+  }
+}
+
+// ── Built-in Shopify connector ─────────────────────────────
+// Store reads + safe v1 writes (docs/architecture/integrations/shopify.md).
+// Credentials are a per-shop tuple: pasted `shpat_` tokens are static; OAuth
+// tokens are expiring with a ROTATING refresh token, so like Fathom each
+// account gets its own token manager whose persist is bound to that
+// instance's row (persist-before-use — a lost persist bricks the connection).
+
+async function injectShopifyTools(
+  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectorStore: ConnectorStore,
+  settingsStore: McpSettingsStore,
+  userId: string,
+  assistantId: string,
+  assistantConnectorStore: AssistantConnectorStore | undefined,
+  tools: Map<string, Tool>,
+  unavailable?: string[],
+  /** See `injectGitHubTools` — same role. Returns the encoded ShopifyTokens JSON blob. */
+  credsOverride?: () => Promise<string | null>,
+  /** Persistence override for grant/team-native rows; defaults to the user-scoped connectorStore. */
+  persistOverride?: (encoded: string) => Promise<void>,
+  /** Additional connected Shopify instances (multi-store). See `injectGitHubTools`. */
+  extraInstances?: ConnectorInstanceRef[],
+  /** Load an extra instance's encoded token tuple. */
+  resolveInstanceCreds?: (instanceId: string) => Promise<string | null>,
+  /** Persist a rotated token tuple back to an extra instance. */
+  persistInstanceCreds?: (instanceId: string, clientId: string, secret: string) => Promise<void>,
+  /** Call-time liveness probe (migration 294). See `injectGitHubTools`. */
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  /** Per-assistant write-grant gate — see `gateToolsOnActionGrants`. */
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore,
+): Promise<void> {
+  const shopify = connectors.find((c) => c.connectorId === 'shopify' && c.connected)
+  const shopifyEnabled = shopify && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'shopify'))
+
+  if (!shopify || !shopifyEnabled) {
+    unavailable?.push(notConnectedNotice('Shopify', 'store products, orders, customers, and inventory'))
+    return
+  }
+
+  async function loadEncodedTokens(): Promise<string | null> {
+    if (credsOverride) return credsOverride()
+    const creds = await connectorStore.getCredentials(userId, 'shopify')
+    return creds?.client_secret ?? null
+  }
+
+  async function persistEncoded(encoded: string): Promise<void> {
+    if (persistOverride) {
+      await persistOverride(encoded)
+      return
+    }
+    await connectorStore.upsert(userId, {
+      connectorId: 'shopify',
+      name: 'Shopify',
+      connected: true,
+      credentials: { client_id: 'shopify_oauth', client_secret: encoded },
+    })
+  }
+
+  // App credentials (SHOPIFY_CLIENT_ID/SECRET) are only needed to refresh an
+  // expiring OAuth token — resolved lazily inside the manager so pasted
+  // static tokens work with zero app registration.
+  function makeTokenManager(
+    load: () => Promise<string | null>,
+    persist: (encoded: string) => Promise<void>,
+  ) {
+    return createShopifyTokenManager({
+      getAppConfig: () => getConnectorConfig('shopify'),
+      store: {
+        async getTokens() {
+          const encoded = await load()
+          return encoded ? unpackShopifyTokens(encoded) : null
+        },
+        async persistTokens(tokens) {
+          await persist(packShopifyTokens(tokens))
+        },
+      },
+    })
+  }
+
+  function buildTools(tm: ReturnType<typeof makeTokenManager>): Tool[] {
+    return gateToolsOnActionGrants(createShopifyTools({
+      getShop: async () => getShopifyShop(await tm.getAuth()),
+      listProducts: async (params) => listShopifyProducts(await tm.getAuth(), params),
+      getProduct: async (productId) => getShopifyProduct(await tm.getAuth(), productId),
+      listOrders: async (params) => listShopifyOrders(await tm.getAuth(), params),
+      getOrder: async (orderId) => getShopifyOrder(await tm.getAuth(), orderId),
+      searchCustomers: async (params) => searchShopifyCustomers(await tm.getAuth(), params),
+      getCustomer: async (customerId) => getShopifyCustomer(await tm.getAuth(), customerId),
+      getInventoryLevels: async (params) => getShopifyInventoryLevels(await tm.getAuth(), params),
+      listCollections: async (params) => listShopifyCollections(await tm.getAuth(), params),
+      listDraftOrders: async (params) => listShopifyDraftOrders(await tm.getAuth(), params),
+      listDiscounts: async (params) => listShopifyDiscounts(await tm.getAuth(), params),
+      listAbandonedCheckouts: async (params) => listShopifyAbandonedCheckouts(await tm.getAuth(), params),
+      getPayoutsSummary: async (params) => getShopifyPayoutsSummary(await tm.getAuth(), params),
+      listDisputes: async (params) => listShopifyDisputes(await tm.getAuth(), params),
+      listContent: async (params) => listShopifyContent(await tm.getAuth(), params),
+      fetchOrdersRange: async (params) => fetchShopifyOrdersRange(await tm.getAuth(), params),
+      updateProduct: async (params) => updateShopifyProduct(await tm.getAuth(), params),
+      createProduct: async (params) => createShopifyProduct(await tm.getAuth(), params),
+      createDraftOrder: async (params) => createShopifyDraftOrder(await tm.getAuth(), params),
+      sendDraftOrderInvoice: async (draftOrderId) => sendShopifyDraftOrderInvoice(await tm.getAuth(), draftOrderId),
+      addTags: async (resource, resourceId, tags) => addShopifyTags(await tm.getAuth(), resource, resourceId, tags),
+      updateCustomer: async (params) => updateShopifyCustomer(await tm.getAuth(), params),
+      setInventoryQuantity: async (params) => setShopifyInventoryQuantity(await tm.getAuth(), params),
+      createFulfillment: async (params) => createShopifyFulfillment(await tm.getAuth(), params),
+      createDiscountCode: async (params) => createShopifyDiscountCode(await tm.getAuth(), params),
+      createContent: async (params) => createShopifyContent(await tm.getAuth(), params),
+      cancelOrder: async (params) => cancelShopifyOrder(await tm.getAuth(), params),
+      refundOrder: async (params) => refundShopifyOrder(await tm.getAuth(), params),
+      completeDraftOrder: async (params) => completeShopifyDraftOrder(await tm.getAuth(), params),
+    }), 'shopify', assistantConnectorGrantsStore, assistantId)
+  }
+
+  const primaryInstanceId = healthProbe?.instanceId ?? (shopify as { id?: string }).id ?? null
+  try {
+    const built = buildTools(makeTokenManager(loadEncodedTokens, persistEncoded))
+    const shopifyTools = healthProbe && primaryInstanceId
+      ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+      : built
+
+    for (const tool of shopifyTools) {
+      if (await applyPolicyOrSkip(tool, 'shopify', settingsStore, assistantId, userId, unavailable) === 'include') {
+        tools.set(tool.name, tool)
+      }
+    }
+
+    // Extra stores → label-qualified variant tool sets, each with its own
+    // token manager bound to its own instance row.
+    if (!credsOverride && extraInstances?.length && resolveInstanceCreds && persistInstanceCreds) {
+      await injectInstanceVariants({
+        provider: 'shopify',
+        extras: extraInstances,
+        settingsStore, assistantId, userId, tools,
+        buildToolsForInstance: (inst) => {
+          const variant = buildTools(makeTokenManager(
+            () => resolveInstanceCreds(inst.id),
+            (encoded) => persistInstanceCreds(inst.id, 'shopify_oauth', encoded),
+          ))
+          return healthProbe ? wrapToolsWithHealthProbe(variant, inst.id, healthProbe.report) : variant
+        },
+      })
+    }
+
+    console.debug(`[mcp-inject] Shopify: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra store(s))` : ''}`)
+  } catch (err) {
+    console.error('[mcp-inject] Shopify injection failed:', err)
+  }
+}
+
+// ── Company mailbox (imap) injection ──────────────────────────
+//
+// The USER'S own corporate mailbox (mailbox-imap.md) — the third identity
+// lane beside gmail (the user's Google account) and agentmail (the
+// assistant's own address). Single account per user (D11, `single_instance`
+// in the registry). Credentials are the typed `type:'imap'` blob on the
+// user-scoped connector_instance; `imapSendMessage` reuses the Gmail
+// governance chain verbatim: `ask` classification + write-grant gate
+// (registry-derived), the connector_actions `send_email` audit with the
+// payload-classifier preflight before the network call, and the
+// confidential-turn egress refusal inside the core tool.
+
+async function injectMailboxTools(params: {
+  connectors: Array<{ connectorId: string; connected: boolean }>
+  settingsStore: McpSettingsStore
+  userId: string
+  assistantId: string
+  assistantConnectorStore: AssistantConnectorStore | undefined
+  tools: Map<string, Tool>
+  unavailable?: string[]
+  connectorInstanceStore?: import('../db/connector-instance-store.js').ConnectorInstanceStore
+  connectorActionAudit?: ConnectorActionAudit
+  assistantConnectorGrantsStore?: import('../db/assistant-connector-grants-store.js').AssistantConnectorGrantsStore
+  /** Grant-overlay path: bind to this EXACT exposed instance id. */
+  instanceIdOverride?: string | null
+  healthProbe?: { report: HealthReporter }
+}): Promise<void> {
+  const {
+    connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
+    connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore, instanceIdOverride, healthProbe,
+  } = params
+
+  const imap = connectors.find((c) => c.connectorId === 'imap' && c.connected)
+  const imapEnabled = imap && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'imap'))
+  if (!imap || !imapEnabled) {
+    unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
+    return
+  }
+  if (!connectorInstanceStore) return  // credentials live only on the instance row — nothing to bind
+
+  const instanceId = instanceIdOverride ?? (imap as { id?: string }).id ?? null
+  if (!instanceId) return
+
+  async function getSettings(): Promise<MailboxAccountSettings> {
+    const creds = await connectorInstanceStore!.getAuthCredentialsSystem(instanceId!)
+    if (!creds || creds.type !== 'imap') {
+      throw new Error('Company mailbox is not connected (no imap credentials on the instance)')
+    }
+    const { type: _t, ...settings } = creds
+    return settings
+  }
+
+  try {
+    const api = createMailboxApi({ cacheKey: instanceId, getSettings })
+
+    // Audit-wrapped send (the Gmail pattern): classifier preflight decides
+    // BEFORE the network call; executed/failed both audit. v1
+    // `audienceClearance='public'` for all recipients, like gmail.
+    const auditedApi: typeof api = {
+      searchMessages: (p) => api.searchMessages(p),
+      getMessage: (id) => api.getMessage(id),
+      sendMessage: async (p) => {
+        const auditPayload = {
+          to: p.to,
+          from: null as string | null,
+          subject: p.subject,
+          has_body: Boolean(p.body),
+          body_length: p.body?.length ?? 0,
+          body: p.body ?? '',
+          in_reply_to: p.inReplyTo ?? null,
+        }
+        let preflight: ConnectorActionPreflight | undefined
+        if (connectorActionAudit) {
+          preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload: auditPayload })
+          if (preflight.shouldDeny) {
+            try {
+              await connectorActionAudit.emit(
+                { userId, assistantId },
+                { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'denied', payload: auditPayload, preflight },
+              )
+            } catch (auditErr) {
+              console.warn('[mcp-inject] imap classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
+            }
+            throw new Error(
+              `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
+            )
+          }
+        }
+        try {
+          const result = await api.sendMessage(p)
+          if (connectorActionAudit) {
+            try {
+              await connectorActionAudit.emit(
+                { userId, assistantId },
+                { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'executed', externalId: result.messageId, payload: auditPayload, preflight },
+              )
+            } catch (auditErr) {
+              console.warn('[mcp-inject] imap connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
+            }
+          }
+          return result
+        } catch (err) {
+          if (connectorActionAudit) {
+            try {
+              await connectorActionAudit.emit(
+                { userId, assistantId },
+                {
+                  connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'failed',
+                  payload: { ...auditPayload, error: err instanceof Error ? err.message : String(err) },
+                  preflight,
+                },
+              )
+            } catch (auditErr) {
+              console.warn('[mcp-inject] imap connector_action audit emit failed (failure path, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
+            }
+          }
+          throw err
+        }
+      },
+    }
+
+    const built = gateToolsOnActionGrants(createMailboxTools(auditedApi), 'imap', assistantConnectorGrantsStore, assistantId)
+    const mailboxTools = healthProbe
+      ? wrapToolsWithHealthProbe(built, instanceId, healthProbe.report)
+      : built
+    // Archive search (Phase 2) — injected only when boot wired the archive
+    // seam (DB + embedder). Read-only; a DB search must not flip connector
+    // health, so it rides OUTSIDE the health-probe wrap. Owner + instance are
+    // bound here, never model inputs.
+    const archiveDeps = getGlobalMailboxArchiveDeps()
+    const withArchive = archiveDeps
+      ? [...mailboxTools, createSearchEmailArchiveTool({ ownerUserId: userId, instanceId, deps: archiveDeps })]
+      : mailboxTools
+    for (const tool of withArchive) {
+      if (await applyPolicyOrSkip(tool, 'imap', settingsStore, assistantId, userId, unavailable) === 'include') {
+        tools.set(tool.name, tool)
+      }
+    }
+    console.debug('[mcp-inject] Company mailbox (imap): injected tools')
+  } catch (err) {
+    console.error('[mcp-inject] Company mailbox (imap) injection failed:', err)
   }
 }
 

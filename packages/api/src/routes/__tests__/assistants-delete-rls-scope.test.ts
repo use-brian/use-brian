@@ -24,10 +24,19 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// verifyMembership now delegates to `resolveAssistantAccess` — the single access
+// predicate (see [COMP:api/assistant-access]). It is one call, not a route-local
+// membership join, so the gate is stubbed here instead of via queryWithRLS.
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS, getPool } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 const mockGetPool = vi.mocked(getPool)
 
 const capabilityStore = {
@@ -58,8 +67,8 @@ function makeApp(opts: { userId: string }) {
 describe('[COMP:api/assistants-delete-rls-scope] DELETE /:assistantId scopes RLS with SET LOCAL', () => {
   it('uses SET LOCAL after BEGIN and never leaves the connection at current_user_id = ""', async () => {
     // Pre-delete guards (all queryWithRLS): role=owner, kind=standard, no other members.
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQueryWithRLS
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
       .mockResolvedValueOnce({ rows: [{ kind: 'standard' }], rowCount: 1 } as never)
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
 

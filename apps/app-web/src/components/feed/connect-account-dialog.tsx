@@ -13,7 +13,7 @@
  * Admin/owner only.
  *
  * Port deltas: `useWorkspaceContext()` → `useFeedWorkspace()`; platform list
- * derived from `FEED_PLATFORMS`; copy via `useT().feedPage.connect`.
+ * derived from `FEED_CONNECTABLE_PLATFORMS`; copy via `useT().feedPage.connect`.
  *
  * [COMP:app-web/feed-connect-account-dialog]
  */
@@ -24,7 +24,10 @@ import { cn } from "@/lib/utils";
 import { authFetch } from "@/lib/auth-fetch";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { buildAuthorizeUrl } from "@/lib/feed-connect-account";
-import { FEED_PLATFORMS, type FeedPlatform } from "@/lib/feed-nav";
+import {
+  FEED_CONNECTABLE_PLATFORMS,
+  type ConnectableFeedPlatform,
+} from "@/lib/feed-nav";
 import { useT } from "@/lib/i18n/client";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -37,7 +40,9 @@ export function useConnectAccount() {
   const isAdmin = team.role === "admin" || team.role === "owner";
 
   const [open, setOpen] = useState(false);
-  const [platform, setPlatform] = useState<FeedPlatform>("threads");
+  // Connectable platforms only — Instagram/XHS draft without OAuth and
+  // land on the coming-soon connection stub (feed-create-split.md D11).
+  const [platform, setPlatform] = useState<ConnectableFeedPlatform>("threads");
   const [assistants, setAssistants] = useState<DistributionAssistant[]>([]);
   const [mode, setMode] = useState<"existing" | "new">("new");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -159,15 +164,15 @@ export function useConnectAccount() {
             <div>
               <div className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground mb-1.5">{t.connect.platformLabel}</div>
               <div className="grid grid-cols-2 gap-2">
-                {FEED_PLATFORMS.map((p) => (
+                {FEED_CONNECTABLE_PLATFORMS.map((p) => (
                   <button
                     key={p}
                     type="button"
                     onClick={() => setPlatform(p)}
                     className={cn(
-                      "press rounded-xl border px-3 h-10 text-sm font-medium transition-colors",
+                      "press rounded-lg border px-3 h-9 text-[13px] font-medium transition-colors",
                       platform === p
-                        ? "border-primary/50 bg-primary/10 text-foreground"
+                        ? "border-transparent bg-foreground text-background"
                         : "border-border bg-background/60 text-muted-foreground hover:bg-accent",
                     )}
                   >
@@ -211,7 +216,7 @@ export function useConnectAccount() {
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     placeholder={t.connect.voiceNamePlaceholder}
-                    className="w-full rounded-xl border border-border bg-background px-3 h-10 text-sm outline-none focus:border-primary/50"
+                    className="w-full rounded-lg border border-border bg-background px-3 h-9 text-sm outline-none focus:border-primary/50"
                   />
                 )}
               </div>

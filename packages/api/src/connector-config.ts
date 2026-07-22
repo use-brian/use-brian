@@ -23,7 +23,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 
-export type ConnectorProvider = 'google' | 'notion' | 'fathom'
+export type ConnectorProvider = 'google' | 'notion' | 'fathom' | 'shopify'
 
 export type ConnectorAppConfig = {
   clientId: string
@@ -40,6 +40,7 @@ const fileSchema = z
     google: appConfigSchema.optional(),
     notion: appConfigSchema.optional(),
     fathom: appConfigSchema.optional(),
+    shopify: appConfigSchema.optional(),
   })
   .partial()
 
@@ -76,6 +77,7 @@ const ENV_KEYS: Record<ConnectorProvider, { id: string; secret: string }> = {
   google: { id: 'GOOGLE_CLIENT_ID', secret: 'GOOGLE_CLIENT_SECRET' },
   notion: { id: 'NOTION_CLIENT_ID', secret: 'NOTION_CLIENT_SECRET' },
   fathom: { id: 'FATHOM_CLIENT_ID', secret: 'FATHOM_CLIENT_SECRET' },
+  shopify: { id: 'SHOPIFY_CLIENT_ID', secret: 'SHOPIFY_CLIENT_SECRET' },
 }
 
 /**

@@ -137,11 +137,43 @@ function AgentmailIcon() {
   );
 }
 
+function ImapMailboxIcon() {
+  // Company Email (IMAP) — inbox-tray glyph, distinct from the AgentMail
+  // envelope. Strokes only so it inherits the text color in both themes.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" xmlns="http://www.w3.org/2000/svg">
+      <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+      <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </svg>
+  );
+}
+
 function NotionIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 100 100" fill="none">
       <path d="M6.017 4.313l55.333-4.087c6.797-.583 8.543-.19 12.817 2.917l17.663 12.443c2.913 2.14 3.883 2.723 3.883 5.053v68.243c0 4.277-1.553 6.807-6.99 7.193L24.467 99.967c-4.08.193-6.023-.39-8.16-3.113L3.3 79.94c-2.333-3.113-3.3-5.443-3.3-8.167V11.113c0-3.497 1.553-6.413 6.017-6.8Z" fill="#fff" />
       <path fillRule="evenodd" clipRule="evenodd" d="M61.35.227l-55.333 4.087C1.553 4.7 0 7.617 0 11.113v60.66c0 2.723.967 5.053 3.3 8.167l12.007 16.913c2.137 2.723 4.08 3.307 8.16 3.113L88.723 96.08c5.437-.387 6.99-2.917 6.99-7.193V20.64c0-2.21-.852-2.845-3.443-4.733L74.167 3.14C69.893.033 68.147-.357 61.35.227ZM25.723 19.263c-5.53.337-6.793.413-9.95-2.21L7.89 10.727c-.78-.78-.39-1.753 1.163-1.947l52.617-3.89c4.667-.39 7.003 1.167 8.75 2.527l9.457 6.807c.39.193 1.36 1.36.193 1.36l-54.347 3.487v.193ZM19.297 88.4V29.68c0-2.527.78-3.697 3.103-3.893L86 22.347c2.14-.193 3.107 1.167 3.107 3.693v58.527c0 2.527-.39 4.667-3.893 4.86l-62.803 3.693c-3.5.193-5.113-.973-5.113-4.72ZM74.36 33.5c.39 1.75 0 3.5-1.75 3.7l-3.11.583v43.313c-2.723 1.363-5.247 2.14-7.393 2.14-3.497 0-4.277-.967-6.803-4.083L37.873 50.97v27.527l6.413 1.36s0 3.5-4.857 3.5l-13.39.777c-.39-.777 0-2.723 1.36-3.11l3.497-.967V41.173l-4.86-.39c-.39-1.75.583-4.277 3.3-4.47L43.06 35.64l18.273 28.11V38.573l-5.247-.583c-.39-2.14 1.167-3.7 3.107-3.89l13.167-.6Z" fill="#000" />
+    </svg>
+  );
+}
+
+function ShopifyIcon() {
+  // Simplified Shopify shopping-bag mark in the brand greens: bag silhouette
+  // with a darker right lobe and the white "S" squiggle.
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M17.9 5.4c-.02-.12-.12-.19-.22-.2l-2.1-.16-1.55-1.54c-.15-.15-.45-.11-.56-.07 0 0-.29.09-.78.24C12.21 2.3 11.36 1 9.9 1 6.9 1 5.46 4.75 5 6.66l-2.1.65c-.65.2-.67.22-.76.83L.7 19.2l9.5 1.8 5.15-1.12L17.9 5.4Z"
+        fill="#95BF47"
+      />
+      <path
+        d="M17.68 5.2l-2.1-.16-1.55-1.54a.35.35 0 0 0-.19-.09L10.2 21l5.15-1.12L17.9 5.4c-.02-.12-.12-.19-.22-.2Z"
+        fill="#5E8E3E"
+      />
+      <path
+        d="M11.4 8.2l-.63 1.9s-.57-.3-1.25-.3c-1.01 0-1.06.63-1.06.79 0 .87 2.26 1.2 2.26 3.23 0 1.6-1.01 2.63-2.38 2.63-1.64 0-2.47-1.02-2.47-1.02l.44-1.45s.86.74 1.59.74c.48 0 .67-.38.67-.65 0-1.14-1.85-1.19-1.85-3.04 0-1.57 1.12-3.08 3.38-3.08.87 0 1.3.25 1.3.25Z"
+        fill="#fff"
+      />
     </svg>
   );
 }
@@ -272,6 +304,7 @@ export function ConnectorIcon({
     case "slack": return <SlackIcon />;
     case "notion": return <NotionIcon />;
     case "fathom": return <FathomIcon />;
+    case "shopify": return <ShopifyIcon />;
     case "whatsapp": return <WhatsAppIcon />;
     case "files": return <FilesIcon />;
     case "computer": return <ComputerIcon />;
@@ -279,6 +312,7 @@ export function ConnectorIcon({
     case "s3": return <S3Icon />;
     case "msteams": return <MsTeamsIcon />;
     case "agentmail": return <AgentmailIcon />;
+    case "imap": return <ImapMailboxIcon />;
     default:
       if (iconUrl) {
         return (

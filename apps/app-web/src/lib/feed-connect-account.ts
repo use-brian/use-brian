@@ -9,9 +9,12 @@
  * [COMP:app-web/feed-connect-account]
  */
 
-import type { FeedPlatform } from "@/lib/feed-nav";
+import type { ConnectableFeedPlatform } from "@/lib/feed-nav";
 
-export const OAUTH_PATH: Record<FeedPlatform, string> = {
+// Connectable platforms only — Instagram/XHS have no OAuth integration yet
+// (docs/plans/feed-create-split.md D5/D11); their sidebar rows land on the
+// coming-soon connection stub instead of an authorize URL.
+export const OAUTH_PATH: Record<ConnectableFeedPlatform, string> = {
   threads: "/api/threads-oauth/authorize",
   twitter: "/api/twitter-oauth/authorize",
 };
@@ -23,7 +26,7 @@ export const OAUTH_PATH: Record<FeedPlatform, string> = {
  */
 export function buildAuthorizeUrl(params: {
   apiUrl: string;
-  platform: FeedPlatform;
+  platform: ConnectableFeedPlatform;
   assistantId: string;
   origin: string;
   workspaceId: string;

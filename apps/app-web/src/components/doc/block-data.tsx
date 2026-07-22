@@ -21,12 +21,16 @@
  * inline alert.
  *
  * Phase 3 — the remaining write-back actions:
- *   - `row-open` / `open-entity`  → intentionally NOT handled. The row
- *     detail drawer was removed: on a doc surface it is meaningless —
- *     the table already shows every field inline and edits commit
- *     inline — so clicking a row's "Open" menu item or a relation pill
- *     is inert (the shared renderer still emits these host-agnostic
- *     actions; this host simply ignores them, like `apps/web` does).
+ *   - `row-open` / `open-entity`  → for TABLES/BOARDS intentionally NOT
+ *     handled. The row detail drawer was removed: the table already
+ *     shows every field inline and edits commit inline, so clicking a
+ *     row's "Open" menu item or a relation pill is inert (the shared
+ *     renderer still emits these host-agnostic actions; this host
+ *     ignores them, like `apps/web` does). For a CALENDAR chip the
+ *     rationale inverts — a chip shows only a truncated title — so the
+ *     click opens the /tasks-surface task peek (`TaskRecordDetail`)
+ *     over the doc, with commits on the supersession-aware brain
+ *     adjust wire + an `onDataMutated` re-resolve.
  *   - `row-delete`  → confirm, optimistically drop the row, then
  *     `deleteEntity` (D.4 soft-delete). On failure, restore + alert.
  *   - `row-add`     → `createEntity` with the entity's minimal defaults,
@@ -38,11 +42,17 @@
  *     we route the group change through the same `patchEntity` path as a
  *     cell-update, and on failure refetch so the board snaps back to
  *     server truth.
+ *   - `reschedule`  → a calendar chip was dropped on another day. The
+ *     Calendar already moved the chip optimistically; we PATCH the row's
+ *     date field (`due` for tasks) through the same `patchEntity` path,
+ *     then refetch — success re-renders server truth (clearing the
+ *     renderer's optimistic overlay), failure snaps the chip back.
  *
  * [COMP:app-web/block-data]
  */
 
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { useT, format } from "@/lib/i18n/client";
 import { renderWidget } from "@use-brian/views-renderer";
 import type {
@@ -50,6 +60,7 @@ import type {
   A2UIRowValue,
   A2UIWidget,
   BoardWidget,
+  CalendarWidget,
   ColumnMenuLabels,
   OnActionHandler,
   TableWidget,
@@ -69,6 +80,15 @@ import {
   type CellValue,
   type PropertyKind,
 } from "@/lib/api/doc-entities";
+import { TaskRecordDetail } from "@/components/tasks/task-record-detail";
+import {
+  adjustBrainRow,
+  type AdjustMemoryChanges,
+} from "@/lib/api/brain-inbox";
+import { fetchWorkspaceTasks, type TaskRow } from "@/lib/api/tasks";
+import { projectOptions } from "@/lib/tasks-view";
+import { loadWorkspaceRoster } from "@/lib/api/workspace-roster";
+import type { AssignableMember } from "@/components/brain/property-edit";
 
 type CellUpdateParams = {
   entity: string;
@@ -323,6 +343,78 @@ export function BlockData({
   );
   const [cellError, setCellError] = useState<string | null>(null);
 
+  // ── Calendar task peek ────────────────────────────────────────────────
+  // Clicking a calendar chip opens the SAME floating task editor the
+  // /tasks operator surface uses (`TaskRecordDetail`) — a chip shows only
+  // a truncated title, so unlike a table row there is nothing to edit
+  // inline. Rows + roster load lazily on the first chip click; commits go
+  // through the supersession-aware brain adjust wire, then `onDataMutated`
+  // re-resolves the calendar so the chip reflects the edit.
+  const [peekTaskId, setPeekTaskId] = useState<string | null>(null);
+  const [peekTasks, setPeekTasks] = useState<TaskRow[] | null>(null);
+  const [peekRoster, setPeekRoster] = useState<AssignableMember[] | null>(null);
+  useEffect(() => {
+    if (!peekTaskId) return;
+    let cancelled = false;
+    // Refetch on every open — a drag-reschedule or another surface may have
+    // changed the row since the last peek. A kept stale list is only used
+    // as the fallback when the refetch fails mid-session.
+    fetchWorkspaceTasks(workspace.workspaceId)
+      .then((rows) => {
+        if (!cancelled) setPeekTasks(rows);
+      })
+      .catch(() => {
+        // No data at all → close rather than show an empty panel.
+        if (!cancelled) setPeekTasks((prev) => (prev === null ? [] : prev));
+      });
+    if (peekRoster === null) {
+      loadWorkspaceRoster(workspace.workspaceId)
+        .then((r) => {
+          if (!cancelled) setPeekRoster(r);
+        })
+        .catch(() => {
+          if (!cancelled) setPeekRoster([]);
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+    // `peekRoster` is a load-once cache, not a retrigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peekTaskId, workspace.workspaceId]);
+  const peekTask = useMemo(
+    () => (peekTasks ?? []).find((r) => r.id === peekTaskId) ?? null,
+    [peekTasks, peekTaskId],
+  );
+  const commitPeekField = useCallback(
+    async (
+      row: TaskRow,
+      changes: AdjustMemoryChanges,
+      patch: Partial<TaskRow>,
+    ): Promise<{ ok: boolean; error?: string }> => {
+      const result = await adjustBrainRow(
+        workspace.workspaceId,
+        "task",
+        row.id,
+        changes,
+      );
+      if (!result.ok) return { ok: false, error: result.error };
+      // Apply the local patch + follow a supersession id swap, so the peek
+      // stays anchored while the calendar refetches underneath.
+      setPeekTasks((prev) =>
+        prev
+          ? prev.map((r) =>
+              r.id === row.id ? { ...r, ...patch, id: result.newId ?? r.id } : r,
+            )
+          : prev,
+      );
+      setPeekTaskId((cur) => (cur === row.id ? (result.newId ?? row.id) : cur));
+      onDataMutated?.();
+      return { ok: true };
+    },
+    [workspace.workspaceId, onDataMutated],
+  );
+
   // Apply optimistic overrides + deletions BEFORE rendering so editors
   // paint the new value (and removed rows vanish) in the same frame as
   // commit.
@@ -339,12 +431,17 @@ export function BlockData({
     );
   }
 
-  const rowActionParams = isTableWidget(widget) ? (widget.rowAction?.params ?? {}) : {};
+  const actionCarrier = isTableWidget(widget)
+    ? widget
+    : isCalendarWidget(widget)
+      ? widget
+      : null;
+  const rowActionParams = actionCarrier?.rowAction?.params ?? {};
   const tableEntity =
     typeof rowActionParams.entity === "string" ? rowActionParams.entity : "row";
 
-  // Resolve the entity for this block. Tables carry it on `rowAction`;
-  // boards carry only `groupBy`, from which the entity is inferred.
+  // Resolve the entity for this block. Tables and calendars carry it on
+  // `rowAction`; boards carry only `groupBy`, from which it is inferred.
   const blockEntity: string = isBoardWidget(widget)
     ? boardEntity(widget.groupBy) ?? "row"
     : tableEntity;
@@ -543,6 +640,70 @@ export function BlockData({
       return;
     }
 
+    // ── Calendar day "+" → create a task due that day ───────────────
+    // The hover affordance fires `date-add { date: 'YYYY-MM-DD' }`. Create
+    // the entity with its date field pre-set (server fills the rest from
+    // the frozen-v1 defaults), then refetch so the new chip renders; the
+    // user clicks it to fill in the rest via the peek.
+    if (actionId === "date-add") {
+      const date = typeof params?.date === "string" ? params.date : null;
+      if (!date || !isCalendarWidget(widget)) return;
+      if (!isSupportedEntity(blockEntity)) {
+        setCellError(`Unsupported entity: ${blockEntity}`);
+        return;
+      }
+      setCellError(null);
+      void createEntity({
+        entity: blockEntity,
+        workspaceId: workspace.workspaceId,
+        values: { due: date },
+      }).then((result) => {
+        if (!result.ok) {
+          setCellError(format(t.dataRow.addFailed, { message: result.error }));
+          return;
+        }
+        onDataMutated?.();
+      });
+      return;
+    }
+
+    // ── Calendar chip drop → date-field update ──────────────────────
+    // The Calendar fires `reschedule { rowId, date, dateField }` after its
+    // own optimistic local move (`date` is the target day's YYYY-MM-DD;
+    // `dateField` is the widget's dateColumnId, e.g. `due`). Route it
+    // through the same per-field PATCH the cell editor uses, then refetch:
+    // on success the fresh payload carries the new date (clearing the
+    // renderer's overlay against server truth); on failure the refetch
+    // snaps the chip back to its server day.
+    if (actionId === "reschedule") {
+      const rowId = typeof params?.rowId === "string" ? params.rowId : null;
+      const date = typeof params?.date === "string" ? params.date : null;
+      const dateField =
+        typeof params?.dateField === "string" ? params.dateField : null;
+      if (!rowId || !date || !dateField || !isCalendarWidget(widget)) return;
+      if (!isSupportedEntity(blockEntity)) {
+        setCellError(`Unsupported entity: ${blockEntity}`);
+        return;
+      }
+      const patch = translateCommit(dateField, date);
+      if (!patch) {
+        setCellError(`Cannot translate update for field: ${dateField}`);
+        return;
+      }
+      setCellError(null);
+      void patchEntity({ entity: blockEntity, id: rowId, patch }).then(
+        (result) => {
+          if (!result.ok) {
+            setCellError(
+              format(t.dataRow.rescheduleFailed, { message: result.error }),
+            );
+          }
+          onDataMutated?.();
+        },
+      );
+      return;
+    }
+
     // ── Row add ("+ Add row") ───────────────────────────────────────
     if (actionId === "row-add") {
       if (customEntity) {
@@ -642,9 +803,25 @@ export function BlockData({
       return;
     }
 
-    // `row-open` / `open-entity` are deliberately unhandled — the row
-    // detail drawer was removed (see the header note). Row clicks edit
-    // cells inline; there is no detail panel to open.
+    // ── Calendar chip click → task peek ─────────────────────────────
+    // A calendar chip shows only a truncated title, so (unlike a table
+    // row, where every field edits inline and `open-entity` stays
+    // deliberately unhandled) a click opens the /tasks-surface peek
+    // panel over the doc.
+    if (
+      (actionId === "open-entity" || actionId === "row-open") &&
+      isCalendarWidget(widget) &&
+      blockEntity === "tasks"
+    ) {
+      const rowId = typeof params?.rowId === "string" ? params.rowId : null;
+      if (rowId) setPeekTaskId(rowId);
+      return;
+    }
+
+    // `row-open` / `open-entity` on tables/boards are deliberately
+    // unhandled — the row detail drawer was removed (see the header
+    // note). Table row clicks edit cells inline; there is no detail
+    // panel to open.
   };
 
   return (
@@ -673,6 +850,28 @@ export function BlockData({
             tableLabels,
           })
         : null}
+      {peekTask && typeof document !== "undefined"
+        ? // Portal to <body>: `ResizablePeek` positions with `absolute
+          // inset-y-0 right-0` + a full-bleed backdrop, so it must anchor
+          // to the viewport — rendered inline here it would anchor to the
+          // nearest positioned/transformed editor ancestor and float
+          // mid-page. The portal gives the /tasks + Brain drawer behavior:
+          // slide-in right panel, click the dimmed whitespace (or Escape)
+          // to collapse.
+          createPortal(
+            <div className="fixed inset-0 z-50">
+              <TaskRecordDetail
+                workspaceId={workspace.workspaceId}
+                row={peekTask}
+                roster={peekRoster}
+                projects={projectOptions(peekTasks ?? [])}
+                commitField={commitPeekField}
+                onClose={() => setPeekTaskId(null)}
+              />
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -687,4 +886,10 @@ function isBoardWidget(
   widget: A2UIWidget | null,
 ): widget is BoardWidget {
   return widget !== null && widget.type === "board";
+}
+
+function isCalendarWidget(
+  widget: A2UIWidget | null,
+): widget is CalendarWidget {
+  return widget !== null && widget.type === "calendar";
 }

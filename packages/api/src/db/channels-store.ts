@@ -34,7 +34,7 @@ import { getPool, query, queryWithRLS } from './client.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
-export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams'
+export type ChannelType = 'telegram' | 'slack' | 'whatsapp' | 'discord' | 'email' | 'msteams' | 'wechat'
 export type ChannelClearance = 'public' | 'internal' | 'confidential'
 export type ChannelCapability = 'chat' | 'broadcast' | 'ingest'
 export type ChannelStatus = 'active' | 'revoked' | 'invalid'
@@ -91,6 +91,9 @@ export const CHANNEL_CAPABILITIES: Record<ChannelType, ChannelCapability[]> = {
   // Microsoft Teams mirrors Slack: chat + broadcast + passive ingest
   // (docs/architecture/channels/msteams.md).
   msteams: ['chat', 'broadcast', 'ingest'],
+  // WeChat iLink bots are DMs-only chat — no groups, no broadcast surface,
+  // no ingest substrate (docs/architecture/channels/wechat.md).
+  wechat: ['chat'],
 }
 
 /**
@@ -110,6 +113,7 @@ function modelAliasColumnFor(channelType: ChannelType): string | null {
     case 'discord':
     case 'email':
     case 'msteams':
+    case 'wechat':
       // No per-platform default column — fresh routing rows seed from 'pro'
       // (migration 234), like Discord/email.
       return null

@@ -199,13 +199,11 @@ function InspirationPageLayout({
   const noKeywords = (config?.keywords?.length ?? 0) === 0;
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-7xl mx-auto space-y-5">
       <header className="flex items-start sm:items-center justify-between gap-4 flex-wrap">
         <div className="space-y-1.5">
           <h1
-            className="text-2xl font-semibold tracking-tight"
-            style={{ fontFamily: "var(--font-rocknroll)" }}
-          >
+            className="text-[15px] font-semibold"          >
             {format(td.heading, { platform: platformLabel })}
           </h1>
           <p className="text-xs text-muted-foreground">
@@ -235,7 +233,7 @@ function InspirationPageLayout({
             type="button"
             onClick={runScan}
             disabled={scanning || noKeywords}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-primary text-primary-foreground px-4 h-9 text-sm font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press shadow-md shadow-primary/20"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-primary text-primary-foreground px-3 h-8 text-[12.5px] font-medium hover:bg-primary/90 active:bg-primary/85 disabled:opacity-50 transition-colors press"
           >
             {scanning ? <SpinnerIcon /> : <PlayIcon />}
             {scanning ? td.scanning : td.runButton}
@@ -571,7 +569,7 @@ function CandidateCard({
   }
 
   return (
-    <li className="group rounded-xl border border-border bg-card p-4 space-y-3 hover-lift hover:border-primary/30">
+    <li className="group rounded-xl border border-border/60 bg-card p-4 space-y-3 shadow-xs hover:border-primary/30">
       <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
           <span className="font-medium text-foreground">@{c.author.handle}</span>
@@ -726,11 +724,9 @@ function NotConnectedState({
 }) {
   const label = t.platformLabels[platform];
   return (
-    <div className="px-8 py-10 max-w-2xl space-y-4">
+    <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
       <h1
-        className="text-xl font-semibold"
-        style={{ fontFamily: "var(--font-rocknroll)" }}
-      >
+        className="text-[15px] font-semibold"      >
         {format(t.draftSessions.connectFirstTitle, { platform: label })}
       </h1>
       <p className="text-sm text-muted-foreground">
@@ -738,7 +734,7 @@ function NotConnectedState({
       </p>
       <Link
         href={feedPath(workspaceId)}
-        className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
       >
         {format(t.draftSessions.connectCta, { platform: label })}
       </Link>

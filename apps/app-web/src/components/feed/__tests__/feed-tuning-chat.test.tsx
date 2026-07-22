@@ -39,6 +39,17 @@ vi.mock("@/contexts/feed-profiles-context", () => ({
   useFeedWorkspace: () => ctxRef.workspace,
   useFeedWorkspaceState: () => ctxRef.state,
 }));
+// The shell mounts the operator top bar above the gate; its router + layout
+// sidebar state don't exist under bare SSR, so mock the hooks it reads.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
+}));
+vi.mock("@/components/doc/doc-sidebar-data", () => ({
+  useSidebarData: () => ({
+    sidebarCollapsed: false,
+    setSidebarCollapsed: vi.fn(),
+  }),
+}));
 
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
@@ -77,6 +88,7 @@ function workspace(profiles: FeedProfile[]): FeedWorkspaceValue {
     canDraft: true,
     me: { id: "u-1" },
     profiles,
+    assistants: [],
     refresh: async () => {},
   };
 }

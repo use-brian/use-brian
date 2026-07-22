@@ -27,7 +27,13 @@ function mailboxAddress(mailbox: string): string {
   return (angled ? angled[1] : mailbox).trim().toLowerCase()
 }
 
-function collectActors(input: EmailMessageInput): EpisodeActor[] {
+/** Sender + recipient actors, deduped by address. Shared with the mailbox
+ *  (imap) adapter. */
+export function collectEmailActors(input: Pick<EmailMessageInput, 'from' | 'to' | 'cc'>): EpisodeActor[] {
+  return collectActors(input)
+}
+
+function collectActors(input: Pick<EmailMessageInput, 'from' | 'to' | 'cc'>): EpisodeActor[] {
   const seen = new Set<string>()
   const actors: EpisodeActor[] = []
   const push = (role: EpisodeActor['role'], mailbox: string) => {

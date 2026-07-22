@@ -252,6 +252,33 @@ describe('[COMP:views/bindings] buildPayload', () => {
     expect(won?.cards).toHaveLength(1)
   })
 
+  it('produces a valid Calendar for tasks (dateBy due, rows on due dates)', async () => {
+    const payload = await buildPayload(
+      { entity: 'tasks', viewType: 'calendar', dateBy: 'due' },
+      deps(),
+    )
+    expect(viewPayloadSchema.parse(payload)).toBeTruthy()
+    if (payload.root.type !== 'calendar') throw new Error('expected calendar')
+    expect(payload.root.dateColumnId).toBe('due')
+    expect(payload.root.rows).toHaveLength(2)
+    // t1 carries its due date as a DateWidget cell; t2 has none (dropped
+    // from the grid by the renderer, but still present in rows).
+    const dueCell = payload.root.rows[0].due
+    if (typeof dueCell !== 'object' || dueCell === null) throw new Error('expected widget')
+    expect((dueCell as { type: string }).type).toBe('date')
+    // Host entity resolution rides on rowAction (same as tables).
+    expect(payload.root.rowAction?.params?.entity).toBe('tasks')
+  })
+
+  it('force-includes the due column when a column subset omits it', async () => {
+    const payload = await buildPayload(
+      { entity: 'tasks', viewType: 'calendar', dateBy: 'due', columns: ['title', 'status'] },
+      deps(),
+    )
+    if (payload.root.type !== 'calendar') throw new Error('expected calendar')
+    expect(payload.root.columns.map((c) => c.field)).toEqual(['title', 'status', 'due'])
+  })
+
   it('produces a Table for workflow_runs with required workflowId filter', async () => {
     const payload = await buildPayload(
       {

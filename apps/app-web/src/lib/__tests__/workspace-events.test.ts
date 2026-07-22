@@ -80,6 +80,21 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     );
   });
 
+  // Regression: creating an assistant left every persistent surface stale —
+  // the FloatingChat dock's switcher only re-reads on `[workspaceId]`, which
+  // never changes during SPA navigation, so a new assistant stayed invisible
+  // until a full app restart.
+  it("routes assistant changes to the assistant bus with rowId", () => {
+    expect(
+      routeWorkspaceChange(payload("assistant", { rowId: "a-1", action: "create" })),
+    ).toEqual([
+      {
+        event: "sidan:assistant-refresh",
+        detail: { workspaceId: "ws-1", rowId: "a-1" },
+      },
+    ]);
+  });
+
   it("ignores unknown primitives — a newer server must never break an older client", () => {
     expect(
       routeWorkspaceChange(
@@ -96,6 +111,10 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     expect(events).toContain(WORKFLOW_REFRESH_EVENT);
     expect(events).toContain(SKILL_REFRESH_EVENT);
     expect(events).toContain(SCHEDULED_JOB_REFRESH_EVENT);
+    // Catch-up must cover the roster too: a create that lands while the tab is
+    // asleep or the stream is down still has to reach the never-unmounting
+    // chrome on reconnect.
+    expect(events).toContain("sidan:assistant-refresh");
   });
 });
 

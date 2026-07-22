@@ -144,6 +144,9 @@ import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './rout
 import { menuForClass } from '@use-brian/shared/model-registry'
 import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
+import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
+import { setGlobalMailboxArchiveDeps } from './mailbox/archive-search-tool.js'
+import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
@@ -196,6 +199,9 @@ import { publishSessionEvent, startSessionEventBus, subscribeSessionEvents } fro
 import { createDbMcpSettingsStore } from './db/mcp-settings-store.js'
 import { createDbConnectorStore } from './db/connector-store.js'
 import { createConnectorInstanceStore } from './db/connector-instance-store.js'
+import { createIngestSinkStore } from './db/ingest-sink-store.js'
+import { createIngestOutboxStore } from './db/ingest-outbox-store.js'
+import { createExternalSinkRelay } from './ingest/external-sink-relay.js'
 import { createWorkspaceToolPolicyStore } from './db/workspace-tool-policy-store.js'
 import { buildOpenSyncCredentials } from './build-sync-credentials.js'
 import { createDbAssistantConnectorStore } from './db/assistant-connector-store.js'
@@ -233,6 +239,8 @@ import { slackLinkingRoutes } from './routes/slack-linking.js'
 import { createDbChannelUserStore } from './db/channel-user-store.js'
 import { createDiscordConnectorClient } from './discord/connector-client.js'
 import { createWhatsappConnectorClient } from './whatsapp/connector-client.js'
+import { createWechatConnectorClient } from './wechat/connector-client.js'
+import { wechatRoutes } from './routes/wechat.js'
 import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
 import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
@@ -492,6 +500,14 @@ export interface OpenApiEnv {
    */
   DISCORD_CONNECTOR_URL?: string
   DISCORD_CONNECTOR_SECRET?: string
+  /**
+   * WeChat iLink long-poll connector bridge (`apps/wechat-connector`). Both
+   * set → the WeChat QR pairing endpoints work and `/internal/wechat/*` is
+   * mounted; unset → WeChat connect returns 503 and the inbound route is
+   * absent. See docs/architecture/channels/wechat.md.
+   */
+  WECHAT_CONNECTOR_URL?: string
+  WECHAT_CONNECTOR_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
   // Blob storage (open uses local-disk fallback when unset).
   GCS_FILES_BUCKET?: string
@@ -727,6 +743,9 @@ export interface OpenApiPorts {
 
   /** Hosted has a pending-ingest batch worker; OSS executes WhatsApp realtime. */
   whatsappScheduledBatching?: boolean
+  /** Same flag for the mailbox (imap) brain router — hosted batches its
+   *  newsletter digests; OSS executes scheduled matches realtime. */
+  mailboxScheduledBatching?: boolean
   /** A later closed router owns the hosted shared-number fallback. */
   whatsappOfficialFallback?: boolean
   /**
@@ -4902,6 +4921,58 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   syncWorkerRef = knowledgeSyncWorker
   if (runWorkers) knowledgeSyncWorker.start()
 
+  // ── Mailbox sync worker (imap connector — mailbox-imap.md §Phase 2) ──
+  // Archive is unconditional per connected instance; brain routing rides the
+  // instance's `ingestion_enabled` toggle + seeded imap rules. The archive
+  // search tool's late-bound seam is armed here (embedder optional — the
+  // vector arm soft-fails to ILIKE until embeddings are configured).
+  setGlobalMailboxArchiveDeps({ ...(sharedEmbedder ? { embedder: sharedEmbedder } : {}) })
+  const mailboxSyncWorker = createMailboxSyncWorker({
+    connectorInstanceStore,
+    resolvePersonalWorkspaceId: async (userId) => {
+      // Ownership, never membership (the ingest pollers' resolve-workspace
+      // rule): an is_personal workspace the owner was merely invited into
+      // can belong to another user.
+      const r = await query<{ id: string }>(
+        `SELECT id FROM workspaces
+          WHERE owner_user_id = $1 AND is_personal = true
+          ORDER BY created_at LIMIT 1`,
+        [userId],
+      )
+      return r.rows[0]?.id ?? null
+    },
+    resolveAssistantId: resolvePrimaryAssistantForWorkspace,
+    brain: {
+      provider,
+      model: extractionModel,
+      crm: crmStore,
+      entities: entitiesStore,
+      entityLinks: entityLinksStore,
+      memories: memoryStore,
+      tasks: taskStore,
+      episodes: episodesStore,
+      ingestRulesStore,
+      resolvePlaceholders: resolveIngestPlaceholders,
+      analytics,
+      usageStore,
+      ingestCharge: ports.ingestCharge,
+      scheduledBatching: ports.mailboxScheduledBatching,
+    },
+  })
+  if (runWorkers) mailboxSyncWorker.start()
+
+  // ── External-sink relay (ingest outbox → ub.ingest.append.v1) ──
+  // Drains ingest_outbox to each attached external sink; the sink cursor
+  // advances only on ack (X3). See ingest-external-sink.md.
+  const ingestSinkStore = createIngestSinkStore(credKey)
+  const ingestOutboxStore = createIngestOutboxStore()
+  const externalSinkRelay = createExternalSinkRelay({
+    outbox: ingestOutboxStore,
+    sinks: ingestSinkStore,
+    analytics,
+  })
+  if (runWorkers) externalSinkRelay.start()
+
   // ── Stuck-session sweeper ──
   const stuckSessionSweeper = createStuckSessionSweeper({
     publishDraftTurnCompleted: (sessionId) =>
@@ -5077,6 +5148,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             connectorSecret: env.WA_CONNECTOR_SECRET,
           })
         : undefined
+    const wechatConnector =
+      env.WECHAT_CONNECTOR_URL && env.WECHAT_CONNECTOR_SECRET
+        ? createWechatConnectorClient({
+            connectorUrl: env.WECHAT_CONNECTOR_URL,
+            connectorSecret: env.WECHAT_CONNECTOR_SECRET,
+          })
+        : undefined
 
     // Workspace channels operator surface (Studio → Channels).
     app.use('/api', requireAuth(env.JWT_SECRET), channelsRoutes({
@@ -5085,6 +5163,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       apiUrl: env.API_URL,
       discordConnector,
       whatsappConnector,
+      wechatConnector,
       // Fallback bot for naming sessions-derived telegram delivery destinations.
       telegramBotToken: env.TELEGRAM_BOT_TOKEN,
     }))
@@ -5241,6 +5320,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           skillStore, pendingMessageStore, episodicStore, sessionStateStore,
         }))
       }
+      if (env.WECHAT_CONNECTOR_SECRET) {
+        app.use('/internal/wechat', wechatRoutes({
+          backgroundModel,
+          artifactPromoter,
+          connectorSecret: env.WECHAT_CONNECTOR_SECRET, provider, systemPrompt: LAYER_1_SYSTEM_PROMPT,
+          tools: allTools, capabilityStore, memoryStore, usageStore,
+          checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
+          workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
+          connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
+          skillStore, pendingMessageStore, episodicStore, sessionStateStore,
+        }))
+      }
     }
   }
 
@@ -5276,6 +5367,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     pollWorker.stop()
     runQueueWorker.stop()
     knowledgeSyncWorker.stop()
+    mailboxSyncWorker.stop()
+    externalSinkRelay.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)

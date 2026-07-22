@@ -19,7 +19,7 @@ import { authFetch } from "@/lib/auth-fetch";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email" | "msteams";
+export type ChannelType = "telegram" | "slack" | "whatsapp" | "discord" | "email" | "msteams" | "wechat";
 export type ChannelClearance = "public" | "internal" | "confidential";
 export type ChannelCapability = "chat" | "broadcast" | "ingest";
 type ChannelStatus = "active" | "revoked" | "invalid";
@@ -344,6 +344,90 @@ export async function connectMsTeamsChannel(
     );
   }
   return (await res.json()) as ConnectMsTeamsResult;
+}
+
+// ── WeChat — QR pairing (poll-based) ────────────────────────────
+
+export type WechatPairingStatus = {
+  status:
+    | "qr"
+    | "scanned"
+    | "need_verifycode"
+    | "verify_code_rejected"
+    | "already_bound"
+    | "expired"
+    | "error"
+    | "connected";
+  /** URL to render as a QR code; refreshes in place when iLink expires one. */
+  qrcodeUrl?: string | null;
+  error?: string | null;
+  /** Present when status = connected. */
+  channel?: Channel | null;
+  /** Soft warning: saved, but the long-poll didn't open yet (retries on boot). */
+  connectorError?: string | null;
+};
+
+/**
+ * Start a WeChat QR pairing session. The user scans the returned URL
+ * (rendered as a QR) with their WeChat; poll `getWechatPairingStatus` until
+ * `connected`. iLink may demand a pairing code mid-flow
+ * (`need_verifycode`) — submit it via `submitWechatVerifyCode`.
+ */
+export async function startWechatPairing(
+  workspaceId: string,
+  input: { defaultAssistantId?: string | null } = {},
+): Promise<{ pairingId: string; qrcodeUrl: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/wechat/pairing`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as {
+      error?: string;
+      detail?: string;
+    };
+    throw new Error(
+      data.detail ?? data.error ?? `WeChat pairing failed (${res.status})`,
+    );
+  }
+  return (await res.json()) as { pairingId: string; qrcodeUrl: string };
+}
+
+export async function getWechatPairingStatus(
+  workspaceId: string,
+  pairingId: string,
+): Promise<WechatPairingStatus> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/wechat/pairing/${encodeURIComponent(pairingId)}`,
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `WeChat pairing status failed (${res.status})`);
+  }
+  return (await res.json()) as WechatPairingStatus;
+}
+
+export async function submitWechatVerifyCode(
+  workspaceId: string,
+  pairingId: string,
+  code: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/channels/wechat/pairing/${encodeURIComponent(pairingId)}/verify-code`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `Code submit failed (${res.status})`);
+  }
 }
 
 export async function listChannelAssistants(

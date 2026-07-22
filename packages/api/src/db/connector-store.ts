@@ -77,10 +77,27 @@ export type S3AccessKey = {
   [k: string]: unknown
 }
 
+/**
+ * A user's corporate-mailbox credential (the `imap` connector): the mailbox
+ * address, the app-specific "client security password", and the resolved
+ * IMAP/SMTP endpoints. The password is the secret; hosts/ports ride along so
+ * the runtime never re-resolves MX. See
+ * docs/architecture/integrations/mailbox-imap.md.
+ */
+export type ImapMailboxCredentials = {
+  email: string
+  appPassword: string
+  imapHost: string
+  imapPort: number
+  smtpHost: string
+  smtpPort: number
+}
+
 export type ConnectorCredentials =
   | { type: 'oauth'; client_id: string; client_secret: string }
   | { type: 'bearer'; token: string }
   | { type: 'custom_header'; header: string; value: string }
+  | ({ type: 'imap' } & ImapMailboxCredentials)
   | { type: 'gcs'; serviceAccountKey: GcsCredentialKey; bucket: string; projectId?: string }
   | {
       type: 's3'
@@ -119,6 +136,27 @@ export function normalizeStoredCredentials(raw: unknown): ConnectorCredentials |
           serviceAccountKey: key as GcsCredentialKey,
           bucket,
           ...(typeof obj.projectId === 'string' ? { projectId: obj.projectId } : {}),
+        }
+      }
+      return null
+    }
+    case 'imap': {
+      if (
+        typeof obj.email === 'string' &&
+        typeof obj.appPassword === 'string' &&
+        typeof obj.imapHost === 'string' &&
+        typeof obj.imapPort === 'number' &&
+        typeof obj.smtpHost === 'string' &&
+        typeof obj.smtpPort === 'number'
+      ) {
+        return {
+          type: 'imap',
+          email: obj.email,
+          appPassword: obj.appPassword,
+          imapHost: obj.imapHost,
+          imapPort: obj.imapPort,
+          smtpHost: obj.smtpHost,
+          smtpPort: obj.smtpPort,
         }
       }
       return null

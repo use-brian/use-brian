@@ -32,6 +32,8 @@
     "@use-brian/shared": "workspace:*",
     "dotenv": "^16",
     "express": "^5",
+    "imapflow": "^1.0.191",
+    "mailparser": "^3.7.4",
     "multer": "^2.1.1",
     "nodemailer": "^8.0.9",
     "pg": "^8",
@@ -39,6 +41,7 @@
   },
   "devDependencies": {
     "@types/express": "^5",
+    "@types/mailparser": "^3.4.6",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.19.39",
     "@types/nodemailer": "^8.0.0",

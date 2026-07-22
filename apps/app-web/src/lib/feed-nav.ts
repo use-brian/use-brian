@@ -3,14 +3,16 @@
  * grouped sub-menu (`FeedSidebarPanel`) and its route helpers, mirroring
  * `studio-nav.ts` (the root CLAUDE.md "derive, don't duplicate" rule).
  *
- * The Feed surface is the ported feed-web operator app
- * (docs/plans/feed-web-consolidation.md): team-level rows (home / inbox /
- * voice) plus per-platform rows (insights / inspiration / drafts / connection /
- * policy / settings) scoped by the active connected platform.
+ * The Feed surface splits into two groups (docs/plans/feed-create-split.md):
+ * **Create** — workspace-level content creation (home / voice / drafts /
+ * inbox / ready), which works with ZERO platform connections — and
+ * **Platforms** — the integration side, one row per target platform with
+ * per-platform sub-rows (insights / inspiration / connection / policy /
+ * settings) for connected ones.
  *
  * The keys index into the i18n `feedPage.sections` / `feedPage.groups`
  * dictionaries; the `segment` is the child route under
- * `/w/[id]/feed/` (team rows) or `/w/[id]/feed/[platform]/` (platform rows).
+ * `/w/[id]/feed/` (create rows) or `/w/[id]/feed/[platform]/` (platform rows).
  *
  * [COMP:app-web/feed-nav]
  */
@@ -21,18 +23,41 @@ export type FeedSectionKey =
   keyof ReturnType<typeof useT>["feedPage"]["sections"];
 type FeedGroupKey = keyof ReturnType<typeof useT>["feedPage"]["groups"];
 
-/** The distribution platforms the feed engine supports. Mirrors the backend's
- *  `distribution_profiles.platform` enum — the URL segment is the platform id. */
-export const FEED_PLATFORMS = ["threads", "twitter"] as const;
+/**
+ * The platforms a team can DRAFT for — the Create half of the split. The
+ * URL segment is the platform id. Mirrors the backend's
+ * `FEED_TARGET_PLATFORMS` (`packages/api-platform/src/db/feed-store.ts`).
+ */
+export const FEED_PLATFORMS = ["instagram", "threads", "twitter", "xhs"] as const;
 export type FeedPlatform = (typeof FEED_PLATFORMS)[number];
 
-const FEED_PLATFORM_SET: ReadonlySet<string> = new Set(FEED_PLATFORMS);
+/**
+ * The platforms with a full integration (OAuth + publish). Mirrors the
+ * backend's `distribution_profiles.platform` CHECK constraint. The connect
+ * dialog and OAuth URL builder derive from THIS list — Instagram/XHS render
+ * a coming-soon connection stub instead.
+ */
+export const FEED_CONNECTABLE_PLATFORMS = ["threads", "twitter"] as const;
+export type ConnectableFeedPlatform =
+  (typeof FEED_CONNECTABLE_PLATFORMS)[number];
 
-/** Narrow an arbitrary route segment to a known feed platform. */
+const FEED_PLATFORM_SET: ReadonlySet<string> = new Set(FEED_PLATFORMS);
+const FEED_CONNECTABLE_SET: ReadonlySet<string> = new Set(
+  FEED_CONNECTABLE_PLATFORMS,
+);
+
+/** Narrow an arbitrary route segment to a known feed target platform. */
 export function isFeedPlatform(
   value: string | null | undefined,
 ): value is FeedPlatform {
   return !!value && FEED_PLATFORM_SET.has(value);
+}
+
+/** Narrow a target platform to the connectable (OAuth + publish) subset. */
+export function isConnectableFeedPlatform(
+  value: string | null | undefined,
+): value is ConnectableFeedPlatform {
+  return !!value && FEED_CONNECTABLE_SET.has(value);
 }
 
 type FeedSection = {
@@ -49,27 +74,31 @@ export type FeedGroup = {
 };
 
 /**
- * Grouped by scope (docs/architecture/feed/operator-app.md):
- *   workspace — team-level surfaces (dashboard, approval inbox, voice)
- *   platform  — surfaces scoped to one connected platform account
+ * Grouped by the Create/Platforms split (docs/architecture/feed/operator-app.md):
+ *   create    — workspace-level content creation (works with zero
+ *               connections): dashboard, voice, drafts, approval inbox,
+ *               ready-to-post queue. Drafts hoisted here from the old
+ *               per-platform `draft-sessions` row (feed-create-split.md D8).
+ *   platforms — the integration side, scoped to one platform account
  */
 export const FEED_GROUPS: readonly FeedGroup[] = [
   {
-    key: "workspace",
+    key: "create",
     perPlatform: false,
     sections: [
       { key: "home", segment: "" },
-      { key: "inbox", segment: "inbox" },
       { key: "voice", segment: "voice" },
+      { key: "drafts", segment: "drafts" },
+      { key: "inbox", segment: "inbox" },
+      { key: "ready", segment: "ready" },
     ],
   },
   {
-    key: "platform",
+    key: "platforms",
     perPlatform: true,
     sections: [
       { key: "insights", segment: "insights" },
       { key: "inspiration", segment: "inspiration" },
-      { key: "draftSessions", segment: "draft-sessions" },
       { key: "connection", segment: "connection" },
       { key: "policy", segment: "policy" },
       { key: "settings", segment: "settings" },
@@ -110,6 +139,73 @@ export function feedPlatformFromPathname(
   if (!m || !m[1]) return null;
   const first = m[1].split("/")[0];
   return isFeedPlatform(first) ? first : null;
+}
+
+// ── Platform pick (guided first-run, feed-create-split.md D14) ────────────
+//
+// The platforms the brand posts on, chosen in the feed home's first-run step
+// and used as the default platform on the Drafts and Voice pages. Stored
+// per-workspace in localStorage — a per-device UI default, deliberately not
+// server state (the `workspaces` table has no generic settings jsonb and the
+// sidebar/chips still switch freely). Reads are validated against
+// `FEED_PLATFORMS` so a stale pick from a removed platform never leaks out.
+
+const platformPickKey = (workspaceId: string) =>
+  `feed:platform-pick:${workspaceId}`;
+
+/** Usable Storage or null — SSR, private mode, and Node 26's undefined
+ *  experimental `localStorage` global all resolve to null (no-throw). */
+function pickStorage(): Storage | null {
+  try {
+    const s = (globalThis as { localStorage?: Storage }).localStorage;
+    return s && typeof s.getItem === "function" ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The stored platform pick for a workspace; `[]` when unset/unavailable. */
+export function getFeedPlatformPick(workspaceId: string): FeedPlatform[] {
+  const storage = pickStorage();
+  if (!storage) return [];
+  try {
+    const raw = storage.getItem(platformPickKey(workspaceId));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((p): p is FeedPlatform => isFeedPlatform(String(p)));
+  } catch {
+    return [];
+  }
+}
+
+/** Persist the platform pick. Silently a no-op when storage is unavailable. */
+export function setFeedPlatformPick(
+  workspaceId: string,
+  platforms: readonly FeedPlatform[],
+): void {
+  const storage = pickStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(platformPickKey(workspaceId), JSON.stringify(platforms));
+  } catch {
+    /* private mode / quota — the pick just isn't remembered */
+  }
+}
+
+/**
+ * The default platform for Create surfaces: first picked platform, else the
+ * first connected profile's platform, else the first target in app order.
+ */
+export function defaultFeedPlatform(
+  workspaceId: string,
+  connectedPlatforms: readonly FeedPlatform[],
+): FeedPlatform {
+  return (
+    getFeedPlatformPick(workspaceId)[0] ??
+    connectedPlatforms[0] ??
+    FEED_PLATFORMS[0]
+  );
 }
 
 /**

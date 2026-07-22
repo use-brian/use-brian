@@ -41,6 +41,12 @@ commit rights are not the price of a good patch.
    ```
 5. Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
    messages.
+6. Never put real-world data in tests, fixtures, or examples: no real names,
+   email addresses, customer domains, phone numbers, or production IDs. Use
+   fictional values instead (reserved `.example` domains, `555` phone numbers,
+   invented names). Tests mock their boundaries, so fictional data behaves
+   identically, and this is a public repo: a real value publishes someone's
+   identity.
 
 ## Reporting security issues
 

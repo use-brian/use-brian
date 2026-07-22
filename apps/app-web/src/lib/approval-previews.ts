@@ -18,7 +18,7 @@
  */
 
 /** Discriminator for the specific previews the queue knows how to render. */
-type ToolPreviewKind = "email_send";
+type ToolPreviewKind = "email_send" | "shopify_refund" | "shopify_cancel";
 
 /**
  * Tool name → preview kind. Keyed on the canonical tool ident carried by
@@ -28,6 +28,14 @@ type ToolPreviewKind = "email_send";
  */
 const TOOL_PREVIEW_KINDS: Record<string, ToolPreviewKind> = {
   gmailSendMessage: "email_send",
+  // Company mailbox (imap) sends share the same to/subject/body shape — the
+  // two mail lanes look identical at approval time (mailbox-imap.md §4).
+  imapSendMessage: "email_send",
+  // Shopify order actions that move real money / cancel a fulfilment. The
+  // approver reads the order, the flags, and — for refunds — the fact that
+  // the amount is Shopify's own suggested figure, not one we invent here.
+  shopifyRefundOrder: "shopify_refund",
+  shopifyCancelOrder: "shopify_cancel",
 };
 
 /** Parsed `gmailSendMessage` input, normalised for rendering. */
@@ -42,10 +50,48 @@ export type EmailSendPreviewData = {
   attachments: string[];
 };
 
-export type ToolPreviewData = {
-  kind: "email_send";
-  email: EmailSendPreviewData;
+/** One line of a partial refund — the line item id and quantity refunded. */
+type ShopifyRefundLineItem = { lineItemId: string; quantity: number };
+
+/** Parsed `shopifyRefundOrder` input, normalised for rendering. */
+export type ShopifyRefundPreviewData = {
+  orderId: string;
+  /** `null` = full refund; otherwise the specific lines being refunded. */
+  lineItems: ShopifyRefundLineItem[] | null;
+  /** Email the customer about the refund (tool default: true). */
+  notify: boolean;
+  note: string | null;
 };
+
+/** The cancellation reasons the `shopifyCancelOrder` tool accepts (its enum). */
+const SHOPIFY_CANCEL_REASONS = [
+  "CUSTOMER",
+  "DECLINED",
+  "FRAUD",
+  "INVENTORY",
+  "OTHER",
+  "STAFF",
+] as const;
+type ShopifyCancelReason = (typeof SHOPIFY_CANCEL_REASONS)[number];
+
+/** Parsed `shopifyCancelOrder` input, normalised for rendering. */
+export type ShopifyCancelPreviewData = {
+  orderId: string;
+  /** Cancellation reason (tool default: OTHER). */
+  reason: ShopifyCancelReason;
+  /** Restock the items (tool default: true). */
+  restock: boolean;
+  /** Refund the payment (tool default: true). */
+  refund: boolean;
+  /** Notify the customer (tool default: true). */
+  notifyCustomer: boolean;
+  staffNote: string | null;
+};
+
+export type ToolPreviewData =
+  | { kind: "email_send"; email: EmailSendPreviewData }
+  | { kind: "shopify_refund"; refund: ShopifyRefundPreviewData }
+  | { kind: "shopify_cancel"; cancel: ShopifyCancelPreviewData };
 
 /**
  * Recognise + parse an approval row's tool call into preview data.
@@ -58,11 +104,22 @@ export function parseToolPreview(
   args: Record<string, unknown> | null | undefined,
 ): ToolPreviewData | null {
   const kind = toolName ? TOOL_PREVIEW_KINDS[toolName] : undefined;
-  if (kind === "email_send") {
-    const email = parseEmailSendArgs(args ?? {});
-    return email ? { kind, email } : null;
+  switch (kind) {
+    case "email_send": {
+      const email = parseEmailSendArgs(args ?? {});
+      return email ? { kind, email } : null;
+    }
+    case "shopify_refund": {
+      const refund = parseShopifyRefundArgs(args ?? {});
+      return refund ? { kind, refund } : null;
+    }
+    case "shopify_cancel": {
+      const cancel = parseShopifyCancelArgs(args ?? {});
+      return cancel ? { kind, cancel } : null;
+    }
+    default:
+      return null;
   }
-  return null;
 }
 
 /**
@@ -96,6 +153,72 @@ export function splitRecipients(value: string): string[] {
     .split(/[,;]/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * Parse `shopifyRefundOrder`-shaped arguments. `orderId` is required (the
+ * tool requires it); without it the input isn't a refund, so degrade to the
+ * generic view. An absent or empty `lineItems` is a *full* refund. The
+ * refunded amount is deliberately never parsed — Shopify computes the
+ * suggested refund server-side, so the card must not imply a figure the
+ * input doesn't carry.
+ */
+export function parseShopifyRefundArgs(
+  args: Record<string, unknown>,
+): ShopifyRefundPreviewData | null {
+  const orderId = typeof args.orderId === "string" ? args.orderId : null;
+  if (!orderId) return null;
+  const lineItems = Array.isArray(args.lineItems)
+    ? args.lineItems
+        .map(parseRefundLineItem)
+        .filter((li): li is ShopifyRefundLineItem => li !== null)
+    : [];
+  return {
+    orderId,
+    lineItems: lineItems.length > 0 ? lineItems : null,
+    notify: typeof args.notify === "boolean" ? args.notify : true,
+    note: typeof args.note === "string" && args.note.trim() ? args.note : null,
+  };
+}
+
+/** Parse one `{ lineItemId, quantity }` refund line; `null` on any bad shape. */
+function parseRefundLineItem(entry: unknown): ShopifyRefundLineItem | null {
+  if (!entry || typeof entry !== "object") return null;
+  const li = entry as Record<string, unknown>;
+  const lineItemId = typeof li.lineItemId === "string" ? li.lineItemId : null;
+  const quantity = typeof li.quantity === "number" ? li.quantity : null;
+  if (lineItemId === null || quantity === null) return null;
+  return { lineItemId, quantity };
+}
+
+/**
+ * Parse `shopifyCancelOrder`-shaped arguments. `orderId` is required; the
+ * three booleans fall back to the tool's own defaults (restock / refund /
+ * notify all true) when absent, and an unrecognised `reason` degrades to
+ * OTHER.
+ */
+export function parseShopifyCancelArgs(
+  args: Record<string, unknown>,
+): ShopifyCancelPreviewData | null {
+  const orderId = typeof args.orderId === "string" ? args.orderId : null;
+  if (!orderId) return null;
+  const reason =
+    typeof args.reason === "string" &&
+    (SHOPIFY_CANCEL_REASONS as readonly string[]).includes(args.reason)
+      ? (args.reason as ShopifyCancelReason)
+      : "OTHER";
+  return {
+    orderId,
+    reason,
+    restock: typeof args.restock === "boolean" ? args.restock : true,
+    refund: typeof args.refund === "boolean" ? args.refund : true,
+    notifyCustomer:
+      typeof args.notifyCustomer === "boolean" ? args.notifyCustomer : true,
+    staffNote:
+      typeof args.staffNote === "string" && args.staffNote.trim()
+        ? args.staffNote
+        : null,
+  };
 }
 
 /**

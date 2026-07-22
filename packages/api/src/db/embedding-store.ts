@@ -95,6 +95,13 @@ const PRIMITIVE_CONFIGS: Partial<Record<EmbeddingPrimitive, PrimitiveConfig>> = 
     textExpr:
       "(CASE WHEN heading_path <> '{}' THEN array_to_string(heading_path, ' > ') || E'\\n' ELSE '' END) || content",
   },
+  // email archive segments — the mailbox corpus (mailbox-imap.md). Subject +
+  // sender context is baked into segment 0's text at insert time (the store
+  // prefixes the header line), so the single-table claim SQL stays flat.
+  email_segment: {
+    table: 'email_archive_segments',
+    textExpr: 'segment_text',
+  },
 }
 
 function sha256(text: string): string {

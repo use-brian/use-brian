@@ -45,7 +45,7 @@ export type BuiltinToolDefaultPolicy = 'allow' | 'ask'
  * connector auth", docs/plans/byo-google-storage.md, and
  * docs/plans/byo-s3-storage.md.
  */
-export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs', 's3'] as const
+export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs', 's3', 'imap'] as const
 export type ConnectorAuthType = (typeof CONNECTOR_AUTH_TYPES)[number]
 
 export type BuiltinConnectorTool = {
@@ -138,6 +138,41 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'fathomGetTranscript', description: 'Read the transcript of a Fathom meeting', classification: 'read', defaultPolicy: 'allow' },
     { name: 'fathomGetSummary', description: 'Read the AI summary and action items for a Fathom meeting', classification: 'read', defaultPolicy: 'allow' },
   ],
+  // Shopify — v1 slice (docs/architecture/integrations/shopify.md; full catalog
+  // in docs/plans/shopify-connector.md §5). Classification is load-bearing:
+  // `write` rows are auto-wrapped by gateToolsOnActionGrants — a write
+  // misclassified as `read` ships UNGATED.
+  shopify: [
+    { name: 'shopifyGetShop', description: 'Get store name, domain, plan, currency, and timezone', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListProducts', description: 'Search and list products in the store', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetProduct', description: 'Get a product with variants and inventory', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListOrders', description: 'List orders with date, status, and payment filters', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetOrder', description: 'Get an order with line items, fulfillment, and totals', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifySearchCustomers', description: 'Search customers by email, name, or tag', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetCustomer', description: 'Get a customer with order count and total spent', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetInventoryLevels', description: 'Get inventory quantities by product or SKU', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListCollections', description: 'List product collections in the store', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListDraftOrders', description: 'List draft orders (open quotes and invoices)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListDiscounts', description: 'List discount and promo codes with status and usage counts', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListAbandonedCheckouts', description: 'List abandoned checkouts with cart value and customer', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyGetPayoutsSummary', description: 'Get Shopify Payments balance and recent payouts', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListDisputes', description: 'List Shopify Payments disputes and chargebacks', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyListContent', description: 'List online store pages, blog posts, or blogs', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifySalesReport', description: 'Aggregate sales over a date range (count, revenue, top items)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'shopifyUpdateProduct', description: 'Update product title, description, tags, status, or SEO', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateProduct', description: 'Create a new product', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateDraftOrder', description: 'Create a draft order (quote or invoice, never a charge)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySendDraftOrderInvoice', description: 'Email the invoice for a draft order', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyAddTags', description: 'Add tags to an order, customer, or product', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyUpdateCustomer', description: 'Update a customer note or tags (never marketing consent)', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifySetInventory', description: 'Set the available inventory quantity for a variant', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateFulfillment', description: 'Mark an order fulfilled with an optional tracking number', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateDiscountCode', description: 'Create a discount or promo code', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCreateContent', description: 'Create an online store page or blog post', classification: 'write', defaultPolicy: 'ask' },
+    { name: 'shopifyCancelOrder', description: 'Cancel an order, optionally restocking and notifying the customer', classification: 'destructive', defaultPolicy: 'ask' },
+    { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask' },
+    { name: 'shopifyCompleteDraftOrder', description: 'Convert a draft order into a real order', classification: 'destructive', defaultPolicy: 'ask' },
+  ],
   // Assistant Email (AgentMail) — the assistant's OWN mailbox. Sends go out
   // from the assistant's address, never the user's (that is Gmail); see
   // docs/architecture/integrations/agentmail.md → "Connector tools".
@@ -145,6 +180,16 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'agentmailSendMessage', description: "Send an email from the assistant's own address", classification: 'write', defaultPolicy: 'ask' },
     { name: 'agentmailSearchThreads', description: "Search the assistant's own mailbox threads", classification: 'read', defaultPolicy: 'allow' },
     { name: 'agentmailCreateDraft', description: "Create an unsent draft in the assistant's mailbox (supports scheduled send)", classification: 'write', defaultPolicy: 'ask' },
+  ],
+  // Company mailbox (IMAP/SMTP) — the USER'S own corporate mailbox (third
+  // identity lane beside gmail and agentmail; see
+  // docs/architecture/integrations/mailbox-imap.md). Generic `imap` provider;
+  // AliMail is a connect-time preset, never a branded connector (D1).
+  imap: [
+    { name: 'imapSearchMessages', description: "Search the user's company mailbox (INBOX + Sent)", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'imapGetMessage', description: 'Read a specific email from the company mailbox', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'imapSendMessage', description: "Send an email from the user's company mailbox", classification: 'write', defaultPolicy: 'ask' },
+    { name: 'searchEmailArchive', description: 'Semantic search across the synced mailbox archive', classification: 'read', defaultPolicy: 'allow' },
   ],
   // Workspace Files — Q3 / company-brain §10. Note: this row is for
   // governance display (Settings ▸ Connectors, Assistant ▸ Tools) only.
@@ -238,6 +283,31 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     // when they do, update this list and bump scopeVersion (see the
     // gdrive precedent) so existing users see a "reconnect" banner.
     'public_api',
+  ],
+  shopify: [
+    // Full catalog scope set (docs/plans/shopify-connector.md §6 + D13: the
+    // app registered with zero installs, so the two-wave split collapsed and
+    // everything is requested at install). NOT read_all_orders - it is
+    // approval-gated by Shopify; add it here only AFTER the approval lands
+    // (requesting it unapproved breaks the consent screen), and if real
+    // installs exist by then, bump scopeVersion (D12) for the reconnect banner.
+    'read_products',
+    'read_orders',
+    'read_customers',
+    'read_inventory',
+    'read_fulfillments',
+    'write_products',
+    'write_draft_orders',
+    'write_orders',
+    'write_customers',
+    'write_inventory',
+    'write_fulfillments',
+    'read_discounts',
+    'write_discounts',
+    'read_content',
+    'write_content',
+    'read_shopify_payments_payouts',
+    'read_shopify_payments_disputes',
   ],
 }
 

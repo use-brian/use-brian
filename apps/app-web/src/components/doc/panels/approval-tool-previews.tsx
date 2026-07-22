@@ -13,14 +13,18 @@
  * [COMP:app-web/approvals]
  */
 
-import { Mail, Paperclip } from "lucide-react";
+import { Ban, Check, Mail, Paperclip, RotateCcw, X } from "lucide-react";
 import remarkGfm from "remark-gfm";
 import { ChatMarkdown } from "@use-brian/chat-ui";
+import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
+import { format } from "@/lib/i18n/format";
 import {
   attachmentDisplayName,
   emailBodyPreviewMarkdown,
   type EmailSendPreviewData,
+  type ShopifyCancelPreviewData,
+  type ShopifyRefundPreviewData,
   type ToolPreviewData,
 } from "@/lib/approval-previews";
 
@@ -43,6 +47,10 @@ export function ToolPreview({
           attachmentLines={attachmentLines}
         />
       );
+    case "shopify_refund":
+      return <ShopifyRefundPreview refund={preview.refund} />;
+    case "shopify_cancel":
+      return <ShopifyCancelPreview cancel={preview.cancel} />;
   }
 }
 
@@ -157,5 +165,137 @@ function EnvelopeRow({
       </span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
+  );
+}
+
+/**
+ * A `shopifyRefundOrder` approval: the order, whether it's a full or
+ * per-line refund, the notify flag, and an optional note. The card is
+ * explicit that the money figure is Shopify's own suggested refund — the
+ * tool never carries an amount, so the preview must not invent one.
+ */
+function ShopifyRefundPreview({
+  refund,
+}: {
+  refund: ShopifyRefundPreviewData;
+}) {
+  const t = useT();
+  const s = t.approvalsPage.shopifyRefundPreview;
+  const scope = refund.lineItems
+    ? format(s.lineItems, { count: refund.lineItems.length })
+    : s.fullRefund;
+  return (
+    <div className="w-full max-w-2xl mt-1 rounded-lg border border-border bg-background overflow-hidden shadow-sm">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 border-b border-border">
+        <RotateCcw className="size-3.5 text-muted-foreground" aria-hidden />
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          {s.title}
+        </span>
+      </div>
+      <div className="px-3 py-2 flex flex-col gap-1.5">
+        <FieldRow label={s.order}>
+          <span className="text-sm font-mono break-all">{refund.orderId}</span>
+        </FieldRow>
+        <FieldRow label={s.summary}>
+          <span className="text-sm font-medium">{scope}</span>
+        </FieldRow>
+        <FlagRow label={s.notify} on={refund.notify} />
+        {refund.note && (
+          <FieldRow label={s.note}>
+            <span className="text-sm break-words">{refund.note}</span>
+          </FieldRow>
+        )}
+      </div>
+      <div className="px-3 py-2 border-t border-border">
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          {s.amountNote}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * A `shopifyCancelOrder` approval: the order, the cancellation reason, and
+ * the three consequential flags (restock / refund / notify) as explicit
+ * yes/no rows. Each flag defaults to the tool's default (true) when the
+ * model omitted it, so the approver sees what will actually happen.
+ */
+function ShopifyCancelPreview({
+  cancel,
+}: {
+  cancel: ShopifyCancelPreviewData;
+}) {
+  const t = useT();
+  const c = t.approvalsPage.shopifyCancelPreview;
+  return (
+    <div className="w-full max-w-2xl mt-1 rounded-lg border border-border bg-background overflow-hidden shadow-sm">
+      <div className="flex items-center gap-2 px-3 py-1.5 bg-muted/40 border-b border-border">
+        <Ban className="size-3.5 text-muted-foreground" aria-hidden />
+        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          {c.title}
+        </span>
+      </div>
+      <div className="px-3 py-2 flex flex-col gap-1.5">
+        <FieldRow label={c.order}>
+          <span className="text-sm font-mono break-all">{cancel.orderId}</span>
+        </FieldRow>
+        <FieldRow label={c.reason}>
+          <span className="text-sm font-medium">{c.reasons[cancel.reason]}</span>
+        </FieldRow>
+        <FlagRow label={c.restock} on={cancel.restock} />
+        <FlagRow label={c.refund} on={cancel.refund} />
+        <FlagRow label={c.notify} on={cancel.notifyCustomer} />
+        {cancel.staffNote && (
+          <FieldRow label={c.note}>
+            <span className="text-sm break-words">{cancel.staffNote}</span>
+          </FieldRow>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Label + value row for the order-action cards (wider label than email). */
+function FieldRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-baseline gap-2 min-w-0">
+      <span className="w-28 shrink-0 text-[11px] text-muted-foreground">
+        {label}
+      </span>
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+/** A boolean option rendered as an explicit yes/no, tick for on. */
+function FlagRow({ label, on }: { label: string; on: boolean }) {
+  const t = useT();
+  const f = t.approvalsPage.shopifyFlag;
+  return (
+    <FieldRow label={label}>
+      <span
+        className={cn(
+          "inline-flex items-center gap-1 text-sm",
+          on ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {on ? (
+          <Check
+            className="size-3.5 text-emerald-600 dark:text-emerald-400"
+            aria-hidden
+          />
+        ) : (
+          <X className="size-3.5" aria-hidden />
+        )}
+        {on ? f.yes : f.no}
+      </span>
+    </FieldRow>
   );
 }

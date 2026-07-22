@@ -113,6 +113,41 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['productivity', 'meetings'],
   },
   {
+    id: 'shopify',
+    name: 'Shopify',
+    description: 'Read products, orders, customers, and inventory from your store. Draft orders, update products, and add tags with your approval.',
+    category: 'official',
+    // OAuth per shop (public unlisted app) once SHOPIFY_CLIENT_ID/SECRET exist;
+    // until then the connect dialog offers the pasted `shpat_` token path only.
+    // NOT single_instance: one connector_instance per store, label = shop
+    // domain, extras consumed in injectShopifyTools (the GitHub pattern).
+    // See docs/architecture/integrations/shopify.md.
+    auth_type: 'oauth',
+    oauth_required: true,
+    enabled: true,
+    tags: ['commerce', 'shopify'],
+  },
+  {
+    id: 'imap',
+    name: 'Company Email (IMAP)',
+    description:
+      'Connect your own corporate mailbox (any IMAP/SMTP host — Alibaba enterprise mail detected automatically). The assistant searches, reads, and sends as you, from your own address.',
+    category: 'official',
+    // App-password paste (client security password) — the directory auth
+    // enum's closest fit is api_key (a pasted secret, like the GitHub PAT).
+    // The connect UI is a dedicated dialog (email + app password, MX-resolved
+    // preset hosts), not the generic PAT input.
+    // See docs/architecture/integrations/mailbox-imap.md.
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['email', 'productivity'],
+    // One mailbox per user (D11 — the Gmail v1 boundary). Multi-account is a
+    // later, deliberate change: drop this flag AND consume the extras in
+    // injectMailboxTools (the github/google injector pattern).
+    single_instance: true,
+  },
+  {
     id: 'agentmail',
     name: 'Assistant Email',
     description:

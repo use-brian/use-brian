@@ -18,6 +18,7 @@
 
 import { Router } from 'express'
 import { query, queryWithRLS } from '../db/client.js'
+import { resolveAssistantAccess } from '../db/users.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
 import type { ConnectorInstance, ConnectorInstanceStore } from '../db/connector-instance-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
@@ -447,14 +448,17 @@ export function knowledgeRoutes({
 
   /**
    * Authorize access to team-level knowledge operations (picker + repo
-   * enumeration). Accepts either:
-   *   - direct `assistant_members` row (personal assistants), or
-   *   - `workspace_members` row for the assistant's owning team (team assistants).
+   * enumeration), returning the assistant's workspace.
    *
-   * The owning team's members are the right audience for configuring a
-   * team's KB sources — they may not be in `assistant_members` for every
-   * team-owned assistant. Returns the userId on success; writes a 4xx and
-   * returns null on denial.
+   * Delegates to `resolveAssistantAccess` — the single access predicate
+   * (`direct assistant_members grant OR workspace_members membership`). The
+   * owning workspace's members are the right audience for configuring a team's
+   * KB sources; they may not be in `assistant_members` for every team-owned
+   * assistant.
+   *
+   * **403, never 404.** This previously probed `SELECT workspace_id FROM
+   * assistants` first and 404'd on an unknown id, making a nonexistent assistant
+   * distinguishable from one the caller cannot reach. Both collapse to 403.
    */
   async function verifyTeamOrAssistantAccess(
     req: { userId?: string; params: { assistantId: string } },
@@ -463,37 +467,12 @@ export function knowledgeRoutes({
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return null }
 
-    // Resolve the assistant's team — system query because the caller might
-    // not yet have visibility into the assistant row.
-    const assistant = await query<{ workspace_id: string | null }>(
-      `SELECT workspace_id FROM assistants WHERE id = $1`, [req.params.assistantId],
-    )
-    if (assistant.rows.length === 0) {
-      res.status(404).json({ error: 'Assistant not found' })
+    const access = await resolveAssistantAccess(userId, req.params.assistantId)
+    if (!access) {
+      res.status(403).json({ error: 'Not a member of this assistant or its team' })
       return null
     }
-    const workspaceId = assistant.rows[0].workspace_id
-
-    // Direct assistant membership.
-    const direct = await queryWithRLS<{ role: string }>(
-      userId,
-      `SELECT role FROM assistant_members WHERE assistant_id = $1 AND user_id = $2`,
-      [req.params.assistantId, userId],
-    )
-    if (direct.rows.length > 0) return { userId, workspaceId }
-
-    // Team membership grants access to all team-owned assistants.
-    if (workspaceId) {
-      const teamMember = await queryWithRLS<{ role: string }>(
-        userId,
-        `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
-        [workspaceId, userId],
-      )
-      if (teamMember.rows.length > 0) return { userId, workspaceId }
-    }
-
-    res.status(403).json({ error: 'Not a member of this assistant or its team' })
-    return null
+    return { userId, workspaceId: access.assistant.workspaceId }
   }
 
   // Resolve the assistant's team and clearance into an AccessContext.

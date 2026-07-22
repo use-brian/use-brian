@@ -35,9 +35,9 @@ export function FeedSettings() {
   const platformLabel = t.platformLabels[platform] ?? platform;
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-5xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-5xl mx-auto space-y-5">
       <header className="space-y-1.5">
-        <h1 className="text-2xl font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+        <h1 className="text-[15px] font-semibold">
           {format(t.settings.heading, { platform: platformLabel })}
         </h1>
         <p className="text-sm text-muted-foreground">
@@ -88,7 +88,7 @@ function SettingCard(props: {
   return (
     <Link
       href={props.href}
-      className="group rounded-xl border border-border bg-card p-4 hover:border-primary/40 hover:bg-accent/40 active:bg-accent/55 transition-all duration-200 hover-lift"
+      className="group rounded-xl border border-border bg-card p-4 hover:border-primary/40 hover:bg-accent/40 active:bg-accent/55 transition-all duration-200"
     >
       <div className="flex items-start gap-3">
         <span className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/20 transition-all duration-200 group-hover:bg-primary/15 group-hover:ring-primary/35">

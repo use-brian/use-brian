@@ -26,7 +26,7 @@ export type DefaultRuleTemplate = {
 // support and must not appear here. (Gmail stays a send/read connector but is
 // not an ingestion source — its poll producer + adapter were removed.) Do not
 // derive from OFFICIAL_CONNECTORS.
-export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp', 'email'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
+export const INGEST_SOURCE_PROVIDERS = ['slack', 'github', 'calendar', 'fathom', 'whatsapp', 'email', 'imap', 'shopify'] as const // drift-sweep: intentionally-narrow:ingest-engine-only
 export type IngestSourceProvider = typeof INGEST_SOURCE_PROVIDERS[number]
 
 export const DEFAULT_INGEST_RULES: Readonly<
@@ -147,6 +147,57 @@ export const DEFAULT_INGEST_RULES: Readonly<
       filter_params: {},
       routing_mode: 'scheduled',
       routing_schedule: '0 9 * * 1-5',
+    },
+  ],
+  // Company mailbox (mailbox-imap.md): the ARCHIVE gets every message (D5) —
+  // these rules only pick what additionally reaches the brain, from
+  // connection day forward (D6). Notification noise never lands; newsletters
+  // batch into the weekday digest; real correspondence files realtime.
+  imap: [
+    {
+      filter_type: 'is_noreply',
+      filter_params: {},
+      routing_mode: 'drop',
+    },
+    {
+      filter_type: 'is_bulk',
+      filter_params: {},
+      routing_mode: 'scheduled',
+      routing_schedule: '0 9 * * 1-5',
+    },
+    {
+      filter_type: 'always',
+      filter_params: {},
+      routing_mode: 'realtime',
+    },
+  ],
+  // Shopify (shopify.md → plan §7): digest-first — order events are
+  // individually low-signal, so only high-value orders, cancellations,
+  // refunds, and chargebacks land as their own episodes; everything else
+  // folds into the daily 18:00 digest. Mirrors adapters/shopify/default-rules.
+  shopify: [
+    {
+      filter_type: 'event_type',
+      filter_params: { values: ['dispute.created'] },
+      routing_mode: 'realtime',
+      alert: true,
+    },
+    {
+      filter_type: 'event_type',
+      filter_params: { values: ['order.cancelled', 'refund.created'] },
+      routing_mode: 'realtime',
+    },
+    {
+      filter_type: 'order_value_gte',
+      filter_params: { amount: 500 },
+      routing_mode: 'realtime',
+      alert: true,
+    },
+    {
+      filter_type: 'always',
+      filter_params: {},
+      routing_mode: 'scheduled',
+      routing_schedule: '0 18 * * *',
     },
   ],
 }

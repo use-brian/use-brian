@@ -129,16 +129,14 @@ export function FeedSettingsMembers() {
   }
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-3xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-3xl mx-auto space-y-5">
       <header className="space-y-1.5">
         <BackButton
           href={feedPath(team.workspaceId, { platform, segment: "settings" })}
           label={t.sections.settings}
         />
         <h1
-          className="text-2xl font-semibold tracking-tight"
-          style={{ fontFamily: "var(--font-rocknroll)" }}
-        >
+          className="text-[15px] font-semibold"        >
           {t.settings.membersTitle}
         </h1>
         <p className="text-sm text-muted-foreground">

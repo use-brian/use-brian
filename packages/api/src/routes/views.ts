@@ -2243,6 +2243,10 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
   const taskCreateSchema = workspaceScopedBody.extend({
     title: z.string().min(1).max(512).optional(),
     status: z.enum(TASK_STATUSES).optional(),
+    // ISO string (bare day accepted) — the calendar's day-cell "+" creates
+    // a task already due on the clicked day. Empty string normalises to
+    // null upstream, same as the PATCH path.
+    due: z.union([z.string(), z.null()]).optional(),
   })
   router.post('/tasks', async (req, res) => {
     const ctx = await requireWorkspace(req, res)
@@ -2251,11 +2255,13 @@ export function viewsRoutes(opts: ViewsRouteOptions): Router {
     if (!parsed.success) {
       return badRequest(res, parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '))
     }
+    const dueParsed = isoOrNullish(parsed.data.due)
     const created = await opts.taskStore.create({
       userId: ctx.userId,
       workspaceId: ctx.workspaceId,
       title: parsed.data.title ?? DEFAULT_TASK_TITLE,
       status: (parsed.data.status as TaskRecordStatus | undefined) ?? 'todo',
+      ...(dueParsed !== undefined ? { due: dueParsed } : {}),
     })
     res.status(201).json({
       id: created.id,

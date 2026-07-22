@@ -184,8 +184,10 @@ export function FeedInbox() {
 
   const counts = useMemo(() => {
     const c: Record<FeedPlatform, number> = {
+      instagram: 0,
       threads: 0,
       twitter: 0,
+      xhs: 0,
     };
     for (const e of items) c[e.platform] += 1;
     return c;
@@ -230,20 +232,18 @@ export function FeedInbox() {
   }, [counts, t.platformLabels]);
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-7xl mx-auto space-y-5">
       <header className="space-y-2">
         <div className="flex items-center gap-2.5">
           <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-primary/12 text-primary ring-1 ring-primary/20">
             <InboxIcon className="h-[18px] w-[18px]" strokeWidth={1.7} />
           </span>
           <h1
-            className="text-2xl font-semibold tracking-tight"
-            style={{ fontFamily: "var(--font-rocknroll)" }}
-          >
+            className="text-[15px] font-semibold"          >
             {t.sections.inbox}
           </h1>
           {!loading && items.length > 0 ? (
-            <span className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-primary/15 text-primary text-xs font-semibold tabular-nums ring-1 ring-primary/25">
+            <span className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-muted text-foreground/70 text-xs font-semibold tabular-nums ring-1 ring-border">
               {items.length}
             </span>
           ) : null}
@@ -325,7 +325,7 @@ export function FeedInbox() {
                   >
                     <Link
                       href={reminderHref(team.workspaceId, event)}
-                      className="block h-full rounded-xl border p-3 space-y-2.5 shadow-sm hover:shadow-md hover-lift transition-colors bg-primary/[0.06] border-primary/25 hover:bg-primary/[0.10] hover:border-primary/40"
+                      className="block h-full rounded-xl border p-3 space-y-2.5 shadow-sm hover:shadow-md transition-colors bg-primary/[0.06] border-primary/25 hover:bg-primary/[0.10] hover:border-primary/40"
                     >
                       <CardHeader event={event} />
                       <CardBody event={event} profile={profile ?? null} />
@@ -372,7 +372,7 @@ function CardHeader({ event }: { event: ApprovalEvent }) {
             "inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-[10px] font-semibold ring-1 ring-inset " +
             (isX
               ? "bg-foreground text-background ring-foreground/20"
-              : "bg-primary/15 text-primary ring-primary/25")
+              : "bg-muted text-foreground/70 ring-border")
           }
         >
           <span aria-hidden>{isX ? "X" : "@"}</span>

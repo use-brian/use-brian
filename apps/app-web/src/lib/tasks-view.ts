@@ -23,6 +23,23 @@ import {
   type TaskStatus,
 } from "@/lib/api/tasks";
 
+// ── Local-day formatting ────────────────────────────────────────────────
+
+/**
+ * Local-calendar `YYYY-MM-DD` for an ISO timestamp — the day the VIEWER's
+ * timezone puts it on. Never `iso.slice(0, 10)`: that reads the UTC prefix,
+ * which is the previous day for any timestamp east of UTC (a `+08`
+ * local-midnight due renders as yesterday), so the peek/date-editor showed
+ * a different day than the calendar grid placed the chip on.
+ */
+export function localIsoDay(iso: string): string {
+  const d = new Date(iso);
+  const y = String(d.getFullYear()).padStart(4, "0");
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 // ── Project facet (`project:` tag namespace) ────────────────────────────
 
 const PROJECT_TAG_PREFIX = "project:";

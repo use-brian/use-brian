@@ -187,13 +187,11 @@ export function FeedInsights() {
   }
 
   return (
-    <div className="px-6 md:px-10 py-10 max-w-7xl mx-auto space-y-6 animate-fade-in">
+    <div className="px-4 md:px-6 py-5 max-w-7xl mx-auto space-y-5">
       <header className="flex items-start sm:items-center justify-between gap-4 flex-wrap">
         <div className="space-y-1.5">
           <h1
-            className="text-2xl font-semibold tracking-tight"
-            style={{ fontFamily: "var(--font-rocknroll)" }}
-          >
+            className="text-[15px] font-semibold"          >
             {format(td.heading, { platform: t.platformLabels[platform] })}
           </h1>
           <p className="text-xs text-muted-foreground">
@@ -396,7 +394,7 @@ function ProfileSummary({
         return (
           <div
             key={m.key}
-            className="rounded-xl border border-border bg-card p-5 flex flex-col gap-2 hover-lift"
+            className="rounded-xl border border-border bg-card p-5 flex flex-col gap-2"
             title={cardTitle}
           >
             <div className="flex items-center gap-1.5 text-[10.5px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -929,7 +927,7 @@ function PostInsightsCard({
   return (
     <li
       className={
-        "group rounded-2xl border p-5 flex flex-col gap-4 transition-[border-color,box-shadow,background-color] duration-200 " +
+        "group rounded-xl border p-4 flex flex-col gap-4 transition-[border-color,box-shadow,background-color] duration-200 " +
         chrome
       }
       title={cardTitle}
@@ -1227,11 +1225,9 @@ function NotConnectedState({
 }) {
   const label = t.platformLabels[platform];
   return (
-    <div className="px-8 py-10 max-w-2xl space-y-4">
+    <div className="px-4 md:px-6 py-6 max-w-2xl space-y-4">
       <h1
-        className="text-xl font-semibold"
-        style={{ fontFamily: "var(--font-rocknroll)" }}
-      >
+        className="text-[15px] font-semibold"      >
         {format(t.draftSessions.connectFirstTitle, { platform: label })}
       </h1>
       <p className="text-sm text-muted-foreground">
@@ -1239,7 +1235,7 @@ function NotConnectedState({
       </p>
       <Link
         href={feedPath(workspaceId)}
-        className="inline-flex items-center justify-center rounded-xl bg-primary px-4 h-11 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        className="inline-flex items-center justify-center rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90"
       >
         {format(t.draftSessions.connectCta, { platform: label })}
       </Link>

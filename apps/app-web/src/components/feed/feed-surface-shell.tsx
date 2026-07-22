@@ -4,6 +4,10 @@
  * Feed surface shell — the client wrapper every `/w/[id]/feed/*` route
  * renders inside (mounted by `feed/layout.tsx`).
  *
+ * Mounts the shared operator top bar (`[COMP:app-web/operator-topbar]`)
+ * above the readiness gate — chrome on every feed state — and owns the feed
+ * pane's one `overflow-y-auto` scroll container beneath it.
+ *
  * Owns the `FeedProfilesProvider` and gates children on its readiness so
  * ported feed pages keep feed-web's assumption that the workspace context is
  * synchronously available (docs/plans/feed-web-consolidation.md §4). Once the
@@ -23,6 +27,7 @@ import {
 } from "@/contexts/feed-profiles-context";
 import { chatDockSuppression } from "@/lib/chat-dock-suppress";
 import { FeedFloatingChat } from "@/components/feed/feed-floating-chat";
+import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { useT } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 
@@ -34,9 +39,20 @@ export function FeedSurfaceShell(props: {
   const [epoch, setEpoch] = useState(0);
   return (
     <FeedProfilesProvider key={epoch} workspaceId={props.workspaceId}>
-      <FeedReadyGate onRetry={() => setEpoch((e) => e + 1)}>
-        {props.children}
-      </FeedReadyGate>
+      <div className="flex h-full min-h-0 flex-col">
+        {/* Chrome — the shared operator top bar, ABOVE the readiness gate so
+            it renders on every feed state (loading / error / onboarding
+            included) ([COMP:app-web/operator-topbar]). The wrapper below it
+            owns the feed pane's one scroll container; pages with their own
+            full-height scroller (Voice, draft detail) fill it with `h-full`
+            so the outer never overflows. */}
+        <OperatorTopbar app="feed" />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <FeedReadyGate onRetry={() => setEpoch((e) => e + 1)}>
+            {props.children}
+          </FeedReadyGate>
+        </div>
+      </div>
     </FeedProfilesProvider>
   );
 }

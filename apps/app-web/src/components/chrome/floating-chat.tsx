@@ -83,6 +83,10 @@ import {
 } from "@/lib/doc-page-url";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
 import {
+  ASSISTANT_REFRESH_EVENT,
+  type AssistantRefreshDetail,
+} from "@/lib/assistant-events";
+import {
   derivePageIcon,
   getAssistantIdentity,
   listWorkspaceAssistants,
@@ -503,20 +507,32 @@ export function FloatingChat({
   const [workspaceAssistants, setWorkspaceAssistants] = useState<
     WorkspaceAssistantSummary[]
   >([]);
-  useEffect(() => {
+  const reloadWorkspaceAssistants = useCallback(() => {
     if (!workspaceId) return;
-    let cancelled = false;
     listWorkspaceAssistants(workspaceId)
-      .then((list) => {
-        if (!cancelled) setWorkspaceAssistants(list);
-      })
+      .then((list) => setWorkspaceAssistants(list))
       .catch(() => {
         /* switcher just stays single-option; the default still works */
       });
-    return () => {
-      cancelled = true;
-    };
   }, [workspaceId]);
+
+  useEffect(() => {
+    reloadWorkspaceAssistants();
+  }, [reloadWorkspaceAssistants]);
+
+  // Live refresh. This dock lives in the `/w/[workspaceId]` layout and never
+  // unmounts, so the effect above fires once per full page load — a create in
+  // Studio (or by a teammate, or in another tab) would otherwise stay invisible
+  // until an app restart. Signals arrive via the workspace event spine.
+  useEffect(() => {
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<AssistantRefreshDetail>).detail;
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      reloadWorkspaceAssistants();
+    };
+    window.addEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
+  }, [workspaceId, reloadWorkspaceAssistants]);
 
   // The assistant's display identity — drives the collapsed launcher's avatar
   // (its creature icon) instead of a generic chat glyph. Only the floating

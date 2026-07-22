@@ -475,17 +475,16 @@ export const TuningChatPanel = forwardRef<
   const showEmpty = messages.length === 0 && !isStreaming;
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border/70 bg-gradient-to-b from-card via-card to-card/80 shadow-[0_8px_30px_rgb(0,0,0,0.08)] backdrop-blur-sm">
-      <div className="relative shrink-0 border-b border-border/60 bg-gradient-to-r from-primary/[0.06] via-primary/[0.02] to-transparent px-4 py-3">
-        <div className="absolute inset-x-0 -top-px h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl">
+      <div className="relative shrink-0 border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-2.5">
-          <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary text-xs font-semibold ring-1 ring-primary/20">
+          <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground/70 text-xs font-semibold ring-1 ring-border">
             {assistantInitial}
             <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-card" />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <span className="text-sm font-semibold tracking-tight" style={{ fontFamily: "var(--font-rocknroll)" }}>
+              <span className="text-sm font-semibold tracking-tight">
                 {t.title}
               </span>
               <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
@@ -627,7 +626,7 @@ export const TuningChatPanel = forwardRef<
           </div>
         )}
 
-        <div className="rounded-2xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
+        <div className="rounded-xl border border-border/70 bg-background/60 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-primary/15 transition-all">
           <div className="px-3.5 pt-2.5">
             <textarea
               ref={inputRef}

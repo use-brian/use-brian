@@ -31,6 +31,7 @@ import {
 import type { WorkspaceStore } from '../db/workspace-store.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
+import type { WechatConnectorClient } from '../wechat/connector-client.js'
 import type { ChannelIntegration, ChannelIntegrationStore } from '../db/channel-integrations.js'
 import {
   listChannelsForWorkspace,
@@ -101,6 +102,13 @@ export type ChannelsRouteOptions = {
   /** WhatsApp BYON connector bridge, used to tear down sockets on delete. */
   whatsappConnector?: WhatsappConnectorClient
   /**
+   * WeChat iLink connector bridge. Required for the WeChat QR pairing
+   * endpoints (POST `.../channels/wechat/pairing` + status/verify-code) and
+   * used to start/stop the per-channel long-poll loop. WeChat connect
+   * returns 503 if missing. See docs/architecture/channels/wechat.md.
+   */
+  wechatConnector?: WechatConnectorClient
+  /**
    * Hosted default Telegram bot token (`env.TELEGRAM_BOT_TOKEN`). Fallback bot
    * for resolving display names of sessions-derived telegram delivery
    * destinations when the workspace has no BYO bot (or its bot isn't in the
@@ -156,6 +164,15 @@ const connectMsTeamsSchema = z.object({
   tenantId: z.string().min(1),
   defaultAssistantId: z.string().uuid().nullish(),
   displayName: z.string().min(1).max(200).optional(),
+}).strict()
+
+const wechatPairStartSchema = z.object({
+  defaultAssistantId: z.string().uuid().nullish(),
+}).strict()
+
+const wechatVerifyCodeSchema = z.object({
+  // The digits the user's phone WeChat shows during pairing.
+  code: z.string().min(1).max(16),
 }).strict()
 
 /**
@@ -945,6 +962,239 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     })
   })
 
+  // ── WeChat — BYON iLink bot, QR pairing ─────────────────────────
+  //
+  // Unlike the token-paste platforms, WeChat binds a bot identity by QR scan:
+  // start opens a pairing session on the wechat-connector bridge, the client
+  // polls status (rendering the returned URL as a QR), and on iLink's confirm
+  // THIS route persists the returned credentials (channel + encrypted
+  // integration row), then tells the bridge to open the long-poll loop. The
+  // bot token only ever moves bridge → API — never to the browser. iLink may
+  // also demand a pairing code mid-flow (`need_verifycode`); the client
+  // submits it via the verify-code endpoint. See
+  // docs/architecture/channels/wechat.md → "Connect flow".
+
+  // Pairing sessions this API instance started: remembers the connect params
+  // and memoizes the finalize result so repeat polls stay idempotent.
+  const wechatPairings = new Map<string, {
+    workspaceId: string
+    userId: string
+    defaultAssistantId: string | null
+    startedAt: number
+    finalized?: { channelId: string; connectorError: string | null }
+  }>()
+  const WECHAT_PAIRING_TTL_MS = 15 * 60_000
+
+  function purgeWechatPairings(): void {
+    const now = Date.now()
+    for (const [id, p] of wechatPairings) {
+      if (now - p.startedAt > WECHAT_PAIRING_TTL_MS) wechatPairings.delete(id)
+    }
+  }
+
+  // POST /workspaces/:workspaceId/channels/wechat/pairing — start QR pairing.
+  router.post('/workspaces/:workspaceId/channels/wechat/pairing', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    if (!opts.integrationStore) {
+      res.status(503).json({ error: 'Channel integrations are not configured on this server' })
+      return
+    }
+    if (!opts.wechatConnector) {
+      res.status(503).json({ error: 'WeChat connect requires the iLink connector to be configured' })
+      return
+    }
+
+    const parsed = wechatPairStartSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    purgeWechatPairings()
+    let started
+    try {
+      started = await opts.wechatConnector.startPairing()
+    } catch (err) {
+      console.error('[channels] wechat pairing start failed:', err)
+      res.status(502).json({ error: 'Failed to start WeChat pairing' })
+      return
+    }
+    wechatPairings.set(started.pairingId, {
+      workspaceId,
+      userId,
+      defaultAssistantId: parsed.data.defaultAssistantId ?? null,
+      startedAt: Date.now(),
+    })
+    res.status(201).json({ pairingId: started.pairingId, qrcodeUrl: started.qrcodeUrl, status: 'qr' })
+  })
+
+  // GET /workspaces/:workspaceId/channels/wechat/pairing/:pairingId — poll.
+  // On `confirmed`, finalizes: channel row + encrypted credentials + long-poll
+  // start. Credentials never reach the response.
+  router.get('/workspaces/:workspaceId/channels/wechat/pairing/:pairingId', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, pairingId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const pairing = wechatPairings.get(pairingId)
+    if (!pairing || pairing.workspaceId !== workspaceId) {
+      res.status(404).json({ error: 'Unknown or expired pairing' })
+      return
+    }
+    if (!opts.integrationStore || !opts.wechatConnector) {
+      res.status(503).json({ error: 'WeChat connect is not configured on this server' })
+      return
+    }
+
+    // Idempotent repeat poll after a finalized confirm.
+    if (pairing.finalized) {
+      const channel = await getChannelForUser(userId, pairing.finalized.channelId)
+      res.json({
+        status: 'connected',
+        channel: channel ? serializeChannel(channel) : null,
+        connectorError: pairing.finalized.connectorError,
+      })
+      return
+    }
+
+    let snapshot
+    try {
+      snapshot = await opts.wechatConnector.pairingStatus(pairingId)
+    } catch (err) {
+      console.error('[channels] wechat pairing status failed:', err)
+      res.status(502).json({ error: 'Failed to reach the WeChat connector' })
+      return
+    }
+    if (!snapshot) {
+      wechatPairings.delete(pairingId)
+      res.status(404).json({ error: 'Unknown or expired pairing' })
+      return
+    }
+
+    if (snapshot.status !== 'confirmed' || !snapshot.result) {
+      res.json({
+        status: snapshot.status,
+        qrcodeUrl: snapshot.qrcodeUrl ?? null,
+        error: snapshot.error ?? null,
+      })
+      return
+    }
+
+    // Confirmed: persist and start the poller.
+    const result = snapshot.result
+    let provisioned
+    try {
+      provisioned = await findOrCreateChannelForWorkspaceConnect({
+        workspaceId,
+        channelType: 'wechat',
+        displayName: `WeChat bot ${result.ilinkBotId.split('@')[0]}`,
+        externalIdentity: { botUserId: result.ilinkBotId },
+        defaultAssistantId: pairing.defaultAssistantId,
+      })
+    } catch (err) {
+      const msg = (err as Error).message
+      console.error('[channels] wechat channel provisioning failed:', err)
+      if (msg.toLowerCase().includes('workspace')) {
+        res.status(400).json({ error: 'defaultAssistantId must belong to this workspace' })
+        return
+      }
+      res.status(500).json({ error: 'Failed to provision channel' })
+      return
+    }
+
+    try {
+      await opts.integrationStore.upsert({
+        channelId: provisioned.channelId,
+        channelType: 'wechat',
+        teamId: null,
+        teamName: result.ilinkBotId,
+        botUserId: result.ilinkBotId,
+        botUsername: null,
+        credentials: {
+          bot_token: result.botToken,
+          base_url: result.baseUrl,
+          ilink_bot_id: result.ilinkBotId,
+          ...(result.boundUserId ? { bound_user_id: result.boundUserId } : {}),
+          get_updates_buf: '',
+        },
+        actingUserId: userId,
+      })
+    } catch (err) {
+      console.error('[channels] wechat integration upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save integration' })
+      return
+    }
+
+    // Open the long-poll loop for this bot. Non-fatal on failure: the
+    // integration is persisted, so the connector's restoreAll picks it up on
+    // its next boot — but report it so the UI can prompt a retry.
+    let connectorError: string | null = null
+    try {
+      await opts.wechatConnector.connect(provisioned.channelId, {
+        botToken: result.botToken,
+        baseUrl: result.baseUrl,
+      })
+    } catch (err) {
+      connectorError = (err as Error).message
+      console.error('[channels] wechat connector connect failed:', err)
+    }
+
+    pairing.finalized = { channelId: provisioned.channelId, connectorError }
+
+    const channel = await getChannelForUser(userId, provisioned.channelId)
+    res.json({
+      status: 'connected',
+      channel: channel ? serializeChannel(channel) : null,
+      reused: provisioned.reused,
+      connectorError,
+    })
+  })
+
+  // POST /workspaces/:workspaceId/channels/wechat/pairing/:pairingId/verify-code
+  // — forward the pairing digits iLink asked for (`need_verifycode`).
+  router.post('/workspaces/:workspaceId/channels/wechat/pairing/:pairingId/verify-code', async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const { workspaceId, pairingId } = req.params
+
+    const role = await opts.workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const pairing = wechatPairings.get(pairingId)
+    if (!pairing || pairing.workspaceId !== workspaceId) {
+      res.status(404).json({ error: 'Unknown or expired pairing' })
+      return
+    }
+    if (!opts.wechatConnector) {
+      res.status(503).json({ error: 'WeChat connect is not configured on this server' })
+      return
+    }
+
+    const parsed = wechatVerifyCodeSchema.safeParse(req.body ?? {})
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
+      return
+    }
+
+    try {
+      await opts.wechatConnector.submitVerifyCode(pairingId, parsed.data.code)
+    } catch (err) {
+      console.error('[channels] wechat verify-code failed:', err)
+      res.status(502).json({ error: 'Failed to submit the code' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
   // DELETE /workspaces/:workspaceId/channels/:channelId — cascades to the
   // channel's `channel_integrations` + `channel_assistants` rows.
   router.delete('/workspaces/:workspaceId/channels/:channelId', async (req, res) => {
@@ -977,6 +1227,15 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
     if (channel.channelType === 'discord' && opts.discordConnector) {
       opts.discordConnector.disconnect(channelId).catch((err) => {
         console.error('[channels] discord connector disconnect failed:', err)
+      })
+    }
+
+    // Same for WeChat: stop the iLink long-poll loop immediately (best-effort;
+    // restoreAll would skip the deleted channel anyway). The per-contact
+    // context tokens cascade with the channels row (migration 362 FK).
+    if (channel.channelType === 'wechat' && opts.wechatConnector) {
+      opts.wechatConnector.disconnect(channelId).catch((err) => {
+        console.error('[channels] wechat connector disconnect failed:', err)
       })
     }
 

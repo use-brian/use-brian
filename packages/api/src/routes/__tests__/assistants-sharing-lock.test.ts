@@ -8,10 +8,19 @@ vi.mock('../../db/client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// verifyMembership now delegates to `resolveAssistantAccess` — the single access
+// predicate (see [COMP:api/assistant-access]). It is one call, not a route-local
+// membership join, so the gate is stubbed here instead of via queryWithRLS.
+vi.mock('../../db/users.js', () => ({
+  resolveAssistantAccess: vi.fn(),
+}))
+
 import { assistantRoutes } from '../assistants.js'
 import { queryWithRLS } from '../../db/client.js'
+import { resolveAssistantAccess } from '../../db/users.js'
 
 const mockQueryWithRLS = vi.mocked(queryWithRLS)
+const mockAccess = vi.mocked(resolveAssistantAccess)
 
 const capabilityStore = {
   listActive: vi.fn(),
@@ -41,7 +50,7 @@ function makeApp(opts: { userId: string }) {
 describe('[COMP:routes/assistants-sharing-lock] PATCH /:assistantId sharing_mode hard-lock', () => {
   it('rejects enabling sharing when the assistant has active capability grants (409)', async () => {
     // 1. membership check: owner
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     // hasActive: has grants
     capabilityStore.hasActive.mockResolvedValueOnce(true)
 
@@ -51,13 +60,14 @@ describe('[COMP:routes/assistants-sharing-lock] PATCH /:assistantId sharing_mode
 
     expect(res.status).toBe(409)
     expect(res.body.code).toBe('SHARING_LOCKED_BY_GRANTS')
-    // Critically, the UPDATE query must NOT have been issued.
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1) // only the membership check
+    // Critically, the UPDATE query must NOT have been issued. The membership
+    // check no longer spends a queryWithRLS, so the count is 0.
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(0)
   })
 
   it('allows setting sharing_mode=off even when the assistant has active grants', async () => {
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQueryWithRLS
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never) // membership
       .mockResolvedValueOnce({ // UPDATE
         rows: [{ id: 'a-1', name: 'Bot', system_prompt: null, slack_model_alias: 'standard', telegram_model_alias: 'standard', whatsapp_model_alias: 'standard' }],
         rowCount: 1,
@@ -74,8 +84,8 @@ describe('[COMP:routes/assistants-sharing-lock] PATCH /:assistantId sharing_mode
   })
 
   it('allows enabling sharing when the assistant has no active grants', async () => {
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'owner' } as never)
     mockQueryWithRLS
-      .mockResolvedValueOnce({ rows: [{ role: 'owner' }], rowCount: 1 } as never) // membership
       .mockResolvedValueOnce({ // UPDATE
         rows: [{ id: 'a-1', name: 'Bot', system_prompt: null, slack_model_alias: 'standard', telegram_model_alias: 'standard', whatsapp_model_alias: 'standard' }],
         rowCount: 1,
@@ -91,7 +101,7 @@ describe('[COMP:routes/assistants-sharing-lock] PATCH /:assistantId sharing_mode
   })
 
   it('403 for non-owner members (hard-lock never runs)', async () => {
-    mockQueryWithRLS.mockResolvedValueOnce({ rows: [{ role: 'member' }], rowCount: 1 } as never)
+    mockAccess.mockResolvedValueOnce({ assistant: { id: 'a-1', name: 'A', workspaceId: 'w-1' }, role: 'member' } as never)
 
     const res = await request(makeApp({ userId: 'u-member' }))
       .patch('/api/assistants/a-1')
