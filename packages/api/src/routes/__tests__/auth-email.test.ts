@@ -26,6 +26,7 @@ const findOrCreateUserMock = vi.fn()
 const promoteChannelUserMock = vi.fn()
 const updateUserTimezoneMock = vi.fn()
 const findUserByIdMock = vi.fn()
+const getDefaultAssistantMock = vi.fn()
 
 vi.mock('../../db/users.js', () => ({
   findUserByEmail: (...a: unknown[]) => findUserByEmailMock(...a),
@@ -33,6 +34,7 @@ vi.mock('../../db/users.js', () => ({
   promoteChannelUser: (...a: unknown[]) => promoteChannelUserMock(...a),
   updateUserTimezone: (...a: unknown[]) => updateUserTimezoneMock(...a),
   findUserById: (...a: unknown[]) => findUserByIdMock(...a),
+  getDefaultAssistant: (...a: unknown[]) => getDefaultAssistantMock(...a),
 }))
 
 function makeStore(overrides?: Partial<MagicLinkStore>): MagicLinkStore {
@@ -114,6 +116,7 @@ beforeEach(() => {
   promoteChannelUserMock.mockReset()
   updateUserTimezoneMock.mockReset()
   findUserByIdMock.mockReset()
+  getDefaultAssistantMock.mockReset()
 })
 
 describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
@@ -598,9 +601,11 @@ describe('[COMP:api/auth-email-verify-code] POST /auth/email/verify-code', () =>
       authProviderId: 'tg@example.com',
       timezone: 'Asia/Hong_Kong',
     })
-    // First query() inside tryLinkTelegram is the first-owned-assistant
-    // lookup; anything after (mergeShadowUser) gets the empty fallback.
-    queryMock.mockResolvedValueOnce({ rows: [{ id: 'assistant-1' }] })
+    // tryLinkTelegram resolves the bind target via getDefaultAssistant (the
+    // user's Personal-workspace primary), not a raw owner_user_id lookup —
+    // that column is NULL for workspace-owned assistants. Remaining query()
+    // calls (mergeShadowUser) get the empty fallback.
+    getDefaultAssistantMock.mockResolvedValueOnce({ id: 'assistant-1' })
     queryMock.mockResolvedValue({ rows: [] })
 
     let captured: Parameters<LinkedAccountStore['upsert']>[0] | null = null

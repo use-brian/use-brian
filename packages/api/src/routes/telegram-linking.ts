@@ -9,11 +9,22 @@
  *
  *   POST /api/assistants/:assistantId/telegram/link-code   → generate code
  *   GET  /api/assistants/:assistantId/telegram/link-status  → poll for result
+ *
+ * Both routes take an `:assistantId` straight from the URL, so both must gate on
+ * it. `requireAuth` alone only proves *a* user is calling — it says nothing about
+ * whether that user may touch this assistant. Ungated, `/link-code` minted a
+ * redeemable code binding the caller's Telegram to ANY assistant id in the
+ * database (a cross-workspace bind), and `/link-status` returned another user's
+ * `linked_accounts` row verbatim — their Telegram chat id and profile metadata.
+ * The gate is `getUserAssistant` (`direct OR workspace` membership), identical to
+ * `POST /auth/telegram-link-update`; the two paths write the same binding and
+ * must not disagree on who may write it.
  */
 
 import { Router } from 'express'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
+import { getUserAssistant } from '../db/users.js'
 
 type TelegramLinkingRouteOptions = {
   linkedAccountStore: LinkedAccountStore
@@ -37,6 +48,11 @@ export function telegramLinkingRoutes(options: TelegramLinkingRouteOptions): Rou
     }
     const { assistantId } = req.params
 
+    if (!(await getUserAssistant(userId, assistantId))) {
+      res.status(403).json({ error: 'No access to that assistant' })
+      return
+    }
+
     try {
       const code = await linkCodeStore.create({ userId, assistantId })
       res.json({ code: code.code, expiresAt: code.expiresAt })
@@ -55,6 +71,11 @@ export function telegramLinkingRoutes(options: TelegramLinkingRouteOptions): Rou
       return
     }
     const { assistantId } = req.params
+
+    if (!(await getUserAssistant(userId, assistantId))) {
+      res.status(403).json({ error: 'No access to that assistant' })
+      return
+    }
 
     try {
       // Check if this assistant already has an official bot link (fast path)
