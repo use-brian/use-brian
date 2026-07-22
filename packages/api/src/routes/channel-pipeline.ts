@@ -54,7 +54,7 @@ import {
   getGroupChatContext, buildGroupChatContextPrompt, getSessionTopicLabels,
   markDowngradeNoticeSent, clearDowngradeNotice,
 } from '../db/sessions.js'
-import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget } from '../model-resolution.js'
+import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { PendingMessageStore } from '../db/pending-message-store.js'
@@ -262,6 +262,12 @@ export type ChannelHooks = {
 // ── Pipeline params ──────────────────────────────────────────────
 
 export type ChannelPipelineParams = {
+  /**
+   * Background-lane model, resolved once at boot against the configured
+   * providers. Omitted = fall back to the literal, which is only servable
+   * where a Google credential exists.
+   */
+  backgroundModel?: string
   // ── Identity ──
   /** The user whose session this is (channel user or owner). */
   userId: string
@@ -444,7 +450,12 @@ export type ChannelPipelineParams = {
    * Usage is recorded here as `overhead:transcription` once we have a
    * stored user_message_id.
    */
-  voiceTranscriptionUsage?: { usage: TokenUsage | null; model: string } | null
+  voiceTranscriptionUsage?: {
+    usage: TokenUsage | null
+    model: string
+    /** Duration of the voice note, when the channel handler measured it. */
+    audioSeconds?: number
+  } | null
 }
 
 // ── Large-paste intercept ────────────────────────────────────────
@@ -572,6 +583,12 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     capabilityStore,
   } = params
 
+  // Every background call in this pipeline (session-state diff, memory nudge,
+  // research classifier) runs on this one id. Boot resolves it against the
+  // configured providers; the literal is the fallback for callers without
+  // boot context.
+  const laneModel = params.backgroundModel ?? BACKGROUND_MODEL
+
   // `messageText` + `userContentBlocks` are `let` — the large-paste intercept
   // below may rewrite them to a manifest + head excerpt before anything reads
   // them (classifier, persist, query loop).
@@ -660,7 +677,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   ) {
     try {
       const { classifyResearchIntent } = await import('@use-brian/core')
-      const adaptive = await classifyResearchIntent({ provider, message: messageText })
+      const adaptive = await classifyResearchIntent({ provider, message: messageText, model: laneModel })
       if (adaptive.research) {
         effectiveModelAlias = 'research'
         adaptiveResearchActive = true
@@ -787,6 +804,14 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       model: voiceTranscriptionUsage.model,
       usage: voiceTranscriptionUsage.usage,
       source: 'overhead:transcription',
+      // Distinguishes an inbound voice message from a recording upload:
+      // both are `overhead:transcription`, but they have different volumes,
+      // different latency budgets, and would migrate to a new provider
+      // independently.
+      triggerKey: 'voice_message_transcription',
+      ...(voiceTranscriptionUsage.audioSeconds !== undefined
+        ? { audioSeconds: voiceTranscriptionUsage.audioSeconds }
+        : {}),
     })
   }
 
@@ -1632,7 +1657,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
             provider,
             // Standard tier per docs/architecture/platform/cost-and-pricing.md
             // → Model routing (extraction / classification / structured-output bucket).
-            model: 'gemini-3.1-flash-lite',
+            model: laneModel,
             sessionId: session.id,
             userId,
             assistantId: assistant.id,
@@ -1677,7 +1702,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
         turns: pendingAssistantTurns,
         callModel: async (prompt) => {
           const resp = await collectStream(provider.stream({
-            model: 'gemini-3.1-flash-lite',
+            model: laneModel,
             messages: [{ role: 'user', content: prompt }],
             systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
             maxTokens: 256,
@@ -1688,7 +1713,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
               .map((b) => b.text)
               .join(''),
             usage: resp.usage,
-            model: 'gemini-3.1-flash-lite',
+            model: laneModel,
           }
         },
         store: memoryStore,

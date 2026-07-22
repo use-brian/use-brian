@@ -28,7 +28,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 // no-op/false/null/unset defaults in chatRoutes(). See oss §12.5.
 import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, FileStore, ContentBlock, CacheStore, McpSettingsStore, ConfirmationDecision, ConfirmationResolver, TopicClassification, ClassifierRecentTurn, EpisodicStore, CapabilityStore, RetrievalStore, TranscribeResult, TokenUsage, WorkerResult, EngineHooks } from '@use-brian/core'
 
-import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
+import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
 import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
@@ -906,14 +906,6 @@ export function resolveStickyChannelId(
  */
 type GenerateTitleResult = { title: string | null; usage: TokenUsage | null; model: string | null }
 
-/**
- * The background-lane workhorse: extraction / classification / structured
- * output, per docs/architecture/platform/cost-and-pricing.md → Model routing.
- * Always pass this through `ensureServableModel` before use — on a deployment
- * with no Google credential it is not servable and the routing provider throws.
- */
-const BACKGROUND_MODEL = 'gemini-3.1-flash-lite'
-
 async function generateTitle(provider: LLMProvider, messages: Message[], model: string): Promise<GenerateTitleResult> {
   const filteredMessages = messages
     .filter((m) => m.role === 'user' || m.role === 'assistant')
@@ -954,13 +946,13 @@ async function generateTitle(provider: LLMProvider, messages: Message[], model: 
     const firstUserText = filteredMessages.find((m) => m.role === 'user')?.text ?? ''
     const fallback = sanitizeTitle(firstUserText)
     if (fallback.split(/\s+/).length >= 2) {
-      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model: 'gemini-3.1-flash-lite' }
+      return { title: fallback.charAt(0).toUpperCase() + fallback.slice(1), usage, model }
     }
   }
   return {
     title: cleaned.length > 0 ? cleaned : null,
     usage,
-    model: 'gemini-3.1-flash-lite',
+    model,
   }
 }
 
@@ -1618,6 +1610,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         const adaptive = await classifyResearchIntent({
           provider: options.provider,
           message,
+          model: backgroundModelFor(options.configuredProviders),
         }).catch(() => ({ research: false, operateSite: false, reason: null, usage: null, model: null }))
         adaptiveResearchOverhead = {
           model: adaptive.model,
@@ -2261,6 +2254,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           model: t.model,
           usage: t.usage,
           source: 'overhead:transcription',
+          // Same source as a recording upload, different workload — tag it
+          // so the two can be priced and migrated independently.
+          triggerKey: 'voice_message_transcription',
+          ...(t.audioSeconds !== undefined ? { audioSeconds: t.audioSeconds } : {}),
         })
       }
 
@@ -3247,6 +3244,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const { injectDocTools } = await import('../doc/inject.js')
           await injectDocTools({
             tools: allTools,
+            backgroundModel: backgroundModelFor(options.configuredProviders),
             userId: user.id,
             assistant: {
               id: assistant.id,
@@ -3738,7 +3736,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           // being true here means the explicit toggle: splitter is moot.
           if (!researchMode && !operateSiteIntent) {
             const { classifySplit } = await import('@use-brian/core')
-            const splitResult = await classifySplit({ provider: options.provider, message })
+            const splitResult = await classifySplit({ provider: options.provider, message, model: backgroundModelFor(options.configuredProviders) })
               .catch(() => ({ tasks: null, usage: null, model: null }))
             // Attribute splitter tokens as overhead. Recorded regardless of
             // whether the classifier chose to split — the Gemini call happened.
@@ -5113,9 +5111,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             .then((open: SessionStateRecord[]) =>
               runSessionStateDiff({
                 provider: options.provider,
-                model: options.configuredProviders
-                  ? ensureServableModel(BACKGROUND_MODEL, options.configuredProviders)
-                  : BACKGROUND_MODEL,
+                model: backgroundModelFor(options.configuredProviders),
                 sessionId: session.id,
                 userId: user.id,
                 assistantId: assistant.id,
@@ -5154,11 +5150,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         // Records usage as `overhead:nudge` once the judge call returns.
         // Standard tier per docs/architecture/platform/cost-and-pricing.md
         // → Model routing (extraction / classification / structured-output bucket).
+        const nudgeModel = backgroundModelFor(options.configuredProviders)
         runMemoryNudge({
           turns: pendingAssistantTurns,
           callModel: async (prompt) => {
             const resp = await collectStream(options.provider.stream({
-              model: 'gemini-3.1-flash-lite',
+              model: nudgeModel,
               messages: [{ role: 'user', content: prompt }],
               systemPrompt: 'You are a memory utility judge. Follow instructions exactly.',
               maxTokens: 256,
@@ -5166,7 +5163,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             return {
               text: resp.content.filter((b): b is { type: 'text'; text: string } => b.type === 'text').map((b) => b.text).join(''),
               usage: resp.usage,
-              model: 'gemini-3.1-flash-lite',
+              model: nudgeModel,
             }
           },
           store: options.memoryStore,
@@ -5415,9 +5412,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         // `title_update` event for this turn.
         // Resolved once: the same model drives the call and its latency budget,
         // so a slower serving provider can never be given the Gemini deadline.
-        const autoTitleModel = options.configuredProviders
-          ? ensureServableModel(BACKGROUND_MODEL, options.configuredProviders)
-          : BACKGROUND_MODEL
+        const autoTitleModel = backgroundModelFor(options.configuredProviders)
         const AUTO_TITLE_TIMEOUT_MS = backgroundLatencyBudgetMs(autoTitleModel)
         const autoTitle = (async () => {
           try {
@@ -5616,6 +5611,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 docPageStore,
                 savedViewStore,
                 minChars: AUTO_TITLE_AI_MIN_CHARS,
+                backgroundModel: backgroundModelFor(options.configuredProviders),
               })
               if (result.applied && result.title && !res.writableEnded) {
                 // `icon` is the emoji the generator suggested + the commit

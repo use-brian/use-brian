@@ -12,6 +12,8 @@ import {
   wouldBudgetDowngradeAffectModel,
   chatTierBudget,
   ensureServableModel,
+  backgroundModelFor,
+  BACKGROUND_MODEL,
   backgroundLatencyBudgetMs,
 } from '../model-resolution.js'
 
@@ -316,5 +318,30 @@ describe('[COMP:api/model-resolution] backgroundLatencyBudgetMs — budget follo
 
   it('falls back to the tight budget for an unknown id', () => {
     expect(backgroundLatencyBudgetMs('not-a-real-model')).toBe(10_000)
+  })
+})
+
+describe('[COMP:api/model-resolution] backgroundModelFor — the lane seam boot injects', () => {
+  const GEMINI = new Set(['gemini'])
+  const QWEN = new Set(['openai-compat:dashscope-intl'])
+
+  it('resolves the Gemini workhorse when Gemini is configured', () => {
+    expect(backgroundModelFor(GEMINI)).toBe(BACKGROUND_MODEL)
+  })
+
+  it('resolves the Qwen background model on a Google-free deploy', () => {
+    // The lane is hardcoded at ~17 call sites; this is the single seam that
+    // keeps them alive when the routing provider has no Gemini entry.
+    expect(backgroundModelFor(QWEN)).toBe('qwen3.5-flash')
+  })
+
+  it('falls back to the literal when the caller has no boot context', () => {
+    // Leaf modules and tests call the lanes without a provider table; they
+    // must behave exactly as they did before the injection existed.
+    expect(backgroundModelFor(undefined)).toBe(BACKGROUND_MODEL)
+  })
+
+  it('is a no-op when nothing is configured, so routing still fails loudly', () => {
+    expect(backgroundModelFor(new Set())).toBe(BACKGROUND_MODEL)
   })
 })

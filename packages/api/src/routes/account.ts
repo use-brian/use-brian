@@ -29,6 +29,13 @@ type AccountRouteOptions = {
    */
   getTelegramBotUsername?: () => Promise<string | null>
   /**
+   * Resolves the official WhatsApp bot's number so the Settings UI can tell the
+   * user where to send their code (and render a `wa.me` deep link). Hosted-only
+   * — absent in OSS, which is what gates `POST /whatsapp/link-code` off.
+   * See docs/architecture/channels/whatsapp.md → "Account linking".
+   */
+  getWhatsappOfficialNumber?: () => Promise<string | null>
+  /**
    * GCS blob client for avatar upload/remove/proxy. When absent (prod without
    * GCS_FILES_BUCKET), the avatar routes are not registered — same gating as
    * the file tools. See user-profile.md → "Uploading your own photo".
@@ -154,6 +161,60 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       res.json({ code: code.code, expiresAt: code.expiresAt, botUsername })
     } catch (err) {
       console.error('[account] telegram link-code failed:', err)
+      res.status(500).json({ error: 'Failed to generate linking code' })
+    }
+  })
+
+  // ── POST /api/account/whatsapp/link-code ────────────────────────
+  // Settings → Account → Connected accounts "Connect" flow for the official
+  // WhatsApp bot. Same shape as the Telegram route above: mint a 6-char code
+  // bound to the user's FIRST-OWNED assistant; the user sends it to the
+  // official number and the bot redeems it (whatsapp.ts → "Step A: Link code
+  // detection"), upserting the `whatsapp` identity.
+  //
+  // `officialNumber` is returned so the UI can name the number to message and
+  // build a wa.me deep link. It doubles as the hosted gate: the resolver is
+  // injected only by the hosted API, so OSS gets 503 rather than a code the
+  // user has nowhere to send. See docs/architecture/channels/whatsapp.md →
+  // "Account linking".
+
+  router.post('/whatsapp/link-code', async (req, res) => {
+    const userId = req.userId
+    if (!userId) {
+      res.status(401).json({ error: 'Missing or invalid Authorization header' })
+      return
+    }
+    if (!options.linkCodeStore || !options.getWhatsappOfficialNumber) {
+      res.status(503).json({ error: 'WhatsApp linking not configured' })
+      return
+    }
+
+    try {
+      // A code the user can't deliver is worse than an honest failure — resolve
+      // the number first and refuse if the official bot isn't paired.
+      const officialNumber = await options.getWhatsappOfficialNumber().catch(() => null)
+      if (!officialNumber) {
+        res.status(503).json({ error: 'official_bot_unavailable' })
+        return
+      }
+
+      const assistantRow = await query<{ id: string }>(
+        `SELECT id FROM assistants
+         WHERE owner_user_id = $1
+         ORDER BY created_at ASC
+         LIMIT 1`,
+        [userId],
+      )
+      const assistantId = assistantRow.rows[0]?.id
+      if (!assistantId) {
+        res.status(409).json({ error: 'no_assistant' })
+        return
+      }
+
+      const code = await options.linkCodeStore.create({ userId, assistantId })
+      res.json({ code: code.code, expiresAt: code.expiresAt, officialNumber })
+    } catch (err) {
+      console.error('[account] whatsapp link-code failed:', err)
       res.status(500).json({ error: 'Failed to generate linking code' })
     }
   })

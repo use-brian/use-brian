@@ -25,6 +25,8 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'timeout',
   'stopped',
   'tab_closed',
+  'detached',
+  'consent_denied',
   'stale_ref',
   'backend_error',
 ])

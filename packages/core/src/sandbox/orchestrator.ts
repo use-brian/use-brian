@@ -292,23 +292,35 @@ export function createSandboxOrchestrator(deps: SandboxOrchestratorDeps): Sandbo
       egressAllowlist: deps.egressAllowlistFor?.(ctx) ?? [],
       maxLifetimeSeconds: deps.maxLifetimeSeconds,
     })
-    // Session reuse (§4.4): inject the profile's vaulted bundle BEFORE the
-    // first navigation so the site is already signed in.
-    const injectedSite = await injectVaultBundle(profileId, sandboxId, site)
+    // From here the micro-VM is BILLING, so every path out must either record
+    // the task row or kill the sandbox. Without this the vault injection or
+    // the insert could throw and leave an orphan running until its
+    // max-lifetime reaper — which is exactly what a malformed session id did
+    // (`sandbox_tasks.session_id` is `uuid NOT NULL`; the sign-in route's
+    // decorated id 502'd every call and leaked a sandbox each time).
+    try {
+      // Session reuse (§4.4): inject the profile's vaulted bundle BEFORE the
+      // first navigation so the site is already signed in.
+      const injectedSite = await injectVaultBundle(profileId, sandboxId, site)
 
-    await deps.taskStore.create({
-      taskId,
-      sandboxId,
-      userId: ctx.userId,
-      workspaceId: ctx.workspaceId,
-      sessionId: ctx.sessionId,
-      status: 'running',
-      profileId,
-      injectedSite,
-      authorizedBudgetUsd,
-      createdAt: now(),
-      lastActivityAt: now(),
-    })
+      await deps.taskStore.create({
+        taskId,
+        sandboxId,
+        userId: ctx.userId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.sessionId,
+        status: 'running',
+        profileId,
+        injectedSite,
+        authorizedBudgetUsd,
+        createdAt: now(),
+        lastActivityAt: now(),
+      })
+    } catch (err) {
+      // Best-effort: a failed kill must not mask the original cause.
+      await deps.provider.kill(sandboxId).catch(() => {})
+      throw err
+    }
     return { sandboxId }
   }
 

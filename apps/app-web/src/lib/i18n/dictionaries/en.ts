@@ -1499,6 +1499,18 @@ export const en = {
       generateNewCode: "Generate new code",
       telegramLinked: "Telegram connected.",
       telegramUnlinked: "Telegram disconnected.",
+      whatsapp: "WhatsApp",
+      whatsappConnected: "Connected",
+      connectWhatsappHint:
+        "Send this code to {number} on WhatsApp to connect your account.",
+      openWhatsapp: "Open WhatsApp",
+      whatsappLinked: "WhatsApp connected.",
+      whatsappUnlinked: "WhatsApp disconnected.",
+      whatsappUnavailable:
+        "WhatsApp linking isn't available right now. Please try again later.",
+      disconnectWhatsappTitle: "Disconnect WhatsApp?",
+      disconnectWhatsappConfirm:
+        "Your assistant will stop replying to this WhatsApp number, and groups you added the bot to will stop being read.",
       connectError: "Something went wrong. Please try again.",
     },
     privacy: {
@@ -5722,6 +5734,9 @@ export const en = {
       assistantsEmpty: "No assistants in this workspace yet.",
       sessionsLabel: "Signed-in sites",
       sessionsEmpty: "No sites signed in yet. Sign in during a browser task and save the session here.",
+      ownBrowserLabel: "Logins come from your own browser",
+      ownBrowserHint:
+        "This profile browses in your own Chrome, so it uses the sites you are already signed into there. Nothing is captured or stored here.",
       statusActive: "Active",
       statusDead: "Signed out",
       lastUsed: "Last used",

@@ -42,6 +42,9 @@ import { billingPartyForAssistant } from '../billing-party.js'
 import { classifyMedia, buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
 
 export type DiscordRouteOptions = {
+  /** Servable background-lane model, resolved at boot; forwarded to the
+   * channel pipeline so its background calls work without a Google key. */
+  backgroundModel?: string
   /** Shared secret the connector presents on every call (DISCORD_CONNECTOR_SECRET). */
   connectorSecret: string
   provider: LLMProvider
@@ -504,6 +507,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
     const abortController = new AbortController()
 
     await processChannelMessage({
+      backgroundModel: options.backgroundModel,
       userId: channelUserId,
       ownerId,
       assistant: { ...assistant, ownerUserId: ownerId },

@@ -48,9 +48,11 @@ import { resolveConfig } from "./config.js";
 import {
   DEFAULT_LOCAL_APP_URL,
   TARGET_FILE_NAME,
+  desktopConfigUrl,
   healthUrl,
   localMintUrl,
   localTarget,
+  parseDesktopConfig,
   parsePersistedTarget,
   serializePersistedTarget,
   targetWindowTitle,
@@ -441,13 +443,36 @@ async function probeLocalBrain(apiUrl: string): Promise<boolean> {
 }
 
 /**
+ * Ask the deployment where its own API lives (`GET /api/desktop-config`).
+ * Returns the declared base, or `null` for the caller to derive instead.
+ *
+ * This is what lets a reverse-proxied self-host be reached at all: hostname
+ * derivation only covers `localhost`, an `api.` sibling, and same-host `:4000`,
+ * so a brain served at e.g. `https://brian.example.com` with its API on 443
+ * under a different name was previously unreachable. Never throws — an older
+ * self-host 404s here and falls back.
+ */
+async function fetchDeclaredApiUrl(appUrl: string): Promise<string | null> {
+  try {
+    const res = await net.fetch(desktopConfigUrl(appUrl), {
+      signal: AbortSignal.timeout(3500),
+      cache: "no-store",
+    });
+    if (!res.ok) return null; // 404 — a self-host predating the endpoint
+    return parseDesktopConfig(await res.json());
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Persist the target record and relaunch — the §2.1 switch. The config is a
  * process-lifetime constant (keep-alive timers, menu labels, and the policy
  * closures all hang off it), so a switch never re-resolves in place.
  */
-function persistTargetAndRelaunch(kind: TargetKind, appUrl?: string): void {
+function persistTargetAndRelaunch(kind: TargetKind, appUrl?: string, apiUrl?: string | null): void {
   try {
-    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl));
+    writeFileSync(targetFile(), serializePersistedTarget(kind, appUrl, apiUrl));
   } catch (err) {
     dialog.showErrorBox("Switch failed", `Could not save the target: ${String(err)}`);
     return;
@@ -459,6 +484,15 @@ function persistTargetAndRelaunch(kind: TargetKind, appUrl?: string): void {
 /** The last local address ever used (remembered across a switch to cloud). */
 function rememberedLocalAppUrl(): string {
   return parsePersistedTarget(readPersistedTargetRaw())?.appUrl ?? DEFAULT_LOCAL_APP_URL;
+}
+
+/**
+ * The last API base that local address DECLARED, kept alongside it across a
+ * switch to cloud — otherwise the trip back would silently fall to hostname
+ * derivation and strand a reverse-proxied self-host on an unreachable `:4000`.
+ */
+function rememberedLocalApiUrl(): string | null {
+  return parsePersistedTarget(readPersistedTargetRaw())?.apiUrl ?? null;
 }
 
 let lastLocalMintAt: number | null = null;
@@ -515,7 +549,7 @@ function showLocalDown(win: BrowserWindow, reason: "unreachable" | "auth" = "unr
  */
 function switchTargetFromMenu(): void {
   if (cfg.target === "local") {
-    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl());
+    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl(), rememberedLocalApiUrl());
     return;
   }
   const win = ensureWindow();
@@ -1435,18 +1469,24 @@ if (!gotLock) {
     // so a switch would persist but never survive the relaunch — refuse with
     // an explanation instead of silently reopening in the same place.
     if (cfg.envTargetOverride) return { ok: false, error: "env-override", url: input };
-    const target = localTarget(input);
-    if (!target) return { ok: false, error: "invalid-url", url: input };
+    // Normalize first (cheap reject on a bad URL), then ask the deployment
+    // where its own API lives before probing — a reverse-proxied self-host is
+    // only reachable via its declaration, since derivation would guess `:4000`.
+    const normalized = localTarget(input);
+    if (!normalized) return { ok: false, error: "invalid-url", url: input };
+    const declaredApiUrl = await fetchDeclaredApiUrl(normalized.appUrl);
+    const target = localTarget(normalized.appUrl, declaredApiUrl) ?? normalized;
     if (!(await probeLocalBrain(target.apiUrl))) {
       return { ok: false, error: "unreachable", url: target.appUrl };
     }
     // A short delay (not setImmediate) so the ok-reply actually flushes to the
     // renderer and the landing paints "Restarting..." before the process dies.
-    setTimeout(() => persistTargetAndRelaunch("local", target.appUrl), 150);
+    // The declaration rides along into the record so startup stays sync.
+    setTimeout(() => persistTargetAndRelaunch("local", target.appUrl, declaredApiUrl), 150);
     return { ok: true, url: target.appUrl };
   });
   ipcMain.on("Use Brian:use-cloud", () =>
-    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl()),
+    persistTargetAndRelaunch("cloud", rememberedLocalAppUrl(), rememberedLocalApiUrl()),
   );
 
   // Bundled-mode token bridge: the preload reads/writes the Bearer token here.

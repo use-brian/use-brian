@@ -41,6 +41,12 @@ export type RecordOverheadUsageParams = {
    * forwarded straight through to the store. Migration 164.
    */
   triggerKey?: string
+  /**
+   * Seconds of audio this overhead call processed — see
+   * UsageStore.recordUsage. Set by the voice-transcription paths so the
+   * admin rollup can price speech-to-text per audio hour. Migration 347.
+   */
+  audioSeconds?: number
 }
 
 export async function recordOverheadUsage(
@@ -66,6 +72,7 @@ export async function recordOverheadUsage(
       source: params.source,
       userMessageId: params.userMessageId ?? undefined,
       triggerKey: params.triggerKey,
+      ...(params.audioSeconds !== undefined ? { audioSeconds: params.audioSeconds } : {}),
     })
   } catch (err) {
     console.error(`[overhead-usage] failed to record ${params.source}:`, err)

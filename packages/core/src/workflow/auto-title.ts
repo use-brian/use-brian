@@ -124,7 +124,10 @@ export async function generateWorkflowTitle(
   provider: LLMProvider,
   params: GenerateWorkflowTitleParams,
   signal?: AbortSignal,
+  /** Servable background-lane model; defaults to the historical literal. */
+  modelOverride?: string,
 ): Promise<GenerateWorkflowTitleResult> {
+  const model = modelOverride ?? AUTO_TITLE_MODEL
   const parts: string[] = []
   if (params.instructions && params.instructions.trim().length > 0) {
     parts.push(`Instructions: ${params.instructions.trim()}`)
@@ -142,7 +145,7 @@ export async function generateWorkflowTitle(
   let usage: TokenUsage | null = null
   try {
     for await (const chunk of provider.stream({
-      model: AUTO_TITLE_MODEL,
+      model: model,
       systemPrompt: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: excerpt }],
       maxTokens: 32,
@@ -160,13 +163,13 @@ export async function generateWorkflowTitle(
     // placeholder. The job/workflow record is already persisted; missing
     // a title is purely cosmetic.
     console.warn('[workflow/auto-title] generation failed:', err)
-    return { title: null, usage: null, model: AUTO_TITLE_MODEL }
+    return { title: null, usage: null, model: model }
   }
 
   const cleaned = sanitizeWorkflowTitle(raw)
   if (cleaned.length === 0) {
     // Model produced nothing usable — let the caller keep its placeholder.
-    return { title: null, usage, model: AUTO_TITLE_MODEL }
+    return { title: null, usage, model: model }
   }
-  return { title: cleaned, usage, model: AUTO_TITLE_MODEL }
+  return { title: cleaned, usage, model: model }
 }

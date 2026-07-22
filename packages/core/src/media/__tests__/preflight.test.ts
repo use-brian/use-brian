@@ -94,6 +94,31 @@ describe('[COMP:media/preflight] transcribeFirstAudio', () => {
       { apiKey: 'k', model: 'm', timeoutMs: 1234, fetchFn: customFetch },
     )
   })
+
+  it("carries the attachment's duration onto the result as audioSeconds", async () => {
+    // The transcriber posts bytes and never learns the duration, so the
+    // channel's value is the only source. Without this the token-billed path
+    // records NULL forever and can never be priced per audio hour — the whole
+    // reason `usage_tracking.audio_seconds` exists.
+    mockedTranscribe.mockResolvedValue({ text: 'ok', usage: null, model: 'gemini-2.5-flash' })
+    const result = await transcribeFirstAudio(
+      [{ buffer: Buffer.from('x'), mime: 'audio/ogg', index: 0, durationSeconds: 12 }],
+      baseOptions,
+    )
+    expect(result?.audioSeconds).toBe(12)
+  })
+
+  it('leaves audioSeconds absent when the channel did not measure a duration', async () => {
+    // A raw web upload carries no duration. Absent must stay absent: recorded
+    // as NULL it reads "unknown rate", but a 0 would read "free transcription
+    // of zero-length audio" and deflate every rate averaged over the window.
+    mockedTranscribe.mockResolvedValue({ text: 'ok', usage: null, model: 'gemini-2.5-flash' })
+    const result = await transcribeFirstAudio(
+      [{ buffer: Buffer.from('x'), mime: 'audio/ogg', index: 0 }],
+      baseOptions,
+    )
+    expect(result).not.toHaveProperty('audioSeconds')
+  })
 })
 
 // A swallowed transcription failure used to reach the model as a bare

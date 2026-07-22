@@ -1311,6 +1311,16 @@ export const zh: Dictionary = {
       generateNewCode: "產生新代碼",
       telegramLinked: "已連結 Telegram。",
       telegramUnlinked: "已解除 Telegram 連結。",
+      whatsapp: "WhatsApp",
+      whatsappConnected: "已連結",
+      connectWhatsappHint: "在 WhatsApp 將此代碼傳送至 {number}，即可連結你的帳號。",
+      openWhatsapp: "開啟 WhatsApp",
+      whatsappLinked: "已連結 WhatsApp。",
+      whatsappUnlinked: "已解除 WhatsApp 連結。",
+      whatsappUnavailable: "目前無法使用 WhatsApp 連結，請稍後再試。",
+      disconnectWhatsappTitle: "要解除 WhatsApp 連結嗎？",
+      disconnectWhatsappConfirm:
+        "助理將停止回覆此 WhatsApp 號碼，你加入機器人的群組也會停止被讀取。",
       connectError: "發生問題，請再試一次。",
     },
     privacy: {
@@ -5448,6 +5458,9 @@ export const zh: Dictionary = {
       assistantsEmpty: "這個工作空間還沒有助理。",
       sessionsLabel: "已登入的網站",
       sessionsEmpty: "還沒有已登入的網站。在瀏覽器任務中登入後即可儲存到這裡。",
+      ownBrowserLabel: "登入狀態來自你自己的瀏覽器",
+      ownBrowserHint:
+        "這個設定檔會在你自己的 Chrome 中瀏覽，直接使用你在那裡已登入的網站。這裡不會擷取或儲存任何資料。",
       statusActive: "有效",
       statusDead: "已登出",
       lastUsed: "上次使用",

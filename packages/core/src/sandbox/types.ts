@@ -68,6 +68,8 @@ export type BrowserBackendErrorCode =
   | 'timeout'        // the extension/sandbox did not answer in time
   | 'stopped'        // the user hit Stop in the extension
   | 'tab_closed'     // the controlled tab went away
+  | 'detached'       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
+  | 'consent_denied' // the user declined the extension's per-tab Allow prompt
   | 'stale_ref'      // ref is not from the latest snapshot
   | 'backend_error'  // anything else the backend reported
 

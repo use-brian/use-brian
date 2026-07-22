@@ -46,6 +46,12 @@ export type SplitOptions = {
   provider: LLMProvider
   message: string
   minMessageLength?: number
+  /**
+   * Background-lane model. Callers with boot context (the API routes) pass an
+   * id already checked servable against the configured providers; the default
+   * keeps standalone/test use on the historical literal.
+   */
+  model?: string
 }
 
 export type SplitResult = {
@@ -65,6 +71,7 @@ export type SplitResult = {
  * the classifier cost as `overhead:splitter`.
  */
 export async function classifySplit(options: SplitOptions): Promise<SplitResult> {
+  const model = options.model ?? CLASSIFIER_MODEL
   const { provider, message, minMessageLength = MIN_MESSAGE_LENGTH } = options
 
   // Short messages never need splitting — short-circuit before the LLM call.
@@ -72,7 +79,7 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
 
   try {
     const stream = provider.stream({
-      model: CLASSIFIER_MODEL,
+      model: model,
       systemPrompt: CLASSIFIER_SYSTEM_PROMPT,
       messages: [{ role: 'user', content: message }],
       maxTokens: 512,
@@ -87,15 +94,15 @@ export async function classifySplit(options: SplitOptions): Promise<SplitResult>
 
     const jsonMatch = text.match(/\{[\s\S]*\}/)
     if (!jsonMatch) {
-      return { tasks: null, usage: response.usage, model: CLASSIFIER_MODEL }
+      return { tasks: null, usage: response.usage, model: model }
     }
 
     const parsed = JSON.parse(jsonMatch[0])
     if (!parsed.split || !Array.isArray(parsed.tasks) || parsed.tasks.length < 2) {
-      return { tasks: null, usage: response.usage, model: CLASSIFIER_MODEL }
+      return { tasks: null, usage: response.usage, model: model }
     }
 
-    return { tasks: parsed.tasks as string[], usage: response.usage, model: CLASSIFIER_MODEL }
+    return { tasks: parsed.tasks as string[], usage: response.usage, model: model }
   } catch {
     // Any failure in classification → safe default, no split. Usage is lost
     // because the stream didn't complete — caller records nothing.

@@ -4,13 +4,16 @@ import {
   CLOUD_API_URL,
   CLOUD_APP_URL,
   DEFAULT_LOCAL_APP_URL,
+  acceptDeclaredApiUrl,
   cloudTarget,
   deriveApiUrl,
+  desktopConfigUrl,
   deriveLocalApiUrl,
   healthUrl,
   localMintUrl,
   localTarget,
   normalizeTargetUrl,
+  parseDesktopConfig,
   parsePersistedTarget,
   resolveTargetFromPersisted,
   serializePersistedTarget,
@@ -163,5 +166,101 @@ describe("[COMP:app-desktop/target-store] indicator + URL helpers", () => {
       "http://localhost:3003/api/auth/local-session",
     );
     expect(healthUrl("http://localhost:4000")).toBe("http://localhost:4000/health");
+  });
+});
+
+describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)", () => {
+  // A reverse-proxied self-host is the case hostname derivation cannot serve:
+  // its API is on 443 under a name that is neither an `api.` sibling nor the
+  // same host on :4000, so without a declaration the shell probes a dead port.
+  const PROXIED_APP = "https://brain.example.com";
+  const PROXIED_API = "https://backend.example.com";
+
+  it("builds the config URL off the normalized app base", () => {
+    expect(desktopConfigUrl("http://localhost:3003")).toBe(
+      "http://localhost:3003/api/desktop-config",
+    );
+  });
+
+  it("derivation alone strands a reverse-proxied self-host on an unreachable :4000", () => {
+    expect(deriveLocalApiUrl(PROXIED_APP)).toBe(`${PROXIED_APP}:4000`);
+  });
+
+  it("a declared API outranks the hostname guess", () => {
+    expect(localTarget(PROXIED_APP, PROXIED_API)?.apiUrl).toBe(PROXIED_API);
+  });
+
+  it("falls back to derivation with no declaration, or a rejected one", () => {
+    expect(localTarget(PROXIED_APP)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+    expect(localTarget(PROXIED_APP, null)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+    expect(localTarget(PROXIED_APP, "not a url")?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+  });
+
+  it("accepts a normalized http(s) declaration and strips trailing slashes", () => {
+    expect(acceptDeclaredApiUrl(`${PROXIED_API}/`)).toBe(PROXIED_API);
+    expect(acceptDeclaredApiUrl("http://localhost:4000")).toBe("http://localhost:4000");
+  });
+
+  it("REFUSES a declaration pointing at the cloud API (paired-API-only rule)", () => {
+    // A typo'd or hostile self-host must not aim the shell's sign-in exchange
+    // and refresh traffic at the origin where a real cloud session lives.
+    expect(acceptDeclaredApiUrl(CLOUD_API_URL)).toBeNull();
+    expect(acceptDeclaredApiUrl(`${CLOUD_API_URL}/v1`)).toBeNull();
+    expect(localTarget(PROXIED_APP, CLOUD_API_URL)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+  });
+
+  it("rejects a non-http(s) declaration", () => {
+    expect(acceptDeclaredApiUrl("file:///etc/passwd")).toBeNull();
+    expect(acceptDeclaredApiUrl("")).toBeNull();
+  });
+
+  it("parses the declared apiUrl out of a config body, tolerating junk", () => {
+    expect(parseDesktopConfig({ apiUrl: PROXIED_API, edition: "oss" })).toBe(PROXIED_API);
+    expect(parseDesktopConfig({})).toBeNull();
+    expect(parseDesktopConfig({ apiUrl: "" })).toBeNull();
+    expect(parseDesktopConfig({ apiUrl: 42 })).toBeNull();
+    expect(parseDesktopConfig(null)).toBeNull();
+    expect(parseDesktopConfig([{ apiUrl: PROXIED_API }])).toBeNull();
+    expect(parseDesktopConfig("nope")).toBeNull();
+    // The cloud guard holds through the parse seam too.
+    expect(parseDesktopConfig({ apiUrl: CLOUD_API_URL })).toBeNull();
+  });
+
+  it("round-trips the declaration through the persisted record", () => {
+    const raw = serializePersistedTarget("local", PROXIED_APP, PROXIED_API);
+    expect(parsePersistedTarget(raw)).toEqual({
+      v: 1,
+      kind: "local",
+      appUrl: PROXIED_APP,
+      apiUrl: PROXIED_API,
+    });
+    expect(resolveTargetFromPersisted(raw).apiUrl).toBe(PROXIED_API);
+  });
+
+  it("keeps the declaration while parked on cloud, so the way back still works", () => {
+    const raw = serializePersistedTarget("cloud", PROXIED_APP, PROXIED_API);
+    const rec = parsePersistedTarget(raw);
+    expect(rec?.kind).toBe("cloud");
+    expect(rec?.apiUrl).toBe(PROXIED_API);
+    // Parked on cloud, the resolved target is still the cloud one.
+    expect(resolveTargetFromPersisted(raw).apiUrl).toBe(CLOUD_API_URL);
+  });
+
+  it("omits an absent or rejected declaration from the record", () => {
+    expect(parsePersistedTarget(serializePersistedTarget("local", PROXIED_APP))).toEqual({
+      v: 1,
+      kind: "local",
+      appUrl: PROXIED_APP,
+    });
+    expect(
+      parsePersistedTarget(serializePersistedTarget("local", PROXIED_APP, CLOUD_API_URL)),
+    ).toEqual({ v: 1, kind: "local", appUrl: PROXIED_APP });
+  });
+
+  it("re-validates a hand-edited record rather than trusting it", () => {
+    const handEdited = JSON.stringify({ v: 1, kind: "local", appUrl: PROXIED_APP, apiUrl: CLOUD_API_URL });
+    expect(parsePersistedTarget(handEdited)?.apiUrl).toBeUndefined();
+    // ...and the resolved target derives instead of reaching the cloud API.
+    expect(resolveTargetFromPersisted(handEdited).apiUrl).toBe(`${PROXIED_APP}:4000`);
   });
 });

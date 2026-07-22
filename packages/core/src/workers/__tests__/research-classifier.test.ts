@@ -179,3 +179,32 @@ describe('[COMP:workers/research-classifier] classifyResearchIntent', () => {
     expect(result.operateSite).toBe(false)
   })
 })
+
+describe('[COMP:workers/research-classifier] background-lane model injection', () => {
+  const LONG = 'Please research the current state of solid-state battery manufacturing in detail.'
+
+  it('sends the injected model on the wire, not the Gemini literal', () => {
+    // A Google-free deploy passes a servable id here. If this ever regresses
+    // to the module constant the routing provider throws "not configured" and
+    // the whole lane dies silently in a background job.
+    const provider = makeProvider('{"research":true,"reason":"deep topic"}')
+    return classifyResearchIntent({ provider, message: LONG, model: 'qwen3.5-flash' }).then((r) => {
+      expect(provider.stream).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'qwen3.5-flash' }),
+      )
+      // The result attributes usage to the model that actually served it —
+      // otherwise cost lands on a model that was never called.
+      expect(r.model).toBe('qwen3.5-flash')
+    })
+  })
+
+  it('defaults to the historical literal when nothing is injected', () => {
+    const provider = makeProvider('{"research":true,"reason":"deep topic"}')
+    return classifyResearchIntent({ provider, message: LONG }).then((r) => {
+      expect(provider.stream).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'gemini-3.1-flash-lite' }),
+      )
+      expect(r.model).toBe('gemini-3.1-flash-lite')
+    })
+  })
+})

@@ -423,7 +423,14 @@ export function computerRoutes(deps: {
       res.status(400).json({ error: 'url must be an http(s) URL' })
       return
     }
-    const sessionId = `plogin_${randomUUID()}`
+    // A BARE uuid, never a decorated one: this id is persisted as
+    // `sandbox_tasks.session_id`, which is `uuid NOT NULL` (closed migration
+    // 315). The original synthetic `plogin_<uuid>` made every insert throw
+    // `invalid input syntax for type uuid`, so this route 502'd on every call
+    // from the day it shipped — the in-memory task store used in tests takes
+    // any string, so the suite stayed green. Nothing reads the prefix; the
+    // sign-in flow is marked by the UI's `?flow=login` query instead.
+    const sessionId = randomUUID()
     const cloud = createCloudBrowserProvider({
       provider: deps.provider,
       binding: deps.orchestrator.binding,

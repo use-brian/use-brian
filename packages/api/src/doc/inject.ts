@@ -153,6 +153,9 @@ export type InjectDocToolsOptions = {
   activeThemeId?: string | null
   /** Provider for `refineActiveTheme`'s seed-adjustment call. */
   provider?: LLMProvider
+  /** Servable background-lane model, resolved by the caller against the
+   * configured providers. Forwarded to the theme tool's LLM call. */
+  backgroundModel?: string
   /** Themes store for `refineActiveTheme`; falls back to the lazy singleton. */
   docThemesStore?: DocThemeStore
   /** Fired after a chat-driven theme refine so the route can stream the new
@@ -466,6 +469,7 @@ export async function injectDocTools(
     const refineActiveTheme = createRefineActiveThemeTool({
       themeId: options.activeThemeId,
       provider: options.provider,
+      model: options.backgroundModel,
       store:
         options.docThemesStore ?? (cachedDocThemesStore ??= createDbDocThemesStore()),
       onRefined: options.onThemeRefined,

@@ -4,7 +4,12 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**"],
-      "env": ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]
+      "env": [
+        "GOOGLE_CLIENT_ID",
+        "GOOGLE_CLIENT_SECRET",
+        "NODE_ENV",
+        "NEXT_PUBLIC_*"
+      ]
     },
     "dev": {
       "cache": false,

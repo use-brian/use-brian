@@ -155,6 +155,37 @@ describe('[COMP:recordings/recordings-store] update', () => {
     expect(values).toEqual([null, 'rec-1'])
   })
 
+  // The language signal is instrumentation: it must land in typed columns an
+  // operator can slice in SQL, and a density of 0 must be storable as 0. Zero
+  // is a real reading — "Chinese, carrying no Cantonese", which is exactly the
+  // normalization the metric exists to catch — so it can never be treated as
+  // "nothing to write" and skipped.
+  it('writes the language signal, including a density of zero', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [ROW] } as never)
+    await updateRecording('rec-1', {
+      cantoDensityPerK: 0,
+      cantoMarkerCount: 0,
+      cjkCount: 240,
+      latinTokens: 12,
+      chineseVariant: 'mandarin',
+    })
+    const [sql, values] = mockQuery.mock.calls[0]!
+    const setClause = sql.slice(sql.indexOf('SET'), sql.indexOf('WHERE'))
+    expect(setClause).toMatch(/canto_density_per_k = \$1/)
+    expect(values).toEqual([0, 0, 240, 12, 'mandarin', 'rec-1'])
+  })
+
+  // An unmeasured recording and one measured at zero must stay distinguishable
+  // in every aggregate, so "no CJK present" is written as a real NULL rather
+  // than defaulted to 0 — a 0 there would report every English recording as
+  // Chinese-with-no-Cantonese and drag the statistics with it.
+  it('writes an unmeasurable density as NULL, never as 0', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [ROW] } as never)
+    await updateRecording('rec-1', { cantoDensityPerK: null, cjkCount: 0 })
+    const [, values] = mockQuery.mock.calls[0]!
+    expect(values).toEqual([null, 0, 'rec-1'])
+  })
+
   it('bounds lastError — provider errors can be arbitrarily long', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [ROW] } as never)
     await updateRecording('rec-1', { lastError: 'x'.repeat(5000) })

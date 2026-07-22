@@ -11,8 +11,9 @@ import {
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { computeDocRedirect } from "@/lib/doc-redirect";
 import { isAppHost, isGuardedPath, normalizeHostHeader } from "@/lib/site-hosts";
+import { ossSignedOutRedirect } from "@/lib/oss-entry";
 
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 
 type RefreshResult = {
   accessToken: string;
@@ -93,6 +94,16 @@ export async function proxy(request: NextRequest) {
   const primary = primaryAuthUrl();
 
   if (!hasAccess && !refreshToken) {
+    // Open edition: no login exists, so a signed-out deep link mints the
+    // local-owner session and comes back to where it was headed, rather than
+    // stranding a self-hosted user on a Google button. Checked before
+    // `primary` for clarity only — `primaryAuthUrl()` is already null in oss.
+    const ossEntry = ossSignedOutRedirect(
+      request.nextUrl.pathname + request.nextUrl.search,
+    );
+    if (ossEntry) {
+      return NextResponse.redirect(new URL(ossEntry, request.url));
+    }
     if (primary) {
       // Cross-origin to the primary's /login. Carries the original URL
       // so post-OAuth lands the user back here.
@@ -118,7 +129,14 @@ export async function proxy(request: NextRequest) {
 
   const refreshed = await tryServerRefresh(refreshToken!);
   if (!refreshed) {
-    const res = NextResponse.redirect(new URL("/login", request.url));
+    // A stale refresh token in the open edition is not a login problem — the
+    // owner is still the owner. Re-mint rather than dead-end on /login.
+    const ossEntry = ossSignedOutRedirect(
+      request.nextUrl.pathname + request.nextUrl.search,
+    );
+    const res = NextResponse.redirect(
+      new URL(ossEntry ?? "/login", request.url),
+    );
     applyClearedCookies(res);
     return res;
   }

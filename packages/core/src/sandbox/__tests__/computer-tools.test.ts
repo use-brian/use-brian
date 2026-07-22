@@ -679,4 +679,29 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
     // No event ever carries typed text or page content.
     expect(JSON.stringify(events)).not.toContain('SECRET DRAFT')
   })
+
+  it('audits what each action ADDED TO CONTEXT, so a browse can be costed', async () => {
+    const events: Array<Record<string, unknown>> = []
+    const tools = createComputerTools({
+      local: fakeProvider('local'),
+      cloud: fakeProvider('cloud'),
+      onEvent: (evt) => void events.push(evt as unknown as Record<string, unknown>),
+    })
+    const ctx = toolContext()
+    await run(tools.browserSnapshot, {}, ctx)
+    await run(tools.browserType, { ref: '@e1', text: 'hello' }, ctx)
+
+    // The LOCAL backend books no sandbox-seconds and no usage_tracking row of
+    // its own — a local browse's whole cost is the tokens its results occupy
+    // in the parent turn. Measuring that here is the only per-action signal
+    // there is. Size only: still metadata, never content.
+    const snapshot = events.find((e) => e.op === 'snapshot')
+    expect(snapshot?.resultChars).toBeGreaterThan(0)
+    expect(snapshot?.resultTokens).toBeGreaterThan(0)
+
+    // `type` takes no inline snapshot, so it is near-free — the asymmetry is
+    // the point of measuring, and it must survive in the data.
+    const typed = events.find((e) => e.op === 'type')
+    expect(typed?.resultChars).toBeLessThan(Number(snapshot?.resultChars))
+  })
 })

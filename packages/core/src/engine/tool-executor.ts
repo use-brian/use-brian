@@ -648,12 +648,40 @@ export function createToolExecutor(options: ToolExecutorOptions) {
           }
         : undefined
 
+      // Gateway tools (mcp_call) resolve policy inside execute() and prompt
+      // from there — after this tool already took the exclusive slot. Keeping
+      // the slot across the human wait would stop tryStartQueued from ever
+      // starting the siblings, and a sibling that never starts never prompts,
+      // so it expires unseen at confirmationTimeoutMs. Park instead: drop to
+      // `pending_confirmation` (which canExecute ignores), let the siblings
+      // through to raise their own prompts, then re-take the slot before the
+      // real work runs. Same prompt-parallel / execute-serial ordering the
+      // executor's own confirmation gate above already has.
+      const parkForConfirmation = async <T>(wait: () => Promise<T>): Promise<T> => {
+        t.status = 'pending_confirmation'
+        wake()
+        tryStartQueued()
+        try {
+          return await wait()
+        } finally {
+          if (!canExecute(t.isConcurrencySafe)) {
+            t.status = 'awaiting_slot'
+            while (!canExecute(t.isConcurrencySafe)) {
+              await waitForChange()
+            }
+          }
+          t.status = 'executing'
+          wake()
+        }
+      }
+
       const result = await toolDef.execute(validated, {
         ...options.context,
         abortSignal: mergedSignal,
         confirmationResolver: options.confirmationResolver,
         notifyConfirmationRequired,
         confirmationTimeoutMs: options.confirmationTimeoutMs,
+        parkForConfirmation,
       })
 
       clearTimeout(timer)

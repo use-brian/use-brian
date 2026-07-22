@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 
 /**
  * Server-side fetch helper that forwards the access_token cookie as a

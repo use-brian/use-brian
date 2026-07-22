@@ -32,7 +32,7 @@ import { primaryAuthUrl } from "@/lib/primary-auth";
 
 // Same resolution as the app-web OAuth callback + refresh bridges:
 // server-side `API_URL`, defaulting to the local dev API.
-const API_URL = process.env.API_URL ?? "http://localhost:4000";
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 
 export async function GET(request: Request) {
   // Layer 3 gate (see packages/api/src/routes/dev-auth.ts module docstring).

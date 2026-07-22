@@ -30,6 +30,8 @@ import {
 import { pageToPlaintext } from '@use-brian/doc-model'
 
 export type RunDocAutoTitleParams = {
+  /** Servable background-lane model; omitted = the generator's own default. */
+  backgroundModel?: string
   userId: string
   pageId: string
   provider: LLMProvider
@@ -70,7 +72,7 @@ const SKIPPED: RunDocAutoTitleResult = {
 export async function runDocAutoTitle(
   params: RunDocAutoTitleParams,
 ): Promise<RunDocAutoTitleResult> {
-  const { userId, pageId, provider, docPageStore, savedViewStore, minChars } = params
+  const { userId, pageId, provider, docPageStore, savedViewStore, minChars, backgroundModel } = params
 
   // 1. Read the merged page (prefers the live Yjs snapshot). `nameOrigin`
   //    rides along — only 'placeholder' pages are eligible.
@@ -85,7 +87,7 @@ export async function runDocAutoTitle(
   // 3. Generate. Null when the model can't produce a meaningful title — keep
   //    the placeholder rather than overwrite it (attribution still returned).
   //    `gen.icon` is a suggested emoji (may be null).
-  const gen = await generatePageTitle(provider, text)
+  const gen = await generatePageTitle(provider, text, backgroundModel)
   if (!gen.title) {
     return { applied: false, title: null, icon: null, usage: gen.usage, model: gen.model }
   }
