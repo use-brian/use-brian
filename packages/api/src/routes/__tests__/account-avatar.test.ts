@@ -1,11 +1,9 @@
 /**
  * [COMP:api/account-avatar] Avatar upload / remove / proxy + profile PATCH.
  *
- * Route-level tests: an in-memory fake GcsFilesClient stands in for the bucket
- * (never hit a real bucket) and the db layer is mocked. We assert the upload
- * happy-path returns an avatarUrl, writes the blob, and calls updateUserAvatar;
- * that a non-image MIME and an oversize file are rejected; that DELETE clears
- * the columns; and that PATCH /profile validates the name.
+ * Route-level tests: in-memory fake storage clients stand in for active and
+ * recorded backends. They cover membership, provenance routing, legacy
+ * fallback, replacement cleanup, validation, delete, public GET, and profile.
  *
  * See docs/architecture/platform/user-profile.md.
  */
@@ -15,6 +13,7 @@ import request from 'supertest'
 import { Writable } from 'node:stream'
 import { createTestApp } from './helpers.js'
 import type { GcsFilesClient } from '../../files/gcs-client.js'
+import type { FilesClientResolver } from '../../files/files-api.js'
 
 // Mock DB modules. The avatar routes touch the client pool only via the shared
 // account routes' other handlers; the avatar paths go through db/users.js.
@@ -43,6 +42,7 @@ const mockFindUserById = vi.mocked(findUserById)
 const mockUpdateUserAvatar = vi.mocked(updateUserAvatar)
 const mockClearUserAvatar = vi.mocked(clearUserAvatar)
 const mockUpdateUserProfile = vi.mocked(updateUserProfile)
+const mockWorkspaceMembership = vi.fn()
 
 function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Map<string, string> } {
   const blobs = new Map<string, Buffer>()
@@ -97,9 +97,41 @@ function makeFakeGcs(): GcsFilesClient & { blobs: Map<string, Buffer>; mimes: Ma
   }
 }
 
+function makeResolver(
+  active: GcsFilesClient,
+  options: { bucket?: string; uriClients?: Map<string, GcsFilesClient>; uriScheme?: 'gs' | 's3' | 'file' } = {},
+): FilesClientResolver {
+  return {
+    async forWorkspace() {
+      return {
+        gcs: active,
+        bucket: options.bucket ?? 'active-bucket',
+        uriScheme: options.uriScheme,
+      }
+    },
+    async forUri(_workspaceId, storageUri) {
+      for (const [prefix, client] of options.uriClients ?? []) {
+        if (storageUri.startsWith(prefix)) return client
+      }
+      return active
+    },
+  }
+}
+
+function avatarOptions(gcs: GcsFilesClient, resolver = makeResolver(gcs)) {
+  return {
+    blobClient: gcs,
+    filesResolver: resolver,
+    workspaceMembership: mockWorkspaceMembership,
+  }
+}
+
 describe('[COMP:api/account-avatar] Avatar routes', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    mockWorkspaceMembership.mockResolvedValue({ role: 'member' })
+    mockUpdateUserAvatar.mockResolvedValue(true)
+    mockClearUserAvatar.mockResolvedValue(true)
   })
 
   // ── POST /avatar ────────────────────────────────────────────
@@ -108,7 +140,7 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
     const gcs = makeFakeGcs()
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(gcs)),
       { userId: 'u_1' },
     )
     // No previous avatar to delete.
@@ -116,6 +148,7 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
 
     const res = await request(app)
       .post('/api/account/avatar')
+      .field('workspaceId', 'ws_1')
       .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47]), {
         filename: 'me.png',
         contentType: 'image/png',
@@ -123,33 +156,47 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
 
     expect(res.status).toBe(200)
     expect(res.body.avatarUrl).toMatch(/\/api\/account\/avatar\/u_1\?v=/)
-    // Blob written under avatars/<userId>/<uuid>.
+    expect(mockWorkspaceMembership).toHaveBeenCalledWith('u_1', 'ws_1')
+    // Blob key keeps workspaceId/avatar-id as the final two path components.
     expect(gcs.blobs.size).toBe(1)
     const [writtenKey] = [...gcs.blobs.keys()]
-    expect(writtenKey).toMatch(/^avatars\/u_1\//)
-    // Persisted with the same storage key + the proxy URL.
+    expect(writtenKey).toMatch(/^ws_1\/[0-9a-f-]{36}$/)
+    // Persisted with the same storage key, immutable origin, and proxy URL.
     expect(mockUpdateUserAvatar).toHaveBeenCalledTimes(1)
     const arg = mockUpdateUserAvatar.mock.calls[0][1]
     expect(arg.storageKey).toBe(writtenKey)
+    expect(arg.storageWorkspaceId).toBe('ws_1')
+    expect(arg.storageUri).toBe(`gs://active-bucket/${writtenKey}`)
     expect(arg.url).toBe(res.body.avatarUrl)
+    expect(arg.previousStorageKey).toBeNull()
   })
 
-  it('best-effort deletes the previous uploaded blob on re-upload', async () => {
-    const gcs = makeFakeGcs()
-    // Seed a previous avatar blob.
-    await gcs.writeBlob('avatars/u_1/old', Buffer.from([1]), {
-      workspaceId: 'u_1',
+  it('deletes the previous object through its recorded backend after a storage switch', async () => {
+    const oldGcs = makeFakeGcs()
+    const newGcs = makeFakeGcs()
+    await oldGcs.writeBlob('ws_1/old', Buffer.from([1]), {
+      workspaceId: 'ws_1',
       mime: 'image/png',
+    })
+    const resolver = makeResolver(newGcs, {
+      bucket: 'new-bucket',
+      uriClients: new Map([['gs://old-bucket/', oldGcs]]),
     })
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(newGcs, resolver)),
       { userId: 'u_1' },
     )
-    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', avatarStorageKey: 'avatars/u_1/old' } as never)
+    mockFindUserById.mockResolvedValueOnce({
+      id: 'u_1',
+      avatarStorageKey: 'ws_1/old',
+      avatarStorageWorkspaceId: 'ws_1',
+      avatarStorageUri: 'gs://old-bucket/ws_1/old',
+    } as never)
 
     const res = await request(app)
       .post('/api/account/avatar')
+      .field('workspaceId', 'ws_1')
       .attach('file', Buffer.from([0x89, 0x50, 0x4e, 0x47]), {
         filename: 'new.png',
         contentType: 'image/png',
@@ -157,15 +204,53 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
 
     expect(res.status).toBe(200)
     // Old key gone, new key present.
-    expect(gcs.blobs.has('avatars/u_1/old')).toBe(false)
-    expect(gcs.blobs.size).toBe(1)
+    expect(oldGcs.blobs.has('ws_1/old')).toBe(false)
+    expect(newGcs.blobs.size).toBe(1)
+  })
+
+  it('rejects an upload when the user is not a workspace member', async () => {
+    const gcs = makeFakeGcs()
+    mockWorkspaceMembership.mockResolvedValueOnce(null)
+    const app = createTestApp('/api/account', accountRoutes(avatarOptions(gcs)), { userId: 'u_1' })
+
+    const res = await request(app)
+      .post('/api/account/avatar')
+      .field('workspaceId', 'ws_other')
+      .attach('file', Buffer.from([0x89]), { filename: 'me.png', contentType: 'image/png' })
+
+    expect(res.status).toBe(403)
+    expect(gcs.blobs.size).toBe(0)
+    expect(mockUpdateUserAvatar).not.toHaveBeenCalled()
+  })
+
+  it('requires workspaceId for a new upload', async () => {
+    const gcs = makeFakeGcs()
+    const app = createTestApp('/api/account', accountRoutes(avatarOptions(gcs)), { userId: 'u_1' })
+    const res = await request(app)
+      .post('/api/account/avatar')
+      .attach('file', Buffer.from([0x89]), { filename: 'me.png', contentType: 'image/png' })
+
+    expect(res.status).toBe(400)
+    expect(mockWorkspaceMembership).not.toHaveBeenCalled()
+  })
+
+  it('removes the newly written object when another avatar update wins', async () => {
+    const gcs = makeFakeGcs()
+    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', avatarStorageKey: null } as never)
+    mockUpdateUserAvatar.mockResolvedValueOnce(false)
+    const res = await request(createTestApp('/api/account', accountRoutes(avatarOptions(gcs)), { userId: 'u_1' }))
+      .post('/api/account/avatar')
+      .field('workspaceId', 'ws_1')
+      .attach('file', Buffer.from('png'), { filename: 'me.png', contentType: 'image/png' })
+    expect(res.status).toBe(409)
+    expect(gcs.blobs.size).toBe(0)
   })
 
   it('rejects a non-image MIME with 400 and writes nothing', async () => {
     const gcs = makeFakeGcs()
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(gcs)),
       { userId: 'u_1' },
     )
 
@@ -185,7 +270,7 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
     const gcs = makeFakeGcs()
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(gcs)),
       { userId: 'u_1' },
     )
 
@@ -205,7 +290,7 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
     const gcs = makeFakeGcs()
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(gcs)),
       { userId: 'u_1' },
     )
 
@@ -223,24 +308,34 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
 
   // ── DELETE /avatar ──────────────────────────────────────────
 
-  it('removes an uploaded avatar: deletes the blob and clears the columns', async () => {
-    const gcs = makeFakeGcs()
-    await gcs.writeBlob('avatars/u_1/cur', Buffer.from([1]), {
-      workspaceId: 'u_1',
+  it('removes an uploaded avatar through its recorded backend and clears the columns', async () => {
+    const defaultGcs = makeFakeGcs()
+    const recordedGcs = makeFakeGcs()
+    await recordedGcs.writeBlob('ws_1/cur', Buffer.from([1]), {
+      workspaceId: 'ws_1',
       mime: 'image/png',
+    })
+    const resolver = makeResolver(defaultGcs, {
+      uriClients: new Map([['s3://avatar-bucket/', recordedGcs]]),
     })
     const app = createTestApp(
       '/api/account',
-      accountRoutes({ blobClient: gcs }),
+      accountRoutes(avatarOptions(defaultGcs, resolver)),
       { userId: 'u_1' },
     )
-    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', avatarStorageKey: 'avatars/u_1/cur' } as never)
+    mockFindUserById.mockResolvedValueOnce({
+      id: 'u_1',
+      avatarStorageKey: 'ws_1/cur',
+      avatarStorageWorkspaceId: 'ws_1',
+      avatarStorageUri: 's3://avatar-bucket/ws_1/cur',
+    } as never)
 
     const res = await request(app).delete('/api/account/avatar')
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
-    expect(gcs.blobs.has('avatars/u_1/cur')).toBe(false)
-    expect(mockClearUserAvatar).toHaveBeenCalledWith('u_1')
+    expect(recordedGcs.blobs.has('ws_1/cur')).toBe(false)
+    expect(defaultGcs.blobs.size).toBe(0)
+    expect(mockClearUserAvatar).toHaveBeenCalledWith('u_1', 'ws_1/cur')
   })
 
   // ── PATCH /profile ──────────────────────────────────────────
@@ -280,14 +375,26 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
   // ── Public proxy: GET /:userId ──────────────────────────────
 
   it('serves an uploaded avatar blob from the public proxy', async () => {
-    const gcs = makeFakeGcs()
-    await gcs.writeBlob('avatars/u_1/cur', Buffer.from([0x89, 0x50]), {
-      workspaceId: 'u_1',
+    const defaultGcs = makeFakeGcs()
+    const recordedGcs = makeFakeGcs()
+    await recordedGcs.writeBlob('ws_1/cur', Buffer.from([0x89, 0x50]), {
+      workspaceId: 'ws_1',
       mime: 'image/png',
     })
+    const resolver = makeResolver(defaultGcs, {
+      uriClients: new Map([['s3://avatar-bucket/', recordedGcs]]),
+    })
     // Public router mounts WITHOUT auth.
-    const app = createTestApp('/api/account/avatar', accountAvatarPublicRoutes(gcs))
-    mockFindUserById.mockResolvedValueOnce({ id: 'u_1', avatarStorageKey: 'avatars/u_1/cur' } as never)
+    const app = createTestApp('/api/account/avatar', accountAvatarPublicRoutes({
+      blobClient: defaultGcs,
+      filesResolver: resolver,
+    }))
+    mockFindUserById.mockResolvedValueOnce({
+      id: 'u_1',
+      avatarStorageKey: 'ws_1/cur',
+      avatarStorageWorkspaceId: 'ws_1',
+      avatarStorageUri: 's3://avatar-bucket/ws_1/cur',
+    } as never)
 
     const res = await request(app).get('/api/account/avatar/u_1')
     expect(res.status).toBe(200)
@@ -295,9 +402,32 @@ describe('[COMP:api/account-avatar] Avatar routes', () => {
     expect(res.headers['cache-control']).toMatch(/max-age=3600/)
   })
 
+  it('serves a legacy NULL-provenance avatar from the default client', async () => {
+    const gcs = makeFakeGcs()
+    await gcs.writeBlob('avatars/u_1/legacy', Buffer.from([0x89]), {
+      workspaceId: 'u_1',
+      mime: 'image/png',
+    })
+    const app = createTestApp('/api/account/avatar', accountAvatarPublicRoutes({
+      blobClient: gcs,
+      filesResolver: makeResolver(makeFakeGcs()),
+    }))
+    mockFindUserById.mockResolvedValueOnce({
+      id: 'u_1',
+      avatarStorageKey: 'avatars/u_1/legacy',
+      avatarStorageWorkspaceId: null,
+      avatarStorageUri: null,
+    } as never)
+
+    expect((await request(app).get('/api/account/avatar/u_1')).status).toBe(200)
+  })
+
   it('returns 404 from the public proxy when the user has no uploaded avatar', async () => {
     const gcs = makeFakeGcs()
-    const app = createTestApp('/api/account/avatar', accountAvatarPublicRoutes(gcs))
+    const app = createTestApp('/api/account/avatar', accountAvatarPublicRoutes({
+      blobClient: gcs,
+      filesResolver: makeResolver(gcs),
+    }))
     mockFindUserById.mockResolvedValueOnce({ id: 'u_1', avatarStorageKey: null } as never)
 
     const res = await request(app).get('/api/account/avatar/u_1')

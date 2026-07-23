@@ -38,9 +38,14 @@ function harness(binding: WorkspaceStorageBinding | null) {
     byoClients.set(opts.bucket, c)
     return c
   })
+  const createLocalClient = vi.fn((opts: { baseDir: string }) => {
+    const c = fakeGcs(`local:${opts.baseDir}`)
+    byoClients.set(opts.baseDir, c)
+    return c
+  })
   const lookup = vi.fn(async () => binding)
-  const resolver = createCachedByoFilesResolver({ lookup, fallback, createGcsClient, createS3Client })
-  return { appGcs, resolver, createGcsClient, createS3Client, lookup, byoClients }
+  const resolver = createCachedByoFilesResolver({ lookup, fallback, createGcsClient, createS3Client, createLocalClient })
+  return { appGcs, resolver, createGcsClient, createS3Client, createLocalClient, lookup, byoClients }
 }
 
 describe('[COMP:files/byo-resolver] createCachedByoFilesResolver', () => {
@@ -72,6 +77,18 @@ describe('[COMP:files/byo-resolver] createCachedByoFilesResolver', () => {
     expect(c).toBe(byoClients.get('s3-bucket'))
   })
 
+  it('routes a local binding and file:// storage_uri through the local client', async () => {
+    const { resolver, createLocalClient, byoClients } = harness({ kind: 'local', path: '/srv/brian-files' })
+    const resolved = await resolver.forWorkspace(ws)
+    expect(resolved.bucket).toBe('/srv/brian-files')
+    expect(resolved.byo).toBe(false)
+    expect(resolved.uriScheme).toBe('file')
+    expect(createLocalClient).toHaveBeenCalledWith({ baseDir: '/srv/brian-files' })
+
+    const client = await resolver.forUri(ws, 'file:///srv/brian-files/workspace_1/file_1')
+    expect(client).toBe(byoClients.get('/srv/brian-files'))
+  })
+
   it('falls back to the app resolver when the workspace has no binding', async () => {
     const { appGcs, resolver, createGcsClient } = harness(null)
     const r = await resolver.forWorkspace(ws)
@@ -93,6 +110,12 @@ describe('[COMP:files/byo-resolver] createCachedByoFilesResolver', () => {
     const { resolver, byoClients } = harness(gcsBinding('cust-bucket'))
     const c = await resolver.forUri(ws, 'gs://cust-bucket/x/y')
     expect(c).toBe(byoClients.get('cust-bucket'))
+  })
+
+  it('does not route a different URI scheme through a same-named binding', async () => {
+    const { appGcs, resolver } = harness(gcsBinding('same-name'))
+    const c = await resolver.forUri(ws, 's3://same-name/x/y')
+    expect(c).toBe(appGcs)
   })
 
   it('forUri uses the app client for pre-BYO default-bucket files', async () => {

@@ -118,8 +118,10 @@ export async function createRecording(input: {
   gcsKey: string
   storageUri?: string | null
   fileName?: string | null
+  bytes?: number | null
   title?: string | null
   kind?: RecordingKind
+  status?: RecordingStatus
   assistantId: string | null
   userId?: string | null
   sensitivity?: string
@@ -127,10 +129,10 @@ export async function createRecording(input: {
 }): Promise<Recording> {
   const { rows } = await query<Record<string, unknown>>(
     `INSERT INTO recordings (
-       id, workspace_id, mime, gcs_key, storage_uri, file_name, title, kind,
+       id, workspace_id, mime, gcs_key, storage_uri, file_name, title, kind, status, bytes,
        user_id, assistant_id, sensitivity, created_by_user_id
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'memo'), $9, $10, COALESCE($11, 'internal'), $12)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 'memo'), COALESCE($9, 'awaiting_upload'), $10, $11, $12, COALESCE($13, 'internal'), $14)
      ON CONFLICT (id) DO UPDATE SET updated_at = now()
      RETURNING ${COLS}`,
     [
@@ -142,6 +144,8 @@ export async function createRecording(input: {
       input.fileName ?? null,
       input.title ?? null,
       input.kind ?? null,
+      input.status ?? null,
+      input.bytes ?? null,
       input.userId ?? null,
       input.assistantId,
       input.sensitivity ?? null,

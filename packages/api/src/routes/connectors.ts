@@ -55,6 +55,8 @@
  */
 
 import { Router } from 'express'
+import { constants as fsConstants, promises as fs } from 'node:fs'
+import * as nodePath from 'node:path'
 import { classifyTool, defaultPolicy } from '@use-brian/core'
 import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
@@ -135,6 +137,9 @@ type ConnectorRouteOptions = {
     resolvePreset?: typeof resolveMailboxPreset
     probe?: typeof probeMailboxFolders
     countArchive?: typeof countEmailArchiveMessages
+  }
+  localStorage?: {
+    requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
   }
 }
 
@@ -431,6 +436,94 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     } catch (err) {
       console.error('[connectors] s3 disconnect failed:', err)
       res.status(500).json({ error: 'Failed to disconnect S3 storage' })
+    }
+  })
+
+  // ── Local directory storage (workspace-scoped) ──────────────
+
+  router.post('/local/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string; path?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const dirPath = typeof body.path === 'string' ? body.path.trim() : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!dirPath) { res.status(400).json({ error: 'Missing path' }); return }
+
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    const requestedPath = nodePath.resolve(dirPath)
+    const resolvedPath = await fs.realpath(requestedPath).catch(() => null)
+    if (!resolvedPath) {
+      res.status(400).json({ error: 'Directory does not exist or is not writable' }); return
+    }
+    try {
+      const stat = await fs.stat(resolvedPath)
+      if (!stat.isDirectory()) {
+        res.status(400).json({ error: 'Path is not a directory' }); return
+      }
+      await fs.access(resolvedPath, fsConstants.W_OK)
+    } catch {
+      res.status(400).json({ error: 'Directory does not exist or is not writable' }); return
+    }
+
+    const credentials: ConnectorCredentials = { type: 'local', path: resolvedPath }
+    const config = { path: resolvedPath, disconnectedAt: null }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      if (existing) {
+        await connectorInstanceStore.update(userId, existing.id, { connected: true, credentials })
+        await connectorInstanceStore.setConfigSystem(existing.id, config)
+        res.json({ ok: true, connectorInstanceId: existing.id }); return
+      }
+      const created = await connectorInstanceStore.createWorkspaceInstance({
+        workspaceId,
+        provider: 'local',
+        label: 'Local Directory Storage',
+        connected: true,
+        credentials,
+        config,
+        createdBy: userId,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' }); return
+      }
+      console.error('[connectors] local connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect local storage' })
+    }
+  })
+
+  router.post('/local/disconnect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      if (!existing) { res.json({ ok: true }); return }
+      await connectorInstanceStore.update(userId, existing.id, { connected: false, credentials: { type: 'none' } })
+      await connectorInstanceStore.setConfigSystem(existing.id, { disconnectedAt: new Date().toISOString() })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] local disconnect failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect local storage' })
     }
   })
 

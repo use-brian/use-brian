@@ -9,7 +9,7 @@
  *
  * All wire contracts match apps/web:
  * - `PATCH /api/account/profile` `{ name }` updates the display name.
- * - `POST /api/account/avatar` (multipart `file`) uploads a profile photo.
+ * - `POST /api/account/avatar` (multipart `file` + active `workspaceId`) uploads a profile photo.
  * - `DELETE /api/account/avatar` removes it.
  *
  * After any of these, callers should re-pull the `user` cookie via the
@@ -35,9 +35,10 @@ export async function updateDisplayName(name: string): Promise<boolean> {
 }
 
 /** Upload a profile photo (multipart). Resolves `true` on success. */
-export async function uploadAvatar(file: File): Promise<boolean> {
+export async function uploadAvatar(file: File, workspaceId: string): Promise<boolean> {
   const form = new FormData();
   form.append("file", file);
+  form.append("workspaceId", workspaceId);
   const res = await authFetch(`${API_URL}/api/account/avatar`, {
     method: "POST",
     body: form,

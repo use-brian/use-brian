@@ -214,6 +214,17 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['storage', 's3', 'workspace'],
     single_instance: true,
   },
+  {
+    id: 'local',
+    name: 'Local Directory Storage',
+    description: 'Store your workspace file bytes in a local directory on the server filesystem. For self-hosted and development deployments.',
+    category: 'official',
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['storage', 'local', 'workspace'],
+    single_instance: true,
+  },
 ]
 
 // ── Built-in workspace primitives ─────────────────────────────

@@ -1,13 +1,13 @@
 /**
  * Bring-your-own-storage resolver — points a workspace's file bytes at its
  * OWN bucket under its OWN credentials, falling back to the app default for
- * workspaces with no binding. Supports two backends: GCS (service-account key)
- * and S3-compatible (access-key/secret-key). Both satisfy the same
+ * workspaces with no binding. Supports GCS (service-account key), S3-compatible
+ * (access-key/secret-key), and OSS local-directory bindings. All satisfy the same
  * `GcsFilesClient` blob interface, so the caller (files-api) is backend-blind.
  *
  * This module is the *mechanism* (build + cache per-workspace clients, route
  * by bucket); it is policy-free. The caller injects a `lookup` that knows how
- * to find a workspace's binding (an active `gcs` or `s3` connector_instance)
+ * to find a workspace's binding (an active `gcs`, `s3`, or `local` connector_instance)
  * and a `fallback` (the app-default singleton resolver). See
  * docs/plans/byo-google-storage.md §2-3 and docs/plans/byo-s3-storage.md.
  */
@@ -19,6 +19,7 @@ import {
   type GcsServiceAccountCredentials,
 } from './gcs-client.js'
 import { createS3FilesClient, type S3Credentials } from './s3-client.js'
+import { createLocalFilesClient } from './local-files-client.js'
 import type { FilesClientResolver, ResolvedFilesClient } from './files-api.js'
 
 /** A workspace's GCS bring-your-own binding. */
@@ -39,7 +40,13 @@ export type S3StorageBinding = {
   forcePathStyle?: boolean
 }
 
-export type WorkspaceStorageBinding = GcsStorageBinding | S3StorageBinding
+/** A workspace's local-directory bring-your-own binding. */
+export type LocalStorageBinding = {
+  kind: 'local'
+  path: string
+}
+
+export type WorkspaceStorageBinding = GcsStorageBinding | S3StorageBinding | LocalStorageBinding
 
 export type CachedByoResolverDeps = {
   /** Find a workspace's active BYO binding, or null when it has none. */
@@ -56,20 +63,23 @@ export type CachedByoResolverDeps = {
     forcePathStyle?: boolean
     credentials: S3Credentials
   }) => GcsFilesClient
+  /** Local client factory — overridable in tests. */
+  createLocalClient?: (opts: { baseDir: string }) => GcsFilesClient
   /** Bound on the per-bucket client cache. Default 256. */
   maxCacheEntries?: number
 }
 
 /** Cache key: backend + endpoint + bucket, so two backends never collide on a shared bucket name. */
 function cacheKeyFor(binding: WorkspaceStorageBinding): string {
-  return binding.kind === 's3'
-    ? `s3:${binding.endpoint ?? ''}:${binding.bucket}`
-    : `gcs:${binding.bucket}`
+  if (binding.kind === 's3') return `s3:${binding.endpoint ?? ''}:${binding.bucket}`
+  if (binding.kind === 'local') return `local:${binding.path}`
+  return `gcs:${binding.bucket}`
 }
 
 export function createCachedByoFilesResolver(deps: CachedByoResolverDeps): FilesClientResolver {
   const makeGcs = deps.createGcsClient ?? createGcsFilesClient
   const makeS3 = deps.createS3Client ?? createS3FilesClient
+  const makeLocal = deps.createLocalClient ?? createLocalFilesClient
   const max = deps.maxCacheEntries ?? 256
   // Keyed by backend+bucket; the build is identical for the lifetime of a
   // binding, so the key is enough (a creds rotation that keeps the same bucket
@@ -90,7 +100,9 @@ export function createCachedByoFilesResolver(deps: CachedByoResolverDeps): Files
             forcePathStyle: binding.forcePathStyle,
             credentials: binding.credentials,
           })
-        : makeGcs({ bucket: binding.bucket, projectId: binding.projectId, credentials: binding.credentials })
+        : binding.kind === 'local'
+          ? makeLocal({ baseDir: binding.path })
+          : makeGcs({ bucket: binding.bucket, projectId: binding.projectId, credentials: binding.credentials })
     cache.set(cacheKey, client)
     if (cache.size > max) {
       const oldest = cache.keys().next().value
@@ -103,24 +115,25 @@ export function createCachedByoFilesResolver(deps: CachedByoResolverDeps): Files
     async forWorkspace(workspaceId: string): Promise<ResolvedFilesClient> {
       const binding = await deps.lookup(workspaceId)
       if (!binding) return deps.fallback.forWorkspace(workspaceId)
+      const bucket = binding.kind === 'local' ? binding.path : binding.bucket
       return {
         gcs: getClient(binding),
-        bucket: binding.bucket,
-        uriScheme: binding.kind === 's3' ? 's3' : 'gs',
-        byo: true,
+        bucket,
+        uriScheme: binding.kind === 's3' ? 's3' : binding.kind === 'local' ? 'file' : 'gs',
+        // Local paths are still finite server-owned disk, so retain the normal
+        // workspace quota. Only customer cloud buckets lift it.
+        byo: binding.kind !== 'local',
       }
     },
 
     async forUri(workspaceId: string, storageUri: string): Promise<GcsFilesClient> {
       const bucket = parseStorageBucket(storageUri)
       const binding = await deps.lookup(workspaceId)
-      // The file lives in the workspace's BYO bucket and we still hold the key.
-      // (After disconnect the key is gone → lookup returns null → fallback, so
-      // dormant BYO files read as not_found until a reconnect.)
-      if (binding && binding.bucket === bucket) return getClient(binding)
-      // Otherwise it's an app-default-bucket file (the common pre-BYO case) →
-      // app client. (A file stranded in a *previous* BYO bucket the workspace
-      // has since left is a documented limitation, not handled here.)
+      const bindingBucket = binding
+        ? binding.kind === 'local' ? binding.path : binding.bucket
+        : null
+      const bindingScheme = binding?.kind === 'local' ? 'file' : binding?.kind === 's3' ? 's3' : 'gs'
+      if (binding && storageUri.startsWith(`${bindingScheme}://`) && bindingBucket === bucket) return getClient(binding)
       return deps.fallback.forUri(workspaceId, storageUri)
     },
   }

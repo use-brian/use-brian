@@ -682,6 +682,10 @@ function ConnectorsList() {
   const [s3SecretKey, setS3SecretKey] = useState("");
   const [s3Error, setS3Error] = useState<string | null>(null);
 
+  const [showLocalForm, setShowLocalForm] = useState<string | null>(null);
+  const [localDirPath, setLocalDirPath] = useState("");
+  const [localDirError, setLocalDirError] = useState<string | null>(null);
+
   // Company mailbox (imap) form state — one dialog with progressive
   // disclosure: email (MX-resolves the preset on blur) + app password, with
   // Advanced host/port fields for unrecognized servers. The server verifies
@@ -778,6 +782,9 @@ function ConnectorsList() {
         // Same collapse for the workspace-scoped `s3` storage binding.
         if (rows.some((r) => r.id === "s3" && r.connectorInstanceId)) {
           rows = rows.filter((r) => !(r.id === "s3" && !r.connectorInstanceId));
+        }
+        if (rows.some((r) => r.id === "local" && r.connectorInstanceId)) {
+          rows = rows.filter((r) => !(r.id === "local" && !r.connectorInstanceId));
         }
         setConnectors(rows);
       })
@@ -1036,6 +1043,13 @@ function ConnectorsList() {
     if (id === "s3") {
       setShowS3Form(rid);
       setS3Error(null);
+      setConnecting(null);
+      return;
+    }
+
+    if (id === "local") {
+      setShowLocalForm(rid);
+      setLocalDirError(null);
       setConnecting(null);
       return;
     }
@@ -1490,6 +1504,33 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  async function handleSaveLocal(c: Connector) {
+    if (!localDirPath.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setLocalDirError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/local/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, path: localDirPath.trim() }),
+      });
+      if (res.ok) {
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setSelected(rid);
+        setShowLocalForm(null);
+        setLocalDirPath("");
+        fetchConnectors();
+        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
+      } else {
+        setLocalDirError(tc.local.errGeneric);
+      }
+    } catch {
+      setLocalDirError(tc.local.errGeneric);
+    }
+    setConnecting(null);
+  }
+
   async function handlePolicyChange(connectorId: string, serverName: string, toolName: string, policy: "allow" | "ask" | "block") {
     setToolsMap((prev) => {
       const entry = prev[connectorId];
@@ -1638,6 +1679,19 @@ function ConnectorsList() {
       setSelected(null);
       try {
         await authFetch(`${API_URL}/api/connectors/s3/disconnect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId }),
+        });
+      } catch {}
+      fetchConnectors();
+      return;
+    }
+    if (c.id === "local") {
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
+      setSelected(null);
+      try {
+        await authFetch(`${API_URL}/api/connectors/local/disconnect`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId }),
@@ -2817,6 +2871,37 @@ function ConnectorsList() {
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.s3.validatingBtn : tc.s3.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {showLocalForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.local.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.local.pathPlaceholder}
+                      value={localDirPath}
+                      onChange={(e) => setLocalDirPath(e.target.value)}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.local.pathNote}</p>
+                    {localDirError && <p className="text-xs text-destructive">{localDirError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setShowLocalForm(null); setLocalDirPath(""); setLocalDirError(null); }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveLocal(sel)}
+                        disabled={!localDirPath.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
                       </button>
                     </div>
                   </div>

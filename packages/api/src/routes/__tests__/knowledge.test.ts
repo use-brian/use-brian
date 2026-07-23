@@ -11,6 +11,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
@@ -77,11 +80,12 @@ const connectorGrantStore = {
   listForTargetSystem: vi.fn(),
 }
 
-function appWs(userId?: string) {
+function appWs(userId?: string, allowLocalSources = true) {
   return createTestApp(
     '/api/workspaces/:workspaceId/knowledge',
     workspaceKnowledgeRoutes({
       knowledgeStore: knowledgeStore as never,
+      allowLocalSources,
       connectorInstanceStore: connectorInstanceStore as never,
       connectorGrantStore: connectorGrantStore as never,
     }),
@@ -412,5 +416,61 @@ describe('[COMP:api/kb-write-capability] POST /sources — create-time write pro
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('[COMP:api/knowledge-route] local filesystem sources', () => {
+  it('is unavailable unless the standalone composition explicitly enables it', async () => {
+    mockRls.mockResolvedValueOnce({
+      rows: [{ role: 'admin', clearance: 'confidential', compartments: null }],
+      rowCount: 1,
+    } as never)
+    const res = await request(appWs('u1', false))
+      .post('/api/workspaces/ws-1/knowledge/sources')
+      .send({ sourceType: 'local', localPath: '/tmp' })
+    expect(res.status).toBe(404)
+    expect(knowledgeStore.createSource).not.toHaveBeenCalled()
+  })
+
+  it('allows a workspace admin to connect a readable markdown directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'brian-local-kb-route-'))
+    try {
+      await writeFile(join(dir, 'index.md'), '# Local knowledge')
+      mockRls.mockResolvedValueOnce({
+        rows: [{ role: 'admin', clearance: 'confidential', compartments: null }],
+        rowCount: 1,
+      } as never)
+      knowledgeStore.createSource.mockResolvedValueOnce({
+        id: 'local-source', workspaceId: 'ws-1', sourceType: 'local', repo: dir,
+        branch: 'local', rootPath: '', lastSyncedSha: null, lastSyncedAt: null,
+        syncError: null, connectorInstanceId: null, writeAccess: null,
+        writeAccessCheckedAt: null, createdAt: new Date(),
+      })
+
+      const res = await request(appWs('u1'))
+        .post('/api/workspaces/ws-1/knowledge/sources')
+        .send({ sourceType: 'local', localPath: dir })
+
+      expect(res.status).toBe(201)
+      expect(knowledgeStore.createSource).toHaveBeenCalledWith(expect.objectContaining({
+        workspaceId: 'ws-1', sourceType: 'local', repo: dir, branch: 'local', rootPath: '',
+      }))
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects local filesystem sources from ordinary workspace members', async () => {
+    mockRls.mockResolvedValueOnce({
+      rows: [{ role: 'member', clearance: 'internal', compartments: null }],
+      rowCount: 1,
+    } as never)
+
+    const res = await request(appWs('u1'))
+      .post('/api/workspaces/ws-1/knowledge/sources')
+      .send({ sourceType: 'local', localPath: '/tmp' })
+
+    expect(res.status).toBe(403)
+    expect(knowledgeStore.createSource).not.toHaveBeenCalled()
   })
 })

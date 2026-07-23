@@ -24,7 +24,7 @@ vi.mock('../client.js', () => ({
 }))
 
 import { query } from '../client.js'
-import { findOrCreateUser, promoteChannelUser } from '../users.js'
+import { clearUserAvatar, findOrCreateUser, promoteChannelUser, updateUserAvatar } from '../users.js'
 
 const mockedQuery = vi.mocked(query)
 
@@ -81,5 +81,41 @@ describe('[COMP:api/account-avatar] Provider login avatar no-clobber', () => {
     const sourceMentions = sql.match(/avatar_source/g) ?? []
     expect(sourceMentions).toHaveLength(1)
     expect(sql).toMatch(/WHEN avatar_source = 'uploaded'/)
+  })
+})
+
+describe('[COMP:api/account-avatar] Uploaded avatar provenance persistence', () => {
+  it('writes the object key, workspace, and immutable storage URI together', async () => {
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+    await updateUserAvatar('u_1', {
+      url: 'https://api.example/api/account/avatar/u_1?v=1234',
+      storageKey: 'ws_1/avatar_1',
+      storageWorkspaceId: 'ws_1',
+      storageUri: 's3://bucket/ws_1/avatar_1',
+      previousStorageKey: null,
+    })
+
+    const [sql, values] = mockedQuery.mock.calls[0]
+    expect(String(sql)).toMatch(/avatar_storage_workspace_id = \$3/)
+    expect(String(sql)).toMatch(/avatar_storage_uri = \$4/)
+    expect(values).toEqual([
+      'https://api.example/api/account/avatar/u_1?v=1234',
+      'ws_1/avatar_1',
+      'ws_1',
+      's3://bucket/ws_1/avatar_1',
+      'u_1',
+      null,
+    ])
+  })
+
+  it('clears both provenance columns with the uploaded avatar', async () => {
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+
+    await clearUserAvatar('u_1', 'ws_1/avatar_1')
+
+    const sql = String(mockedQuery.mock.calls[0][0])
+    expect(sql).toMatch(/avatar_storage_workspace_id = NULL/)
+    expect(sql).toMatch(/avatar_storage_uri = NULL/)
   })
 })

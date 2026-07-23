@@ -21,6 +21,7 @@ const baseRef: ChannelMediaRef = {
 function makeDeps(overrides: Partial<ChannelMediaIntakeDeps> = {}): ChannelMediaIntakeDeps {
   return {
     createEpisode: vi.fn(async () => ({ id: 'rec-1' }) as never),
+    createRecording: vi.fn(async () => ({ id: 'rec-1' }) as never),
     enqueueRecordingJob: vi.fn(async () => ({ enqueued: true, jobId: 'job-1' })),
     ...overrides,
   }
@@ -61,6 +62,11 @@ describe('[COMP:brain/channel-media-intake] ingestChannelMedia', () => {
     expect(deps.enqueueRecordingJob).toHaveBeenCalledWith(
       expect.objectContaining({ recordingId: 'rec-1', workspaceId: 'ws-1', actingUserId: 'owner-1' }),
     )
+    expect(deps.createRecording).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'rec-1',
+      gcsKey: 'ws-1/channel-media/abc',
+      status: 'queued',
+    }))
     // With no resolver wired, the job carries no blueprint (ingest-only).
     expect(deps.enqueueRecordingJob).toHaveBeenCalledWith(
       expect.objectContaining({ blueprintSlug: null }),

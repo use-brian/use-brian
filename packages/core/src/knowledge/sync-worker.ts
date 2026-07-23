@@ -15,12 +15,16 @@ import { parseMarkdownFile } from './parser.js'
 import { buildPathIndex, resolveWikilink } from './wikilink-resolver.js'
 import { buildLintIndex, runAllChecks, type Finding, type LintInputEntry } from '@use-brian/brian-kb'
 import type { Sensitivity } from '../security/sensitivity.js'
+import { promises as fs } from 'node:fs'
+import * as nodePath from 'node:path'
+import { createHash } from 'node:crypto'
 
 // ── Types ──────────────────────────────────────────────────────
 
 export type SyncSource = {
   id: string
   workspaceId: string
+  sourceType: 'github' | 'local'
   repo: string
   branch: string
   rootPath: string
@@ -60,7 +64,11 @@ export type SyncStore = {
   // per-viewer projection). See permissions.md § Privileged-service
   // exception and packages/api/src/db/knowledge-store.ts.
   listPathsSystem(workspaceId: string): Promise<string[]>
-  getByPathSystem(workspaceId: string, path: string): Promise<{ id: string } | null>
+  getByPathSystem(workspaceId: string, path: string): Promise<{
+    id: string
+    sourceId?: string | null
+    metadata?: Record<string, unknown>
+  } | null>
   updateRelatedIds(id: string, relatedIds: string[]): Promise<void>
   updateSourceSync(id: string, sha: string, error?: string | null): Promise<void>
   /** Persist the per-tick PAT write-capability probe (migration 310). */
@@ -142,6 +150,11 @@ export function createKnowledgeSyncWorker(options: {
   }
 
   async function syncSource(source: SyncSource) {
+    if (source.sourceType === 'local') {
+      await syncLocalSource(source)
+      return
+    }
+
     const [owner, repo] = source.repo.split('/')
     if (!owner || !repo) throw new Error(`Invalid repo format: ${source.repo}`)
 
@@ -272,6 +285,87 @@ export function createKnowledgeSyncWorker(options: {
       }
     }
 
+    await store.updateSourceSync(source.id, headSha)
+
+    onEvent?.({
+      type: 'sync_completed',
+      sourceId: source.id,
+      repo: source.repo,
+      entriesCreated: created,
+      entriesUpdated: updated,
+      entriesDeleted: deleted,
+    })
+
+    console.debug(
+      `[knowledge-sync] ${source.repo}: created=${created} updated=${updated} deleted=${deleted}`,
+    )
+  }
+
+  async function syncLocalSource(source: SyncSource) {
+    const baseDir = nodePath.resolve(source.repo)
+    const root = nodePath.resolve(baseDir, source.rootPath || '.')
+    const relativeRoot = nodePath.relative(baseDir, root)
+    if (relativeRoot === '..' || relativeRoot.startsWith(`..${nodePath.sep}`)) {
+      throw new Error(`Local knowledge root escapes its source directory: ${source.rootPath}`)
+    }
+
+    const rootStat = await fs.stat(root)
+    if (!rootStat.isDirectory()) throw new Error(`Local knowledge path is not a directory: ${root}`)
+
+    const mdFiles = await walkMarkdownFiles(root)
+    const headSha = await computeDirHash(root, mdFiles)
+    if (headSha === source.lastSyncedSha) return
+
+    onEvent?.({ type: 'sync_started', sourceId: source.id, repo: source.repo })
+
+    let created = 0
+    let updated = 0
+    let deleted = 0
+
+    const lintInputs: LintInputEntry[] = []
+    for (const absPath of mdFiles) {
+      const relativePath = nodePath.relative(root, absPath)
+      const content = await fs.readFile(absPath, 'utf-8')
+
+      const parsed = parseMarkdownFile(relativePath, content)
+      lintInputs.push({
+        source: `${source.repo}:${relativePath}`,
+        relativePath,
+        rawContent: content,
+      })
+
+      const existing = await store.getByPathSystem(source.workspaceId, parsed.path)
+      await store.upsertByPath({
+        workspaceId: source.workspaceId,
+        path: parsed.path,
+        title: parsed.title,
+        summary: parsed.summary,
+        content: parsed.content,
+        tags: parsed.tags,
+        sensitivity: parsed.sensitivity,
+        metadata: { ...parsed.metadata, _rawRelated: parsed.related },
+        sourceId: source.id,
+        sourceSha: headSha,
+      })
+      if (existing) updated++
+      else created++
+    }
+
+    const syncedPaths = new Set(
+      mdFiles.map((f) => parseMarkdownFile(nodePath.relative(root, f), '').path),
+    )
+    const allPaths = await store.listPathsSystem(source.workspaceId)
+    for (const p of allPaths) {
+      if (syncedPaths.has(p)) continue
+      const entry = await store.getByPathSystem(source.workspaceId, p)
+      if (!entry) continue
+      if (entry.sourceId !== source.id) continue
+      const wasDeleted = await store.deleteByTeamAndPath(source.workspaceId, p)
+      if (wasDeleted) deleted++
+    }
+
+    await resolveAllWikilinks(source, store)
+    runLintPass(source, lintInputs)
     await store.updateSourceSync(source.id, headSha)
 
     onEvent?.({
@@ -424,4 +518,29 @@ function describeSyncError(err: unknown): string {
 function describeInner(e: Error): string {
   const code = (e as Error & { code?: string }).code
   return code ? `${e.message} (${code})` : e.message
+}
+
+async function walkMarkdownFiles(dir: string): Promise<string[]> {
+  const results: string[] = []
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const full = nodePath.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+      results.push(...await walkMarkdownFiles(full))
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      results.push(full)
+    }
+  }
+  return results
+}
+
+async function computeDirHash(root: string, files: string[]): Promise<string> {
+  const hash = createHash('sha256')
+  for (const f of files.sort()) {
+    const rel = nodePath.relative(root, f)
+    const content = await fs.readFile(f, 'utf-8')
+    hash.update(`${rel}:${content}\n`)
+  }
+  return hash.digest('hex').slice(0, 40)
 }

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import sharp from 'sharp'
 import { distillFileToText } from '../distill.js'
 
 function mockResponse(body: unknown, init: ResponseInit = {}): Response {
@@ -62,5 +63,31 @@ describe('[COMP:files/distill] distillFileToText', () => {
         { apiKey: 'k', fetchFn: fetchFn as unknown as typeof fetch },
       ),
     ).rejects.toThrow(/distillation failed/i)
+  })
+
+  it('downscales oversized images before sending them to DashScope', async () => {
+    const oversized = await sharp({
+      create: { width: 2000, height: 2000, channels: 3, background: '#446688' },
+    }).png({ compressionLevel: 0 }).toBuffer()
+    expect(oversized.length).toBeGreaterThan(6 * 1024 * 1024)
+
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(init?.body as string)
+      const dataUrl = body.messages[0].content[1].image_url.url as string
+      expect(dataUrl).toMatch(/^data:image\/jpeg;base64,/)
+      expect(Buffer.byteLength(dataUrl.split(',', 2)[1]!, 'base64')).toBeLessThanOrEqual(6 * 1024 * 1024)
+      return mockResponse({ choices: [{ message: { content: 'visible text' } }] })
+    })
+
+    const result = await distillFileToText(
+      { buffer: oversized, mime: 'image/png' },
+      {
+        backend: { kind: 'dashscope', apiKey: 'test-key', baseUrl: 'https://dashscope.example/v1' },
+        fetchFn: fetchFn as unknown as typeof fetch,
+      },
+    )
+
+    expect(result.text).toBe('visible text')
+    expect(fetchFn).toHaveBeenCalledOnce()
   })
 })

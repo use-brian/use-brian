@@ -42,6 +42,8 @@ describe('[COMP:recordings/recording-jobs-store] recording job queue', () => {
 
     mockQuery.mockResolvedValueOnce({ rows: [] } as never)
     expect(await claimNextRecordingJob()).toBeNull()
+    expect(mockQuery.mock.calls[0]?.[0]).toContain("status = 'processing'")
+    expect(mockQuery.mock.calls[0]?.[0]).toContain('worker lease expired after final attempt')
   })
 
   it('markFailed re-queues while attempts remain, parks at the cap', async () => {

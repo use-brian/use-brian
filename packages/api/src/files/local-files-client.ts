@@ -1,29 +1,66 @@
 /**
- * Local-filesystem stand-in for {@link GcsFilesClient}, used in dev / test when
- * `GCS_FILES_BUCKET` is unset (no bucket to provision). Stores each blob at
+ * Local-filesystem implementation of {@link GcsFilesClient}. It is used as the
+ * self-hosted application default when `LOCAL_FILES_DIR` is configured, and as
+ * the dev/test fallback when `GCS_FILES_BUCKET` is unset. Stores each blob at
  * `<baseDir>/<key>` with a sidecar `<...>.meta.json` carrying the mime + custom
  * metadata, so the workspace-file tools (`fileWrite`, `saveFileToBrain`, …)
  * work end-to-end without GCS — otherwise the whole file primitive is silently
  * disabled locally and the model can't actually save an uploaded file.
  *
- * **Not for production.** Cloud Run always sets `GCS_FILES_BUCKET`; the boot
- * wiring only reaches for this off Cloud Run (no `K_SERVICE`), so a
- * misconfigured prod fails safe instead of writing to ephemeral disk.
+ * Signed reads and writes use a short-lived API transfer URL when `apiUrl` and
+ * `signingSecret` are configured. That keeps browser recording uploads,
+ * connector media streams, public previews, and Range playback working without
+ * exposing a `file://` path. Production use requires `LOCAL_FILES_DIR` to point
+ * at a durable mounted volume. Without an explicit path, boot only uses the
+ * ephemeral `/tmp` fallback off Cloud Run; Cloud Run remains fail-closed.
  */
 
-import { promises as fs, createWriteStream } from 'node:fs'
-import { PassThrough, type Writable } from 'node:stream'
+import { createReadStream, createWriteStream, mkdirSync, promises as fs, writeFileSync } from 'node:fs'
+import type { Readable, Writable } from 'node:stream'
+import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 import type { GcsBlob, GcsFilesClient, GcsObjectMetadata } from './gcs-client.js'
+import { buildLocalFileTransferUrl } from './local-files-signing.js'
 
 const DEFAULT_META: GcsObjectMetadata = { workspaceId: '', mime: 'application/octet-stream' }
 
-export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClient {
-  const { baseDir } = opts
-  const blobPath = (key: string): string => path.join(baseDir, key)
-  const metaPath = (key: string): string => `${path.join(baseDir, key)}.meta.json`
+export function resolveLocalFilesBaseDir(configured?: string): string {
+  return path.resolve(configured?.trim() || path.join(tmpdir(), 'sidanclaw-files'))
+}
 
-  const client: GcsFilesClient = {
+export type LocalFilesClient = GcsFilesClient & {
+  openReadStream(key: string, range?: { start: number; end: number }): Readable
+}
+
+export function createLocalFilesClient(opts: {
+  baseDir: string
+  apiUrl?: string
+  signingSecret?: string
+}): LocalFilesClient {
+  const baseDir = path.resolve(opts.baseDir)
+  const blobPath = (key: string): string => {
+    const resolved = path.resolve(baseDir, key)
+    if (resolved !== baseDir && !resolved.startsWith(`${baseDir}${path.sep}`)) {
+      throw new Error('local files: key escapes storage directory')
+    }
+    return resolved
+  }
+  const metaPath = (key: string): string => `${blobPath(key)}.meta.json`
+  const transferUrl = (action: 'read' | 'write', key: string, ttlSec: number, mime?: string): string | null => {
+    if (!opts.apiUrl || !opts.signingSecret) return null
+    return buildLocalFileTransferUrl({
+      apiUrl: opts.apiUrl,
+      secret: opts.signingSecret,
+      grant: {
+        action,
+        key,
+        expires: Math.floor(Date.now() / 1000) + ttlSec,
+        ...(mime ? { mime } : {}),
+      },
+    })
+  }
+
+  const client: LocalFilesClient = {
     async writeBlob(key, bytes, metadata) {
       const p = blobPath(key)
       await fs.mkdir(path.dirname(p), { recursive: true })
@@ -76,32 +113,25 @@ export function createLocalFilesClient(opts: { baseDir: string }): GcsFilesClien
       await fs.rm(metaPath(key), { force: true })
     },
 
-    async signedReadUrl(key) {
-      // No signing locally. The workspace-file tools never call this (they read
-      // via readBlob); it exists only to satisfy the interface for the
-      // doc-block preview path, which is GCS-only anyway.
-      return `file://${blobPath(key)}`
+    async signedReadUrl(key, ttlSec = 3600) {
+      return transferUrl('read', key, ttlSec) ?? `file://${blobPath(key)}`
     },
 
-    async signedWriteUrl(key) {
-      // No signed PUT locally — the recording upload flow is GCS-only. Returned
-      // for interface parity; a local caller should writeBlob directly instead.
-      return `file://${blobPath(key)}`
+    async signedWriteUrl(key, signedOpts) {
+      return transferUrl('write', key, signedOpts?.ttlSec ?? 3600, signedOpts?.contentType) ?? `file://${blobPath(key)}`
+    },
+
+    openReadStream(key, range) {
+      return createReadStream(blobPath(key), range)
     },
 
     writeStream(key, opts): Writable {
-      // A PassThrough the caller pipes into; we set up the real file sink (and
-      // meta sidecar) asynchronously and forward into it. Dev/test only.
       const p = blobPath(key)
-      const pass = new PassThrough()
-      void (async () => {
-        await fs.mkdir(path.dirname(p), { recursive: true })
-        await fs.writeFile(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
-        const out = createWriteStream(p)
-        out.on('error', (e) => pass.destroy(e))
-        pass.pipe(out)
-      })().catch((e) => pass.destroy(e))
-      return pass
+      // Setup is synchronous so the returned stream is the actual file sink;
+      // its `finish` event therefore means bytes have reached the filesystem.
+      mkdirSync(path.dirname(p), { recursive: true })
+      writeFileSync(metaPath(key), JSON.stringify(opts.metadata ?? { workspaceId: '', mime: opts.mime }))
+      return createWriteStream(p)
     },
   }
 

@@ -19,6 +19,7 @@
 import dotenv from 'dotenv'
 import { bootOpenApi, type OpenApiEnv } from '@use-brian/api/boot.js'
 import { buildEpisodeIngestors } from '@use-brian/api/build-episode-ingestors.js'
+import { buildOpenChannelHosts } from '@use-brian/api/channel-hosts.js'
 
 dotenv.config()
 
@@ -60,6 +61,9 @@ const env: OpenApiEnv = {
   DASHSCOPE_API_KEY: process.env.DASHSCOPE_API_KEY,
   DASHSCOPE_BASE_URL: process.env.DASHSCOPE_BASE_URL,
   GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
+  LOCAL_FILES_DIR: process.env.LOCAL_FILES_DIR,
+  LOCAL_FILES_PUBLIC_URL: process.env.LOCAL_FILES_PUBLIC_URL,
+  LOCAL_FILESYSTEM_SOURCES_ENABLED: true,
   SKILLS_AUTO_GEN_ENABLED: process.env.SKILLS_AUTO_GEN_ENABLED === 'true',
   BROWSER_RELAY_URL: process.env.BROWSER_RELAY_URL,
   BROWSER_RELAY_SECRET: process.env.BROWSER_RELAY_SECRET,
@@ -90,6 +94,6 @@ const env: OpenApiEnv = {
 const { start } = await bootOpenApi({
   env,
   runWorkers: true,
-  ports: { buildEpisodeIngestors },
+  ports: { buildEpisodeIngestors, buildChannelHosts: buildOpenChannelHosts },
 })
 await start()

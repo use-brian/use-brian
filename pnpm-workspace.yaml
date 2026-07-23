@@ -3,6 +3,10 @@ packages:
   - "packages/*"
 
 onlyBuiltDependencies:
+  - "@whiskeysockets/baileys"
+  - esbuild
   - pprof
   - protobufjs
   - electron
+  - sharp
+  - unrs-resolver
