@@ -13,6 +13,7 @@ import {
   BrowserSnapshotSchema,
   BrowserUrlResultSchema,
   NO_EXTENSION_MESSAGE,
+  NO_EXTENSION_REMEDY,
   type BrowserBackendErrorCode,
   type BrowserCallContext,
   type BrowserProvider,
@@ -27,13 +28,26 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'tab_closed',
   'detached',
   'consent_denied',
+  'no_eligible_tab',
   'stale_ref',
   'backend_error',
 ])
 
 function toBackendError(error: string, code?: string): BrowserBackendError {
   const known = code && KNOWN_ERROR_CODES.has(code) ? (code as BrowserBackendErrorCode) : 'backend_error'
-  if (known === 'no_extension') return new BrowserBackendError(NO_EXTENSION_MESSAGE, 'no_extension')
+  if (known === 'no_extension') {
+    // Keep the relay's cause and APPEND the remedy, rather than substituting
+    // one for the other. The relay reports three different situations under
+    // this code — never connected, disconnected, evicted by a newer pairing —
+    // and flattening them made an eviction storm byte-identical to a missing
+    // install in the logs, while telling users whose extension was open to go
+    // install it.
+    const cause = error.trim()
+    return new BrowserBackendError(
+      cause ? `${cause} ${NO_EXTENSION_REMEDY}` : NO_EXTENSION_MESSAGE,
+      'no_extension',
+    )
+  }
   return new BrowserBackendError(error, known)
 }
 

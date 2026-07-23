@@ -70,6 +70,7 @@ export type BrowserBackendErrorCode =
   | 'tab_closed'     // the controlled tab went away
   | 'detached'       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
   | 'consent_denied' // the user declined the extension's per-tab Allow prompt
+  | 'no_eligible_tab' // the active tab is one Chrome will not attach the debugger to
   | 'stale_ref'      // ref is not from the latest snapshot
   | 'backend_error'  // anything else the backend reported
 
@@ -83,9 +84,17 @@ export class BrowserBackendError extends Error {
   }
 }
 
+/**
+ * What to DO about a missing extension. Kept separate from the cause so a
+ * relay that knows more (disconnected, or evicted by a newer pairing) can say
+ * so and still carry the instruction — the P1.4 contract is a clear next step,
+ * never a hang, and that does not require discarding the reason.
+ */
+export const NO_EXTENSION_REMEDY =
+  'Ask the user to open Chrome with the Use Brian extension installed and enabled (and signed in), then retry.'
+
 /** The P1.4 contract: a missing extension is a clear instruction, never a hang. */
-export const NO_EXTENSION_MESSAGE =
-  'No Use Brian browser extension is connected. Ask the user to open Chrome with the Use Brian extension installed and enabled (and signed in), then retry.'
+export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected. ${NO_EXTENSION_REMEDY}`
 
 // ── BrowserProvider seam (§4.15) ───────────────────────────────
 

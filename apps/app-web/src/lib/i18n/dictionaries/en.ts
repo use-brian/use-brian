@@ -5700,6 +5700,12 @@ export const en = {
       step2Title: "2. Pair it to your account",
       step2Body:
         "Generate a pairing code, then paste it into the extension popup with the relay address.",
+      oneClickBody:
+        "The Use Brian extension is installed in this browser. Connect it to your account in one step, with nothing to copy.",
+      oneClickCta: "Connect my browser",
+      oneClickConnecting: "Connecting...",
+      oneClickFailed:
+        "The extension did not accept the pairing. Use the code below instead, or reload the page and try again.",
       generate: "Generate pairing code",
       generating: "Generating...",
       generateFailed: "Could not generate a pairing code. Please try again.",

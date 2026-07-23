@@ -25,6 +25,11 @@ import {
   type BrowserExtensionPairing,
   type BrowserExtensionStatus,
 } from "@/lib/api/computer";
+import {
+  chromeMessenger,
+  detectExtension,
+  pairViaExtension,
+} from "@/lib/browser-extension-bridge";
 
 // Set to the published listing at P2 (Chrome Web Store publish). A search link
 // keeps the CTA honest pre-publish rather than pointing at a dead extension id.
@@ -88,6 +93,8 @@ export function ConnectBrowserPanel() {
   const [pairing, setPairing] = useState<BrowserExtensionPairing | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Null while we have not asked yet, so the button does not flicker in. */
+  const [installed, setInstalled] = useState<boolean | null>(null);
 
   // Plan gate (D3): hosted paid only; OSS never gates. A null/unknown plan does
   // NOT gate (planGateApplies) so a paid user never sees the upsell flash.
@@ -116,6 +123,19 @@ export function ConnectBrowserPanel() {
     return () => clearInterval(id);
   }, [refreshStatus]);
 
+  // Probe once for a reachable extension. A negative answer is not final (the
+  // user may install it while this panel is open), so the manual flow stays
+  // reachable either way rather than being hidden behind this result.
+  useEffect(() => {
+    let cancelled = false;
+    void detectExtension({ send: chromeMessenger() }).then((found) => {
+      if (!cancelled) setInstalled(found);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const onGenerate = useCallback(async () => {
     if (busy || !workspaceId) return;
     setBusy(true);
@@ -128,6 +148,39 @@ export function ConnectBrowserPanel() {
     }
     setPairing(p);
   }, [busy, workspaceId, c.generateFailed]);
+
+  /**
+   * One click: mint a code and hand it straight to the extension. Falling back
+   * to the copy fields on `not_installed` matters more than it looks - the
+   * probe can be stale, and stranding someone with no visible next step is the
+   * failure this panel already had.
+   */
+  const onOneClickConnect = useCallback(async () => {
+    if (busy || !workspaceId) return;
+    setBusy(true);
+    setError(null);
+    const p = await pairBrowserExtension(workspaceId);
+    if (!p) {
+      setBusy(false);
+      setError(c.generateFailed);
+      return;
+    }
+    const result = await pairViaExtension({
+      relayUrl: p.relayUrl,
+      pairingToken: p.pairingToken,
+      send: chromeMessenger(),
+    });
+    setBusy(false);
+    if (result === "paired") {
+      setInstalled(true);
+      await refreshStatus();
+      return;
+    }
+    // Show the copy fields so the user is never left without a way forward.
+    setPairing(p);
+    setInstalled(false);
+    if (result === "refused") setError(c.oneClickFailed);
+  }, [busy, workspaceId, c.generateFailed, c.oneClickFailed, refreshStatus]);
 
   // Gated: paid feature upsell (opens the Plan section in-app).
   if (gated) {
@@ -168,6 +221,22 @@ export function ConnectBrowserPanel() {
         <p className="mt-3 text-xs text-muted-foreground">{c.notConfigured}</p>
       ) : connected ? (
         <p className="mt-3 text-xs text-muted-foreground">{c.connectedHint}</p>
+      ) : installed && !pairing ? (
+        // The extension answered, so it already has everything it needs from
+        // us. Asking the user to copy a relay address and a code into a popup
+        // before a 10 minute expiry buys nothing here.
+        <div className="mt-3">
+          <p className="text-[11px] text-muted-foreground">{c.oneClickBody}</p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onOneClickConnect()}
+            className="mt-2 h-8 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
+          >
+            {busy ? c.oneClickConnecting : c.oneClickCta}
+          </button>
+          {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
+        </div>
       ) : (
         <div className="mt-3 space-y-3">
           {/* Step 1: install */}

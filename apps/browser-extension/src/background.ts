@@ -6,19 +6,25 @@
  */
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
-import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS } from './task-gate.js'
+import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
+import { eligibilityOf } from './tab-eligibility.js'
+import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
 
 const executor = new TabExecutor()
 
 // ── Consent prompt: a small extension window with Allow / Deny ──
 
-let pendingConsent: ((res: { allowed: boolean; tabId: number | null }) => void) | null = null
+let pendingConsent: ((res: { allowed: boolean }) => void) | null = null
 
-async function promptForConsent(): Promise<{ allowed: boolean; tabId: number | null }> {
+async function promptForConsent(): Promise<ConsentOutcome> {
   const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
-  if (!activeTab?.id || activeTab.url?.startsWith('chrome://')) {
-    return { allowed: false, tabId: null }
-  }
+  // An unattachable page is NOT a refusal. Reporting it as one told users they
+  // had declined a prompt never shown, and sent the assistant chasing a consent
+  // problem instead of saying "switch to the page you want me to work on".
+  const eligibility = eligibilityOf(activeTab?.url)
+  if (!eligibility.eligible) return { allowed: false, reason: eligibility.reason }
+  if (activeTab?.id == null) return { allowed: false, reason: 'no_active_tab' }
+
   const targetTabId = activeTab.id
   await chrome.windows.create({
     url: chrome.runtime.getURL(`allow.html?host=${encodeURIComponent(hostOf(activeTab.url ?? ''))}`),
@@ -30,12 +36,14 @@ async function promptForConsent(): Promise<{ allowed: boolean; tabId: number | n
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       pendingConsent = null
-      resolve({ allowed: false, tabId: null })
+      resolve({ allowed: false, reason: 'denied' })
     }, CONSENT_PROMPT_TIMEOUT_MS)
     pendingConsent = (res) => {
       clearTimeout(timer)
       pendingConsent = null
-      resolve({ allowed: res.allowed, tabId: res.allowed ? targetTabId : null })
+      resolve(
+        res.allowed ? { allowed: true, tabId: targetTabId } : { allowed: false, reason: 'denied' },
+      )
     }
   })
 }
@@ -74,6 +82,24 @@ const client = new RelayClient({
 
 async function startClient(): Promise<void> {
   client.start()
+}
+
+/**
+ * The one path that writes pairing credentials, shared by the popup's Connect
+ * and by one-click pairing from the web app. `credentialsForConfigure` decides
+ * what survives — critically, a Connect with no new token keeps the live
+ * session instead of wiping it.
+ */
+async function applyPairing(req: PairRequest): Promise<void> {
+  const { set, remove } = credentialsForConfigure(req)
+  if (Object.keys(set).length > 0) await chrome.storage.local.set(set)
+  if (remove.length > 0) await chrome.storage.local.remove(remove)
+  client.stop()
+  await startClient()
+}
+
+function pairingMatches(): string[] {
+  return chrome.runtime.getManifest().externally_connectable?.matches ?? []
 }
 
 // ── Command loop ───────────────────────────────────────────────
@@ -164,7 +190,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const msg = message as { type?: string; allowed?: boolean; relayUrl?: string; pairingToken?: string }
   if (msg.type === 'consent-response') {
-    pendingConsent?.({ allowed: msg.allowed === true, tabId: null })
+    pendingConsent?.({ allowed: msg.allowed === true })
     sendResponse({ ok: true })
   } else if (msg.type === 'stop-task') {
     gate.stop()
@@ -173,13 +199,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true })
   } else if (msg.type === 'configure') {
     void (async () => {
-      await chrome.storage.local.set({
-        relayUrl: msg.relayUrl,
-        ...(msg.pairingToken ? { pairingToken: msg.pairingToken } : {}),
-      })
-      await chrome.storage.local.remove('sessionToken')
-      client.stop()
-      await startClient()
+      await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
       sendResponse({ ok: true })
     })()
     return true // async sendResponse
@@ -192,8 +212,45 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       state: client.getState(),
       controlledTab: gate.currentTab(),
       stopped: gate.isStopped(),
+      // Shown in the popup so a self-hoster can point their own deployment at
+      // this install without digging through chrome://extensions.
+      extensionId: chrome.runtime.id,
     })
   }
+  return undefined
+})
+
+/**
+ * One-click pairing: our own web app already holds the relay address and a
+ * freshly minted code, so it hands them straight over instead of asking the
+ * user to copy two values into the popup before a 10-minute token expires.
+ *
+ * `externally_connectable` in the manifest is what admits the sender at all;
+ * the origin re-check below reads that same list, so the manifest stays the
+ * single definition of who may pair this extension. The channel is inbound
+ * only and carries nothing but pairing config — it grants the extension no
+ * reach into any page, which is why it does not widen the §6 surface.
+ */
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  if (!isTrustedPairingOrigin(sender.origin, pairingMatches())) {
+    sendResponse({ ok: false, error: 'origin_not_allowed' })
+    return undefined
+  }
+  const msg = message as { type?: string; relayUrl?: string; pairingToken?: string }
+  if (msg.type === 'pair') {
+    void (async () => {
+      await applyPairing({ relayUrl: msg.relayUrl, pairingToken: msg.pairingToken })
+      sendResponse({ ok: true })
+    })()
+    return true // async sendResponse
+  }
+  if (msg.type === 'status') {
+    // Lets the connect panel say "installed but not paired" instead of
+    // guessing from the relay's server-side view alone.
+    sendResponse({ ok: true, state: client.getState(), stopped: gate.isStopped() })
+    return undefined
+  }
+  sendResponse({ ok: false, error: 'unsupported' })
   return undefined
 })
 

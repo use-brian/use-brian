@@ -53,8 +53,27 @@ describe("[COMP:app-web/connect-browser] My Browser connect surface", () => {
     expect(html).not.toContain(c.notConfigured);
   });
 
-  it("points its install CTA at the Chrome Web Store, never a bare or dead link", () => {
+  it("sends the install CTA to the Chrome Web Store", () => {
     const html = render();
     expect(html).toContain("chromewebstore.google.com");
+  });
+
+  it("still points at a SEARCH, because the extension is not published yet", () => {
+    // Asserts the gap rather than hiding it. The previous version of this test
+    // was named "never a bare or dead link" but only checked the hostname, so
+    // a search URL that returns no Use Brian extension satisfied it - and that
+    // dead link is step 1 of the product's own onboarding. When P2 publishes
+    // the listing, replace this with an assertion on the /detail/<id> URL.
+    const html = render();
+    expect(html).toContain("chromewebstore.google.com/search");
+  });
+
+  it("offers the copy-paste flow when no extension answers the probe", () => {
+    // Effects do not run under SSR, so `installed` stays null, which is the
+    // same state as "we have not found one". The manual path must be what
+    // renders, or a user without the extension has no way forward at all.
+    const html = render();
+    expect(html).toContain(c.step1Cta);
+    expect(html).not.toContain(c.oneClickCta);
   });
 });

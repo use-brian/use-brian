@@ -1,4 +1,5 @@
 /** Popup UI: connect/disconnect the relay pairing + the persistent Stop (P1.7). */
+import { statusLine, type PopupStatus } from './popup-status.js'
 
 function el<T extends HTMLElement>(id: string): T {
   const node = document.getElementById(id)
@@ -11,22 +12,12 @@ const statusText = el<HTMLSpanElement>('status-text')
 const relayUrlInput = el<HTMLInputElement>('relay-url')
 const tokenInput = el<HTMLInputElement>('pairing-token')
 
-const STATE_LABELS: Record<string, string> = {
-  ready: 'Connected. The assistant can request browser tasks.',
-  connecting: 'Connecting to the relay...',
-  disconnected: 'Disconnected. Reconnecting automatically.',
-  unpaired: 'Not paired. Paste a pairing token from Use Brian settings.',
-}
-
 async function refreshStatus(): Promise<void> {
-  const status = (await chrome.runtime.sendMessage({ type: 'status' })) as {
-    state?: string
-    controlledTab?: number | null
-  }
-  const state = status?.state ?? 'unpaired'
-  statusBox.classList.toggle('ready', state === 'ready')
-  const suffix = status?.controlledTab != null ? ' Controlling one allowed tab.' : ''
-  statusText.textContent = `${STATE_LABELS[state] ?? state}${suffix}`
+  const status = ((await chrome.runtime.sendMessage({ type: 'status' })) ?? {}) as PopupStatus
+  // "Ready" is the socket AND the gate: a held Stop is not a working browser,
+  // so it must not paint the green state either.
+  statusBox.classList.toggle('ready', status.state === 'ready' && !status.stopped)
+  statusText.textContent = statusLine(status)
 }
 
 async function loadStored(): Promise<void> {
