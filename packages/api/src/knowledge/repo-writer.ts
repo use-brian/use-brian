@@ -1,5 +1,5 @@
 /**
- * Knowledge repo writer — the assistant KB write tools' GitHub write-back.
+ * Knowledge source writer — assistant KB write-back for GitHub and local sources.
  * [COMP:knowledge/repo-writer]
  *
  * Implements the core `KnowledgeRepoWriter` port: direct commits to a
@@ -23,10 +23,13 @@
  *   write tools drop out of injection on the next turn.
  */
 
-import { parseMarkdownFile, normalisePath } from '@use-brian/core'
+import { randomUUID } from 'node:crypto'
+import fs from 'node:fs/promises'
+import nodePath from 'node:path'
+import { parseMarkdownFile } from '@use-brian/core'
 import type { KnowledgeRepoWriter, KnowledgeRepoWriteResult, Sensitivity } from '@use-brian/core'
 import * as github from '../github/client.js'
-import { splitFrontmatterBlock, resolveRepoFilePath } from './repo-files.js'
+import { splitFrontmatterBlock, resolveRepoFilePath, validateKnowledgeEntryPath } from './repo-files.js'
 
 /** The GitHub calls the writer makes. Injectable so tests run without the network. */
 export type RepoWriterGithubOps = {
@@ -53,6 +56,7 @@ export type RepoWriterStore = {
   getSource(id: string): Promise<{
     id: string
     workspaceId: string
+    sourceType: 'github' | 'local'
     repo: string
     branch: string
     rootPath: string
@@ -71,7 +75,7 @@ export type RepoWriterStore = {
 export type KnowledgeRepoWriterDeps = {
   store: RepoWriterStore
   /** Same bound-instance PAT resolution the sync worker uses. */
-  syncCredentials: { getPat(workspaceId: string, connectorInstanceId: string | null): Promise<string> }
+  syncCredentials?: { getPat(workspaceId: string, connectorInstanceId: string | null): Promise<string> }
   /** Test seam. Defaults to the real fetch-based client. */
   githubOps?: RepoWriterGithubOps
   /** Metadata-only audit emit (`kb_repo_write` into analytics_events). */
@@ -79,7 +83,8 @@ export type KnowledgeRepoWriterDeps = {
 }
 
 type ResolvedTarget =
-  | { ok: true; source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>; owner: string; repo: string; pat: string }
+  | { ok: true; kind: 'github'; source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>; owner: string; repo: string; pat: string }
+  | { ok: true; kind: 'local'; source: NonNullable<Awaited<ReturnType<RepoWriterStore['getSource']>>>; root: string }
   | { ok: false; result: KnowledgeRepoWriteResult }
 
 export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): KnowledgeRepoWriter {
@@ -94,6 +99,23 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     if (!source || source.workspaceId !== workspaceId) {
       return fail('source_missing', 'The knowledge source backing this entry no longer exists.')
     }
+    if (source.sourceType === 'local') {
+      try {
+        const base = await fs.realpath(source.repo)
+        const root = await fs.realpath(nodePath.resolve(base, source.rootPath || '.'))
+        const relative = nodePath.relative(base, root)
+        if (relative === '..' || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+          return fail('source_missing', 'The local knowledge root escapes its configured source directory.')
+        }
+        const stat = await fs.stat(root)
+        if (!stat.isDirectory()) return fail('source_missing', 'The local knowledge root is not a directory.')
+        return { ok: true, kind: 'local', source, root }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return fail('not_writable', `The local knowledge directory is unavailable: ${message}`)
+      }
+    }
+
     // Defense-in-depth behind the injection gate: the cached probe is the
     // authority even if a stale tool instance survives a capability flip.
     if (source.writeAccess !== true) {
@@ -105,11 +127,12 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     }
     let pat: string
     try {
+      if (!deps.syncCredentials) throw new Error('GitHub credentials are not configured')
       pat = await deps.syncCredentials.getPat(source.workspaceId, source.connectorInstanceId)
     } catch {
       return fail('no_credentials', `The GitHub connector backing ${source.repo} has no credentials. Reconnect it in Studio → Connectors.`)
     }
-    return { ok: true, source, owner, repo, pat }
+    return { ok: true, kind: 'github', source, owner, repo, pat }
   }
 
   /**
@@ -137,6 +160,73 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       }
     }
     return { ok: false, reason: 'error', message: `GitHub write failed: ${message}` }
+  }
+
+  function classifyLocalWriteError(source: { repo: string }, err: unknown): KnowledgeRepoWriteResult {
+    const code = (err as NodeJS.ErrnoException | null)?.code
+    const message = err instanceof Error ? err.message : String(err)
+    if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+      return { ok: false, reason: 'not_writable', message: `The local knowledge directory is not writable: ${source.repo}` }
+    }
+    return { ok: false, reason: 'error', message: `Local knowledge write failed: ${message}` }
+  }
+
+  function toPosixPath(value: string): string {
+    return value.split(nodePath.sep).join('/')
+  }
+
+  async function listLocalMarkdownFiles(root: string): Promise<Array<{ absolute: string; relative: string }>> {
+    const files: Array<{ absolute: string; relative: string }> = []
+    async function walk(dir: string): Promise<void> {
+      const entries = await fs.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.isSymbolicLink()) continue
+        const absolute = nodePath.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+          await walk(absolute)
+        } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+          files.push({ absolute, relative: toPosixPath(nodePath.relative(root, absolute)) })
+        }
+      }
+    }
+    await walk(root)
+    return files
+  }
+
+  async function replaceLocalFile(filePath: string, content: string): Promise<void> {
+    const stat = await fs.lstat(filePath)
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('The local knowledge file is not a regular file.')
+    const tempPath = nodePath.join(nodePath.dirname(filePath), `.${nodePath.basename(filePath)}.${randomUUID()}.tmp`)
+    try {
+      await fs.writeFile(tempPath, content, { flag: 'wx', mode: stat.mode })
+      await fs.rename(tempPath, filePath)
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => {})
+    }
+  }
+
+  async function ensureLocalCreateParent(root: string, entryPath: string): Promise<string> {
+    const segments = entryPath.split('/')
+    let current = root
+    for (const segment of segments.slice(0, -1)) {
+      current = nodePath.join(current, segment)
+      try {
+        const stat = await fs.lstat(current)
+        if (!stat.isDirectory() || stat.isSymbolicLink()) {
+          throw new Error(`Local knowledge path parent is not a regular directory: ${segment}`)
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        await fs.mkdir(current)
+      }
+    }
+    const target = nodePath.join(root, ...segments) + '.md'
+    const relative = nodePath.relative(root, target)
+    if (relative === '..' || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+      throw new Error('Local knowledge path escapes its configured root.')
+    }
+    return target
   }
 
   function relativeRepoPath(rootPath: string, filePath: string): string {
@@ -172,11 +262,11 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
    */
   async function writeThrough(
     source: { id: string; workspaceId: string; rootPath: string },
-    filePath: string,
+    relativePath: string,
     fileContent: string,
     commitSha: string | null,
   ): Promise<{ id: string; path: string }> {
-    const parsed = parseMarkdownFile(relativeRepoPath(source.rootPath, filePath), fileContent)
+    const parsed = parseMarkdownFile(relativePath, fileContent)
     return await deps.store.upsertByPath({
       workspaceId: source.workspaceId,
       path: parsed.path,
@@ -191,12 +281,14 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     })
   }
 
-  function mirrorFailure(commitSha: string | null, err: unknown): KnowledgeRepoWriteResult {
-    console.error('[kb-repo-writer] write-through failed after a successful commit:', err)
+  function mirrorFailure(sourceType: 'github' | 'local', commitSha: string | null, err: unknown): KnowledgeRepoWriteResult {
+    console.error('[kb-repo-writer] write-through failed after a successful source write:', err)
     return {
       ok: false,
       reason: 'error',
-      message: `The change was committed to GitHub${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}, but the local mirror update failed — it will appear after the next sync (within ~15 minutes).`,
+      message: sourceType === 'github'
+        ? `The change was committed to GitHub${commitSha ? ` (${commitSha.slice(0, 7)})` : ''}, but the local mirror update failed — it will appear after the next sync (within ~15 minutes).`
+        : 'The local knowledge file was updated, but the database mirror failed — it will recover after the next sync (within ~15 minutes).',
     }
   }
 
@@ -204,106 +296,148 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     async commitEntryUpdate({ workspaceId, entry, newBody, changeSummary, requestedBy }) {
       const target = await resolveTarget(workspaceId, entry.sourceId)
       if (!target.ok) return target.result
-      const { source, owner, repo, pat } = target
+      const { source } = target
 
       let filePath: string
+      let relativePath: string
       let newFile: string
-      let commitSha: string | null
-      let commitUrl: string | null
-      try {
-        const headSha = await ops.getBranchHead(pat, owner, repo, source.branch)
-        const tree = await ops.getRepoTree(pat, owner, repo, headSha)
-        const resolved = resolveRepoFilePath(tree.map((t) => t.path), source.rootPath, entry.path)
-        if (!resolved) {
-          return { ok: false, reason: 'file_missing', message: 'The file behind this entry was not found in the repository — it may have been moved or deleted. Try again after the next sync.' }
-        }
-        filePath = resolved
+      let commitSha: string | null = null
+      let commitUrl: string | null = null
 
-        const fileData = await ops.getFileContents(pat, owner, repo, filePath, headSha)
-        const rawFile = Array.isArray(fileData) ? null : (fileData.content ?? null)
-        if (rawFile === null) {
-          return { ok: false, reason: 'file_missing', message: 'Could not read the current file from the repository.' }
-        }
+      if (target.kind === 'github') {
+        try {
+          const headSha = await ops.getBranchHead(target.pat, target.owner, target.repo, source.branch)
+          const tree = await ops.getRepoTree(target.pat, target.owner, target.repo, headSha)
+          const resolved = resolveRepoFilePath(tree.map((t) => t.path), source.rootPath, entry.path)
+          if (!resolved) {
+            return { ok: false, reason: 'file_missing', message: 'The file behind this entry was not found in the repository — it may have been moved or deleted. Try again after the next sync.' }
+          }
+          filePath = resolved
+          relativePath = relativeRepoPath(source.rootPath, filePath)
 
-        // Staleness guard: the DB stores the frontmatter-stripped, trimmed
-        // body. If the live repo body differs, the model edited a stale copy
-        // — committing would silently overwrite someone else's change.
-        const { frontmatter, body: repoBody } = splitFrontmatterBlock(rawFile)
-        if (repoBody.trim() !== entry.content.trim()) {
-          return { ok: false, reason: 'stale_entry', message: 'The repository moved ahead of the synced copy. Retry after the next sync (within ~15 minutes), then re-read the entry before editing.' }
+          const fileData = await ops.getFileContents(target.pat, target.owner, target.repo, filePath, headSha)
+          const rawFile = Array.isArray(fileData) ? null : (fileData.content ?? null)
+          if (rawFile === null) {
+            return { ok: false, reason: 'file_missing', message: 'Could not read the current file from the repository.' }
+          }
+          const { frontmatter, body: liveBody } = splitFrontmatterBlock(rawFile)
+          if (liveBody.trim() !== entry.content.trim()) {
+            return { ok: false, reason: 'stale_entry', message: 'The repository moved ahead of the synced copy. Retry after the next sync (within ~15 minutes), then re-read the entry before editing.' }
+          }
+          const body = newBody.endsWith('\n') ? newBody : `${newBody}\n`
+          newFile = `${frontmatter}${body}`
+          const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
+            path: filePath,
+            content: newFile,
+            message: commitMessage(changeSummary, entry.path, requestedBy),
+            branch: source.branch,
+          })
+          ;({ sha: commitSha, url: commitUrl } = commitRef(res))
+        } catch (err) {
+          return classifyWriteError(source, err)
         }
-
-        const body = newBody.endsWith('\n') ? newBody : `${newBody}\n`
-        newFile = `${frontmatter}${body}`
-        const res = await ops.createOrUpdateFile(pat, owner, repo, {
-          path: filePath,
-          content: newFile,
-          message: commitMessage(changeSummary, entry.path, requestedBy),
-          branch: source.branch,
-        })
-        ;({ sha: commitSha, url: commitUrl } = commitRef(res))
-      } catch (err) {
-        return classifyWriteError(source, err)
+      } else {
+        try {
+          const files = await listLocalMarkdownFiles(target.root)
+          const resolved = files.find((file) => validateKnowledgeEntryPath(file.relative) === entry.path)
+          if (!resolved) {
+            return { ok: false, reason: 'file_missing', message: 'The file behind this entry was not found in the local knowledge directory. Try again after the next sync.' }
+          }
+          filePath = resolved.absolute
+          relativePath = resolved.relative
+          const rawFile = await fs.readFile(filePath, 'utf8')
+          const { frontmatter, body: liveBody } = splitFrontmatterBlock(rawFile)
+          if (liveBody.trim() !== entry.content.trim()) {
+            return { ok: false, reason: 'stale_entry', message: 'The local knowledge file moved ahead of the synced copy. Retry after the next sync, then re-read the entry before editing.' }
+          }
+          const body = newBody.endsWith('\n') ? newBody : `${newBody}\n`
+          newFile = `${frontmatter}${body}`
+          await replaceLocalFile(filePath, newFile)
+        } catch (err) {
+          return classifyLocalWriteError(source, err)
+        }
       }
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, filePath, newFile, commitSha)
+        row = await writeThrough(source, relativePath, newFile, commitSha)
       } catch (err) {
-        return mirrorFailure(commitSha, err)
+        return mirrorFailure(source.sourceType, commitSha, err)
       }
       emitAudit(requestedBy, {
-        workspaceId, sourceId: source.id, entryId: row.id, op: 'update', repo: source.repo, commitSha,
+        workspaceId, sourceId: source.id, sourceType: source.sourceType, entryId: row.id, op: 'update', repo: source.repo, commitSha,
       })
-      return { ok: true, entryId: row.id, path: row.path, commitSha, commitUrl }
+      return { ok: true, entryId: row.id, path: row.path, sourceType: source.sourceType, commitSha, commitUrl }
     },
 
     async commitEntryCreate({ workspaceId, sourceId, path, fileContent, changeSummary, requestedBy }) {
       const target = await resolveTarget(workspaceId, sourceId)
       if (!target.ok) return target.result
-      const { source, owner, repo, pat } = target
+      const { source } = target
 
-      const entryPath = normalisePath(path)
+      const entryPath = validateKnowledgeEntryPath(path)
       if (!entryPath) {
         return { ok: false, reason: 'error', message: `Invalid entry path: "${path}"` }
       }
 
       let filePath: string
+      let relativePath: string
       let newFile: string
-      let commitSha: string | null
-      let commitUrl: string | null
-      try {
-        const headSha = await ops.getBranchHead(pat, owner, repo, source.branch)
-        const tree = await ops.getRepoTree(pat, owner, repo, headSha)
-        const existing = resolveRepoFilePath(tree.map((t) => t.path), source.rootPath, entryPath)
-        if (existing) {
-          return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}" (${existing}). Use updateKnowledgeEntry to change it.` }
-        }
+      let commitSha: string | null = null
+      let commitUrl: string | null = null
 
-        const prefix = source.rootPath.replace(/\/+$/, '')
-        filePath = prefix ? `${prefix}/${entryPath}.md` : `${entryPath}.md`
-        newFile = fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`
-        const res = await ops.createOrUpdateFile(pat, owner, repo, {
-          path: filePath,
-          content: newFile,
-          message: commitMessage(changeSummary, entryPath, requestedBy),
-          branch: source.branch,
-        })
-        ;({ sha: commitSha, url: commitUrl } = commitRef(res))
-      } catch (err) {
-        return classifyWriteError(source, err)
+      if (target.kind === 'github') {
+        try {
+          const headSha = await ops.getBranchHead(target.pat, target.owner, target.repo, source.branch)
+          const tree = await ops.getRepoTree(target.pat, target.owner, target.repo, headSha)
+          const existing = resolveRepoFilePath(tree.map((t) => t.path), source.rootPath, entryPath)
+          if (existing) {
+            return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}" (${existing}). Use updateKnowledgeEntry to change it.` }
+          }
+
+          const prefix = source.rootPath.replace(/\/+$/, '')
+          filePath = prefix ? `${prefix}/${entryPath}.md` : `${entryPath}.md`
+          relativePath = relativeRepoPath(source.rootPath, filePath)
+          newFile = fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`
+          const res = await ops.createOrUpdateFile(target.pat, target.owner, target.repo, {
+            path: filePath,
+            content: newFile,
+            message: commitMessage(changeSummary, entryPath, requestedBy),
+            branch: source.branch,
+          })
+          ;({ sha: commitSha, url: commitUrl } = commitRef(res))
+        } catch (err) {
+          return classifyWriteError(source, err)
+        }
+      } else {
+        try {
+          const files = await listLocalMarkdownFiles(target.root)
+          const existing = files.find((file) => validateKnowledgeEntryPath(file.relative) === entryPath)
+          if (existing) {
+            return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}" (${existing.relative}). Use updateKnowledgeEntry to change it.` }
+          }
+          filePath = await ensureLocalCreateParent(target.root, entryPath)
+          relativePath = toPosixPath(nodePath.relative(target.root, filePath))
+          newFile = fileContent.endsWith('\n') ? fileContent : `${fileContent}\n`
+          await fs.writeFile(filePath, newFile, { flag: 'wx' })
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+            return { ok: false, reason: 'file_exists', message: `An entry already exists at "${entryPath}". Use updateKnowledgeEntry to change it.` }
+          }
+          return classifyLocalWriteError(source, err)
+        }
       }
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, filePath, newFile, commitSha)
+        row = await writeThrough(source, relativePath, newFile, commitSha)
       } catch (err) {
-        return mirrorFailure(commitSha, err)
+        return mirrorFailure(source.sourceType, commitSha, err)
       }
       emitAudit(requestedBy, {
-        workspaceId, sourceId: source.id, entryId: row.id, op: 'create', repo: source.repo, commitSha,
+        workspaceId, sourceId: source.id, sourceType: source.sourceType, entryId: row.id, op: 'create', repo: source.repo, commitSha,
       })
-      return { ok: true, entryId: row.id, path: row.path, commitSha, commitUrl }
+      return { ok: true, entryId: row.id, path: row.path, sourceType: source.sourceType, commitSha, commitUrl }
     },
   }
 }

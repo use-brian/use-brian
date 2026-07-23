@@ -103,7 +103,9 @@ describe('[COMP:api/mcp-inject] injectMcpTools', () => {
 })
 
 describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
-  function kbStoreStub(sources: Array<{ id: string; repo: string; writeAccess?: boolean | null }>) {
+  type KbSource = { id: string; repo: string; sourceType: 'github' | 'local'; writeAccess?: boolean | null }
+
+  function kbStoreStub(sources: KbSource[]) {
     return {
       hasEntriesForAssistant: vi.fn().mockResolvedValue(true),
       listSourcesForAssistant: vi.fn().mockResolvedValue(sources),
@@ -116,7 +118,7 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
   }
 
   async function inject(params: {
-    sources: Array<{ id: string; repo: string; writeAccess?: boolean | null }>
+    sources: KbSource[]
     allowKnowledgeWrites?: boolean
     withWriter?: boolean
     keepBuiltinsDirect?: boolean
@@ -136,13 +138,20 @@ describe('[COMP:api/mcp-inject] KB write-tool exposure gate', () => {
     return { tools, result }
   }
 
-  const WRITABLE = [{ id: 's1', repo: 'acme/kb', writeAccess: true }]
-  const READ_ONLY = [{ id: 's1', repo: 'acme/kb', writeAccess: null }]
+  const WRITABLE: KbSource[] = [{ id: 's1', repo: 'acme/kb', sourceType: 'github', writeAccess: true }]
+  const READ_ONLY: KbSource[] = [{ id: 's1', repo: 'acme/kb', sourceType: 'github', writeAccess: null }]
+  const LOCAL: KbSource[] = [{ id: 'local1', repo: '/srv/kb', sourceType: 'local', writeAccess: null }]
 
   it('exposes updateKnowledgeEntry on an interactive surface with a writable source', async () => {
     const { tools, result } = await inject({ sources: WRITABLE, allowKnowledgeWrites: true })
     expect([...tools.keys()]).toContain('updateKnowledgeEntry')
     expect(result.unavailable.join(' ')).not.toContain('knowledge base editing')
+  })
+
+  it('treats a local source as writable without a GitHub capability probe', async () => {
+    const { tools, result } = await inject({ sources: LOCAL, allowKnowledgeWrites: true })
+    expect([...tools.keys()]).toContain('updateKnowledgeEntry')
+    expect(result.unavailable.join(' ')).not.toContain('GitHub token')
   })
 
   it('keeps write tools out on non-interactive surfaces (default), with no unavailable advert', async () => {

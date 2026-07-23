@@ -1,9 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import fs from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createKnowledgeRepoWriter, type RepoWriterGithubOps, type RepoWriterStore } from '../repo-writer.js'
 
 const SOURCE = {
   id: 'src1',
   workspaceId: 'w1',
+  sourceType: 'github' as const,
   repo: 'acme/kb',
   branch: 'main',
   rootPath: 'docs/kb',
@@ -41,6 +45,11 @@ function makeOps(overrides?: Partial<RepoWriterGithubOps>): RepoWriterGithubOps 
 const syncCredentials = { getPat: vi.fn(async () => 'ghp_pat') }
 
 beforeEach(() => { vi.clearAllMocks() })
+
+const tempDirs: string[] = []
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })))
+})
 
 const UPDATE_PARAMS = {
   workspaceId: 'w1',
@@ -214,6 +223,121 @@ describe('[COMP:knowledge/repo-writer] createKnowledgeRepoWriter', () => {
       const result = await writer.commitEntryCreate(CREATE_PARAMS)
 
       expect(result).toMatchObject({ ok: false, reason: 'no_credentials' })
+    })
+  })
+
+  describe('local source parity', () => {
+    async function makeLocalSource() {
+      const base = await fs.mkdtemp(path.join(os.tmpdir(), 'brian-kb-writer-'))
+      tempDirs.push(base)
+      const root = path.join(base, 'docs', 'kb')
+      await fs.mkdir(root, { recursive: true })
+      const source = {
+        ...SOURCE,
+        sourceType: 'local' as const,
+        repo: base,
+        branch: 'local',
+        rootPath: 'docs/kb',
+        connectorInstanceId: null,
+        writeAccess: null,
+      }
+      return { base, root, source }
+    }
+
+    it('updates the local file atomically, preserves frontmatter, and writes through', async () => {
+      const { root, source } = await makeLocalSource()
+      const filePath = path.join(root, 'products', 'vault.md')
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      await fs.writeFile(filePath, RAW_FILE)
+      const store = makeStore({ getSource: vi.fn(async () => source) })
+      const ops = makeOps()
+      const events: unknown[] = []
+      const writer = createKnowledgeRepoWriter({
+        store,
+        githubOps: ops,
+        recordEvent: (event) => events.push(event),
+      })
+
+      const result = await writer.commitEntryUpdate(UPDATE_PARAMS)
+
+      expect(result).toMatchObject({ ok: true, sourceType: 'local', commitSha: null, commitUrl: null })
+      expect(await fs.readFile(filePath, 'utf8')).toBe('---\ntitle: "Vault"\nsensitivity: internal\n---\nNew body\n')
+      expect(ops.getBranchHead).not.toHaveBeenCalled()
+      expect(store.upsertByPath).toHaveBeenCalledWith(expect.objectContaining({
+        path: 'products/vault', content: 'New body', sourceId: 'src1', sourceSha: null,
+      }))
+      expect(events[0]).toMatchObject({
+        eventName: 'kb_repo_write', metadata: expect.objectContaining({ sourceType: 'local', op: 'update' }),
+      })
+    })
+
+    it('rejects a stale local body without changing the file', async () => {
+      const { root, source } = await makeLocalSource()
+      const filePath = path.join(root, 'products', 'vault', 'index.md')
+      await fs.mkdir(path.dirname(filePath), { recursive: true })
+      const changed = '---\ntitle: "Vault"\n---\nExternal edit\n'
+      await fs.writeFile(filePath, changed)
+      const store = makeStore({ getSource: vi.fn(async () => source) })
+      const writer = createKnowledgeRepoWriter({ store })
+
+      const result = await writer.commitEntryUpdate(UPDATE_PARAMS)
+
+      expect(result).toMatchObject({ ok: false, reason: 'stale_entry' })
+      expect(await fs.readFile(filePath, 'utf8')).toBe(changed)
+      expect(store.upsertByPath).not.toHaveBeenCalled()
+    })
+
+    it('creates a local markdown file beneath rootPath with no GitHub calls', async () => {
+      const { root, source } = await makeLocalSource()
+      const store = makeStore({
+        getSource: vi.fn(async () => source),
+        upsertByPath: vi.fn(async () => ({ id: 'local-new', path: 'guides/start' })),
+      })
+      const ops = makeOps()
+      const writer = createKnowledgeRepoWriter({ store, githubOps: ops })
+
+      const result = await writer.commitEntryCreate({
+        workspaceId: 'w1', sourceId: 'src1', path: 'guides/start',
+        fileContent: '---\ntitle: "Start"\n---\nBody\n', changeSummary: 'add guide',
+      })
+
+      expect(result).toMatchObject({ ok: true, sourceType: 'local', commitSha: null })
+      expect(await fs.readFile(path.join(root, 'guides', 'start.md'), 'utf8')).toContain('title: "Start"')
+      expect(ops.createOrUpdateFile).not.toHaveBeenCalled()
+      expect(store.upsertByPath).toHaveBeenCalledWith(expect.objectContaining({ path: 'guides/start' }))
+    })
+
+    it('rejects local path traversal and existing index variants', async () => {
+      const { root, source } = await makeLocalSource()
+      await fs.mkdir(path.join(root, 'guides', 'start'), { recursive: true })
+      await fs.writeFile(path.join(root, 'guides', 'start', 'index.md'), '# Existing\n')
+      const store = makeStore({ getSource: vi.fn(async () => source) })
+      const writer = createKnowledgeRepoWriter({ store })
+      const params = {
+        workspaceId: 'w1', sourceId: 'src1', fileContent: '# New\n', changeSummary: 'add',
+      }
+
+      await expect(writer.commitEntryCreate({ ...params, path: '../outside' }))
+        .resolves.toMatchObject({ ok: false, reason: 'error' })
+      await expect(writer.commitEntryCreate({ ...params, path: 'guides/start' }))
+        .resolves.toMatchObject({ ok: false, reason: 'file_exists' })
+      await expect(fs.stat(path.join(root, '..', 'outside.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    })
+
+    it('rejects a local root symlink that escapes the configured source', async () => {
+      const { base, source } = await makeLocalSource()
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'brian-kb-outside-'))
+      tempDirs.push(outside)
+      await fs.rm(path.join(base, 'docs', 'kb'), { recursive: true })
+      await fs.symlink(outside, path.join(base, 'docs', 'kb'))
+      const writer = createKnowledgeRepoWriter({ store: makeStore({ getSource: vi.fn(async () => source) }) })
+
+      const result = await writer.commitEntryCreate({
+        workspaceId: 'w1', sourceId: 'src1', path: 'escape', fileContent: '# Escape\n', changeSummary: 'add',
+      })
+
+      expect(result).toMatchObject({ ok: false, reason: 'source_missing' })
+      await expect(fs.stat(path.join(outside, 'escape.md'))).rejects.toMatchObject({ code: 'ENOENT' })
     })
   })
 })
