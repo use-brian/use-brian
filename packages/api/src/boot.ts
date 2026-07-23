@@ -233,6 +233,10 @@ import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
 import { connectionRoutes } from './routes/connections.js'
 import { connectorRoutes } from './routes/connectors.js'
+import {
+  memberConnectorInstanceRoutes,
+  workspaceConnectorInstanceRoutes,
+} from './routes/connector-instances.js'
 import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
@@ -253,6 +257,7 @@ import { wechatRoutes } from './routes/wechat.js'
 import { createWhatsappByonRuntime } from './whatsapp/byon-runtime.js'
 import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
+import { ingestRoutes } from './routes/ingest.js'
 import { processChannelMessage } from './routes/channel-pipeline.js'
 import { snapshotRoutes } from './routes/snapshots.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
@@ -288,6 +293,8 @@ import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
 import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
+import { localFilesTransferRoutes } from './routes/local-files-transfer.js'
+import { openRecordingsRoutes } from './routes/recordings.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -526,6 +533,8 @@ export interface OpenApiEnv {
   // self-hosted local storage; otherwise non-Cloud-Run dev falls back to /tmp.
   GCS_FILES_BUCKET?: string
   LOCAL_FILES_DIR?: string
+  /** Public HTTPS base used only for signed local-file transfer URLs. */
+  LOCAL_FILES_PUBLIC_URL?: string
   /** Standalone OSS trust boundary for admin-selected server filesystem paths. */
   LOCAL_FILESYSTEM_SOURCES_ENABLED?: boolean
   // Weekly skill-hygiene passes ship dark unless on.
@@ -989,12 +998,21 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // to ~13.4MB encoded plus JSON envelope. Express's default 100kb limit 413s
   // any media-bearing message, silently dropping it from ingest. Other routes
   // post small JSON, so the higher ceiling only matters for that relay.
-  app.use(express.json({
+  const jsonParser = express.json({
     limit: '15mb',
     verify: (req, _res, buf) => {
       ;(req as express.Request & { rawBody?: string }).rawBody = buf.toString('utf8')
     },
-  }))
+  })
+  app.use((req, res, next) => {
+    // Signed local-file PUTs are raw byte streams. Let their route consume the
+    // request directly even when the uploaded file itself is JSON.
+    if (req.path === '/api/local-files') {
+      next()
+      return
+    }
+    jsonParser(req, res, next)
+  })
 
   // ── CORS ──
   const allowedOrigins = new Set([env.APP_URL, env.FEED_URL, env.AUTHED_APP_URL].filter(Boolean) as string[])
@@ -2832,14 +2850,27 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ── Workspace filesystem ──
   const configuredLocalFilesDir = env.LOCAL_FILES_DIR?.trim()
   const localFilesDir = resolveLocalFilesBaseDir(configuredLocalFilesDir)
+  const localFilesClient = !env.GCS_FILES_BUCKET && !(process.env.K_SERVICE && !configuredLocalFilesDir)
+    ? createLocalFilesClient({
+        baseDir: localFilesDir,
+        apiUrl: env.LOCAL_FILES_PUBLIC_URL?.trim() || env.API_URL,
+        signingSecret: env.JWT_SECRET,
+      })
+    : null
   const filesBlobClient = env.GCS_FILES_BUCKET
     ? createGcsFilesClient({ bucket: env.GCS_FILES_BUCKET, projectId: process.env.GOOGLE_CLOUD_PROJECT })
-    : process.env.K_SERVICE && !configuredLocalFilesDir
-      ? null
-      : createLocalFilesClient({ baseDir: localFilesDir })
+    : localFilesClient
   if (filesBlobClient && !env.GCS_FILES_BUCKET) {
     const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
     console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
+  }
+  if (localFilesClient) {
+    // Signed bearer URLs keep direct browser/connector transfers working without
+    // exposing file:// paths. Mount before authenticated /api catch-all guards.
+    app.use('/api/local-files', localFilesTransferRoutes({
+      client: localFilesClient,
+      signingSecret: env.JWT_SECRET,
+    }))
   }
   let brainFileTools:
     | Pick<
@@ -3632,6 +3663,14 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       membership: getWorkspaceMembershipWithClearanceSystem,
     }))
   }
+  if (process.env.USEBRIAN_EDITION === 'oss' && filesResolver && filesBlobClient) {
+    app.use('/api/recordings', requireAuth(env.JWT_SECRET), openRecordingsRoutes({
+      filesResolver,
+      getRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
+      enqueueJob: enqueueRecordingJob,
+      hasProcessed: hasCompletedRecordingJob,
+    }))
+  }
 
   if (filesBlobClient && filesResolver) {
     app.use('/api/account/avatar', accountAvatarPublicRoutes({
@@ -3821,6 +3860,25 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }))
 
   const workspaceInvitationStore = createWorkspaceInvitationStore()
+  if (process.env.USEBRIAN_EDITION === 'oss') {
+    const connectorInstanceRouteOptions = {
+      connectorInstanceStore,
+      connectorGrantStore,
+      workspaceStore,
+      auditStore: workspaceAuditStore,
+      workspaceToolPolicyStore,
+    }
+    app.use(
+      '/api/connector-instances',
+      requireAuth(env.JWT_SECRET),
+      memberConnectorInstanceRoutes(connectorInstanceRouteOptions),
+    )
+    app.use(
+      '/api/workspaces/:workspaceId/connectors',
+      requireAuth(env.JWT_SECRET),
+      workspaceConnectorInstanceRoutes(connectorInstanceRouteOptions),
+    )
+  }
   const workspaceRouter = workspaceRoutes({
     workspaceStore,
     auditStore: workspaceAuditStore,
@@ -5078,6 +5136,18 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) externalSinkRelay.start()
 
+  // Hosted keeps its platform route; the standalone edition mounts the open
+  // implementation against this composition root's shared store instances.
+  if (process.env.USEBRIAN_EDITION === 'oss') {
+    app.use('/api/ingest', requireAuth(env.JWT_SECRET), ingestRoutes({
+      connectorInstanceStore,
+      ingestRulesStore,
+      workspaceStore,
+      connectorGrantStore,
+      ingestSinkStore,
+    }))
+  }
+
   // ── Stuck-session sweeper ──
   const stuckSessionSweeper = createStuckSessionSweeper({
     publishDraftTurnCompleted: (sessionId) =>
@@ -5366,6 +5436,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         integrationStore,
         ingestor: whatsapp.ingestor,
         bot: whatsapp.bot,
+        filesResolver: filesResolver ?? undefined,
         passUnknownToFallback: ports.whatsappOfficialFallback,
       }))
     }
