@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import request from 'supertest'
@@ -433,7 +433,9 @@ describe('[COMP:api/knowledge-route] local filesystem sources', () => {
   })
 
   it('allows a workspace admin to connect a readable markdown directory', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'brian-local-kb-route-'))
+    // realpath so the expected `repo` matches what the route stores: on macOS
+    // `tmpdir()` (/tmp) is a symlink to /private/tmp, which the route canonicalizes.
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'brian-local-kb-route-')))
     try {
       await writeFile(join(dir, 'index.md'), '# Local knowledge')
       mockRls.mockResolvedValueOnce({
