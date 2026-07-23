@@ -12,8 +12,9 @@
  * has been restarted and the relay socket is gone. Both are one click here.
  *
  * **Shape.** A 28px icon square in the **Browsers operator surface's top bar**
- * (`browsers-surface-shell.tsx`, the `right` slot, next to the live-session
- * count) — the browser controls sit where the browser lives. It began as a
+ * (`browsers-surface-shell.tsx`, the `right` slot) — the browser controls sit
+ * where the browser lives; the live-session count moved to the left sidebar
+ * panel's header (`browsers-sidebar-panel.tsx`). It began as a
  * square trailing the global operator app-bar, which put a browser affordance
  * on every surface; it moved onto the Browsers surface once Browsers became a
  * first-class operator app (doc.md → "Home operator app-bar").
