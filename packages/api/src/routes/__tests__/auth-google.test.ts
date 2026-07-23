@@ -47,6 +47,8 @@ function makeUser(overrides: Partial<User>): User {
     avatarUrl: null,
     avatarSource: null,
     avatarStorageKey: null,
+    avatarStorageWorkspaceId: null,
+    avatarStorageUri: null,
     authProvider: 'email',
     authProviderId: 'cynthia@example.com',
     stripeCustomerId: null,

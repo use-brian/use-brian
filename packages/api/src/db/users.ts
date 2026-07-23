@@ -10,15 +10,18 @@ export type User = {
   /**
    * Avatar provenance (migration 237). NULL / 'google' = synced from the
    * OAuth provider (hot-linked, not copied); 'uploaded' = the user uploaded
-   * their own photo, stored in GCS under `avatar_storage_key`. Drives the
+   * their own photo, stored under `avatar_storage_key`. Drives the
    * no-clobber guard in `findOrCreateUser` / `promoteChannelUser` so a later
    * provider sign-in can't overwrite an upload. See
    * docs/architecture/platform/user-profile.md → "Avatar precedence".
    */
   avatarSource: string | null
-  /** GCS object key for an uploaded avatar (`avatars/<userId>/<uuid>`).
-   *  NULL for provider hot-links. Migration 237. */
+  /** Backend object key for an uploaded avatar. NULL for provider hot-links. */
   avatarStorageKey: string | null
+  /** Workspace whose storage binding received the avatar. Migration 367. */
+  avatarStorageWorkspaceId: string | null
+  /** Immutable gs://, s3://, or file:// origin URI. Migration 367. */
+  avatarStorageUri: string | null
   authProvider: string
   authProviderId: string
   /** Per-account Stripe customer link (migration 001). The only billing
@@ -49,6 +52,8 @@ export type User = {
 const USER_COLUMNS = `
   id, email, name, handle, avatar_url as "avatarUrl",
   avatar_source as "avatarSource", avatar_storage_key as "avatarStorageKey",
+  avatar_storage_workspace_id as "avatarStorageWorkspaceId",
+  avatar_storage_uri as "avatarStorageUri",
   auth_provider as "authProvider", auth_provider_id as "authProviderId",
   stripe_customer_id as "stripeCustomerId",
   timezone,
@@ -414,41 +419,59 @@ export async function updateUserTimezone(
 
 /**
  * Persist an uploaded avatar. Sets `avatar_url` to our proxy URL,
- * `avatar_storage_key` to the GCS object key, and stamps
+ * `avatar_storage_key` plus immutable workspace/URI origin provenance, and stamps
  * `avatar_source='uploaded'` so the no-clobber guard in `findOrCreateUser` /
  * `promoteChannelUser` protects it from a later provider sign-in. Called by
  * `POST /api/account/avatar`. See user-profile.md → "Uploading your own photo".
  */
 export async function updateUserAvatar(
   userId: string,
-  { url, storageKey }: { url: string; storageKey: string },
-): Promise<void> {
-  await query(
+  {
+    url,
+    storageKey,
+    storageWorkspaceId,
+    storageUri,
+    previousStorageKey,
+  }: {
+    url: string
+    storageKey: string
+    storageWorkspaceId: string
+    storageUri: string
+    previousStorageKey: string | null
+  },
+): Promise<boolean> {
+  const result = await query(
     `UPDATE users SET
        avatar_url = $1,
        avatar_storage_key = $2,
+       avatar_storage_workspace_id = $3,
+       avatar_storage_uri = $4,
        avatar_source = 'uploaded',
        updated_at = now()
-     WHERE id = $3`,
-    [url, storageKey, userId],
+     WHERE id = $5 AND avatar_storage_key IS NOT DISTINCT FROM $6`,
+    [url, storageKey, storageWorkspaceId, storageUri, userId, previousStorageKey],
   )
+  return (result.rowCount ?? 0) > 0
 }
 
 /**
- * Remove an uploaded avatar. Nulls all three avatar columns so the next
+ * Remove an uploaded avatar. Nulls all five avatar columns so the next
  * provider sign-in re-syncs the hot-linked photo. Called by
  * `DELETE /api/account/avatar` (after the blob delete).
  */
-export async function clearUserAvatar(userId: string): Promise<void> {
-  await query(
+export async function clearUserAvatar(userId: string, expectedStorageKey: string | null): Promise<boolean> {
+  const result = await query(
     `UPDATE users SET
        avatar_url = NULL,
        avatar_storage_key = NULL,
+       avatar_storage_workspace_id = NULL,
+       avatar_storage_uri = NULL,
        avatar_source = NULL,
        updated_at = now()
-     WHERE id = $1`,
-    [userId],
+     WHERE id = $1 AND avatar_storage_key IS NOT DISTINCT FROM $2`,
+    [userId, expectedStorageKey],
   )
+  return (result.rowCount ?? 0) > 0
 }
 
 /**
