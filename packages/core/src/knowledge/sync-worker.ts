@@ -302,10 +302,10 @@ export function createKnowledgeSyncWorker(options: {
   }
 
   async function syncLocalSource(source: SyncSource) {
-    const baseDir = nodePath.resolve(source.repo)
-    const root = nodePath.resolve(baseDir, source.rootPath || '.')
+    const baseDir = await fs.realpath(nodePath.resolve(source.repo))
+    const root = await fs.realpath(nodePath.resolve(baseDir, source.rootPath || '.'))
     const relativeRoot = nodePath.relative(baseDir, root)
-    if (relativeRoot === '..' || relativeRoot.startsWith(`..${nodePath.sep}`)) {
+    if (relativeRoot === '..' || relativeRoot.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relativeRoot)) {
       throw new Error(`Local knowledge root escapes its source directory: ${source.rootPath}`)
     }
 
