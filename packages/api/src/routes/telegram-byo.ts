@@ -36,7 +36,7 @@ import { resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from 
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import { withChatLock } from '../db/chat-lock.js'
-import { buildDocumentFiledReply, buildOversizeDocReply } from '../ingest/channel-media-intake.js'
+import { buildDocumentFiledReply, buildOversizeDocReply, classifyMedia } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
 import { transcribeFirstAudio, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
@@ -147,10 +147,8 @@ type TelegramByoRouteOptions = {
    */
   recordingIngest?: ChannelRecordingIngest
   /**
-   * Route inbound document / video (≤ the 20MB bot cap) through the universal
-   * channel-media intake for durability. Audio is NOT routed here on BYO — it
-   * keeps the inline `recordingIngest` port path above (queue migration is a
-   * separate remaining item). See large-content-artifacts §Phase 0.3.
+   * Route inbound document / video through universal intake. Audio uses this
+   * path when the hosted inline recording hook is absent (the OSS default).
    */
   ingestChannelMediaRef?: (input: {
     source: { url: string }
@@ -163,6 +161,15 @@ type TelegramByoRouteOptions = {
     assistantId: string | null
     actingUserId: string
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult | null>
+}
+
+/** Hosted keeps its billing-aware inline audio path; OSS queues audio through
+ * universal channel intake when that hook is absent. */
+export function shouldUseUniversalTelegramIntake(
+  mediaType: IncomingMessage['mediaType'],
+  hasRecordingIngest: boolean,
+): boolean {
+  return mediaType === 'document' || mediaType === 'video' || (!hasRecordingIngest && mediaType === 'audio')
 }
 
 /**
@@ -1012,6 +1019,7 @@ type ProcessMessageParams = {
   }
   /** Universal channel-media intake for document/video (large-content-artifacts §Phase 0.3). */
   ingestChannelMediaRef?: TelegramByoRouteOptions['ingestChannelMediaRef']
+  recordingIngest?: ChannelRecordingIngest
   /** Web app origin for the oversize-document handoff copy. */
   appUrl?: string
 }
@@ -1037,13 +1045,31 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   }
 
   // ── Channel-media intake (large-content-artifacts §Phase 0.3) ──
-  // Route document / video (≤ the 20MB cap) through the universal intake for
-  // durability. Audio deliberately excluded on BYO — it keeps the inline
-  // recordingIngestor path (queue migration is a separate remaining item).
+  // Route documents/video through universal intake. In OSS, where the hosted
+  // billing-aware inline hook is absent, audio falls through here as well and
+  // is queued for the open recording worker.
   // Fire-and-forget beside the one-turn content-block path below.
+  const handleUniversalResult = async (
+    result: Awaited<ReturnType<NonNullable<TelegramByoRouteOptions['ingestChannelMediaRef']>>>,
+  ) => {
+    if (result?.status === 'pending_confirmation') {
+      await adapter.sendMessage(incoming.channelId, { text: result.message })
+      return
+    }
+    if (result?.status === 'ingested' && result.kind === 'document') {
+      await adapter.sendMessage(incoming.channelId, { text: buildDocumentFiledReply(result.fileName) })
+      return
+    }
+    if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
+      await adapter.sendMessage(incoming.channelId, {
+        text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
+      })
+    }
+  }
+
   if (
     incoming.mediaUrl &&
-    (incoming.mediaType === 'document' || incoming.mediaType === 'video') &&
+    shouldUseUniversalTelegramIntake(incoming.mediaType, Boolean(params.recordingIngest)) &&
     params.ingestChannelMediaRef &&
     assistant.workspaceId
   ) {
@@ -1064,22 +1090,32 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           actingUserId: ownerId,
         }),
       )
-      .then(async (result) => {
-        if (result?.status === 'pending_confirmation') {
-          await adapter.sendMessage(incoming.channelId, { text: result.message })
-          return
-        }
-        if (result?.status === 'ingested' && result.kind === 'document') {
-          await adapter.sendMessage(incoming.channelId, { text: buildDocumentFiledReply(result.fileName) })
-          return
-        }
-        if (result?.status === 'rejected' && result.reason === 'doc_too_large') {
-          await adapter.sendMessage(incoming.channelId, {
-            text: buildOversizeDocReply(params.appUrl ?? 'https://app.sidan.ai', result.limitMb ?? 25, result.sizeMb ?? 0),
-          })
-        }
-      })
+      .then(handleUniversalResult)
       .catch((err) => console.error('[telegram-byo] media→brain ingest failed:', err))
+  }
+
+  // Albums use `incoming.files` rather than the single-media fields. Persist
+  // every document/video there as well as supplying it to the immediate turn.
+  if (incoming.files?.length && params.ingestChannelMediaRef && assistant.workspaceId) {
+    const ingest = params.ingestChannelMediaRef
+    const workspaceId = assistant.workspaceId
+    for (const file of incoming.files) {
+      if (classifyMedia(file.mimeType) === 'unsupported') continue
+      adapter.resolveFileUrl(file.url)
+        .then((url) => ingest({
+          source: { url },
+          mime: file.mimeType,
+          fileName: file.name,
+          sizeBytes: null,
+          sender: { id: channelUserId, name: null },
+          conversationId: incoming.channelId,
+          workspaceId,
+          assistantId: assistant.id,
+          actingUserId: ownerId,
+        }))
+        .then(handleUniversalResult)
+        .catch((err) => console.error('[telegram-byo] album media→brain ingest failed:', err))
+    }
   }
 
   // Voice preflight — mirror the official telegram route. Transcribe the

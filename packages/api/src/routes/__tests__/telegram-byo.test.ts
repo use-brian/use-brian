@@ -209,7 +209,12 @@ vi.mock('../../db/sessions.js', () => ({
 
 // ── Route import (must come after vi.mock calls) ───────────────
 
-import { telegramByoRoutes, persistSeenChat, telegramLinkBindsHere } from '../telegram-byo.js'
+import {
+  telegramByoRoutes,
+  persistSeenChat,
+  telegramLinkBindsHere,
+  shouldUseUniversalTelegramIntake,
+} from '../telegram-byo.js'
 import { findOrCreateSession } from '../../db/sessions.js'
 
 const mockFindOrCreateSession = vi.mocked(findOrCreateSession)
@@ -262,6 +267,14 @@ beforeEach(() => {
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
+})
+
+describe('[COMP:api/telegram-byo-route] OSS audio intake fallback', () => {
+  it('routes audio to universal intake only when hosted recordingIngest is absent', () => {
+    expect(shouldUseUniversalTelegramIntake('audio', false)).toBe(true)
+    expect(shouldUseUniversalTelegramIntake('audio', true)).toBe(false)
+    expect(shouldUseUniversalTelegramIntake('document', true)).toBe(true)
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] forum-topic routing', () => {

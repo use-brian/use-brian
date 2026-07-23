@@ -16,6 +16,7 @@
 // DB, GCS, or a worker. See docs/plans/channel-media-ingest.md §Phase 3.
 
 import type { CreateEpisodeInput, EpisodeRecord, EpisodeSensitivity } from '../db/episodes-store.js'
+import type { Recording } from '../db/recordings-store.js'
 import { buildChannelSessionKey } from '../db/pending-recording-confirmations-store.js'
 
 /** A normalized inbound attachment whose bytes are already in GCS. */
@@ -82,6 +83,21 @@ export function classifyMedia(mime: string): ChannelMediaKind {
 export type ChannelMediaIntakeDeps = {
   /** open episodes-store `createEpisode(actorUserId, input)`. */
   createEpisode: (actorUserId: string, input: CreateEpisodeInput) => Promise<EpisodeRecord>
+  /** First-class recording state used by the recording UI and worker. */
+  createRecording: (input: {
+    id: string
+    workspaceId: string
+    mime: string
+    gcsKey: string
+    storageUri?: string | null
+    fileName?: string | null
+    bytes?: number | null
+    status?: import('../db/recordings-store.js').RecordingStatus
+    assistantId: string | null
+    userId?: string | null
+    sensitivity?: string
+    createdByUserId: string
+  }) => Promise<Recording>
   /** open recording-jobs-store `enqueueRecordingJob`. */
   enqueueRecordingJob: (input: {
     recordingId: string
@@ -96,6 +112,7 @@ export type ChannelMediaIntakeDeps = {
     storageUri?: string | null
     mime: string
     fileName: string | null
+    sizeBytes: number | null
     workspaceId: string
     assistantId: string | null
     actingUserId: string
@@ -258,6 +275,20 @@ export async function ingestChannelMedia(
       createdByUserId: ref.actingUserId,
       sensitivity,
     })
+    await deps.createRecording({
+      id: episode.id,
+      workspaceId: ref.workspaceId,
+      mime: ref.mime,
+      gcsKey: ref.gcsKey,
+      storageUri: ref.storageUri ?? null,
+      fileName: ref.fileName,
+      bytes: ref.sizeBytes,
+      status: 'queued',
+      assistantId: ref.assistantId,
+      userId: null,
+      sensitivity,
+      createdByUserId: ref.actingUserId,
+    })
     // Store-without-transcribe (highlights-only): the caller wants the recording
     // Episode to exist so media-fetch can resolve it (e.g. an external highlights
     // integration pulls the raw video), but NOT the transcription pipeline. Skip
@@ -342,6 +373,7 @@ export async function ingestChannelMedia(
     storageUri: ref.storageUri,
     mime: ref.mime,
     fileName: ref.fileName,
+    sizeBytes: ref.sizeBytes,
     workspaceId: ref.workspaceId,
     assistantId: ref.assistantId,
     actingUserId: ref.actingUserId,
