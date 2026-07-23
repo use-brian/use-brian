@@ -158,7 +158,6 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'oauth_authorizations',
   // Settings + config + authored structure
   'workspace_tool_policy',
-  'workspace_memory_sharing',
   'workspace_knowledge_sources',
   'workspace_page_templates',
   'entity_types',

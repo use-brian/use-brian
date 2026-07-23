@@ -108,9 +108,6 @@ const JOINS = `
 // ── Store ──────────────────────────────────────────────────────
 
 export type ConnectionStore = {
-  /** Follow an assistant. If target is public, auto-accepted. If private, pending. */
-  follow(followerAssistantId: string, followingAssistantId: string, autoAccept?: boolean): Promise<Connection>
-
   /**
    * Idempotently seed the intra-workspace follow plane: the workspace's
    * `kind='primary'` assistant follows every other assistant in the same
@@ -152,33 +149,16 @@ export type ConnectionStore = {
   ): Promise<string | null | undefined>
   /** Reject a pending follow request (deletes it). */
   rejectRequest(connectionId: string): Promise<boolean>
-  /** Block an assistant from following you. */
-  blockAssistant(myAssistantId: string, blockedAssistantId: string): Promise<Connection>
-  /** Unblock a blocked assistant. */
-  unblock(myAssistantId: string, blockedAssistantId: string): Promise<boolean>
 
   /** Who I follow (my outgoing, accepted). */
   getFollowing(assistantId: string): Promise<Connection[]>
-  /** My outgoing pending requests. */
-  getPendingOutgoing(assistantId: string): Promise<Connection[]>
   /** Who follows me (incoming, accepted). */
   getFollowers(assistantId: string): Promise<Connection[]>
-  /** Mutual: both follow each other (accepted). */
-  getMutuals(assistantId: string): Promise<Connection[]>
   /** Pending follow requests for my assistant. */
   getPendingRequests(assistantId: string): Promise<Connection[]>
 
   /** Check if follower has accepted access to following. */
   isFollowing(followerAssistantId: string, followingAssistantId: string): Promise<boolean>
-  /** Check if blocked. */
-  isBlocked(myAssistantId: string, otherAssistantId: string): Promise<boolean>
-
-  /**
-   * Set the follower's note on a connection. Pass null to clear.
-   * Returns the updated connection or null if the caller does not own the follower assistant.
-   * Auth (assistant membership) is checked at the route layer.
-   */
-  setCallerNote(connectionId: string, note: string | null): Promise<Connection | null>
 
   /** Count followers (accepted). */
   followerCount(assistantId: string): Promise<number>
@@ -188,38 +168,6 @@ export type ConnectionStore = {
 
 export function createConnectionStore(): ConnectionStore {
   return {
-    async follow(followerAssistantId, followingAssistantId, autoAccept = true) {
-      // Check if blocked
-      const blocked = await query<{ id: string }>(
-        `SELECT id FROM assistant_connections
-         WHERE follower_assistant_id = $1 AND following_assistant_id = $2 AND status = 'blocked'`,
-        [followerAssistantId, followingAssistantId],
-      )
-      if (blocked.rows.length > 0) {
-        throw new Error('blocked')
-      }
-
-      const status = autoAccept ? 'accepted' : 'pending'
-      // An explicit user follow always lands as origin='user'. If an
-      // auto-seeded origin='workspace' edge already exists, this UPSERT
-      // upgrades it to 'user' (the stronger, relevance-triggered plane) —
-      // never the reverse: seedWorkspacePrimaryFollows uses DO NOTHING.
-      const result = await query<Connection>(
-        `INSERT INTO assistant_connections (follower_assistant_id, following_assistant_id, status, origin)
-         VALUES ($1, $2, $3, 'user')
-         ON CONFLICT (follower_assistant_id, following_assistant_id) DO UPDATE
-           SET status = CASE
-             WHEN assistant_connections.status = 'blocked' THEN assistant_connections.status
-             ELSE EXCLUDED.status
-           END,
-           origin = 'user',
-           updated_at = now()
-         RETURNING ${RETURNING_COLUMNS}`,
-        [followerAssistantId, followingAssistantId, status],
-      )
-      return result.rows[0]
-    },
-
     async seedWorkspacePrimaryFollows(workspaceId) {
       // Set-based + idempotent. The primary follows every sibling in the
       // workspace; ON CONFLICT DO NOTHING protects existing user follows and
@@ -294,28 +242,6 @@ export function createConnectionStore(): ConnectionStore {
       return (result.rowCount ?? 0) > 0
     },
 
-    async blockAssistant(myAssistantId, blockedAssistantId) {
-      // Upsert: if they follow me, set to blocked. Otherwise create blocked entry.
-      const result = await query<Connection>(
-        `INSERT INTO assistant_connections (follower_assistant_id, following_assistant_id, status)
-         VALUES ($1, $2, 'blocked')
-         ON CONFLICT (follower_assistant_id, following_assistant_id) DO UPDATE
-           SET status = 'blocked', updated_at = now()
-         RETURNING ${RETURNING_COLUMNS}`,
-        [blockedAssistantId, myAssistantId],
-      )
-      return result.rows[0]
-    },
-
-    async unblock(myAssistantId, blockedAssistantId) {
-      const result = await query(
-        `DELETE FROM assistant_connections
-         WHERE follower_assistant_id = $1 AND following_assistant_id = $2 AND status = 'blocked'`,
-        [blockedAssistantId, myAssistantId],
-      )
-      return (result.rowCount ?? 0) > 0
-    },
-
     async getFollowing(assistantId) {
       const result = await query<Connection>(
         `SELECT ${CONNECTION_COLUMNS_WITH_DETAILS}
@@ -327,39 +253,11 @@ export function createConnectionStore(): ConnectionStore {
       return result.rows
     },
 
-    async getPendingOutgoing(assistantId) {
-      const result = await query<Connection>(
-        `SELECT ${CONNECTION_COLUMNS_WITH_DETAILS}
-         FROM assistant_connections ac ${JOINS}
-         WHERE ac.follower_assistant_id = $1 AND ac.status = 'pending'
-         ORDER BY ac.created_at DESC`,
-        [assistantId],
-      )
-      return result.rows
-    },
-
     async getFollowers(assistantId) {
       const result = await query<Connection>(
         `SELECT ${CONNECTION_COLUMNS_WITH_DETAILS}
          FROM assistant_connections ac ${JOINS}
          WHERE ac.following_assistant_id = $1 AND ac.status = 'accepted'
-         ORDER BY ac.created_at DESC`,
-        [assistantId],
-      )
-      return result.rows
-    },
-
-    async getMutuals(assistantId) {
-      const result = await query<Connection>(
-        `SELECT ${CONNECTION_COLUMNS_WITH_DETAILS}
-         FROM assistant_connections ac ${JOINS}
-         WHERE ac.follower_assistant_id = $1 AND ac.status = 'accepted'
-           AND EXISTS (
-             SELECT 1 FROM assistant_connections ac2
-             WHERE ac2.follower_assistant_id = ac.following_assistant_id
-               AND ac2.following_assistant_id = $1
-               AND ac2.status = 'accepted'
-           )
          ORDER BY ac.created_at DESC`,
         [assistantId],
       )
@@ -388,17 +286,6 @@ export function createConnectionStore(): ConnectionStore {
       return result.rows[0].exists
     },
 
-    async isBlocked(myAssistantId, otherAssistantId) {
-      const result = await query<{ exists: boolean }>(
-        `SELECT EXISTS(
-           SELECT 1 FROM assistant_connections
-           WHERE follower_assistant_id = $1 AND following_assistant_id = $2 AND status = 'blocked'
-         ) AS exists`,
-        [otherAssistantId, myAssistantId],
-      )
-      return result.rows[0].exists
-    },
-
     async followerCount(assistantId) {
       const result = await query<{ count: string }>(
         `SELECT COUNT(*)::text FROM assistant_connections
@@ -415,18 +302,6 @@ export function createConnectionStore(): ConnectionStore {
         [assistantId],
       )
       return parseInt(result.rows[0].count, 10)
-    },
-
-    async setCallerNote(connectionId, note) {
-      const trimmed = note === null ? null : note.trim().slice(0, 500) || null
-      const result = await query<Connection>(
-        `UPDATE assistant_connections
-         SET caller_note = $2, updated_at = now()
-         WHERE id = $1
-         RETURNING ${RETURNING_COLUMNS}`,
-        [connectionId, trimmed],
-      )
-      return result.rows[0] ?? null
     },
   }
 }

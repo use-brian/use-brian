@@ -238,7 +238,6 @@ import {
   memberConnectorInstanceRoutes,
   workspaceConnectorInstanceRoutes,
 } from './routes/connector-instances.js'
-import { discoverRoutes } from './routes/discover.js'
 import { createModesRouter } from './routes/modes.js'
 import { pendingMessageRoutes } from './routes/pending-messages.js'
 import { channelsRoutes } from './routes/channels.js'
@@ -4045,11 +4044,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
 
-  // Public assistant directory — world-readable by design (its module header:
-  // "no auth required"). Same shadowing victim as the stream above: it sat
-  // below the bare guards and 401'd for everyone (route-mount-order rule 2).
-  app.use('/api/discover', discoverRoutes())
-
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
     workspaceStore,
@@ -4309,7 +4303,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   app.use('/api/handles', requireAuth(env.JWT_SECRET), handleRoutes())
   app.use('/api/connections', requireAuth(env.JWT_SECRET), connectionRoutes({ connectionStore }))
-  // (/api/discover moved to the early-public block above the bare guards.)
   app.use('/api/assistants/:assistantId/modes', requireAuth(env.JWT_SECRET), createModesRouter({ modesStore: assistantModesStore }))
   app.use('/api/pending-messages', requireAuth(env.JWT_SECRET), pendingMessageRoutes({ pendingMessageStore, integrationStore: integrationStore ?? undefined, defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN, waConnectorUrl: env.WA_CONNECTOR_URL, waConnectorSecret: env.WA_CONNECTOR_SECRET }))
   app.use('/api/snapshots', requireAuth(env.JWT_SECRET), snapshotRoutes({ snapshotStore, generateSnapshot: snapshotGenerator }))

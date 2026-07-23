@@ -1,22 +1,27 @@
 /**
- * Assistant connection routes — follow/follower model.
+ * Assistant connection routes — the A2A follow graph read/manage surface.
  *
- * Mounted at `/api/connections` behind requireAuth.
+ * Mounted at `/api/connections` behind requireAuth. Consumed by the Studio
+ * Network (modes) tab. The graph itself is populated by intra-workspace
+ * auto-seeding (seedWorkspacePrimaryFollows) and read in-process by the A2A
+ * relay (askAssistant/listConnectedAssistants) via the connection store, not
+ * these routes.
  *
  * [COMP:api/connections-route]
  *
- *   POST   /follow              — follow an assistant
  *   POST   /unfollow            — unfollow
  *   POST   /:id/accept          — accept a pending follow request
  *   POST   /:id/reject          — reject a pending follow request
- *   POST   /:id/note            — set/clear the follower's note on a connection
- *   POST   /block               — block an assistant
- *   POST   /unblock             — unblock
  *   GET    /following?assistantId=  — who I follow
  *   GET    /followers?assistantId=  — who follows me
- *   GET    /mutuals?assistantId=    — mutual connections
  *   GET    /pending?assistantId=    — pending follow requests
  *   GET    /counts?assistantId=     — follower + following counts
+ *   GET    /activity?assistantId=   — recent inter-assistant interactions
+ *
+ * The discovery/social write surface (follow, block/unblock, remove-follower,
+ * note, mutuals, pending-outgoing) was removed with the sharing_mode teardown —
+ * it had no frontend caller and POST /follow gated on the dropped column. See
+ * docs/plans/network-feature-teardown.md.
  */
 
 import { Router } from 'express'
@@ -30,61 +35,6 @@ type ConnectionRouteOptions = {
 
 export function connectionRoutes({ connectionStore }: ConnectionRouteOptions): Router {
   const router = Router()
-
-  // ── POST /follow ─────────────────────────────────────────────
-
-  router.post('/follow', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-
-    const { followerAssistantId, followingAssistantId } = req.body as {
-      followerAssistantId?: string
-      followingAssistantId?: string
-    }
-
-    if (!followerAssistantId || !followingAssistantId) {
-      res.status(400).json({ error: 'followerAssistantId and followingAssistantId are required' })
-      return
-    }
-    if (followerAssistantId === followingAssistantId) {
-      res.status(400).json({ error: 'Cannot follow yourself' })
-      return
-    }
-    if (!(await requireAssistantMember(userId, followerAssistantId, res))) return
-
-    const target = await query<{ id: string }>(
-      `SELECT id FROM assistants WHERE id = $1`,
-      [followingAssistantId],
-    )
-    if (target.rows.length === 0) {
-      res.status(404).json({ error: 'Target assistant not found' })
-      return
-    }
-
-    // Auto-accept if target is public, pending if private
-    const targetAssistant = await query<{ sharing_mode: string }>(
-      `SELECT sharing_mode FROM assistants WHERE id = $1`,
-      [followingAssistantId],
-    )
-    const targetMode = targetAssistant.rows[0]?.sharing_mode ?? 'off'
-    if (targetMode === 'off') {
-      res.status(403).json({ error: 'This assistant is not accepting followers' })
-      return
-    }
-    const autoAccept = targetMode === 'public'
-
-    try {
-      const connection = await connectionStore.follow(followerAssistantId, followingAssistantId, autoAccept)
-      res.status(201).json(connection)
-    } catch (err: any) {
-      if (err?.message === 'blocked') {
-        res.status(403).json({ error: 'You are blocked by this assistant' })
-        return
-      }
-      console.error('[connections] follow failed:', err)
-      res.status(500).json({ error: 'Failed to follow' })
-    }
-  })
 
   // ── POST /unfollow ───────────────────────────────────────────
 
@@ -108,31 +58,6 @@ export function connectionRoutes({ connectionStore }: ConnectionRouteOptions): R
     } catch (err) {
       console.error('[connections] unfollow failed:', err)
       res.status(500).json({ error: 'Failed to unfollow' })
-    }
-  })
-
-  // ── POST /remove-follower — remove a follower from your assistant ──
-
-  router.post('/remove-follower', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-
-    const { myAssistantId, followerAssistantId } = req.body as {
-      myAssistantId?: string
-      followerAssistantId?: string
-    }
-    if (!myAssistantId || !followerAssistantId) {
-      res.status(400).json({ error: 'myAssistantId and followerAssistantId are required' })
-      return
-    }
-    if (!(await requireAssistantMember(userId, myAssistantId, res))) return
-
-    try {
-      await connectionStore.unfollow(followerAssistantId, myAssistantId)
-      res.json({ ok: true })
-    } catch (err) {
-      console.error('[connections] remove-follower failed:', err)
-      res.status(500).json({ error: 'Failed to remove follower' })
     }
   })
 
@@ -211,93 +136,6 @@ export function connectionRoutes({ connectionStore }: ConnectionRouteOptions): R
     }
   })
 
-  // ── POST /:id/note ──────────────────────────────────────────
-  // Follower-side note: only the follower's owner can set it.
-
-  router.post('/:id/note', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-
-    const { note } = req.body as { note?: string | null }
-    if (note !== null && typeof note !== 'string') {
-      res.status(400).json({ error: 'note must be a string or null' })
-      return
-    }
-
-    const owner = await query<{ followerAssistantId: string }>(
-      `SELECT follower_assistant_id AS "followerAssistantId"
-       FROM assistant_connections WHERE id = $1`,
-      [req.params.id],
-    )
-    if (owner.rows.length === 0) {
-      res.status(404).json({ error: 'Connection not found' })
-      return
-    }
-    if (!(await requireAssistantMember(userId, owner.rows[0].followerAssistantId, res))) return
-
-    try {
-      const updated = await connectionStore.setCallerNote(req.params.id, note ?? null)
-      if (!updated) {
-        res.status(404).json({ error: 'Connection not found' })
-        return
-      }
-      res.json(updated)
-    } catch (err) {
-      console.error('[connections] set note failed:', err)
-      res.status(500).json({ error: 'Failed to set note' })
-    }
-  })
-
-  // ── POST /block ──────────────────────────────────────────────
-
-  router.post('/block', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-
-    const { myAssistantId, blockedAssistantId } = req.body as {
-      myAssistantId?: string
-      blockedAssistantId?: string
-    }
-    if (!myAssistantId || !blockedAssistantId) {
-      res.status(400).json({ error: 'myAssistantId and blockedAssistantId are required' })
-      return
-    }
-    if (!(await requireAssistantMember(userId, myAssistantId, res))) return
-
-    try {
-      const connection = await connectionStore.blockAssistant(myAssistantId, blockedAssistantId)
-      res.json(connection)
-    } catch (err) {
-      console.error('[connections] block failed:', err)
-      res.status(500).json({ error: 'Failed to block' })
-    }
-  })
-
-  // ── POST /unblock ────────────────────────────────────────────
-
-  router.post('/unblock', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-
-    const { myAssistantId, blockedAssistantId } = req.body as {
-      myAssistantId?: string
-      blockedAssistantId?: string
-    }
-    if (!myAssistantId || !blockedAssistantId) {
-      res.status(400).json({ error: 'myAssistantId and blockedAssistantId are required' })
-      return
-    }
-    if (!(await requireAssistantMember(userId, myAssistantId, res))) return
-
-    try {
-      await connectionStore.unblock(myAssistantId, blockedAssistantId)
-      res.json({ ok: true })
-    } catch (err) {
-      console.error('[connections] unblock failed:', err)
-      res.status(500).json({ error: 'Failed to unblock' })
-    }
-  })
-
   // ── GET /following ───────────────────────────────────────────
 
   router.get('/following', async (req, res) => {
@@ -315,23 +153,6 @@ export function connectionRoutes({ connectionStore }: ConnectionRouteOptions): R
     }
   })
 
-  // ── GET /pending-outgoing ─────────────────────────────────────
-
-  router.get('/pending-outgoing', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-    const assistantId = req.query.assistantId as string
-    if (!assistantId) { res.status(400).json({ error: 'assistantId required' }); return }
-    if (!(await requireAssistantMember(userId, assistantId, res))) return
-    try {
-      const connections = await connectionStore.getPendingOutgoing(assistantId)
-      res.json({ connections })
-    } catch (err) {
-      console.error('[connections] pending-outgoing failed:', err)
-      res.status(500).json({ error: 'Failed to list' })
-    }
-  })
-
   // ── GET /followers ───────────────────────────────────────────
 
   router.get('/followers', async (req, res) => {
@@ -345,23 +166,6 @@ export function connectionRoutes({ connectionStore }: ConnectionRouteOptions): R
       res.json({ connections })
     } catch (err) {
       console.error('[connections] followers failed:', err)
-      res.status(500).json({ error: 'Failed to list' })
-    }
-  })
-
-  // ── GET /mutuals ─────────────────────────────────────────────
-
-  router.get('/mutuals', async (req, res) => {
-    const userId = req.userId
-    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
-    const assistantId = req.query.assistantId as string
-    if (!assistantId) { res.status(400).json({ error: 'assistantId required' }); return }
-    if (!(await requireAssistantMember(userId, assistantId, res))) return
-    try {
-      const connections = await connectionStore.getMutuals(assistantId)
-      res.json({ connections })
-    } catch (err) {
-      console.error('[connections] mutuals failed:', err)
       res.status(500).json({ error: 'Failed to list' })
     }
   })

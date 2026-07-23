@@ -12,57 +12,47 @@ import { query } from '../../db/client.js'
 
 const mockQuery = vi.mocked(query)
 
-describe('[COMP:api/handles-route] Handle search', () => {
+// The discovery endpoints (/search, /:handle/assistants) were removed with the
+// sharing_mode teardown. Only the caller's own-handle get/change survives.
+// See docs/plans/network-feature-teardown.md.
+describe('[COMP:api/handles-route] Own-handle get/change', () => {
   beforeEach(() => vi.clearAllMocks())
 
   function app() {
     return createTestApp('/api/handles', handleRoutes(), { userId: 'u_caller' })
   }
 
-  it('discovers assistants owned via teams (post-089 ownership XOR)', async () => {
-    // Query 1: handle prefix lookup → one user
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ handle: 'sidan', name: 'Sidan', avatarUrl: null, userId: 'u_sidan' }],
-    } as any)
-    // Query 2: per-user assistants. Returning a row simulates a
-    // team-owned assistant matched via teams.owner_user_id (the new
-    // branch added to handle the post-089 ownership shape).
-    mockQuery.mockResolvedValueOnce({
-      rows: [{
-        id: 'a_team_owned',
-        name: 'Use Brian - Product',
-        bio: 'private team assistant',
-        iconSeed: 7,
-        connectionCount: '0',
-        sharingMode: 'private',
-      }],
-    } as any)
+  it('returns the caller\'s existing handle', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ handle: 'sidan' }] } as any)
 
-    const res = await request(app()).get('/api/handles/search?q=sidan')
+    const res = await request(app()).get('/api/handles/me')
 
     expect(res.status).toBe(200)
-    expect(res.body.users).toHaveLength(1)
-    expect(res.body.users[0]).toMatchObject({
-      handle: 'sidan',
-      assistants: [{ id: 'a_team_owned', sharingMode: 'private' }],
-    })
-
-    // The per-user assistants SQL must check both ownership shapes:
-    // assistant_members (personal) AND teams.owner_user_id (team).
-    const assistantsSql = mockQuery.mock.calls[1][0]
-    expect(assistantsSql).toMatch(/assistant_members/)
-    expect(assistantsSql).toMatch(/workspaces\b[\s\S]*owner_user_id/)
+    expect(res.body).toEqual({ handle: 'sidan' })
   })
 
-  it('omits users with no shareable assistants', async () => {
-    mockQuery.mockResolvedValueOnce({
-      rows: [{ handle: 'lonely', name: null, avatarUrl: null, userId: 'u_lonely' }],
-    } as any)
-    mockQuery.mockResolvedValueOnce({ rows: [] } as any)
+  it('rejects an invalid handle on PATCH', async () => {
+    const res = await request(app()).patch('/api/handles/me').send({ handle: 'A B' })
 
-    const res = await request(app()).get('/api/handles/search?q=lonely')
+    expect(res.status).toBe(400)
+    expect(mockQuery).not.toHaveBeenCalled()
+  })
+
+  it('normalizes and stores a valid handle', async () => {
+    mockQuery.mockResolvedValueOnce({ rowCount: 1 } as any)
+
+    const res = await request(app()).patch('/api/handles/me').send({ handle: 'Sidan-AI' })
 
     expect(res.status).toBe(200)
-    expect(res.body.users).toEqual([])
+    expect(res.body).toEqual({ handle: 'sidan-ai' })
+    expect(mockQuery.mock.calls[0][1]).toEqual(['sidan-ai', 'u_caller'])
+  })
+
+  it('surfaces a duplicate handle as 409', async () => {
+    mockQuery.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: '23505' }))
+
+    const res = await request(app()).patch('/api/handles/me').send({ handle: 'taken' })
+
+    expect(res.status).toBe(409)
   })
 })
