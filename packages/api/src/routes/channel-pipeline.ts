@@ -1089,25 +1089,24 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   const connectorUserId = await getConnectorUserId(ownerId, assistant.workspaceId)
   let unavailableCapabilities: string[] = []
   if (connectorStore && mcpSettingsStore) {
-    // Assistant KB repo writer — built per turn (pure closures, no I/O) over
-    // the same closed credential resolution the sync worker uses. Channel
-    // chats have a live Approve/Deny loop (`confirmationResolver` below), so
-    // this surface qualifies for `allowKnowledgeWrites` (D2 — chat-only).
-    const knowledgeRepoWriter = connectorInstanceStore && connectorGrantStore
-      ? createKnowledgeRepoWriter({
-          store: createDbKnowledgeStore(),
-          syncCredentials: createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore),
-          recordEvent: ({ userId: eventUserId, eventName, metadata }) => {
-            const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
-            for (const [k, v] of Object.entries(metadata)) {
-              if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
-              else if (v === null) safe[k] = undefined
-              else safe[k] = sanitizeAnalytics(String(v))
-            }
-            analytics?.logEvent({ userId: eventUserId, eventName, channelType, metadata: safe })
-          },
-        })
-      : undefined
+    // Built every turn so local filesystem sources remain writable even when
+    // GitHub credential stores are absent. GitHub targets fail closed without
+    // the optional credential provider.
+    const knowledgeRepoWriter = createKnowledgeRepoWriter({
+      store: createDbKnowledgeStore(),
+      syncCredentials: connectorInstanceStore && connectorGrantStore
+        ? createSyncCredentialProvider(connectorInstanceStore, connectorGrantStore)
+        : undefined,
+      recordEvent: ({ userId: eventUserId, eventName, metadata }) => {
+        const safe: Record<string, number | boolean | undefined | ReturnType<typeof sanitizeAnalytics>> = {}
+        for (const [k, v] of Object.entries(metadata)) {
+          if (typeof v === 'number' || typeof v === 'boolean' || v === undefined) safe[k] = v
+          else if (v === null) safe[k] = undefined
+          else safe[k] = sanitizeAnalytics(String(v))
+        }
+        analytics?.logEvent({ userId: eventUserId, eventName, channelType, metadata: safe })
+      },
+    })
     try {
       const injection = await injectMcpTools({
         userId: connectorUserId,
