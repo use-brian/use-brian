@@ -1,11 +1,11 @@
 /**
  * [COMP:app-web/browsers-surface] Browsers operator surface — the live-session
- * rail + its index prompt.
+ * list that lives in the persistent left sidebar (`BrowsersSidebarPanel`).
  *
- * Node-only vitest (no jsdom): the rail renders via `renderToString` (the
+ * Node-only vitest (no jsdom): the list renders via `renderToString` (the
  * live-pill / operator-topbar pattern). The polling wrapper isn't exercised
- * here (no effects in SSR); the contract under test is the presentational rail
- * (rows link into the Take-Over view, the active row is marked, the empty
+ * here (no effects in SSR); the contract under test is the presentational
+ * list (rows link into the Take-Over view, the active row is marked, the empty
  * state shows) plus the pure `sessionIdFromPathname` route reader.
  */
 
@@ -15,7 +15,10 @@ import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
 import type { ComputerTaskSummary } from "@/lib/api/computer";
-import { SessionsRail, sessionIdFromPathname } from "../browsers-surface-shell";
+import {
+  BrowsersSessionList,
+  sessionIdFromPathname,
+} from "../browsers-sidebar-panel";
 
 const dict = en as unknown as Dictionary;
 
@@ -40,7 +43,7 @@ function task(overrides: Partial<ComputerTaskSummary>): ComputerTaskSummary {
   };
 }
 
-describe("[COMP:app-web/browsers-surface] Live-session rail", () => {
+describe("[COMP:app-web/browsers-surface] Live-session sidebar panel", () => {
   it("reads the active session id off a /computer/<id> path (null at the index)", () => {
     expect(sessionIdFromPathname("/w/ws-1/computer/sess-1")).toBe("sess-1");
     expect(sessionIdFromPathname("/w/ws-1/computer")).toBeNull();
@@ -52,7 +55,7 @@ describe("[COMP:app-web/browsers-surface] Live-session rail", () => {
 
   it("shows the empty state when no session is live", () => {
     const html = wrap(
-      <SessionsRail workspaceId="ws-1" tasks={[]} activeSessionId={null} />,
+      <BrowsersSessionList workspaceId="ws-1" tasks={[]} activeSessionId={null} />,
     );
     expect(html).toContain(en.computer.sessions.railTitle);
     expect(html).toContain(en.computer.sessions.railEmpty);
@@ -64,7 +67,7 @@ describe("[COMP:app-web/browsers-surface] Live-session rail", () => {
       task({ taskId: "t2", sessionId: "s2", status: "paused", injectedSite: null }),
     ];
     const html = wrap(
-      <SessionsRail workspaceId="ws-1" tasks={tasks} activeSessionId="s1" />,
+      <BrowsersSessionList workspaceId="ws-1" tasks={tasks} activeSessionId="s1" />,
     );
     // Rows link into the Take-Over live view.
     expect(html).toContain("/w/ws-1/computer/s1");
