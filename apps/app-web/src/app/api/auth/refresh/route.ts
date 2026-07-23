@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     const data = (await backendRes.json()) as {
       accessToken: string;
       refreshToken: string;
-      user?: { id: string; email: string; name: string };
+      user?: { id: string; email: string; name: string; avatarUrl?: string | null };
     };
 
     const res = NextResponse.json({ accessToken: data.accessToken });
@@ -79,6 +79,7 @@ export async function POST(request: Request) {
             id: data.user.id,
             name: data.user.name,
             email: data.user.email,
+            ...(data.user.avatarUrl ? { avatarUrl: data.user.avatarUrl } : {}),
           }),
         ),
       );
