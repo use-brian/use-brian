@@ -40,8 +40,12 @@ const TOOL_PREVIEW_KINDS: Record<string, ToolPreviewKind> = {
 
 /** Parsed `gmailSendMessage` input, normalised for rendering. */
 export type EmailSendPreviewData = {
-  /** Recipient addresses — a comma-separated `to` string is split. */
+  /** Primary recipients (an address array, or a legacy comma/semicolon string). */
   to: string[];
+  /** Visible carbon-copy recipients. */
+  cc: string[];
+  /** Blind carbon-copy recipients (shown in the approval card so the approver consents to them). */
+  bcc: string[];
   /** Verified "Send mail as" alias, when the model passed one. */
   from: string | null;
   subject: string;
@@ -131,20 +135,37 @@ export function parseToolPreview(
 export function parseEmailSendArgs(
   args: Record<string, unknown>,
 ): EmailSendPreviewData | null {
-  const to = typeof args.to === "string" ? args.to : null;
+  const hasTo = Array.isArray(args.to) || typeof args.to === "string";
   const subject = typeof args.subject === "string" ? args.subject : null;
   const body = typeof args.body === "string" ? args.body : null;
-  if (to === null && subject === null && body === null) return null;
+  if (!hasTo && subject === null && body === null) return null;
   const attachments = Array.isArray(args.attachments)
     ? args.attachments.filter((a): a is string => typeof a === "string")
     : [];
   return {
-    to: to ? splitRecipients(to) : [],
+    to: parseRecipients(args.to),
+    cc: parseRecipients(args.cc),
+    bcc: parseRecipients(args.bcc),
     from: typeof args.from === "string" && args.from.trim() ? args.from : null,
     subject: subject ?? "",
     body: body ?? "",
     attachments,
   };
+}
+
+/**
+ * Normalise a recipient field into address chips. The current tools pass an
+ * address array; a legacy/queued row may still carry a comma/semicolon
+ * `to` string, so both shapes are accepted.
+ */
+function parseRecipients(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((a): a is string => typeof a === "string")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return typeof value === "string" ? splitRecipients(value) : [];
 }
 
 /** Split a To header value on commas/semicolons into address chips. */

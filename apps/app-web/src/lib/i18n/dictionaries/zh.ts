@@ -1635,9 +1635,6 @@ export const zh: Dictionary = {
         "此連接器已共用至工作空間，因此你可以在這裡用它設定知識庫和助理。只有連接它的成員才能管理或移除。各助理的工具權限請在「助理」>「工具」>「連接器」中設定。",
       workspaceNativeNote:
         "這是工作空間連接器，已與這裡的所有人共用。任何工作空間成員都可以在下方移除它。各助理的工具權限請在「助理」>「工具」>「連接器」中設定。",
-      workspaceNativeRemoveTitle: "移除工作空間連接器",
-      workspaceNativeRemoveDesc:
-        "要將此連接器從工作空間移除嗎？這裡的助理將無法使用它的工具，它所供給的任何攝取也會停止。此操作無法復原。",
       railAriaLabel: "你的連接器",
       selectPrompt: "選擇一個連接器來管理。",
       workspaceAccessTitle: "工作空間存取",
@@ -1654,6 +1651,22 @@ export const zh: Dictionary = {
       connectingBtn: "連接中…",
       disconnectBtn: "中斷連接",
       removeBtn: "移除",
+      removalConfirmation: {
+        removeTitle: "要移除 {name} 嗎？",
+        disconnectTitle: "要中斷 {name} 的連接嗎？",
+        standard:
+          "Brian 將立即失去存取權。相關工具及後續同步會停止，此連接的設定也會被刪除。之後重新連接不會還原這些設定。",
+        ingest:
+          "Brian 將立即失去存取權。後續攝取會停止，此連接器的攝取規則及待處理匯入將永久刪除。已完成匯入所建立的 Brain 項目會保留。",
+        mailArchive:
+          "Brian 將立即失去存取權。此操作會永久刪除信箱中的封存郵件及搜尋索引。之後重新連接也不會還原該封存。",
+        remoteStorage:
+          "此儲存空間中的檔案將立即無法讀取。請在 30 天內重新連接以恢復存取；逾期後，Brian 會移除其 Brain 檔案記錄。原始檔案仍會保留在你的儲存空間中。",
+        localStorage:
+          "Brian 將立即無法讀取此目錄中的檔案。重新連接該目錄即可恢復存取；其 Brain 檔案記錄會保留。",
+        removeLabel: "移除連接器",
+        disconnectLabel: "中斷連接",
+      },
       remoteMcpDesc: "連接到遠端 MCP 伺服器。",
       perAssistantPermsPrefix: "設定各助理的工具權限，請前往",
       assistantConnectorsTab: "助理的「連接器」分頁",
@@ -2077,6 +2090,8 @@ export const zh: Dictionary = {
     emailPreview: {
       title: "待寄出的郵件",
       to: "收件人",
+      cc: "副本",
+      bcc: "密件副本",
       from: "寄件人",
       subject: "主旨",
       noSubject: "（無主旨）",

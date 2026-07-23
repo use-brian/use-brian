@@ -73,6 +73,25 @@ describe('[COMP:tools/agentmail] Assistant Email tools', () => {
     )
   })
 
+  it('forwards cc and bcc on both send and draft', async () => {
+    const api = makeApi()
+    const tools = createAgentmailTools(api)
+    await toolByName(tools, 'agentmailSendMessage').execute(
+      { to: ['client@example.com'], cc: ['lead@example.com'], bcc: ['audit@example.com'], subject: 's', body: 'b' },
+      CTX,
+    )
+    expect(api.send).toHaveBeenCalledWith(
+      expect.objectContaining({ cc: ['lead@example.com'], bcc: ['audit@example.com'] }),
+    )
+    await toolByName(tools, 'agentmailCreateDraft').execute(
+      { to: ['client@example.com'], cc: ['lead@example.com'], bcc: ['audit@example.com'], subject: 's', body: 'b' },
+      CTX,
+    )
+    expect(api.createDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ cc: ['lead@example.com'], bcc: ['audit@example.com'] }),
+    )
+  })
+
   it('honors fromInbox and rejects an unknown inbox listing the real ones', async () => {
     const api = makeApi()
     const send = toolByName(createAgentmailTools(api), 'agentmailSendMessage')

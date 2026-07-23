@@ -50,7 +50,11 @@ export type GmailApi = {
   getMessage(messageId: string): Promise<unknown>
 
   sendMessage(params: {
-    to: string
+    to: string[]
+    /** Visible carbon-copy recipients (a real `Cc:` header). */
+    cc?: string[]
+    /** Blind carbon-copy recipients (a `Bcc:` header Gmail strips from the delivered copy). */
+    bcc?: string[]
     from?: string
     subject: string
     body: string
@@ -65,6 +69,17 @@ function formatMb(bytes: number): string {
 function formatSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
   return formatMb(bytes)
+}
+
+/**
+ * Join a recipient field for a confirmation line. `to`/`cc`/`bcc` are address
+ * arrays; a bare string is tolerated for legacy/queued rows.
+ */
+function formatRecipientField(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value.filter((a): a is string => typeof a === 'string').join(', ')
+  }
+  return typeof value === 'string' ? value : ''
 }
 
 export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }): Tool[] {
@@ -123,12 +138,16 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
       'To send from a different address, pass `from` — it must already be a verified "Send mail as" alias ' +
       'configured in the connected account\'s Gmail settings; Gmail rejects the send otherwise, so never ' +
       'guess an alias the user has not confirmed exists. ' +
+      'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); ' +
+      'put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'Workspace files can be attached as real email attachments (the recipient gets the file itself, never a link): ' +
       'pass their ids or paths in `attachments`. Only files already saved in the workspace brain can be attached; ' +
       'confidential files cannot be emailed. Limits: 10 attachments, 18 MB total. ' +
       'If attaching fails, relay the reason honestly — never claim a file was attached when it was not.',
     inputSchema: z.object({
-      to: z.string().describe('Recipient email address.'),
+      to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
+      cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
+      bcc: z.array(z.string()).max(20).optional().describe('BCC addresses: copied recipients hidden from everyone else on the email.'),
       from: z
         .string()
         .optional()
@@ -165,8 +184,10 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
     // too. stat is metadata-only under the caller's read ceiling — the same
     // projection the send itself applies. Null → generic renderer.
     async describeConfirmation(input, context) {
-      const { to, from, subject, body, attachments } = (input ?? {}) as {
+      const { to, cc, bcc, from, subject, body, attachments } = (input ?? {}) as {
         to?: unknown
+        cc?: unknown
+        bcc?: unknown
         from?: unknown
         subject?: unknown
         body?: unknown
@@ -182,7 +203,12 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
 
       const lines: string[] = []
       if (typeof from === 'string') lines.push(`• From: ${from}`)
-      if (typeof to === 'string') lines.push(`• To: ${to}`)
+      const toLine = formatRecipientField(to)
+      if (toLine) lines.push(`• To: ${toLine}`)
+      const ccLine = formatRecipientField(cc)
+      if (ccLine) lines.push(`• Cc: ${ccLine}`)
+      const bccLine = formatRecipientField(bcc)
+      if (bccLine) lines.push(`• Bcc: ${bccLine}`)
       if (typeof subject === 'string') lines.push(`• Subject: ${subject}`)
       if (typeof body === 'string') lines.push(`• Body: ${body}`)
 
@@ -283,6 +309,8 @@ export function createGmailTools(api: GmailApi, opts?: { filesApi?: FilesApi }):
 
         const data = await api.sendMessage({
           to: input.to,
+          ...(input.cc?.length ? { cc: input.cc } : {}),
+          ...(input.bcc?.length ? { bcc: input.bcc } : {}),
           subject: input.subject,
           body: input.body,
           ...(input.from ? { from: input.from } : {}),

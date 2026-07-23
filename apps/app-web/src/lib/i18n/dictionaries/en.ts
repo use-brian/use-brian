@@ -1826,9 +1826,6 @@ export const en = {
         "This connector is shared with the workspace, so you can use it to set up knowledge and assistants here. Only the member who connected it can manage or remove it. Per-assistant tool permissions are set in Assistant, Tools, Connectors.",
       workspaceNativeNote:
         "This is a workspace connector, shared with everyone here. Any workspace member can remove it below. Per-assistant tool permissions are set in Assistant, Tools, Connectors.",
-      workspaceNativeRemoveTitle: "Remove workspace connector",
-      workspaceNativeRemoveDesc:
-        "Remove this connector from the workspace? Assistants here lose access to its tools, and any ingestion it feeds stops. This cannot be undone.",
       railAriaLabel: "Your connectors",
       selectPrompt: "Select a connector to manage it.",
       workspaceAccessTitle: "Workspace access",
@@ -1845,6 +1842,22 @@ export const en = {
       connectingBtn: "Connecting...",
       disconnectBtn: "Disconnect",
       removeBtn: "Remove",
+      removalConfirmation: {
+        removeTitle: "Remove {name}?",
+        disconnectTitle: "Disconnect {name}?",
+        standard:
+          "Brian will lose access immediately. Its tools and future syncs will stop, and this connection's settings will be deleted. Reconnecting later will not restore those settings.",
+        ingest:
+          "Brian will lose access immediately. Future ingestion will stop, and this connector's ingest rules and pending imports will be permanently deleted. Brain entries from completed imports will be kept.",
+        mailArchive:
+          "Brian will lose access immediately. This permanently deletes the mailbox's archived messages and search index. Reconnecting later will not restore that archive.",
+        remoteStorage:
+          "Files in this storage will become unreadable immediately. Reconnect within 30 days to restore access; after that, Brian will prune their brain file records. Original files remain in your storage.",
+        localStorage:
+          "Files in this directory will become unreadable to Brian immediately. Reconnect the directory to restore access; its brain file records will be kept.",
+        removeLabel: "Remove connector",
+        disconnectLabel: "Disconnect",
+      },
       remoteMcpDesc: "Connect to a remote MCP server.",
       perAssistantPermsPrefix: "Configure per-assistant tool permissions in the",
       assistantConnectorsTab: "Assistant Connectors tab",
@@ -2282,6 +2295,8 @@ export const en = {
     emailPreview: {
       title: "Outgoing email",
       to: "To",
+      cc: "Cc",
+      bcc: "Bcc",
       from: "From",
       subject: "Subject",
       noSubject: "(no subject)",

@@ -68,6 +68,7 @@ import { ImapSyncPanel } from "@/components/connectors/imap-sync-panel";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
+import { connectorRemovalConfirmationModel } from "@/lib/connector-removal-confirmation";
 import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
@@ -157,6 +158,8 @@ type Connector = {
   isPlaceholder?: boolean;
   description?: string;
   connected: boolean;
+  /** Pipeline-C state; selects the stronger state-aware removal warning. */
+  ingestionEnabled?: boolean;
   /**
    * Liveness (migration 294). "auth_failed" means the credentials stopped
    * working (a 401/403 at call time) and the connector needs reconnecting even
@@ -1745,7 +1748,54 @@ function ConnectorsList() {
     }
   }
 
+  async function confirmConnectorRemoval(c: Connector): Promise<boolean> {
+    const model = connectorRemovalConfirmationModel(c);
+    const copy = tc.removalConfirmation;
+    const description = {
+      standard: copy.standard,
+      ingest: copy.ingest,
+      mailArchive: copy.mailArchive,
+      remoteStorage: copy.remoteStorage,
+      localStorage: copy.localStorage,
+    }[model.risk];
+    const name = c.label ?? c.name;
+    return confirmDialog({
+      title: (
+        model.action === "disconnect"
+          ? copy.disconnectTitle
+          : copy.removeTitle
+      ).replace("{name}", name),
+      description,
+      confirmLabel:
+        model.action === "disconnect"
+          ? copy.disconnectLabel
+          : copy.removeLabel,
+      cancelLabel: tc.cancel,
+      variant: "destructive",
+    });
+  }
+
+  async function disconnectStorageConnector(c: Connector): Promise<boolean> {
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/${c.id}/disconnect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId }),
+      });
+      if (!res.ok) return false;
+      setConnectors((prev) =>
+        prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)),
+      );
+      setSelected(null);
+      fetchConnectors();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleRemoveCustom(c: Connector) {
+    if (!(await confirmConnectorRemoval(c))) return;
     setConnectors((prev) => prev.filter((x) => !isSameRow(x, c)));
     setSelected(null);
     // Custom rows are keyed by their provider UUID (== `c.id`), unique per row.
@@ -1753,48 +1803,12 @@ function ConnectorsList() {
   }
 
   async function handleRemove(c: Connector) {
-    // GCS uses the workspace-scoped disconnect (wipes the stored key; new
-    // writes revert to the default bucket).
-    if (c.id === "gcs") {
-      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
-      setSelected(null);
-      try {
-        await authFetch(`${API_URL}/api/connectors/gcs/disconnect`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspaceId }),
-        });
-      } catch {}
-      fetchConnectors();
-      return;
-    }
-
-    // S3 uses the workspace-scoped disconnect (wipes the stored keys; new
-    // writes revert to the default bucket).
-    if (c.id === "s3") {
-      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
-      setSelected(null);
-      try {
-        await authFetch(`${API_URL}/api/connectors/s3/disconnect`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspaceId }),
-        });
-      } catch {}
-      fetchConnectors();
-      return;
-    }
-    if (c.id === "local") {
-      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
-      setSelected(null);
-      try {
-        await authFetch(`${API_URL}/api/connectors/local/disconnect`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ workspaceId }),
-        });
-      } catch {}
-      fetchConnectors();
+    const model = connectorRemovalConfirmationModel(c);
+    if (!(await confirmConnectorRemoval(c))) return;
+    // Storage bindings disconnect instead of deleting the instance, preserving
+    // their reconnect/grace semantics. The model is the single verb selector.
+    if (model.action === "disconnect") {
+      await disconnectStorageConnector(c);
       return;
     }
     setConnectors((prev) => prev.filter((x) => !isSameRow(x, c)));
@@ -1814,18 +1828,20 @@ function ConnectorsList() {
   // via the clearance-gated workspace route (DELETE .../connectors/:instanceId).
   // Any member cleared for the connector may delete it — but it is a shared
   // resource whose removal stops its tools + any ingestion it feeds for the
-  // whole workspace, so confirm first. [COMP:web/workspace-connector-manage]
+  // whole workspace. Storage is disconnected through its provider route so
+  // the binding survives for reconnect. [COMP:web/workspace-connector-manage]
   async function handleRemoveWorkspaceConnector(c: Connector) {
     const iid = c.connectorInstanceId;
     if (!iid || !workspaceId) return;
-    const ok = await confirmDialog({
-      title: tc.workspaceNativeRemoveTitle,
-      description: tc.workspaceNativeRemoveDesc,
-      confirmLabel: tc.removeBtn,
-      variant: "destructive",
-    });
-    if (!ok) return;
+    const model = connectorRemovalConfirmationModel(c);
+    if (!(await confirmConnectorRemoval(c))) return;
     setWsManageError(null);
+    if (model.action === "disconnect") {
+      if (!(await disconnectStorageConnector(c))) {
+        setWsManageError(tc.wsManageError);
+      }
+      return;
+    }
     try {
       const res = await authFetch(
         `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/connectors/${iid}`,
@@ -2343,7 +2359,9 @@ function ConnectorsList() {
                       onClick={() => handleRemoveWorkspaceConnector(sel)}
                       className="text-xs font-medium text-destructive/60 hover:text-destructive transition-colors px-2 py-1"
                     >
-                      {tc.removeBtn}
+                      {connectorRemovalConfirmationModel(sel).action === "disconnect"
+                        ? tc.disconnectBtn
+                        : tc.removeBtn}
                     </button>
                   </div>
 
@@ -2688,15 +2706,16 @@ function ConnectorsList() {
                     </div>
                   )}
 
-                {/* Connect / Disconnect / Add another / Remove / Drive picker.
+                {/* Connect / Add another / Remove-or-Disconnect / Drive picker.
                     Hidden for built-in primitives — there is no connection
                     state to manage. */}
                 {!builtin && (
                 <div className="flex flex-wrap items-center gap-2">
                   {/* Connect — only when this instance isn't connected. There is
-                      no Disconnect: turning a connector off is Remove (below),
-                      which deletes the instance. Built-ins fall back to a connect
-                      placeholder, so re-adding one is a single click. */}
+                      no generic off switch: ordinary connections use Remove,
+                      while storage bindings use their lifecycle-aware
+                      Disconnect action. Built-ins fall back to a connect
+                      placeholder after their last instance is removed. */}
                   {!sel.connected && (
                     <button
                       onClick={() => handleConnect(sel)}
@@ -2716,9 +2735,9 @@ function ConnectorsList() {
                       {tc.addAnother}
                     </button>
                   )}
-                  {/* Remove — the single removal action on every real instance:
-                      custom MCPs, directory connectors, and any built-in instance
-                      including the primary and the Google OAuth built-ins.
+                  {/* Remove (or Disconnect for storage) on every real instance:
+                      custom MCPs, directory connectors, and any credentialed
+                      built-in instance including Google OAuth.
                       Deleting the primary promotes the next-oldest instance to the
                       canonical tools; removing the last built-in instance brings
                       its connect placeholder back. A placeholder (no instance) has
@@ -2729,7 +2748,9 @@ function ConnectorsList() {
                       onClick={() => sel.custom ? handleRemoveCustom(sel) : handleRemove(sel)}
                       className="text-xs font-medium text-destructive/60 hover:text-destructive transition-colors px-2 py-1"
                     >
-                      {tc.removeBtn}
+                      {connectorRemovalConfirmationModel(sel).action === "disconnect"
+                        ? tc.disconnectBtn
+                        : tc.removeBtn}
                     </button>
                   )}
 

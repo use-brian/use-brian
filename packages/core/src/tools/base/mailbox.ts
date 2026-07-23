@@ -87,7 +87,11 @@ export type MailboxApi = {
   }>
   getMessage(id: string): Promise<MailboxMessage>
   sendMessage(params: {
-    to: string
+    to: string[]
+    /** Visible carbon-copy recipients (a real `Cc:` header). */
+    cc?: string[]
+    /** Blind carbon-copy recipients: added to the SMTP envelope only, never a header. */
+    bcc?: string[]
     subject: string
     /** Markdown source — the API layer renders it to multipart/alternative. */
     body: string
@@ -357,9 +361,12 @@ export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
       'This is the ONLY tool that sends as the corporate address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
       'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
+      'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which address to send AS; omit it for the primary.',
     inputSchema: z.object({
-      to: z.string().describe('Recipient email address.'),
+      to: z.array(z.string()).min(1).max(20).describe('Recipient email addresses.'),
+      cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
+      bcc: z.array(z.string()).max(20).optional().describe('BCC addresses: copied recipients hidden from everyone else on the email.'),
       subject: z.string().describe('Email subject line.'),
       body: z
         .string()
@@ -398,6 +405,8 @@ export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
         }
         const data = await resolved.api.sendMessage({
           to: input.to,
+          ...(input.cc?.length ? { cc: input.cc } : {}),
+          ...(input.bcc?.length ? { bcc: input.bcc } : {}),
           subject: input.subject,
           body: input.body,
           ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),

@@ -166,6 +166,53 @@ describe('[COMP:tools/gmail-attachments] sendGmailMessage MIME assembly', () => 
   })
 })
 
+describe('[COMP:tools/gmail-attachments] sendGmailMessage Cc/Bcc + array recipients', () => {
+  it('emits Cc and Bcc headers on the text-only path', async () => {
+    await sendGmailMessage(TOKEN, {
+      to: ['a@b.co'],
+      cc: ['lead@corp.com'],
+      bcc: ['audit@corp.com'],
+      subject: 'Report',
+      body: 'x',
+    })
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    // Gmail honors a Bcc header and strips it from the delivered copy, so unlike
+    // the SMTP lane we DO write both headers into the raw message.
+    expect(decoded).toMatch(/^Cc: lead@corp\.com/m)
+    expect(decoded).toMatch(/^Bcc: audit@corp\.com/m)
+  })
+
+  it('joins an array `to` into one address-list header', async () => {
+    await sendGmailMessage(TOKEN, { to: ['a@b.co', 'c@d.co'], subject: 's', body: 'x' })
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    expect(decoded).toContain('To: a@b.co, c@d.co')
+  })
+
+  it('emits Cc/Bcc on the multipart (attachments) path too', async () => {
+    await sendGmailMessage(TOKEN, {
+      to: ['a@b.co'],
+      cc: ['lead@corp.com'],
+      bcc: ['audit@corp.com'],
+      subject: 'Report',
+      body: 'x',
+      attachments: [{ filename: 'a.txt', mime: 'text/plain', data: new Uint8Array([1]) }],
+    })
+    const mime = (sentRequest().init.body as Buffer).toString('utf-8')
+    expect(mime).toMatch(/^Cc: lead@corp\.com/m)
+    expect(mime).toMatch(/^Bcc: audit@corp\.com/m)
+  })
+
+  it('omits Cc/Bcc headers when none are given', async () => {
+    await sendGmailMessage(TOKEN, { to: ['a@b.co'], subject: 's', body: 'x' })
+    const raw = (JSON.parse(sentRequest().init.body as string) as { raw: string }).raw
+    const decoded = Buffer.from(raw, 'base64url').toString('utf-8')
+    expect(decoded).not.toMatch(/^Cc:/m)
+    expect(decoded).not.toMatch(/^Bcc:/m)
+  })
+})
+
 describe('[COMP:tools/gmail-send-as] sendGmailMessage From header (alias sending)', () => {
   it('omits the From header when no alias is given', async () => {
     await sendGmailMessage(TOKEN, BASE)

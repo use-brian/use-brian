@@ -374,6 +374,8 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
       const composed = await composeMailboxMessage({
         from: settings.email,
         to: params.to,
+        ...(params.cc?.length ? { cc: params.cc } : {}),
+        ...(params.bcc?.length ? { bcc: params.bcc } : {}),
         subject: params.subject,
         body: params.body,
         ...(inReplyToHeader ? { inReplyTo: inReplyToHeader } : {}),

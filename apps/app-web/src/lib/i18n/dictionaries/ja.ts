@@ -1650,9 +1650,6 @@ export const ja: Dictionary = {
         "このコネクターはワークスペースで共有されているため、ここでナレッジやアシスタントの設定に利用できます。管理や削除ができるのは接続したメンバーのみです。アシスタントごとのツール権限は「アシスタント」>「ツール」>「コネクター」で設定します。",
       workspaceNativeNote:
         "これはワークスペースのコネクターで、ここにいる全員と共有されています。ワークスペースのメンバーは下から削除できます。アシスタントごとのツール権限は「アシスタント」>「ツール」>「コネクター」で設定します。",
-      workspaceNativeRemoveTitle: "ワークスペースコネクターを削除",
-      workspaceNativeRemoveDesc:
-        "このコネクターをワークスペースから削除しますか？ここのアシスタントはツールを使えなくなり、これが供給している取り込みも停止します。元に戻せません。",
       railAriaLabel: "あなたのコネクタ",
       selectPrompt: "管理するコネクタを選択してください。",
       workspaceAccessTitle: "ワークスペースでの利用",
@@ -1669,6 +1666,22 @@ export const ja: Dictionary = {
       connectingBtn: "接続中...",
       disconnectBtn: "切断",
       removeBtn: "削除",
+      removalConfirmation: {
+        removeTitle: "{name} を削除しますか？",
+        disconnectTitle: "{name} の接続を解除しますか？",
+        standard:
+          "Brian は直ちにアクセスできなくなります。ツールと今後の同期は停止し、この接続の設定は削除されます。後で再接続しても設定は復元されません。",
+        ingest:
+          "Brian は直ちにアクセスできなくなります。今後の取り込みは停止し、このコネクターの取り込みルールと保留中のインポートは完全に削除されます。完了済みのインポートから作成されたブレインのエントリは保持されます。",
+        mailArchive:
+          "Brian は直ちにアクセスできなくなります。メールボックスのアーカイブ済みメッセージと検索インデックスは完全に削除されます。後で再接続してもこのアーカイブは復元されません。",
+        remoteStorage:
+          "このストレージ内のファイルは直ちに読み取れなくなります。30 日以内に再接続するとアクセスを復元できます。それ以降は、Brian がブレイン内のファイル記録を削除します。元のファイルはストレージに残ります。",
+        localStorage:
+          "このディレクトリ内のファイルは Brian から直ちに読み取れなくなります。ディレクトリを再接続するとアクセスを復元できます。ブレイン内のファイル記録は保持されます。",
+        removeLabel: "コネクターを削除",
+        disconnectLabel: "接続を解除",
+      },
       remoteMcpDesc: "リモート MCP サーバーに接続します。",
       perAssistantPermsPrefix: "アシスタントごとのツール権限は、",
       assistantConnectorsTab: "アシスタントの「コネクタ」タブ",
@@ -2095,6 +2108,8 @@ export const ja: Dictionary = {
     emailPreview: {
       title: "送信予定のメール",
       to: "宛先",
+      cc: "Cc",
+      bcc: "Bcc",
       from: "差出人",
       subject: "件名",
       noSubject: "（件名なし）",

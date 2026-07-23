@@ -100,6 +100,34 @@ function EmailSendPreview({
             </span>
           )}
         </EnvelopeRow>
+        {email.cc.length > 0 && (
+          <EnvelopeRow label={t.approvalsPage.emailPreview.cc}>
+            <span className="flex flex-wrap gap-1">
+              {email.cc.map((addr) => (
+                <span
+                  key={addr}
+                  className="rounded-full bg-muted px-2 py-0.5 text-xs"
+                >
+                  {addr}
+                </span>
+              ))}
+            </span>
+          </EnvelopeRow>
+        )}
+        {email.bcc.length > 0 && (
+          <EnvelopeRow label={t.approvalsPage.emailPreview.bcc}>
+            <span className="flex flex-wrap gap-1">
+              {email.bcc.map((addr) => (
+                <span
+                  key={addr}
+                  className="rounded-full bg-muted px-2 py-0.5 text-xs"
+                >
+                  {addr}
+                </span>
+              ))}
+            </span>
+          </EnvelopeRow>
+        )}
         {email.from && (
           <EnvelopeRow label={t.approvalsPage.emailPreview.from}>
             <span className="rounded-full bg-muted px-2 py-0.5 text-xs">

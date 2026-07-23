@@ -89,8 +89,8 @@ function makeContext(over: Partial<ToolContext> = {}): ToolContext {
   } as ToolContext
 }
 
-function gmailApi(): { api: GmailApi; sent: Array<{ to: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] }> } {
-  const sent: Array<{ to: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] }> = []
+function gmailApi(): { api: GmailApi; sent: Array<{ to: string[]; cc?: string[]; bcc?: string[]; subject: string; body: string; attachments?: GmailOutgoingAttachment[] }> } {
+  const sent: Array<{ to: string[]; cc?: string[]; bcc?: string[]; subject: string; body: string; attachments?: GmailOutgoingAttachment[] }> = []
   const api: GmailApi = {
     listMessages: vi.fn(),
     getMessage: vi.fn(),
@@ -109,7 +109,7 @@ function sendTool(api: GmailApi, filesApi?: FilesApi) {
   return tool
 }
 
-const SEND = { to: 'a@b.co', subject: 'Hi', body: 'Hello' }
+const SEND = { to: ['a@b.co'], subject: 'Hi', body: 'Hello' }
 
 // ── Tests ────────────────────────────────────────────────────
 

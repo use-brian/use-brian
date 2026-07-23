@@ -47,6 +47,7 @@ export type AgentmailToolApi = {
     inboxAddress: string
     to: string[]
     cc?: string[]
+    bcc?: string[]
     subject: string
     body: string
   }): Promise<{ messageId: string; threadId: string }>
@@ -60,6 +61,7 @@ export type AgentmailToolApi = {
     inboxAddress: string
     to: string[]
     cc?: string[]
+    bcc?: string[]
     subject: string
     body: string
     /** ISO 8601 scheduled send time. */
@@ -114,10 +116,12 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
       'To email someone as the user themself, use their connected Gmail instead when it is available this turn; ' +
       'if the identity is ambiguous or the preferred sender is unavailable, ask the user which address to send ' +
       'from — never silently substitute one for the other. ' +
+      'Copy additional people with `cc` (visible to every recipient) or `bcc` (hidden from the others); put an internal colleague you are looping in on `cc` unless the user asks to keep them hidden. ' +
       'For a scheduled or reviewable send, create a draft instead.',
     inputSchema: z.object({
       to: recipientList,
-      cc: z.array(z.string()).max(20).optional().describe('CC addresses.'),
+      cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
+      bcc: z.array(z.string()).max(20).optional().describe('BCC addresses: copied recipients hidden from everyone else on the email.'),
       subject: z.string().describe('Email subject line.'),
       body: z
         .string()
@@ -149,6 +153,7 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
           inboxAddress: inbox.address,
           to: input.to,
           cc: input.cc,
+          bcc: input.bcc,
           subject: input.subject,
           body: input.body,
         })
@@ -214,7 +219,8 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
       'review first and for scheduled sends; use the send tool for immediate delivery.',
     inputSchema: z.object({
       to: recipientList,
-      cc: z.array(z.string()).max(20).optional().describe('CC addresses.'),
+      cc: z.array(z.string()).max(20).optional().describe('CC addresses: copied recipients, visible to everyone on the email.'),
+      bcc: z.array(z.string()).max(20).optional().describe('BCC addresses: copied recipients hidden from everyone else on the email.'),
       subject: z.string().describe('Email subject line.'),
       body: z
         .string()
@@ -254,6 +260,7 @@ export function createAgentmailTools(api: AgentmailToolApi): Tool[] {
           inboxAddress: inbox.address,
           to: input.to,
           cc: input.cc,
+          bcc: input.bcc,
           subject: input.subject,
           body: input.body,
           sendAt: input.sendAt,

@@ -142,7 +142,12 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
   it('GET / merges built-in placeholders with the caller instances', async () => {
     const { app, listForUser } = makeApp('u1')
     listForUser.mockResolvedValue([
-      instance({ provider: 'gcal', label: 'Work cal', connectedEmail: 'a@b.com' }),
+      instance({
+        provider: 'gcal',
+        label: 'Work cal',
+        connectedEmail: 'a@b.com',
+        ingestionEnabled: true,
+      }),
     ])
     const res = await request(app).get('/api/connectors')
     expect(res.status).toBe(200)
@@ -155,6 +160,7 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
       label: 'Work cal',
       connected: true,
       connectedEmail: 'a@b.com',
+      ingestionEnabled: true,
     })
 
     // github has no instance → it appears as a never-connected placeholder so

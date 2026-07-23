@@ -91,6 +91,8 @@ type ConnectorRowOut = {
   isPlaceholder?: boolean
   description?: string
   connected: boolean
+  /** Pipeline-C state; drives the stronger removal confirmation in Studio. */
+  ingestionEnabled?: boolean
   custom?: boolean
   url?: string
   oauthRequired?: boolean
@@ -319,6 +321,7 @@ function instanceRow(inst: ConnectorInstance, isPrimary: boolean): ConnectorRowO
     addable: entry ? entry.auth_type !== 'none' && !entry.single_instance : false,
     description: entry?.description,
     connected: inst.connected,
+    ingestionEnabled: inst.ingestionEnabled,
     custom: inst.custom,
     url: inst.url ?? undefined,
     oauthRequired: entry?.oauth_required,
