@@ -28,6 +28,8 @@ describe("[COMP:app-web/approvals] parseToolPreview", () => {
       kind: "email_send",
       email: {
         to: ["alice@example.com"],
+        cc: [],
+        bcc: [],
         from: null,
         subject: "Q2 report",
         body: "Attached.",
@@ -38,7 +40,9 @@ describe("[COMP:app-web/approvals] parseToolPreview", () => {
 
   it("recognises imapSendMessage — the company-mailbox lane renders the same email card", () => {
     const preview = parseToolPreview("imapSendMessage", {
-      to: "ken@client.hk",
+      to: ["ops@example.com"],
+      cc: ["lead@example.com"],
+      bcc: ["archive@example.com"],
       subject: "Re: Deal terms",
       body: "Agreed.",
       inReplyTo: "INBOX:7",
@@ -46,7 +50,9 @@ describe("[COMP:app-web/approvals] parseToolPreview", () => {
     expect(preview).toEqual({
       kind: "email_send",
       email: {
-        to: ["ken@client.hk"],
+        to: ["ops@example.com"],
+        cc: ["lead@example.com"],
+        bcc: ["archive@example.com"],
         from: null,
         subject: "Re: Deal terms",
         body: "Agreed.",
@@ -200,11 +206,33 @@ describe("[COMP:app-web/approvals] parseEmailSendArgs", () => {
     const email = parseEmailSendArgs({ body: "just a body" });
     expect(email).toEqual({
       to: [],
+      cc: [],
+      bcc: [],
       from: null,
       subject: "",
       body: "just a body",
       attachments: [],
     });
+  });
+
+  it("parses an array `to` (the current tool shape) alongside cc and bcc", () => {
+    const email = parseEmailSendArgs({
+      to: ["primary@example.com", "second@example.com"],
+      cc: ["colleague@example.com"],
+      bcc: ["silent@example.com"],
+      subject: "Intro",
+      body: "Hello",
+    });
+    expect(email?.to).toEqual(["primary@example.com", "second@example.com"]);
+    expect(email?.cc).toEqual(["colleague@example.com"]);
+    expect(email?.bcc).toEqual(["silent@example.com"]);
+  });
+
+  it("still splits a legacy comma/semicolon `to` string into chips", () => {
+    const email = parseEmailSendArgs({ to: "a@x.com, b@y.com; c@z.com" });
+    expect(email?.to).toEqual(["a@x.com", "b@y.com", "c@z.com"]);
+    expect(email?.cc).toEqual([]);
+    expect(email?.bcc).toEqual([]);
   });
 
   it("drops non-string attachment entries instead of failing", () => {

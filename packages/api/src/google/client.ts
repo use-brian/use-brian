@@ -478,13 +478,21 @@ function alternativeBodyLines(body: string, boundary: string): string[] {
   ]
 }
 
+/** Sanitize each address and join into one RFC 822 address-list header value. */
+function addressHeaderValue(value: string | string[]): string {
+  const list = Array.isArray(value) ? value : [value]
+  return list.map(sanitizeHeaderValue).filter(Boolean).join(', ')
+}
+
 /**
  * Assemble a multipart/mixed RFC 822 message: a nested multipart/alternative
  * body (text + html) + base64 attachment parts. Returned as a Buffer — the
  * upload endpoint takes the raw bytes, not base64url-in-JSON.
  */
 function buildMultipartMessage(params: {
-  to: string
+  to: string | string[]
+  cc?: string[]
+  bcc?: string[]
   from?: string
   subject: string
   body: string
@@ -494,7 +502,9 @@ function buildMultipartMessage(params: {
   const altBoundary = `=_usebrian_alt_${randomUUID()}`
   const lines: string[] = [
     ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
-    `To: ${sanitizeHeaderValue(params.to)}`,
+    `To: ${addressHeaderValue(params.to)}`,
+    ...(params.cc?.length ? [`Cc: ${addressHeaderValue(params.cc)}`] : []),
+    ...(params.bcc?.length ? [`Bcc: ${addressHeaderValue(params.bcc)}`] : []),
     `Subject: ${encodeHeaderWord(params.subject)}`,
     'MIME-Version: 1.0',
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
@@ -521,12 +531,22 @@ function buildMultipartMessage(params: {
 
 export async function sendGmailMessage(
   accessToken: string,
-  params: { to: string; from?: string; subject: string; body: string; attachments?: GmailOutgoingAttachment[] },
+  params: {
+    to: string | string[]
+    cc?: string[]
+    bcc?: string[]
+    from?: string
+    subject: string
+    body: string
+    attachments?: GmailOutgoingAttachment[]
+  },
 ): Promise<{ id: string; threadId: string }> {
   // With attachments: multipart/mixed through the media-upload endpoint.
   if (params.attachments && params.attachments.length > 0) {
     const raw = buildMultipartMessage({
       to: params.to,
+      cc: params.cc,
+      bcc: params.bcc,
       from: params.from,
       subject: params.subject,
       body: params.body,
@@ -557,7 +577,9 @@ export async function sendGmailMessage(
   // Build RFC 2822 message
   const rawMessage = [
     ...(params.from ? [`From: ${sanitizeHeaderValue(params.from)}`] : []),
-    `To: ${sanitizeHeaderValue(params.to)}`,
+    `To: ${addressHeaderValue(params.to)}`,
+    ...(params.cc?.length ? [`Cc: ${addressHeaderValue(params.cc)}`] : []),
+    ...(params.bcc?.length ? [`Bcc: ${addressHeaderValue(params.bcc)}`] : []),
     `Subject: ${encodedSubject}`,
     'MIME-Version: 1.0',
     `Content-Type: multipart/alternative; boundary="${altBoundary}"`,

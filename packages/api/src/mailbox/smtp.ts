@@ -40,19 +40,31 @@ export type ComposedMailboxMessage = {
  */
 export async function composeMailboxMessage(params: {
   from: string
-  to: string
+  to: string[]
+  /** Visible carbon-copy recipients — rendered as a real `Cc:` header. */
+  cc?: string[]
+  /** Blind carbon-copy — added to the SMTP envelope only, never a header (see below). */
+  bcc?: string[]
   subject: string
   /** Markdown source. */
   body: string
   inReplyTo?: string
   references?: string[]
 }): Promise<ComposedMailboxMessage> {
-  const to = sanitizeHeaderValue(params.to)
+  const to = params.to.map(sanitizeHeaderValue).filter(Boolean)
+  const cc = (params.cc ?? []).map(sanitizeHeaderValue).filter(Boolean)
+  const bcc = (params.bcc ?? []).map(sanitizeHeaderValue).filter(Boolean)
   const subject = sanitizeHeaderValue(params.subject)
   const rendered = renderEmailBody(params.body)
   const composer = new MailComposer({
     from: params.from,
     to,
+    // Cc is a visible header. Bcc is deliberately NOT handed to MailComposer:
+    // the composed raw bytes are also APPENDed to the IMAP Sent folder, so a
+    // `Bcc:` header here would leak the blind recipients to anyone reading the
+    // Sent copy. Instead bcc addresses are added to the SMTP envelope only
+    // (below) — they receive the message, no other recipient sees them.
+    ...(cc.length ? { cc } : {}),
     subject,
     text: rendered.text,
     html: rendered.html,
@@ -64,7 +76,9 @@ export async function composeMailboxMessage(params: {
   const compiled = composer.compile()
   const raw = await compiled.build()
   const messageId = compiled.messageId() ?? null
-  return { raw, messageId, envelope: { from: params.from, to: [to] } }
+  // Envelope RCPT TO must list every delivery recipient — to + cc + bcc — or
+  // the copied/blind addresses would never actually receive the message.
+  return { raw, messageId, envelope: { from: params.from, to: [...to, ...cc, ...bcc] } }
 }
 
 /**

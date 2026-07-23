@@ -145,7 +145,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
   it('refuses send on a confidential turn (egress gate) without touching the network', async () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')
-    const result = await send.execute({ to: 'x@y.z', subject: 's', body: 'b' }, CONFIDENTIAL_CTX)
+    const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, CONFIDENTIAL_CTX)
     expect(result.isError).toBe(true)
     expect(result.data).toContain('confidential')
     expect(api.sendMessage).not.toHaveBeenCalled()
@@ -155,14 +155,35 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     const api = makeApi()
     const send = toolByName(toolsFor(api), 'imapSendMessage')
     const result = await send.execute(
-      { to: 'x@y.z', subject: 'Re: Deal', body: 'On it.', inReplyTo: 'INBOX:7' },
+      { to: ['x@y.z'], subject: 'Re: Deal', body: 'On it.', inReplyTo: 'INBOX:7' },
       CTX,
     )
     expect(result.isError).toBeFalsy()
     expect(api.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ inReplyTo: 'INBOX:7', to: 'x@y.z' }),
+      expect.objectContaining({ inReplyTo: 'INBOX:7', to: ['x@y.z'] }),
     )
     expect(result.data).toEqual({ messageId: '<m1@corp.com>', from: EMAIL })
+  })
+
+  it('forwards cc and bcc to the seam, omitting empty ones', async () => {
+    const api = makeApi()
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
+    await send.execute(
+      { to: ['client@example.com'], cc: ['lead@corp.com'], bcc: ['audit@corp.com'], subject: 's', body: 'b' },
+      CTX,
+    )
+    expect(api.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ['client@example.com'],
+        cc: ['lead@corp.com'],
+        bcc: ['audit@corp.com'],
+      }),
+    )
+    // A send with no cc/bcc must not pass empty arrays down (kept off the payload).
+    await send.execute({ to: ['solo@example.com'], subject: 's', body: 'b' }, CTX)
+    const lastCall = (api.sendMessage as ReturnType<typeof vi.fn>).mock.calls.at(-1)![0]
+    expect(lastCall).not.toHaveProperty('cc')
+    expect(lastCall).not.toHaveProperty('bcc')
   })
 
   it('surfaces seam errors honestly', async () => {
@@ -201,7 +222,7 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
   it('routes to the named `account` and reports it as the sender', async () => {
     const { router, primary, other } = multiRouter()
     const send = toolByName(createMailboxTools(router), 'imapSendMessage')
-    const result = await send.execute({ to: 'x@y.z', subject: 's', body: 'b', account: 'other@corp.com' }, CTX)
+    const result = await send.execute({ to: ['x@y.z'], subject: 's', body: 'b', account: 'other@corp.com' }, CTX)
     expect(other.sendMessage).toHaveBeenCalledTimes(1)
     expect(primary.sendMessage).not.toHaveBeenCalled()
     expect(result.data).toEqual({ messageId: '<other@corp.com>', from: 'other@corp.com' })

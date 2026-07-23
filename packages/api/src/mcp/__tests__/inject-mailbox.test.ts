@@ -159,14 +159,14 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     const send = tools.get('imapSendMessage')!
 
     // Named non-primary account → audited from = that mailbox.
-    await send.execute({ to: 'x@y.z', subject: 's', body: 'b', account: 'ops@harborlane.example' }, {} as never)
+    await send.execute({ to: ['x@y.z'], subject: 's', body: 'b', account: 'ops@harborlane.example' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
     )
 
     // Omitted account → audited from = the primary (first-connected) mailbox.
-    await send.execute({ to: 'x@y.z', subject: 's', body: 'b' }, {} as never)
+    await send.execute({ to: ['x@y.z'], subject: 's', body: 'b' }, {} as never)
     expect(emit).toHaveBeenLastCalledWith(
       { userId: 'u-1', assistantId: 'a-1' },
       expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
@@ -182,7 +182,7 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     const { tools } = await injectImap({ audit })
     const send = tools.get('imapSendMessage')!
     const result = await send.execute(
-      { to: 'x@y.z', subject: 's', body: 'sk_live_secret' },
+      { to: ['x@y.z'], subject: 's', body: 'sk_live_secret' },
       {} as never,
     )
     expect(result.isError).toBe(true)

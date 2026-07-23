@@ -71,7 +71,7 @@ export const DASHSCOPE_ASR_MODEL = 'qwen3-asr-flash'
 // DashScope's OpenAI-compatible endpoint rejects request bodies around 10 MB.
 // Leave room for base64 expansion and JSON/prompt overhead rather than relying
 // on the provider's edge to reject an otherwise valid camera image.
-export const DASHSCOPE_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+const DASHSCOPE_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
 
 async function prepareDashScopeImage(buffer: Buffer, mime: string): Promise<{ buffer: Buffer; mime: string }> {
   if (buffer.length <= DASHSCOPE_MAX_INLINE_IMAGE_BYTES) return { buffer, mime }

@@ -1,7 +1,7 @@
 {
   "name": "@use-brian/app-desktop",
   "productName": "Use Brian",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Use Brian — saved table + board views over your tasks, CRM, and workflow runs.",
   "author": "SIDAN Lab",
   "private": true,

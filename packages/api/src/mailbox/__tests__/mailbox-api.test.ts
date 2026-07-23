@@ -219,7 +219,7 @@ describe('[COMP:api/mailbox-imap-client] sendMessage', () => {
     const sendComposed = vi.fn(async (..._args: unknown[]) => {})
     const api = makeApi(client, { sendComposed })
     const result = await api.sendMessage({
-      to: 'ada@acme.com',
+      to: ['ada@acme.com'],
       subject: 'Re: msg 7',
       body: 'Agreed.',
       inReplyTo: 'INBOX:7',
@@ -238,9 +238,27 @@ describe('[COMP:api/mailbox-imap-client] sendMessage', () => {
     const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })  // no Sent folder at all
     const sendComposed = vi.fn(async () => {})
     const api = makeApi(client, { sendComposed })
-    const result = await api.sendMessage({ to: 'x@y.z', subject: 's', body: 'b' })
+    const result = await api.sendMessage({ to: ['x@y.z'], subject: 's', body: 'b' })
     expect(result.messageId).toBeTruthy()
     expect(sendComposed).toHaveBeenCalledTimes(1)
+  })
+
+  it('carries cc as a header and cc + bcc into the delivery envelope', async () => {
+    const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    const sendComposed = vi.fn(async (..._args: unknown[]) => {})
+    const api = makeApi(client, { sendComposed })
+    await api.sendMessage({
+      to: ['ada@acme.com'],
+      cc: ['lead@corp.com'],
+      bcc: ['audit@corp.com'],
+      subject: 's',
+      body: 'b',
+    })
+    const composed = sendComposed.mock.calls[0][1] as { raw: Buffer; envelope: { to: string[] } }
+    const raw = composed.raw.toString('utf8')
+    expect(raw).toMatch(/^Cc: lead@corp\.com/im)
+    expect(raw).not.toMatch(/^Bcc:/im)  // blind: envelope only, never a header
+    expect(composed.envelope.to).toEqual(['ada@acme.com', 'lead@corp.com', 'audit@corp.com'])
   })
 })
 

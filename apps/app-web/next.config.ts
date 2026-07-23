@@ -24,6 +24,15 @@ const nextConfig: NextConfig = {
   },
   env: {
     NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
+    // Google Drive Picker (components/drive-picker.tsx) needs the browser API key
+    // and GCP project number CLIENT-SIDE. Both are non-secret (the API key is a
+    // referrer-restricted browser key; the project number is the Picker appId), so
+    // inlining them as NEXT_PUBLIC_* is safe and required. Without this bridge the
+    // picker's notConfigured guard is permanently true and "Add files from Drive"
+    // only ever surfaces the "not configured" banner. Ported from apps/web/next.config.ts
+    // (dropped when the picker moved here during app consolidation §9 #5).
+    NEXT_PUBLIC_GOOGLE_API_KEY: process.env.GOOGLE_API_KEY ?? "",
+    NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER: process.env.GOOGLE_PROJECT_NUMBER ?? "",
     // The un-blanked origin for URLs DISPLAYED to users — see lib/display-api-url.ts.
     // This is deliberately inlined: client components render it.
     //

@@ -84,7 +84,7 @@ describeIf('[COMP:api/mailbox-imap-client] live IMAP/SMTP round-trip', () => {
     const to = process.env.TEST_IMAP_SEND_TO
     if (!to) return
     const result = await api.sendMessage({
-      to,
+      to: [to],
       subject: `Use Brian mailbox integration ${new Date().toISOString()}`,
       body: 'Integration check.\n\n**Bold works.**\n\n- list item',
     })

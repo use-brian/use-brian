@@ -1826,6 +1826,8 @@ async function injectGoogleTools(
           // future enhancement.
           const auditPayload = {
             to: params.to,
+            cc: params.cc ?? [],
+            bcc: params.bcc ?? [],
             from: params.from ?? null,
             subject: params.subject,
             has_body: Boolean(params.body),
@@ -3135,6 +3137,7 @@ async function injectAgentmailTools(params: {
         from: p.inboxAddress,
         to: p.to,
         cc: p.cc ?? [],
+        bcc: p.bcc ?? [],
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body.length,
@@ -3151,6 +3154,7 @@ async function injectAgentmailTools(params: {
           provider.sendMessage(p.inboxAddress, {
             to: p.to,
             cc: p.cc,
+            bcc: p.bcc,
             subject: p.subject,
             text: rendered.text,
             html: rendered.html,
@@ -3181,6 +3185,7 @@ async function injectAgentmailTools(params: {
         from: p.inboxAddress,
         to: p.to,
         cc: p.cc ?? [],
+        bcc: p.bcc ?? [],
         subject: p.subject,
         has_body: Boolean(p.body),
         body_length: p.body.length,
@@ -3197,6 +3202,7 @@ async function injectAgentmailTools(params: {
           provider.createDraft(p.inboxAddress, {
             to: p.to,
             cc: p.cc,
+            bcc: p.bcc,
             subject: p.subject,
             text: rendered.text,
             html: rendered.html,

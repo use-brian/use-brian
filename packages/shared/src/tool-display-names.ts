@@ -322,6 +322,8 @@ const FIELD_LABELS: Record<string, string> = {
   subject: 'Subject',
   body: 'Body',
   to: 'To',
+  cc: 'Cc',
+  bcc: 'Bcc',
   parent: 'Parent',
 }
 
@@ -356,6 +358,14 @@ export function formatConfirmationInput(
   })
   return entries.map(([k, v]) => {
     const label = FIELD_LABELS[k] ?? k.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
-    return `${bullet}${label}: ${typeof v === 'object' ? JSON.stringify(v) : v}`
+    // Address lists (to/cc/bcc) and other string arrays read as a comma list,
+    // not a raw JSON blob.
+    const rendered =
+      Array.isArray(v) && v.every((x) => typeof x === 'string')
+        ? (v as string[]).join(', ')
+        : typeof v === 'object'
+          ? JSON.stringify(v)
+          : v
+    return `${bullet}${label}: ${rendered}`
   })
 }
