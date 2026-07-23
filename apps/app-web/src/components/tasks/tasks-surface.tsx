@@ -416,7 +416,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
       key: "status",
       label: t.filterStatus,
       options: (
-        ["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]
+        ["todo", "in_progress", "in_review", "blocked", "done", "archived"] as TaskStatus[]
       ).map((sKey) => ({
         value: sKey,
         label: statusLabels[sKey] ?? sKey,
@@ -521,7 +521,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           <BulkMenu
             label={t.bulkStatus}
             items={Object.fromEntries(
-              (["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]).map(
+              (["todo", "in_progress", "in_review", "blocked", "done", "archived"] as TaskStatus[]).map(
                 (s) => [s, statusLabels[s] ?? s],
               ),
             )}

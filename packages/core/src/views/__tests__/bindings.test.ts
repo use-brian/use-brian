@@ -231,7 +231,7 @@ describe('[COMP:views/bindings] buildPayload', () => {
     expect(viewPayloadSchema.parse(payload)).toBeTruthy()
     if (payload.root.type !== 'board') throw new Error('expected board')
     const colIds = payload.root.columns.map((c) => c.id)
-    expect(colIds).toEqual(['todo', 'in_progress', 'blocked', 'done'])
+    expect(colIds).toEqual(['todo', 'in_progress', 'in_review', 'blocked', 'done'])
     expect(payload.root.groupBy).toBe('status')
   })
 

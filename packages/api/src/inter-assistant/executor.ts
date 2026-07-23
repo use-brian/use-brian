@@ -434,7 +434,16 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // 2. Session. A `sessionKey` (workflow `persistent` steps) anchors a
     // durable session reused across calls so the callee accumulates
     // history; otherwise a fresh per-interaction session, never reused.
-    const channelId = params.sessionKey ?? `${params.callerAssistantId}:${Date.now()}`
+    // A per-run WORKFLOW consult stamps its origin into the channel id
+    // (`workflow-run:<workflowId>:<ts>`) so the background skill reviewer
+    // can classify the session as workflow-origin — persistent steps already
+    // carry it via the `workflow:<workflowId>:<stepId>` sessionKey. See
+    // docs/architecture/engine/skill-system.md → "Origin-aware induction".
+    const channelId =
+      params.sessionKey ??
+      (params.callerChannelType === 'workflow' && params.workflowId
+        ? `workflow-run:${params.workflowId}:${Date.now()}`
+        : `${params.callerAssistantId}:${Date.now()}`)
     const session = await findOrCreateSession({
       assistantId: params.calleeAssistantId,
       userId: calleeActorUserId,

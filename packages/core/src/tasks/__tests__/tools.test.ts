@@ -62,6 +62,16 @@ function makeFakeStore(): TaskStore & {
       const row = rows.find((r) => r.id === id)
       return row ? { ...row } : null
     },
+    async findByExternalRefSystem(workspaceId, match) {
+      return rows
+        .filter((r) => r.workspaceId === workspaceId && r.status !== 'archived')
+        .filter((r) =>
+          Object.entries(match).every(
+            ([k, v]) => (r.externalRef as Record<string, unknown>)[k] === v,
+          ),
+        )
+        .map((r) => ({ ...r }))
+    },
     async list(ctx, filters) {
       let filtered = rows.filter((r) => r.workspaceId === ctx.workspaceId)
       if (filters.assigneeId) filtered = filtered.filter((r) => r.assigneeId === filters.assigneeId)

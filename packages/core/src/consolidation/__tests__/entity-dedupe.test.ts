@@ -1,7 +1,10 @@
 /**
  * [COMP:brain/entity-dedupe] tests — covers `runEntityDedupe` orchestration.
- * Verifies cluster traversal, survivor selection (oldest wins), merge invocation,
- * and error/conflict accounting.
+ * Verifies cluster traversal, survivor selection (survivor is `entityIds[0]`,
+ * which the store orders curated-first then oldest), merge invocation, and
+ * error/conflict accounting. Also covers the corrections.md §D.9 dedupe
+ * guard: the caller access context is forwarded to every read (visibility
+ * scoping) and the LLM alias pass is suggest-only (never auto-merges).
  */
 
 import { describe, expect, it } from 'vitest'
@@ -369,7 +372,7 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
     return provider
   }
 
-  it('LLM pass auto-applies high-confidence clusters (>= threshold) — merge + alias-record', async () => {
+  it('LLM pass is suggest-only — even high-confidence clusters are NOT auto-merged (D.9 guard)', async () => {
     const repo = fakeMergeRepo()
     const addAliasCalls: Array<{ entityId: string; alias: string }> = []
     const liveEntities = [
@@ -397,21 +400,17 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
 
     expect(result.llmCluster.ran).toBe(true)
     expect(result.llmCluster.clustersFound).toBe(1)
-    expect(result.llmCluster.applied).toHaveLength(1)
-    expect(result.llmCluster.applied[0]?.mergedEntityIds.sort()).toEqual(['ent-alias-1', 'ent-alias-2'])
-    expect(result.llmCluster.suggestions).toHaveLength(0)
-    // Both alias entities merged into canonical
-    expect(repo.calls).toEqual(
-      expect.arrayContaining([
-        { survivingId: 'ent-canonical', mergedId: 'ent-alias-1' },
-        { survivingId: 'ent-canonical', mergedId: 'ent-alias-2' },
-      ]),
-    )
-    // Both surface forms registered as aliases
-    expect(addAliasCalls.map((c) => c.alias).sort()).toEqual(['dd', 'deltadefi-protocol'])
+    // Nothing auto-applied, no matter how confident — surfaced as a suggestion.
+    expect(result.llmCluster.applied).toEqual([])
+    expect(result.llmCluster.suggestions).toHaveLength(1)
+    expect(result.llmCluster.suggestions[0]?.confidence).toBe(0.95)
+    expect(result.llmCluster.suggestions[0]?.aliasEntityIds.sort()).toEqual(['ent-alias-1', 'ent-alias-2'])
+    // No merge and no alias write happened.
+    expect(repo.calls).toEqual([])
+    expect(addAliasCalls).toEqual([])
   })
 
-  it('LLM pass returns low-confidence clusters as suggestions, does NOT auto-apply', async () => {
+  it('LLM pass surfaces low-confidence clusters as suggestions too', async () => {
     const repo = fakeMergeRepo()
     const addAliasCalls: Array<{ entityId: string; alias: string }> = []
     const liveEntities = [
@@ -443,32 +442,45 @@ describe('[COMP:brain/entity-dedupe] runEntityDedupe', () => {
     expect(addAliasCalls).toEqual([])
   })
 
-  it('LLM pass respects a custom auto-apply threshold', async () => {
-    const repo = fakeMergeRepo()
-    const liveEntities = [
-      fakeEntity('ent-1', 'project', 'foo'),
-      fakeEntity('ent-2', 'project', 'foo-thing'),
-    ]
-    const llmOutput = JSON.stringify({
-      clusters: [{
-        canonical_id: 'ent-1',
-        alias_ids: ['ent-2'],
-        reasoning: 'shares prefix',
-        confidence: 0.7,
-      }],
-    })
-    // Threshold lowered to 0.65 — the 0.7 cluster now auto-applies.
-    const result = await runEntityDedupe({
-      entities: fakeEntityStore([], [], liveEntities, []),
-      merge: { repo },
+  it('threads the caller access context into every visibility-scoped read (D.9 guard)', async () => {
+    const seen: Array<unknown> = []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const recordingStore: any = {
+      findDuplicateClustersSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return []
+      },
+      findCrossKindDuplicateClustersSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return []
+      },
+      listLiveEntitiesSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return []
+      },
+    }
+    const access = {
+      workspaceId: 'ws-1',
+      userId: 'user-1',
+      assistantId: 'a1',
+      assistantKind: 'standard' as const,
+    }
+    await runEntityDedupe({
+      entities: recordingStore as EntityStore,
+      merge: { repo: fakeMergeRepo() },
       workspaceId: 'ws-1',
       actorUserId: 'user-1',
+      access,
       clusterByLlm: true,
-      llmAutoApplyThreshold: 0.65,
-      llmClusterer: { provider: fakeLlmProvider(llmOutput), model: 'gemini-flash' },
+      llmClusterer: {
+        provider: fakeLlmProvider(JSON.stringify({ clusters: [] })),
+        model: 'gemini-flash',
+      },
     })
-    expect(result.llmCluster.applied).toHaveLength(1)
-    expect(result.llmCluster.suggestions).toEqual([])
+    // within-kind + cross-kind + llm-list reads all ran and each got the
+    // caller's access context — never the unscoped system path.
+    expect(seen.length).toBe(3)
+    expect(seen.every((a) => a === access)).toBe(true)
   })
 
   it('LLM pass is a no-op when clusterByLlm is false', async () => {

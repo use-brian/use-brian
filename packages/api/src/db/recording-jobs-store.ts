@@ -38,6 +38,7 @@ export type RecordingJob = {
 /** A job is retried up to this many times (counting the first attempt) before it
  *  is parked in `failed`. */
 export const RECORDING_JOB_MAX_ATTEMPTS = 3
+export const RECORDING_JOB_LEASE_MS = 15 * 60 * 1000
 
 const RETURNING = `
   id,
@@ -88,7 +89,16 @@ export async function enqueueRecordingJob(input: {
  */
 export async function claimNextRecordingJob(): Promise<RecordingJob | null> {
   const { rows } = await query<RecordingJob>(
-    `UPDATE recording_jobs
+    `WITH stale AS (
+       UPDATE recording_jobs
+          SET status = CASE WHEN attempts >= $2 THEN 'failed' ELSE 'pending' END,
+              last_error = CASE WHEN attempts >= $2 THEN 'worker lease expired after final attempt' ELSE last_error END,
+              locked_at = NULL,
+              updated_at = now()
+        WHERE status = 'processing'
+          AND locked_at < now() - ($1::double precision * interval '1 millisecond')
+     )
+     UPDATE recording_jobs
         SET status = 'processing', attempts = attempts + 1, locked_at = now(), updated_at = now()
       WHERE id = (
         SELECT id FROM recording_jobs
@@ -98,6 +108,7 @@ export async function claimNextRecordingJob(): Promise<RecordingJob | null> {
          LIMIT 1
       )
       RETURNING ${RETURNING}`,
+    [RECORDING_JOB_LEASE_MS, RECORDING_JOB_MAX_ATTEMPTS],
   )
   return rows[0] ?? null
 }

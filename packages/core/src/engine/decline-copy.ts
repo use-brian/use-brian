@@ -44,8 +44,26 @@ const STILL_CONNECTED =
   'This is NOT a connection, authorization, or setup problem: the connector is connected and the tool is available again on the next turn. ' +
   'Do NOT tell the user to reconnect, re-authorize, or run a /connect command.'
 
-/** The user tapped Deny on the confirmation prompt. */
-export function declinedToolResult(toolName: string): string {
+/**
+ * The user tapped Deny on the confirmation prompt.
+ *
+ * `comment` is the optional "Deny with comment" note (web chat card /
+ * approvals panel reason box). When present it is surfaced as the user's
+ * reason and framed as an instruction: the model must address it and
+ * re-propose, not merely re-ask. A bare deny keeps the ask-and-retry tail.
+ * The note is arbitrary user text; callers cap its length before it
+ * reaches here (`packages/api/src/routes/chat.ts` /confirm slices to 1000).
+ */
+export function declinedToolResult(toolName: string, comment?: string): string {
+  const note = comment?.trim()
+  if (note) {
+    return (
+      `ERROR: "${toolName}" was not run because the user declined the confirmation prompt for this attempt ` +
+      `and left a note explaining why: "${note}". ` +
+      `${STILL_CONNECTED} ` +
+      'Treat the note as an instruction: address it, then propose the action again (confirming the revised plan with the user first).'
+    )
+  }
   return (
     `ERROR: "${toolName}" was not run because the user declined the confirmation prompt for this attempt. ` +
     `${STILL_CONNECTED} ` +

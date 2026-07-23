@@ -106,12 +106,16 @@ export type TwitterCredentials = {
  * address. `api_key` is the inbox-scoped key minted at provisioning when the
  * vendor returns one — absent, the provider falls back to the org/BYO key
  * from env. `webhook_secret` is the per-webhook Svix signing secret returned
- * at registration; verification tries it first, then the env-level secret.
+ * at registration; it is the ONLY secret the webhook route verifies against
+ * (there is no env-level fallback), so provisioning fails closed if the
+ * webhook cannot be registered. `webhook_id` is that webhook's vendor id, kept
+ * so teardown can delete it explicitly.
  * See docs/architecture/integrations/agentmail.md.
  */
 export type EmailCredentials = {
   inbox_id: string
   api_key?: string
+  webhook_id?: string
   webhook_secret?: string
 }
 

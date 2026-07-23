@@ -16,14 +16,15 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     window.localStorage.clear();
   });
 
-  it("keeps the app-bar order with Feed in the 4th slot", () => {
-    expect(OPERATOR_APP_KEYS).toEqual(["page", "tasks", "crm", "feed"]);
+  it("keeps the app-bar order with Feed 4th and Browsers 5th", () => {
+    expect(OPERATOR_APP_KEYS).toEqual(["page", "tasks", "crm", "feed", "browsers"]);
   });
 
   it("maps operator surfaces to their app and leaves the rest null", () => {
     expect(operatorAppFromSurface("p")).toBe("page");
     expect(operatorAppFromSurface("tasks")).toBe("tasks");
     expect(operatorAppFromSurface("feed")).toBe("feed");
+    expect(operatorAppFromSurface("computer")).toBe("browsers");
     expect(operatorAppFromSurface("brain")).toBeNull();
     expect(operatorAppFromSurface("studio")).toBeNull();
     expect(operatorAppFromSurface("workflow")).toBeNull();
@@ -34,6 +35,8 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
     expect(operatorAppPath("w1", "page")).toBe("/w/w1/p");
     expect(operatorAppPath("w1", "tasks")).toBe("/w/w1/tasks");
     expect(operatorAppPath("w1", "feed")).toBe("/w/w1/feed");
+    // Browsers reuses the existing /computer route family.
+    expect(operatorAppPath("w1", "browsers")).toBe("/w/w1/computer");
   });
 
   it("defaults to Page when nothing is cached", () => {

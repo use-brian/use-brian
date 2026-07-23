@@ -56,6 +56,17 @@ export type QwenFiletransOptions = {
   fetchFn?: typeof fetch
 }
 
+function isPrivateSourceUrl(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase()
+    return host === 'localhost' || host === '::1' || host === '0.0.0.0' || host === '127.0.0.1' ||
+      host.startsWith('127.') || host.startsWith('10.') || host.startsWith('192.168.') ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  } catch {
+    return true
+  }
+}
+
 export function qwenFiletransTranscriber(opts: QwenFiletransOptions): RecordingTranscriber {
   const base = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '')
   const model = opts.model ?? DEFAULT_MODEL
@@ -71,6 +82,12 @@ export function qwenFiletransTranscriber(opts: QwenFiletransOptions): RecordingT
         // URL-submit provider with nothing to submit — let the ladder fall
         // through to a buffer-based provider.
         throw new Error('qwen filetrans requires a sourceUrl (signed READ url)')
+      }
+      if (isPrivateSourceUrl(req.sourceUrl)) {
+        throw new Error(
+          'qwen filetrans cannot download a localhost/private storage URL. ' +
+          'Configure GEMINI_API_KEY for buffer-upload transcription, or set LOCAL_FILES_PUBLIC_URL to a public HTTPS endpoint.',
+        )
       }
 
       // 1. Submit the async task.

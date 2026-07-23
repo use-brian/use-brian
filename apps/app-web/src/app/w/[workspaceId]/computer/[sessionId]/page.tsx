@@ -3,6 +3,10 @@
 /**
  * Take-Over live view — `/w/[workspaceId]/computer/[sessionId]`.
  *
+ * Renders as the detail pane of the Browsers operator surface: the layout
+ * shell (`browsers-surface-shell.tsx`) frames this with the operator top bar
+ * and the left live-session rail, so this page owns only the frame + controls.
+ *
  * The web half of §4.8: a live look at the cloud sandbox browser for one
  * chat session's computer task. Transport ladder, best-first:
  *
@@ -491,7 +495,9 @@ export default function ComputerTakeoverPage(props: {
     });
     if (!confirmed) return;
     await completeComputerTask(sessionId, "failed").catch(() => {});
-    router.push(`/w/${workspaceId}`);
+    // Return to the Browsers surface index — the session rail keeps any other
+    // live sessions in view, rather than dropping to the workspace root.
+    router.push(`/w/${workspaceId}/computer`);
   }, [router, sessionId, t, workspaceId]);
 
   if (task === "loading") {

@@ -19,6 +19,13 @@ import type {
   EntityRecord,
   EntityStore,
 } from '../../entities/types.js'
+import type {
+  ApplyMergeInput,
+  ApplyUndoMergeInput,
+  EntityMergeDeps,
+  EntityMergeRecord,
+  EntityMergeSnapshot,
+} from '../../corrections/entity-merge.js'
 
 // ── Minimal fakes — only the reads describeConfirmation touches ────────
 
@@ -193,6 +200,35 @@ describe('[COMP:brain/healing-tools] dedupeEntities Tier-D gate', () => {
     await tools.dedupeEntities.describeConfirmation!({ kind: 'company' }, ctxInteractive)
     expect(crossCalled).toBe(false)
   })
+
+  it('describeConfirmation scopes its preview reads to the caller (D.9 visibility guard)', async () => {
+    const seen: Array<unknown> = []
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stub: any = {
+      findDuplicateClustersSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return [{ kind: 'company', displayNameNormalized: 'acme', entityIds: ['e1', 'e2'] }]
+      },
+      findCrossKindDuplicateClustersSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return []
+      },
+      listLiveEntitiesSystem: async (_u: string, _w: string, _o: unknown, access: unknown) => {
+        seen.push(access)
+        return [entity('e1', 'Acme'), entity('e2', 'acme')]
+      },
+    }
+    const tools = byName(makeDeps(stub as EntityStore))
+    await tools.dedupeEntities.describeConfirmation!({}, ctxInteractive)
+    // Every preview read got a concrete access context carrying the caller
+    // — never undefined (which would be the unscoped system path).
+    expect(seen.length).toBeGreaterThanOrEqual(2)
+    expect(
+      seen.every(
+        (a) => a != null && (a as { userId?: string }).userId === ctxInteractive.userId,
+      ),
+    ).toBe(true)
+  })
 })
 
 describe('[COMP:brain/healing-tools] Tier-C autonomous-only resolveConfirmation', () => {
@@ -213,5 +249,238 @@ describe('[COMP:brain/healing-tools] Tier-C autonomous-only resolveConfirmation'
   it('read-only healing tools carry no confirmation gate', () => {
     expect(tools.listBrainCandidates.resolveConfirmation).toBeUndefined()
     expect(tools.listBrainCandidates.requiresConfirmation).toBe(false)
+  })
+})
+
+// ── Scoped merge + undo (corrections.md D.1/D.2) ──────────────────────
+
+/** Entities store whose `getById` looks records up by id (visibility fake). */
+function entitiesWithGetById(records: EntityRecord[]): EntityStore {
+  const byId = new Map(records.map((r) => [r.id, r]))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stub: any = {
+    findDuplicateClustersSystem: async () => [],
+    findCrossKindDuplicateClustersSystem: async () => [],
+    listLiveEntitiesSystem: async () => [],
+    getById: async (_ctx: unknown, id: string) => byId.get(id) ?? null,
+  }
+  return stub as EntityStore
+}
+
+function withAttrs(id: string, name: string, attributes: Record<string, unknown>): EntityRecord {
+  return { ...entity(id, name, 'person'), id, attributes }
+}
+
+function fakeEntityMergeDeps(opts: {
+  /** Records whose attributes the merge snapshots should mirror (for reconcile). */
+  records?: EntityRecord[]
+  onApply?: (input: ApplyMergeInput) => void
+  onUndo?: (input: ApplyUndoMergeInput) => void
+  mergeById?: (id: string) => EntityMergeRecord | null
+  active?: (id: string) => boolean
+  now?: Date
+} = {}): EntityMergeDeps {
+  const now = opts.now ?? new Date('2026-01-10T00:00:00Z')
+  const attrsById = new Map((opts.records ?? []).map((r) => [r.id, r.attributes]))
+  const snap = (id: string): EntityMergeSnapshot => ({
+    entityId: id,
+    displayName: id,
+    attributes: attrsById.get(id) ?? {},
+    tags: [],
+    validTo: null,
+    supersededBy: null,
+    workspaceId: 'ws-1',
+  })
+  return {
+    clock: () => now,
+    repo: {
+      readEntityForMerge: async (_ws, id) => snap(id),
+      applyMerge: async (input: ApplyMergeInput): Promise<EntityMergeRecord> => {
+        opts.onApply?.(input)
+        return {
+          id: 'merge-xyz',
+          workspaceId: input.workspaceId,
+          survivingId: input.survivingId,
+          mergedId: input.mergedId,
+          mergedAt: now,
+          mergedBy: input.mergedBy,
+          reason: input.reason,
+          mergedAttributesSnapshot: input.mergedAttributesSnapshot,
+          survivingAttributesPreMerge: input.survivingAttributesPreMerge,
+          mergedSpecializationPointer: input.mergedSpecializationPointer,
+          cascadeApplied: input.cascadeApplied,
+          reconciliationOverrides: input.reconciliationOverrides,
+        }
+      },
+      applyUndoMerge: async (input: ApplyUndoMergeInput) => {
+        opts.onUndo?.(input)
+      },
+      findMergeById: async (_ws, id) => opts.mergeById?.(id) ?? null,
+      isEntityActive: async (_ws, id) => opts.active?.(id) ?? true,
+    },
+  }
+}
+
+function mergeDeps(store: EntityStore, entityMerge: EntityMergeDeps): HealingToolsDeps {
+  return { ...makeDeps(store), entityMerge }
+}
+
+describe('[COMP:brain/healing-tools] mergeEntities scoped pairwise merge (D.1)', () => {
+  it('is gated everywhere (requiresConfirmation: true)', () => {
+    const tools = byName(makeDeps(fakeEntityStore({})))
+    expect(tools.mergeEntities.requiresConfirmation).toBe(true)
+    expect(tools.mergeEntities.allowPersistentApproval).toBe(false)
+  })
+
+  it('describeConfirmation names both records and the survivor', async () => {
+    const store = entitiesWithGetById([entity('e1', 'Ashley Chan', 'person'), entity('e2', 'Ashley Li', 'person')])
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps()))
+    const lines = await tools.mergeEntities.describeConfirmation!(
+      { survivor_id: 'e1', merged_id: 'e2' },
+      ctxInteractive,
+    )
+    expect(lines).not.toBeNull()
+    expect(lines![0]).toContain('Merge Ashley Li into Ashley Chan')
+    expect(lines![0]).toContain('Reversible for 7 days')
+  })
+
+  it('merges two visible records and returns the mergeId for undo', async () => {
+    const applied: ApplyMergeInput[] = []
+    const store = entitiesWithGetById([
+      withAttrs('e1', 'Ashley Chan', { email: 'ashley@acme.example' }),
+      withAttrs('e2', 'Ashley Li', { phone: '+15550000000' }),
+    ])
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps({ onApply: (i) => applied.push(i) })))
+    const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
+    expect(res.isError).toBeFalsy()
+    expect((res.data as { merged: boolean }).merged).toBe(true)
+    expect((res.data as { mergeId: string }).mergeId).toBe('merge-xyz')
+    expect(applied).toHaveLength(1)
+    expect(applied[0]).toMatchObject({ survivingId: 'e1', mergedId: 'e2' })
+  })
+
+  it('refuses to merge a record the caller cannot see (visibility guard)', async () => {
+    const applied: ApplyMergeInput[] = []
+    // Only e1 is visible; e2 is invisible to the caller.
+    const store = entitiesWithGetById([entity('e1', 'Ashley Chan', 'person')])
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps({ onApply: (i) => applied.push(i) })))
+    const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('not visible')
+    expect(applied).toHaveLength(0) // never reached the merge
+  })
+
+  it('rejects a self-merge', async () => {
+    const store = entitiesWithGetById([entity('e1', 'Ashley Chan', 'person')])
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps()))
+    const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e1' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('two different records')
+  })
+
+  it('surfaces conflicting fields in the default "ask" mode instead of losing data', async () => {
+    const applied: ApplyMergeInput[] = []
+    const store = entitiesWithGetById([
+      withAttrs('e1', 'Ashley Chan', { email: 'a@acme.example' }),
+      withAttrs('e2', 'Ashley Li', { email: 'b@acme.example' }),
+    ])
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps({ onApply: (i) => applied.push(i) })))
+    const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('email')
+    expect(String(res.data)).toContain('on_conflict')
+    expect(applied).toHaveLength(0) // did not merge on an unresolved conflict
+  })
+
+  it('on_conflict="keep_survivor" resolves the conflict and merges (survivor-wins)', async () => {
+    const applied: ApplyMergeInput[] = []
+    const records = [
+      withAttrs('e1', 'Ashley Chan', { email: 'a@acme.example' }),
+      withAttrs('e2', 'Ashley Li', { email: 'b@acme.example' }),
+    ]
+    const store = entitiesWithGetById(records)
+    const tools = byName(mergeDeps(store, fakeEntityMergeDeps({ records, onApply: (i) => applied.push(i) })))
+    const res = await tools.mergeEntities.execute(
+      { survivor_id: 'e1', merged_id: 'e2', on_conflict: 'keep_survivor' },
+      ctxInteractive,
+    )
+    expect(res.isError).toBeFalsy()
+    expect(applied).toHaveLength(1)
+    // survivor-wins keeps the survivor's email.
+    expect(applied[0]?.reconciledAttributes).toMatchObject({ email: 'a@acme.example' })
+  })
+
+  it('reports "unavailable" when the merge port is not wired', async () => {
+    const tools = byName(makeDeps(entitiesWithGetById([entity('e1', 'A', 'person'), entity('e2', 'B', 'person')])))
+    const res = await tools.mergeEntities.execute({ survivor_id: 'e1', merged_id: 'e2' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('unavailable')
+  })
+})
+
+describe('[COMP:brain/healing-tools] undoEntityMerge (D.2)', () => {
+  const now = new Date('2026-01-10T00:00:00Z')
+  const mergeRecord = (mergedAt: Date): EntityMergeRecord => ({
+    id: 'merge-xyz',
+    workspaceId: 'ws-1',
+    survivingId: 'e1',
+    mergedId: 'e2',
+    mergedAt,
+    mergedBy: 'u1',
+    reason: null,
+    mergedAttributesSnapshot: {
+      entityId: 'e2', displayName: 'e2', attributes: {}, tags: [], validTo: new Date(mergedAt), supersededBy: 'e1', workspaceId: 'ws-1',
+    },
+    survivingAttributesPreMerge: {
+      entityId: 'e1', displayName: 'e1', attributes: {}, tags: [], validTo: null, supersededBy: null, workspaceId: 'ws-1',
+    },
+    mergedSpecializationPointer: null,
+    cascadeApplied: false,
+    reconciliationOverrides: null,
+  })
+
+  it('gates on the autonomous path and is silent interactive (Tier-C)', async () => {
+    const tools = byName(makeDeps(fakeEntityStore({})))
+    const tool = tools.undoEntityMerge
+    expect(tool.requiresConfirmation).toBe(false)
+    expect(await tool.resolveConfirmation!(ctxAutonomous)).toBe(true)
+    expect(await tool.resolveConfirmation!(ctxInteractive)).toBe(false)
+  })
+
+  it('reverses a merge within the window', async () => {
+    const undone: ApplyUndoMergeInput[] = []
+    const deps = mergeDeps(
+      fakeEntityStore({}),
+      fakeEntityMergeDeps({
+        now,
+        mergeById: (id) => (id === 'merge-xyz' ? mergeRecord(now) : null),
+        onUndo: (i) => undone.push(i),
+      }),
+    )
+    const tools = byName(deps)
+    const res = await tools.undoEntityMerge.execute({ merge_id: 'merge-xyz' }, ctxInteractive)
+    expect(res.isError).toBeFalsy()
+    expect((res.data as { undone: boolean }).undone).toBe(true)
+    expect(undone).toHaveLength(1)
+  })
+
+  it('gives a plain-language error when the merge id is unknown', async () => {
+    const deps = mergeDeps(fakeEntityStore({}), fakeEntityMergeDeps({ now, mergeById: () => null }))
+    const tools = byName(deps)
+    const res = await tools.undoEntityMerge.execute({ merge_id: '00000000-0000-0000-0000-000000000000' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('No merge with that id')
+  })
+
+  it('refuses a merge outside the 7-day window with a clear message', async () => {
+    const old = new Date('2025-01-01T00:00:00Z') // > 7 days before `now`
+    const deps = mergeDeps(
+      fakeEntityStore({}),
+      fakeEntityMergeDeps({ now, mergeById: (id) => (id === 'merge-xyz' ? mergeRecord(old) : null) }),
+    )
+    const tools = byName(deps)
+    const res = await tools.undoEntityMerge.execute({ merge_id: 'merge-xyz' }, ctxInteractive)
+    expect(res.isError).toBe(true)
+    expect(String(res.data)).toContain('7-day undo window')
   })
 })

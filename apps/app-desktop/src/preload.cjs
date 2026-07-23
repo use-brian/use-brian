@@ -51,6 +51,12 @@ const bridge = {
   // signals a latched capture starting/ending so the shell can show/close the
   // floating always-on-top recorder overlay window.
   setRecording: (on) => ipcRenderer.send("Use Brian:recording-state", on === true),
+  // Connector OAuth (Google / Notion). The web flow's browser-cookie CSRF can't
+  // survive the Electron→system-browser jar split, so the connectors page hands
+  // the built provider authorize URL (minus `state`) to the shell, which drives
+  // an RFC 8252 loopback flow and navigates back to the connectors page on done.
+  // Spec: docs/plans/desktop-connector-oauth-return.md.
+  connectConnector: (req) => ipcRenderer.send("Use Brian:connect-connector", req),
 };
 
 if (process.argv.includes("--usebrian-bundled")) {

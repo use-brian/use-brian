@@ -27,6 +27,8 @@ import { effectiveReadClearance, effectiveReadCompartments } from '../db/workspa
 import * as github from '../github/client.js'
 import type { AccessContext, Sensitivity } from '@use-brian/core'
 import { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
+import { promises as fs } from 'node:fs'
+import * as nodePath from 'node:path'
 
 // Re-exported for existing consumers/tests; the implementations moved to
 // `../knowledge/repo-files.ts` so the assistant repo writer shares them.
@@ -67,6 +69,8 @@ const DEFAULT_GITHUB_OPS: KnowledgeGithubOps = {
 
 type KnowledgeRouteOptions = {
   knowledgeStore: KnowledgeStore
+  /** Enables server-local source paths. Only the standalone OSS composition sets this. */
+  allowLocalSources?: boolean
   /**
    * Resolves credentials for the GitHub repo/branch lookups behind the KB
    * settings UI. Under the unified-connectors model a GitHub connector is
@@ -409,6 +413,112 @@ async function createGithubKnowledgeSource(opts: {
       return
     }
     console.error('[knowledge] create source failed:', err)
+    res.status(500).json({ error: 'Failed to connect source' })
+  }
+}
+
+async function walkMdFiles(dir: string): Promise<string[]> {
+  const results: string[] = []
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  for (const entry of entries) {
+    const full = nodePath.join(dir, entry.name)
+    if (entry.isDirectory()) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+      results.push(...await walkMdFiles(full))
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      results.push(full)
+    }
+  }
+  return results
+}
+
+async function createLocalKnowledgeSource(opts: {
+  knowledgeStore: KnowledgeStore
+  workspaceId: string
+  localPath: string
+  rootPath?: string
+  res: import('express').Response
+}): Promise<void> {
+  const { knowledgeStore, workspaceId, localPath, rootPath, res } = opts
+
+  const requestedPath = nodePath.resolve(localPath)
+  const resolvedPath = await fs.realpath(requestedPath).catch(() => null)
+  if (!resolvedPath) {
+    res.status(400).json({ error: `Path does not exist: ${requestedPath}` })
+    return
+  }
+  let stat: import('node:fs').Stats
+  try {
+    stat = await fs.stat(resolvedPath)
+  } catch {
+    res.status(400).json({ error: `Path does not exist: ${resolvedPath}` })
+    return
+  }
+  if (!stat.isDirectory()) {
+    res.status(400).json({ error: `Path is not a directory: ${resolvedPath}` })
+    return
+  }
+
+  const normalizedRoot = rootPath?.trim().replace(/[\\/]+$/, '') ?? ''
+  if (normalizedRoot && nodePath.isAbsolute(normalizedRoot)) {
+    res.status(400).json({ error: 'Root path must be relative to the local source directory.' })
+    return
+  }
+  const requestedScanDir = nodePath.resolve(resolvedPath, normalizedRoot || '.')
+  const scanDir = await fs.realpath(requestedScanDir).catch(() => null)
+  const relativeScanDir = scanDir ? nodePath.relative(resolvedPath, scanDir) : '..'
+  if (!scanDir || relativeScanDir === '..' || relativeScanDir.startsWith(`..${nodePath.sep}`)) {
+    res.status(400).json({ error: 'Root path must resolve inside the local source directory.' })
+    return
+  }
+
+  let mdFiles: string[]
+  try {
+    mdFiles = await walkMdFiles(scanDir)
+  } catch {
+    res.status(400).json({ error: `Directory cannot be read: ${scanDir}` })
+    return
+  }
+
+  const EXCLUDED_NAMES = new Set(['readme', 'changelog', 'contributing', 'license', 'code_of_conduct'])
+  const contentMdFiles = mdFiles.filter((f) => {
+    const name = nodePath.basename(f).replace(/\.md$/i, '').toLowerCase()
+    return !EXCLUDED_NAMES.has(name)
+  })
+
+  if (contentMdFiles.length === 0) {
+    res.status(400).json({
+      error: `No knowledge content found at ${resolvedPath}. A knowledge directory should contain .md files.`,
+    })
+    return
+  }
+
+  try {
+    const source = await knowledgeStore.createSource({
+      workspaceId,
+      sourceType: 'local',
+      repo: resolvedPath,
+      branch: 'local',
+      rootPath: normalizedRoot,
+    })
+
+    res.status(201).json({
+      ...source,
+      validation: {
+        markdownFiles: contentMdFiles.length,
+        hasIndexFile: mdFiles.some((f) => nodePath.basename(f) === 'index.md'),
+        hasNesting: contentMdFiles.some((f) => nodePath.relative(scanDir, f).includes(nodePath.sep)),
+        hasFrontmatter: null,
+        frontmatterRatio: null,
+        warning: null,
+      },
+    })
+  } catch (err: any) {
+    if (err?.code === '23505') {
+      res.status(409).json({ error: 'This path is already connected' })
+      return
+    }
+    console.error('[knowledge] create local source failed:', err)
     res.status(500).json({ error: 'Failed to connect source' })
   }
 }
@@ -931,6 +1041,7 @@ function branchSlug(entryPath: string): string {
  */
 export function workspaceKnowledgeRoutes({
   knowledgeStore,
+  allowLocalSources = false,
   connectorInstanceStore,
   connectorGrantStore,
   triggerSync,
@@ -997,7 +1108,7 @@ export function workspaceKnowledgeRoutes({
     entryId: string,
   ): Promise<
     | { ok: true; entry: { id: string; path: string; title: string }; source: { id: string; repo: string; branch: string; rootPath: string; connectorInstanceId: string | null }; owner: string; repo: string; pat: string }
-    | { ok: false; status: 404 | 400 | 503; failure: 'not_found' | 'manual_entry' | 'source_missing' | 'no_credentials' | 'not_configured' }
+    | { ok: false; status: 404 | 400 | 503; failure: 'not_found' | 'manual_entry' | 'local_source' | 'source_missing' | 'no_credentials' | 'not_configured' }
   > {
     const entry = await knowledgeStore.getById(memberCtx(auth), entryId)
     if (!entry || entry.workspaceId !== auth.workspaceId) {
@@ -1007,6 +1118,9 @@ export function workspaceKnowledgeRoutes({
     const source = await knowledgeStore.getSource(entry.sourceId)
     if (!source || source.workspaceId !== auth.workspaceId) {
       return { ok: false, status: 400, failure: 'source_missing' }
+    }
+    if (source.sourceType === 'local') {
+      return { ok: false, status: 400, failure: 'local_source' }
     }
     const [owner, repo] = source.repo.split('/')
     if (!owner || !repo) return { ok: false, status: 400, failure: 'source_missing' }
@@ -1038,9 +1152,9 @@ export function workspaceKnowledgeRoutes({
           return
         }
         res.json({
-          mode: target.failure === 'manual_entry' ? 'manual' : 'github',
+          mode: target.failure === 'manual_entry' ? 'manual' : target.failure === 'local_source' ? 'local' : 'github',
           canPropose: false,
-          reason: target.failure === 'manual_entry' ? null : target.failure,
+          reason: target.failure === 'manual_entry' || target.failure === 'local_source' ? null : target.failure,
           repo: null,
           branch: null,
           repoUrl: null,
@@ -1105,6 +1219,7 @@ export function workspaceKnowledgeRoutes({
         const message =
           target.failure === 'not_found' ? 'Entry not found'
           : target.failure === 'manual_entry' ? 'This entry is not synced from GitHub. Edit it directly instead.'
+          : target.failure === 'local_source' ? 'Local knowledge entries are read-only in the app. Edit the file in its source directory.'
           : target.failure === 'source_missing' ? 'The knowledge source backing this entry no longer exists.'
           : target.failure === 'no_credentials' ? 'The GitHub connector backing this source has no credentials. Reconnect it in Studio → Connectors.'
           : 'Proposals are not configured on this server.'
@@ -1197,9 +1312,29 @@ export function workspaceKnowledgeRoutes({
   router.post('/sources', async (req, res) => {
     const auth = await verifyWorkspaceMember(req as any, res)
     if (!auth) return
-    const { repo, branch, rootPath, connectorInstanceId } = req.body as {
-      repo?: string; branch?: string; rootPath?: string; connectorInstanceId?: string
+    const { repo, branch, rootPath, connectorInstanceId, sourceType, localPath } = req.body as {
+      repo?: string; branch?: string; rootPath?: string; connectorInstanceId?: string;
+      sourceType?: string; localPath?: string
     }
+
+    if (sourceType === 'local') {
+      if (!allowLocalSources) {
+        res.status(404).json({ error: 'Local filesystem knowledge sources are not available in this deployment.' })
+        return
+      }
+      if (auth.role !== 'owner' && auth.role !== 'admin') {
+        res.status(403).json({ error: 'Workspace owner or admin required for local filesystem sources.' })
+        return
+      }
+      const lp = typeof localPath === 'string' && localPath.trim() ? localPath.trim() : (repo ?? '')
+      if (!lp) {
+        res.status(400).json({ error: 'localPath (or repo) is required for local sources' })
+        return
+      }
+      await createLocalKnowledgeSource({ knowledgeStore, workspaceId: auth.workspaceId, localPath: lp, rootPath, res })
+      return
+    }
+
     if (!repo) {
       res.status(400).json({ error: 'repo is required' })
       return

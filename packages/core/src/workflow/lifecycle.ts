@@ -127,6 +127,29 @@ export function isOneOffWorkflow(
   return !isRecurringTrigger(row.trigger) && row.runCount <= 1
 }
 
+/**
+ * A spent one-off schedule: a `schedule: { type: 'once' }` workflow whose single
+ * fire is done and will never happen again (`!hasLiveFire` — no enabled
+ * `scheduled_jobs` row points at it, so its trigger has already fired or been
+ * disabled). Unlike an *ambiguously* idle workflow, this one is *unambiguously*
+ * complete, so it skips the stale-dwell ladder and archives directly. Narrow by
+ * design: `manual` (user-invoked on demand, never "spent"), recurring, `event`,
+ * and `webhook` triggers are all excluded — only a fired one-off qualifies.
+ * Event-time archival (the scheduling layer) retires these the moment a job
+ * fires; this predicate is the sweep's backstop for rows that predate that path
+ * or whose event-time write missed. Callers still gate on `pinned` / armed
+ * separately (see `decideLifecycle`).
+ */
+export function isSpentOnceSchedule(
+  row: Pick<WorkflowLifecycleRow, 'trigger' | 'hasLiveFire'>,
+): boolean {
+  return (
+    row.trigger.kind === 'schedule' &&
+    row.trigger.schedule.type === 'once' &&
+    !row.hasLiveFire
+  )
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function daysSince(anchor: Date, now: Date): number {
@@ -193,6 +216,14 @@ export function decideLifecycle(
   }
 
   if (row.lifecycleState === 'active') {
+    // A spent one-off schedule is unambiguously complete, not ambiguously idle:
+    // it fired and can never fire again. Skip the 30-day stale dwell (which
+    // exists to gently retire *maybe-abandoned* work) and archive on the first
+    // sweep so a fired reminder leaves the active grid promptly. This is the
+    // backstop; the scheduling layer already archives at fire time.
+    if (isSpentOnceSchedule(row)) {
+      return { action: 'archive', reason: 'One-off schedule completed' }
+    }
     const idleDays = daysSince(lastActivityAt(row), now)
     if (idleDays >= config.staleAfterDays) {
       return { action: 'mark_stale', reason: `no activity for ${Math.floor(idleDays)} days` }

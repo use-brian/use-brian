@@ -5,6 +5,7 @@ import { StubSandboxProvider } from '../providers/stub.js'
 import {
   BrowserBackendError,
   NO_EXTENSION_MESSAGE,
+  NO_EXTENSION_REMEDY,
   type BrowserCallContext,
   type RelayCommandResult,
   type RelayCommandTransport,
@@ -67,17 +68,46 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     expect(snap.nodes[0]).toMatchObject({ ref: '@e1', role: 'button', name: 'Send' })
   })
 
-  it('maps a no_extension relay result to the clear open-Chrome error, never a hang (P1.4)', async () => {
-    const { transport } = transportRecording(() => ({
-      ok: false,
-      error: 'no connection',
-      code: 'no_extension',
-    }))
+  it('falls back to the full open-Chrome instruction when the relay gives no reason (P1.4)', async () => {
+    const { transport } = transportRecording(() => ({ ok: false, error: '', code: 'no_extension' }))
     const provider = createLocalBrowserProvider({ transport })
     const err = await provider.snapshot(CTX).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(BrowserBackendError)
     expect((err as BrowserBackendError).code).toBe('no_extension')
     expect((err as BrowserBackendError).message).toBe(NO_EXTENSION_MESSAGE)
+  })
+
+  it('keeps the relay’s reason for a no_extension, and still says what to do', async () => {
+    // The relay distinguishes three situations under this one code: never
+    // connected, disconnected, and evicted by a newer pairing. Overwriting all
+    // three with one sentence made an eviction storm byte-identical to a
+    // missing install in the database, so it could not be diagnosed after the
+    // fact — and it told users whose extension was open to go install it.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Extension connection was replaced by a newer pairing.',
+      code: 'no_extension',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    const message = (err as BrowserBackendError).message
+    expect(message).toContain('replaced by a newer pairing')
+    expect(message).toContain(NO_EXTENSION_REMEDY)
+  })
+
+  it('passes no_eligible_tab through rather than flattening it to backend_error', async () => {
+    // An unrecognised code becomes `backend_error`, which is how four
+    // unrelated failures came to share one bucket in prod. A tab the debugger
+    // cannot attach to has its own remedy, so it keeps its own code.
+    const { transport } = transportRecording(() => ({
+      ok: false,
+      error: 'Use Brian cannot act on a browser settings page.',
+      code: 'no_eligible_tab',
+    }))
+    const provider = createLocalBrowserProvider({ transport })
+    const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+    expect((err as BrowserBackendError).code).toBe('no_eligible_tab')
+    expect((err as BrowserBackendError).message).toContain('browser settings page')
   })
 
   it('reports not_configured when no relay transport is wired (open-core boot)', async () => {

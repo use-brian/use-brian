@@ -12,9 +12,10 @@
     }
   },
   "bin": {
-    "kb": "./dist/cli.js"
+    "kb": "./bin/kb.js"
   },
   "files": [
+    "bin",
     "dist",
     "README.md",
     "LICENSE"

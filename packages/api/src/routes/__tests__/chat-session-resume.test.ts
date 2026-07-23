@@ -74,6 +74,8 @@ function makeStubApprovalsStore(approval: PendingApproval | null) {
     createStagedSkillCreation: vi.fn(),
     findPendingStagedSkillUpdate: vi.fn(),
     findPendingStagedSkillCreation: vi.fn(),
+    createWorkflowRefinement: vi.fn(),
+    findPendingWorkflowRefinement: vi.fn(),
     createStagedWrite: vi.fn(),
     createQuestion: vi.fn(),
     createBrowserSkillSend: vi.fn(),

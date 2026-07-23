@@ -534,14 +534,14 @@ async function dispatchRemote(params: {
         // the same turn can start and raise their own prompts. See
         // ToolContext.parkForConfirmation.
         const awaitDecision = () => resolver.waitForDecision(confirmId, timeoutMs)
-        const decision = context.parkForConfirmation
+        const { decision, comment } = context.parkForConfirmation
           ? await context.parkForConfirmation(awaitDecision)
           : await awaitDecision()
 
         if (decision === 'deny') {
           blockedTools.add(toolKey)
           return {
-            data: declinedToolResult(tool),
+            data: declinedToolResult(tool, comment),
             isError: true,
           }
         }
@@ -810,14 +810,14 @@ async function dispatchLocal(params: {
       // friends), so without it a multi-write turn shows exactly one card.
       // See ToolContext.parkForConfirmation.
       const awaitDecision = () => resolver.waitForDecision(confirmId, timeoutMs)
-      const decision = context.parkForConfirmation
+      const { decision, comment } = context.parkForConfirmation
         ? await context.parkForConfirmation(awaitDecision)
         : await awaitDecision()
 
       if (decision === 'deny' || decision === 'always_deny') {
         blockedTools.add(toolKey)
         return {
-          data: declinedToolResult(tool),
+          data: declinedToolResult(tool, comment),
           isError: true,
         }
       }

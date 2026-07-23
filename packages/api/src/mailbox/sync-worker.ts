@@ -9,8 +9,10 @@
  *      `ingest_rules` into the brain (connection-day-forward only, D6).
  *      A `UIDVALIDITY` change deletes and re-arms that folder — never
  *      corrupts (§5). The FIRST sync of a folder only establishes the
- *      cursor (the ingest pollers' first-poll posture): history flows only
- *      through the confirmed backfill.
+ *      cursor for the DELTA path (the ingest pollers' first-poll posture):
+ *      history flows only through the confirmed backfill. When a backfill is
+ *      already armed, that same first tick also runs it — a user-consented
+ *      backfill never waits an extra poll interval to begin.
  *   2. BACKFILL (only after the D9 preflight + user confirmation armed it):
  *      newest-first, chunked per tick, checkpointed per folder
  *      (`backfillLow`), resumable across restarts. Backfill is archive-ONLY
@@ -447,12 +449,33 @@ export type MailboxSyncWorkerDeps = {
   now?: () => Date
 }
 
+/** Outcome of an on-demand single-instance sync (`syncInstanceById`). */
+export type MailboxSyncSummary = {
+  /** True when a sync pass actually ran. */
+  synced: boolean
+  /** New (delta) messages archived this pass; 0 when already up to date. */
+  newMessages: number
+  /** Why a sync did not run (only set when `synced` is false). */
+  reason?: 'not_found' | 'disconnected' | 'in_progress' | 'error'
+  /** Error message when `reason === 'error'`. */
+  error?: string
+}
+
 export type MailboxSyncWorker = {
   start(): void
   stop(): void
   isRunning(): boolean
   /** One full pass over every connected imap instance (tests call this directly). */
   tick(): Promise<void>
+  /**
+   * Sync ONE instance right now — the on-demand path behind sync-on-connect
+   * (the connect route fire-and-forgets this so the archive is live within
+   * seconds, not the next poll interval) and the `syncMailboxNow` tool. Never
+   * throws: a disconnected / missing / already-running instance returns a
+   * reasoned summary instead. Concurrent calls for the same instance collapse
+   * to one (`in_progress`).
+   */
+  syncInstanceById(instanceId: string): Promise<MailboxSyncSummary>
 }
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000
@@ -471,6 +494,21 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
 
   let timer: ReturnType<typeof setInterval> | null = null
   let running = false
+  // Instances with a sync in flight. Guards the poll tick and every on-demand
+  // trigger against double-fetching the same mailbox (archive inserts are
+  // idempotent, so this is a waste-avoider, not a correctness gate).
+  const inFlight = new Set<string>()
+
+  /** Run one instance sync under the in-flight guard. `'skipped'` = already running. */
+  async function runGuarded(inst: ConnectorInstance): Promise<{ newMessages: number } | 'skipped'> {
+    if (inFlight.has(inst.id)) return 'skipped'
+    inFlight.add(inst.id)
+    try {
+      return await syncInstance(inst)
+    } finally {
+      inFlight.delete(inst.id)
+    }
+  }
 
   async function resolveWorkspaceId(inst: ConnectorInstance): Promise<string | null> {
     if (inst.workspaceId) return inst.workspaceId
@@ -487,10 +525,14 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     state: MailboxSyncState
     workspaceId: string
     assistantId: string | null
-  }): Promise<void> {
+  }): Promise<number> {
     const { client, inst, settings, folder, state, workspaceId, assistantId } = params
     const ownerUserId = inst.userId
-    if (!ownerUserId) return
+    if (!ownerUserId) return 0
+    // Count of NEW (delta) mail archived this pass — the "N new messages"
+    // reported by an on-demand `syncMailboxNow`. Backfill (historical) inserts
+    // are archive-only catch-up, not new arrivals, and are not counted.
+    let deltaInserted = 0
 
     const status = await client.status(folder, { messages: true, uidNext: true, uidValidity: true })
     const uidvalidity = String(status.uidValidity ?? '')
@@ -505,12 +547,15 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
     }
 
     if (!cursor) {
-      // First sync: establish the cursor, ingest nothing (first-poll
-      // posture). History flows only through the confirmed backfill; a
-      // pre-existing backfill consent re-arms automatically (backfillLow
-      // resets with the cursor).
-      state.folders[folder] = { uidvalidity, lastUid: Math.max(0, uidNext - 1) }
-      return
+      // First sync: establish the cursor. With `lastUid == uidNext-1` the
+      // delta block below skips every pre-existing message (the first-poll
+      // posture — history never reaches the brain un-consented). But a
+      // backfill the user has ALREADY confirmed must not wait a whole extra
+      // poll interval to start: fall through so it runs THIS tick. With no
+      // armed backfill we're done — ingest nothing.
+      cursor = { uidvalidity, lastUid: Math.max(0, uidNext - 1) }
+      state.folders[folder] = cursor
+      if (!(state.backfill && state.backfill.status === 'running')) return 0
     }
 
     // ── Delta: new mail since lastUid ──
@@ -546,6 +591,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
             workspaceId,
             ownerUserId,
           })
+          if (inserted) deltaInserted++
           // Brain flow: NEW mail only, rule-selected, only when ingestion is
           // enabled on the instance (the connected card's toggle).
           if (inserted && router && inst.ingestionEnabled) {
@@ -585,7 +631,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       if (pending.length === 0) {
         cursor.backfillDone = true
         state.folders[folder] = cursor
-        return
+        return deltaInserted
       }
       const chunk = pending.slice(0, backfillChunk)
       const chunkSet = new Set(chunk)
@@ -628,20 +674,22 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         state.folders[folder] = cursor
       }
     }
+    return deltaInserted
   }
 
-  async function syncInstance(inst: ConnectorInstance): Promise<void> {
+  async function syncInstance(inst: ConnectorInstance): Promise<{ newMessages: number }> {
     const creds = await deps.connectorInstanceStore.getAuthCredentialsSystem(inst.id)
-    if (!creds || creds.type !== 'imap') return
+    if (!creds || creds.type !== 'imap') return { newMessages: 0 }
     const { type: _t, ...settings } = creds
     const workspaceId = await resolveWorkspaceId(inst)
     if (!workspaceId) {
       console.warn(`[mailbox-sync] instance ${inst.id}: no resolvable workspace; skipped`)
-      return
+      return { newMessages: 0 }
     }
     const assistantId = deps.resolveAssistantId ? await deps.resolveAssistantId(workspaceId) : null
     const state = readMailboxSyncState(inst.config)
 
+    let newMessages = 0
     try {
       await sessions.withClient(`sync:${inst.id}`, settings, async (client) => {
         const folders = await client.list()
@@ -650,7 +698,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
           return !special || !SKIP_SPECIAL_USE.has(special)
         })
         for (const f of syncable) {
-          await syncFolder({
+          newMessages += await syncFolder({
             client,
             inst,
             settings,
@@ -669,6 +717,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       state.lastError = null
       await deps.connectorInstanceStore.setConfigSystem(inst.id, { mailboxSync: state })
       await deps.connectorInstanceStore.markHealth?.(inst.id, 'ok', null)
+      return { newMessages }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       state.lastError = message
@@ -688,7 +737,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       for (const inst of instances) {
         if (!inst.connected) continue
         try {
-          await syncInstance(inst)
+          await runGuarded(inst)
         } catch (err) {
           console.error(
             `[mailbox-sync] instance ${inst.id} failed:`,
@@ -698,6 +747,27 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       }
     } finally {
       running = false
+    }
+  }
+
+  async function syncInstanceById(instanceId: string): Promise<MailboxSyncSummary> {
+    let inst: ConnectorInstance | undefined
+    try {
+      // No targeted system get-by-id on the store; imap instance volume is
+      // modest and both callers (connect, on-demand tool) are low-frequency.
+      const all = await deps.connectorInstanceStore.listByProviderSystem('imap')
+      inst = all.find((i) => i.id === instanceId)
+    } catch (err) {
+      return { synced: false, newMessages: 0, reason: 'error', error: err instanceof Error ? err.message : String(err) }
+    }
+    if (!inst) return { synced: false, newMessages: 0, reason: 'not_found' }
+    if (!inst.connected) return { synced: false, newMessages: 0, reason: 'disconnected' }
+    try {
+      const r = await runGuarded(inst)
+      if (r === 'skipped') return { synced: false, newMessages: 0, reason: 'in_progress' }
+      return { synced: true, newMessages: r.newMessages }
+    } catch (err) {
+      return { synced: false, newMessages: 0, reason: 'error', error: err instanceof Error ? err.message : String(err) }
     }
   }
 
@@ -716,5 +786,6 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       return timer !== null
     },
     tick,
+    syncInstanceById,
   }
 }

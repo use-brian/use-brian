@@ -40,7 +40,8 @@
  * Over cap → skip cycle + log `skill_review_rate_capped`.
  *
  * Tick cadence mirrors the consolidation worker (15 min default). Gated
- * on `SKILLS_AUTO_GEN_ENABLED=true` at boot — the worker still
+ * on the `SKILLS_AUTO_GEN_ENABLED` flag at boot (default ON since
+ * 2026-07-23; an explicit `false` opts a deploy out) — the worker still
  * constructs but `start()` only schedules the timer when the flag is
  * set. Single-instance assumption; no advisory lock.
  *
@@ -48,7 +49,7 @@
  */
 
 import { query } from '../db/client.js'
-import { sanitize, type AnalyticsStore } from '@use-brian/core'
+import { sanitize, matchSkillAgainstWorkflows, type AnalyticsStore } from '@use-brian/core'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import type {
   WorkspaceSkillFilesStore,
@@ -101,6 +102,7 @@ export type SkillReviewEvent =
   | { type: 'session_skipped'; sessionId: string; reason: string }
   | { type: 'lease_skipped'; skillId: string; sessionId: string }
   | { type: 'action_deduped'; sessionId: string; approvalId: string }
+  | { type: 'action_subsumed'; sessionId: string; workflowId: string; candidateName: string }
   | { type: 'action_failed'; sessionId: string; reason: string; recoverable: boolean }
   | { type: 'cycle_failed'; sessionId: string; reason: string }
   | { type: 'tick_complete'; reviewed: number; skipped: number; failed: number }
@@ -143,6 +145,16 @@ export type SkillReviewLLM = {
     transcriptExcerpt: string
     loadedSkills: Array<{ id: string; name: string; description: string; content: string }>
     priorErrors: string[]
+    /**
+     * Session origin (origin-aware induction). `'workflow'` flips the
+     * reviewer objective from pattern-distilling to deviation/improvement
+     * detection — the workflow definition already IS the pattern. Absent →
+     * `'interactive'` (the historical behavior, unchanged).
+     */
+    origin?: SessionOrigin
+    /** The source workflow of a workflow-origin session, when resolvable —
+     *  gives the reviewer the definition to diff the run against. */
+    sourceWorkflow?: SourceWorkflowForReview | null
   }): Promise<SkillReviewActionPlan>
 }
 
@@ -176,12 +188,53 @@ export type SkillReviewAction =
         }>
       }
     }
+  | {
+      /** Workflow-origin cycles only — propose a patch to the source
+       *  workflow's step instead of minting a mirror skill. Staged as a
+       *  `workflow_refinement` approval; never applied directly. */
+      action: 'propose_workflow_refinement'
+      stepId: string
+      patch: { prompt: string }
+      rationale: string
+    }
 
 export type SkillReviewActionPlan = {
   actions: SkillReviewAction[]
 }
 
 // ── Session candidate selection ───────────────────────────────────
+
+export type SessionOrigin = 'interactive' | 'workflow'
+
+/** The source workflow of a workflow-origin session, as the reviewer sees it. */
+export type SourceWorkflowForReview = {
+  id: string
+  name: string
+  description: string | null
+  steps: Array<{ id: string; kind: string; prompt: string | null }>
+}
+
+/**
+ * Read port over the workflow store (origin-aware induction). Optional on
+ * the worker deps — absent (tests, minimal boots), workflow-origin sessions
+ * still get the deviation-detection objective but with no definition
+ * context, no refinement staging, and no subsumption corpus.
+ */
+export type SkillReviewWorkflowPort = {
+  /** RLS-scoped read of one workflow; must return null when the row is not
+   *  in `workspaceId`. */
+  getWorkflowForReview(
+    userId: string,
+    workspaceId: string,
+    workflowId: string,
+  ): Promise<SourceWorkflowForReview | null>
+  /** Active (non-archived) workflows in the workspace — the subsumption
+   *  corpus for the novelty gate. */
+  listActiveWorkflows(
+    userId: string,
+    workspaceId: string,
+  ): Promise<Array<{ id: string; name: string }>>
+}
 
 type SessionCandidate = {
   sessionId: string
@@ -190,6 +243,56 @@ type SessionCandidate = {
   userId: string
   currentTurnCount: number
   lastReviewedTurn: number | null
+  origin: SessionOrigin
+  /** Parsed from the session channel id when the origin encoding carries it
+   *  (`workflow:<id>:<stepId>` / `workflow-run:<id>:<ts>`). Null for legacy
+   *  cron sessions and interactive sessions. */
+  sourceWorkflowId: string | null
+  /** The step of a persistent workflow session (`workflow:<id>:<stepId>`). */
+  sourceWorkflowStepId: string | null
+}
+
+const UUID_RE = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+const PERSISTENT_WORKFLOW_CHANNEL_RE = new RegExp(`^workflow:(${UUID_RE}):(.+)$`)
+const PER_RUN_WORKFLOW_CHANNEL_RE = new RegExp(`^workflow-run:(${UUID_RE}):`)
+
+/**
+ * Classify a session's origin from its channel row (origin-aware induction,
+ * `docs/architecture/engine/skill-system.md` → "Origin-aware induction").
+ *
+ * Workflow-origin encodings, all produced by the execution stack:
+ *   - `channel_type` `'workflow'` / `'cron'` — legacy pre-unification
+ *     execution sessions (no workflow id recoverable).
+ *   - `'assistant-call'` + `channel_id = workflow:<workflowId>:<stepId>` —
+ *     a `session: 'persistent'` workflow step (the sessionKey).
+ *   - `'assistant-call'` + `channel_id = workflow-run:<workflowId>:<ts>` —
+ *     a per-run workflow consult (stamped by the callee executor).
+ *
+ * Everything else — including plain `assistant-call` consults, which are
+ * legs of an attended flow — is interactive.
+ */
+export function classifySessionOrigin(
+  channelType: string | null,
+  channelId: string | null,
+): Pick<SessionCandidate, 'origin' | 'sourceWorkflowId' | 'sourceWorkflowStepId'> {
+  if (channelType === 'workflow' || channelType === 'cron') {
+    return { origin: 'workflow', sourceWorkflowId: null, sourceWorkflowStepId: null }
+  }
+  if (channelType === 'assistant-call' && channelId) {
+    const persistent = PERSISTENT_WORKFLOW_CHANNEL_RE.exec(channelId)
+    if (persistent) {
+      return {
+        origin: 'workflow',
+        sourceWorkflowId: persistent[1],
+        sourceWorkflowStepId: persistent[2],
+      }
+    }
+    const perRun = PER_RUN_WORKFLOW_CHANNEL_RE.exec(channelId)
+    if (perRun) {
+      return { origin: 'workflow', sourceWorkflowId: perRun[1], sourceWorkflowStepId: null }
+    }
+  }
+  return { origin: 'interactive', sourceWorkflowId: null, sourceWorkflowStepId: null }
 }
 
 /**
@@ -216,12 +319,15 @@ export async function selectCandidateSessions(
     workspace_id: string
     assistant_id: string
     user_id: string
+    channel_type: string | null
+    channel_id: string | null
     current_turn_count: string
     last_skill_reviewed_turn: string | null
   }>(
     `WITH active AS (
        SELECT s.id, COALESCE(s.workspace_id, a.workspace_id) AS workspace_id,
               s.assistant_id, s.user_id,
+              s.channel_type, s.channel_id,
               s.last_skill_reviewed_turn, s.last_active_at,
               (SELECT COUNT(*) FROM session_messages m
                 WHERE m.session_id = s.id
@@ -235,6 +341,8 @@ export async function selectCandidateSessions(
             workspace_id,
             assistant_id,
             user_id,
+            channel_type,
+            channel_id,
             turn_count   AS current_turn_count,
             last_skill_reviewed_turn
      FROM active
@@ -251,6 +359,7 @@ export async function selectCandidateSessions(
     userId: r.user_id,
     currentTurnCount: parseInt(r.current_turn_count, 10),
     lastReviewedTurn: r.last_skill_reviewed_turn === null ? null : parseInt(r.last_skill_reviewed_turn, 10),
+    ...classifySessionOrigin(r.channel_type, r.channel_id),
   }))
 }
 
@@ -337,6 +446,10 @@ export type SkillReviewWorkerOptions = {
   approvalsStore: PendingApprovalsStore
   analyticsStore: AnalyticsStore
   reviewLLM: SkillReviewLLM
+  /** Optional workflow read port (origin-aware induction). Absent →
+   *  workflow-origin sessions run without definition context, refinement
+   *  staging, or the subsumption gate. */
+  workflowPort?: SkillReviewWorkflowPort
   /** Lease holder UUID for this worker instance — same value across cycles
    *  so the holder identity is stable in the DB. */
   leaseHolderId: string
@@ -393,6 +506,7 @@ export function createSkillReviewWorker(
           approvalsStore: options.approvalsStore,
           analyticsStore: options.analyticsStore,
           reviewLLM: options.reviewLLM,
+          workflowPort: options.workflowPort,
           leaseHolderId: options.leaseHolderId,
           leaseMinutes,
           dailyOpCap,
@@ -475,6 +589,7 @@ export type ReviewSessionDeps = {
   approvalsStore: PendingApprovalsStore
   analyticsStore: AnalyticsStore
   reviewLLM: SkillReviewLLM
+  workflowPort?: SkillReviewWorkflowPort
   leaseHolderId: string
   leaseMinutes: number
   dailyOpCap: number
@@ -541,6 +656,37 @@ export async function reviewSession(
   // (`acquireReviewLease` keys on `id` alone). `create_umbrella` has no target.
   const knownSkillIds = new Set(loadedSkills.map((s) => s.id))
 
+  // ── Workflow-origin context (origin-aware induction) ──
+  // Resolve the source workflow definition + the active-workflow corpus for
+  // the subsumption gate. Fail-open: a port read that throws degrades to
+  // "no context" — the deviation objective still applies, the gate simply
+  // has no corpus (the human queue remains the backstop).
+  let sourceWorkflow: SourceWorkflowForReview | null = null
+  let workflowCorpus: Array<{ id: string; name: string }> = []
+  if (candidate.origin === 'workflow' && deps.workflowPort) {
+    try {
+      if (candidate.sourceWorkflowId) {
+        sourceWorkflow = await deps.workflowPort.getWorkflowForReview(
+          candidate.userId,
+          candidate.workspaceId,
+          candidate.sourceWorkflowId,
+        )
+      }
+      workflowCorpus = await deps.workflowPort.listActiveWorkflows(
+        candidate.userId,
+        candidate.workspaceId,
+      )
+    } catch (err) {
+      console.warn(
+        `[skill-review] workflow context read failed for session ${candidate.sessionId}:`,
+        err,
+      )
+    }
+    if (sourceWorkflow && !workflowCorpus.some((w) => w.id === sourceWorkflow!.id)) {
+      workflowCorpus.push({ id: sourceWorkflow.id, name: sourceWorkflow.name })
+    }
+  }
+
   // ── Plan via the LLM (with at most one corrective retry) ──
   let plan: SkillReviewActionPlan
   try {
@@ -552,6 +698,8 @@ export async function reviewSession(
       transcriptExcerpt,
       loadedSkills,
       priorErrors: [],
+      origin: candidate.origin,
+      sourceWorkflow,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
@@ -611,8 +759,25 @@ export async function reviewSession(
   const heldSet = new Set(heldLeases)
   const executableActions = plan.actions.filter((a) => {
     if (a.action === 'create_umbrella') return true // No existing target.
+    if (a.action === 'propose_workflow_refinement') return true // No skill target.
     return heldSet.has(a.skillId)
   })
+
+  // Origin-aware induction: the attach offer + provenance stamped onto any
+  // create_umbrella staged from this workflow-origin cycle.
+  const stagingContext =
+    candidate.origin === 'workflow' && candidate.sourceWorkflowId
+      ? {
+          origin: 'workflow-session',
+          sourceWorkflowIds: [candidate.sourceWorkflowId],
+          attachTo: {
+            workflowId: candidate.sourceWorkflowId,
+            ...(candidate.sourceWorkflowStepId
+              ? { stepId: candidate.sourceWorkflowStepId }
+              : {}),
+          },
+        }
+      : undefined
 
   // ── Apply actions; collect outcome counts ──
   let succeeded = 0
@@ -639,6 +804,99 @@ export async function reviewSession(
         break
       }
 
+      // ── Workflow-refinement staging (origin-aware induction) ──
+      // Handled worker-side, not via skill_manage: the target is a workflow
+      // definition, not a skill row. Dedupe mirrors the staged_skill_* gate.
+      if (action.action === 'propose_workflow_refinement') {
+        try {
+          const outcome = await stageWorkflowRefinement(action, candidate, sourceWorkflow, deps)
+          if (outcome.kind === 'deduped') {
+            deps.onEvent?.({
+              type: 'action_deduped',
+              sessionId: candidate.sessionId,
+              approvalId: outcome.approvalId,
+            })
+            await deps.analyticsStore.record({
+              userId: candidate.userId,
+              assistantId: candidate.assistantId,
+              sessionId: candidate.sessionId,
+              eventName: 'skill_review_action_deduped',
+              metadata: {
+                workspace_id: sanitize(candidate.workspaceId),
+                action: sanitize(action.action),
+                approval_id: sanitize(outcome.approvalId),
+              },
+            })
+            continue
+          }
+          succeeded += 1
+          opsThisCycle += 1
+          await deps.analyticsStore.record({
+            userId: candidate.userId,
+            assistantId: candidate.assistantId,
+            sessionId: candidate.sessionId,
+            eventName: 'skill_review_action_succeeded',
+            metadata: {
+              workspace_id: sanitize(candidate.workspaceId),
+              action: sanitize(action.action),
+              workflow_id: sanitize(outcome.workflowId),
+            },
+          })
+        } catch (err) {
+          actionFailures += 1
+          const message = err instanceof Error ? err.message : String(err)
+          deps.onEvent?.({
+            type: 'action_failed',
+            sessionId: candidate.sessionId,
+            reason: message,
+            recoverable: true,
+          })
+          await deps.analyticsStore.record({
+            userId: candidate.userId,
+            assistantId: candidate.assistantId,
+            sessionId: candidate.sessionId,
+            eventName: 'skill_review_action_failed',
+            metadata: {
+              workspace_id: sanitize(candidate.workspaceId),
+              action: sanitize(action.action),
+              reason: sanitize(message),
+            },
+          })
+        }
+        continue
+      }
+
+      // ── Subsumption gate (origin-aware induction, the novelty gate) ──
+      // A workflow-origin create whose name mirrors an active workflow is
+      // the definition echoed back as prose — suppress it before staging.
+      // Not an op (no cap spend), not a failure; logged under its own event.
+      if (action.action === 'create_umbrella' && candidate.origin === 'workflow') {
+        const subsumedBy = matchSkillAgainstWorkflows(
+          { name: action.umbrella.name },
+          workflowCorpus,
+        )
+        if (subsumedBy) {
+          deps.onEvent?.({
+            type: 'action_subsumed',
+            sessionId: candidate.sessionId,
+            workflowId: subsumedBy.id,
+            candidateName: action.umbrella.name,
+          })
+          await deps.analyticsStore.record({
+            userId: candidate.userId,
+            assistantId: candidate.assistantId,
+            sessionId: candidate.sessionId,
+            eventName: 'skill_review_subsumed_by_workflow',
+            metadata: {
+              workspace_id: sanitize(candidate.workspaceId),
+              workflow_id: sanitize(subsumedBy.id),
+              candidate_name: sanitize(action.umbrella.name),
+            },
+          })
+          continue
+        }
+      }
+
       try {
         const applied = await applyAction(action, {
           workspaceId: candidate.workspaceId,
@@ -648,6 +906,7 @@ export async function reviewSession(
           workspaceSkillStore: deps.workspaceSkillStore,
           fileStore: deps.fileStore,
           approvalsStore: deps.approvalsStore,
+          stagingContext,
         })
         if (applied.actionTaken === 'skipped_pending_approval') {
           // Dedupe: an equivalent proposal is already awaiting a human
@@ -730,6 +989,57 @@ export async function reviewSession(
   }
 }
 
+// ── Workflow-refinement staging ───────────────────────────────────
+
+type RefinementOutcome =
+  | { kind: 'staged'; approvalId: string; workflowId: string }
+  | { kind: 'deduped'; approvalId: string }
+
+/**
+ * Stage a `workflow_refinement` approval for a workflow-origin cycle.
+ * Requires the resolved source workflow (the step must exist in its
+ * definition — a hallucinated stepId fails here, before any row is
+ * written). Throws on invalid context; the caller logs it as a failed
+ * action and continues the cycle.
+ */
+async function stageWorkflowRefinement(
+  action: Extract<SkillReviewAction, { action: 'propose_workflow_refinement' }>,
+  candidate: SessionCandidate,
+  sourceWorkflow: SourceWorkflowForReview | null,
+  deps: ReviewSessionDeps,
+): Promise<RefinementOutcome> {
+  if (candidate.origin !== 'workflow' || !candidate.sourceWorkflowId) {
+    throw new Error('propose_workflow_refinement: session is not workflow-origin')
+  }
+  if (!sourceWorkflow) {
+    throw new Error('propose_workflow_refinement: source workflow unresolved')
+  }
+  if (!sourceWorkflow.steps.some((s) => s.id === action.stepId)) {
+    throw new Error(
+      `propose_workflow_refinement: step '${action.stepId}' not in workflow ${sourceWorkflow.id}`,
+    )
+  }
+
+  const pending = await deps.approvalsStore.findPendingWorkflowRefinement(
+    candidate.workspaceId,
+    sourceWorkflow.id,
+    action.stepId,
+  )
+  if (pending) return { kind: 'deduped', approvalId: pending.id }
+
+  const row = await deps.approvalsStore.createWorkflowRefinement({
+    workspaceId: candidate.workspaceId,
+    workflowId: sourceWorkflow.id,
+    stepId: action.stepId,
+    proposedPatch: action.patch,
+    rationale: action.rationale,
+    approverUserId: candidate.userId,
+    originatingAssistantId: candidate.assistantId,
+    sourceSessionId: candidate.sessionId,
+  })
+  return { kind: 'staged', approvalId: row.id, workflowId: sourceWorkflow.id }
+}
+
 // ── Action dispatch ───────────────────────────────────────────────
 
 type ApplyActionDeps = {
@@ -740,6 +1050,12 @@ type ApplyActionDeps = {
   workspaceSkillStore: WorkspaceSkillStore
   fileStore: WorkspaceSkillFilesStore
   approvalsStore: PendingApprovalsStore
+  /** Origin-aware induction passthrough for create_umbrella staging. */
+  stagingContext?: {
+    origin?: string
+    sourceWorkflowIds?: string[]
+    attachTo?: { workflowId: string; stepId?: string }
+  }
 }
 
 async function applyAction(
@@ -760,6 +1076,7 @@ async function applyAction(
     originatingAssistantId: deps.originatingAssistantId,
     leaseHolderId: deps.leaseHolderId,
     systemActorUserId: deps.systemActorUserId,
+    stagingContext: deps.stagingContext,
     workspaceSkillStore: skillStorePort(deps.workspaceSkillStore),
     fileStore: fileStorePort(deps.fileStore, deps.systemActorUserId),
     approvalsStore: approvalsPort(deps.approvalsStore, deps.systemActorUserId),
@@ -917,12 +1234,18 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
         supportFiles?: Array<{ kind: SkillFileKind; name: string; content: string; description?: string }>
       }
       originatingAssistantId: string | null
+      origin?: string
+      sourceWorkflowIds?: string[]
+      attachTo?: { workflowId: string; stepId?: string }
     }) {
       const row = await approvals.createStagedSkillCreation({
         workspaceId: params.workspaceId,
         proposedUmbrella: params.proposedUmbrella,
         approverUserId,
         originatingAssistantId: params.originatingAssistantId,
+        origin: params.origin,
+        sourceWorkflowIds: params.sourceWorkflowIds,
+        attachTo: params.attachTo,
       })
       return { approvalId: row.id }
     },
@@ -962,7 +1285,7 @@ function enablementPortStub() {
 function collectTargetSkillIds(plan: SkillReviewActionPlan): string[] {
   const ids: string[] = []
   for (const action of plan.actions) {
-    if (action.action !== 'create_umbrella') {
+    if (action.action !== 'create_umbrella' && action.action !== 'propose_workflow_refinement') {
       ids.push(action.skillId)
     }
   }

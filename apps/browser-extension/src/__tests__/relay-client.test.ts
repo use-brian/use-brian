@@ -15,9 +15,9 @@ function fakeWsFactory(): { sockets: FakeWs[]; connect: (url: string) => WebSock
         send(data: string) {
           ws.sentFrames.push(data)
         },
-        close() {
+        close(code?: number) {
           ws.readyState = 3
-          ws.onclose?.()
+          ws.onclose?.(code == null ? undefined : { code })
         },
         onopen: null,
         onmessage: null,
@@ -38,12 +38,15 @@ function timers(): {
   fire: (ms: number) => void
   /** Move the clock forward, firing everything that comes due (re-arming chains included). */
   advance: (ms: number) => void
-  scheduled: Array<{ fn: () => void; ms: number }>
+  /** The same clock the timers run on, so connection lifetimes are drivable. */
+  now: () => number
+  scheduled: Scheduled[]
 } {
   const scheduled: Scheduled[] = []
   let nowMs = 0
   return {
     scheduled,
+    now: () => nowMs,
     advance: (delta) => {
       const target = nowMs + delta
       // Self-rearming chains (schedulePing) enqueue while we drain, so keep
@@ -192,6 +195,131 @@ describe('[COMP:ext/agent] Relay client (P1.2 connection lifecycle)', () => {
       .slice(beforeIdle)
       .filter((f) => JSON.parse(f).type === 'ping')
     expect(pings.length).toBeGreaterThan(0)
+  })
+
+  it('does NOT reconnect after the relay replaces this connection (kills the eviction storm)', async () => {
+    // The relay keeps ONE connection per user and closes the previous socket
+    // with 4000 "replaced". Reconnecting into that is a mutual-eviction loop:
+    // A connects, evicts B, B reconnects, evicts A, forever. `attempts` resets
+    // to 0 on every `ready`, so the backoff never escalates and both clients
+    // hammer at the first step. Prod on 2026-07-22 logged 110 upgrades in nine
+    // minutes at a mean hold of 5.0s, while the assistant saw `no_extension`.
+    //
+    // "Replaced" is not an error — another client legitimately owns the
+    // pairing now. Racing back in is exactly wrong.
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      onSessionToken: async () => {},
+      onCommand: () => {},
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+    })
+    client.start()
+    await flush()
+    const ws = sockets[0]
+    ws.readyState = 1
+    ws.onopen?.()
+    ws.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    expect(client.getState()).toBe('ready')
+
+    ws.close(4000) // the relay handed this user's slot to another client
+    await flush()
+
+    // Drive well past every backoff step: nothing may dial again.
+    t.advance(120_000)
+    await flush()
+    expect(sockets).toHaveLength(1)
+    expect(client.getState()).toBe('replaced')
+  })
+
+  it('escalates backoff when connections keep dying young, so a flap cannot become a flood', async () => {
+    // `attempts` reset on every `ready`, so a connection that reached ready and
+    // died seconds later always retried at the FIRST backoff step. In the
+    // eviction storm every connection did reach ready — for about five seconds
+    // — which is exactly why the schedule never advanced and prod logged 110
+    // upgrades in nine minutes. Treating the replaced close as terminal fixes
+    // that trigger; this fixes the general shape, so the next close reason that
+    // recurs immediately cannot flood the relay the same way.
+    //
+    // A backoff that resets on success is right everywhere EXCEPT when the
+    // success itself is what keeps recurring. Only a connection that stayed up
+    // is evidence the trouble passed.
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      onSessionToken: async () => {},
+      onCommand: () => {},
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+      now: t.now,
+    })
+    client.start()
+    await flush()
+
+    const delays: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const ws = sockets.at(-1) as FakeWs
+      ws.readyState = 1
+      ws.onopen?.()
+      ws.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      t.advance(3_000) // up for three seconds, then dropped — a flap
+      ws.close()
+      const pending = t.scheduled.filter(
+        (e) => (BACKOFF_STEPS_MS as readonly number[]).includes(e.ms) && !e.fired && !e.cleared,
+      )
+      delays.push(pending.at(-1)?.ms as number)
+      t.advance(pending.at(-1)?.ms as number)
+      await flush()
+    }
+
+    // Strictly increasing until the schedule tops out — never a flat 1s wall.
+    expect(delays).toEqual([...BACKOFF_STEPS_MS].slice(0, 4))
+  })
+
+  it('resets backoff once a connection proves stable', async () => {
+    const { sockets, connect } = fakeWsFactory()
+    const t = timers()
+    const client = new RelayClient({
+      getUrl: async () => 'wss://relay.test/ext',
+      connect,
+      getToken: async () => 'tok',
+      onSessionToken: async () => {},
+      onCommand: () => {},
+      setTimer: t.setTimer,
+      clearTimer: t.clearTimer,
+      now: t.now,
+    })
+    client.start()
+    await flush()
+
+    const first = sockets[0]
+    first.readyState = 1
+    first.onopen?.()
+    first.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    t.advance(2_000)
+    first.close() // flap → escalates off step 0
+    t.advance(BACKOFF_STEPS_MS[0])
+    await flush()
+
+    const second = sockets[1]
+    second.readyState = 1
+    second.onopen?.()
+    second.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    t.advance(10 * 60_000) // a long, healthy session
+    second.close()
+
+    const pending = t.scheduled.filter(
+      (e) => (BACKOFF_STEPS_MS as readonly number[]).includes(e.ms) && !e.fired && !e.cleared,
+    )
+    // Back to the fastest step: the earlier trouble is not held against it.
+    expect(pending.at(-1)?.ms).toBe(BACKOFF_STEPS_MS[0])
   })
 
   it('goes unpaired (no auto-retry) when the relay rejects the hello', async () => {

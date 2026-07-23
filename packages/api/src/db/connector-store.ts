@@ -109,6 +109,7 @@ export type ConnectorCredentials =
       /** Path-style addressing (bucket in the URL path). Defaults on for custom endpoints. */
       forcePathStyle?: boolean
     }
+  | { type: 'local'; path: string }
   | { type: 'none' }
 
 /** Normalize a decrypted credentials blob into the typed union. */
@@ -183,6 +184,8 @@ export function normalizeStoredCredentials(raw: unknown): ConnectorCredentials |
     }
     case 'none':
       return { type: 'none' }
+    case 'local':
+      return typeof obj.path === 'string' ? { type: 'local', path: obj.path } : null
     case 'oauth':
     case undefined:
       // Legacy blobs predate the discriminator — every stored pair is OAuth-shaped.

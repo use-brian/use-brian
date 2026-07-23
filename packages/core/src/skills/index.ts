@@ -52,10 +52,15 @@ export {
 export type { SkillActivationInputs, SkillInductionSource } from './governance.js'
 export {
   matchInducedSkill,
+  matchSkillAgainstWorkflows,
   SKILL_REDERIVATION_NAME_THRESHOLD,
   SKILL_REDERIVATION_TRIGGER_THRESHOLD,
 } from './rederivation-match.js'
-export type { InducedSkillCandidate, ExistingSkillForMatch } from './rederivation-match.js'
+export type {
+  InducedSkillCandidate,
+  ExistingSkillForMatch,
+  WorkflowForSkillMatch,
+} from './rederivation-match.js'
 export { createSkillManageTool } from './manage-tool.js'
 export type {
   SkillManageDeps,

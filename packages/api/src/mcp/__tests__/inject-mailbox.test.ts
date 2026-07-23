@@ -116,6 +116,63 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     expect(unavailable.join('\n')).toMatch(/Company email \(IMAP\)/)
   })
 
+  it('multi-account: several mailboxes surface ONE tool set, and `account` routes the send to the right sender', async () => {
+    const primary = imapConnectorRow()  // inst-imap-1, maya@…, createdAt 07-01 → primary
+    const second = {
+      ...imapConnectorRow(),
+      id: 'inst-imap-2',
+      name: 'ops@harborlane.example',
+      createdAt: new Date('2026-07-05T00:00:00Z'),
+    }
+    const credsById: Record<string, typeof IMAP_CREDS> = {
+      'inst-imap-1': IMAP_CREDS,
+      'inst-imap-2': { ...IMAP_CREDS, email: 'ops@harborlane.example' },
+    }
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async (id: string) => credsById[id]),
+      getCredentialsSystem: vi.fn(async () => null),
+    } as unknown as ConnectorInstanceStore
+
+    // Deny preflight short-circuits the send before any IMAP/SMTP call — we only
+    // assert the audited `from`, which the injector sets from the RESOLVED account.
+    const emit = vi.fn(async () => ({ status: 'denied' as const }))
+    const audit = {
+      preflight: vi.fn(() => preflightResult({ shouldDeny: true, classifierMatches: ['x'] })),
+      emit,
+    } as unknown as ConnectorActionAudit
+
+    const tools = new Map<string, Tool>()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([primary, second]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: instanceStore,
+      keepBuiltinsDirect: true,
+      connectorActionAudit: audit,
+    })
+
+    // ONE set of tools (same names), not a namespaced set per mailbox.
+    expect([...tools.keys()].filter((k) => k.startsWith('imap'))).toEqual(
+      expect.arrayContaining(['imapSearchMessages', 'imapGetMessage', 'imapSendMessage']),
+    )
+    expect(tools.size).toBeGreaterThan(0)
+    const send = tools.get('imapSendMessage')!
+
+    // Named non-primary account → audited from = that mailbox.
+    await send.execute({ to: 'x@y.z', subject: 's', body: 'b', account: 'ops@harborlane.example' }, {} as never)
+    expect(emit).toHaveBeenLastCalledWith(
+      { userId: 'u-1', assistantId: 'a-1' },
+      expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'ops@harborlane.example' }) }),
+    )
+
+    // Omitted account → audited from = the primary (first-connected) mailbox.
+    await send.execute({ to: 'x@y.z', subject: 's', body: 'b' }, {} as never)
+    expect(emit).toHaveBeenLastCalledWith(
+      { userId: 'u-1', assistantId: 'a-1' },
+      expect.objectContaining({ status: 'denied', payload: expect.objectContaining({ from: 'maya@harborlane.example' }) }),
+    )
+  })
+
   it('classifier preflight deny short-circuits the send BEFORE any network call and audits status=denied', async () => {
     const emit = vi.fn(async () => ({ status: 'denied' as const }))
     const audit = {

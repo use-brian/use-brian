@@ -56,3 +56,56 @@ export function matchInducedSkill(
   }
   return best
 }
+
+// ── Workflow-subsumption gate (origin-aware induction) ───────────────
+
+export type WorkflowForSkillMatch = { id: string; name: string }
+
+/** Containment only counts when the shorter normalized name is at least this
+ *  long — "sync" ⊂ "daily sync report" must not trigger subsumption. */
+const SUBSUMPTION_CONTAINMENT_MIN_LENGTH = 8
+
+/**
+ * The novelty gate for skill candidates induced from a workflow-origin
+ * session (`docs/architecture/engine/skill-system.md` → "Origin-aware
+ * induction"). A candidate whose name mirrors an ACTIVE workflow is not new
+ * knowledge — the workflow definition already encodes the procedure — so the
+ * curator must not stage it. Match rules, in order:
+ *
+ *   1. High name similarity (jaroWinkler ≥ threshold) against a workflow name.
+ *   2. Containment: one normalized name contains the other and the shorter is
+ *      ≥ SUBSUMPTION_CONTAINMENT_MIN_LENGTH chars — catches the canonical
+ *      "<workflow name> workflow"-shaped mirror where token-level similarity
+ *      dips below the strict threshold.
+ *
+ * Like `matchInducedSkill` this stays name-based and strict: a false negative
+ * only lets a redundant card reach the (human-gated) queue, while a false
+ * positive would silently discard a genuinely novel technique.
+ */
+export function matchSkillAgainstWorkflows(
+  candidate: { name: string },
+  workflows: readonly WorkflowForSkillMatch[],
+): WorkflowForSkillMatch | null {
+  const candName = normalizeName(candidate.name)
+  if (!candName) return null
+  let best: WorkflowForSkillMatch | null = null
+  // Same similarity bar as skill↔skill re-derivation — the mirror case
+  // ("Daily team standup workflow" from the "Daily team standup" workflow's
+  // own session) clears via containment even when the score alone would not.
+  let bestScore = SKILL_REDERIVATION_NAME_THRESHOLD
+  for (const w of workflows) {
+    const wfName = normalizeName(w.name)
+    if (!wfName) continue
+    const shorter = candName.length <= wfName.length ? candName : wfName
+    const longer = candName.length <= wfName.length ? wfName : candName
+    if (shorter.length >= SUBSUMPTION_CONTAINMENT_MIN_LENGTH && longer.includes(shorter)) {
+      return w
+    }
+    const score = jaroWinkler(candName, wfName)
+    if (score >= bestScore) {
+      best = w
+      bestScore = score
+    }
+  }
+  return best
+}

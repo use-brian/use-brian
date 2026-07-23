@@ -219,4 +219,56 @@ describe("[COMP:app-web/chat-confirmation-card] ChatConfirmationCard", () => {
     expect(inFlight.every((b) => b.disabled)).toBe(true);
     expect(inFlight.some((b) => b.textContent === "Approving")).toBe(true);
   });
+
+  it("reveals a note composer and denies with the trimmed comment", () => {
+    const onDeny = vi.fn();
+    renderCard(confirmation(), { onDeny });
+
+    // The default card is two buttons; the composer is behind the 3rd option.
+    const openComposer = Array.from(host!.querySelectorAll("button")).find(
+      (b) => b.textContent === "Deny with comment",
+    )!;
+    expect(openComposer).toBeTruthy();
+    expect(host!.querySelector("textarea")).toBeNull();
+    act(() => openComposer.click());
+
+    const textarea = host!.querySelector("textarea")!;
+    expect(textarea).toBeTruthy();
+    const setValue = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      "value",
+    )!.set!;
+    act(() => {
+      setValue.call(textarea, "  don't ask for an app password  ");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const send = Array.from(host!.querySelectorAll("button")).find(
+      (b) => b.textContent === "Send denial",
+    )!;
+    act(() => send.click());
+
+    // The note reaches onDeny trimmed, alongside the toolCallId.
+    expect(onDeny).toHaveBeenCalledWith(
+      "call-1",
+      "don't ask for an app password",
+    );
+  });
+
+  it("submits a plain deny (no comment arg) when the composer is left blank", () => {
+    const onDeny = vi.fn();
+    renderCard(confirmation(), { onDeny });
+    act(() =>
+      Array.from(host!.querySelectorAll("button"))
+        .find((b) => b.textContent === "Deny with comment")!
+        .click(),
+    );
+    act(() =>
+      Array.from(host!.querySelectorAll("button"))
+        .find((b) => b.textContent === "Send denial")!
+        .click(),
+    );
+    // Blank note → plain deny with the toolCallId only.
+    expect(onDeny).toHaveBeenCalledWith("call-1", undefined);
+  });
 });

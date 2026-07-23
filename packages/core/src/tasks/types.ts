@@ -14,7 +14,7 @@
 
 import type { AccessContext } from '../security/access-context.js'
 
-export const TASK_STATUSES = ['todo', 'in_progress', 'blocked', 'done', 'archived'] as const
+export const TASK_STATUSES = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'] as const
 export type TaskRecordStatus = (typeof TASK_STATUSES)[number]
 
 /**
@@ -174,4 +174,20 @@ export type TaskStore = {
     fields: TaskUpdateFields,
     opts?: { writtenBy?: TaskWriteActor },
   ): Promise<TaskRecord | null>
+
+  /**
+   * System-level lookup (no RLS / `AccessContext`) of live, non-archived tasks
+   * whose `external_ref` jsonb CONTAINS `match` (Postgres `@>`). Used by the
+   * GitHub task lifecycle in ingest to resolve which task an issue/PR event
+   * refers to — the caller (the ingest processor) is already authorized for the
+   * workspace. Returns full records (with `externalRef`); empty when none match.
+   *
+   * Optional: only the DB-backed store (`createDbTaskStore`) provides it, and
+   * only the ingest GitHub lifecycle consumes it (guarding on presence). Test
+   * mocks and non-ingest stores may omit it.
+   */
+  findByExternalRefSystem?(
+    workspaceId: string,
+    match: TaskExternalRef,
+  ): Promise<TaskRecord[]>
 }

@@ -76,10 +76,14 @@ export type FilesClientResolver = {
  * workspace. Used directly in open core / OSS and as the fallback the BYO
  * resolver delegates to when a workspace has no binding.
  */
-export function createSingletonFilesClientResolver(gcs: GcsFilesClient, bucket: string): FilesClientResolver {
+export function createSingletonFilesClientResolver(
+  gcs: GcsFilesClient,
+  bucket: string,
+  uriScheme?: StorageUriScheme,
+): FilesClientResolver {
   return {
     async forWorkspace() {
-      return { gcs, bucket, byo: false }
+      return { gcs, bucket, ...(uriScheme ? { uriScheme } : {}), byo: false }
     },
     async forUri(_workspaceId: string, _storageUri: string) {
       return gcs

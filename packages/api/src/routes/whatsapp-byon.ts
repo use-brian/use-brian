@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
 import type { ChannelIntegrationStore } from '../db/channel-integrations.js'
@@ -6,6 +6,9 @@ import type { WhatsappIngestor } from '../ingest/whatsapp-ingest.js'
 import type { WhatsappBot } from './whatsapp-bot-handler.js'
 import { buildWhatsappListenerHandler } from './whatsapp-listener-handler.js'
 import { runHandlers, selectHandlers } from './whatsapp-dispatcher.js'
+import { getChannelForWebhook } from '../db/channels-store.js'
+import type { FilesClientResolver } from '../files/files-api.js'
+import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
 
 const inboundSchema = z.object({
   channelId: z.string().min(1),
@@ -31,6 +34,8 @@ export type WhatsappByonRoutesOptions = {
   integrationStore: ChannelIntegrationStore
   ingestor: WhatsappIngestor
   bot: WhatsappBot
+  filesResolver?: FilesClientResolver
+  getChannel?: typeof getChannelForWebhook
   /** Let a later closed router handle the shared official number. */
   passUnknownToFallback?: boolean
 }
@@ -41,6 +46,43 @@ export type WhatsappByonRoutesOptions = {
  */
 export function whatsappByonRoutes(opts: WhatsappByonRoutesOptions): Router {
   const router = Router()
+
+  router.post('/media-upload-url', async (req, res, next) => {
+    if (!secretMatches(req.headers['x-connector-secret'], opts.connectorSecret)) {
+      res.status(401).end()
+      return
+    }
+    const parsed = z.object({
+      channelId: z.string().min(1),
+      mime: z.string().min(1),
+      fileName: z.string().nullable().optional(),
+    }).safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'channelId and mime required' })
+      return
+    }
+    if (!opts.filesResolver) {
+      if (opts.passUnknownToFallback) next()
+      else res.status(503).json({ error: 'media ingest not configured' })
+      return
+    }
+    const channel = await (opts.getChannel ?? getChannelForWebhook)(parsed.data.channelId)
+    if (!channel) {
+      if (opts.passUnknownToFallback) next()
+      else res.status(404).json({ error: 'channel not resolvable' })
+      return
+    }
+
+    const fileId = `channel-media/${randomUUID()}`
+    const key = buildStorageKey(channel.workspaceId, fileId)
+    const resolved = await opts.filesResolver.forWorkspace(channel.workspaceId)
+    const uploadUrl = await resolved.gcs.signedWriteUrl(key, { contentType: parsed.data.mime, ttlSec: 3600 })
+    res.json({
+      gcsKey: key,
+      uploadUrl,
+      storageUri: buildStorageUri(resolved.bucket, channel.workspaceId, fileId, resolved.uriScheme),
+    })
+  })
 
   router.post('/disconnected', async (req, res, next) => {
     if (!secretMatches(req.headers['x-connector-secret'], opts.connectorSecret)) {

@@ -128,6 +128,12 @@ export type SkillManageApprovalsStore = {
       supportFiles?: Array<{ kind: SkillFilePointerKind; name: string; content: string; description?: string }>
     }
     originatingAssistantId: string | null
+    /** Induction-provenance passthrough (origin-aware induction) — rides the
+     *  approval_payload so approve-time governance can route provenance and
+     *  render the attach offer. Absent on interactive-session inductions. */
+    origin?: string
+    sourceWorkflowIds?: string[]
+    attachTo?: { workflowId: string; stepId?: string }
   }): Promise<{ approvalId: string }>
 
   /** Dedupe reads — a pending proposal for the same target blocks staging
@@ -173,6 +179,15 @@ export type SkillManageDeps = {
    *  approver is the workspace owner; this id is only used for direct
    *  mutations that touch RLS-gated tables on behalf of the system. */
   systemActorUserId: string
+  /** Origin-aware induction context for `create_umbrella` staging. Set by
+   *  the review worker when the reviewed session is workflow-origin so the
+   *  staged creation carries workflow provenance + the attach offer. Absent
+   *  (interactive sessions, direct tool use) → staging is unchanged. */
+  stagingContext?: {
+    origin?: string
+    sourceWorkflowIds?: string[]
+    attachTo?: { workflowId: string; stepId?: string }
+  }
 
   workspaceSkillStore: SkillManageSkillStore
   fileStore: SkillManageFileStore
@@ -581,6 +596,11 @@ async function runCreateUmbrella(
       supportFiles: umbrella.supportFiles,
     },
     originatingAssistantId: deps.originatingAssistantId,
+    ...(deps.stagingContext?.origin ? { origin: deps.stagingContext.origin } : {}),
+    ...(deps.stagingContext?.sourceWorkflowIds?.length
+      ? { sourceWorkflowIds: deps.stagingContext.sourceWorkflowIds }
+      : {}),
+    ...(deps.stagingContext?.attachTo ? { attachTo: deps.stagingContext.attachTo } : {}),
   })
   return {
     actionTaken: 'queued_for_approval',

@@ -332,6 +332,12 @@ function recordCogs(
       // folds into the recording surcharge. See structural-synthesis.md.
       source: 'overhead:synthesis',
       triggerKey: 'structural_synthesis',
+      // ONLY for `recording`, where `sourceId` is genuinely an Episode id.
+      // For `brain` it is a draft subject and for `research` a workflow/step
+      // key — neither is an episode, and passing one would violate the
+      // migration-365 foreign key and fail the usage write (which is caught
+      // and logged, so it would silently lose the COGS row rather than throw).
+      ...(source.kind === 'recording' ? { sourceEpisodeId: source.sourceId } : {}),
     })
     .catch((err) => console.error('[synthesis] usage tracking failed:', err))
 }

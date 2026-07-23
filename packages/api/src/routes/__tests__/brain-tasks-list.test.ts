@@ -105,7 +105,7 @@ describe('[COMP:brain/tasks-list-http] GET /api/brain/tasks', () => {
     // The surface owns the active/completed fold client-side, so the read
     // asks for EVERY status (incl. archived) at the operator cap.
     const filters = mockList.mock.calls[0][1]
-    expect(filters.status).toEqual(['todo', 'in_progress', 'blocked', 'done', 'archived'])
+    expect(filters.status).toEqual(['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'])
     expect(filters.limit).toBe(500)
   })
 

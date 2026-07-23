@@ -78,6 +78,11 @@ export type WorkspaceSkillSummary = {
   invocations: number;
   succeeded: number;
   userCorrectedAfter: number;
+  /** Origin-aware induction provenance: the workflow this skill was
+   *  distilled from (`learned_from` edge, skill → workflow). Absent for
+   *  interactive inductions. */
+  learnedFromWorkflowId?: string;
+  learnedFromWorkflowName?: string;
 };
 
 /**

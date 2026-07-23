@@ -34,7 +34,12 @@
  */
 
 import { z } from 'zod'
-import type { SkillReviewActionPlan, SkillReviewLLM } from './skill-review-worker.js'
+import type {
+  SessionOrigin,
+  SkillReviewActionPlan,
+  SkillReviewLLM,
+  SourceWorkflowForReview,
+} from './skill-review-worker.js'
 
 /**
  * Max output tokens for one plan call. The model usually emits a tiny
@@ -89,23 +94,45 @@ const PATCH_SCHEMA = z
     message: 'patch must include newContent and/or diff',
   })
 
+const CREATE_UMBRELLA_SCHEMA = z.object({
+  action: z.literal('create_umbrella'),
+  umbrella: z.object({
+    name: z.string().min(1).max(100),
+    description: z.string().min(1).max(500),
+    content: z.string().min(1).max(50_000),
+    supportFiles: z.array(FILE_SCHEMA).max(20).optional(),
+  }),
+})
+
 const ACTION_SCHEMA = z.discriminatedUnion('action', [
   z.object({ action: z.literal('patch_skill'), skillId: z.string().uuid(), patch: PATCH_SCHEMA }),
   z.object({ action: z.literal('update_umbrella'), skillId: z.string().uuid(), patch: PATCH_SCHEMA }),
   z.object({ action: z.literal('add_support_file'), skillId: z.string().uuid(), file: FILE_SCHEMA }),
+  CREATE_UMBRELLA_SCHEMA,
+])
+
+/** Workflow-origin cycles additionally allow `propose_workflow_refinement`
+ *  (origin-aware induction). Interactive plans that emit it fail validation
+ *  — the action is meaningless without a source workflow. */
+const WORKFLOW_ACTION_SCHEMA = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('patch_skill'), skillId: z.string().uuid(), patch: PATCH_SCHEMA }),
+  z.object({ action: z.literal('update_umbrella'), skillId: z.string().uuid(), patch: PATCH_SCHEMA }),
+  z.object({ action: z.literal('add_support_file'), skillId: z.string().uuid(), file: FILE_SCHEMA }),
+  CREATE_UMBRELLA_SCHEMA,
   z.object({
-    action: z.literal('create_umbrella'),
-    umbrella: z.object({
-      name: z.string().min(1).max(100),
-      description: z.string().min(1).max(500),
-      content: z.string().min(1).max(50_000),
-      supportFiles: z.array(FILE_SCHEMA).max(20).optional(),
-    }),
+    action: z.literal('propose_workflow_refinement'),
+    stepId: z.string().min(1).max(200),
+    patch: z.object({ prompt: z.string().min(1).max(20_000) }),
+    rationale: z.string().min(1).max(2000),
   }),
 ])
 
 const PLAN_SCHEMA = z.object({
   actions: z.array(ACTION_SCHEMA).max(MAX_ACTIONS_PER_CYCLE),
+})
+
+const WORKFLOW_PLAN_SCHEMA = z.object({
+  actions: z.array(WORKFLOW_ACTION_SCHEMA).max(MAX_ACTIONS_PER_CYCLE),
 })
 
 // ── Prompts ───────────────────────────────────────────────────────
@@ -161,6 +188,70 @@ skillId MUST be the UUID of a skill listed in "Existing workspace skills". Never
 
 newContent RULE: "newContent" REPLACES the skill's entire body — whatever you omit is deleted. It must be the COMPLETE markdown document, starting from the skill's title heading, with your edits woven in. Never send a fragment, a lone section, or only the changed lines. Before emitting a patch, re-read the skill's current body above and reproduce all of it except the parts you are deliberately changing.`
 
+/**
+ * The workflow-origin review prompt (origin-aware induction,
+ * `docs/architecture/engine/skill-system.md` → "Origin-aware induction").
+ *
+ * A workflow-origin session is a machine executing a definition the user
+ * already wrote — "is there a repeatable pattern?" is the wrong question
+ * (the workflow IS the pattern, and a skill restating it is pure noise:
+ * unreachable from the workflow runtime, redundant in chat). The objective
+ * flips to deviation/improvement detection against the definition, with
+ * `propose_workflow_refinement` as the primary output and skill actions
+ * reserved for genuinely generalizable technique.
+ */
+export const WORKFLOW_ORIGIN_SYSTEM_PROMPT = `You are the background curator reviewing the execution session of an AUTOMATED WORKFLOW for a company-brain assistant. The workflow's definition (its steps and their prompts) is shown to you below. The session transcript is a machine executing that definition unattended — it is NOT a person teaching the assistant something.
+
+Because the definition already encodes the procedure, do NOT distill the run into a skill that restates what the workflow does. That is the single most important rule of this review. A skill named after the workflow, or summarizing its steps, is noise: the workflow runtime can never load it, and in chat it duplicates the definition.
+
+What IS worth capturing, in preference order:
+
+1. propose_workflow_refinement — The run revealed that a step's PROMPT should change: the step misunderstood its instruction, wasted turns on a recoverable ambiguity, repeatedly hit the same avoidable failure, or produced output the next step had to repair. Propose the improved full prompt for that step. This is the primary output of a workflow review. Only propose it when the transcript contains concrete evidence of the deviation — a run that simply executed cleanly needs nothing.
+2. patch_skill / update_umbrella / add_support_file — The run surfaced durable know-how that improves an EXISTING skill (a pitfall, a data quirk, a better sub-procedure) that helps beyond this workflow.
+3. create_umbrella — ONLY for a genuinely generalizable technique whose usefulness clearly extends beyond this workflow (e.g. "how to page through GitHub activity without missing events" learned incidentally). NEVER for the workflow's own procedure. If the candidate's name or content would mirror the workflow, do not emit it.
+
+Most cycles you will find nothing worth changing — the workflow simply ran. That is the correct and expected outcome: return {"actions": []}.
+
+NEVER capture (anti-patterns):
+- The workflow's own procedure, in any packaging.
+- Environment-dependent or transient failures ("the API was down", a one-off ID, today's date).
+- Negative tool claims ("tool X is broken"). State changes; do not bake it in.
+- A narrative of what this run did. A refinement is a better instruction, not a log.
+
+OUTPUT CONTRACT:
+Return ONLY a single JSON object. No prose, no markdown, no code fences. Shape:
+{
+  "actions": [ <0 to ${MAX_ACTIONS_PER_CYCLE} action objects> ]
+}
+Each action is exactly one of:
+- { "action": "propose_workflow_refinement", "stepId": "<step id from the workflow definition below>", "patch": { "prompt": "<the full improved step prompt>" }, "rationale": "<one or two sentences: what the run showed and why this prompt fixes it>" }
+- { "action": "patch_skill",     "skillId": "<uuid of an existing skill>", "patch": { "newContent": "<full new markdown body>" } }
+- { "action": "update_umbrella", "skillId": "<uuid of an existing skill>", "patch": { "newContent": "<full new markdown body>" } }
+- { "action": "add_support_file","skillId": "<uuid of an existing skill>", "file": { "kind": "reference"|"template"|"script", "name": "<file name>", "content": "<file body>", "description": "<optional>" } }
+- { "action": "create_umbrella", "umbrella": { "name": "<class-level name — NEVER the workflow's name>", "description": "<one line>", "content": "<full markdown body>", "supportFiles": [ <optional> ] } }
+
+stepId MUST be a step id from the workflow definition. skillId MUST be the UUID of a skill listed in "Existing workspace skills". Never invent either. "patch.prompt" and "newContent" REPLACE the whole prompt/body — send the complete text, never a fragment. If nothing qualifies, return {"actions": []}.`
+
+function buildSourceWorkflowBlock(sourceWorkflow: SourceWorkflowForReview | null | undefined): string {
+  if (!sourceWorkflow) {
+    return '(source workflow definition unavailable — propose_workflow_refinement is not possible this cycle; only skill actions with a clearly generalizable, non-mirroring pattern qualify)'
+  }
+  const steps = sourceWorkflow.steps
+    .map((s) => {
+      const prompt = s.prompt ? `\nPrompt:\n${s.prompt}` : ''
+      return `### Step ${s.id} (${s.kind})${prompt}`
+    })
+    .join('\n\n')
+  return [
+    `Name: ${sourceWorkflow.name}`,
+    sourceWorkflow.description ? `Description: ${sourceWorkflow.description}` : null,
+    '',
+    steps,
+  ]
+    .filter((line): line is string => line !== null)
+    .join('\n')
+}
+
 function buildUserPrompt(input: Parameters<SkillReviewLLM['plan']>[0]): string {
   const skillsBlock =
     input.loadedSkills.length === 0
@@ -177,6 +268,22 @@ function buildUserPrompt(input: Parameters<SkillReviewLLM['plan']>[0]): string {
         .map((e) => `- ${e}`)
         .join('\n')}`
     : ''
+
+  if (input.origin === 'workflow') {
+    return [
+      '# Workflow definition (the source of this execution session)',
+      buildSourceWorkflowBlock(input.sourceWorkflow),
+      '',
+      '# Execution session transcript',
+      input.transcriptExcerpt.trim() || '(empty transcript)',
+      '',
+      '# Existing workspace skills',
+      skillsBlock,
+      priorBlock,
+      '',
+      'Review the execution transcript AGAINST the workflow definition. Did the run reveal that a step prompt should improve, or surface a genuinely generalizable technique the existing skills do not carry? Never restate the workflow itself as a skill. If nothing qualifies, return {"actions": []}.',
+    ].join('\n')
+  }
 
   return [
     '# Recent conversation transcript',
@@ -195,11 +302,13 @@ function buildUserPrompt(input: Parameters<SkillReviewLLM['plan']>[0]): string {
 type ParseResult = { plan?: SkillReviewActionPlan; error?: string }
 
 /**
- * Strip fences → regex first {...} → JSON.parse → PLAN_SCHEMA. Returns a
+ * Strip fences → regex first {...} → JSON.parse → plan schema. Returns a
  * structured error string (not a throw) so the caller can feed it into the
- * one corrective re-prompt.
+ * one corrective re-prompt. `origin: 'workflow'` validates against the
+ * extended schema that admits `propose_workflow_refinement`; interactive
+ * plans reject it (the action is meaningless without a source workflow).
  */
-export function parseSkillReviewPlan(raw: string): ParseResult {
+export function parseSkillReviewPlan(raw: string, origin?: SessionOrigin): ParseResult {
   const cleaned = raw
     .trim()
     .replace(/^```(?:json)?\s*/i, '')
@@ -215,7 +324,8 @@ export function parseSkillReviewPlan(raw: string): ParseResult {
     return { error: `JSON parse failed: ${err instanceof Error ? err.message : String(err)}` }
   }
 
-  const result = PLAN_SCHEMA.safeParse(parsed)
+  const schema = origin === 'workflow' ? WORKFLOW_PLAN_SCHEMA : PLAN_SCHEMA
+  const result = schema.safeParse(parsed)
   if (!result.success) {
     return {
       error: result.error.issues
@@ -244,26 +354,28 @@ export function createGeminiSkillReviewLLM(call: SkillReviewModelCall): SkillRev
         assistantId: input.assistantId,
         sessionId: input.sessionId,
       }
+      const systemPrompt =
+        input.origin === 'workflow' ? WORKFLOW_ORIGIN_SYSTEM_PROMPT : SKILL_REVIEW_SYSTEM_PROMPT
       const userPrompt = buildUserPrompt(input)
 
       const first = await call({
-        systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
+        systemPrompt,
         prompt: userPrompt,
         maxTokens: SKILL_REVIEW_MAX_TOKENS,
         attribution,
       })
-      const firstParse = parseSkillReviewPlan(first)
+      const firstParse = parseSkillReviewPlan(first, input.origin)
       if (firstParse.plan) return firstParse.plan
 
       // One corrective re-prompt carrying the rejection reason.
       const correctivePrompt = `${userPrompt}\n\n---\nYour previous response was rejected: ${firstParse.error}\nReturn ONLY a valid JSON object matching the schema above. No prose, no code fences.`
       const second = await call({
-        systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
+        systemPrompt,
         prompt: correctivePrompt,
         maxTokens: SKILL_REVIEW_MAX_TOKENS,
         attribution,
       })
-      const secondParse = parseSkillReviewPlan(second)
+      const secondParse = parseSkillReviewPlan(second, input.origin)
       if (secondParse.plan) return secondParse.plan
 
       // Still invalid after the one allowed retry → no-op. The worker marks

@@ -129,6 +129,17 @@ describe('[COMP:media/transcriber-qwen] qwenFiletransTranscriber', () => {
     expect(fetchFn).not.toHaveBeenCalled()
   })
 
+  it('rejects localhost source URLs before creating a doomed remote task', async () => {
+    const { fetchFn } = scriptedFetch([() => mockResponse({})])
+    const t = qwenFiletransTranscriber({ apiKey: 'k', pollIntervalMs: 0, fetchFn })
+
+    await expect(t.transcribe({
+      ...REQ,
+      sourceUrl: 'http://localhost:4000/api/local-files?action=read',
+    })).rejects.toThrow(/cannot download a localhost\/private storage URL/i)
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
   it('throws on a FAILED task, carrying the task message', async () => {
     const { fetchFn } = scriptedFetch([
       () => mockResponse({ output: { task_id: 't3' } }),

@@ -22,6 +22,8 @@ export { createGitHubTools } from './base/github.js'
 export type { GitHubApi } from './base/github.js'
 export { createNotionTools } from './base/notion.js'
 export type { NotionApi } from './base/notion.js'
+export { createMsGraphTools } from './base/msgraph.js'
+export type { MsGraphApi } from './base/msgraph.js'
 export { createFathomTools } from './base/fathom.js'
 export type { FathomApi } from './base/fathom.js'
 export { createShopifyTools } from './base/shopify.js'
@@ -30,12 +32,13 @@ export { createAgentmailTools } from './base/agentmail.js'
 export type { AgentmailToolApi, AgentmailInboxRef, AgentmailThreadSummary } from './base/agentmail.js'
 export {
   createMailboxTools,
+  singleMailboxRouter,
   stitchMailboxThreads,
   MAILBOX_DEFAULT_WINDOW_DAYS,
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,
 } from './base/mailbox.js'
-export type { MailboxApi, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread } from './base/mailbox.js'
+export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread } from './base/mailbox.js'
 export { createKnowledgeTools } from './base/knowledge.js'
 export { createInterAssistantTools } from './base/ask-assistant.js'
 export type { InterAssistantDeps } from './base/ask-assistant.js'

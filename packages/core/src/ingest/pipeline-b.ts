@@ -336,6 +336,36 @@ const extractedTaskSchema = z.object({
   assignee_ref: z.string().nullish().transform(emptyToUndef),
 })
 
+// ── Task-creation lane policy ─────────────────────────────────────────
+//
+// Some source kinds are RETROSPECTIVE records of work already completed
+// (code history), not sources of new action items. Pipeline B still mines
+// them for entities / edges / memories (knowledge), but must NOT mint tasks:
+// a merged/pushed commit narrates work that is already DONE, so reifying its
+// imperative-sounding text ("Fix X", "Add @Y", "Review PR #Z") into `todo`s
+// is slop. On 2026-07-23 this produced 314 open todos in one workspace, 98%
+// never closed, from push-to-`main` batches alone.
+//
+// `github_sync` = push-to-default-branch batches (ingest/adapters/github/
+// envelope.ts `pickSourceKind`). Reconciling EXISTING tasks against a merge
+// (`Closes #N` → done) and CREATING tasks from prospective events
+// (`issue.opened`) are separate, forward-looking paths — see
+// docs/plans/github-task-extraction-fix.md.
+//
+// Denylist, not allowlist: every other source (chat, slack, recording,
+// whatsapp, connector_action, …) legitimately creates tasks, so the default
+// is "creates tasks" and only retrospective kinds are gated out. Graded by
+// `pnpm check` (`invariants/no-task-extraction-from-code-history`).
+// Spec: docs/architecture/brain/ingest-pipeline.md → "Retrospective sources".
+const RETROSPECTIVE_SOURCE_KINDS: ReadonlySet<SourceKind> = new Set<SourceKind>([
+  'github_sync',
+])
+
+/** False for retrospective code-history sources that must not mint tasks. */
+export function sourceKindCreatesTasks(sourceKind: SourceKind): boolean {
+  return !RETROSPECTIVE_SOURCE_KINDS.has(sourceKind)
+}
+
 // v2 — explicit drop-with-reason slot. Persisted to analytics only
 // (NOT written to `memories`), so the LLM has a non-empty target for
 // status updates / ack noise / per-cycle counters that otherwise rot
@@ -869,6 +899,19 @@ async function recordExtractionUsage(
   deps: PipelineBDeps,
   episode: PipelineBEpisode,
   usage: TokenUsage | null,
+  /**
+   * Overrides for the non-extraction calls this ingest also makes. The
+   * sensitivity classifier fires once per episode and was computing its usage,
+   * returning it on `PipelineBResult.sensitivity.usage`, and finding no
+   * consumer anywhere in the repo — 2,827 unrecorded LLM calls over 90 days,
+   * roughly 59x the entire transcription bucket's row count. Cheap in dollars,
+   * but an unmetered call path is how a ledger starts drifting from reality.
+   *
+   * `overhead:classifier` is deliberate: it is already in `OVERHEAD_SOURCES`
+   * and the `valid_source` CHECK, so metering this needs no migration, and the
+   * `trigger_key` keeps it separable from the routing classifiers.
+   */
+  over: { model?: string; source?: string; triggerKey?: string } = {},
 ): Promise<void> {
   if (!deps.usage || !usage) return
   const userId = episode.createdByUserId || episode.userId
@@ -879,14 +922,19 @@ async function recordExtractionUsage(
       assistantId: episode.assistantId ?? '',
       workspaceId: episode.workspaceId,
       sessionId: null,
-      model: deps.model,
+      model: over.model ?? deps.model,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: calculateCost(deps.model, usage),
-      source: 'overhead:extraction',
-      triggerKey: 'pipeline_b_extraction',
+      actualCostUsd: calculateCost(over.model ?? deps.model, usage),
+      source: over.source ?? 'overhead:extraction',
+      triggerKey: over.triggerKey ?? 'pipeline_b_extraction',
+      // The episode itself, NOT its parent. Rolling up to the originating
+      // recording is `COALESCE(parent_episode_id, id)` at query time — cheap
+      // at the current depth of 1, and it keeps which child drove the spend,
+      // which a denormalized root would discard permanently.
+      sourceEpisodeId: episode.id,
     })
   } catch (err) {
     console.warn(
@@ -1236,7 +1284,11 @@ export async function processEpisode(
   //     actor). Assignee resolution (assignee_ref → workspace_members.id)
   //     is deferred to a follow-up; v1 lands tasks unassigned.
   const tasksWritten: { id: string }[] = []
-  if (deps.tasks) {
+  // Retrospective sources (code history) extract knowledge but never mint
+  // tasks — see RETROSPECTIVE_SOURCE_KINDS. This is the enforcement point
+  // graded by `invariants/no-task-extraction-from-code-history`.
+  const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
+  if (deps.tasks && createsTasks) {
     for (const ex of payload.tasks) {
       try {
         let due: Date | null = null
@@ -1267,7 +1319,11 @@ export async function processEpisode(
     }
   } else if (payload.tasks.length > 0) {
     console.warn(
-      `[pipeline-b] ${payload.tasks.length} extracted task(s) dropped for episode ${episode.id} — deps.tasks not wired`,
+      `[pipeline-b] ${payload.tasks.length} extracted task(s) dropped for episode ${episode.id} — ${
+        !createsTasks
+          ? `source_kind '${episode.sourceKind}' is retrospective (no task creation)`
+          : 'deps.tasks not wired'
+      }`,
     )
   }
 
@@ -1371,6 +1427,19 @@ export async function processEpisode(
           summary: payload.summary,
           memories: memoriesWritten.map((m) => ({ summary: m.summary })),
         },
+      })
+      // Meter it. This call was invisible to the ledger until migration 365's
+      // audit; it fires once per ingested episode, so it is the highest-count
+      // LLM call in the system. Best-effort, exactly like extraction — a
+      // metering failure must never break ingestion.
+      // `classifySensitivity` returns NULL when it throws internally, so this
+      // must be null-safe: metering is instrumentation and may never be the
+      // thing that breaks an ingest. `recordExtractionUsage` already no-ops on
+      // a null usage, so the guard only has to survive the property read.
+      await recordExtractionUsage(deps, episode, sensitivity?.usage ?? null, {
+        model: sensitivity?.model ?? classifierModel,
+        source: 'overhead:classifier',
+        triggerKey: 'sensitivity_classifier',
       })
     }
   }

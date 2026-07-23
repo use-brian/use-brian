@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createKnowledgeSyncWorker, type SyncGitHubApi, type SyncStore, type SyncCredentials } from '../sync-worker.js'
 
 const mockApi: SyncGitHubApi = {
@@ -29,6 +32,7 @@ beforeEach(() => { vi.clearAllMocks() })
 const SOURCE = {
   id: 'src1',
   workspaceId: 't1',
+  sourceType: 'github' as const,
   repo: 'deltadefi-protocol/knowledge',
   branch: 'main',
   rootPath: '',
@@ -233,6 +237,62 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
 
       // Only 1 file under rootPath
       expect(mockStore.upsertByPath).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('local filesystem sync', () => {
+    it('syncs markdown without resolving GitHub credentials', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'brian-kb-'))
+      try {
+        await writeFile(join(dir, 'product.md'), '---\ndescription: Product notes\n---\n# Product\nLocal body.')
+        vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{
+          ...SOURCE,
+          sourceType: 'local',
+          repo: dir,
+          branch: 'local',
+        }])
+        vi.mocked(mockStore.getByPathSystem).mockResolvedValue(null)
+        vi.mocked(mockStore.listPathsSystem).mockResolvedValue([])
+        vi.mocked(mockStore.upsertByPath).mockResolvedValue({ id: 'entry-1', path: 'product' })
+
+        const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+        await worker.tick()
+
+        expect(mockCreds.getPat).not.toHaveBeenCalled()
+        expect(mockApi.getBranchHead).not.toHaveBeenCalled()
+        expect(mockStore.upsertByPath).toHaveBeenCalledWith(expect.objectContaining({
+          workspaceId: 't1',
+          path: 'product',
+          sourceId: 'src1',
+        }))
+        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/))
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('deletes a source entry when its final local markdown file is removed', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'brian-kb-empty-'))
+      try {
+        vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{
+          ...SOURCE,
+          sourceType: 'local',
+          repo: dir,
+          branch: 'local',
+          lastSyncedSha: 'old-hash',
+        }])
+        vi.mocked(mockStore.listPathsSystem).mockResolvedValue(['removed'])
+        vi.mocked(mockStore.getByPathSystem).mockResolvedValue({ id: 'entry-1', sourceId: 'src1' })
+        vi.mocked(mockStore.deleteByTeamAndPath).mockResolvedValue(true)
+
+        const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+        await worker.tick()
+
+        expect(mockStore.deleteByTeamAndPath).toHaveBeenCalledWith('t1', 'removed')
+        expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/))
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
     })
   })
 })

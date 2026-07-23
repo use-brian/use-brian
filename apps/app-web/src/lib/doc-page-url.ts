@@ -102,6 +102,10 @@ export function pageIdFromInAppHref(
  *   - `'tasks'`         `/tasks` — the Tasks operator surface (filter /
  *                       bulk-clean the workspace task backlog); an operator
  *                       app under Home, like `'p'` and `'feed'`
+ *   - `'computer'`      `/computer` (+ `/computer/<sessionId>`) — the Browsers
+ *                       operator surface: a left rail of live browser sessions
+ *                       (`sandbox_tasks`) navigating the per-session Take-Over
+ *                       live view; the 5th operator app under Home
  *   - `'goals'`         `/goals` (+ `/goals/<goalId>`) — attention-routed
  *                       (home-dock Autopilot card / Brain task panel), no
  *                       sidebar slot, same pattern as `'approvals'`
@@ -124,6 +128,7 @@ export type WorkspaceSurface =
   | "feed"
   | "tasks"
   | "crm"
+  | "computer"
   | "goals"
   | "approvals"
   | "recordings"
@@ -141,6 +146,7 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "feed",
   "tasks",
   "crm",
+  "computer",
   "goals",
   "approvals",
   "recordings",

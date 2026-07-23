@@ -29,6 +29,7 @@ import { Router } from 'express'
 import type { Response } from 'express'
 import { query } from '../db/client.js'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { WorkspaceSkillStore } from '../db/skill-store.js'
 import {
   listBrainInbox,
   countBrainInbox,
@@ -99,6 +100,17 @@ type RouteOptions = {
    * lags.
    */
   entityLinks?: EntityLinksStore
+  /**
+   * Workspace-skills store — when provided, confirming a `learned_from`
+   * relationship review whose source is a skill cascades into
+   * `confirmSkill`, stamping that skill as human-verified. The review card
+   * shows the full skill body, so "Looks correct" there IS a human review
+   * of the skill. Absent → the edge is verified but the skill is not
+   * (the open-build minimal mount / unit tests without a skill store).
+   *
+   * Spec: docs/architecture/engine/skill-system.md → "Human confirmation".
+   */
+  workspaceSkillStore?: WorkspaceSkillStore
 }
 
 const VALID_PRIMITIVES: BrainInboxPrimitive[] = [
@@ -143,6 +155,7 @@ export function brainInboxRoutes({
   pendingClassificationStore,
   filesApi,
   entityLinks,
+  workspaceSkillStore,
 }: RouteOptions): Router {
   const router = Router()
 
@@ -523,6 +536,25 @@ export function brainInboxRoutes({
           verifiedByUserId: userId,
           action: 'confirm',
         })
+      }
+
+      // Cascade: confirming a `skill → learned_from → assistant` induction
+      // edge also marks the source skill human-verified. The review card
+      // renders the skill's full body (SkillEndpointDetail), so "Looks
+      // correct" here is a deliberate review of that skill — mirror the
+      // skill-editor Confirm action rather than leaving the skill at its
+      // auto-induced confidence. `confirmSkill` is idempotent and preserves
+      // the "confidence 1.0 ⇔ verified" invariant (verifier stamp + confidence
+      // lift + activation together); a bare verified_at stamp would break it.
+      if (primitiveParam === 'entity_link' && workspaceSkillStore) {
+        const edge = await query<{ source_kind: string; source_id: string; edge_type: string }>(
+          `SELECT source_kind, source_id, edge_type FROM entity_links WHERE id = $1`,
+          [rowId],
+        )
+        const link = edge.rows[0]
+        if (link && link.source_kind === 'skill' && link.edge_type === 'learned_from') {
+          await workspaceSkillStore.confirmSkill(userId, workspaceId, link.source_id)
+        }
       }
 
       // Fire-and-forget realtime NOTIFY so open /brain pages on other tabs /

@@ -19,11 +19,12 @@
  */
 
 import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
-import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi } from '@use-brian/core'
+import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
 import { createMailboxApi } from '../mailbox/mailbox-api.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
+import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -31,7 +32,7 @@ import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connecto
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
 import { gateToolsOnActionGrants } from '../safety/assert-action-allowed.js'
-import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, type HealthReporter } from './connector-health.js'
+import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
 import {
   refreshGoogleAccessToken,
@@ -2835,7 +2836,7 @@ async function injectShopifyTools(
 // confidential-turn egress refusal inside the core tool.
 
 async function injectMailboxTools(params: {
-  connectors: Array<{ connectorId: string; connected: boolean }>
+  connectors: Array<{ connectorId: string; connected: boolean; id?: string; createdAt?: Date; name?: string }>
   settingsStore: McpSettingsStore
   userId: string
   assistantId: string
@@ -2854,113 +2855,192 @@ async function injectMailboxTools(params: {
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore, instanceIdOverride, healthProbe,
   } = params
 
-  const imap = connectors.find((c) => c.connectorId === 'imap' && c.connected)
-  const imapEnabled = imap && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'imap'))
-  if (!imap || !imapEnabled) {
+  const imapConnectors = connectors.filter((c) => c.connectorId === 'imap' && c.connected)
+  const imapEnabled = imapConnectors.length > 0 && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'imap'))
+  if (!imapEnabled) {
     unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
     return
   }
   if (!connectorInstanceStore) return  // credentials live only on the instance row — nothing to bind
+  const store = connectorInstanceStore
 
-  const instanceId = instanceIdOverride ?? (imap as { id?: string }).id ?? null
-  if (!instanceId) return
+  // Which instances to bind. The grant overlay pins ONE exposed instance
+  // (`instanceIdOverride`, same one-per-provider limit every other connector's
+  // grant overlay has); the base path binds EVERY connected mailbox — this is
+  // the multi-account surface (D11 retired), the AgentMail `fromInbox` router
+  // ported. Primary = first-connected (createdAt asc): the default when the
+  // model omits `account`.
+  const rows = (instanceIdOverride
+    ? imapConnectors.filter((c) => c.id === instanceIdOverride)
+    : [...imapConnectors])
+    .sort((a, b) => (a.createdAt?.getTime() ?? 0) - (b.createdAt?.getTime() ?? 0))
 
-  async function getSettings(): Promise<MailboxAccountSettings> {
-    const creds = await connectorInstanceStore!.getAuthCredentialsSystem(instanceId!)
-    if (!creds || creds.type !== 'imap') {
-      throw new Error('Company mailbox is not connected (no imap credentials on the instance)')
+  // Health rides at the API level, per instance, so a mailbox whose auth died
+  // flips ITS OWN row — never a sibling's — and the read-only archive tool
+  // (built below) stays outside it. Mirrors `wrapToolsWithHealthProbe`'s
+  // auth-error classification.
+  const withHealth = (raw: MailboxApi, instanceId: string): MailboxApi => {
+    if (!healthProbe) return raw
+    const report = healthProbe.report
+    const guard = async <R>(op: () => Promise<R>): Promise<R> => {
+      try {
+        const r = await op()
+        report(instanceId, 'ok')
+        return r
+      } catch (err) {
+        if (classifyConnectorAuthError(err)) report(instanceId, 'auth_failed', err instanceof Error ? err.message : String(err))
+        throw err
+      }
     }
-    const { type: _t, ...settings } = creds
-    return settings
+    return {
+      searchMessages: (p) => guard(() => raw.searchMessages(p)),
+      getMessage: (id) => guard(() => raw.getMessage(id)),
+      sendMessage: (p) => guard(() => raw.sendMessage(p)),
+    }
   }
 
-  try {
-    const api = createMailboxApi({ cacheKey: instanceId, getSettings })
-
-    // Audit-wrapped send (the Gmail pattern): classifier preflight decides
-    // BEFORE the network call; executed/failed both audit. v1
-    // `audienceClearance='public'` for all recipients, like gmail.
-    const auditedApi: typeof api = {
-      searchMessages: (p) => api.searchMessages(p),
-      getMessage: (id) => api.getMessage(id),
-      sendMessage: async (p) => {
-        const auditPayload = {
-          to: p.to,
-          from: null as string | null,
-          subject: p.subject,
-          has_body: Boolean(p.body),
-          body_length: p.body?.length ?? 0,
-          body: p.body ?? '',
-          in_reply_to: p.inReplyTo ?? null,
-        }
-        let preflight: ConnectorActionPreflight | undefined
-        if (connectorActionAudit) {
-          preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload: auditPayload })
-          if (preflight.shouldDeny) {
-            try {
-              await connectorActionAudit.emit(
-                { userId, assistantId },
-                { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'denied', payload: auditPayload, preflight },
-              )
-            } catch (auditErr) {
-              console.warn('[mcp-inject] imap classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
-            }
-            throw new Error(
-              `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
+  // Audit-wrapped send (the Gmail pattern): classifier preflight decides
+  // BEFORE the network call; executed/failed both audit. v1
+  // `audienceClearance='public'` for all recipients, like gmail. `from` is the
+  // sending mailbox (the resolved account), not null — the multi-account audit.
+  const withAudit = (raw: MailboxApi, fromEmail: string): MailboxApi => ({
+    searchMessages: (p) => raw.searchMessages(p),
+    getMessage: (id) => raw.getMessage(id),
+    sendMessage: async (p) => {
+      const auditPayload = {
+        to: p.to,
+        from: fromEmail,
+        subject: p.subject,
+        has_body: Boolean(p.body),
+        body_length: p.body?.length ?? 0,
+        body: p.body ?? '',
+        in_reply_to: p.inReplyTo ?? null,
+      }
+      let preflight: ConnectorActionPreflight | undefined
+      if (connectorActionAudit) {
+        preflight = connectorActionAudit.preflight({ audienceClearance: 'public', payload: auditPayload })
+        if (preflight.shouldDeny) {
+          try {
+            await connectorActionAudit.emit(
+              { userId, assistantId },
+              { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'denied', payload: auditPayload, preflight },
             )
+          } catch (auditErr) {
+            console.warn('[mcp-inject] imap classifier-deny audit emit failed:', auditErr instanceof Error ? auditErr.message : String(auditErr))
+          }
+          throw new Error(
+            `This email contains content the classifier blocked (matched patterns: ${preflight.classifierMatches.join(', ')}). Revise the message and try again.`,
+          )
+        }
+      }
+      try {
+        const result = await raw.sendMessage(p)
+        if (connectorActionAudit) {
+          try {
+            await connectorActionAudit.emit(
+              { userId, assistantId },
+              { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'executed', externalId: result.messageId, payload: auditPayload, preflight },
+            )
+          } catch (auditErr) {
+            console.warn('[mcp-inject] imap connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
           }
         }
-        try {
-          const result = await api.sendMessage(p)
-          if (connectorActionAudit) {
-            try {
-              await connectorActionAudit.emit(
-                { userId, assistantId },
-                { connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'executed', externalId: result.messageId, payload: auditPayload, preflight },
-              )
-            } catch (auditErr) {
-              console.warn('[mcp-inject] imap connector_action audit emit failed (best-effort, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
-            }
+        return result
+      } catch (err) {
+        if (connectorActionAudit) {
+          try {
+            await connectorActionAudit.emit(
+              { userId, assistantId },
+              {
+                connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'failed',
+                payload: { ...auditPayload, error: err instanceof Error ? err.message : String(err) },
+                preflight,
+              },
+            )
+          } catch (auditErr) {
+            console.warn('[mcp-inject] imap connector_action audit emit failed (failure path, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
           }
-          return result
-        } catch (err) {
-          if (connectorActionAudit) {
-            try {
-              await connectorActionAudit.emit(
-                { userId, assistantId },
-                {
-                  connectorId: 'imap', actionKind: 'send_email', audienceClearance: 'public', status: 'failed',
-                  payload: { ...auditPayload, error: err instanceof Error ? err.message : String(err) },
-                  preflight,
-                },
-              )
-            } catch (auditErr) {
-              console.warn('[mcp-inject] imap connector_action audit emit failed (failure path, suppressed):', auditErr instanceof Error ? auditErr.message : String(auditErr))
-            }
-          }
-          throw err
         }
-      },
+        throw err
+      }
+    },
+  })
+
+  try {
+    // Build a bound MailboxApi per connected mailbox + resolve its
+    // authoritative email (the value the model passes as `account`; the label
+    // can be renamed so it is NOT the identity). A creds-missing instance is
+    // skipped rather than surfaced as a dead tool.
+    const bound: Array<{ instanceId: string; email: string; api: MailboxApi }> = []
+    for (const row of rows) {
+      const instanceId = row.id ?? instanceIdOverride ?? null
+      if (!instanceId) continue
+      let email: string
+      try {
+        const creds = await store.getAuthCredentialsSystem(instanceId)
+        if (!creds || creds.type !== 'imap') continue
+        email = creds.email
+      } catch { continue }
+      const boundId = instanceId
+      const getSettings = async (): Promise<MailboxAccountSettings> => {
+        const creds = await store.getAuthCredentialsSystem(boundId)
+        if (!creds || creds.type !== 'imap') {
+          throw new Error('Company mailbox is not connected (no imap credentials on the instance)')
+        }
+        const { type: _t, ...settings } = creds
+        return settings
+      }
+      const rawApi = createMailboxApi({ cacheKey: boundId, getSettings })
+      bound.push({ instanceId: boundId, email, api: withHealth(withAudit(rawApi, email), boundId) })
+    }
+    if (bound.length === 0) {
+      unavailable?.push(notConnectedNotice('Company email (IMAP)', "searching, reading, and sending from the user's own corporate mailbox"))
+      return
     }
 
-    const built = gateToolsOnActionGrants(createMailboxTools(auditedApi), 'imap', assistantConnectorGrantsStore, assistantId)
-    const mailboxTools = healthProbe
-      ? wrapToolsWithHealthProbe(built, instanceId, healthProbe.report)
-      : built
+    // One tool set over an account router — primary (first-connected) is the
+    // default sender; `account` selects a sibling by email.
+    const router: MailboxAccountRouter = {
+      list: () => bound.map((b, i) => ({ email: b.email, isPrimary: i === 0 })),
+      get: (email) => bound.find((b) => b.email.trim().toLowerCase() === email.trim().toLowerCase())?.api,
+    }
+    const built = gateToolsOnActionGrants(createMailboxTools(router), 'imap', assistantConnectorGrantsStore, assistantId)
+
     // Archive search (Phase 2) — injected only when boot wired the archive
     // seam (DB + embedder). Read-only; a DB search must not flip connector
-    // health, so it rides OUTSIDE the health-probe wrap. Owner + instance are
-    // bound here, never model inputs.
+    // health, so it rides OUTSIDE the per-instance api health wrap. Owner + the
+    // instance set are bound here, never model inputs.
     const archiveDeps = getGlobalMailboxArchiveDeps()
     const withArchive = archiveDeps
-      ? [...mailboxTools, createSearchEmailArchiveTool({ ownerUserId: userId, instanceId, deps: archiveDeps })]
-      : mailboxTools
-    for (const tool of withArchive) {
+      ? [
+          ...built,
+          createSearchEmailArchiveTool({
+            ownerUserId: userId,
+            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
+            deps: archiveDeps,
+          }),
+        ]
+      : built
+
+    // On-demand sync (sync-on-connect's twin) — injected only when boot wired
+    // the sync seam. Same bound account set as the archive tool; the instance
+    // is bound here, never a model input.
+    const syncDeps = getGlobalMailboxSyncDeps()
+    const withSync = syncDeps
+      ? [
+          ...withArchive,
+          createSyncMailboxNowTool({
+            accounts: bound.map((b, i) => ({ instanceId: b.instanceId, email: b.email, isPrimary: i === 0 })),
+            deps: syncDeps,
+          }),
+        ]
+      : withArchive
+    for (const tool of withSync) {
       if (await applyPolicyOrSkip(tool, 'imap', settingsStore, assistantId, userId, unavailable) === 'include') {
         tools.set(tool.name, tool)
       }
     }
-    console.debug('[mcp-inject] Company mailbox (imap): injected tools')
+    console.debug(`[mcp-inject] Company mailbox (imap): injected tools for ${bound.length} mailbox(es)`)
   } catch (err) {
     console.error('[mcp-inject] Company mailbox (imap) injection failed:', err)
   }

@@ -92,6 +92,7 @@ export type QuickFilter = (typeof QUICK_FILTERS)[number];
 const OPEN_STATUSES: ReadonlySet<TaskStatus> = new Set([
   "todo",
   "in_progress",
+  "in_review",
   "blocked",
 ]);
 
@@ -201,6 +202,7 @@ function oneOf<T extends string>(
 const STATUS_KEYS: readonly TaskStatus[] = [
   "todo",
   "in_progress",
+  "in_review",
   "blocked",
   "done",
   "archived",
@@ -374,6 +376,7 @@ export type TaskGroup = {
 
 const STATUS_GROUP_ORDER: readonly TaskStatus[] = [
   "in_progress",
+  "in_review",
   "todo",
   "blocked",
   "done",

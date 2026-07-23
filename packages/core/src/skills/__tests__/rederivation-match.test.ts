@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { matchInducedSkill } from '../rederivation-match.js'
+import { matchInducedSkill, matchSkillAgainstWorkflows } from '../rederivation-match.js'
 
 const existing = [
   {
@@ -45,5 +45,40 @@ describe('[COMP:skills/rederivation-match] matchInducedSkill', () => {
 
   it('returns null when there are no existing skills', () => {
     expect(matchInducedSkill({ slug: 's', name: 'n' }, [])).toBeNull()
+  })
+})
+
+describe('[COMP:skills/rederivation-match] matchSkillAgainstWorkflows', () => {
+  const workflows = [
+    { id: 'w1', name: 'Daily team standup' },
+    { id: 'w2', name: 'Weekly investor digest' },
+  ]
+
+  it('matches the canonical mirror shape — "<workflow name> workflow" (containment)', () => {
+    expect(
+      matchSkillAgainstWorkflows({ name: 'Daily team standup workflow' }, workflows)?.id,
+    ).toBe('w1')
+  })
+
+  it('matches an exact workflow name', () => {
+    expect(matchSkillAgainstWorkflows({ name: 'Weekly investor digest' }, workflows)?.id).toBe('w2')
+  })
+
+  it('matches a near-identical name via similarity', () => {
+    expect(matchSkillAgainstWorkflows({ name: 'Daily team standups' }, workflows)?.id).toBe('w1')
+  })
+
+  it('does NOT match a genuinely different technique name', () => {
+    expect(
+      matchSkillAgainstWorkflows({ name: 'Paging through GitHub activity' }, workflows),
+    ).toBeNull()
+  })
+
+  it('does NOT treat a short common word as containment', () => {
+    expect(matchSkillAgainstWorkflows({ name: 'Digest' }, workflows)).toBeNull()
+  })
+
+  it('returns null on an empty corpus', () => {
+    expect(matchSkillAgainstWorkflows({ name: 'Daily team standup workflow' }, [])).toBeNull()
   })
 })

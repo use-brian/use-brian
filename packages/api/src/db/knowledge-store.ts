@@ -42,10 +42,12 @@ export type KnowledgeEntry = {
   updatedAt: Date
 }
 
+export type KnowledgeSourceType = 'github' | 'local'
+
 export type KnowledgeSource = {
   id: string
   workspaceId: string
-  sourceType: 'github'
+  sourceType: KnowledgeSourceType
   repo: string
   branch: string
   rootPath: string
@@ -226,7 +228,7 @@ export type KnowledgeStore = {
 
   // Sources
   createSource(params: {
-    workspaceId: string; sourceType: 'github'; repo: string; branch?: string; rootPath?: string
+    workspaceId: string; sourceType: KnowledgeSourceType; repo: string; branch?: string; rootPath?: string
     /** The connector_instance whose PAT this source syncs through. */
     connectorInstanceId?: string | null
   }): Promise<KnowledgeSource>

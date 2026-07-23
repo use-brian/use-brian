@@ -4,6 +4,7 @@ import {
   decideLifecycle,
   isArmedListener,
   isOneOffWorkflow,
+  isSpentOnceSchedule,
   isRecurringTrigger,
   lastActivityAt,
   pickDigestBatch,
@@ -101,6 +102,23 @@ describe('[COMP:workflow/lifecycle] Workflow lifecycle policy', () => {
       expect(isOneOffWorkflow(row({ trigger: DAILY, runCount: 0 }))).toBe(false)
       expect(isOneOffWorkflow(row({ trigger: EVENT, runCount: 1 }))).toBe(false)
       expect(isOneOffWorkflow(row({ trigger: MANUAL, runCount: 2 }))).toBe(false)
+    })
+  })
+
+  describe('isSpentOnceSchedule', () => {
+    it('a schedule-once workflow with no live fire is spent', () => {
+      expect(isSpentOnceSchedule(row({ trigger: ONCE, hasLiveFire: false }))).toBe(true)
+    })
+
+    it('a schedule-once workflow with a live fire pending is NOT spent (still armed)', () => {
+      expect(isSpentOnceSchedule(row({ trigger: ONCE, hasLiveFire: true }))).toBe(false)
+    })
+
+    it('manual / recurring / event / webhook are never spent one-offs', () => {
+      expect(isSpentOnceSchedule(row({ trigger: MANUAL, hasLiveFire: false }))).toBe(false)
+      expect(isSpentOnceSchedule(row({ trigger: DAILY, hasLiveFire: false }))).toBe(false)
+      expect(isSpentOnceSchedule(row({ trigger: EVENT, hasLiveFire: false }))).toBe(false)
+      expect(isSpentOnceSchedule(row({ trigger: WEBHOOK, hasLiveFire: false }))).toBe(false)
     })
   })
 
@@ -301,6 +319,38 @@ describe('[COMP:workflow/lifecycle] Workflow lifecycle policy', () => {
       // 200 days idle but still 'active': first sweep only marks stale.
       const decision = decideLifecycle(row({ updatedAt: daysAgo(200) }), NOW)
       expect(decision.action).toBe('mark_stale')
+    })
+
+    it('archives a spent one-off schedule on the FIRST sweep (skips the stale dwell)', () => {
+      // A fired reminder — schedule-once, no live fire — is unambiguously done,
+      // so it jumps straight to archived even though it just "ran".
+      const decision = decideLifecycle(
+        row({ trigger: ONCE, hasLiveFire: false, updatedAt: daysAgo(1), runCount: 1 }),
+        NOW,
+      )
+      expect(decision.action).toBe('archive')
+    })
+
+    it('does NOT fast-archive a still-armed future one-off reminder', () => {
+      // hasLiveFire → an enabled trigger row is still pending; it has not fired.
+      const decision = decideLifecycle(
+        row({ trigger: ONCE, hasLiveFire: true, updatedAt: daysAgo(1) }),
+        NOW,
+      )
+      expect(decision).toEqual({ action: 'none' })
+    })
+
+    it('a pinned spent one-off is exempt from the fast-archive', () => {
+      const decision = decideLifecycle(
+        row({ trigger: ONCE, hasLiveFire: false, pinned: true, updatedAt: daysAgo(1) }),
+        NOW,
+      )
+      expect(decision).toEqual({ action: 'none' })
+    })
+
+    it('does NOT fast-archive a fresh idle manual workflow (only schedule-once qualifies)', () => {
+      const decision = decideLifecycle(row({ trigger: MANUAL, hasLiveFire: false, updatedAt: daysAgo(3) }), NOW)
+      expect(decision).toEqual({ action: 'none' })
     })
 
     it('honors custom thresholds', () => {

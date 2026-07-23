@@ -8,6 +8,13 @@
  *                             `promoteMemoryToEntity` (Q8 delegation).
  *  • `healMemories`          — run the reclassifier on demand against a slice
  *                             of recent memories (rate-limited).
+ *  • `dedupeEntities`        — visibility-scoped self-heal sweep (D.9 guard).
+ *  • `mergeEntities`         — scoped pairwise merge of two named records
+ *                             (D.1) — the "combine these two" path that never
+ *                             touches the whole-workspace sweep.
+ *  • `undoEntityMerge`       — reverse a merge within the 7-day window (D.2),
+ *                             the self-recovery path for an errant merge.
+ *  • `noteAlias` / `splitAlias` — alias curation for the resolver.
  *
  * Pattern follows `createCorrectionTools` (corrections/tools.ts) — pure
  * orchestration with injected ports; `apps/api` wires DB adapters and
@@ -27,8 +34,9 @@
  */
 
 import { z } from 'zod'
-import { buildTool, type Tool } from '../tools/types.js'
+import { buildTool, type Tool, type ToolContext } from '../tools/types.js'
 import { isAutonomousToolContext } from '../tools/capability-gate.js'
+import type { AccessContext } from '../security/access-context.js'
 import { createRateLimiter } from '../security/rate-limiter.js'
 import {
   promoteMemoryToEntity,
@@ -45,7 +53,15 @@ import {
   runEntityDedupe,
   type EntityDedupeResult,
 } from '../consolidation/entity-dedupe.js'
-import type { EntityMergeDeps } from '../corrections/entity-merge.js'
+import {
+  mergeEntities,
+  undoMerge,
+  reconcileAttributes,
+  EntityMergeError,
+  UndoMergeError,
+  type EntityMergeDeps,
+  type ReconciliationMode,
+} from '../corrections/entity-merge.js'
 import type {
   BrainCandidate,
   BrainCandidateStore,
@@ -96,6 +112,55 @@ function requireWorkspace(workspaceId: string | null | undefined): string {
     throw new Error('brain healing tool invoked without a workspace context')
   }
   return workspaceId
+}
+
+/**
+ * The caller's access context for a dedupe run (corrections.md §D.9
+ * dedupe guard). Threaded into `runEntityDedupe` and the confirmation
+ * preview so the sweep is scoped to rows the caller can see and never
+ * merges across the visibility double.
+ */
+function dedupeAccess(context: ToolContext, workspaceId: string): AccessContext {
+  return {
+    workspaceId,
+    userId: context.userId,
+    assistantId: context.assistantId,
+    assistantKind: context.assistantKind ?? 'standard',
+    clearance: context.clearance,
+    compartments: context.compartments,
+  }
+}
+
+/** Map a scoped-merge failure to a plain-language, user-facing message. */
+function mergeErrorMessage(err: EntityMergeError): string {
+  switch (err.code) {
+    case 'self_merge':
+      return 'survivor_id and merged_id must be two different records.'
+    case 'entity_not_found':
+      return 'One or both records no longer exist in this workspace.'
+    case 'entity_inactive':
+      return 'One of the records was already merged away or deleted — nothing to merge.'
+    case 'cross_workspace_rejected':
+      return 'Both records must be in the same workspace.'
+    case 'conflict_requires_resolution':
+      return 'Some fields differ between the two records. Re-run with on_conflict="keep_survivor" or on_conflict="keep_merged" to choose which values win.'
+  }
+}
+
+/** Map an undo-merge failure to a plain-language, user-facing message. */
+function undoErrorMessage(err: UndoMergeError): string {
+  switch (err.code) {
+    case 'merge_not_found':
+      return 'No merge with that id exists in this workspace (it may already have been undone).'
+    case 'snapshot_unavailable':
+      return 'That merge is too old to reverse automatically — it predates undo support. Rebuild the record by hand.'
+    case 'merge_too_old':
+      return 'That merge is outside the 7-day undo window and can no longer be reversed automatically.'
+    case 'survivor_superseded':
+      return 'The surviving record was merged again since — undo the later merge first, then retry.'
+    case 'cascade_target_missing':
+      return 'A record involved in the merge was hard-deleted, so the merge cannot be cleanly reversed.'
+  }
 }
 
 function errorData(err: unknown): { data: string; isError: true } {
@@ -558,15 +623,22 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
   const dedupeEntities = buildTool({
     name: 'dedupeEntities',
     description:
-      'Self-heal duplicate entities in this workspace. Runs two passes: ' +
+      'Self-heal duplicate entities you can see in this workspace. Only ' +
+      'merges entities visible to you and never merges across a visibility ' +
+      'boundary, so a record that has no duplicate you can see is never ' +
+      'touched. Runs two auto-apply passes over that visible scope: ' +
       '(1) within-kind collisions on (kind, lower(display_name)); ' +
       '(2) cross-kind collisions on lower(display_name) alone, capped at ' +
       'small clusters so legitimately-ambiguous shared names are not ' +
-      'auto-merged. Each duplicate is merged into the oldest survivor ' +
-      '(within-kind) or the highest-priority kind (cross-kind: CRM > ' +
-      'repository > project > product) using survivor-wins reconciliation. ' +
-      'Use when the user says "clean up duplicates", "dedupe my brain", ' +
-      '"I see the same project listed five times".',
+      'auto-merged. Each duplicate is merged into the curated survivor ' +
+      '(within-kind: a user-verified / user-created row, else the oldest) ' +
+      'or the highest-priority kind (cross-kind: CRM > repository > project ' +
+      '> product) using survivor-wins reconciliation. This operates on the ' +
+      'WHOLE visible workspace, not a named pair — when the user names two ' +
+      'specific records to combine ("combine these two Ashley Chan ' +
+      'contacts"), use mergeEntities instead. Use dedupeEntities when the ' +
+      'user says "clean up duplicates", "dedupe my brain", "I see the same ' +
+      'project listed five times".',
     inputSchema: z.object({
       cluster_cap: z
         .number()
@@ -588,17 +660,9 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         .describe(
           'Opt-in: run a third LLM-clustering pass that catches semantic ' +
             'aliases the lexical passes miss (e.g. "AC" ↔ "Acme Corp"). ' +
-            'Costs one Flash-class LLM call per invocation. Default false.',
-        ),
-      llm_auto_apply_threshold: z
-        .number()
-        .min(0)
-        .max(1)
-        .optional()
-        .describe(
-          'Confidence threshold for auto-applying LLM-proposed clusters. ' +
-            'Lower-confidence clusters are returned as suggestions in the ' +
-            'reply. Default 0.85.',
+            'Costs one Flash-class LLM call per invocation. Its clusters are ' +
+            'returned as suggestions for the user to confirm and are NEVER ' +
+            'auto-merged. Default false.',
         ),
     }),
     isConcurrencySafe: false,
@@ -632,11 +696,16 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
       const clusterCap = parsed.cluster_cap ?? 25
       const kind = parsed.kind as EntityKind | undefined
 
+      // Same visibility scope as execute (corrections.md §D.9 dedupe
+      // guard) — the preview must show exactly what would merge, so it
+      // reads through the caller's access context too.
+      const access = dedupeAccess(context, workspaceId)
       try {
         const withinKind = await deps.entities.findDuplicateClustersSystem(
           context.userId,
           workspaceId,
           { limit: clusterCap, kind },
+          access,
         )
         // Cross-kind pass runs only when no single-kind filter is set —
         // exactly the runEntityDedupe gate, so the preview matches execute.
@@ -646,6 +715,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
                 context.userId,
                 workspaceId,
                 { limit: clusterCap },
+                access,
               )
             : []
 
@@ -653,12 +723,13 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           return ['No duplicate clusters found — nothing would be merged.']
         }
 
-        // Resolve every clustered id to its display name in one system read.
+        // Resolve every clustered id to its display name in one visible read.
         const names = await resolveEntityDisplayNames(
           deps.entities,
           context.userId,
           workspaceId,
           kind,
+          access,
         )
         const nameOf = (id: string) => names.get(id) ?? `(id ${id.slice(0, 8)})`
 
@@ -689,7 +760,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
         }
         if (parsed.cluster_by_llm) {
           lines.push(
-            '(plus any semantic-alias clusters the opt-in LLM pass finds at run time)',
+            '(plus any semantic-alias clusters the opt-in LLM pass proposes — those are returned as suggestions for you to confirm, never auto-merged)',
           )
         }
         return lines
@@ -716,10 +787,12 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
           merge: deps.entityMerge,
           workspaceId,
           actorUserId: context.userId,
+          // Scope the sweep to rows the caller can see (corrections.md
+          // §D.9 dedupe guard) — never merge across a visibility boundary.
+          access: dedupeAccess(context, workspaceId),
           clusterCap: input.cluster_cap,
           kind: input.kind,
           clusterByLlm: input.cluster_by_llm,
-          llmAutoApplyThreshold: input.llm_auto_apply_threshold,
           llmClusterer: input.cluster_by_llm
             ? { provider: deps.provider, model: deps.reclassifierModel }
             : undefined,
@@ -748,7 +821,236 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     },
   })
 
-  // ── 7. noteAlias ──────────────────────────────────────────────────
+  // ── 7. mergeEntities (scoped pairwise merge — corrections.md D.1) ──
+
+  const mergeEntitiesTool = buildTool({
+    name: 'mergeEntities',
+    description:
+      'Combine TWO specific duplicate records into one — the scoped, ' +
+      'pairwise merge. Use this (not dedupeEntities) when the user names ' +
+      'the records to combine ("combine these two Ashley Chan contacts", ' +
+      '"these two are the same company"). survivor_id is the record to ' +
+      'KEEP; merged_id is folded into it and superseded. Pass the id of a ' +
+      'contact / company / deal / entity from listContacts / getContact / ' +
+      'searchBrain / getEntity (the CRM row id and the entity id are the ' +
+      'same value). Non-conflicting fields are unioned onto the survivor; ' +
+      'if a field genuinely differs the tool tells you which and you re-run ' +
+      'with on_conflict to choose. Only records you can see can be merged, ' +
+      'and the merge is reversible for 7 days with undoEntityMerge.',
+    inputSchema: z.object({
+      survivor_id: z
+        .string()
+        .uuid()
+        .describe('The record to KEEP (survives the merge).'),
+      merged_id: z
+        .string()
+        .uuid()
+        .describe('The duplicate record to fold into the survivor (superseded).'),
+      on_conflict: z
+        .enum(['ask', 'keep_survivor', 'keep_merged'])
+        .optional()
+        .describe(
+          'How to resolve a field that differs between the two records. ' +
+            '"ask" (default) surfaces the conflicting fields instead of ' +
+            'guessing; "keep_survivor" takes the survivor\'s values; ' +
+            '"keep_merged" takes the merged record\'s values.',
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe('Optional note recorded in the merge audit.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    // Tier-D write-gate (Posture A) — a merge collapses one record's
+    // identity into another and can drop a field under keep_survivor /
+    // keep_merged. Reversible for 7 days, but a destructive identity
+    // change must never fire un-previewed. Gate everywhere with a preview.
+    requiresConfirmation: true,
+    allowPersistentApproval: false,
+
+    async describeConfirmation(input, context) {
+      const workspaceId = context.workspaceId
+      if (!workspaceId) return null
+      const parsed = input as { survivor_id?: string; merged_id?: string }
+      if (!parsed.survivor_id || !parsed.merged_id) return null
+      try {
+        const access = dedupeAccess(context, workspaceId)
+        const [survivor, merged] = await Promise.all([
+          deps.entities.getById(access, parsed.survivor_id),
+          deps.entities.getById(access, parsed.merged_id),
+        ])
+        const sName = survivor?.displayName ?? `(id ${parsed.survivor_id.slice(0, 8)})`
+        const mName = merged?.displayName ?? `(id ${parsed.merged_id.slice(0, 8)})`
+        return [
+          `Merge ${mName} into ${sName}. ${sName} survives and keeps its identity; ${mName} is folded in and superseded. Reversible for 7 days.`,
+        ]
+      } catch (err) {
+        console.debug('[healing-tools] mergeEntities describeConfirmation failed:', err)
+        return null
+      }
+    },
+
+    async execute(input, context) {
+      try {
+        const workspaceId = requireWorkspace(context.workspaceId)
+        if (!deps.entityMerge) {
+          return {
+            data:
+              'mergeEntities is unavailable — merge ports not wired in this ' +
+              'environment. Wire EntityMergeRepository on createBrainHealingTools.',
+            isError: true,
+          }
+        }
+        if (input.survivor_id === input.merged_id) {
+          return { data: 'survivor_id and merged_id must be two different records.', isError: true }
+        }
+
+        // Visibility guard (corrections.md §D.9): only records the caller
+        // can actually see may be merged — resolve both through the
+        // access-scoped read, never a system lookup. This is the pairwise
+        // analogue of the dedupe sweep's visibility scoping.
+        const access = dedupeAccess(context, workspaceId)
+        const [survivor, merged] = await Promise.all([
+          deps.entities.getById(access, input.survivor_id),
+          deps.entities.getById(access, input.merged_id),
+        ])
+        if (!survivor) {
+          return { data: `survivor_id ${input.survivor_id} was not found or is not visible to you.`, isError: true }
+        }
+        if (!merged) {
+          return { data: `merged_id ${input.merged_id} was not found or is not visible to you.`, isError: true }
+        }
+
+        const onConflict = input.on_conflict ?? 'ask'
+        const mode: ReconciliationMode =
+          onConflict === 'keep_survivor'
+            ? 'survivor-wins'
+            : onConflict === 'keep_merged'
+              ? 'merged-wins'
+              : 'auto-merge-with-prompt'
+
+        // In the default 'ask' mode, surface the exact conflicting fields
+        // (and both values) instead of a bare failure, so the user can
+        // choose which record's values win rather than silently losing one.
+        if (mode === 'auto-merge-with-prompt') {
+          const { conflicts } = reconcileAttributes(survivor.attributes, merged.attributes, mode)
+          const unresolved = conflicts.filter((c) => c.severity === 'requires_resolution')
+          if (unresolved.length > 0) {
+            const fields = unresolved
+              .map((c) => `${c.field} (${JSON.stringify(c.survivorValue)} vs ${JSON.stringify(c.mergedValue)})`)
+              .join('; ')
+            return {
+              data:
+                `These fields differ between ${survivor.displayName} and ${merged.displayName}: ${fields}. ` +
+                `Re-run with on_conflict="keep_survivor" (keep ${survivor.displayName}'s values) or ` +
+                `on_conflict="keep_merged" (keep ${merged.displayName}'s values).`,
+              isError: true,
+            }
+          }
+        }
+
+        const record = await mergeEntities(
+          {
+            workspaceId,
+            survivingId: survivor.id,
+            mergedId: merged.id,
+            actorUserId: context.userId,
+            reason: input.reason ?? 'user-initiated pairwise merge (chat)',
+            mode,
+          },
+          deps.entityMerge,
+        )
+
+        return {
+          data: {
+            merged: true,
+            survivorId: survivor.id,
+            survivorName: survivor.displayName,
+            mergedId: merged.id,
+            mergedName: merged.displayName,
+            mergeId: record.id,
+            note:
+              `Merged ${merged.displayName} into ${survivor.displayName}. ` +
+              `Reversible for 7 days with undoEntityMerge (merge_id ${record.id}).`,
+          },
+        }
+      } catch (err) {
+        if (err instanceof EntityMergeError) {
+          return { data: mergeErrorMessage(err), isError: true }
+        }
+        return errorData(err)
+      }
+    },
+  })
+
+  // ── 8. undoEntityMerge (reverse a merge — corrections.md D.2) ──────
+
+  const undoEntityMergeTool = buildTool({
+    name: 'undoEntityMerge',
+    description:
+      'Reverse an entity merge within its 7-day window — restores both ' +
+      'records to their pre-merge state. Use when the user says "undo that ' +
+      'merge", "they are actually different people, split them back", or ' +
+      '"put that record back" after a mergeEntities or dedupeEntities run. ' +
+      'Pass merge_id from the merge result. Outside 7 days, or if the ' +
+      'survivor was merged again, the tool says so and the record must be ' +
+      'rebuilt by hand.',
+    inputSchema: z.object({
+      merge_id: z
+        .string()
+        .uuid()
+        .describe('The merge id returned by mergeEntities (or from the merge audit).'),
+      reason: z
+        .string()
+        .optional()
+        .describe('Optional note recorded in the undo audit.'),
+    }),
+    isConcurrencySafe: false,
+    isReadOnly: false,
+    // Tier-C write-gate (see undoReclassification): this IS the recovery
+    // path for an errant merge, so interactive stays silent; the
+    // autonomous path gates so a headless loop can't roll merges back and
+    // forth unattended.
+    resolveConfirmation: async (context) => isAutonomousToolContext(context),
+
+    async execute(input, context) {
+      try {
+        const workspaceId = requireWorkspace(context.workspaceId)
+        if (!deps.entityMerge) {
+          return {
+            data:
+              'undoEntityMerge is unavailable — merge ports not wired in this ' +
+              'environment. Wire EntityMergeRepository on createBrainHealingTools.',
+            isError: true,
+          }
+        }
+        await undoMerge(
+          {
+            workspaceId,
+            mergeId: input.merge_id,
+            actorUserId: context.userId,
+            reason: input.reason,
+          },
+          deps.entityMerge,
+        )
+        return {
+          data: {
+            undone: true,
+            mergeId: input.merge_id,
+            note: 'The merge was reversed — both records are back to their pre-merge state.',
+          },
+        }
+      } catch (err) {
+        if (err instanceof UndoMergeError) {
+          return { data: undoErrorMessage(err), isError: true }
+        }
+        return errorData(err)
+      }
+    },
+  })
+
+  // ── 9. noteAlias ──────────────────────────────────────────────────
 
   const noteAlias = buildTool({
     name: 'noteAlias',
@@ -823,7 +1125,7 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     },
   })
 
-  // ── 8. splitAlias ─────────────────────────────────────────────────
+  // ── 10. splitAlias ────────────────────────────────────────────────
 
   const splitAlias = buildTool({
     name: 'splitAlias',
@@ -878,6 +1180,8 @@ export function createBrainHealingTools(deps: HealingToolsDeps): Tool[] {
     undoReclassification,
     healMemories,
     dedupeEntities,
+    mergeEntitiesTool,
+    undoEntityMergeTool,
     noteAlias,
     splitAlias,
   ]
@@ -898,11 +1202,14 @@ async function resolveEntityDisplayNames(
   actorUserId: string,
   workspaceId: string,
   kind: EntityKind | undefined,
+  access?: AccessContext,
 ): Promise<Map<string, string>> {
-  const rows = await entities.listLiveEntitiesSystem(actorUserId, workspaceId, {
-    kind,
-    limit: 500,
-  })
+  const rows = await entities.listLiveEntitiesSystem(
+    actorUserId,
+    workspaceId,
+    { kind, limit: 500 },
+    access,
+  )
   return new Map(rows.map((e) => [e.id, e.displayName]))
 }
 

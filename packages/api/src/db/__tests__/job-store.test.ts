@@ -42,33 +42,85 @@ describe('[COMP:db/job-store-claim] markCompleted reap + nag preservation (2026-
     expect(sqls[2]).toContain('DELETE FROM workflows')
   })
 
-  it('deletes a once-job but skips workflow cascade when channel_type = workflow', async () => {
+  it('deletes a once-job and ARCHIVES (never deletes) the workflow when channel_type = workflow', async () => {
+    // Row read.
     mockQuery.mockResolvedValueOnce({
       rows: [
         {
           schedule: { type: 'once', datetime: '2026-05-04T10:00:00Z' },
           nag_interval_mins: null,
-          channel_type: 'workflow', // scheduleWorkflow-backed, leave intact
-          workflow_id: 'wf_user_authored',
+          channel_type: 'workflow', // createWorkflow-shaped one-off — archive, don't delete
+          workflow_id: 'wf_reminder',
           state_json: {},
         },
       ],
       rowCount: 1,
     } as never)
+    // DELETE scheduled_jobs.
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
+    // UPDATE workflows ... archived (retireBackingWorkflow) → workspace for notify.
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 'ws_1' }], rowCount: 1 } as never)
 
     const store = createDbJobStore()
     await store.markCompleted('job_1', new Date(0))
-    // Let the fire-and-forget realtime signal's workspace lookup settle.
     await new Promise((r) => setImmediate(r))
 
-    // Row read + scheduled_jobs DELETE + the realtime signal's assistants
-    // workspace lookup (realtime-sync) — but NEVER the workflow cascade.
-    expect(mockQuery).toHaveBeenCalledTimes(3)
     const sqls = mockQuery.mock.calls.map((c) => c[0] as string)
     expect(sqls[1]).toContain('DELETE FROM scheduled_jobs')
-    expect(sqls[2]).toContain('FROM assistants')
+    // The spent one-off's backing workflow is archived, never hard-deleted.
+    const archive = mockQuery.mock.calls.find((c) => (c[0] as string).includes("lifecycle_state = 'archived'"))
+    expect(archive).toBeDefined()
+    expect((archive![0] as string)).toContain("pinned = false")
+    expect(archive![1]).toEqual(['wf_reminder'])
     expect(sqls.some((s) => s.includes('DELETE FROM workflows'))).toBe(false)
+  })
+
+  it('markFailed archives the backing workflow of a terminally-failed once-job', async () => {
+    // The UPDATE ... RETURNING carries the discriminators the reap needs.
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          assistantId: 'a_1',
+          schedule: { type: 'once', datetime: '2026-05-04T10:00:00Z' },
+          nagIntervalMins: null,
+          workflowId: 'wf_reminder',
+        },
+      ],
+      rowCount: 1,
+    } as never)
+    // UPDATE workflows ... archived.
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspaceId: 'ws_1' }], rowCount: 1 } as never)
+
+    const store = createDbJobStore()
+    await store.markFailed('job_1', new Date(0))
+    await new Promise((r) => setImmediate(r))
+
+    const sqls = mockQuery.mock.calls.map((c) => c[0] as string)
+    expect(sqls[0]).toContain("last_status = 'failed'")
+    const archive = mockQuery.mock.calls.find((c) => (c[0] as string).includes("lifecycle_state = 'archived'"))
+    expect(archive).toBeDefined()
+    expect(archive![1]).toEqual(['wf_reminder'])
+  })
+
+  it('markFailed does NOT archive a recurring job (only terminal once-jobs are spent)', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          assistantId: 'a_1',
+          schedule: { type: 'daily', time: '09:00' },
+          nagIntervalMins: null,
+          workflowId: 'wf_recurring',
+        },
+      ],
+      rowCount: 1,
+    } as never)
+
+    const store = createDbJobStore()
+    await store.markFailed('job_1', new Date('2026-05-05T09:00:00Z'))
+    await new Promise((r) => setImmediate(r))
+
+    const sqls = mockQuery.mock.calls.map((c) => c[0] as string)
+    expect(sqls.some((s) => s.includes("lifecycle_state = 'archived'"))).toBe(false)
   })
 
   it('UPDATEs (does not delete) a recurring job', async () => {

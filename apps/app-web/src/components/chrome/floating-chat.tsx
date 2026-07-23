@@ -2372,7 +2372,11 @@ export function FloatingChat({
   }, [stream, session]);
 
   const handleConfirmation = useCallback(
-    async (toolCallId: string, action: "approve" | "deny") => {
+    async (
+      toolCallId: string,
+      action: "approve" | "deny",
+      comment?: string,
+    ) => {
       const conf = session.state.pendingConfirmations.find(
         (p) => p.toolCallId === toolCallId,
       );
@@ -2389,6 +2393,9 @@ export function FloatingChat({
             sessionId: conf.sessionId,
             toolCallId,
             decision,
+            // Deny-with-comment: the note rides to the model via
+            // declinedToolResult so the assistant revises, not re-asks.
+            ...(action === "deny" && comment ? { comment } : {}),
           }),
         });
         if (res.ok) {
@@ -2771,7 +2778,9 @@ export function FloatingChat({
               denyLabel={t.confirmationDeny}
               approvingLabel={t.confirmationApproving}
               onApprove={(id) => void handleConfirmation(id, "approve")}
-              onDeny={(id) => void handleConfirmation(id, "deny")}
+              onDeny={(id, comment) =>
+                void handleConfirmation(id, "deny", comment)
+              }
             />
           ))}
 

@@ -8,7 +8,7 @@ describe('[COMP:mcp/confirmation] ConfirmationResolver', () => {
     const promise = resolver.waitForDecision('tool-1', 5000)
     resolver.resolve('tool-1', 'allow')
 
-    await expect(promise).resolves.toBe('allow')
+    await expect(promise).resolves.toEqual({ decision: 'allow' })
   })
 
   it('handles early-arriving decisions', async () => {
@@ -18,7 +18,29 @@ describe('[COMP:mcp/confirmation] ConfirmationResolver', () => {
     resolver.resolve('tool-1', 'deny')
     const result = await resolver.waitForDecision('tool-1', 5000)
 
-    expect(result).toBe('deny')
+    expect(result).toEqual({ decision: 'deny' })
+  })
+
+  it('carries a deny-with-comment note back with the decision', async () => {
+    const resolver = createConfirmationResolver()
+
+    const promise = resolver.waitForDecision('tool-1', 5000)
+    resolver.resolve('tool-1', 'deny', '  do not mention the app password  ')
+
+    // The note is trimmed and rides alongside the decision.
+    await expect(promise).resolves.toEqual({
+      decision: 'deny',
+      comment: 'do not mention the app password',
+    })
+  })
+
+  it('omits an all-whitespace comment (treated as a plain deny)', async () => {
+    const resolver = createConfirmationResolver()
+
+    resolver.resolve('tool-1', 'deny', '   ')
+    const result = await resolver.waitForDecision('tool-1', 5000)
+
+    expect(result).toEqual({ decision: 'deny' })
   })
 
   it('times out with rejection', async () => {
@@ -41,8 +63,8 @@ describe('[COMP:mcp/confirmation] ConfirmationResolver', () => {
     resolver.resolve('tool-2', 'always_deny')
     resolver.resolve('tool-1', 'always_allow')
 
-    await expect(p1).resolves.toBe('always_allow')
-    await expect(p2).resolves.toBe('always_deny')
+    await expect(p1).resolves.toEqual({ decision: 'always_allow' })
+    await expect(p2).resolves.toEqual({ decision: 'always_deny' })
   })
 
   it('ignores resolve for unknown tool IDs', () => {

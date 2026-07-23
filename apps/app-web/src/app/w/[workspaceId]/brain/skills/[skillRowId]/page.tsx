@@ -424,6 +424,18 @@ function AboutGroup({
             </Link>
           </PropRow>
         )}
+        {/* Origin-aware induction: distilled from a workflow's execution
+            sessions — link back to the source workflow. */}
+        {skill.learnedFromWorkflowId && (
+          <PropRow label={copy.learnedFromWorkflowLabel}>
+            <Link
+              href={`/w/${workspaceId}/workflow/${skill.learnedFromWorkflowId}`}
+              className="underline underline-offset-2 decoration-muted-foreground/40 hover:decoration-foreground"
+            >
+              {skill.learnedFromWorkflowName ?? copy.learnedFromWorkflowView}
+            </Link>
+          </PropRow>
+        )}
         <PropRow label={skillsCopy.confidenceLabel}>
           <span className="flex w-28 items-center gap-2">
             <span className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">

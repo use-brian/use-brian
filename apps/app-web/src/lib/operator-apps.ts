@@ -7,10 +7,10 @@
  *   - The TOP icon row (doc-sidebar) is frozen at Home / Brain / Studio /
  *     Workflow — how you shape the brain. It never grows.
  *   - OPERATOR APPS — things you run over the brain (Page, Tasks, CRM,
- *     Feed) — live under Home in the app-bar. Selecting Home resolves to
- *     the workspace's LAST-USED operator app (default Page), cached per
- *     workspace in localStorage, so leaving to Studio and returning
- *     resumes where you were.
+ *     Feed, Browsers) — live under Home in the app-bar. Selecting Home
+ *     resolves to the workspace's LAST-USED operator app (default Page),
+ *     cached per workspace in localStorage, so leaving to Studio and
+ *     returning resumes where you were.
  *
  * Pure + IO-light (localStorage only, guarded) so vitest can exercise the
  * resolution logic without React or the router.
@@ -20,18 +20,22 @@
 
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 
-/** The operator apps, in app-bar order. Page is the default; Feed holds the 4th slot. */
-export const OPERATOR_APP_KEYS = ["page", "tasks", "crm", "feed"] as const;
+/** The operator apps, in app-bar order. Page is the default; Feed holds the
+ *  4th slot; Browsers (the live-browser-sessions surface) holds the 5th. */
+export const OPERATOR_APP_KEYS = ["page", "tasks", "crm", "feed", "browsers"] as const;
 export type OperatorAppKey = (typeof OPERATOR_APP_KEYS)[number];
 
 export const DEFAULT_OPERATOR_APP: OperatorAppKey = "page";
 
-/** App key → the `WorkspaceSurface` route segment it lives on. */
+/** App key → the `WorkspaceSurface` route segment it lives on. Browsers reuses
+ *  the existing `/computer` route family (the Take-Over live view + its new
+ *  session-rail index). */
 const APP_SEGMENT: Record<OperatorAppKey, string> = {
   page: "p",
   tasks: "tasks",
   feed: "feed",
   crm: "crm",
+  browsers: "computer",
 };
 
 /** Surfaces that belong to an operator app (the bar shows on these). */
@@ -40,6 +44,7 @@ const SURFACE_TO_APP: Partial<Record<WorkspaceSurface, OperatorAppKey>> = {
   tasks: "tasks",
   feed: "feed",
   crm: "crm",
+  computer: "browsers",
 };
 
 /** The operator app a surface belongs to, or null for Brain/Studio/… */

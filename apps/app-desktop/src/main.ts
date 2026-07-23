@@ -104,6 +104,16 @@ import {
   type DesktopSession,
 } from "./desktop-auth.js";
 import {
+  parseConnectRequest,
+  generateConnectorNonce,
+  buildDesktopConnectorState,
+  buildConnectorAuthorizeUrl,
+  buildConnectorConnectedPageUrl,
+  buildConnectorsReturnPath,
+  exchangeAndStore,
+  type ConnectorConnectRequest,
+} from "./desktop-connector-oauth.js";
+import {
   parseAccountStore,
   parseAccountDir,
   parseUserCookieValue,
@@ -194,6 +204,10 @@ let pendingState: string | null = null;
 let authServer: Server | null = null;
 /** Auto-teardown for an abandoned sign-in's loopback server. */
 let authServerTimer: ReturnType<typeof setTimeout> | null = null;
+/** The ephemeral `127.0.0.1` server receiving an in-flight connector-connect code. */
+let connectorServer: Server | null = null;
+/** Auto-teardown for an abandoned connector-connect loopback server. */
+let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
 
@@ -802,6 +816,18 @@ function closeAuthServer(): void {
   pendingState = null;
 }
 
+/** Tear down the ephemeral connector-connect loopback server (if any). */
+function closeConnectorServer(): void {
+  if (connectorServerTimer) {
+    clearTimeout(connectorServerTimer);
+    connectorServerTimer = null;
+  }
+  if (connectorServer) {
+    connectorServer.close();
+    connectorServer = null;
+  }
+}
+
 /**
  * Open the system browser to complete OAuth. The single-use code returns over an
  * ephemeral `http://127.0.0.1:<port>/cb` loopback redirect (RFC 8252 §7.3) — this
@@ -912,6 +938,115 @@ async function completeSignIn(code: string): Promise<void> {
     focusWindow(win); // focus AFTER the reload so the fresh contents take input
   } catch (err) {
     dialog.showErrorBox("Sign-in failed", err instanceof Error ? err.message : String(err));
+  }
+}
+
+// ── Connector OAuth (Google / Notion) — RFC 8252 loopback, mirrors sign-in ──
+//
+// The renderer (connectors page) hands us the provider authorize URL over the
+// `connect-connector` IPC. We start an ephemeral loopback, append our loopback +
+// a state nonce to the URL, and open consent in the SYSTEM browser. The app-web
+// callback forwards the code back over loopback; we exchange + store it via the
+// API with our OWN session, then navigate the app window to the connectors page.
+// Spec: docs/architecture/features/app-desktop.md → "Connector OAuth".
+
+/**
+ * The shell's current access token for API calls: the cookie-jar session in the
+ * thin remote shell, or the safeStorage Bearer in bundled mode. Connector OAuth
+ * (Google/Notion) is a cloud feature, so in practice this is the jar cookie.
+ */
+async function currentConnectorAccessToken(): Promise<string | null> {
+  const jar = await readJarCookie("access_token");
+  if (jar) return jar;
+  return cfg.bundled ? (readStoredTokens()?.accessToken ?? null) : null;
+}
+
+/** Navigate the app window to the connectors page (success or error query). */
+async function navigateToConnectors(
+  workspaceId: string,
+  opts: { connector?: string; instanceId?: string; error?: string },
+): Promise<void> {
+  const win = ensureWindow();
+  await win.webContents.loadURL(`${cfg.appUrl}${buildConnectorsReturnPath(workspaceId, opts)}`);
+  focusWindow(win);
+}
+
+function startConnectorConnect(raw: unknown): void {
+  const req = parseConnectRequest(raw);
+  if (!req) {
+    console.warn("[connector-oauth] ignoring malformed connect request");
+    return;
+  }
+
+  closeConnectorServer();
+  const nonce = generateConnectorNonce();
+  const server = createServer((r, res) => {
+    // The loopback nonce is the CSRF guard: a stray/forged /cb whose `state`
+    // doesn't match parses to null → 404, server stays open.
+    const cb = r.url ? parseLoopbackCallback(r.url, nonce) : null;
+    if (!cb) {
+      res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+      res.end("Not found");
+      return;
+    }
+    res.writeHead(302, {
+      Location: buildConnectorConnectedPageUrl(cfg.appUrl, { error: cb.kind !== "code" }),
+      "Cache-Control": "no-store",
+    });
+    res.end();
+    closeConnectorServer();
+    if (cb.kind === "code") void completeConnectorConnect(req, cb.code);
+    else {
+      dialog.showErrorBox("Connection failed", `Connecting ${req.connector} didn't complete (${cb.error}).`);
+      void navigateToConnectors(req.workspaceId, { error: cb.error });
+    }
+  });
+  server.on("error", (err) => {
+    // Unlike sign-in, connector OAuth has no `usebrian://` scheme fallback: the
+    // return carries a `code` the scheme handler doesn't route. A bind failure is
+    // rare (ephemeral port); surface it rather than silently fall back to the
+    // broken web-redirect behaviour.
+    console.warn("[connector-oauth] loopback server failed:", err);
+    closeConnectorServer();
+    dialog.showErrorBox("Connection failed", "Could not start the connection. Please try again.");
+  });
+  connectorServer = server;
+  connectorServerTimer = setTimeout(closeConnectorServer, LOOPBACK_SERVER_TTL_MS);
+  server.listen(0, "127.0.0.1", () => {
+    const port = (server.address() as AddressInfo).port;
+    const state = buildDesktopConnectorState({
+      connector: req.connector,
+      workspaceId: req.workspaceId,
+      nonce,
+      loopback: buildLoopbackRedirectUri(port),
+      createNew: req.createNew,
+      instanceId: req.instanceId,
+    });
+    void shell.openExternal(buildConnectorAuthorizeUrl(req.authorizeUrl, state));
+  });
+}
+
+async function completeConnectorConnect(req: ConnectorConnectRequest, code: string): Promise<void> {
+  closeConnectorServer(); // idempotent — the loopback path already closed it
+  try {
+    const accessToken = await currentConnectorAccessToken();
+    if (!accessToken) {
+      dialog.showErrorBox("Connection failed", "Please sign in first, then reconnect.");
+      return;
+    }
+    const instanceId = await exchangeAndStore(cfg.apiUrl, accessToken, {
+      connector: req.connector,
+      code,
+      redirectUri: req.redirectUri,
+      createNew: req.createNew,
+      instanceId: req.instanceId,
+    });
+    await navigateToConnectors(req.workspaceId, { connector: req.connector, instanceId });
+  } catch (err) {
+    dialog.showErrorBox("Connection failed", err instanceof Error ? err.message : String(err));
+    // Land the user back on the connectors page (clears the row spinner) with the
+    // error surfaced, matching the web callback's error redirect.
+    await navigateToConnectors(req.workspaceId, { error: "store_failed" });
   }
 }
 
@@ -1552,6 +1687,9 @@ if (!gotLock) {
   // Registered in every mode like sign-in/out; bundled mode (Bearer tokens, not
   // cookies) stays single-account — `switchAccount` returns an error there.
   ipcMain.on("Use Brian:add-account", () => startSignIn({ addAccount: true }));
+  // Connector OAuth (Google / Notion): the connectors page hands us the provider
+  // authorize URL; we drive the loopback flow (see startConnectorConnect).
+  ipcMain.on("Use Brian:connect-connector", (_event, req: unknown) => startConnectorConnect(req));
   ipcMain.handle("Use Brian:switch-account", (_event, accountId: unknown): Promise<SwitchResult> =>
     typeof accountId === "string"
       ? switchAccount(accountId)

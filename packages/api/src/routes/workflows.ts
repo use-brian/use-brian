@@ -917,3 +917,74 @@ export function workflowsRoutes(opts: WorkflowsRouteOptions): Router {
 
   return router
 }
+
+// ── Validated definition editing (shared with approval applies) ──────
+
+export type ValidatedDefinitionEditor = (params: {
+  userId: string
+  workspaceId: string
+  workflowId: string
+  /** Pure transform over a deep-cloned definition. Return the edited
+   *  definition, or `{ error }` to abort (e.g. target step vanished). */
+  mutate: (definition: WorkflowDefinition) => WorkflowDefinition | { error: string }
+}) => Promise<{ ok: true } | { ok: false; error: string }>
+
+/**
+ * The one write path for programmatic workflow-definition edits that must
+ * hold the SAME authoring bar as the REST `PATCH /api/workflows/:id` —
+ * schema parse, page-anchor checks, delivery/connector/tool-policy
+ * preflight. Used by the skill-approvals route to apply
+ * `workflow_refinement` patches and attach-offer allow-list writes
+ * (origin-aware induction) so an approval can never land a definition the
+ * builder would have rejected.
+ */
+export function createValidatedDefinitionEditor(
+  opts: WorkflowsRouteOptions,
+): ValidatedDefinitionEditor {
+  return async function applyValidatedDefinitionEdit(params) {
+    const existing = await opts.workflowStore.getById(params.userId, params.workflowId)
+    if (!existing || existing.workspaceId !== params.workspaceId) {
+      return { ok: false, error: 'Workflow not found in this workspace' }
+    }
+
+    const mutated = params.mutate(
+      JSON.parse(JSON.stringify(existing.definition)) as WorkflowDefinition,
+    )
+    if ('error' in mutated) {
+      return { ok: false, error: mutated.error }
+    }
+
+    const definitionParsed = WorkflowDefinitionSchema.safeParse(mutated)
+    if (!definitionParsed.success) {
+      const summary = definitionParsed.error.issues
+        .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
+        .join('; ')
+      return { ok: false, error: `Invalid definition after edit: ${summary}` }
+    }
+
+    const editIssues = [
+      ...(await pageAnchorIssues(
+        definitionParsed.data,
+        { userId: params.userId, workspaceId: params.workspaceId },
+        opts.savedViewStore,
+      )),
+      ...(await dependencyIssues(
+        definitionParsed.data,
+        { userId: params.userId, workspaceId: params.workspaceId },
+        opts,
+      )),
+    ]
+    if (editIssues.length > 0) {
+      return {
+        ok: false,
+        error: editIssues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      }
+    }
+
+    const updated = await opts.workflowStore.update(params.userId, params.workflowId, {
+      definition: definitionParsed.data,
+    })
+    if (!updated) return { ok: false, error: 'Workflow update failed' }
+    return { ok: true }
+  }
+}

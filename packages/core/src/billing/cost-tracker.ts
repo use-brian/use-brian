@@ -178,9 +178,25 @@ export type UsageStore = {
      * (recorded as NULL, which the admin rollup reports as an unknown rate
      * rather than a free one).
      *
-     * Optional — null on non-audio rows and on rows pre-migration 347.
+     * Optional — null on non-audio rows and on rows pre-migration 353.
      */
     audioSeconds?: number
+    /**
+     * Episode that CAUSED this spend — a recording, channel media, an
+     * ingested doc. The one axis the ledger lacked: `source` says who pays,
+     * `model_tier` how expensive a model, the derived category what
+     * capability, but none of them say what artifact triggered the call. A
+     * recording's cost fans out across transcription, brain ingest and
+     * synthesis under three different sources; without this they cannot be
+     * summed back to the recording, and measured in production the ingest
+     * tail cost MORE than the transcription line.
+     *
+     * Pass it wherever the originating episode is in hand. Optional and
+     * additive: most spend (a chat turn, an embedding batch) has no single
+     * origin and records NULL. Never inferred — a value here always means a
+     * measured attribution. Migration 365.
+     */
+    sourceEpisodeId?: string
     /**
      * Which API key drove the LLM call: the platform's (`platform`, the
      * default) or the workspace's bring-your-own key (`user`). BYO turns are

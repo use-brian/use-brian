@@ -85,7 +85,7 @@ describe("[COMP:app-web/approvals] isActionable", () => {
     }
   });
 
-  it("ACTIONABLE_KINDS holds exactly the six in-place kinds", () => {
+  it("ACTIONABLE_KINDS holds exactly the seven in-place kinds", () => {
     expect([...ACTIONABLE_KINDS].sort()).toEqual(
       [
         "browser_skill_send",
@@ -93,6 +93,7 @@ describe("[COMP:app-web/approvals] isActionable", () => {
         "staged_skill_update",
         "staged_write",
         "tool_invocation",
+        "workflow_refinement",
         "workflow_step",
       ].sort(),
     );

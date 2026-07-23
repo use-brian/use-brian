@@ -76,6 +76,42 @@ function notifyJobChange(jobId: string, assistantId: string, action: 'create' | 
   })().catch(() => {})
 }
 
+/**
+ * Retire a spent one-off schedule's backing workflow to `archived` so a fired
+ * reminder leaves the active Workflow grid. Called from `markCompleted` (for a
+ * `channel_type = 'workflow'` once-job — a `createWorkflow`-shaped one-off we
+ * must not hard-delete, since at this seam it is indistinguishable from a
+ * hand-built workflow) and from `markFailed` (a once-job never retries, so a
+ * failure is terminal and the workflow is equally spent).
+ *
+ * Archive, not delete: reversible via PATCH `lifecycleState:'active'`; the only
+ * hard delete stays the sweep's grace-gated, digest-gated one-off delete. The
+ * `pinned = false` guard honors the user's pin veto, mirroring `decideLifecycle`
+ * and `applyLifecycleTransitionSystem` (which also flips `enabled = false` on
+ * archive). Best-effort like every cross-table write here — a failure logs and
+ * never affects the job write. Spec: docs/architecture/features/
+ * workflow-lifecycle.md -> "Spent one-off schedules".
+ */
+async function retireBackingWorkflow(workflowId: string): Promise<void> {
+  try {
+    const r = await query<{ workspaceId: string }>(
+      `UPDATE workflows
+          SET lifecycle_state = 'archived',
+              lifecycle_reason = 'One-off schedule completed',
+              lifecycle_transitioned_at = now(),
+              enabled = false
+        WHERE id = $1
+          AND pinned = false
+          AND lifecycle_state <> 'archived'
+        RETURNING workspace_id AS "workspaceId"`,
+      [workflowId],
+    )
+    if (r.rows[0]) notifyWorkspaceChange(r.rows[0].workspaceId, 'workflow', 'update', workflowId)
+  } catch (err) {
+    console.error(`[job-store] failed to archive backing workflow ${workflowId}:`, err)
+  }
+}
+
 function rowToJob(row: JobRow): ScheduledJob {
   return {
     ...row,
@@ -332,6 +368,14 @@ export function createDbJobStore(): JobStore {
                 err,
               )
             })
+        } else if (row.workflow_id) {
+          // channel_type === 'workflow': a `createWorkflow`-shaped one-off (the
+          // shape the model builds for reminders today). We can't tell it apart
+          // from a hand-built one-off-scheduled workflow at this seam, so retire
+          // it to `archived` (reversible) instead of deleting — its single fire
+          // is spent, so it leaves the active grid. The sweep's grace-gated
+          // one-off delete GCs it later.
+          await retireBackingWorkflow(row.workflow_id)
         }
         notifyJobChange(id, row.assistant_id, 'delete')
         return
@@ -357,12 +401,33 @@ export function createDbJobStore(): JobStore {
     },
 
     async markFailed(id, nextRunAt) {
-      const result = await query<{ assistantId: string }>(
+      // Fold the discriminators the terminal-failure reap needs into the same
+      // UPDATE's RETURNING — no extra read on the common recurring-failure path.
+      const result = await query<{
+        assistantId: string
+        schedule: StructuredSchedule
+        nagIntervalMins: number | null
+        workflowId: string | null
+      }>(
         `UPDATE scheduled_jobs SET last_run_at = now(), last_status = 'failed', next_run_at = $2, updated_at = now() WHERE id = $1
-         RETURNING assistant_id AS "assistantId"`,
+         RETURNING assistant_id AS "assistantId", schedule, nag_interval_mins AS "nagIntervalMins", workflow_id AS "workflowId"`,
         [id, safeNextRunAt(id, nextRunAt)],
       )
-      if (result.rows[0]) notifyJobChange(id, result.rows[0].assistantId, 'update')
+      const row = result.rows[0]
+      if (!row) return
+      notifyJobChange(id, row.assistantId, 'update')
+
+      // A `once` job never retries — the poll worker disables it on the first
+      // failure — so `markFailed` on a once-job is always terminal and its
+      // backing workflow is spent. Retire it (archived, so the failed fire
+      // stays visible + debuggable) the same way `markCompleted` does, so a
+      // failed reminder also leaves the active grid. Recurring failures (which
+      // will retry or hit the auto-disable backstop) and nag parents are left
+      // alone.
+      const isOnceNonNag = row.schedule?.type === 'once' && row.nagIntervalMins == null
+      if (isOnceNonNag && row.workflowId) {
+        await retireBackingWorkflow(row.workflowId)
+      }
     },
 
     async purgeDisabledOlderThan(cutoff) {

@@ -5,6 +5,7 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
+import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const NOTION_CLIENT_ID = process.env.NOTION_CLIENT_ID ?? "";
@@ -34,6 +35,20 @@ export async function GET(request: Request) {
   const code = url.searchParams.get("code");
   const stateRaw = url.searchParams.get("state") ?? ""; // "notion[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
+
+  // Desktop (Electron) path — forward the code to the shell's loopback; it does
+  // the exchange + store with its own session. See the google-connector callback
+  // and docs/plans/desktop-connector-oauth-return.md for why.
+  const desktopState = parseDesktopConnectorState(stateRaw);
+  if (desktopState) {
+    const forward = buildLoopbackForwardUrl(desktopState, { code, error });
+    if (!forward) {
+      return NextResponse.redirect(
+        new URL(connectorsPath(desktopState.workspaceId, { error: "invalid_state" }), request.url),
+      );
+    }
+    return NextResponse.redirect(forward);
+  }
 
   const { connector: intent, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
   const validIntent = intent === "notion";

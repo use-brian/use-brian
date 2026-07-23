@@ -26,7 +26,7 @@ import { taskPriority, type TaskRow, type TaskStatus } from "@/lib/api/tasks";
 import { taskProject } from "@/lib/tasks-view";
 import { STATUS_DOT } from "./task-cells";
 
-const LIVE_COLUMNS: readonly TaskStatus[] = ["todo", "in_progress", "blocked"];
+const LIVE_COLUMNS: readonly TaskStatus[] = ["todo", "in_progress", "in_review", "blocked"];
 const COMPLETED_COLUMNS: readonly TaskStatus[] = ["done", "archived"];
 
 const PRIORITY_TINT: Record<string, string> = {

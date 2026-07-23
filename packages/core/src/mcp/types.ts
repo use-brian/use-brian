@@ -72,6 +72,24 @@ export type McpToolInfo = {
 
 export type ConfirmationDecision = 'allow' | 'deny' | 'always_allow' | 'always_deny'
 
+/**
+ * The user's answer to a confirmation prompt, plus an optional free-text
+ * note attached when denying.
+ *
+ * The `comment` is the "Deny with comment" affordance: a UI that offers it
+ * (the web chat confirmation card, the approvals panel's reason box) passes
+ * the user's note here so it reaches the model-facing `declinedToolResult`.
+ * The model reads it as an instruction and revises before re-proposing —
+ * a bare deny only lets it re-ask. Absent for allow/always_* decisions,
+ * for a plain deny with no note, and for channels that resolve by keyword.
+ *
+ * Spec: docs/architecture/engine/tool-executor.md → "Declined confirmations".
+ */
+export type ConfirmationOutcome = {
+  decision: ConfirmationDecision
+  comment?: string
+}
+
 export type ToolConfirmationRequest = {
   toolCallId: string
   toolName: string
@@ -142,8 +160,8 @@ export type AwaitingApprovalEvent = {
  * the route handler calls `resolve()` with the user's choice.
  */
 export type ConfirmationResolver = {
-  resolve(toolCallId: string, decision: ConfirmationDecision): void
-  waitForDecision(toolCallId: string, timeoutMs: number): Promise<ConfirmationDecision>
+  resolve(toolCallId: string, decision: ConfirmationDecision, comment?: string): void
+  waitForDecision(toolCallId: string, timeoutMs: number): Promise<ConfirmationOutcome>
 }
 
 /** After this many `allow` decisions, auto-promote to `always_allow`. */
@@ -157,23 +175,27 @@ export const AUTO_PROMOTE_THRESHOLD = 5
  * when `waitForDecision()` is called.
  */
 export function createConfirmationResolver(): ConfirmationResolver {
-  type Pending = { resolve: (d: ConfirmationDecision) => void; reject: (e: Error) => void }
+  type Pending = { resolve: (o: ConfirmationOutcome) => void; reject: (e: Error) => void }
   const pending = new Map<string, Pending>()
-  const earlyDecisions = new Map<string, ConfirmationDecision>()
+  const earlyDecisions = new Map<string, ConfirmationOutcome>()
 
   return {
-    resolve(toolCallId: string, decision: ConfirmationDecision) {
+    resolve(toolCallId: string, decision: ConfirmationDecision, comment?: string) {
+      const trimmed = comment?.trim()
+      const outcome: ConfirmationOutcome = trimmed
+        ? { decision, comment: trimmed }
+        : { decision }
       const p = pending.get(toolCallId)
       if (p) {
-        p.resolve(decision)
+        p.resolve(outcome)
         pending.delete(toolCallId)
       } else {
         // Decision arrived before waitForDecision — store for pickup
-        earlyDecisions.set(toolCallId, decision)
+        earlyDecisions.set(toolCallId, outcome)
       }
     },
 
-    waitForDecision(toolCallId: string, timeoutMs: number): Promise<ConfirmationDecision> {
+    waitForDecision(toolCallId: string, timeoutMs: number): Promise<ConfirmationOutcome> {
       // Check for early-arriving decision
       const early = earlyDecisions.get(toolCallId)
       if (early !== undefined) {
@@ -181,7 +203,7 @@ export function createConfirmationResolver(): ConfirmationResolver {
         return Promise.resolve(early)
       }
 
-      return new Promise<ConfirmationDecision>((resolve, reject) => {
+      return new Promise<ConfirmationOutcome>((resolve, reject) => {
         pending.set(toolCallId, { resolve, reject })
 
         const timer = setTimeout(() => {

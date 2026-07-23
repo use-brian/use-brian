@@ -7,7 +7,7 @@
  * createNew / instanceId), the CHANNEL_CREDENTIAL_KEY-missing 503, and the
  * list / disconnect / rename / delete handlers. Stores are mocked, so no DB.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 
@@ -97,6 +97,19 @@ function makeApp(userId?: string) {
 
 describe('[COMP:api/connectors-route] /api/connectors', () => {
   beforeEach(() => vi.clearAllMocks())
+
+  // The desktop exchange-and-store tests stub global fetch + read OAuth client
+  // secrets from the env; snapshot/restore both so they can't leak across tests.
+  const OAUTH_ENV_KEYS = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'NOTION_CLIENT_ID', 'NOTION_CLIENT_SECRET']
+  const savedEnv: Record<string, string | undefined> = {}
+  beforeEach(() => { for (const k of OAUTH_ENV_KEYS) savedEnv[k] = process.env[k] })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    for (const k of OAUTH_ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k]
+      else process.env[k] = savedEnv[k]
+    }
+  })
 
   // Connector-health governance route (migration 294).
   it('[COMP:integrations/connector-health] GET /workspace/:id lists workspace connectors with health for a member', async () => {
@@ -360,6 +373,101 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     )
     const res = await request(app).post('/api/connectors/github/store-credentials').send({ pat: 'x' })
     expect(res.status).toBe(503)
+  })
+
+  // ── POST /:provider/exchange-and-store — desktop OAuth loopback path ──
+  // Spec: docs/plans/desktop-connector-oauth-return.md. Google/Notion wired;
+  // Fathom intentionally has no exchanger (its store path is unwired).
+
+  const G_REDIRECT = 'https://app.usebrian.ai/api/auth/callback/google-connector'
+
+  /** Stub global fetch with a queued list of responses (token, then userinfo). */
+  function stubFetch(responses: Array<{ ok: boolean; status?: number; json?: unknown }>) {
+    let i = 0
+    const fn = vi.fn(async () => {
+      const r = responses[Math.min(i, responses.length - 1)]
+      i += 1
+      return { ok: r.ok, status: r.status ?? (r.ok ? 200 : 400), json: async () => r.json ?? {} } as unknown as Response
+    })
+    vi.stubGlobal('fetch', fn)
+    return fn
+  }
+
+  it('exchange-and-store 401 without auth', async () => {
+    const { app } = makeApp()
+    const res = await request(app).post('/api/connectors/gdrive/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT })
+    expect(res.status).toBe(401)
+  })
+
+  it('exchange-and-store rejects a provider with no desktop exchanger (github)', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).post('/api/connectors/github/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT })
+    expect(res.status).toBe(400)
+  })
+
+  it('exchange-and-store 400 when code or redirectUri is missing', async () => {
+    const { app } = makeApp('u1')
+    const res = await request(app).post('/api/connectors/gdrive/exchange-and-store').send({ code: 'c' })
+    expect(res.status).toBe(400)
+  })
+
+  it('exchange-and-store Google exchanges the code and stores the refresh token', async () => {
+    process.env.GOOGLE_CLIENT_ID = 'gid'; process.env.GOOGLE_CLIENT_SECRET = 'gsec'
+    const { app, createUserInstance } = makeApp('u1')
+    stubFetch([
+      { ok: true, json: { access_token: 'at', refresh_token: 'rt-123' } }, // token
+      { ok: true, json: { email: 'user@example.com' } },                    // userinfo
+    ])
+    const res = await request(app).post('/api/connectors/gdrive/exchange-and-store').send({ code: 'code-abc', redirectUri: G_REDIRECT })
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'gdrive', connected: true, connectedEmail: 'user@example.com',
+      credentials: { type: 'oauth', client_id: '', client_secret: 'rt-123' },
+    }))
+  })
+
+  it('exchange-and-store Google 502s when no refresh_token comes back', async () => {
+    process.env.GOOGLE_CLIENT_ID = 'gid'; process.env.GOOGLE_CLIENT_SECRET = 'gsec'
+    const { app, createUserInstance } = makeApp('u1')
+    stubFetch([{ ok: true, json: { access_token: 'at' } }]) // no refresh_token
+    const res = await request(app).post('/api/connectors/gcal/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT })
+    expect(res.status).toBe(502)
+    expect(createUserInstance).not.toHaveBeenCalled()
+  })
+
+  it('exchange-and-store Google 503s when the client secret is unset', async () => {
+    delete process.env.GOOGLE_CLIENT_ID; delete process.env.GOOGLE_CLIENT_SECRET
+    const { app } = makeApp('u1')
+    const res = await request(app).post('/api/connectors/gdrive/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT })
+    expect(res.status).toBe(503)
+  })
+
+  it('exchange-and-store Notion stores the access token, workspace name as the createNew label', async () => {
+    process.env.NOTION_CLIENT_ID = 'nid'; process.env.NOTION_CLIENT_SECRET = 'nsec'
+    const { app, createUserInstance } = makeApp('u1')
+    stubFetch([{ ok: true, json: { access_token: 'notion-at', workspace_name: 'Acme HQ' } }])
+    const res = await request(app)
+      .post('/api/connectors/notion/exchange-and-store')
+      .send({ code: 'c', redirectUri: 'https://app.usebrian.ai/api/auth/callback/notion', createNew: true })
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'notion', label: 'Acme HQ',
+      credentials: { type: 'oauth', client_id: '', client_secret: 'notion-at' },
+    }))
+  })
+
+  it('exchange-and-store reconnect (instanceId) re-points the existing instance', async () => {
+    process.env.GOOGLE_CLIENT_ID = 'gid'; process.env.GOOGLE_CLIENT_SECRET = 'gsec'
+    const { app, update } = makeApp('u1')
+    stubFetch([
+      { ok: true, json: { access_token: 'at', refresh_token: 'rt-r' } },
+      { ok: true, json: { email: 'x@example.com' } },
+    ])
+    const res = await request(app).post('/api/connectors/gcal/exchange-and-store').send({ code: 'c', redirectUri: G_REDIRECT, instanceId: IID })
+    expect(res.status).toBe(200)
+    expect(update).toHaveBeenCalledWith('u1', IID, expect.objectContaining({
+      credentials: { type: 'oauth', client_id: '', client_secret: 'rt-r' },
+    }))
   })
 
   it('disconnect flips the primary instance and 404s when absent', async () => {

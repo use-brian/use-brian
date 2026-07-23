@@ -82,6 +82,9 @@ const NATIVE_SURFACE: Record<Exclude<ApprovalKind, 'workflow_step'>, string> = {
   staged_write: 'web',
   staged_skill_creation: 'web',
   staged_skill_update: 'web',
+  // Curator-proposed workflow-step patches (origin-aware induction) resolve
+  // on the same web curator queue as the staged_skill_* kinds.
+  workflow_refinement: 'web',
   // Question approvals resolve on the chat surface — the answer input
   // renders inline in the suspended turn. See
   // docs/architecture/engine/askquestion-suspend-resume.md.
@@ -211,6 +214,7 @@ export function approvalsRoutes(opts: UnifiedApprovalRouteOptions): Router {
       const resume = await enqueueToolInvocationResume(opts.resumeDeps, {
         approval: updated,
         decision,
+        reason,
       })
       res.json({ kind: 'tool_invocation', status: updated.status, resume })
       return

@@ -812,7 +812,7 @@ describe('[COMP:api/views-routes] ad-hoc render', () => {
     const statusCol = (res.body.root.columns as { field: string; options?: string[] }[]).find(
       (c) => c.field === 'status',
     )
-    expect(statusCol?.options).toEqual(['todo', 'in_progress', 'blocked', 'done', 'archived'])
+    expect(statusCol?.options).toEqual(['todo', 'in_progress', 'in_review', 'blocked', 'done', 'archived'])
   })
 })
 

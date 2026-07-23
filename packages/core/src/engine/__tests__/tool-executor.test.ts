@@ -530,7 +530,7 @@ describe('[COMP:engine/tool-executor] requiresCapability gate', () => {
 function makeResolverThatAllows(): ConfirmationResolver {
   return {
     resolve: () => {},
-    waitForDecision: async () => 'allow',
+    waitForDecision: async () => ({ decision: 'allow' }),
   }
 }
 
@@ -1054,7 +1054,12 @@ describe('[COMP:engine/tool-executor] identifier-provenance write-gate', () => {
 // Spec: docs/architecture/engine/tool-executor.md → "Declined confirmations".
 
 function makeResolverThatDenies(): ConfirmationResolver {
-  return { resolve: () => {}, waitForDecision: async () => 'deny' }
+  return { resolve: () => {}, waitForDecision: async () => ({ decision: 'deny' }) }
+}
+
+/** Denies AND attaches a note, exercising the deny-with-comment path. */
+function makeResolverThatDeniesWith(comment: string): ConfirmationResolver {
+  return { resolve: () => {}, waitForDecision: async () => ({ decision: 'deny', comment }) }
 }
 
 function makeResolverThatTimesOut(): ConfirmationResolver {
@@ -1104,6 +1109,29 @@ describe('[COMP:engine/decline-copy] Declined-confirmation tool_result copy', ()
     const content = toolResultContent(results[0])
     expectHonestDeclineCopy(content, 'sensitiveTool')
     expect(content).toContain('declined the confirmation prompt')
+  })
+
+  it('carries a deny-with-comment note into the result as a revise instruction', async () => {
+    const tools = new Map<string, Tool>([['sensitiveTool', makeConfirmationTool()]])
+    const executor = createToolExecutor({
+      tools,
+      context: ctx,
+      loopDetector: createLoopDetector(),
+      confirmationResolver: makeResolverThatDeniesWith(
+        'do not ask for an app password, it is already set up',
+      ),
+      onConfirmationRequired: () => {},
+    })
+    executor.addTool('call_1', 'sensitiveTool', {})
+    const results = await drainResults(executor)
+
+    expect(results[0]).toMatchObject({ isError: true })
+    const content = toolResultContent(results[0])
+    // Still honest about scope/diagnosis/remedy — the note does not weaken it.
+    expectHonestDeclineCopy(content, 'sensitiveTool')
+    // The user's note is quoted and framed as an instruction to revise.
+    expect(content).toContain('do not ask for an app password, it is already set up')
+    expect(content).toContain('instruction')
   })
 
   it('reports an expired confirmation the same way, naming the timeout', async () => {

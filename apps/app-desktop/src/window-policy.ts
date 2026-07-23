@@ -85,12 +85,20 @@ const CONNECTOR_OAUTH_CALLBACK_PATH = "/api/auth/callback/google-connector";
  * A connector connect hops through the same provider host as login
  * (`accounts.google.com`), so the two are told apart by the `redirect_uri`: a
  * connector flow points it back at the connector callback on the app. A connector
- * connect must NOT trigger the sign-in landing — it is handed to the system
- * browser like any other external origin (`classifyNavigation` → external), where
- * the browser's own `.usebrian.ai` session (left over from desktop sign-in) completes
- * Google's redirect back to the callback. Loading it in-window is not an option:
- * Google refuses embedded user agents (see "Sign-in"). Returns false for a
- * non-provider host, a missing/unparseable `redirect_uri`, or a parse failure.
+ * connect must NOT trigger the sign-in landing — it returns false and falls
+ * through to `classifyNavigation` → external.
+ *
+ * NOTE: current app-web no longer NAVIGATES here for a wired connector (Google /
+ * Notion) — the connectors page hands the shell the authorize URL over the
+ * `connectConnector` IPC, which drives an RFC 8252 loopback flow and returns into
+ * the app window (docs/plans/desktop-connector-oauth-return.md). Handing consent
+ * to the system browser via `classifyNavigation` was the OLD path: it stranded
+ * the user in the browser AND failed the callback's cookie CSRF, because the
+ * nonce cookie lives in the Electron jar, not the system-browser jar. This
+ * predicate now guards only the legacy fallback (an older app-web build without
+ * the IPC bridge) and unwired providers. Loading consent in-window is never an
+ * option: Google refuses embedded user agents (see "Sign-in"). Returns false for
+ * a non-provider host, a missing/unparseable `redirect_uri`, or a parse failure.
  */
 export function isConnectorOAuth(targetUrl: string): boolean {
   let url: URL;

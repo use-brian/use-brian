@@ -68,6 +68,33 @@ interface DesktopBridge {
    * overlay window. Absent on the web and in older shells.
    */
   setRecording?: (on: boolean) => void;
+  /**
+   * Connect an OAuth connector from the desktop shell (Google / Notion). The
+   * browser-cookie CSRF the web flow uses can't survive the Electron→system-
+   * browser jar split, so the shell drives an RFC 8252 loopback flow instead:
+   * it appends its loopback + a CSRF nonce to `authorizeUrl`'s `state`, opens
+   * consent in the system browser, receives the code back over loopback,
+   * exchanges + stores it with the shell's own session, then navigates the app
+   * window to the connectors page. Absent on the web and in older shells (the
+   * connectors page falls back to the full-page redirect there). Spec:
+   * docs/plans/desktop-connector-oauth-return.md.
+   */
+  connectConnector?: (req: ConnectConnectorRequest) => void;
+}
+
+/** The connector-connect handoff payload (see `DesktopBridge.connectConnector`). */
+interface ConnectConnectorRequest {
+  connector: string;
+  /** The provider authorize URL, fully built EXCEPT `state` — the shell appends its own. */
+  authorizeUrl: string;
+  /** The provider `redirect_uri` the shell must reuse for the token exchange. */
+  redirectUri: string;
+  /** Active workspace, so the shell can navigate back to the right connectors page. */
+  workspaceId: string;
+  /** "Add another account" — mint a fresh instance instead of overwriting. */
+  createNew?: boolean;
+  /** Reconnect target — re-point an existing instance's credential. */
+  instanceId?: string;
 }
 
 declare global {

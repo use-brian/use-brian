@@ -165,3 +165,54 @@ describe('[COMP:workers/skill-review-llm] createGeminiSkillReviewLLM', () => {
     expect(call.calls).toHaveLength(2)
   })
 })
+
+// ── Origin-aware induction (workflow-origin plans) ─────────────────
+
+describe('[COMP:workers/skill-review-llm] workflow-origin plans', () => {
+  const REFINEMENT = {
+    action: 'propose_workflow_refinement',
+    stepId: 'step-1',
+    patch: { prompt: 'Summarize GitHub activity, paging past 30 events' },
+    rationale: 'The run truncated at 30 events every fire',
+  }
+
+  it('accepts propose_workflow_refinement on a workflow-origin parse', () => {
+    const r = parseSkillReviewPlan(JSON.stringify({ actions: [REFINEMENT] }), 'workflow')
+    expect(r.error).toBeUndefined()
+    expect(r.plan?.actions[0]).toMatchObject({ action: 'propose_workflow_refinement' })
+  })
+
+  it('rejects propose_workflow_refinement on an interactive parse', () => {
+    const r = parseSkillReviewPlan(JSON.stringify({ actions: [REFINEMENT] }))
+    expect(r.plan).toBeUndefined()
+    expect(r.error).toBeTruthy()
+  })
+
+  it('uses the workflow-origin system prompt and threads origin into the parse', async () => {
+    const call = makeCall([JSON.stringify({ actions: [REFINEMENT] })])
+    const llm = createGeminiSkillReviewLLM(call)
+    const plan = await llm.plan({
+      ...PLAN_INPUT,
+      origin: 'workflow',
+      sourceWorkflow: {
+        id: '11111111-2222-3333-4444-555555555555',
+        name: 'Daily team standup',
+        description: null,
+        steps: [{ id: 'step-1', kind: 'assistant_call', prompt: 'Summarize GitHub activity' }],
+      },
+    })
+    expect(plan.actions).toHaveLength(1)
+    // The system prompt is the workflow-origin variant, and the user prompt
+    // carries the definition block the reviewer diffs the run against.
+    expect(call.calls[0].systemPrompt).toMatch(/AUTOMATED WORKFLOW/)
+    expect(call.calls[0].prompt).toMatch(/# Workflow definition/)
+    expect(call.calls[0].prompt).toMatch(/Daily team standup/)
+  })
+
+  it('keeps the interactive system prompt for interactive sessions', async () => {
+    const call = makeCall(['{"actions": []}'])
+    const llm = createGeminiSkillReviewLLM(call)
+    await llm.plan(PLAN_INPUT)
+    expect(call.calls[0].systemPrompt).not.toMatch(/AUTOMATED WORKFLOW/)
+  })
+})

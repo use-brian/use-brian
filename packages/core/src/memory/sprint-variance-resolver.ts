@@ -31,15 +31,17 @@
  * [COMP:brain/sprint-variance-resolver]
  */
 
+import type { TaskRecordStatus } from '../tasks/types.js'
 import type { CommitmentResolution, CommitmentResolver } from './commitment-lifecycle-worker.js'
 import type { MemoryRecord } from './types.js'
 
 /** Tag prefix that ties a commitment memory to the task it refers to. */
 export const TASK_TAG_PREFIX = 'task:'
 
-/** Subset of a task the sprint-variance resolver inspects. */
+/** Subset of a task the sprint-variance resolver inspects. Status tracks the
+ *  canonical `TaskRecordStatus` so a new status (e.g. `in_review`) never drifts. */
 export type SprintTaskSnapshot = {
-  status: 'todo' | 'in_progress' | 'blocked' | 'done' | 'archived'
+  status: TaskRecordStatus
   due: Date | null
 }
 

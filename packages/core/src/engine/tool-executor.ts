@@ -481,7 +481,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
       wake() // let the query loop yield the confirmation event
 
       try {
-        const decision = await options.confirmationResolver.waitForDecision(
+        const { decision, comment } = await options.confirmationResolver.waitForDecision(
           t.id,
           options.confirmationTimeoutMs ?? 300_000,
         )
@@ -492,7 +492,7 @@ export function createToolExecutor(options: ToolExecutorOptions) {
             type: 'tool_result',
             toolUseId: t.id,
             name: t.name,
-            content: declinedToolResult(t.name),
+            content: declinedToolResult(t.name, comment),
             isError: true,
           }
           t.status = 'completed'

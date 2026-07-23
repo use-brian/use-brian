@@ -186,6 +186,12 @@ function fakeApprovalsStore(): PendingApprovalsStore & { rows: PendingApproval[]
     async findPendingStagedSkillCreation() {
       return null
     },
+    async createWorkflowRefinement(): Promise<never> {
+      throw new Error('createWorkflowRefinement not used in workflow approval tests')
+    },
+    async findPendingWorkflowRefinement() {
+      return null
+    },
     async createStagedWrite() {
       throw new Error('createStagedWrite not used in workflow approval tests')
     },

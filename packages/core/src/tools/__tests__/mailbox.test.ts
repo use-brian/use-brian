@@ -1,14 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   createMailboxTools,
+  singleMailboxRouter,
   stitchMailboxThreads,
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,
   MAILBOX_SNIPPET_CHARS,
   type MailboxApi,
+  type MailboxAccountRouter,
   type MailboxSearchHit,
 } from '../base/mailbox.js'
 import type { Tool, ToolContext } from '../types.js'
+
+const EMAIL = 'me@corp.com'
+
+/** The one-mailbox common case — wrap an api as the primary account. */
+function toolsFor(api: MailboxApi): Tool[] {
+  return createMailboxTools(singleMailboxRouter(api, EMAIL))
+}
 
 function hit(overrides: Partial<MailboxSearchHit> = {}): MailboxSearchHit {
   return {
@@ -57,7 +66,7 @@ beforeEach(() => {
 
 describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
   it('declares the identity lane: sends as the user\'s corporate address, ask-gated, never a silent substitute', () => {
-    const tools = createMailboxTools(makeApi())
+    const tools = toolsFor(makeApi())
     const send = toolByName(tools, 'imapSendMessage')
     expect(send.description).toContain('company mailbox')
     expect(send.description).toMatch(/never silently substitute/i)
@@ -76,7 +85,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
 
   it('applies the 90-day default window and default result cap (D12 #4)', async () => {
     const api = makeApi()
-    const search = toolByName(createMailboxTools(api), 'imapSearchMessages')
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
     await search.execute({ keywords: ['invoice'] }, CTX)
     const params = (api.searchMessages as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(params.limit).toBe(MAILBOX_DEFAULT_LIMIT)
@@ -88,7 +97,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
 
   it('honors explicit since/folder and hard-caps maxResults', async () => {
     const api = makeApi()
-    const search = toolByName(createMailboxTools(api), 'imapSearchMessages')
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
     await search.execute(
       { keywords: ['契約'], folder: 'Archive', since: '2024-01-01', maxResults: MAILBOX_MAX_LIMIT },
       CTX,
@@ -104,7 +113,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
       hit({ id: `INBOX:${i + 1}`, subject: `msg ${i}`, snippet: 'x'.repeat(500), date: `2026-07-${(i % 28) + 1}T00:00:00.000Z` }),
     )
     const api = makeApi({ searchMessages: vi.fn(async () => ({ hits: many })) })
-    const search = toolByName(createMailboxTools(api), 'imapSearchMessages')
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
     const result = await search.execute({ maxResults: 5 }, CTX)
     const data = result.data as { threads: Array<{ messages: Array<{ snippet?: string }> }> }
     const messages = data.threads.flatMap((t) => t.messages)
@@ -125,7 +134,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
         note: 'degraded',
       })),
     })
-    const search = toolByName(createMailboxTools(api), 'imapSearchMessages')
+    const search = toolByName(toolsFor(api), 'imapSearchMessages')
     const result = await search.execute({}, CTX)
     const data = result.data as { threads: Array<{ messages: unknown[] }>; note?: string }
     expect(data.threads).toHaveLength(2)
@@ -135,7 +144,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
 
   it('refuses send on a confidential turn (egress gate) without touching the network', async () => {
     const api = makeApi()
-    const send = toolByName(createMailboxTools(api), 'imapSendMessage')
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
     const result = await send.execute({ to: 'x@y.z', subject: 's', body: 'b' }, CONFIDENTIAL_CTX)
     expect(result.isError).toBe(true)
     expect(result.data).toContain('confidential')
@@ -144,7 +153,7 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
 
   it('passes inReplyTo through to the seam and returns the message id', async () => {
     const api = makeApi()
-    const send = toolByName(createMailboxTools(api), 'imapSendMessage')
+    const send = toolByName(toolsFor(api), 'imapSendMessage')
     const result = await send.execute(
       { to: 'x@y.z', subject: 'Re: Deal', body: 'On it.', inReplyTo: 'INBOX:7' },
       CTX,
@@ -153,15 +162,75 @@ describe('[COMP:tools/mailbox-imap] Company mailbox tools', () => {
     expect(api.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({ inReplyTo: 'INBOX:7', to: 'x@y.z' }),
     )
-    expect(result.data).toEqual({ messageId: '<m1@corp.com>' })
+    expect(result.data).toEqual({ messageId: '<m1@corp.com>', from: EMAIL })
   })
 
   it('surfaces seam errors honestly', async () => {
     const api = makeApi({ getMessage: vi.fn(async () => { throw new Error('Message INBOX:9 not found.') }) })
-    const get = toolByName(createMailboxTools(api), 'imapGetMessage')
+    const get = toolByName(toolsFor(api), 'imapGetMessage')
     const result = await get.execute({ messageId: 'INBOX:9' }, CTX)
     expect(result.isError).toBe(true)
     expect(result.data).toContain('not found')
+  })
+})
+
+describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, default primary)', () => {
+  /** Two connected mailboxes: `me@corp.com` (primary) and `other@corp.com`. */
+  function multiRouter(): { router: MailboxAccountRouter; primary: MailboxApi; other: MailboxApi } {
+    const primary = makeApi({ sendMessage: vi.fn(async () => ({ messageId: '<primary@corp.com>' })) })
+    const other = makeApi({ sendMessage: vi.fn(async () => ({ messageId: '<other@corp.com>' })) })
+    const bound = [
+      { email: 'me@corp.com', isPrimary: true, api: primary },
+      { email: 'other@corp.com', isPrimary: false, api: other },
+    ]
+    const router: MailboxAccountRouter = {
+      list: () => bound.map(({ email, isPrimary }) => ({ email, isPrimary })),
+      get: (email) => bound.find((b) => b.email.toLowerCase() === email.trim().toLowerCase())?.api,
+    }
+    return { router, primary, other }
+  }
+
+  it('routes to the primary mailbox when `account` is omitted', async () => {
+    const { router, primary, other } = multiRouter()
+    const search = toolByName(createMailboxTools(router), 'imapSearchMessages')
+    await search.execute({ keywords: ['x'] }, CTX)
+    expect(primary.searchMessages).toHaveBeenCalledTimes(1)
+    expect(other.searchMessages).not.toHaveBeenCalled()
+  })
+
+  it('routes to the named `account` and reports it as the sender', async () => {
+    const { router, primary, other } = multiRouter()
+    const send = toolByName(createMailboxTools(router), 'imapSendMessage')
+    const result = await send.execute({ to: 'x@y.z', subject: 's', body: 'b', account: 'other@corp.com' }, CTX)
+    expect(other.sendMessage).toHaveBeenCalledTimes(1)
+    expect(primary.sendMessage).not.toHaveBeenCalled()
+    expect(result.data).toEqual({ messageId: '<other@corp.com>', from: 'other@corp.com' })
+  })
+
+  it('matches `account` case-insensitively', async () => {
+    const { router, other } = multiRouter()
+    const get = toolByName(createMailboxTools(router), 'imapGetMessage')
+    await get.execute({ messageId: 'INBOX:1', account: 'OTHER@CORP.COM' }, CTX)
+    expect(other.getMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('errors with the connected list when `account` matches no mailbox (no network call)', async () => {
+    const { router, primary, other } = multiRouter()
+    const search = toolByName(createMailboxTools(router), 'imapSearchMessages')
+    const result = await search.execute({ keywords: ['x'], account: 'ghost@corp.com' }, CTX)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('me@corp.com')
+    expect(result.data).toContain('other@corp.com')
+    expect(primary.searchMessages).not.toHaveBeenCalled()
+    expect(other.searchMessages).not.toHaveBeenCalled()
+  })
+
+  it('errors when no mailbox is connected at all', async () => {
+    const empty: MailboxAccountRouter = { list: () => [], get: () => undefined }
+    const search = toolByName(createMailboxTools(empty), 'imapSearchMessages')
+    const result = await search.execute({ keywords: ['x'] }, CTX)
+    expect(result.isError).toBe(true)
+    expect(result.data).toMatch(/no company mailbox/i)
   })
 })
 

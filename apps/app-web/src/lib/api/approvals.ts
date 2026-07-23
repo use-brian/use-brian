@@ -38,6 +38,7 @@ export type ApprovalKind =
   | "distribution_draft"
   | "staged_skill_creation"
   | "staged_skill_update"
+  | "workflow_refinement"
   | "browser_skill_send";
 
 /** Provenance surface for `staged_write` rows — which credential class the agent used. */
@@ -135,14 +136,21 @@ async function respondToApproval(
   return { ok: false, error: data.error ?? "Request failed" };
 }
 
-// ── Skill approvals (staged_skill_creation / staged_skill_update) ──────
+// ── Curator approvals (staged_skill_* / workflow_refinement) ──────────
 // These rows live in the same queue but action through the dedicated
 // `/api/skills/approvals` routes (packages/api/src/routes/skill-approvals.ts).
 
-export type SkillApprovalKind = "staged_skill_creation" | "staged_skill_update";
+export type SkillApprovalKind =
+  | "staged_skill_creation"
+  | "staged_skill_update"
+  | "workflow_refinement";
 
 export function isSkillApprovalKind(kind: ApprovalKind): kind is SkillApprovalKind {
-  return kind === "staged_skill_creation" || kind === "staged_skill_update";
+  return (
+    kind === "staged_skill_creation" ||
+    kind === "staged_skill_update" ||
+    kind === "workflow_refinement"
+  );
 }
 
 /** Snapshot of a staged update's target skill, joined server-side. */
@@ -153,13 +161,31 @@ type SkillApprovalTargetSkill = {
   content: string;
 };
 
+/** Snapshot of the workflow a `workflow_refinement` (or a creation row's
+ *  attach offer) targets, joined server-side. */
+export type SkillApprovalTargetWorkflow = {
+  id: string;
+  name: string;
+  steps: Array<{ id: string; type: string; prompt: string | null }>;
+};
+
 export type SkillApprovalDetail = {
   id: string;
   kind: SkillApprovalKind;
   arguments: Record<string, unknown>;
+  approvalPayload?: {
+    // Origin-aware induction: a workflow-origin creation carries the offer
+    // to wire the new skill into the source step's `skills` allow-list.
+    attachTo?: { workflowId: string; stepId?: string };
+    origin?: string;
+    sourceWorkflowIds?: string[];
+  };
   /** null for creation rows, and for update rows whose target skill was
    *  deleted after staging (the card blocks approve in that case). */
   targetSkill: SkillApprovalTargetSkill | null;
+  /** null when the row touches no workflow, or the workflow vanished after
+   *  staging (the card blocks refinement approve / hides the attach offer). */
+  targetWorkflow?: SkillApprovalTargetWorkflow | null;
 };
 
 /**
@@ -181,19 +207,31 @@ export async function listSkillApprovalDetails(
   return byId;
 }
 
-/** Approve or reject a staged_skill_* row via its dedicated endpoints. */
+/** Approve or reject a curator row via its dedicated endpoints. `attach`
+ *  applies only to workflow-origin `staged_skill_creation` approves: also
+ *  wire the new skill into the offered step's `skills` allow-list. */
 export async function respondToSkillApproval(
   id: string,
   decision: "approved" | "rejected",
   reason?: string,
+  extra?: { attach?: boolean; attachStepId?: string },
 ): Promise<RespondResult> {
   const action = decision === "approved" ? "approve" : "reject";
+  const body =
+    decision === "rejected"
+      ? reason
+        ? { reason }
+        : {}
+      : {
+          ...(extra?.attach ? { attach: true } : {}),
+          ...(extra?.attach && extra.attachStepId ? { attachStepId: extra.attachStepId } : {}),
+        };
   const res = await authFetch(
     `${API_URL}/api/skills/approvals/${encodeURIComponent(id)}/${action}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(decision === "rejected" && reason ? { reason } : {}),
+      body: JSON.stringify(body),
     },
   );
   const data = (await res.json().catch(() => ({}))) as {
@@ -214,9 +252,9 @@ export function respondByKind(
   row: Pick<PendingApprovalRow, "id" | "kind">,
   decision: "approved" | "rejected",
   reason?: string,
-  extra?: { grantAlways?: boolean },
+  extra?: { grantAlways?: boolean; attach?: boolean; attachStepId?: string },
 ): Promise<RespondResult> {
   return isSkillApprovalKind(row.kind)
-    ? respondToSkillApproval(row.id, decision, reason)
+    ? respondToSkillApproval(row.id, decision, reason, extra)
     : respondToApproval(row.id, decision, reason, extra);
 }

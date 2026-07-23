@@ -38,6 +38,7 @@ import {
   MessageSquare,
   Sparkles,
   StickyNote,
+  Workflow as WorkflowIcon,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -82,6 +83,8 @@ const KIND_ICON: Record<string, LucideIcon> = {
   kb_chunk: BookText,
   skill: Sparkles,
   assistant: Bot,
+  // Origin-aware induction: skill → workflow `learned_from` provenance.
+  workflow: WorkflowIcon,
 };
 
 /** Humanise a snake/underscore data token for display ("documented_by" →
@@ -301,10 +304,12 @@ function EndpointCard({
 }
 
 /** Expanded detail for a `skill` endpoint — the skill's description +
- *  when-to-use routing copy + Suggested/Active status, and the UX path to
- *  preview the exact skill: a link into the full skill editor
- *  (`/w/:ws/brain/skills/:rowId`). This is what makes a "learned_from" review
- *  reviewable — the user can see and open the skill they're confirming. */
+ *  when-to-use routing copy + Suggested/Active status, the **full skill body**
+ *  (the plain markdown content, rendered inline in a scrollable panel), and the
+ *  UX path to open the exact skill in the full editor (`/w/:ws/brain/skills/:rowId`).
+ *  This is what makes a "learned_from" review reviewable — the user reads the
+ *  actual skill they're confirming right here. Confirming the review cascades a
+ *  human-verified stamp onto this skill (brain-inbox verify → `confirmSkill`). */
 function SkillEndpointDetail({
   workspaceId,
   skillRowId,
@@ -332,6 +337,7 @@ function SkillEndpointDetail({
 
   const description = skill.description.trim();
   const whenToUse = skill.whenToUse?.trim() ?? "";
+  const content = skill.content?.trim() ?? "";
   const statusLabel = skill.activatedAt ? rel.skillActive : rel.skillSuggested;
 
   return (
@@ -357,6 +363,16 @@ function SkillEndpointDetail({
             {rel.skillWhenToUse}
           </span>
           <p className="leading-relaxed text-muted-foreground">{whenToUse}</p>
+        </div>
+      )}
+      {content.length > 0 && (
+        <div className="flex flex-col gap-0.5">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">
+            {rel.skillContent}
+          </span>
+          <div className="chat-markdown max-h-80 overflow-y-auto break-words rounded-md border border-border bg-muted/30 p-2 text-sm leading-relaxed">
+            <Markdown>{content}</Markdown>
+          </div>
         </div>
       )}
       <Link

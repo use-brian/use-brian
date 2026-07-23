@@ -66,10 +66,16 @@ export function openFeedStream(opts: {
     );
     if (lastEventId) url.searchParams.set("lastEventId", lastEventId);
     // EventSource can't set headers — pass the access_token as a query
-    // param. The SSE route accepts both Bearer and `?access_token=`.
+    // param. The SSE route accepts both Bearer and `?access_token=`. Auth
+    // rides the URL token, NOT cookies, so this MUST NOT set
+    // `withCredentials: true`: a credentialed cross-origin EventSource needs
+    // the server to answer `Access-Control-Allow-Credentials: true` (the API
+    // does not), and without it the browser rejects every connection before
+    // `open` and retries forever — a reconnect storm that silently kills the
+    // stream. See workspace-events.ts for the same fix + rationale.
     const token = getAccessToken();
     if (token) url.searchParams.set("access_token", token);
-    source = new EventSource(url.toString(), { withCredentials: true });
+    source = new EventSource(url.toString());
 
     source.addEventListener("feed-event", (ev) => {
       try {

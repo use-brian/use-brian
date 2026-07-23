@@ -27,6 +27,7 @@
  */
 
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Pencil } from "lucide-react";
 import { BackButton } from "@/components/ui/back-button";
 import { useRouter } from "next/navigation";
@@ -89,6 +90,12 @@ export default function WorkflowDetailPage({
   const [pages, setPages] = useState<ViewListRow[]>([]);
   const [blueprints, setBlueprints] = useState<CustomPageTemplateSummary[]>([]);
   const [skills, setSkills] = useState<WorkspaceSkillSummary[]>([]);
+  // Origin-aware induction: skills distilled from THIS workflow's runs —
+  // derived from the same workspace-skills list the SkillsField uses.
+  const learnedSkills = useMemo(
+    () => skills.filter((s) => s.learnedFromWorkflowId === id),
+    [skills, id],
+  );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
@@ -597,6 +604,31 @@ export default function WorkflowDetailPage({
               <p className="mt-1 text-xs text-red-600 dark:text-red-400">
                 {descriptionIssues.map((i) => i.message).join("; ")}
               </p>
+            )}
+            {/* Origin-aware induction: skills the curator distilled from
+                this workflow's runs (`learned_from` edge, skill → workflow).
+                Each links into the skill editor; the step editor's Skills
+                field below is where one gets attached. */}
+            {learnedSkills.length > 0 && (
+              <div className="mt-2 flex flex-col gap-1">
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {t.workflowPage.detail.learnedSkillsTitle}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {learnedSkills.map((s) => (
+                    <Link
+                      key={s.rowId}
+                      href={`/w/${workspaceId}/brain/skills/${s.rowId}`}
+                      className="text-xs px-2 py-0.5 rounded border border-border hover:bg-muted truncate max-w-[16rem]"
+                    >
+                      {s.name}
+                    </Link>
+                  ))}
+                </div>
+                <span className="text-[11px] text-muted-foreground">
+                  {t.workflowPage.detail.learnedSkillsHint}
+                </span>
+              </div>
             )}
           </div>
           <div className="flex items-center gap-2 shrink-0">

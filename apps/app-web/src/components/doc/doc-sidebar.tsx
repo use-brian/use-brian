@@ -689,18 +689,20 @@ export function DocSidebar(props: Props) {
         )}
       </nav>
 
-      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / Feed),
-          between the icon row and the surface body. Shown only while an
-          operator app is active; clicking a pill navigates AND persists the
-          per-workspace selection the Home icon resumes. See
-          operator-app-bar.tsx / lib/operator-apps.ts. */}
-      {activeOperatorApp && (
-        <OperatorAppBar
-          workspaceId={workspaceId}
-          active={activeOperatorApp}
-          feedEnabled={props.feedEnabled}
-        />
-      )}
+      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
+          Feed), between the icon row and the surface body. Clicking an app
+          navigates AND persists the per-workspace selection the Home icon
+          resumes. It also carries "My Browser" as a trailing square: that is
+          workspace-wide chrome rather than an operator app, so the strip is
+          rendered unconditionally and `active` may be null (Brain / Studio /
+          Workflow), which hides the app switcher while keeping the browser
+          button reachable from every surface. See operator-app-bar.tsx /
+          lib/operator-apps.ts. */}
+      <OperatorAppBar
+        workspaceId={workspaceId}
+        active={activeOperatorApp}
+        feedEnabled={props.feedEnabled}
+      />
 
       {/* Search input — revealed by the Search icon (Home only). */}
       {searchOpen && props.activeSurface === "p" && (

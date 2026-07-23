@@ -21,6 +21,12 @@
   <body>
     <h1>Use Brian Browser Agent</h1>
     <div id="status" class="status"><span class="dot"></span><span id="status-text">Checking...</span></div>
+    <!-- Shown only while browser control is NOT granted. The click here is the
+         user gesture Chrome requires before it will open its own dialog, which
+         is why this button lives in the extension and not in the web app. -->
+    <div class="row" id="grant-row" hidden>
+      <button id="grant" class="primary" style="width: 100%">Allow Use Brian to manage this browser</button>
+    </div>
     <div class="row">
       <label for="relay-url">Relay URL</label>
       <input id="relay-url" placeholder="wss://relay.usebrian.ai/ext" />

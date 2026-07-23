@@ -5,6 +5,7 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
+import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -35,6 +36,24 @@ export async function GET(request: Request) {
   const code = url.searchParams.get("code");
   const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
+
+  // Desktop (Electron) path: the shell drove an RFC 8252 loopback flow and put
+  // its loopback + CSRF nonce in `state`. Forward the raw code straight back to
+  // the shell over loopback — it does the token exchange + store with its OWN
+  // session, because the browser-cookie CSRF the web path uses can't survive the
+  // Electron→system-browser jar split. CSRF here is the loopback nonce, which the
+  // shell verifies. Spec: docs/plans/desktop-connector-oauth-return.md.
+  const desktopState = parseDesktopConnectorState(stateRaw);
+  if (desktopState) {
+    const forward = buildLoopbackForwardUrl(desktopState, { code, error });
+    if (!forward) {
+      // Tampered/invalid loopback — never 302 to a non-loopback host.
+      return NextResponse.redirect(
+        new URL(connectorsPath(desktopState.workspaceId, { error: "invalid_state" }), request.url),
+      );
+    }
+    return NextResponse.redirect(forward);
+  }
 
   const { connector, createNew, instanceId, workspaceId, nonce } = parseConnectorState(stateRaw);
 

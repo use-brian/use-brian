@@ -175,6 +175,31 @@ describe('[COMP:api/mailbox-sync-worker] first sync + preflight gate', () => {
     expect(state.folders.INBOX).toMatchObject({ uidvalidity: '7', lastUid: 3 })
   })
 
+  it('a backfill armed BEFORE the first cursor exists runs on that SAME first tick — no extra interval of "Syncing 0 of N"', async () => {
+    const client = makeFakeImap({
+      INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } },
+    })
+    // Exact prod shape: the user connected + confirmed a backfill, but the
+    // worker has not yet established any folder cursor. Previously the first
+    // tick only established the cursor and returned, deferring the consented
+    // backfill to the SECOND tick (a 1-message mailbox stuck at "0 of 1").
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: {},
+          backfill: { scope: 'all', requestedAt: '2026-07-23T09:50:56Z', status: 'running', totalEstimate: 1 },
+        },
+      },
+    } as never)
+    const { worker, insertMessage, configs } = makeWorker({ client, instance })
+    await worker.tick()
+    expect(insertMessage).toHaveBeenCalledTimes(1)
+    expect(insertMessage.mock.calls[0][0].providerMessageId).toBe('INBOX:1')
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders.INBOX).toMatchObject({ uidvalidity: '7', lastUid: 1, backfillDone: true })
+    expect(state.backfill?.status).toBe('done')
+  })
+
   it('new mail after the cursor is archived (delta), and completeness reconciles with the server totals', async () => {
     const folders: Record<string, FakeFolderState> = {
       INBOX: { uidvalidity: '7', uids: [1, 2], sources: { 1: rfc822(1), 2: rfc822(2) } },
@@ -501,5 +526,72 @@ describe('[COMP:api/mailbox-sync-worker] delta brain wiring', () => {
     await worker.tick()
     expect(insertMessage).toHaveBeenCalledTimes(1)
     expect(runExtraction).not.toHaveBeenCalled()
+  })
+})
+
+// ── On-demand single-instance sync (syncInstanceById) ───────────
+
+describe('[COMP:api/mailbox-sync-worker] syncInstanceById (on-demand)', () => {
+  it('returns a delta count and never throws — first pass establishes the cursor (0), the next reports new mail', async () => {
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1, 2], sources: { 1: rfc822(1), 2: rfc822(2) } },
+    }
+    const client = makeFakeImap(folders)
+    const { worker, instanceId } = makeWorker({ client })
+
+    // First on-demand sync only establishes the cursor (D6 first-poll posture).
+    const first = await worker.syncInstanceById(instanceId)
+    expect(first).toEqual({ synced: true, newMessages: 0 })
+
+    // New mail arrives → the next on-demand sync reports it.
+    folders.INBOX.uids = [1, 2, 3, 4]
+    folders.INBOX.sources[3] = rfc822(3)
+    folders.INBOX.sources[4] = rfc822(4)
+    const second = await worker.syncInstanceById(instanceId)
+    expect(second).toEqual({ synced: true, newMessages: 2 })
+  })
+
+  it('unknown instance → { synced:false, reason:"not_found" } (no throw)', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [], sources: {} } })
+    const { worker } = makeWorker({ client })
+    expect(await worker.syncInstanceById('nope')).toEqual({ synced: false, newMessages: 0, reason: 'not_found' })
+  })
+
+  it('disconnected instance → { synced:false, reason:"disconnected" } (no sync)', async () => {
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } } })
+    const { worker, insertMessage, instanceId } = makeWorker({
+      client,
+      instance: instanceRow({ connected: false }),
+    })
+    expect(await worker.syncInstanceById(instanceId)).toEqual({ synced: false, newMessages: 0, reason: 'disconnected' })
+    expect(insertMessage).not.toHaveBeenCalled()
+  })
+
+  it('collapses concurrent syncs of the same instance → the second gets reason:"in_progress"', async () => {
+    const base = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1], sources: { 1: rfc822(1) } } })
+    // Gate the first sync inside client.list() so it is still in flight when
+    // the second call arrives.
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => { release = r })
+    let listCalls = 0
+    const client = {
+      ...base,
+      async list() {
+        listCalls++
+        if (listCalls === 1) await gate
+        return (base as unknown as { list: () => Promise<unknown> }).list()
+      },
+    } as unknown as ImapClientLike
+    const { worker, instanceId } = makeWorker({ client })
+
+    const p1 = worker.syncInstanceById(instanceId)
+    // Let p1 reach the awaited gate (a macrotask flushes the whole await chain
+    // up to the parked client.list()) before firing the second call.
+    await new Promise((r) => setTimeout(r, 0))
+    const second = await worker.syncInstanceById(instanceId)
+    expect(second).toEqual({ synced: false, newMessages: 0, reason: 'in_progress' })
+    release()
+    const first = await p1
+    expect(first.synced).toBe(true)
   })
 })

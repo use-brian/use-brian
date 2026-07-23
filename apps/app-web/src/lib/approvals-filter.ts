@@ -28,6 +28,9 @@ export const ACTIONABLE_KINDS: readonly ApprovalKind[] = [
   "staged_write",
   "staged_skill_creation",
   "staged_skill_update",
+  // Curator-proposed workflow-step patches (origin-aware induction) resolve
+  // through the same dedicated /api/skills/approvals endpoints.
+  "workflow_refinement",
   // Logic-block terminal sends (computer-use R2-5): the block's runner
   // polls the row, so responding in place IS the resume.
   "browser_skill_send",

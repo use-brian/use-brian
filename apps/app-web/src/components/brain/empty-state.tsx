@@ -20,7 +20,7 @@
  *     listener is no longer origin-gated). apps/web routes these into the
  *     app-chrome FloatingChat; here the same one dock catches the seed.
  *   - Studio CTAs (Knowledge / Ingest rules / Connectors / Channels /
- *     Programmatic access / Mini apps) route IN-APP to
+ *     Programmatic access) route IN-APP to
  *     `/w/[id]/studio/<section>` — app-web hosts Studio since the
  *     single-app consolidation ("#" while the workspace id resolves).
  *   - The Workflow CTA routes IN-APP to `/w/[id]/workflow`.
@@ -38,7 +38,6 @@ import {
   Check,
   Code2,
   GitBranch,
-  LayoutGrid,
   Loader2,
   MessageSquareText,
   Radio,
@@ -309,7 +308,7 @@ function loadNudgeMode(): NudgeMode {
  * - **Ingest** (default): MCP brain-key gen, Sync Knowledge Base CTA,
  *   Connect daily-driver tools CTA. The "feed the brain" lane.
  * - **Consume**: same MCP brain-key (read-side), Connect to channel,
- *   Build with Assistant API, Mini apps. The "use the brain" lane.
+ *   Build with Assistant API, Workflow. The "use the brain" lane.
  *
  * The active tab persists in localStorage so the user's chosen lens
  * survives refreshes / route transitions.
@@ -595,7 +594,6 @@ function TalkToAssistantsCard() {
       <div className="flex flex-col gap-0.5 -mx-1">
         <SubRow tone="violet" icon={Radio} href={activeId ? `/w/${activeId}/studio/channels` : "#"} title={copy.channel.title} body={copy.channel.body} />
         <SubRow tone="blue" icon={Code2} href={activeId ? `/w/${activeId}/studio/programmatic-access` : "#"} title={copy.api.title} body={copy.api.body} />
-        <SubRow tone="emerald" icon={LayoutGrid} href={activeId ? `/w/${activeId}/studio/mini-apps` : "#"} title={copy.miniApp.title} body={copy.miniApp.body} />
         <SubRow tone="amber" icon={Workflow} href={activeId ? `/w/${activeId}/workflow` : "#"} title={copy.workflow.title} body={copy.workflow.body} />
       </div>
     </div>

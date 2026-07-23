@@ -133,6 +133,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   imapSearchMessages: 'Search company mailbox',
   imapGetMessage: 'Read company email',
   imapSendMessage: 'Send email from company mailbox',
+  syncMailboxNow: 'Sync company mailbox now',
   searchEmailArchive: 'Search mailbox archive',
 
   // Workspace files (Q3 / company-brain §10)

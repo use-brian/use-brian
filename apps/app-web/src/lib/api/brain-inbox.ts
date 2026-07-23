@@ -177,7 +177,7 @@ export type AdjustMemoryChanges = {
   tags?: string[];
   /** task adjust — the editable doc-like fields. */
   title?: string;
-  status?: "todo" | "in_progress" | "blocked" | "done" | "archived";
+  status?: "todo" | "in_progress" | "in_review" | "blocked" | "done" | "archived";
   /** task adjust — ISO date string, or null to clear the due date. */
   due_at?: string | null;
   /** task adjust — a workspace_members row id, or null to unassign. */

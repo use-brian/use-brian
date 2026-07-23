@@ -49,6 +49,7 @@ export type CellCommit<T> = (next: T) => Promise<{ ok: boolean; error?: string }
 export const STATUS_DOT: Record<TaskStatus, string> = {
   todo: "bg-muted-foreground/50",
   in_progress: "bg-blue-500",
+  in_review: "bg-violet-500",
   blocked: "bg-amber-500",
   done: "bg-emerald-500",
   archived: "bg-muted-foreground/30",

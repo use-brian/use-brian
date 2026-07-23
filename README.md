@@ -43,6 +43,8 @@ record. You stay on the decisions. It handles the rest.
 
 **Prerequisites:** Node 22+, pnpm 10+, and a free Gemini API key
 ([get one here](https://aistudio.google.com/apikey)).
+Recording and video ingestion also requires `ffmpeg` and `ffprobe` on `PATH`
+(`brew install ffmpeg`, `apt install ffmpeg`, or the equivalent for your OS).
 
 ```bash
 git clone https://github.com/use-brian/use-brian.git
@@ -55,6 +57,33 @@ pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; ope
 That is it. There is no step three. The store defaults to an embedded PGLite
 database under `~/.usebrian/`; point `DATABASE_URL` at a local Postgres if you
 prefer a container. Self-host overrides live in [`.env.example`](./.env.example).
+Binary data can stay local too: set `LOCAL_FILES_DIR` to a durable directory and
+workspace files, recordings, avatars, and channel media use it. Browser uploads,
+public media, and audio/video seeking use short-lived signed API URLs, so GCS is
+optional.
+
+DashScope long-recording transcription fetches input by URL. To keep persistent
+storage local, expose only the signed transfer endpoint through a public HTTPS
+reverse proxy and set its origin separately:
+
+```env
+LOCAL_FILES_DIR=/absolute/path/to/use-brian-files
+LOCAL_FILES_PUBLIC_URL=https://files.example.com
+```
+
+For example, a Cloudflare Tunnel ingress can restrict the public hostname to
+that endpoint while leaving the rest of the API local:
+
+```yaml
+ingress:
+  - hostname: files.example.com
+    path: ^/api/local-files$
+    service: http://localhost:4000
+  - service: http_status:404
+```
+
+Read and write grants are HMAC-signed with `JWT_SECRET`, expire after their
+requested TTL, and bind the object key and action (plus MIME for writes).
 
 ### If the web app dies with "JavaScript heap out of memory"
 

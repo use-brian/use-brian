@@ -75,6 +75,7 @@ import { useT } from "@/lib/i18n/client";
 import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expose";
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
+import { desktopBridge } from "@/lib/desktop-auth-source";
 import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
@@ -109,6 +110,14 @@ const OAUTH_SCOPES_WITH_EMAIL: Record<string, string[]> = Object.fromEntries(
 
 /** Connectors that authenticate via a Personal Access Token (not OAuth). */
 const PAT_CONNECTORS = new Set(["github"]);
+
+/**
+ * OAuth connectors whose DESKTOP connect is routed through the Electron shell's
+ * loopback flow (docs/plans/desktop-connector-oauth-return.md). Google + Notion
+ * are wired; Fathom is intentionally absent (its store path is unwired), so on
+ * desktop it falls through to the normal web redirect like the web app.
+ */
+const DESKTOP_OAUTH_CONNECTORS = new Set(["gcal", "gmail", "gdrive", "notion"]);
 
 /**
  * First-party workspace primitives (Workspace Files). Always-on — no
@@ -682,6 +691,10 @@ function ConnectorsList() {
   const [s3SecretKey, setS3SecretKey] = useState("");
   const [s3Error, setS3Error] = useState<string | null>(null);
 
+  const [showLocalForm, setShowLocalForm] = useState<string | null>(null);
+  const [localDirPath, setLocalDirPath] = useState("");
+  const [localDirError, setLocalDirError] = useState<string | null>(null);
+
   // Company mailbox (imap) form state — one dialog with progressive
   // disclosure: email (MX-resolves the preset on blur) + app password, with
   // Advanced host/port fields for unrecognized servers. The server verifies
@@ -710,6 +723,12 @@ function ConnectorsList() {
   const [shopifyToken, setShopifyToken] = useState("");
   const [shopifyError, setShopifyError] = useState<string | null>(null);
   const [shopifyConnectOpts, setShopifyConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
+  // Branded-domain resolution: the canonical {handle}.myshopify.com we detected
+  // for whatever the user typed (a branded domain resolves via a server probe;
+  // a myshopify domain / bare handle resolves locally). See resolveEffectiveShopDomain.
+  const [shopifyResolved, setShopifyResolved] = useState<string | null>(null);
+  const [shopifyResolving, setShopifyResolving] = useState(false);
+  const [shopifyResolveFailed, setShopifyResolveFailed] = useState(false);
 
   // "Add another account" state — provider slug whose add-another form is open,
   // plus the nickname + secret for the new instance.
@@ -778,6 +797,9 @@ function ConnectorsList() {
         // Same collapse for the workspace-scoped `s3` storage binding.
         if (rows.some((r) => r.id === "s3" && r.connectorInstanceId)) {
           rows = rows.filter((r) => !(r.id === "s3" && !r.connectorInstanceId));
+        }
+        if (rows.some((r) => r.id === "local" && r.connectorInstanceId)) {
+          rows = rows.filter((r) => !(r.id === "local" && !r.connectorInstanceId));
         }
         setConnectors(rows);
       })
@@ -1007,6 +1029,33 @@ function ConnectorsList() {
   }
 
   // ── Actions ──────────────────────────────────────────────────
+  // Desktop shell: hand an OAuth connect to the shell's RFC 8252 loopback flow
+  // (it owns CSRF + the return into the app window), because the web flow's
+  // browser-cookie CSRF can't survive the Electron→system-browser jar split.
+  // Returns true when handled; web (no bridge) or a non-wired provider returns
+  // false, so the caller does the normal full-page redirect. `params` must NOT
+  // carry `state` — the shell appends its own. Spec:
+  // docs/plans/desktop-connector-oauth-return.md.
+  function startConnectorOAuthOnDesktop(args: {
+    connector: string;
+    authorizeBase: string;
+    params: URLSearchParams;
+    redirectUri: string;
+    opts?: { addAnother?: boolean; instanceId?: string };
+  }): boolean {
+    const bridge = desktopBridge();
+    if (!bridge?.connectConnector || !DESKTOP_OAUTH_CONNECTORS.has(args.connector)) return false;
+    bridge.connectConnector({
+      connector: args.connector,
+      authorizeUrl: `${args.authorizeBase}?${args.params.toString()}`,
+      redirectUri: args.redirectUri,
+      workspaceId,
+      createNew: !!args.opts?.addAnother,
+      instanceId: args.opts?.instanceId,
+    });
+    return true;
+  }
+
   // `opts.addAnother` connects a NEW account for a provider that already has
   // one (OAuth state carries an `:add` suffix so the callback creates a fresh
   // instance instead of overwriting the first).
@@ -1040,6 +1089,13 @@ function ConnectorsList() {
       return;
     }
 
+    if (id === "local") {
+      setShowLocalForm(rid);
+      setLocalDirError(null);
+      setConnecting(null);
+      return;
+    }
+
     // Company mailbox — email + app password with MX-detected hosts,
     // verified live (IMAP login + SMTP) server-side before storing.
     if (id === "imap") {
@@ -1054,15 +1110,16 @@ function ConnectorsList() {
     // redirect back to this workspace-scoped route. `armConnectorOauthState`
     // mints a CSRF nonce into `state` + a companion cookie the callback checks.
     if (id === "notion") {
-      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/notion`;
       const sp = new URLSearchParams({
         client_id: NOTION_CLIENT_ID,
         redirect_uri: redirectUri,
         response_type: "code",
         owner: "user",
-        state: buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
+      if (startConnectorOAuthOnDesktop({ connector: "notion", authorizeBase: "https://api.notion.com/v1/oauth/authorize", params: sp, redirectUri, opts })) return;
+      const nonce = armConnectorOauthState();
+      sp.set("state", buildConnectorState({ connector: "notion", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }));
       window.location.href = `https://api.notion.com/v1/oauth/authorize?${sp}`;
       return;
     }
@@ -1100,7 +1157,6 @@ function ConnectorsList() {
     // fresh instance instead of overwriting the first).
     const scopes = OAUTH_SCOPES_WITH_EMAIL[id];
     if (scopes) {
-      const nonce = armConnectorOauthState();
       const redirectUri = `${window.location.origin}/api/auth/callback/google-connector`;
       const sp = new URLSearchParams({
         client_id: GOOGLE_CLIENT_ID,
@@ -1109,8 +1165,10 @@ function ConnectorsList() {
         scope: scopes.join(" "),
         access_type: "offline",
         prompt: "consent",
-        state: buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
+      if (startConnectorOAuthOnDesktop({ connector: id, authorizeBase: "https://accounts.google.com/o/oauth2/v2/auth", params: sp, redirectUri, opts })) return;
+      const nonce = armConnectorOauthState();
+      sp.set("state", buildConnectorState({ connector: id, workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }));
       window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${sp}`;
       return;
     }
@@ -1251,11 +1309,61 @@ function ConnectorsList() {
     setConnecting(null);
   }
 
+  // Resolve whatever the merchant typed to the canonical {handle}.myshopify.com.
+  // A myshopify domain / bare handle / admin URL resolves locally; a BRANDED
+  // domain (shop.theirbrand.com) is resolved server-side via the /admin probe,
+  // because that's the one host they never see. Returns null when it can't be
+  // mapped, so the caller shows the manual .myshopify.com fallback.
+  async function resolveEffectiveShopDomain(): Promise<string | null> {
+    const direct = normalizeShopifyShopDomain(shopifyDomain);
+    if (direct) return direct;
+    if (shopifyResolved) return shopifyResolved;
+    const raw = shopifyDomain.trim();
+    if (!raw || !raw.includes(".")) return null;
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/shopify/resolve-domain`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ input: raw }),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { shopDomain?: string };
+        if (data.shopDomain) {
+          setShopifyResolved(data.shopDomain);
+          return data.shopDomain;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  function handleShopifyDomainChange(value: string) {
+    setShopifyDomain(value);
+    setShopifyError(null);
+    setShopifyResolveFailed(false);
+    // Direct shapes resolve instantly; branded domains normalize to null and
+    // get probed on blur.
+    setShopifyResolved(normalizeShopifyShopDomain(value));
+  }
+
+  async function handleShopifyDomainBlur() {
+    if (shopifyResolving || shopifyResolved) return;
+    const raw = shopifyDomain.trim();
+    // Already resolvable locally, empty, or not a domain yet → nothing to probe.
+    if (!raw || normalizeShopifyShopDomain(raw) || !raw.includes(".")) return;
+    setShopifyResolving(true);
+    setShopifyResolveFailed(false);
+    const resolved = await resolveEffectiveShopDomain();
+    if (!resolved) setShopifyResolveFailed(true);
+    setShopifyResolving(false);
+  }
+
   // Shopify OAuth — redirect to the per-shop authorize URL. Only offered when
   // NEXT_PUBLIC_SHOPIFY_CLIENT_ID is configured (P0 app registration).
-  function startShopifyOauth(c: Connector) {
-    const shopDomain = normalizeShopifyShopDomain(shopifyDomain);
+  async function startShopifyOauth(c: Connector) {
+    const shopDomain = await resolveEffectiveShopDomain();
     if (!shopDomain) {
+      setShopifyResolveFailed(true);
       setShopifyError(tc.shopify.errDomain);
       return;
     }
@@ -1275,8 +1383,9 @@ function ConnectorsList() {
   // Shopify pasted admin token (`shpat_...`) — the static-token path. Works
   // with zero app registration (legacy custom apps, dev stores, self-host).
   async function handleSaveShopifyToken(c: Connector) {
-    const shopDomain = normalizeShopifyShopDomain(shopifyDomain);
+    const shopDomain = await resolveEffectiveShopDomain();
     if (!shopDomain) {
+      setShopifyResolveFailed(true);
       setShopifyError(tc.shopify.errDomain);
       return;
     }
@@ -1302,6 +1411,7 @@ function ConnectorsList() {
         setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
         setShowShopifyForm(null);
         setShopifyDomain(""); setShopifyToken(""); setShopifyConnectOpts(null);
+        setShopifyResolved(null); setShopifyResolving(false); setShopifyResolveFailed(false);
         setSelected(rid);
         loadTools(c.id);
         fetchConnectors();
@@ -1425,7 +1535,8 @@ function ConnectorsList() {
         setImapShowAdvanced(false); setImapShowHelp(false);
         setImapHostIn(""); setImapPortIn("993"); setImapSmtpHostIn(""); setImapSmtpPortIn("465");
         fetchConnectors();
-        // imap is single_instance (one mailbox per user), so the arm resolves.
+        // Multi-account: a new address adds a mailbox, the same address
+        // reconnects; the returned instanceId targets whichever it was.
         setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
       } else {
         const data = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
@@ -1486,6 +1597,33 @@ function ConnectorsList() {
       }
     } catch {
       setS3Error(tc.s3.errGeneric);
+    }
+    setConnecting(null);
+  }
+
+  async function handleSaveLocal(c: Connector) {
+    if (!localDirPath.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setLocalDirError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/local/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId, path: localDirPath.trim() }),
+      });
+      if (res.ok) {
+        setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: true } : x)));
+        setSelected(rid);
+        setShowLocalForm(null);
+        setLocalDirPath("");
+        fetchConnectors();
+        setJustConnected({ slug: c.id, instanceId: c.connectorInstanceId });
+      } else {
+        setLocalDirError(tc.local.errGeneric);
+      }
+    } catch {
+      setLocalDirError(tc.local.errGeneric);
     }
     setConnecting(null);
   }
@@ -1638,6 +1776,19 @@ function ConnectorsList() {
       setSelected(null);
       try {
         await authFetch(`${API_URL}/api/connectors/s3/disconnect`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workspaceId }),
+        });
+      } catch {}
+      fetchConnectors();
+      return;
+    }
+    if (c.id === "local") {
+      setConnectors((prev) => prev.map((x) => (isSameRow(x, c) ? { ...x, connected: false } : x)));
+      setSelected(null);
+      try {
+        await authFetch(`${API_URL}/api/connectors/local/disconnect`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ workspaceId }),
@@ -2664,14 +2815,26 @@ function ConnectorsList() {
                       type="text"
                       placeholder={tc.shopify.domainPlaceholder}
                       value={shopifyDomain}
-                      onChange={(e) => setShopifyDomain(e.target.value)}
+                      onChange={(e) => handleShopifyDomainChange(e.target.value)}
+                      onBlur={handleShopifyDomainBlur}
                       className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                       autoFocus
                     />
+                    {/* Branded-domain resolution feedback: detecting → detected → fallback hint. */}
+                    {shopifyResolving ? (
+                      <p className="text-xs text-muted-foreground">{tc.shopify.detecting}</p>
+                    ) : shopifyResolved && shopifyResolved !== shopifyDomain.trim().toLowerCase() ? (
+                      <p className="text-xs text-muted-foreground">
+                        {tc.shopify.resolvedPrefix}
+                        <span className="font-medium text-foreground">{shopifyResolved}</span>
+                      </p>
+                    ) : shopifyResolveFailed ? (
+                      <p className="text-xs text-muted-foreground">{tc.shopify.resolveHint}</p>
+                    ) : null}
                     {SHOPIFY_CLIENT_ID && (
                       <button
                         onClick={() => startShopifyOauth(sel)}
-                        disabled={!shopifyDomain.trim()}
+                        disabled={!shopifyDomain.trim() || shopifyResolving}
                         className="w-full text-xs font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {tc.shopify.oauthBtn}
@@ -2693,6 +2856,7 @@ function ConnectorsList() {
                           setShowShopifyForm(null);
                           setShopifyDomain(""); setShopifyToken("");
                           setShopifyError(null); setShopifyConnectOpts(null);
+                          setShopifyResolved(null); setShopifyResolving(false); setShopifyResolveFailed(false);
                         }}
                         className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
                       >
@@ -2700,7 +2864,7 @@ function ConnectorsList() {
                       </button>
                       <button
                         onClick={() => handleSaveShopifyToken(sel)}
-                        disabled={!shopifyDomain.trim() || !shopifyToken.trim() || connecting === rid}
+                        disabled={!shopifyDomain.trim() || !shopifyToken.trim() || connecting === rid || shopifyResolving}
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.savingBtn : tc.saveBtn}
@@ -2822,10 +2986,44 @@ function ConnectorsList() {
                   </div>
                 )}
 
+                {showLocalForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.local.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.local.pathPlaceholder}
+                      value={localDirPath}
+                      onChange={(e) => setLocalDirPath(e.target.value)}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.local.pathNote}</p>
+                    {localDirError && <p className="text-xs text-destructive">{localDirError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setShowLocalForm(null); setLocalDirPath(""); setLocalDirError(null); }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveLocal(sel)}
+                        disabled={!localDirPath.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.local.connectingBtn : tc.local.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Company mailbox (imap) connected card — archive sync status
                     + the D9 backfill consent (preflight counts, scope choices,
-                    Later first-class). */}
-                {sel.id === "imap" && sel.connected && <ImapSyncPanel />}
+                    Later first-class). Bound to THIS mailbox instance
+                    (multi-account: each connected mailbox has its own row). */}
+                {sel.id === "imap" && sel.connected && (
+                  <ImapSyncPanel instanceId={sel.connectorInstanceId} />
+                )}
 
                 {/* Company mailbox (imap) form — one dialog, progressive
                     disclosure: email resolves the MX preset on blur; Advanced

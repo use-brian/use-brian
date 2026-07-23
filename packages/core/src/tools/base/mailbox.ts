@@ -185,7 +185,78 @@ function mailboxError(err: unknown): { data: string; isError: true } {
   return { data: `Mailbox error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
 }
 
-export function createMailboxTools(api: MailboxApi): Tool[] {
+/** A connected company mailbox, primary (first-connected) first. */
+export type MailboxAccountRef = {
+  /** The mailbox email address — the value the model passes as `account`. */
+  email: string
+  /** True for the user's primary (first-connected) mailbox — the default sender. */
+  isPrimary: boolean
+}
+
+/**
+ * Multi-account router (D11 retired — the AgentMail `fromInbox` precedent):
+ * the tools stay ONE set, an optional `account` picks one of the user's
+ * connected mailboxes, and an omitted `account` resolves to the primary
+ * (first-connected). The injector builds this over one per-instance
+ * `MailboxApi` each; `list()` and `get()` are cheap (creds lazy-load on the
+ * first real IMAP call).
+ */
+export type MailboxAccountRouter = {
+  /** Every connected mailbox for this user, primary first. */
+  list(): MailboxAccountRef[]
+  /** The `MailboxApi` for a mailbox email (case-insensitive), or undefined. */
+  get(email: string): MailboxApi | undefined
+}
+
+/** Single-account router — the one-mailbox common case and tests. */
+export function singleMailboxRouter(api: MailboxApi, email: string): MailboxAccountRouter {
+  return {
+    list: () => [{ email, isPrimary: true }],
+    get: (e) => (e.trim().toLowerCase() === email.trim().toLowerCase() ? api : undefined),
+  }
+}
+
+/**
+ * Resolve the `account` argument to a concrete `MailboxApi` (mirrors
+ * AgentMail's `resolveInbox`): an explicit account matches by email or fails
+ * with an honest list of what IS connected; omitted resolves to the primary.
+ */
+function resolveMailboxAccount(
+  router: MailboxAccountRouter,
+  account: string | undefined,
+): { ok: true; api: MailboxApi; email: string } | { ok: false; error: string } {
+  const accounts = router.list()
+  if (accounts.length === 0) {
+    return { ok: false, error: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.' }
+  }
+  const pick = (email: string): { ok: true; api: MailboxApi; email: string } | { ok: false; error: string } => {
+    const api = router.get(email)
+    return api ? { ok: true, api, email } : { ok: false, error: `Company mailbox ${email} is unavailable right now.` }
+  }
+  if (account) {
+    const wanted = account.trim().toLowerCase()
+    const match = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
+    if (!match) {
+      return {
+        ok: false,
+        error: `No connected company mailbox "${account}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+      }
+    }
+    return pick(match.email)
+  }
+  return pick((accounts.find((a) => a.isPrimary) ?? accounts[0]).email)
+}
+
+/** The `account` field shared by every tool schema — omitted = primary mailbox. */
+const accountField = z
+  .string()
+  .optional()
+  .describe(
+    'Which connected company mailbox to use, by its email address. ' +
+    'Omit to use the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+  )
+
+export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
@@ -193,7 +264,8 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
       'Searches INBOX and Sent by default, so "what did I reply to X" is answerable; pass `folder` to search elsewhere. ' +
       'Server-side search is substring matching with no ranking — iterate like grep: start with 2-4 `keywords` (they are OR\'d in one round trip, so include synonyms), ' +
       'then refine by sender, subject, or date. Results come back grouped into conversation threads with snippets. ' +
-      `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail.`,
+      `Defaults to the last ${MAILBOX_DEFAULT_WINDOW_DAYS} days — pass \`since\` to search older mail. ` +
+      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
     inputSchema: z.object({
       keywords: z
         .array(z.string())
@@ -219,12 +291,16 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
         .max(MAILBOX_MAX_LIMIT)
         .optional()
         .describe(`Max messages to return (default ${MAILBOX_DEFAULT_LIMIT}, max ${MAILBOX_MAX_LIMIT}).`),
+      account: accountField,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 30_000,
 
     async execute(input) {
+      const resolved = resolveMailboxAccount(router, input.account)
+      if (!resolved.ok) return { data: resolved.error, isError: true }
+      const api = resolved.api
       try {
         const limit = Math.min(input.maxResults ?? MAILBOX_DEFAULT_LIMIT, MAILBOX_MAX_LIMIT)
         const { hits, note } = await api.searchMessages({
@@ -256,14 +332,17 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
       'Returns headers, the text body, and attachment names/sizes (attachment contents cannot be fetched).',
     inputSchema: z.object({
       messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
+      account: accountField,
     }),
     isConcurrencySafe: true,
     isReadOnly: true,
     timeoutMs: 20_000,
 
     async execute(input) {
+      const resolved = resolveMailboxAccount(router, input.account)
+      if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
-        const data = await api.getMessage(input.messageId)
+        const data = await resolved.api.getMessage(input.messageId)
         return { data }
       } catch (err) {
         return mailboxError(err)
@@ -277,7 +356,8 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
       "Send an email from the user's own company mailbox (their connected IMAP/SMTP account) — the recipient sees the user's corporate address as the sender. " +
       'This is the ONLY tool that sends as the corporate address: if it is unavailable, say so — never silently substitute another email identity for it (or it for them). ' +
       'Call this tool directly — the user will see an Approve/Deny prompt. ' +
-      'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly.',
+      'To reply on an existing thread, pass the original message\'s id as `inReplyTo` so the reply threads correctly. ' +
+      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which address to send AS; omit it for the primary.',
     inputSchema: z.object({
       to: z.string().describe('Recipient email address.'),
       subject: z.string().describe('Email subject line.'),
@@ -292,6 +372,7 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
         .string()
         .optional()
         .describe('Message id (`folder:uid`) of the message being replied to — threads the reply via In-Reply-To/References.'),
+      account: accountField,
     }),
     isConcurrencySafe: false,
     isReadOnly: false,
@@ -299,6 +380,8 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
     timeoutMs: 30_000,
 
     async execute(input, context) {
+      const resolved = resolveMailboxAccount(router, input.account)
+      if (!resolved.ok) return { data: resolved.error, isError: true }
       try {
         // Egress-safety gate (the gmailSendMessage / agentmail precedent):
         // if confidential content entered the model's context this turn, the
@@ -313,13 +396,13 @@ export function createMailboxTools(api: MailboxApi): Tool[] {
             isError: true,
           }
         }
-        const data = await api.sendMessage({
+        const data = await resolved.api.sendMessage({
           to: input.to,
           subject: input.subject,
           body: input.body,
           ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
         })
-        return { data: { messageId: data.messageId } }
+        return { data: { messageId: data.messageId, from: resolved.email } }
       } catch (err) {
         return mailboxError(err)
       }

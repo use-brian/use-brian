@@ -14,9 +14,9 @@
  * creating (name + scope form), revealed (the one-time plaintext key).
  * Plaintext is shown ONCE — the GET endpoint never returns it.
  *
- * Visual language follows the modern Studio sections (Mini-apps / Knowledge /
- * Channels): `rounded-xl bg-card` cards with icon tiles, pill badges, and
- * uppercase section headers — see those pages for the reference styling.
+ * Visual language follows the modern Studio sections (Knowledge / Channels):
+ * `rounded-xl bg-card` cards with icon tiles, pill badges, and uppercase
+ * section headers — see those pages for the reference styling.
  *
  * Backed by the already-ported `lib/api/brain-keys.ts` +
  * `lib/api/oauth-authorizations.ts`. Scoped to the route workspace via

@@ -40,7 +40,11 @@ export function formatImapSyncLine(
 
 type ProbeResult = { folders: Array<{ path: string; messages: number }>; total: number };
 
-export function ImapSyncPanel() {
+/**
+ * `instanceId` targets a specific connected mailbox (multi-account); omit for
+ * the primary. Each mailbox row renders its own panel bound to its instance.
+ */
+export function ImapSyncPanel({ instanceId }: { instanceId?: string } = {}) {
   const t = useT();
   const tm = t.settings.connectors.imap;
   const [status, setStatus] = useState<ImapSyncStatus | null>(null);
@@ -51,12 +55,13 @@ export function ImapSyncPanel() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const res = await authFetch(`${API_URL}/api/connectors/imap/sync-status`);
+      const qs = instanceId ? `?instanceId=${encodeURIComponent(instanceId)}` : "";
+      const res = await authFetch(`${API_URL}/api/connectors/imap/sync-status${qs}`);
       if (res.ok) setStatus((await res.json()) as ImapSyncStatus);
     } catch {
       // Status is decorative — a failed poll shows the last known state.
     }
-  }, []);
+  }, [instanceId]);
 
   useEffect(() => {
     void loadStatus();
@@ -68,7 +73,11 @@ export function ImapSyncPanel() {
     setProbing(true);
     setError(null);
     try {
-      const res = await authFetch(`${API_URL}/api/connectors/imap/backfill/preflight`, { method: "POST" });
+      const res = await authFetch(`${API_URL}/api/connectors/imap/backfill/preflight`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instanceId }),
+      });
       if (res.ok) setProbe((await res.json()) as ProbeResult);
       else setError(tm.backfillFailed);
     } catch {
@@ -84,7 +93,7 @@ export function ImapSyncPanel() {
       const res = await authFetch(`${API_URL}/api/connectors/imap/backfill`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope }),
+        body: JSON.stringify({ scope, instanceId }),
       });
       if (res.ok) {
         setProbe(null);

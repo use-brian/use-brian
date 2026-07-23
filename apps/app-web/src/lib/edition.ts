@@ -4,7 +4,7 @@
  *
  * app-web is one codebase served by both editions (the local OSS launcher and
  * the hosted platform both run this same app), so hosted-only surfaces -
- * billing, teammates, paid mini-apps - are gated on this flag at runtime rather
+ * billing, teammates, paid capabilities - are gated on this flag at runtime rather
  * than forked into a second copy.
  *
  * The flag DEFAULTS to the full hosted edition when unset, so a hosted deploy

@@ -63,13 +63,30 @@ const inputSchema = z.object({
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional()
     .describe('Latest sent date (YYYY-MM-DD), exclusive.'),
+  account: z
+    .string()
+    .optional()
+    .describe(
+      'Which connected company mailbox to search, by its email address. ' +
+      'Omit to search the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
+    ),
 })
+
+/** A connected mailbox archive, primary first — bound at injection, never model input. */
+export type ArchiveAccountRef = {
+  /** The imap connector instance owning this archive. */
+  instanceId: string
+  /** The mailbox email — the value the model passes as `account`. */
+  email: string
+  /** True for the primary (first-connected) mailbox — the default. */
+  isPrimary: boolean
+}
 
 export type CreateArchiveSearchToolOptions = {
   /** The mailbox owner — bound at injection, never model input. */
   ownerUserId: string
-  /** The imap connector instance — bound at injection, never model input. */
-  instanceId: string
+  /** The owner's connected mailboxes, primary first — bound at injection. */
+  accounts: ArchiveAccountRef[]
   deps: MailboxArchiveDeps
 }
 
@@ -82,18 +99,36 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
       '("what did the landlord say about the deposit"), even when exact words are unknown. ' +
       'Results carry a message id (`folder:uid`) usable with imapGetMessage for the full message. ' +
       'For fresh or exact lookups (new mail, a known sender/date), use imapSearchMessages instead — the archive syncs on a delay. ' +
-      'For cross-source company knowledge, use searchBrain.',
+      'For cross-source company knowledge, use searchBrain. ' +
+      'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
     inputSchema,
     isReadOnly: true,
     isConcurrencySafe: true,
     requiresConfirmation: false,
     timeoutMs: 30_000,
     async execute(input) {
+      const accounts = opts.accounts
+      if (accounts.length === 0) {
+        return { data: 'No company mailbox is connected. Connect one in Studio → Connectors, then try again.', isError: true }
+      }
+      let target: ArchiveAccountRef | undefined
+      if (input.account) {
+        const wanted = input.account.trim().toLowerCase()
+        target = accounts.find((a) => a.email.trim().toLowerCase() === wanted)
+        if (!target) {
+          return {
+            data: `No connected company mailbox "${input.account}". Connected mailboxes: ${accounts.map((a) => a.email).join(', ')}.`,
+            isError: true,
+          }
+        }
+      } else {
+        target = accounts.find((a) => a.isPrimary) ?? accounts[0]
+      }
       try {
         const hits = await search(
           {
             ownerUserId: opts.ownerUserId,
-            instanceId: opts.instanceId,
+            instanceId: target.instanceId,
             query: input.query,
             topK: input.topK,
             from: input.from,

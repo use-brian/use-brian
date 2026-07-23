@@ -40,6 +40,7 @@ export type ApprovalKind =
   | 'distribution_draft'
   | 'staged_skill_creation'
   | 'staged_skill_update'
+  | 'workflow_refinement'
   | 'question'
   | 'browser_skill_send'
   | 'email_sender'
@@ -248,12 +249,42 @@ export type CreateStagedSkillCreationParams = {
   originatingAssistantId: string | null
   /**
    * Producer provenance (mig 308 workflow lifecycle). The session curator
-   * omits both; the workflow-digest pass stamps `origin: 'workflow-digest'`
-   * plus the retiring workflows the candidate was distilled from. Rides
-   * `approval_payload` — additive, ignored by the approve path.
+   * omits both on interactive sessions; the workflow-digest pass stamps
+   * `origin: 'workflow-digest'` plus the retiring workflows the candidate
+   * was distilled from, and the origin-aware session curator stamps
+   * `origin: 'workflow-session'` plus the live source workflow. Rides
+   * `approval_payload` — additive.
    */
   origin?: string
   sourceWorkflowIds?: string[]
+  /**
+   * Origin-aware induction attach offer: when the candidate was induced
+   * from a workflow-origin session, the approval card offers wiring the new
+   * skill into the source step's `skills` allow-list. `stepId` is present
+   * when the session resolved to a specific step (persistent-session key);
+   * absent, the card lets the approver pick a step. Rides `approval_payload`.
+   */
+  attachTo?: { workflowId: string; stepId?: string }
+}
+
+/**
+ * Origin-aware induction — `kind='workflow_refinement'`. The session curator
+ * reviewing a WORKFLOW-ORIGIN session proposes a patch to the source
+ * workflow's step (today: the step prompt) instead of minting a mirror
+ * skill. Applied at approve time through the validated workflow-update path
+ * (`docs/architecture/features/workflow.md` → "Unified approvals").
+ */
+export type CreateWorkflowRefinementParams = {
+  workspaceId: string
+  workflowId: string
+  stepId: string
+  proposedPatch: { prompt: string }
+  /** Why the curator believes the step should change — rendered on the card. */
+  rationale: string
+  approverUserId: string
+  originatingAssistantId: string | null
+  /** The reviewed session the deviation was observed in (evidence pointer). */
+  sourceSessionId?: string | null
 }
 
 /**
@@ -335,6 +366,26 @@ export type PendingApprovalsStore = {
    * time by the route handler. Returns the new approval row.
    */
   createStagedSkillCreation(params: CreateStagedSkillCreationParams): Promise<PendingApproval>
+
+  /**
+   * Origin-aware induction — stage a curator-proposed patch to a workflow
+   * step (`kind='workflow_refinement'`). Nothing mutates here; the skill-
+   * approvals route applies the patch through the validated workflow-update
+   * path at approve time.
+   */
+  createWorkflowRefinement(params: CreateWorkflowRefinementParams): Promise<PendingApproval>
+
+  /**
+   * System read — newest pending `workflow_refinement` for a (workflow,
+   * step) pair. Same dedupe gate as the staged-skill reads: while one
+   * refinement for a step sits unresolved, the curator must not stack
+   * another every review tick.
+   */
+  findPendingWorkflowRefinement(
+    workspaceId: string,
+    workflowId: string,
+    stepId: string,
+  ): Promise<PendingApproval | null>
 
   /**
    * Agent surface — stage an Approve-band control-plane write
@@ -675,6 +726,7 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
             ...(params.sourceWorkflowIds?.length
               ? { sourceWorkflowIds: params.sourceWorkflowIds }
               : {}),
+            ...(params.attachTo ? { attachTo: params.attachTo } : {}),
           }),
           params.originatingAssistantId ?? null,
         ],
@@ -682,6 +734,62 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
       const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
       notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
       return approval
+    },
+
+    async createWorkflowRefinement(params) {
+      // `arguments` carries the full proposal (what the apply path reads);
+      // `approval_payload` mirrors the routing keys for the dedupe read +
+      // card rendering, matching the staged_skill_* convention. Workflow
+      // run columns stay NULL — this row targets a workflow DEFINITION, not
+      // a paused run.
+      const result = await query(
+        `INSERT INTO pending_approvals (
+           workspace_id, kind, approver_user_id, tool_name, arguments,
+           approval_payload, delivery_channel_type, delivery_channel_id,
+           originating_assistant_id, workflow_run_id, workflow_step_run_id,
+           blocking_session_id, expires_at
+         )
+         VALUES ($1, 'workflow_refinement', $2, 'workflow_refine', $3, $4,
+                 'web', NULL, $5, NULL, NULL, NULL, NULL)
+         RETURNING ${COLS}`,
+        [
+          params.workspaceId,
+          params.approverUserId,
+          JSON.stringify({
+            workflowId: params.workflowId,
+            stepId: params.stepId,
+            patch: params.proposedPatch,
+            rationale: params.rationale,
+          }),
+          JSON.stringify({
+            kind: 'workflow_refinement',
+            workflowId: params.workflowId,
+            stepId: params.stepId,
+            originatingAssistantId: params.originatingAssistantId,
+            ...(params.sourceSessionId ? { sourceSessionId: params.sourceSessionId } : {}),
+          }),
+          params.originatingAssistantId ?? null,
+        ],
+      )
+      const approval = rowToApproval(result.rows[0] as Record<string, unknown>)
+      notifyWorkspaceChange(approval.workspaceId, 'approval', 'create', approval.id)
+      return approval
+    },
+
+    async findPendingWorkflowRefinement(workspaceId, workflowId, stepId) {
+      const result = await query(
+        `SELECT ${COLS} FROM pending_approvals
+         WHERE workspace_id = $1
+           AND kind = 'workflow_refinement'
+           AND status = 'pending'
+           AND approval_payload->>'workflowId' = $2
+           AND approval_payload->>'stepId' = $3
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [workspaceId, workflowId, stepId],
+      )
+      const row = result.rows[0]
+      return row ? rowToApproval(row as Record<string, unknown>) : null
     },
 
     async createStagedWrite(params) {
@@ -755,11 +863,14 @@ export function createPendingApprovalsStore(): PendingApprovalsStore {
     },
 
     async listSkillApprovals(userId, workspaceId) {
+      // `workflow_refinement` rides the same curator queue: it is the third
+      // output of the background review worker, resolved on the same web
+      // surface as the staged_skill_* kinds.
       const result = await queryWithRLS(
         userId,
         `SELECT ${COLS} FROM pending_approvals
          WHERE workspace_id = $1
-           AND kind IN ('staged_skill_update', 'staged_skill_creation')
+           AND kind IN ('staged_skill_update', 'staged_skill_creation', 'workflow_refinement')
            AND status = 'pending'
          ORDER BY created_at DESC`,
         [workspaceId],

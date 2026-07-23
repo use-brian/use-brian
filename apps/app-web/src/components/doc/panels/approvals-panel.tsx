@@ -59,6 +59,7 @@ import {
   type ApprovalKind,
   type PendingApprovalRow,
   type SkillApprovalDetail,
+  type SkillApprovalTargetWorkflow,
 } from "@/lib/api/approvals";
 import { listAssistants } from "@/lib/api/studio";
 import {
@@ -655,13 +656,32 @@ function ApprovalCard({
         ? stagedCreationName || t.approvalsPage.kind[row.kind]
         : row.kind === "staged_skill_update"
           ? skillDetail?.targetSkill?.name || t.approvalsPage.kind[row.kind]
-          : row.approvalPayload.description?.trim() || row.toolName;
+          : row.kind === "workflow_refinement"
+            ? skillDetail?.targetWorkflow?.name || t.approvalsPage.kind[row.kind]
+            : row.approvalPayload.description?.trim() || row.toolName;
 
   // A staged update can only be applied while its target skill exists —
   // block approve (reject stays available) when the snapshot says it's gone
-  // or hasn't loaded yet, so nobody approves a body rewrite blind.
+  // or hasn't loaded yet, so nobody approves a body rewrite blind. Same
+  // rule for a workflow refinement and its target workflow: the patch
+  // replaces the step prompt, so it is never approved without the
+  // current-vs-proposed context.
   const approveBlocked =
-    row.kind === "staged_skill_update" && !skillDetail?.targetSkill;
+    (row.kind === "staged_skill_update" && !skillDetail?.targetSkill) ||
+    (row.kind === "workflow_refinement" && !skillDetail?.targetWorkflow);
+
+  // Attach offer (origin-aware induction): a workflow-origin creation card
+  // proposes wiring the new skill into the source step's `skills`
+  // allow-list. Checked by default when the offer names a step; the
+  // approver can untick, or pick a step when the offer left it open.
+  const attachTo = skillDetail?.approvalPayload?.attachTo;
+  const attachOffered =
+    row.kind === "staged_skill_creation" &&
+    !!attachTo?.workflowId &&
+    !!skillDetail?.targetWorkflow;
+  const [attach, setAttach] = useState(true);
+  const [attachStepId, setAttachStepId] = useState<string | null>(null);
+  const resolvedAttachStepId = attachStepId ?? attachTo?.stepId ?? null;
 
   // Tool-specific rich preview (an email as an email), for the kinds whose
   // `arguments` are a frozen tool input. Null → the generic raw-input view.
@@ -717,11 +737,15 @@ function ApprovalCard({
   ) {
     setBusy(true);
     setError(null);
+    const attachExtra =
+      decision === "approved" && attachOffered && attach && resolvedAttachStepId
+        ? { attach: true, attachStepId: resolvedAttachStepId }
+        : {};
     const result = await respondByKind(
       row,
       decision,
       reason.trim() || undefined,
-      extra,
+      { ...extra, ...attachExtra },
     );
     if (result.ok) {
       onResolved(row.id);
@@ -802,8 +826,25 @@ function ApprovalCard({
             {row.kind === "staged_skill_creation" && (
               <SkillCreationBody row={row} />
             )}
+            {attachOffered && skillDetail?.targetWorkflow && (
+              <AttachOffer
+                workflow={skillDetail.targetWorkflow}
+                attach={attach}
+                onAttachChange={setAttach}
+                stepId={resolvedAttachStepId}
+                onStepChange={setAttachStepId}
+                disabled={busy || batchBusy}
+              />
+            )}
             {row.kind === "staged_skill_update" && (
               <SkillUpdateBody
+                row={row}
+                detail={skillDetail}
+                detailsLoaded={skillDetailsLoaded}
+              />
+            )}
+            {row.kind === "workflow_refinement" && (
+              <WorkflowRefinementBody
                 row={row}
                 detail={skillDetail}
                 detailsLoaded={skillDetailsLoaded}
@@ -1222,6 +1263,162 @@ function DiffView({ rows }: { rows: DiffRow[] }) {
           </div>
         ),
       )}
+    </div>
+  );
+}
+
+/** Attach offer on a workflow-origin `staged_skill_creation` card
+ *  (origin-aware induction): approve can also wire the new skill into the
+ *  source step's `skills` allow-list. Default-on when the offer resolved a
+ *  step; the approver can untick, or pick among the workflow's
+ *  assistant_call steps when the offer left the step open. */
+function AttachOffer({
+  workflow,
+  attach,
+  onAttachChange,
+  stepId,
+  onStepChange,
+  disabled,
+}: {
+  workflow: SkillApprovalTargetWorkflow;
+  attach: boolean;
+  onAttachChange: (v: boolean) => void;
+  stepId: string | null;
+  onStepChange: (v: string) => void;
+  disabled: boolean;
+}) {
+  const t = useT();
+  const assistantSteps = workflow.steps.filter((s) => s.type === "assistant_call");
+  if (assistantSteps.length === 0) return null;
+  const stepLabel = (id: string) => {
+    const step = assistantSteps.find((s) => s.id === id);
+    const prompt = step?.prompt?.trim() ?? "";
+    return prompt.length > 0 ? `${id} · ${prompt.slice(0, 48)}` : id;
+  };
+  return (
+    <div className="mt-1 flex flex-col items-start gap-1.5 border border-border rounded px-2.5 py-2 bg-muted/30">
+      <label className="flex items-center gap-2 text-xs">
+        <input
+          type="checkbox"
+          checked={attach}
+          disabled={disabled}
+          onChange={(e) => onAttachChange(e.target.checked)}
+        />
+        <span>
+          {format(t.approvalsPage.attachOffer.label, { workflow: workflow.name })}
+        </span>
+      </label>
+      {attach && (
+        <Select
+          value={stepId ?? ""}
+          onValueChange={(v) => {
+            if (typeof v === "string" && v) onStepChange(v);
+          }}
+        >
+          <SelectTrigger size="sm" className="min-w-[12rem] text-xs">
+            <SelectValue>
+              {stepId ? stepLabel(stepId) : t.approvalsPage.attachOffer.pickStep}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectContent align="start">
+            {assistantSteps.map((s) => (
+              <SelectItem key={s.id} value={s.id} className="text-xs">
+                {stepLabel(s.id)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
+      {attach && !stepId && (
+        <span className="text-[11px] text-amber-600 dark:text-amber-400">
+          {t.approvalsPage.attachOffer.stepRequired}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Proposal body for a `workflow_refinement` card (origin-aware induction):
+ *  which step of which workflow, the curator's rationale, and a
+ *  current-vs-proposed prompt diff built from the fetched workflow
+ *  snapshot — the same review artifact shape as a skill-update card. */
+function WorkflowRefinementBody({
+  row,
+  detail,
+  detailsLoaded,
+}: {
+  row: PendingApprovalRow;
+  detail?: SkillApprovalDetail;
+  detailsLoaded: boolean;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const args = row.arguments as {
+    stepId?: string;
+    patch?: { prompt?: string };
+    rationale?: string;
+  };
+  const workflow = detail?.targetWorkflow ?? null;
+  const step = workflow?.steps.find((s) => s.id === args.stepId) ?? null;
+  const proposed = args.patch?.prompt;
+
+  const diff = useMemo(
+    () =>
+      step && proposed !== undefined
+        ? diffLines(step.prompt ?? "", proposed)
+        : null,
+    [step, proposed],
+  );
+  const diffRows = useMemo(() => (diff ? collapseContext(diff) : null), [diff]);
+  const preview = useMemo(() => (diff ? previewChanges(diff) : null), [diff]);
+
+  return (
+    <div className="flex flex-col items-start gap-1 mt-0.5">
+      {args.stepId && (
+        <div className="text-[11px] font-mono text-muted-foreground/80">
+          {format(t.approvalsPage.refinement.step, { step: args.stepId })}
+        </div>
+      )}
+      {!detailsLoaded ? (
+        <div className="text-xs text-muted-foreground">
+          {t.approvalsPage.skill.updateTargetLoading}
+        </div>
+      ) : !workflow ? (
+        <div className="text-xs text-amber-600 dark:text-amber-400">
+          {t.approvalsPage.refinement.workflowMissing}
+        </div>
+      ) : !step ? (
+        <div className="text-xs text-amber-600 dark:text-amber-400">
+          {t.approvalsPage.refinement.stepMissing}
+        </div>
+      ) : null}
+      {args.rationale && (
+        <div className="text-xs text-muted-foreground">{args.rationale}</div>
+      )}
+      {!open && preview && preview.rows.length > 0 && (
+        <>
+          <DiffView rows={preview.rows} />
+          {preview.moreChanges > 0 && (
+            <div className="text-[11px] text-muted-foreground/70">
+              {format(t.approvalsPage.skill.moreChanges, {
+                count: preview.moreChanges,
+              })}
+            </div>
+          )}
+        </>
+      )}
+      {diffRows && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="text-xs text-primary hover:underline"
+        >
+          {open
+            ? t.approvalsPage.skill.hideChanges
+            : t.approvalsPage.skill.viewAllChanges}
+        </button>
+      )}
+      {open && diffRows && <DiffView rows={diffRows} />}
     </div>
   );
 }

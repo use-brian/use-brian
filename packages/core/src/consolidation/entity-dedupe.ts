@@ -9,10 +9,11 @@
  * Algorithm:
  *   1. Pull every live entity cluster colliding on
  *      `(workspace_id, kind, lower(display_name))` via
- *      `EntityStore.findDuplicateClustersSystem`.
- *   2. Per cluster: pick the oldest row as the survivor (carries the
- *      richest history of edges + verifications by sheer age), call
- *      `mergeEntities()` for every other row in the cluster.
+ *      `EntityStore.findDuplicateClustersSystem` — scoped to the caller's
+ *      visible rows (see "Visibility scoping" below).
+ *   2. Per cluster: pick the survivor as `entityIds[0]` — the store
+ *      orders it curated-first (verified, then `source='user'`) then
+ *      oldest — and call `mergeEntities()` for every other row.
  *   3. Use `survivor-wins` reconciliation by default — safest mode for
  *      a background heal because it never throws on attribute conflicts
  *      and leaves the survivor's attributes unchanged. Attribute drift
@@ -22,6 +23,18 @@
  * No new audit row — `mergeEntities()` writes to `entity_merges` per
  * pair, which is the existing source of truth for "why are these two
  * one entity now".
+ *
+ * Visibility scoping (corrections.md §D.9 dedupe guard):
+ *   - Pass `access` (the caller's `AccessContext`) and every read is
+ *     projected through it — only rows the caller can see are clustered,
+ *     and clusters never span the visibility double. This is what stops
+ *     the sweep from collapsing a caller-visible record into an invisible
+ *     survivor (the "accidental swipe" of an entity that has no duplicate
+ *     the user can see). The chat `dedupeEntities` tool always passes it.
+ *   - The LLM alias pass is **suggest-only** — a fuzzy matcher on
+ *     self-reported confidence, never shown in the confirmation preview,
+ *     so it surfaces proposals and never auto-merges (the lexical passes,
+ *     being exact-name and previewed, still auto-apply on approval).
  *
  * Scope guardrails:
  *   - `clusterCap` caps how many clusters we touch per invocation
@@ -46,6 +59,7 @@ import {
   clusterEntityAliases,
   type AliasCluster,
 } from './alias-clusterer.js'
+import type { AccessContext } from '../security/access-context.js'
 import type { LLMProvider } from '../providers/types.js'
 
 /**
@@ -80,6 +94,15 @@ export interface EntityDedupeDeps {
   merge: EntityMergeDeps
   workspaceId: string
   actorUserId: string
+  /**
+   * The caller's access context (corrections.md §D.9 dedupe guard).
+   * When supplied — the chat `dedupeEntities` path always does — every
+   * cluster/list read is projected through it, so the sweep only ever
+   * considers rows the caller can see and never merges across the
+   * visibility double. Omitting it falls back to workspace-wide system
+   * scope (trusted background callers only).
+   */
+  access?: AccessContext
   /** Cap on clusters processed per invocation. Default 25. */
   clusterCap?: number
   /** Optional kind narrowing — applies only to the within-kind pass. */
@@ -102,16 +125,13 @@ export interface EntityDedupeDeps {
    * (e.g. "DD" ↔ "DeltaDeFi") that the lexical passes miss. Opt-in
    * because it incurs one LLM call per invocation. Requires
    * `llmClusterer` deps; no-op when those are absent.
+   *
+   * The pass is **suggest-only** (corrections.md §D.9 dedupe guard): it
+   * surfaces every proposed cluster in `llmCluster.suggestions` and never
+   * auto-merges — a fuzzy same-entity guess must be confirmed, never
+   * applied unseen.
    */
   clusterByLlm?: boolean
-  /**
-   * Confidence threshold (0-1) above which LLM-proposed clusters are
-   * auto-applied (merged + alias-recorded). Lower-confidence clusters
-   * are surfaced in `llmCluster.suggestions` for manual review.
-   * Default 0.85 — empirically the point where Flash-class models stop
-   * being overconfident on weak signals.
-   */
-  llmAutoApplyThreshold?: number
   /** LLM dependencies for the alias-clustering pass. */
   llmClusterer?: { provider: LLMProvider; model: string }
 }
@@ -149,7 +169,11 @@ export interface EntityDedupeResult {
     /** True when the pass actually ran (deps + flag set). */
     ran: boolean
     clustersFound: number
-    /** Clusters auto-applied (confidence >= llmAutoApplyThreshold). */
+    /**
+     * Retained for result-shape stability but **always empty** — the LLM
+     * pass is suggest-only (corrections.md §D.9 dedupe guard) and never
+     * auto-merges. Every proposed cluster lands in `suggestions`.
+     */
     applied: Array<{
       canonicalEntityId: string
       canonicalDisplayName: string
@@ -158,7 +182,7 @@ export interface EntityDedupeResult {
       confidence: number
       reasoning: string
     }>
-    /** Clusters below the auto-apply threshold — surface for user review. */
+    /** Every LLM-proposed cluster — surfaced for the user to confirm. */
     suggestions: Array<{
       canonicalEntityId: string
       canonicalDisplayName: string
@@ -181,6 +205,7 @@ export async function runEntityDedupe(
     deps.actorUserId,
     deps.workspaceId,
     { limit: clusterCap, kind: deps.kind },
+    deps.access,
   )
 
   const result: EntityDedupeResult = {
@@ -260,6 +285,7 @@ export async function runEntityDedupe(
       deps.actorUserId,
       deps.workspaceId,
       { limit: clusterCap, maxClusterSize: deps.crossKindMaxClusterSize },
+      deps.access,
     )
     result.crossKind.clustersScanned = xClusters.length
     for (const cluster of xClusters) {
@@ -282,15 +308,14 @@ async function runLlmAliasPass(
   result: EntityDedupeResult,
 ): Promise<void> {
   if (!deps.llmClusterer) return
-  const threshold = deps.llmAutoApplyThreshold ?? 0.85
   result.llmCluster.ran = true
 
   const entities = await deps.entities.listLiveEntitiesSystem(
     deps.actorUserId,
     deps.workspaceId,
     { kind: deps.kind },
+    deps.access,
   )
-  const byId = new Map(entities.map((e) => [e.id, e]))
 
   let clusters: AliasCluster[]
   try {
@@ -310,71 +335,23 @@ async function runLlmAliasPass(
   }
   result.llmCluster.clustersFound = clusters.length
 
+  // Suggest-only (corrections.md §D.9 dedupe guard). The LLM pass is a
+  // FUZZY same-entity matcher scored on a self-reported confidence, and
+  // it is deliberately NOT run inside the dedupeEntities confirmation
+  // preview — so auto-merging here would collapse two distinct entities
+  // on a hallucinated cluster that the user never saw (the "accidental
+  // swipe" class). Every proposed cluster is surfaced for the user to
+  // confirm; nothing is merged. The lexical passes keep auto-applying
+  // because they are exact-name matches shown in the preview card.
   for (const cluster of clusters) {
-    if (cluster.confidence < threshold) {
-      result.llmCluster.suggestions.push({
-        canonicalEntityId: cluster.canonicalEntityId,
-        canonicalDisplayName: cluster.canonicalDisplayName,
-        aliasEntityIds: cluster.aliasEntityIds,
-        aliasDisplayNames: cluster.aliasDisplayNames,
-        confidence: cluster.confidence,
-        reasoning: cluster.reasoning,
-      })
-      continue
-    }
-    // Auto-apply path: merge each alias entity into the canonical, then
-    // record its surface form as an alias on the canonical.
-    const canonical = byId.get(cluster.canonicalEntityId)
-    if (!canonical) continue
-    const applied = {
-      canonicalEntityId: canonical.id,
-      canonicalDisplayName: canonical.displayName,
-      mergedEntityIds: [] as string[],
-      mergedDisplayNames: [] as string[],
+    result.llmCluster.suggestions.push({
+      canonicalEntityId: cluster.canonicalEntityId,
+      canonicalDisplayName: cluster.canonicalDisplayName,
+      aliasEntityIds: cluster.aliasEntityIds,
+      aliasDisplayNames: cluster.aliasDisplayNames,
       confidence: cluster.confidence,
       reasoning: cluster.reasoning,
-    }
-    for (let i = 0; i < cluster.aliasEntityIds.length; i++) {
-      const aliasId = cluster.aliasEntityIds[i]!
-      const aliasName = cluster.aliasDisplayNames[i]!
-      try {
-        await mergeEntities(
-          {
-            workspaceId: deps.workspaceId,
-            survivingId: canonical.id,
-            mergedId: aliasId,
-            actorUserId: deps.actorUserId,
-            reason: `self-heal: LLM alias cluster (${cluster.confidence.toFixed(2)})`,
-            mode: 'survivor-wins',
-          },
-          deps.merge,
-        )
-        applied.mergedEntityIds.push(aliasId)
-        applied.mergedDisplayNames.push(aliasName)
-        // Record the alias name on the canonical so the next mention
-        // hits the cheap name+alias index. Best-effort; conflicts are
-        // already merged so the addAlias should succeed.
-        await deps.entities
-          .addAlias(deps.actorUserId, canonical.id, aliasName)
-          .catch((err) => {
-            console.warn(
-              `[entity-dedupe] alias record failed for ${canonical.id} alias='${aliasName}': ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            )
-          })
-      } catch (err) {
-        result.llmCluster.errors += 1
-        console.warn(
-          `[entity-dedupe] LLM-cluster merge failed for canonical=${canonical.id} alias=${aliasId}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        )
-      }
-    }
-    if (applied.mergedEntityIds.length > 0) {
-      result.llmCluster.applied.push(applied)
-    }
+    })
   }
 }
 

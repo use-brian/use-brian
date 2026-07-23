@@ -47,7 +47,6 @@ import {
   type PanelId,
 } from "@/lib/doc-page-url";
 import {
-  activePageId,
   back,
   blankActiveTab,
   canGoBack,
@@ -55,13 +54,12 @@ import {
   closeTab,
   dropPage,
   forward,
-  initTabs,
   newTab,
   openPage,
   switchTab,
   tabPageId,
-  type TabsState,
 } from "@/lib/doc-tabs";
+import { useDocTabs } from "@/lib/use-doc-tabs";
 import {
   createDraft,
   commitPageCreatedEvent,
@@ -299,54 +297,19 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
   // ── Tab strip + per-tab browse history — the top "layer" (Row 1) ──────
   // The active tab's current ENTRY is the source of truth for what the pane
   // shows — a page id, a panel sentinel (`panel:<id>`, Approvals / Autopilot),
-  // or null (the Suggested-for-you home). It is mirrored into the URL
-  // (`/p/<id>` or `/p?panel=<id>`) by the sync effect below, and the
-  // pathname/query-keyed reads load the body. Seeded once from the URL;
-  // session-scoped (survives soft nav, resets on reload). `doc-tabs.ts` treats
-  // every entry as an opaque string, so panel entries flow through unchanged.
-  const [tabsState, setTabsState] = useState<TabsState>(() =>
-    initTabs(urlEntry),
-  );
-  const tabsActiveEntry = activePageId(tabsState);
-  const tabsActiveEntryRef = useRef(tabsActiveEntry);
-  tabsActiveEntryRef.current = tabsActiveEntry;
-  // Latest URL-derived entry, read by the tabs → URL effect for COMPARISON only
-  // (never as a trigger — see below). Updated every render so the effect sees
-  // the committed URL when it runs.
-  const urlEntryRef = useRef(urlEntry);
-  urlEntryRef.current = urlEntry;
-
-  // tabs → URL: mirror the active tab's current entry into the canonical URL.
-  // Triggered ONLY by the active entry (the tab side owns this direction); it
-  // reads the URL entry through a ref purely to no-op once they already match.
+  // or null (the Suggested-for-you home). `useDocTabs` owns the strip and both
+  // directions of the URL mirror (`/p/<id>` or `/p?panel=<id>`); the
+  // pathname/query-keyed reads below load the body. `doc-tabs.ts` treats every
+  // entry as an opaque string, so panel entries flow through unchanged.
   //
-  // The URL entry must NOT be a dependency. If it were, an EXTERNAL url change —
-  // the editor's "/"→Page `router.push`, floating-chat's `router.replace`, a
-  // deep link, browser back/forward — would re-fire this effect in the render
-  // where `urlEntry` has advanced but `tabsActiveEntry` still lags by one
-  // commit. It would then `router.replace` the URL back to the stale active
-  // entry, while the URL → tabs effect simultaneously adopts the new one, leaving
-  // the two a half-step out of phase forever: the page and its child page
-  // ping-pong endlessly. Reacting to the active entry alone lets the URL → tabs
-  // effect own external changes and this effect own tab-driven ones; both guard
-  // on equality, so they converge.
-  useEffect(() => {
-    if (urlEntryRef.current !== tabsActiveEntry) {
-      router.replace(docEntryPath(workspaceId, tabsActiveEntry));
-    }
-  }, [tabsActiveEntry, workspaceId, router]);
-
-  // URL → tabs: reconcile a URL change from OUTSIDE the tab actions — a
-  // chat-created draft auto-navigation (`floating-chat` calls `router.replace`
-  // directly), a page link, a `?panel=` deep link, a redirect from the legacy
-  // `/approvals` / `/goals` routes, a deep link followed in-session. Reacting to
-  // `urlEntry` alone (latest active entry read via the ref) keeps a tab switch's
-  // not-yet-synced URL from being mistaken for an external change; both effects
-  // guard on equality, so they converge with no ping-pong.
-  useEffect(() => {
-    if (urlEntry === tabsActiveEntryRef.current) return;
-    setTabsState((s) => (urlEntry ? openPage(s, urlEntry) : blankActiveTab(s)));
-  }, [urlEntry]);
+  // The strip is SESSION-scoped, not mount-scoped: this shell is mounted by
+  // `p/layout.tsx`, which Next tears down whenever the user steps out to a
+  // sibling surface (Brain / Studio / Workflow — they hang off the workspace
+  // layout, one level up), so the strip is held in `doc-tabs-session.ts` and
+  // restored on re-entry. It still resets on a hard reload.
+  const [tabsState, setTabsState] = useDocTabs(workspaceId, urlEntry, (entry) =>
+    router.replace(docEntryPath(workspaceId, entry)),
+  );
 
   const [activeError, setActiveError] = useState<string | null>(null);
   // Centre-pane errors (build / full-width / clearance) route through the

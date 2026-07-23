@@ -24,7 +24,7 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     const search = vi.fn(async () => [])
     const tool = createSearchEmailArchiveTool({
       ownerUserId: 'owner-1',
-      instanceId: 'inst-1',
+      accounts: [{ instanceId: 'inst-1', email: 'me@corp.com', isPrimary: true }],
       deps: { search: search as never },
     })
     await tool.execute({ query: 'deposit terms', topK: 5 }, CTX)
@@ -38,10 +38,33 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     expect(shape).not.toContain('instanceId')
   })
 
+  it('routes to the primary archive by default and to a named account, never model-controlled instance', async () => {
+    const search = vi.fn(async () => [])
+    const tool = createSearchEmailArchiveTool({
+      ownerUserId: 'owner-1',
+      accounts: [
+        { instanceId: 'inst-primary', email: 'me@corp.com', isPrimary: true },
+        { instanceId: 'inst-other', email: 'other@corp.com', isPrimary: false },
+      ],
+      deps: { search: search as never },
+    })
+    // Default → primary archive.
+    await tool.execute({ query: 'q1' }, CTX)
+    expect(search).toHaveBeenNthCalledWith(1, expect.objectContaining({ instanceId: 'inst-primary' }), undefined)
+    // account → the named archive.
+    await tool.execute({ query: 'q2', account: 'other@corp.com' }, CTX)
+    expect(search).toHaveBeenNthCalledWith(2, expect.objectContaining({ instanceId: 'inst-other' }), undefined)
+    // Unknown account → honest error, no store call.
+    const miss = await tool.execute({ query: 'q3', account: 'ghost@corp.com' }, CTX)
+    expect(miss.isError).toBe(true)
+    expect(miss.data).toContain('other@corp.com')
+    expect(search).toHaveBeenCalledTimes(2)
+  })
+
   it('states the routing contract: archive for semantic recall, live imap tools for fresh mail, searchBrain for cross-source', () => {
     const tool = createSearchEmailArchiveTool({
       ownerUserId: 'o',
-      instanceId: 'i',
+      accounts: [{ instanceId: 'i', email: 'me@corp.com', isPrimary: true }],
       deps: { search: vi.fn() as never },
     })
     expect(tool.isReadOnly).toBe(true)
@@ -58,7 +81,7 @@ describe('[COMP:tools/email-archive-search] searchEmailArchive tool', () => {
     })
     const tool = createSearchEmailArchiveTool({
       ownerUserId: 'o',
-      instanceId: 'i',
+      accounts: [{ instanceId: 'i', email: 'me@corp.com', isPrimary: true }],
       deps: { search: search as never, embedder },
     })
     const result = await tool.execute({ query: 'x' }, CTX)

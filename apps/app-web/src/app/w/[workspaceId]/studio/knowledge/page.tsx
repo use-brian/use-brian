@@ -8,9 +8,8 @@
  * Rendered inside the Studio full-page layout, NOT the doc three-column
  * page shell.
  *
- * Lists the active workspace's connected knowledge sources (GitHub
- * repositories synced into `workspace_knowledge_sources`) and lets the
- * user connect new ones via a workspace-scoped GitHub connector instance.
+ * Lists the active workspace's connected knowledge sources and lets the user
+ * connect either GitHub repositories or OSS-local server directories.
  *
  * Sources are workspace-scoped — every assistant in the workspace shares the
  * same source set. The per-assistant Knowledge tab (on the assistant detail
@@ -30,7 +29,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import { authFetch } from "@/lib/auth-fetch";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { SearchableSelect } from "@/components/ui/searchable-select";
@@ -69,10 +67,6 @@ export default function StudioKnowledgePage() {
   const t = useT();
   const copy = t.studioPage.knowledgePage;
   const { activeId } = useWorkspaces();
-  const params = useParams<{ workspaceId: string }>();
-  const workspaceId = params?.workspaceId ?? "";
-  const connectorsHref = `/w/${workspaceId}/studio/connectors`;
-
   const [sources, setSources] = useState<KnowledgeSource[] | null>(null);
   const [instances, setInstances] = useState<ConnectorInstance[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +74,8 @@ export default function StudioKnowledgePage() {
 
   // Picker state
   const [showPicker, setShowPicker] = useState(false);
+  const [sourceType, setSourceType] = useState<"github" | "local">("github");
+  const [localPath, setLocalPath] = useState("");
   const [selectedInstance, setSelectedInstance] = useState("");
   const [repos, setRepos] = useState<RepoOption[]>([]);
   const [loadingRepos, setLoadingRepos] = useState(false);
@@ -196,6 +192,8 @@ export default function StudioKnowledgePage() {
 
   function closePicker() {
     setShowPicker(false);
+    setSourceType("github");
+    setLocalPath("");
     setSelectedInstance("");
     setSelectedRepo("");
     setSelectedBranch("");
@@ -206,22 +204,27 @@ export default function StudioKnowledgePage() {
   }
 
   async function handleConnect() {
-    if (!activeId || !selectedInstance || !selectedRepo || !selectedBranch) return;
+    if (!activeId) return;
+    if (sourceType === "github" && (!selectedInstance || !selectedRepo || !selectedBranch)) return;
+    if (sourceType === "local" && !localPath.trim()) return;
     setConnecting(true);
     setConnectError(null);
     setConnectWarning(null);
     try {
+      const body = sourceType === "local"
+        ? { sourceType: "local", localPath: localPath.trim(), rootPath: rootPath.trim() }
+        : {
+            connectorInstanceId: selectedInstance,
+            repo: selectedRepo,
+            branch: selectedBranch,
+            rootPath: rootPath.trim(),
+          };
       const res = await authFetch(
         `${API_URL}/api/workspaces/${activeId}/knowledge/sources`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            connectorInstanceId: selectedInstance,
-            repo: selectedRepo,
-            branch: selectedBranch,
-            rootPath: rootPath.trim(),
-          }),
+          body: JSON.stringify(body),
         },
       );
       if (res.ok) {
@@ -305,75 +308,106 @@ export default function StudioKnowledgePage() {
             {copy.sources}
           </h2>
           {!showPicker && (
-            instances.length > 0 ? (
-              <button
-                onClick={openPicker}
-                className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
-              >
-                {copy.addRepo}
-              </button>
-            ) : (
-              <Link
-                href={connectorsHref}
-                className="text-xs font-medium border border-border px-3 py-1.5 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
-              >
-                {copy.goToConnectors}
-              </Link>
-            )
+            <button
+              onClick={openPicker}
+              className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors"
+            >
+              {copy.addRepo}
+            </button>
           )}
         </div>
 
         {showPicker && (
           <div className="rounded-xl border border-border bg-card p-5 flex flex-col gap-3">
-            <PickerField label={copy.connectorLabel}>
-              <SearchableSelect
-                value={selectedInstance}
-                onValueChange={(next) => {
-                  setSelectedInstance(next);
-                  setSelectedRepo("");
-                  setSelectedBranch("");
-                }}
-                items={instances.map((i) => ({
-                  value: i.id,
-                  label: i.label,
-                  hint: i.connectedEmail ?? undefined,
-                }))}
-                placeholder={copy.connectorPlaceholder}
-                searchPlaceholder={copy.connectorSearchPlaceholder}
-                emptyMessage={copy.connectorNoMatch}
-              />
-            </PickerField>
+            <div className="flex gap-1 rounded-lg border border-border p-0.5">
+              <button
+                onClick={() => setSourceType("github")}
+                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "github" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+              >
+                {copy.sourceTypeGithub}
+              </button>
+              <button
+                onClick={() => setSourceType("local")}
+                className={`flex-1 text-xs font-medium px-3 py-1.5 rounded-md transition-colors ${sourceType === "local" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+              >
+                {copy.sourceTypeLocal}
+              </button>
+            </div>
 
-            <PickerField label={copy.repoLabel}>
-              <SearchableSelect
-                value={selectedRepo}
-                onValueChange={(next) => {
-                  setSelectedRepo(next);
-                  setSelectedBranch("");
-                }}
-                items={repos.map((r) => ({
-                  value: r.fullName,
-                  label: r.fullName,
-                  hint: r.private ? "private" : undefined,
-                }))}
-                disabled={!selectedInstance || loadingRepos}
-                placeholder={loadingRepos ? copy.repoLoading : copy.repoPlaceholder}
-                searchPlaceholder={copy.repoSearchPlaceholder}
-                emptyMessage={copy.repoNoMatch}
-              />
-            </PickerField>
+            {sourceType === "github" ? (
+              <>
+                <PickerField label={copy.connectorLabel}>
+                  <SearchableSelect
+                    value={selectedInstance}
+                    onValueChange={(next) => {
+                      setSelectedInstance(next);
+                      setSelectedRepo("");
+                      setSelectedBranch("");
+                    }}
+                    items={instances.map((i) => ({
+                      value: i.id,
+                      label: i.label,
+                      hint: i.connectedEmail ?? undefined,
+                    }))}
+                    placeholder={copy.connectorPlaceholder}
+                    searchPlaceholder={copy.connectorSearchPlaceholder}
+                    emptyMessage={copy.connectorNoMatch}
+                  />
+                </PickerField>
+                {instances.length === 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    {copy.noGithubConnector}{" "}
+                    <Link
+                      href={`/w/${activeId}/studio/connectors`}
+                      className="font-medium text-foreground underline underline-offset-2"
+                    >
+                      {copy.goToConnectors}
+                    </Link>
+                  </div>
+                )}
 
-            <PickerField label={copy.branchLabel}>
-              <SearchableSelect
-                value={selectedBranch}
-                onValueChange={setSelectedBranch}
-                items={branches.map((b) => ({ value: b, label: b }))}
-                disabled={!selectedRepo || loadingBranches}
-                placeholder={loadingBranches ? copy.branchLoading : copy.branchPlaceholder}
-                searchPlaceholder={copy.branchSearchPlaceholder}
-                emptyMessage={copy.branchNoMatch}
-              />
-            </PickerField>
+                <PickerField label={copy.repoLabel}>
+                  <SearchableSelect
+                    value={selectedRepo}
+                    onValueChange={(next) => {
+                      setSelectedRepo(next);
+                      setSelectedBranch("");
+                    }}
+                    items={repos.map((r) => ({
+                      value: r.fullName,
+                      label: r.fullName,
+                      hint: r.private ? "private" : undefined,
+                    }))}
+                    disabled={!selectedInstance || loadingRepos}
+                    placeholder={loadingRepos ? copy.repoLoading : copy.repoPlaceholder}
+                    searchPlaceholder={copy.repoSearchPlaceholder}
+                    emptyMessage={copy.repoNoMatch}
+                  />
+                </PickerField>
+
+                <PickerField label={copy.branchLabel}>
+                  <SearchableSelect
+                    value={selectedBranch}
+                    onValueChange={setSelectedBranch}
+                    items={branches.map((b) => ({ value: b, label: b }))}
+                    disabled={!selectedRepo || loadingBranches}
+                    placeholder={loadingBranches ? copy.branchLoading : copy.branchPlaceholder}
+                    searchPlaceholder={copy.branchSearchPlaceholder}
+                    emptyMessage={copy.branchNoMatch}
+                  />
+                </PickerField>
+              </>
+            ) : (
+              <PickerField label={copy.localPathLabel} help={copy.localPathHelp}>
+                <input
+                  type="text"
+                  value={localPath}
+                  onChange={(e) => setLocalPath(e.target.value)}
+                  placeholder={copy.localPathPlaceholder}
+                  className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                />
+              </PickerField>
+            )}
 
             <PickerField label={copy.rootPathLabel} help={copy.rootPathHelp}>
               <input
@@ -401,7 +435,7 @@ export default function StudioKnowledgePage() {
               </button>
               <button
                 onClick={handleConnect}
-                disabled={connecting || !selectedInstance || !selectedRepo || !selectedBranch}
+                disabled={connecting || (sourceType === "github" ? !selectedInstance || !selectedRepo || !selectedBranch : !localPath.trim())}
                 className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
               >
                 {connecting ? copy.addRepoSubmitting : copy.addRepoSubmit}
@@ -416,7 +450,7 @@ export default function StudioKnowledgePage() {
           <div className="text-sm text-destructive">{copy.loadError}</div>
         ) : sources && sources.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border px-5 py-6 text-sm text-muted-foreground">
-            {instances.length === 0 ? copy.noGithubConnector : copy.empty}
+            {copy.empty}
           </div>
         ) : (
           <ul className="flex flex-col gap-2">

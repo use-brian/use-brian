@@ -88,12 +88,20 @@ export function tryResolveLiveToolApproval(params: {
   sessionId: string
   approvalId: string
   decision: 'approved' | 'rejected'
+  /** The reject `reason` from the approvals panel — carried to the live
+   *  resolver so a "deny with comment" from the async queue reaches the
+   *  model the same way the inline chat card's does. Ignored on approve. */
+  reason?: string
 }): boolean {
   const entry = approvalResolverIndex.get(params.approvalId)
   if (!entry || entry.sessionId !== params.sessionId) return false
   const resolver = activeResolvers.get(entry.sessionId)
   if (!resolver) return false
-  resolver.resolve(entry.toolCallId, params.decision === 'approved' ? 'allow' : 'deny')
+  resolver.resolve(
+    entry.toolCallId,
+    params.decision === 'approved' ? 'allow' : 'deny',
+    params.decision === 'rejected' ? params.reason : undefined,
+  )
   approvalResolverIndex.delete(params.approvalId)
   return true
 }
@@ -5731,16 +5739,26 @@ export function chatRoutes(options: WebChatOptions): Router {
 
   // ── POST /confirm — resolve a pending tool confirmation ──────
   router.post('/confirm', async (req, res) => {
-    const { sessionId, toolCallId, decision } = req.body as {
+    const { sessionId, toolCallId, decision, comment } = req.body as {
       sessionId?: string
       toolCallId?: string
       decision?: ConfirmationDecision
+      comment?: string
     }
 
     if (!sessionId || !toolCallId || !decision) {
       res.status(400).json({ error: 'Missing sessionId, toolCallId, or decision' })
       return
     }
+
+    // "Deny with comment" — the user's note travels with the decision to the
+    // model-facing `declinedToolResult` so the assistant revises rather than
+    // just re-asks. Arbitrary user text, so cap it (mirrors the approvals
+    // panel's `reason` slice) before it lands in `session_messages`.
+    const note =
+      typeof comment === 'string' && comment.trim()
+        ? comment.trim().slice(0, 1000)
+        : undefined
 
     const jwtUserId = (req as { userId?: string }).userId
     if (!jwtUserId) { res.status(401).json({ error: 'Unauthorized' }); return }
@@ -5758,7 +5776,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         res.status(403).json({ error: 'Not authorized for this confirmation' })
         return
       }
-      resolver.resolve(toolCallId, decision)
+      resolver.resolve(toolCallId, decision, note)
       res.json({ ok: true })
       return
     }

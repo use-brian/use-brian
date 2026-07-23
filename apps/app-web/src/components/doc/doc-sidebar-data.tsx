@@ -82,6 +82,7 @@ import { isHostedEdition } from "@/lib/edition";
 import { fetchHomeDock, type ResolvedDock } from "@/lib/api/home-dock";
 import { isDesktopAuth } from "@/lib/desktop-auth-source";
 import { idbGet, idbSet } from "@/lib/offline/idb";
+import { dropPageFromDocTabsSession } from "@/lib/doc-tabs-session";
 import { offlineWrite, getOnline } from "@/lib/offline/offline-writes";
 import type { SidebarMove } from "./doc-sidebar";
 
@@ -646,13 +647,19 @@ export function DocSidebarDataProvider({
           b.dropFromTabs(id);
           b.setActiveView((v) => (v && v.id === id ? null : v));
         }
+        // The strip outlives the doc surface's mount (`doc-tabs-session.ts`),
+        // so deleting from a sibling surface — where there is no bridge — has
+        // to scrub the STORED copy too, or the page comes back as a live tab
+        // on re-entry. Redundant but harmless while mounted: the shell writes
+        // its own (already scrubbed) state back on the next commit.
+        dropPageFromDocTabsSession(workspaceId, id);
         reloadSidebar();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setTopError(format(t.saveFailed, { message }));
       }
     },
-    [reloadSidebar, t],
+    [reloadSidebar, t, workspaceId],
   );
 
   const handleMove = useCallback(

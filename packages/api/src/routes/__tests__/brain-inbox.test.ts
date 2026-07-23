@@ -294,6 +294,87 @@ describe('[COMP:api/brain-inbox-route] Brain inbox route', () => {
     expect(mockUpdateTask).not.toHaveBeenCalled()
   })
 
+  // ── Verify — learned-skill cascade ───────────────────────────────
+  // Confirming a `skill → learned_from → assistant` edge also human-verifies
+  // the source skill (the review card renders the full skill body, so "Looks
+  // correct" is a review of the skill). See corrections.md → "Learned-skill
+  // review shows the body + confirm marks the skill human-verified".
+  const SKILL = '5e2c9a10-0000-4000-8000-0000000000ab'
+
+  function makeAppWithSkillStore(confirmSkill: ReturnType<typeof vi.fn>) {
+    const workspaceStore = { getRole: vi.fn().mockResolvedValue('member') } as never
+    const workspaceSkillStore = { confirmSkill } as never
+    return createTestApp(
+      '/api/brain-inbox',
+      brainInboxRoutes({ workspaceStore, workspaceSkillStore }),
+      { userId: 'u_caller' },
+    )
+  }
+
+  // Shared query sequence for the entity_link verify happy path: ownership
+  // pre-check → markVerifiedGeneric UPDATE → appendBrainVerification INSERT →
+  // the cascade's edge lookup (returns `edge`).
+  function primeEntityLinkVerify(edge: { source_kind: string; source_id: string; edge_type: string }) {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+      .mockResolvedValueOnce({ rowCount: 1 } as never) // markVerifiedGeneric
+      .mockResolvedValueOnce({ rows: [] } as never) // appendBrainVerification
+      .mockResolvedValueOnce({ rows: [edge] } as never) // edge lookup
+  }
+
+  it('verify confirms the source skill for a learned_from skill edge', async () => {
+    const confirmSkill = vi.fn().mockResolvedValue(undefined)
+    primeEntityLinkVerify({ source_kind: 'skill', source_id: SKILL, edge_type: 'learned_from' })
+
+    const res = await request(makeAppWithSkillStore(confirmSkill))
+      .post(`/api/brain-inbox/${WS}/entity_link/${ROW}/verify`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(confirmSkill).toHaveBeenCalledWith('u_caller', WS, SKILL)
+  })
+
+  it('verify does NOT confirm a skill for a non-learned_from edge', async () => {
+    const confirmSkill = vi.fn()
+    primeEntityLinkVerify({ source_kind: 'skill', source_id: SKILL, edge_type: 'mentioned' })
+
+    const res = await request(makeAppWithSkillStore(confirmSkill))
+      .post(`/api/brain-inbox/${WS}/entity_link/${ROW}/verify`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(confirmSkill).not.toHaveBeenCalled()
+  })
+
+  it('verify does NOT confirm when the learned_from source is not a skill', async () => {
+    const confirmSkill = vi.fn()
+    primeEntityLinkVerify({ source_kind: 'memory', source_id: SKILL, edge_type: 'learned_from' })
+
+    const res = await request(makeAppWithSkillStore(confirmSkill))
+      .post(`/api/brain-inbox/${WS}/entity_link/${ROW}/verify`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(confirmSkill).not.toHaveBeenCalled()
+  })
+
+  it('verify skips the skill cascade entirely for a non-entity_link primitive', async () => {
+    // memory verify: ownership → markVerifiedGeneric → memory_verifications
+    // INSERT. No edge lookup, no confirmSkill, even with a store wired.
+    const confirmSkill = vi.fn()
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never)
+      .mockResolvedValueOnce({ rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [] } as never)
+
+    const res = await request(makeAppWithSkillStore(confirmSkill))
+      .post(`/api/brain-inbox/${WS}/memory/${ROW}/verify`)
+      .send({})
+
+    expect(res.status).toBe(200)
+    expect(confirmSkill).not.toHaveBeenCalled()
+  })
+
   // ── Memory adjust ────────────────────────────────────────────────
   const ASSISTANT = 'a1b2c3d4-0000-4000-8000-000000000001'
   const NEW_ROW = 'f4b30b32-1771-4c90-b5af-b1b42311f999'

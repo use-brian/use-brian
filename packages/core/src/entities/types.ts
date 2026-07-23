@@ -76,9 +76,11 @@ export type EdgeType = typeof EDGE_TYPES[number]
 // `skill` + `connector` added for the procedural-brain primitive (2026-06-10): a skill node
 // is a workspace_skills row; a connector node is a connector_instance row. `session` + `assistant`
 // are the remaining `learned_from` induction-provenance targets (skill → episode|session|assistant,
-// plan §6). source_kind/target_kind are free TEXT in the DB (no CHECK), so these are
+// plan §6). `workflow` added for origin-aware induction (2026-07-23): a skill induced from a
+// workflow-origin session records `learned_from` → the source workflows row instead of the
+// assistant. source_kind/target_kind are free TEXT in the DB (no CHECK), so these are
 // convention-validated here at the type boundary.
-export const LINK_KINDS = ['entity', 'memory', 'kb_chunk', 'task', 'event', 'file', 'episode', 'workspace', 'skill', 'connector', 'session', 'assistant'] as const
+export const LINK_KINDS = ['entity', 'memory', 'kb_chunk', 'task', 'event', 'file', 'episode', 'workspace', 'skill', 'connector', 'session', 'assistant', 'workflow'] as const
 export type LinkKind = typeof LINK_KINDS[number]
 
 // ── Resolver helper types (WU-1.4) ───────────────────────────────────
@@ -357,18 +359,24 @@ export interface EntityStore {
   /**
    * Self-healing read — find live (valid_to IS NULL) entity rows that
    * collide on (workspace_id, kind, lower(display_name)). Returns one
-   * cluster per collision group; each cluster's `entityIds` is sorted
-   * ascending by `created_at` so the first id is the natural survivor.
-   * Clusters of length 1 (no collision) are omitted.
+   * cluster per collision group; each cluster's `entityIds[0]` is the
+   * survivor candidate, ordered curated-first (verified, then
+   * `source='user'`) then oldest. Clusters of length 1 (no collision)
+   * are omitted.
    *
-   * System-level — no AccessContext; the caller is the self-healing
-   * orchestrator. Powers the `dedupeEntities` chat tool that calls
-   * `mergeEntities()` per non-survivor in each cluster.
+   * **Pass `access` (corrections.md §D.9 dedupe guard).** The chat
+   * `dedupeEntities` path always supplies the caller's `AccessContext`,
+   * which scopes the scan to rows the caller can see and groups by the
+   * visibility double so a cluster never spans owners — the sweep can
+   * never merge a visible record into an invisible survivor. Omitting
+   * `access` is the legacy workspace-wide system scope, reserved for a
+   * trusted background orchestrator with no per-viewer projection.
    */
   findDuplicateClustersSystem(
     actorUserId: string,
     workspaceId: string,
     opts?: { limit?: number; kind?: EntityKind },
+    access?: AccessContext,
   ): Promise<DuplicateClusterRow[]>
 
   /**
@@ -378,13 +386,16 @@ export interface EntityStore {
    * need attribute/alias data the compact `EntityListRow` doesn't
    * carry — most notably the LLM alias clusterer.
    *
-   * System-level: bypasses per-viewer projection so heal passes see
-   * every author's rows in the workspace.
+   * Pass `access` (corrections.md §D.9 dedupe guard) to scope the list
+   * to rows the caller can see — the chat `dedupeEntities` path does, so
+   * the LLM alias-clustering pass and the confirmation preview only
+   * consider visible rows. Omitting it is the legacy system scope.
    */
   listLiveEntitiesSystem(
     actorUserId: string,
     workspaceId: string,
     opts?: { limit?: number; kind?: EntityKind },
+    access?: AccessContext,
   ): Promise<EntityRecord[]>
 
   /**
@@ -400,6 +411,7 @@ export interface EntityStore {
     actorUserId: string,
     workspaceId: string,
     opts?: { limit?: number; maxClusterSize?: number },
+    access?: AccessContext,
   ): Promise<CrossKindClusterRow[]>
 
   /**

@@ -16,6 +16,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 export type TaskStatus =
   | "todo"
   | "in_progress"
+  | "in_review"
   | "blocked"
   | "done"
   | "archived";
@@ -23,6 +24,7 @@ export type TaskStatus =
 export const TASK_STATUSES: TaskStatus[] = [
   "todo",
   "in_progress",
+  "in_review",
   "blocked",
   "done",
   "archived",

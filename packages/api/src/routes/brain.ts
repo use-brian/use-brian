@@ -69,8 +69,8 @@ type WebBrainRow = {
   createdByAssistantId?: string | null
   hasPending?: boolean
   /**
-   * Task lifecycle status (`todo` | `in_progress` | `blocked` | `done` |
-   * `archived`) — only set on `kind:'tasks'` rows. Drives the Brain list's
+   * Task lifecycle status (`todo` | `in_progress` | `in_review` | `blocked` |
+   * `done` | `archived`) — only set on `kind:'tasks'` rows. Drives the Brain list's
    * status chip + the "Show completed" partition (see the `/list` route's
    * `taskStatus` param). Absent on every other primitive.
    */
@@ -300,7 +300,9 @@ const PRIMITIVE_TO_SCOPE: Partial<Record<BrainPrimitive, string>> = {
  * default (a reading/trust surface leads with live work, mirroring the
  * entity rollup's `open_tasks` and the `idx_tasks_workspace_active` partial
  * index); the `taskStatus` param opts them back in. The active statuses
- * (`todo` / `in_progress` / `blocked`) are everything else.
+ * (`todo` / `in_progress` / `in_review` / `blocked`) are everything else —
+ * defined as the complement of `COMPLETED_TASK_STATUSES`, so a new open
+ * status (e.g. `in_review`) is active without touching this filter.
  *
  * This partition lives at the BROWSE layer only — the shared
  * `searchTasksScope` retrieval primitive still returns every status so chat

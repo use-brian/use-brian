@@ -29,9 +29,20 @@ export type RelayClientDeps = {
   /** Injected timers so tests can drive time. */
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
+  /** Injected clock, so connection lifetimes are drivable in tests. */
+  now?: () => number
 }
 
-export type RelayClientState = 'disconnected' | 'connecting' | 'ready' | 'unpaired'
+export type RelayClientState = 'disconnected' | 'connecting' | 'ready' | 'unpaired' | 'replaced'
+
+/**
+ * The relay's close code when this user's slot was handed to a newer
+ * connection (one connection per user). Reconnecting into it is a mutual
+ * eviction loop — and because `attempts` resets on every `ready`, the backoff
+ * never escalates, so both clients hammer the relay at its first step. Another
+ * client owns the pairing now; the honest move is to stand down and say so.
+ */
+const CLOSE_REPLACED = 4000
 
 /**
  * Must stay UNDER Chrome's 30 s MV3 service-worker idle kill — the ping is
@@ -46,6 +57,17 @@ const PING_INTERVAL_MS = 20_000
 /** Backoff schedule for reconnects; stays at the last step. */
 export const BACKOFF_STEPS_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const
 
+/**
+ * How long a connection must survive before the backoff is forgiven.
+ *
+ * Resetting on `ready` alone made the schedule unreachable: in the eviction
+ * storm every connection DID reach ready, for about five seconds, so each
+ * retry started again at 1s and prod logged 110 upgrades in nine minutes.
+ * Reaching ready is not evidence the trouble passed — outliving several
+ * keepalive pings is.
+ */
+const STABLE_CONNECTION_MS = 60_000
+
 export class RelayClient {
   private deps: RelayClientDeps
   private ws: WebSocketLike | null = null
@@ -54,6 +76,8 @@ export class RelayClient {
   private pingTimer: unknown = null
   private reconnectTimer: unknown = null
   private enabled = false
+  /** When the live socket reached `ready`; null while not ready. */
+  private readyAt: number | null = null
 
   constructor(deps: RelayClientDeps) {
     this.deps = deps
@@ -70,6 +94,10 @@ export class RelayClient {
 
   private setTimer(fn: () => void, ms: number): unknown {
     return (this.deps.setTimer ?? ((f, m) => setTimeout(f, m)))(fn, ms)
+  }
+
+  private now(): number {
+    return (this.deps.now ?? Date.now)()
   }
 
   private clearTimer(handle: unknown): void {
@@ -127,7 +155,9 @@ export class RelayClient {
       const msg = parseRelayMessage(ev.data)
       if (!msg) return
       if (msg.type === 'ready') {
-        this.attempts = 0
+        // NOT `attempts = 0` — see STABLE_CONNECTION_MS. Only a connection
+        // that lasts earns the reset, and that is only knowable at close.
+        this.readyAt = this.now()
         this.setState('ready')
         if (msg.sessionToken) void this.deps.onSessionToken(msg.sessionToken)
         this.schedulePing()
@@ -143,10 +173,18 @@ export class RelayClient {
       }
       // pong: nothing to do — arrival alone proves liveness.
     }
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.clearTimer(this.pingTimer)
       this.pingTimer = null
       this.ws = null
+      const wasStable =
+        this.readyAt != null && this.now() - this.readyAt >= STABLE_CONNECTION_MS
+      this.readyAt = null
+      if (wasStable) this.attempts = 0
+      if ((ev as { code?: number } | undefined)?.code === CLOSE_REPLACED) {
+        this.setState('replaced')
+        return
+      }
       if (!this.enabled || this.state === 'unpaired') {
         if (this.enabled) return // unpaired: wait for a new token, no auto-retry
         this.setState('disconnected')

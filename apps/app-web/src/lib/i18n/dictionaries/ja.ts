@@ -38,6 +38,12 @@ export const ja: Dictionary = {
     errorTitle: "サインインが完了しませんでした",
     errorBody: "Use Brian に戻り、もう一度サインインをお試しください。",
   },
+  desktopConnectorConnected: {
+    title: "コネクターを接続しました",
+    body: "このタブを閉じて Use Brian に戻ってください。",
+    errorTitle: "接続が完了しませんでした",
+    errorBody: "Use Brian に戻り、もう一度接続をお試しください。",
+  },
   workspace: {
         brain: {
       knowledgeTitle: "ナレッジ ソース",
@@ -59,24 +65,6 @@ export const ja: Dictionary = {
       enabledLabel: "このアシスタントで有効",
       enabledHelp: "オフにすると、このアシスタントはこのソースの知識を参照しなくなります。他のアシスタントや共有ナレッジベースには影響しません。",
       enablementFailed: "このソースを更新できませんでした。もう一度お試しください。",
-    },
-    home: {
-      open: "開く",
-      comingSoon: "近日公開",
-      proBadge: "Pro",
-      alphaBadge: "α版",
-      contactForTrial: "トライアルはお問い合わせください",
-      trialEmailSubject: "トライアル申請: {app}",
-      miniApps: {
-        distribution: {
-          label: "フィード",
-          description: "SNS運用をサポート。X と Threads のアカウントをまとめて管理。",
-        },
-        views: {
-          label: "キャンバス",
-          description: "ブレインを土台にした Notion 風ページ。タスク・CRM・ワークフロー実行を見渡すテーブル/ボードビューも保存可能。",
-        },
-      },
     },
   },
   planGate: {
@@ -184,6 +172,10 @@ export const ja: Dictionary = {
     },
     confirmationApprove: "承認",
     confirmationDeny: "拒否",
+    confirmationDenyWithComment: "コメントを付けて拒否",
+    confirmationCommentPlaceholder: "アシスタントが修正できるようメモを追加（任意）",
+    confirmationCommentSubmit: "拒否を送信",
+    confirmationCommentCancel: "キャンセル",
     confirmationApproving: "実行中…",
     confirmationDone: "完了しました。{label} を実行しました。",
     confirmationFailed: "失敗しました。{label} を完了できませんでした。",
@@ -1540,13 +1532,24 @@ export const ja: Dictionary = {
         errKey: "そのキーは無効です。アクセスキー ID とシークレットアクセスキーを確認してください。",
         errGeneric: "そのバケットに接続できませんでした。キー、バケット、リージョン、エンドポイントを確認して、もう一度お試しください。",
       },
+      local: {
+        formHelp: "セルフホストサーバー上のディレクトリにワークスペースのファイルを保存します。",
+        pathPlaceholder: "/absolute/path/to/workspace-files",
+        pathNote: "ディレクトリは事前に作成し、API プロセスから書き込み可能にしてください。",
+        connectBtn: "ディレクトリを接続",
+        connectingBtn: "接続中...",
+        errGeneric: "ディレクトリに接続できませんでした。パスが存在し、サーバーから書き込み可能か確認してください。",
+      },
       shopify: {
-        formHelp: "ストアの myshopify.com ドメインを入力してください。Shopify で接続するか、カスタムアプリの Admin API アクセストークンを貼り付けます。",
-        domainPlaceholder: "mystore.myshopify.com",
+        formHelp: "ストアのウェブサイトまたは myshopify.com ドメインを入力してください。Shopify で接続するか、カスタムアプリの Admin API アクセストークンを貼り付けます。",
+        domainPlaceholder: "yourstore.com",
+        detecting: "ストアのドメインを確認中...",
+        resolvedPrefix: "検出したストア: ",
+        resolveHint: "自動で検出できませんでした。myshopify.com ドメインを入力してください（Shopify 管理画面の「設定」>「ドメイン」で確認できます）。",
         oauthBtn: "Shopify で続行",
         orPasteToken: "または Admin API アクセストークンを貼り付け:",
         tokenPlaceholder: "shpat_...",
-        errDomain: "mystore.myshopify.com のような有効なストアドメインを入力してください。",
+        errDomain: "ストアのウェブサイト、または yourstore.myshopify.com のようなドメインを入力してください。",
         errSave: "ストアに接続できませんでした。ドメインとトークンを確認して、もう一度お試しください。",
       },
       imap: {
@@ -2056,7 +2059,20 @@ export const ja: Dictionary = {
       staged_write: "エージェントの変更リクエスト",
       staged_skill_creation: "新しいスキル",
       staged_skill_update: "スキルの更新",
+      workflow_refinement: "ワークフロー改善",
       browser_skill_send: "ブラウザ送信",
+    },
+    refinement: {
+      step: "ステップ {step}",
+      workflowMissing:
+        "対象のワークフローはこのワークスペースに存在しません。この提案は却下のみ可能です。",
+      stepMissing:
+        "対象のステップはワークフローに存在しません。この提案は却下のみ可能です。",
+    },
+    attachOffer: {
+      label: "このスキルを学習元の「{workflow}」のステップでも使えるようにする",
+      pickStep: "ステップを選択",
+      stepRequired: "ステップを選択するか、チェックを外して添付なしで承認してください。",
     },
     browserSkillSend: {
       deny: "拒否",
@@ -2344,6 +2360,9 @@ export const ja: Dictionary = {
     detail: {
       backToList: "すべてのワークフロー",
       notFound: "ワークフローが見つかりません",
+      learnedSkillsTitle: "このワークフローから学習したスキル",
+      learnedSkillsHint:
+        "このワークフローの実行から抽出されました。ここで使うには、ステップのスキル欄に追加してください。",
     },
     board: {
       triggerLabel: "トリガー",
@@ -2808,6 +2827,7 @@ export const ja: Dictionary = {
     taskStatus: {
       todo: "未着手",
       in_progress: "進行中",
+      in_review: "レビュー中",
       blocked: "ブロック中",
       done: "完了",
       archived: "アーカイブ済み",
@@ -3066,6 +3086,8 @@ export const ja: Dictionary = {
       rederivations: "再導出",
       blueprintLabel: "ブループリント",
       blueprintView: "表示",
+      learnedFromWorkflowLabel: "学習元のワークフロー",
+      learnedFromWorkflowView: "ワークフローを表示",
       verifiedAt: "承認日時",
       notVerified: "未承認",
       lastUsedLabel: "最終使用",
@@ -3181,6 +3203,7 @@ export const ja: Dictionary = {
         detailsUnavailable: "追加の詳細はありません。",
         openSkill: "スキルを開く",
         skillWhenToUse: "使用する場面",
+        skillContent: "スキルの内容",
         skillActive: "有効",
         skillSuggested: "提案中",
         kinds: {
@@ -3192,6 +3215,7 @@ export const ja: Dictionary = {
           knowledge: "ナレッジ",
           skill: "スキル",
           assistant: "アシスタント",
+          workflow: "ワークフロー",
         },
       },
     },
@@ -3232,7 +3256,7 @@ export const ja: Dictionary = {
         },
         talkToAssistants: {
           title: "アシスタントに話しかける",
-          body: "ブレインを活用する4つの方法。",
+          body: "ブレインを活用する3つの方法。",
           channel: {
             title: "チャネル",
             body: "Telegram、Slack、Discord でそのまま会話できます。",
@@ -3240,10 +3264,6 @@ export const ja: Dictionary = {
           api: {
             title: "Assistant API",
             body: "学習済みのAIを自分のアプリへ手軽に組み込み。",
-          },
-          miniApp: {
-            title: "ミニアプリ",
-            body: "ブレインを土台にした、目的特化のアプリケーション。",
           },
           workflow: {
             title: "ワークフロー",
@@ -3676,6 +3696,7 @@ export const ja: Dictionary = {
     tasks: "タスク",
     feed: "フィード",
     crm: "CRM",
+    browsers: "ブラウザ",
   },
   crmPage: {
     title: "CRM",
@@ -4526,7 +4547,6 @@ export const ja: Dictionary = {
     sectionsAriaLabel: "スタジオのセクション",
     sections: {
       assistants: "アシスタント",
-      miniApps: "ミニアプリ",
       connectors: "コネクタ",
       programmaticAccess: "プログラム連携",
       skills: "スキル",
@@ -4541,10 +4561,15 @@ export const ja: Dictionary = {
     },
     knowledgePage: {
       heading: "ナレッジ",
-      addRepo: "リポジトリを接続",
+      addRepo: "ソースを接続",
       addRepoCancel: "キャンセル",
       addRepoSubmit: "接続",
       addRepoSubmitting: "接続中…",
+      sourceTypeGithub: "GitHub リポジトリ",
+      sourceTypeLocal: "ローカルディレクトリ",
+      localPathLabel: "ディレクトリパス",
+      localPathPlaceholder: "/path/to/knowledge-base",
+      localPathHelp: "サーバー上の .md ナレッジファイルを含むディレクトリの絶対パス。",
       connectorLabel: "GitHub コネクタ",
       connectorPlaceholder: "GitHub コネクタを選択…",
       connectorSearchPlaceholder: "コネクタを検索…",
@@ -4561,8 +4586,8 @@ export const ja: Dictionary = {
       branchNoMatch: "一致するブランチはありません。",
       rootPathLabel: "ルートパス（任意）",
       rootPathPlaceholder: "例: docs/",
-      rootPathHelp: "同期対象をこのフォルダ配下に限定します。空欄ならリポジトリ全体を取り込みます。",
-      sources: "接続中のリポジトリ",
+      rootPathHelp: "同期対象をこのフォルダ配下に限定します。空欄ならソース全体を取り込みます。",
+      sources: "接続中のソース",
       sourceLastSynced: "最終同期: {time}",
       sourceNeverSynced: "未同期",
       sourceSyncFailed: "同期に失敗: {message}",
@@ -4573,12 +4598,12 @@ export const ja: Dictionary = {
       noConnectorWorkspace: "ナレッジソースを管理するにはチームワークスペースに切り替えてください。",
       noGithubConnector: "このワークスペースに公開された GitHub コネクタがまだありません。コネクタから接続するか、既存の接続を公開してください。",
       goToConnectors: "コネクタを開く",
-      empty: "接続中のナレッジリポジトリはまだありません。",
+      empty: "接続中のナレッジソースはまだありません。",
       validationWarning: "{message}",
       loading: "読み込み中…",
       loadError: "ナレッジソースを読み込めませんでした。再読み込みしてください。",
-      connectError: "リポジトリを接続できませんでした: {message}",
-      defaultConnectError: "リポジトリを接続できませんでした。もう一度お試しください。",
+      connectError: "ソースを接続できませんでした: {message}",
+      defaultConnectError: "ソースを接続できませんでした。もう一度お試しください。",
       networkError: "ネットワークエラーが発生しました。もう一度お試しください。",
     },
     ingestRules: {
@@ -5672,6 +5697,18 @@ export const ja: Dictionary = {
       watch: "見る",
       unnamedTask: "ブラウザタスク",
     },
+    // Browsers operator surface: the left session rail + its index prompt.
+    sessions: {
+      railTitle: "ライブセッション",
+      railEmpty: "ライブセッションはまだありません",
+      liveCount: "{count}件が動作中",
+      selectTitle: "ライブブラウザを見る",
+      selectHint:
+        "左のセッションを選んで見るか操作を引き継ぐか、アシスタントがブラウザを開くのを待ちます。",
+      statusRunning: "実行中",
+      statusPaused: "一時停止",
+      unnamed: "ブラウザセッション",
+    },
     connectBrowser: {
       title: "マイブラウザ",
       description:
@@ -5691,6 +5728,12 @@ export const ja: Dictionary = {
       step2Title: "2. アカウントとペアリング",
       step2Body:
         "ペアリングコードを生成し、リレーアドレスと一緒に拡張機能のポップアップに貼り付けます。",
+      oneClickBody:
+        "このブラウザにUse Brian拡張機能がインストールされています。コピー不要で、ワンステップでアカウントに接続できます。",
+      oneClickCta: "このブラウザを接続",
+      oneClickConnecting: "接続中...",
+      oneClickFailed:
+        "拡張機能がペアリングを受け付けませんでした。下のコードをお使いいただくか、ページを再読み込みしてもう一度お試しください。",
       generate: "ペアリングコードを生成",
       generating: "生成中...",
       generateFailed: "ペアリングコードを生成できませんでした。もう一度お試しください。",
@@ -5700,6 +5743,16 @@ export const ja: Dictionary = {
       copy: "コピー",
       copied: "コピーしました",
       refresh: "状態を更新",
+      sidebarRow: {
+        connect: "自分のブラウザを接続",
+        connecting: "接続中...",
+        connected: "マイブラウザ",
+        connectedBadge: "接続済み",
+        connectAria: "自分の Chrome を Use Brian に接続します",
+        allow: "ブラウザの操作を許可",
+        allowAria: "Use Brian にこのブラウザの操作を許可します",
+        manageAria: "マイブラウザの接続を管理します",
+      },
     },
     profiles: {
       title: "ブラウザプロフィール",

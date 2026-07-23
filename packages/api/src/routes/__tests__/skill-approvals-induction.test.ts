@@ -212,3 +212,199 @@ describe('[COMP:api/skill-approvals-route] induction governance on approve', () 
     )
   })
 })
+
+// ── Origin-aware induction: workflow refinements + attach offer ─────
+
+describe('[COMP:api/skill-approvals-route] workflow_refinement approve', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const REFINEMENT_APPROVAL = {
+    id: 'appr-wr-1',
+    kind: 'workflow_refinement' as const,
+    status: 'pending' as const,
+    workspaceId: WS,
+    originatingAssistantId: ASSISTANT,
+    arguments: {
+      workflowId: 'wf-1',
+      stepId: 'step-1',
+      patch: { prompt: 'Improved step prompt' },
+      rationale: 'The run showed the old prompt truncates',
+    },
+    approvalPayload: { kind: 'workflow_refinement', workflowId: 'wf-1', stepId: 'step-1' },
+  }
+
+  function refinementOpts(over: Partial<SkillApprovalRouteOptions> = {}) {
+    return baseOpts({
+      approvalsStore: {
+        getById: vi.fn().mockResolvedValue(REFINEMENT_APPROVAL),
+        respond: vi.fn().mockResolvedValue({ ...REFINEMENT_APPROVAL, status: 'approved' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      ...over,
+    })
+  }
+
+  it('applies the step-prompt patch through the validated definition editor', async () => {
+    const applyDefinitionEdit = vi.fn(
+      async (params: {
+        mutate: (d: { steps: Array<{ id: string; type: string; prompt?: string }> }) =>
+          | { steps: Array<{ id: string; type: string; prompt?: string }> }
+          | { error: string }
+      }) => {
+        // Drive the mutate exactly like the real editor: clone + transform.
+        const def = { steps: [{ id: 'step-1', type: 'assistant_call', prompt: 'old' }] }
+        const mutated = params.mutate(def)
+        expect('error' in mutated).toBe(false)
+        expect((mutated as { steps: Array<{ prompt?: string }> }).steps[0]!.prompt).toBe(
+          'Improved step prompt',
+        )
+        return { ok: true as const }
+      },
+    )
+    const opts = refinementOpts({ applyDefinitionEdit: applyDefinitionEdit as never })
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-wr-1/approve').send({})
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ status: 'approved', kind: 'workflow_refinement' })
+    expect(applyDefinitionEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: APPROVER, workspaceId: WS, workflowId: 'wf-1' }),
+    )
+    expect(opts.approvalsStore.respond).toHaveBeenCalledWith('appr-wr-1', 'approved', APPROVER)
+  })
+
+  it('leaves the row pending when the validated edit is rejected', async () => {
+    const applyDefinitionEdit = vi.fn(async () => ({
+      ok: false as const,
+      error: 'definition.steps.0.prompt: too long',
+    }))
+    const opts = refinementOpts({ applyDefinitionEdit: applyDefinitionEdit as never })
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-wr-1/approve').send({})
+    expect(res.status).toBe(500)
+    expect(opts.approvalsStore.respond).not.toHaveBeenCalled()
+  })
+
+  it('rejects a refinement without mutation', async () => {
+    const opts = refinementOpts()
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-wr-1/reject').send({})
+    expect(res.status).toBe(200)
+    expect(opts.approvalsStore.respond).toHaveBeenCalledWith(
+      'appr-wr-1',
+      'rejected',
+      APPROVER,
+      undefined,
+    )
+  })
+})
+
+describe('[COMP:api/skill-approvals-route] attach offer on creation approve', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const CREATION_WITH_ATTACH = {
+    id: 'appr-ca-1',
+    kind: 'staged_skill_creation' as const,
+    status: 'pending' as const,
+    workspaceId: WS,
+    originatingAssistantId: ASSISTANT,
+    arguments: {
+      umbrella: {
+        slug: 'paging-github-activity',
+        name: 'Paging through GitHub activity',
+        description: 'Enumerate events past the API page limit',
+        content: 'Use per_page + since cursors.',
+      },
+    },
+    approvalPayload: {
+      kind: 'staged_skill_creation',
+      origin: 'workflow-session',
+      sourceWorkflowIds: ['wf-1'],
+      attachTo: { workflowId: 'wf-1', stepId: 'step-1' },
+    },
+  }
+
+  function attachOpts(over: Partial<SkillApprovalRouteOptions> = {}) {
+    return baseOpts({
+      approvalsStore: {
+        getById: vi.fn().mockResolvedValue(CREATION_WITH_ATTACH),
+        respond: vi.fn().mockResolvedValue({ ...CREATION_WITH_ATTACH, status: 'approved' }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      ...over,
+    })
+  }
+
+  it('appends the slug to the step skills allow-list when attach is accepted', async () => {
+    const applyDefinitionEdit = vi.fn(
+      async (params: {
+        mutate: (d: {
+          steps: Array<{ id: string; type: string; skills?: string[] }>
+        }) => { steps: Array<{ id: string; type: string; skills?: string[] }> } | { error: string }
+      }) => {
+        const def = { steps: [{ id: 'step-1', type: 'assistant_call' }] }
+        const mutated = params.mutate(def)
+        expect(
+          (mutated as { steps: Array<{ skills?: string[] }> }).steps[0]!.skills,
+        ).toEqual(['paging-github-activity'])
+        return { ok: true as const }
+      },
+    )
+    const opts = attachOpts({ applyDefinitionEdit: applyDefinitionEdit as never })
+    const app = mountApp(opts)
+
+    const res = await request(app)
+      .post('/api/skills/approvals/appr-ca-1/approve')
+      .send({ attach: true })
+    expect(res.status).toBe(200)
+    expect(res.body.attach).toEqual({ applied: true })
+    expect(opts.workspaceSkillStore.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed attach never unwinds the approved creation', async () => {
+    const applyDefinitionEdit = vi.fn(async () => ({
+      ok: false as const,
+      error: 'step vanished',
+    }))
+    const opts = attachOpts({ applyDefinitionEdit: applyDefinitionEdit as never })
+    const app = mountApp(opts)
+
+    const res = await request(app)
+      .post('/api/skills/approvals/appr-ca-1/approve')
+      .send({ attach: true })
+    expect(res.status).toBe(200)
+    expect(res.body.status).toBe('approved')
+    expect(res.body.attach).toMatchObject({ applied: false })
+    expect(opts.workspaceSkillStore.create).toHaveBeenCalledTimes(1)
+    expect(opts.approvalsStore.respond).toHaveBeenCalled()
+  })
+
+  it('skips the attach entirely without explicit opt-in', async () => {
+    const applyDefinitionEdit = vi.fn(async () => ({ ok: true as const }))
+    const opts = attachOpts({ applyDefinitionEdit: applyDefinitionEdit as never })
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-ca-1/approve').send({})
+    expect(res.status).toBe(200)
+    expect(res.body.attach).toBeUndefined()
+    expect(applyDefinitionEdit).not.toHaveBeenCalled()
+  })
+
+  it('routes the learned_from edge at the source workflow for workflow-origin inductions', async () => {
+    const opts = attachOpts()
+    const app = mountApp(opts)
+
+    const res = await request(app).post('/api/skills/approvals/appr-ca-1/approve').send({})
+    expect(res.status).toBe(200)
+    expect(opts.entityLinks!.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceKind: 'skill',
+        targetKind: 'workflow',
+        targetId: 'wf-1',
+        edgeType: 'learned_from',
+      }),
+    )
+  })
+})

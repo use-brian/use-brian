@@ -16,8 +16,10 @@
  * [COMP:app-web/chat-confirmation-card]
  */
 
+import { useState } from "react";
 import { TriangleAlert } from "lucide-react";
 import type { PendingConfirmation } from "@use-brian/chat-ui";
+import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { ToolPreview } from "@/components/doc/panels/approval-tool-previews";
 import {
@@ -38,8 +40,16 @@ export function ChatConfirmationCard({
   denyLabel: string;
   approvingLabel: string;
   onApprove: (toolCallId: string) => void;
-  onDeny: (toolCallId: string) => void;
+  /** A denial with an optional note. The note reaches the model via
+   *  `declinedToolResult` so the assistant revises rather than re-asks. */
+  onDeny: (toolCallId: string, comment?: string) => void;
 }) {
+  const t = useT().chat;
+  // "Deny with comment": the composer is revealed on demand so the default
+  // card stays a two-button Approve/Deny. Submitting sends the trimmed note
+  // (or a plain deny when left blank).
+  const [commenting, setCommenting] = useState(false);
+  const [comment, setComment] = useState("");
   const title = confirmation.displayName ?? confirmation.toolName;
   const isInFlight = confirmation.status === "approving";
   const preview = parseToolPreview(confirmation.toolName, confirmation.input);
@@ -74,30 +84,82 @@ export function ChatConfirmationCard({
             ) : null}
           </>
         )}
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            onClick={() => onApprove(confirmation.toolCallId)}
-            disabled={isInFlight}
-            className={cn(
-              "rounded-md bg-primary px-3 py-1 text-[12px] font-medium text-primary-foreground",
-              "transition-colors hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
-            )}
-          >
-            {isInFlight ? approvingLabel : approveLabel}
-          </button>
-          <button
-            type="button"
-            onClick={() => onDeny(confirmation.toolCallId)}
-            disabled={isInFlight}
-            className={cn(
-              "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",
-              "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
-            )}
-          >
-            {denyLabel}
-          </button>
-        </div>
+        {commenting ? (
+          <div className="space-y-2 pt-1">
+            <textarea
+              autoFocus
+              rows={2}
+              value={comment}
+              onChange={(e) => setComment(e.target.value)}
+              disabled={isInFlight}
+              placeholder={t.confirmationCommentPlaceholder}
+              maxLength={1000}
+              className={cn(
+                "w-full resize-none rounded-md border border-amber-500/40 bg-background px-2.5 py-1.5 text-[12px] text-foreground",
+                "placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-amber-500/50 disabled:opacity-50",
+              )}
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  onDeny(confirmation.toolCallId, comment.trim() || undefined)
+                }
+                disabled={isInFlight}
+                className={cn(
+                  "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",
+                  "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
+                )}
+              >
+                {t.confirmationCommentSubmit}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setCommenting(false);
+                  setComment("");
+                }}
+                disabled={isInFlight}
+                className="rounded-md px-2 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {t.confirmationCommentCancel}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => onApprove(confirmation.toolCallId)}
+              disabled={isInFlight}
+              className={cn(
+                "rounded-md bg-primary px-3 py-1 text-[12px] font-medium text-primary-foreground",
+                "transition-colors hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
+            >
+              {isInFlight ? approvingLabel : approveLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => onDeny(confirmation.toolCallId)}
+              disabled={isInFlight}
+              className={cn(
+                "rounded-md border border-border bg-background px-3 py-1 text-[12px] font-medium text-muted-foreground",
+                "transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed",
+              )}
+            >
+              {denyLabel}
+            </button>
+            <button
+              type="button"
+              onClick={() => setCommenting(true)}
+              disabled={isInFlight}
+              className="rounded-md px-2 py-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {t.confirmationDenyWithComment}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

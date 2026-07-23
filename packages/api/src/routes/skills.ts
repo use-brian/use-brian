@@ -37,6 +37,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
+import { query } from '../db/client.js'
 import { loadBuiltinSkills, createRateLimiter, shouldInline, extractionSpecSchema, extractionSpecToBlocks } from '@use-brian/core'
 import type { SkillContent, LLMProvider, FileStore, ContentBlock } from '@use-brian/core'
 import type { SkillStore, WorkspaceSkillStore, WorkspaceSkill } from '../db/skill-store.js'
@@ -396,9 +397,44 @@ export function skillRoutes({
           enabledBySkill.set(row.workspaceSkillId, list)
         }
       }
-      const projected = visible.map((s) =>
-        projectWorkspaceSkill(s, enabledBySkill.get(s.rowId) ?? []),
-      )
+      // Origin-aware induction provenance: one bulk read of the ACTIVE
+      // skill → workflow `learned_from` edges so the editors can render
+      // "distilled from workflow X" / "skills learned from this workflow's
+      // runs" from the list they already load. Best-effort — a read failure
+      // degrades to no provenance, never a dead listing.
+      const learnedFrom = new Map<string, { id: string; name: string }>()
+      if (visible.length > 0) {
+        try {
+          const edges = await query<{
+            skill_id: string
+            workflow_id: string
+            workflow_name: string
+          }>(
+            `SELECT el.source_id AS skill_id, w.id AS workflow_id, w.name AS workflow_name
+             FROM entity_links el
+             JOIN workflows w ON w.id = el.target_id
+             WHERE el.workspace_id = $1
+               AND el.source_kind = 'skill'
+               AND el.target_kind = 'workflow'
+               AND el.edge_type = 'learned_from'
+               AND el.valid_to IS NULL
+               AND el.retracted_at IS NULL`,
+            [workspaceId],
+          )
+          for (const row of edges.rows) {
+            learnedFrom.set(row.skill_id, { id: row.workflow_id, name: row.workflow_name })
+          }
+        } catch (err) {
+          console.warn('[skills] learned-from-workflow enrichment failed:', err)
+        }
+      }
+      const projected = visible.map((s) => {
+        const wf = learnedFrom.get(s.rowId)
+        return {
+          ...projectWorkspaceSkill(s, enabledBySkill.get(s.rowId) ?? []),
+          ...(wf ? { learnedFromWorkflowId: wf.id, learnedFromWorkflowName: wf.name } : {}),
+        }
+      })
       res.json({ skills: projected })
     } catch (err) {
       console.error('[skills] workspace list failed:', err)

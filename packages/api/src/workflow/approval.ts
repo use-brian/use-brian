@@ -346,6 +346,9 @@ export type ToolInvocationResumeDeps = {
     sessionId: string
     approvalId: string
     decision: 'approved' | 'rejected'
+    /** Reject note from the approvals panel, forwarded to the live resolver
+     *  so a deny-with-comment reaches the model. */
+    reason?: string
   }) => boolean
 }
 
@@ -370,16 +373,19 @@ export async function enqueueToolInvocationResume(
   params: {
     approval: PendingApproval
     decision: 'approved' | 'rejected'
+    /** Reject note (deny-with-comment). Only forwarded to the live-resolver
+     *  fast path; the restart resume worker does not yet replay it. */
+    reason?: string
   },
 ): Promise<ToolInvocationResumeOutcome> {
-  const { approval, decision } = params
+  const { approval, decision, reason } = params
   const sessionId = approval.blockingSessionId
 
   // No suspended session recorded → nothing to resume.
   if (!sessionId) return { kind: 'no_checkpoint' }
 
   // Fast path: a live resolver in this process handled the suspension.
-  if (deps.tryResolveLive({ sessionId, approvalId: approval.id, decision })) {
+  if (deps.tryResolveLive({ sessionId, approvalId: approval.id, decision, reason })) {
     return { kind: 'resumed_live' }
   }
 

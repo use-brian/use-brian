@@ -37,6 +37,7 @@ beforeEach(() => {
 const SOURCE = {
   id: 'src1',
   workspaceId: 't1',
+  sourceType: 'github' as const,
   repo: 'org/kb',
   branch: 'main',
   rootPath: '',

@@ -12,28 +12,27 @@
  */
 
 import type { useT } from "@/lib/i18n/client";
-import { isOssEdition } from "@/lib/edition";
 
 export type StudioSectionKey =
   keyof ReturnType<typeof useT>["studioPage"]["sections"];
 type StudioGroupKey =
   keyof ReturnType<typeof useT>["studioPage"]["groups"];
 
-/** `hostedOnly` sections are dropped from the nav in the OSS edition (see
- *  `visibleStudioGroups`). Mini-apps is the only one today: its sole installable
- *  mini-apps are Feed (hosted-only) and Doc (hidden), so OSS has nothing here. */
 type StudioSection = {
   key: StudioSectionKey;
   segment: string;
-  hostedOnly?: boolean;
 };
 export type StudioGroup = { key: StudioGroupKey; sections: readonly StudioSection[] };
 
 /**
  * Grouped by the verb each section serves (docs/architecture/features/studio.md → IA):
  *   Ingest  — sources connected and tuned (Connectors, Events, Knowledge)
- *   Consume — surfaces that use the brain (Assistants, Channels, Mini-apps)
+ *   Consume — surfaces that use the brain (Assistants, Channels)
  *   Develop — credentials for external MCP clients (Programmatic access)
+ *
+ * Every section is edition-independent: the nav renders identically in hosted
+ * and OSS. (Mini-apps, removed 2026-07-23, was the one hosted-only section —
+ * its edition filter went with it.)
  */
 export const STUDIO_GROUPS: readonly StudioGroup[] = [
   {
@@ -49,7 +48,6 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
     sections: [
       { key: "assistants", segment: "assistants" },
       { key: "channels", segment: "channels" },
-      { key: "miniApps", segment: "mini-apps", hostedOnly: true },
     ],
   },
   {
@@ -59,21 +57,6 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
     ],
   },
 ] as const;
-
-/**
- * The Studio groups visible in the current edition. Hosted gets the full
- * `STUDIO_GROUPS` unchanged; the OSS edition drops every `hostedOnly` section
- * (and any group thereby left empty). `STUDIO_GROUPS` itself stays the static
- * source of truth — callers iterate this instead so the nav reflects the
- * edition. The two nav surfaces (sidebar panel + mobile strip) both call it.
- */
-export function visibleStudioGroups(): readonly StudioGroup[] {
-  if (!isOssEdition()) return STUDIO_GROUPS;
-  return STUDIO_GROUPS.map((g) => ({
-    ...g,
-    sections: g.sections.filter((s) => !s.hostedOnly),
-  })).filter((g) => g.sections.length > 0);
-}
 
 /**
  * Resolve the active Studio section from a pathname

@@ -70,7 +70,6 @@ import StudioChannelsPage from "@/app/w/[workspaceId]/studio/channels/page";
 import ConnectorsPage from "@/app/w/[workspaceId]/studio/connectors/page";
 import StudioIngestRulesPage from "@/app/w/[workspaceId]/studio/ingest-rules/page";
 import StudioKnowledgePage from "@/app/w/[workspaceId]/studio/knowledge/page";
-import StudioMiniAppsPage from "@/app/w/[workspaceId]/studio/mini-apps/page";
 import ProgrammaticAccessPage from "@/app/w/[workspaceId]/studio/programmatic-access/page";
 import WorkflowPage from "@/app/w/[workspaceId]/workflow/page";
 // Tasks + CRM operator surfaces — thin Next wrappers by design (feed-port
@@ -159,7 +158,6 @@ export function App() {
                 <Route path="connectors" element={<ConnectorsPage />} />
                 <Route path="ingest-rules" element={<StudioIngestRulesPage />} />
                 <Route path="knowledge" element={<StudioKnowledgePage />} />
-                <Route path="mini-apps" element={<StudioMiniAppsPage />} />
                 <Route path="programmatic-access" element={<ProgrammaticAccessPage />} />
                 {/* Legacy URL — the Next page is a server redirect to the
                     Brain's Skills view; the SPA mirrors it client-side. */}

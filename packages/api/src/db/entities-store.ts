@@ -516,17 +516,44 @@ export async function findEntitiesByCanonicalIdSystem(
 /**
  * Self-healing read — find live entity clusters that collide on
  * (workspace_id, kind, lower(display_name)). Drives the `dedupeEntities`
- * chat tool and any future background dedupe phase. System-level: skips
- * the per-viewer projection so the dedupe surface mirrors what Pipeline
- * B sees when it writes.
+ * chat tool and any future background dedupe phase.
+ *
+ * **Visibility scoping (corrections.md §D.9 dedupe guard).** When an
+ * `access` context is supplied — the chat `dedupeEntities` path always
+ * passes one — the collision scan is projected through
+ * `buildAccessPredicate`, so only rows the caller can actually see are
+ * clustered, and the GROUP BY carries the visibility double
+ * (`user_id, assistant_id`) so a cluster never spans owners. Together
+ * these mean the sweep can never merge a caller-visible record into an
+ * invisible survivor, nor touch another principal's private duplicate —
+ * the 2026-07-05 CRM-dedupe incident class, now closed for entities too.
+ * When `access` is omitted (a true background/system caller), the scan
+ * falls back to the legacy workspace-wide system scope.
+ *
+ * **Survivor ordering.** `entity_ids[0]` is the survivor candidate,
+ * ordered curated-first (`verified_at` set, then `source='user'`) then
+ * oldest — so the sweep collapses onto the record the user actually
+ * curates rather than the oldest shadow row.
  */
 export async function findEntityDuplicateClustersSystem(
   actorUserId: string,
   workspaceId: string,
   opts: { limit?: number; kind?: EntityKind } = {},
+  access?: AccessContext,
 ): Promise<{ kind: EntityKind; displayNameNormalized: string; entityIds: string[] }[]> {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500)
-  const values: unknown[] = [workspaceId]
+  const values: unknown[] = []
+  let whereScope: string
+  let doubleGroup = ''
+  if (access) {
+    const ap = buildAccessPredicate(access, { startIdx: 1 })
+    values.push(...ap.params)
+    whereScope = ap.sql
+    doubleGroup = ', user_id, assistant_id'
+  } else {
+    values.push(workspaceId)
+    whereScope = 'workspace_id = $1'
+  }
   let kindFilter = ''
   if (opts.kind) {
     values.push(opts.kind)
@@ -543,12 +570,12 @@ export async function findEntityDuplicateClustersSystem(
     `SELECT
         kind,
         lower(display_name) AS display_name_normalized,
-        array_agg(id ORDER BY created_at ASC, id ASC) AS entity_ids
+        array_agg(id ORDER BY (verified_at IS NOT NULL) DESC, (source = 'user') DESC, created_at ASC, id ASC) AS entity_ids
        FROM entities
-      WHERE workspace_id = $1
+      WHERE ${whereScope}
         AND valid_to IS NULL
         ${kindFilter}
-      GROUP BY kind, lower(display_name)
+      GROUP BY kind, lower(display_name)${doubleGroup}
      HAVING COUNT(*) > 1
       ORDER BY COUNT(*) DESC
       LIMIT $${limitIdx}`,
@@ -566,14 +593,31 @@ export async function findEntityDuplicateClustersSystem(
  * (including `aliases` + `attributes`) for live entities in the
  * workspace, ordered newest-first. Backs the alias clusterer pass
  * inside `runEntityDedupe`.
+ *
+ * **Visibility scoping (corrections.md §D.9 dedupe guard).** As with
+ * `findEntityDuplicateClustersSystem`, a supplied `access` context
+ * projects the list through `buildAccessPredicate` so the LLM
+ * alias-clustering pass (and the confirmation preview's name resolution)
+ * only ever see rows the caller can see. Omitting `access` falls back to
+ * legacy system scope.
  */
 export async function listLiveEntitiesForWorkspaceSystem(
   actorUserId: string,
   workspaceId: string,
   opts: { limit?: number; kind?: EntityKind } = {},
+  access?: AccessContext,
 ): Promise<EntityRecord[]> {
   const limit = Math.min(Math.max(opts.limit ?? 200, 1), 500)
-  const values: unknown[] = [workspaceId]
+  const values: unknown[] = []
+  let whereScope: string
+  if (access) {
+    const ap = buildAccessPredicate(access, { startIdx: 1 })
+    values.push(...ap.params)
+    whereScope = ap.sql
+  } else {
+    values.push(workspaceId)
+    whereScope = 'workspace_id = $1'
+  }
   let kindFilter = ''
   if (opts.kind) {
     values.push(opts.kind)
@@ -584,7 +628,7 @@ export async function listLiveEntitiesForWorkspaceSystem(
   const result = await queryWithRLS<EntityRow>(
     actorUserId,
     `SELECT ${FULL_SELECT} FROM entities
-      WHERE workspace_id = $1
+      WHERE ${whereScope}
         AND valid_to IS NULL
         ${kindFilter}
       ORDER BY created_at DESC
@@ -612,9 +656,31 @@ export async function findCrossKindDuplicateClustersSystem(
   actorUserId: string,
   workspaceId: string,
   opts: { limit?: number; maxClusterSize?: number } = {},
+  access?: AccessContext,
 ): Promise<{ displayNameNormalized: string; kinds: EntityKind[]; entityIds: string[]; createdAts: Date[] }[]> {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500)
   const maxCluster = Math.min(Math.max(opts.maxClusterSize ?? 10, 2), 100)
+  // Visibility scoping (corrections.md §D.9 dedupe guard) — mirror
+  // findEntityDuplicateClustersSystem: project through the access
+  // predicate and group by the visibility double when a caller context
+  // is supplied. `kinds`/`entity_ids`/`created_ats` stay co-sorted by
+  // created_at so the caller's kind-priority survivor pick is stable.
+  const values: unknown[] = []
+  let whereScope: string
+  let doubleGroup = ''
+  if (access) {
+    const ap = buildAccessPredicate(access, { startIdx: 1 })
+    values.push(...ap.params)
+    whereScope = ap.sql
+    doubleGroup = ', user_id, assistant_id'
+  } else {
+    values.push(workspaceId)
+    whereScope = 'workspace_id = $1'
+  }
+  values.push(maxCluster)
+  const maxIdx = values.length
+  values.push(limit)
+  const limitIdx = values.length
   const result = await queryWithRLS<{
     display_name_normalized: string
     kinds: string[]
@@ -628,14 +694,14 @@ export async function findCrossKindDuplicateClustersSystem(
         array_agg(id         ORDER BY created_at ASC, id ASC) AS entity_ids,
         array_agg(created_at ORDER BY created_at ASC, id ASC) AS created_ats
        FROM entities
-      WHERE workspace_id = $1
+      WHERE ${whereScope}
         AND valid_to IS NULL
-      GROUP BY lower(display_name)
+      GROUP BY lower(display_name)${doubleGroup}
      HAVING COUNT(DISTINCT kind) > 1
-        AND COUNT(*) <= $2
+        AND COUNT(*) <= $${maxIdx}
       ORDER BY COUNT(*) DESC
-      LIMIT $3`,
-    [workspaceId, maxCluster, limit],
+      LIMIT $${limitIdx}`,
+    values,
   )
   return result.rows.map((r) => ({
     displayNameNormalized: r.display_name_normalized,
@@ -1671,12 +1737,12 @@ export function createDbEntitiesStore(deps: { entityLinks: EntityLinksStore }): 
     findByCanonicalIdSystem: (actorUserId, workspaceId, canonicalId, opts) =>
       findEntitiesByCanonicalIdSystem(actorUserId, workspaceId, canonicalId, opts ?? {}),
     listForWorkspace: (ctx, opts) => listEntities(ctx, opts ?? {}),
-    findDuplicateClustersSystem: (actorUserId, workspaceId, opts) =>
-      findEntityDuplicateClustersSystem(actorUserId, workspaceId, opts ?? {}),
-    findCrossKindDuplicateClustersSystem: (actorUserId, workspaceId, opts) =>
-      findCrossKindDuplicateClustersSystem(actorUserId, workspaceId, opts ?? {}),
-    listLiveEntitiesSystem: (actorUserId, workspaceId, opts) =>
-      listLiveEntitiesForWorkspaceSystem(actorUserId, workspaceId, opts ?? {}),
+    findDuplicateClustersSystem: (actorUserId, workspaceId, opts, access) =>
+      findEntityDuplicateClustersSystem(actorUserId, workspaceId, opts ?? {}, access),
+    findCrossKindDuplicateClustersSystem: (actorUserId, workspaceId, opts, access) =>
+      findCrossKindDuplicateClustersSystem(actorUserId, workspaceId, opts ?? {}, access),
+    listLiveEntitiesSystem: (actorUserId, workspaceId, opts, access) =>
+      listLiveEntitiesForWorkspaceSystem(actorUserId, workspaceId, opts ?? {}, access),
     addAlias: (actorUserId, entityId, alias) =>
       addEntityAlias(actorUserId, entityId, alias),
     removeAlias: (actorUserId, entityId, alias) =>

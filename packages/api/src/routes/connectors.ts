@@ -55,6 +55,8 @@
  */
 
 import { Router } from 'express'
+import { constants as fsConstants, promises as fs } from 'node:fs'
+import * as nodePath from 'node:path'
 import { classifyTool, defaultPolicy } from '@use-brian/core'
 import { OFFICIAL_CONNECTORS, OFFICIAL_CONNECTOR_TOOLS, type ConnectorEntry } from '@use-brian/shared'
 import type { ConnectorStore, ConnectorCredentials } from '../db/connector-store.js'
@@ -66,10 +68,12 @@ import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
 import { normalizeShopDomain, packShopifyTokens } from '../shopify/client.js'
+import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
 import { verifyMailboxConnection } from '../mailbox/verify.js'
 import { probeMailboxFolders } from '../mailbox/probe.js'
 import { readMailboxSyncState, type MailboxBackfillScope, type MailboxSyncState } from '../mailbox/sync-worker.js'
+import { getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import { countEmailArchiveMessages } from '../db/email-archive-store.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
 
@@ -136,6 +140,14 @@ type ConnectorRouteOptions = {
     probe?: typeof probeMailboxFolders
     countArchive?: typeof countEmailArchiveMessages
   }
+  localStorage?: {
+    requireWorkspaceAdmin: (userId: string, workspaceId: string) => Promise<boolean>
+  }
+  /**
+   * Test seam for `/shopify/resolve-domain` (branded domain → myshopify host).
+   * Defaults to the real SSRF-guarded probe. See `../shopify/resolve-domain.ts`.
+   */
+  shopifyResolveDomain?: typeof resolveShopifyDomain
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
@@ -154,6 +166,129 @@ function credentialedConnector(provider: string): ConnectorEntry | null {
  */
 function credentialsFor(secret: string): ConnectorCredentials {
   return { type: 'oauth', client_id: '', client_secret: secret }
+}
+
+/**
+ * Persist resolved credentials onto a connector_instance — the shared store step
+ * behind both `store-credentials` (credential handed in from the web callback)
+ * and `exchange-and-store` (credential just minted from an OAuth code on the
+ * desktop loopback path). One code path, three write intents:
+ *   createNew    → mint a fresh instance (multi-account "add another")
+ *   instanceId   → re-point an EXISTING instance's credential (re-auth)
+ *   primary      → update the first matching instance or create it
+ * Throws on infra failure (e.g. CHANNEL_CREDENTIAL_KEY unset) so the caller maps
+ * it to 503; returns a discriminated 404 for a missing reconnect target.
+ */
+async function persistConnectorInstance(opts: {
+  store: ConnectorInstanceStore
+  userId: string
+  provider: string
+  fallbackLabel: string
+  credentials: ConnectorCredentials
+  email: string | null
+  label: string | undefined
+  configPatch: Record<string, unknown> | null
+  createNew?: boolean
+  instanceId?: string
+}): Promise<{ ok: true; connectorInstanceId: string } | { ok: false; status: 404; error: string }> {
+  const { store, userId, provider, fallbackLabel, credentials, email, label, configPatch } = opts
+
+  if (opts.createNew) {
+    const created = await store.createUserInstance({
+      userId, provider, label: label ?? fallbackLabel, connectedEmail: email, connected: true, credentials,
+      ...(configPatch ? { config: configPatch } : {}),
+    })
+    return { ok: true, connectorInstanceId: created.id }
+  }
+
+  if (opts.instanceId) {
+    const updated = await store.update(userId, opts.instanceId, {
+      connected: true, connectedEmail: email, credentials, ...(label ? { label } : {}),
+    })
+    if (!updated) return { ok: false, status: 404, error: 'Connector instance not found' }
+    if (configPatch) await store.setConfig(userId, updated.id, configPatch)
+    return { ok: true, connectorInstanceId: updated.id }
+  }
+
+  const existing = (await store.listByUser(userId, userId)).find((i) => i.provider === provider)
+  if (existing) {
+    const updated = await store.update(userId, existing.id, {
+      connected: true, connectedEmail: email, credentials, ...(label ? { label } : {}),
+    })
+    if (configPatch) await store.setConfig(userId, existing.id, configPatch)
+    return { ok: true, connectorInstanceId: updated?.id ?? existing.id }
+  }
+
+  const created = await store.createUserInstance({
+    userId, provider, label: label ?? fallbackLabel, connectedEmail: email, connected: true, credentials,
+    ...(configPatch ? { config: configPatch } : {}),
+  })
+  return { ok: true, connectorInstanceId: created.id }
+}
+
+// ── Desktop OAuth code exchange (per provider) ──────────────────────
+//
+// The desktop shell drives an RFC 8252 loopback flow (mirroring desktop
+// sign-in), receives the provider's OAuth `code`, and posts it to
+// `exchange-and-store` with its OWN bearer. The exchange runs HERE, server-side:
+// client secrets are read from the process env (the same names the web callbacks
+// use) and never transit the loopback URL. Each exchanger returns the single
+// secret we persist (`credentialsFor`) plus the connected email + a default
+// multi-account label. Spec: docs/plans/desktop-connector-oauth-return.md.
+//
+// Fathom is intentionally absent: its store path (`fathomTokens` tuple) is not
+// wired in store-credentials, so its desktop path stays on the web-redirect
+// behaviour until that lands (plan §6a). Adding it later is one entry here.
+
+type DesktopOAuthExchangeResult = { secret: string; email: string | null; defaultLabel?: string }
+type DesktopOAuthExchanger = (args: { code: string; redirectUri: string }) => Promise<DesktopOAuthExchangeResult>
+
+async function exchangeGoogleCode({ code, redirectUri }: { code: string; redirectUri: string }): Promise<DesktopOAuthExchangeResult> {
+  const clientId = process.env.GOOGLE_CLIENT_ID
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
+  if (!clientId || !clientSecret) throw new Error('Google OAuth is not configured')
+  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }),
+  })
+  if (!tokenRes.ok) throw new Error(`Google token exchange failed (HTTP ${tokenRes.status})`)
+  const tokens = (await tokenRes.json()) as { access_token?: string; refresh_token?: string }
+  // Same guard as the web callback: without a refresh_token we can never re-mint
+  // access — the user granted before without revoking. Surface it, don't store.
+  if (!tokens.refresh_token) throw new Error('Google returned no refresh_token (revoke prior access, then reconnect)')
+  let email: string | null = null
+  if (tokens.access_token) {
+    try {
+      const ui = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } })
+      if (ui.ok) email = ((await ui.json()) as { email?: string }).email ?? null
+    } catch { /* email is best-effort */ }
+  }
+  return { secret: tokens.refresh_token, email, defaultLabel: email ?? undefined }
+}
+
+async function exchangeNotionCode({ code, redirectUri }: { code: string; redirectUri: string }): Promise<DesktopOAuthExchangeResult> {
+  const clientId = process.env.NOTION_CLIENT_ID
+  const clientSecret = process.env.NOTION_CLIENT_SECRET
+  if (!clientId || !clientSecret) throw new Error('Notion OAuth is not configured')
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
+  const tokenRes = await fetch('https://api.notion.com/v1/oauth/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
+    body: JSON.stringify({ grant_type: 'authorization_code', code, redirect_uri: redirectUri }),
+  })
+  if (!tokenRes.ok) throw new Error(`Notion token exchange failed (HTTP ${tokenRes.status})`)
+  const tokens = (await tokenRes.json()) as { access_token?: string; workspace_name?: string }
+  if (!tokens.access_token) throw new Error('Notion returned no access_token')
+  return { secret: tokens.access_token, email: null, defaultLabel: tokens.workspace_name }
+}
+
+/** Providers whose desktop connect is wired (plan §6a). */
+const DESKTOP_OAUTH_EXCHANGERS: Record<string, DesktopOAuthExchanger> = {
+  gcal: exchangeGoogleCode,
+  gmail: exchangeGoogleCode,
+  gdrive: exchangeGoogleCode,
+  notion: exchangeNotionCode,
 }
 
 /** A never-connected built-in: the bare "Connect" affordance in the list. */
@@ -434,12 +569,103 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
+  // ── Local directory storage (workspace-scoped) ──────────────
+
+  router.post('/local/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string; path?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    const dirPath = typeof body.path === 'string' ? body.path.trim() : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!dirPath) { res.status(400).json({ error: 'Missing path' }); return }
+
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    const requestedPath = nodePath.resolve(dirPath)
+    const resolvedPath = await fs.realpath(requestedPath).catch(() => null)
+    if (!resolvedPath) {
+      res.status(400).json({ error: 'Directory does not exist or is not writable' }); return
+    }
+    try {
+      const stat = await fs.stat(resolvedPath)
+      if (!stat.isDirectory()) {
+        res.status(400).json({ error: 'Path is not a directory' }); return
+      }
+      await fs.access(resolvedPath, fsConstants.W_OK)
+    } catch {
+      res.status(400).json({ error: 'Directory does not exist or is not writable' }); return
+    }
+
+    const credentials: ConnectorCredentials = { type: 'local', path: resolvedPath }
+    const config = { path: resolvedPath, disconnectedAt: null }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      if (existing) {
+        await connectorInstanceStore.update(userId, existing.id, { connected: true, credentials })
+        await connectorInstanceStore.setConfigSystem(existing.id, config)
+        res.json({ ok: true, connectorInstanceId: existing.id }); return
+      }
+      const created = await connectorInstanceStore.createWorkspaceInstance({
+        workspaceId,
+        provider: 'local',
+        label: 'Local Directory Storage',
+        connected: true,
+        credentials,
+        config,
+        createdBy: userId,
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' }); return
+      }
+      console.error('[connectors] local connect failed:', err)
+      res.status(500).json({ error: 'Failed to connect local storage' })
+    }
+  })
+
+  router.post('/local/disconnect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const localStorage = opts.localStorage
+    if (!localStorage) { res.status(404).json({ error: 'Local storage connector not available' }); return }
+
+    const body = (req.body ?? {}) as { workspaceId?: string }
+    const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+    if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspaceId' }); return }
+    if (!(await localStorage.requireWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Workspace owner or admin required' }); return
+    }
+
+    try {
+      const existing = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      if (!existing) { res.json({ ok: true }); return }
+      await connectorInstanceStore.update(userId, existing.id, { connected: false, credentials: { type: 'none' } })
+      await connectorInstanceStore.setConfigSystem(existing.id, { disconnectedAt: new Date().toISOString() })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[connectors] local disconnect failed:', err)
+      res.status(500).json({ error: 'Failed to disconnect local storage' })
+    }
+  })
+
   // ── Company mailbox (user-scoped `imap` connector) ─────────────
   //
   // Credential-entry connect with an MX-resolved preset (D1) and a LIVE
   // IMAP login + SMTP verify BEFORE anything is stored — green check or a
-  // named error, never a stored-but-dead credential (plan §4). One mailbox
-  // per user (D11; `single_instance` in the registry). Generic
+  // named error, never a stored-but-dead credential (plan §4). Multi-account
+  // (D11 retired): a user connects several corporate mailboxes; connect keys on
+  // the address, so the same email RECONNECTS (updates) and a new email ADDS.
+  // The `/imap/*` status routes take an optional `instanceId` to target one
+  // mailbox; omitted = the primary (first-connected). Generic
   // `/:provider/disconnect` and `DELETE /:provider` cover teardown.
   // See docs/architecture/integrations/mailbox-imap.md.
 
@@ -503,16 +729,29 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
 
     const credentials: ConnectorCredentials = { type: 'imap', ...settings }
+    // Sync-on-connect: fire-and-forget a first sync so the archive goes live
+    // within seconds instead of the next poll interval (mailbox-imap.md
+    // §Phase 2 → "On-demand sync"). Never blocks the connect response; the
+    // poller catches up if the seam is unarmed or the sync fails.
+    const kickSync = (instanceId: string): void => {
+      void getGlobalMailboxSyncDeps()?.syncInstanceById(instanceId).catch((err) => {
+        console.warn('[connectors] imap sync-on-connect failed (poller will catch up):', err instanceof Error ? err.message : String(err))
+      })
+    }
     try {
+      // Key on the address: the SAME mailbox reconnects (update, so a rotated
+      // app password refreshes in place), a NEW address adds another instance
+      // (multi-account, D11 retired). Preserves the user's label if renamed.
+      const wantedEmail = email.trim().toLowerCase()
       const existing = (await connectorInstanceStore.listByUser(userId, userId))
-        .find((i) => i.provider === 'imap')
+        .find((i) => i.provider === 'imap' && (i.connectedEmail ?? '').trim().toLowerCase() === wantedEmail)
       if (existing) {
         const updated = await connectorInstanceStore.update(userId, existing.id, {
           connected: true,
           connectedEmail: email,
           credentials,
-          label: email,
         })
+        kickSync(updated?.id ?? existing.id)
         res.json({ ok: true, connectorInstanceId: updated?.id ?? existing.id })
         return
       }
@@ -524,6 +763,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         connected: true,
         credentials,
       })
+      kickSync(created.id)
       res.json({ ok: true, connectorInstanceId: created.id })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -536,12 +776,21 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
-  /** Resolve the caller's imap instance + decrypted settings, or null. */
-  async function resolveImapInstance(userId: string): Promise<
+  /**
+   * Resolve one of the caller's connected imap instances + decrypted settings.
+   * `instanceId` targets a specific mailbox (ownership-checked via the
+   * user-scoped list); omitted resolves the primary (first-connected). Returns
+   * null when the caller has no such connected mailbox.
+   */
+  async function resolveImapInstance(userId: string, instanceId?: string): Promise<
     { instance: ConnectorInstance; settings: MailboxAccountSettings } | null
   > {
-    const instance = (await connectorInstanceStore.listByUser(userId, userId))
-      .find((i) => i.provider === 'imap' && i.connected)
+    const connected = (await connectorInstanceStore.listByUser(userId, userId))
+      .filter((i) => i.provider === 'imap' && i.connected)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+    const instance = instanceId
+      ? connected.find((i) => i.id === instanceId)
+      : connected[0]
     if (!instance) return null
     const creds = await connectorInstanceStore.getAuthCredentialsSystem(instance.id)
     if (!creds || creds.type !== 'imap') return null
@@ -549,18 +798,23 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     return { instance, settings }
   }
 
+  /** The optional `instanceId` targeting query/body param on the `/imap/*` status routes. */
+  const readInstanceId = (v: unknown): string | undefined =>
+    typeof v === 'string' && UUID_RE.test(v) ? v : undefined
+
   // Connected-card status: archive counts + sync/backfill cursor state. No
   // IMAP round-trip — safe to poll.
   router.get('/imap/sync-status', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const resolved = await resolveImapInstance(userId)
+      const resolved = await resolveImapInstance(userId, readInstanceId(req.query.instanceId))
       if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
       const state = readMailboxSyncState(resolved.instance.config)
       const countArchive = opts.imapMailbox?.countArchive ?? countEmailArchiveMessages
       const counts = await countArchive(resolved.instance.id)
       res.json({
+        instanceId: resolved.instance.id,
         email: resolved.instance.connectedEmail ?? resolved.settings.email,
         archived: counts.total,
         byFolder: counts.byFolder,
@@ -581,7 +835,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     try {
-      const resolved = await resolveImapInstance(userId)
+      const resolved = await resolveImapInstance(userId, readInstanceId((req.body ?? {}).instanceId))
       if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
       const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
       const result = await probe(resolved.settings)
@@ -605,7 +859,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       return
     }
     try {
-      const resolved = await resolveImapInstance(userId)
+      const resolved = await resolveImapInstance(userId, readInstanceId((req.body ?? {}).instanceId))
       if (!resolved) { res.status(404).json({ error: 'No connected mailbox' }); return }
       const probe = opts.imapMailbox?.probe ?? probeMailboxFolders
       const probed = await probe(resolved.settings)
@@ -848,6 +1102,37 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
+  // ── POST /shopify/resolve-domain — branded domain → myshopify host ──
+  //
+  // The OAuth authorize URL is per-shop and keyed on {handle}.myshopify.com,
+  // which merchants rarely know (they only ever see their branded domain).
+  // This resolves whatever they type — branded domain, myshopify domain, bare
+  // handle, or pasted admin URL — to the canonical host by reading the /admin
+  // redirect, SSRF-guarded. The connect dialog calls it on blur. Returns
+  // { shopDomain, source: 'direct' | 'redirect' } or a typed error.
+  // See docs/architecture/integrations/shopify.md → "Branded-domain resolution".
+  router.post('/shopify/resolve-domain', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const input = typeof (req.body ?? {}).input === 'string' ? (req.body as { input: string }).input.trim() : ''
+    if (!input) { res.status(400).json({ error: 'invalid_input' }); return }
+    const resolve = opts.shopifyResolveDomain ?? resolveShopifyDomain
+    let result: ShopifyDomainResolution
+    try {
+      result = await resolve(input)
+    } catch (err) {
+      console.error('[connectors] shopify resolve-domain failed:', err)
+      res.status(502).json({ error: 'fetch_failed' }); return
+    }
+    if (!result.ok) {
+      // Bad input / private host → 400; a valid host we simply couldn't map to
+      // a shop (not-a-store, unreachable) → 422 so the form shows its fallback.
+      const status = result.reason === 'invalid_input' || result.reason === 'blocked' ? 400 : 422
+      res.status(status).json({ error: result.reason }); return
+    }
+    res.json({ shopDomain: result.shopDomain, source: result.source })
+  })
+
   // ── POST /:provider/store-credentials — persist an OAuth/PAT grant ──
   //
   // Request body (any one secret field, per the open OAuth callbacks +
@@ -929,62 +1214,20 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
 
     try {
-      // Multi-account "add another" — always a fresh instance.
-      if (body.createNew) {
-        const created = await connectorInstanceStore.createUserInstance({
-          userId,
-          provider,
-          label: label ?? entry.name,
-          connectedEmail: email,
-          connected: true,
-          credentials,
-          ...(configPatch ? { config: configPatch } : {}),
-        })
-        res.json({ ok: true, connectorInstanceId: created.id })
-        return
-      }
-
-      // Re-auth / update a specific existing instance.
-      if (body.instanceId) {
-        const updated = await connectorInstanceStore.update(userId, body.instanceId, {
-          connected: true,
-          connectedEmail: email,
-          credentials,
-          ...(label ? { label } : {}),
-        })
-        if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
-        if (configPatch) await connectorInstanceStore.setConfig(userId, updated.id, configPatch)
-        res.json({ ok: true, connectorInstanceId: updated.id })
-        return
-      }
-
-      // Primary (one-per-provider) path: update the first matching instance or
-      // create it. Mirrors the legacy `connectorStore.upsert` semantic but also
-      // records `connected_email`, which the shim drops.
-      const existing = (await connectorInstanceStore.listByUser(userId, userId))
-        .find((i) => i.provider === provider)
-      if (existing) {
-        const updated = await connectorInstanceStore.update(userId, existing.id, {
-          connected: true,
-          connectedEmail: email,
-          credentials,
-          ...(label ? { label } : {}),
-        })
-        if (configPatch) await connectorInstanceStore.setConfig(userId, existing.id, configPatch)
-        res.json({ ok: true, connectorInstanceId: updated?.id ?? existing.id })
-        return
-      }
-
-      const created = await connectorInstanceStore.createUserInstance({
+      const result = await persistConnectorInstance({
+        store: connectorInstanceStore,
         userId,
         provider,
-        label: label ?? entry.name,
-        connectedEmail: email,
-        connected: true,
+        fallbackLabel: entry.name,
         credentials,
-        ...(configPatch ? { config: configPatch } : {}),
+        email,
+        label,
+        configPatch,
+        createNew: body.createNew,
+        instanceId: body.instanceId,
       })
-      res.json({ ok: true, connectorInstanceId: created.id })
+      if (!result.ok) { res.status(result.status).json({ error: result.error }); return }
+      res.json({ ok: true, connectorInstanceId: result.connectorInstanceId })
     } catch (err) {
       // The store throws when CHANNEL_CREDENTIAL_KEY is unset — surface it as a
       // 503 so the launcher-misconfiguration case is distinguishable from a bug.
@@ -995,6 +1238,80 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         return
       }
       console.error('[connectors] store-credentials failed:', err)
+      res.status(500).json({ error: 'Failed to store credentials' })
+    }
+  })
+
+  // ── POST /:provider/exchange-and-store — desktop OAuth: mint tokens from a code, then store ──
+  //
+  // The desktop shell can't complete the web callbacks' browser-cookie CSRF: consent
+  // runs in the SYSTEM browser, a different cookie jar than the Electron renderer that
+  // set the nonce, so `verifyConnectorState` always fails there (this was the bug —
+  // docs/plans/desktop-connector-oauth-return.md). Instead the shell drives an RFC 8252
+  // loopback flow (mirroring desktop sign-in), receives the OAuth `code`, and posts it
+  // here with its OWN bearer. The exchange runs server-side (secrets never transit the
+  // loopback URL), then stores via the same path as `store-credentials`. CSRF/cross-user
+  // injection stays closed: the code only reaches the shell that minted the loopback
+  // nonce, and the store is authorized by that acting user's token.
+  router.post('/:provider/exchange-and-store', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const provider = req.params.provider
+    const entry = credentialedConnector(provider)
+    if (!entry) { res.status(400).json({ error: `Unsupported connector: ${provider}` }); return }
+
+    const exchanger = DESKTOP_OAUTH_EXCHANGERS[provider]
+    if (!exchanger) {
+      res.status(400).json({ error: `Connector ${provider} does not support the desktop OAuth flow` })
+      return
+    }
+
+    const body = (req.body ?? {}) as { code?: string; redirectUri?: string; instanceId?: string; createNew?: boolean }
+    const code = body.code?.trim()
+    const redirectUri = body.redirectUri?.trim()
+    if (!code || !redirectUri) { res.status(400).json({ error: 'Missing code or redirectUri' }); return }
+    if (body.instanceId !== undefined && !UUID_RE.test(body.instanceId)) {
+      res.status(400).json({ error: 'Invalid instanceId' })
+      return
+    }
+
+    let minted: DesktopOAuthExchangeResult
+    try {
+      minted = await exchanger({ code, redirectUri })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[connectors] exchange-and-store: ${provider} exchange failed:`, msg)
+      // 503 = server misconfigured (no client secret); 502 = the provider or the
+      // code rejected the exchange. Either way, nothing was stored.
+      res.status(msg.includes('not configured') ? 503 : 502).json({ error: msg })
+      return
+    }
+
+    try {
+      const result = await persistConnectorInstance({
+        store: connectorInstanceStore,
+        userId,
+        provider,
+        fallbackLabel: entry.name,
+        credentials: credentialsFor(minted.secret),
+        email: minted.email,
+        // A fresh account's default nickname (createNew only) — the connected
+        // email (Google) or workspace name (Notion). Reconnect/primary keep theirs.
+        label: body.createNew ? minted.defaultLabel : undefined,
+        configPatch: null,
+        createNew: body.createNew,
+        instanceId: body.instanceId,
+      })
+      if (!result.ok) { res.status(result.status).json({ error: result.error }); return }
+      res.json({ ok: true, connectorInstanceId: result.connectorInstanceId })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' })
+        return
+      }
+      console.error('[connectors] exchange-and-store store failed:', err)
       res.status(500).json({ error: 'Failed to store credentials' })
     }
   })

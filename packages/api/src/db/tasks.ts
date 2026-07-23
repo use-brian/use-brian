@@ -680,6 +680,29 @@ export async function getTaskByIdSystem(id: string): Promise<TaskRecord | null> 
   return toRecord(result.rows[0])
 }
 
+/**
+ * System-level lookup of live, non-archived tasks whose `external_ref` jsonb
+ * CONTAINS `match` (`@>` containment). No RLS / AccessContext — the caller
+ * (the ingest GitHub task lifecycle) is already authorized for `workspaceId`,
+ * which scopes the query. Archived tasks are excluded so a reconciliation
+ * (PR merged → done) never re-touches a row the user swept away. Newest first.
+ */
+export async function findTasksByExternalRefSystem(
+  workspaceId: string,
+  match: Record<string, unknown>,
+): Promise<TaskRecord[]> {
+  const result = await query<TaskRow>(
+    `SELECT ${FULL_SELECT} FROM tasks
+     WHERE workspace_id = $1
+       AND external_ref @> $2::jsonb
+       AND valid_to IS NULL
+       AND status <> 'archived'
+     ORDER BY created_at DESC`,
+    [workspaceId, JSON.stringify(match)],
+  )
+  return result.rows.map(toRecord)
+}
+
 export async function getTaskHistory(ctx: AccessContext, id: string): Promise<TaskRecord[]> {
   // D.7 invariant: every row in a supersession chain shares the same
   // universal-column tuple (workspace_id, user_id, assistant_id,

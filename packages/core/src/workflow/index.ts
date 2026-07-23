@@ -151,6 +151,7 @@ export {
   touchedSinceTransition,
   isArmedListener,
   isOneOffWorkflow,
+  isSpentOnceSchedule,
   decideLifecycle,
   pickDigestBatch,
   type WorkflowLifecycleConfig,

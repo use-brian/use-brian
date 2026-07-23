@@ -38,6 +38,7 @@ import {
 import { buildWhatsappDeepLink } from "@/lib/whatsapp-link";
 import { format } from "@/lib/i18n/format";
 import { isOssEdition, isHostedEdition } from "@/lib/edition";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -46,6 +47,7 @@ type Status = { kind: "success" | "error"; text: string } | null;
 
 export function AccountSection() {
   const t = useT();
+  const { workspaceId } = useWorkspaceContext();
   const [userInfo, setUserInfo] = useState<UserInfo | null>(getCachedUserInfo);
   const [name, setName] = useState("");
   const [savingName, setSavingName] = useState(false);
@@ -92,7 +94,8 @@ export function AccountSection() {
     setUploading(true);
     setStatus(null);
     try {
-      const ok = await uploadAvatar(file);
+      if (!workspaceId) throw new Error("missing_workspace");
+      const ok = await uploadAvatar(file, workspaceId);
       if (!ok) throw new Error("upload_failed");
       await refreshUserInfo();
       setStatus({ kind: "success", text: t.settings.account.photoUpdated });

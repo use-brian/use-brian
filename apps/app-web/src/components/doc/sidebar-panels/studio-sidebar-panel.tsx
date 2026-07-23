@@ -17,7 +17,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
-import { visibleStudioGroups } from "@/lib/studio-nav";
+import { STUDIO_GROUPS } from "@/lib/studio-nav";
 
 export function StudioSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const t = useT();
@@ -29,7 +29,7 @@ export function StudioSidebarPanel({ workspaceId }: { workspaceId: string }) {
       aria-label={t.studioPage.sectionsAriaLabel}
       className="flex flex-col gap-4 px-1 pt-1"
     >
-      {visibleStudioGroups().map((g) => (
+      {STUDIO_GROUPS.map((g) => (
         <div key={g.key} className="flex flex-col gap-0.5">
           <div className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
             {t.studioPage.groups[g.key]}

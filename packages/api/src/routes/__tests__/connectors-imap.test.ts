@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import request from 'supertest'
 import { connectorRoutes } from '../connectors.js'
+import { setGlobalMailboxSyncDeps } from '../../mailbox/sync-tool.js'
 import { createTestApp } from './helpers.js'
 import type { ConnectorInstanceStore } from '../../db/connector-instance-store.js'
 import type { ConnectorStore } from '../../db/connector-store.js'
@@ -21,7 +22,7 @@ function makeApp(over: {
   verifyOk?: boolean
   verifyCode?: 'auth_failed' | 'access_disabled' | 'unreachable'
   preset?: MailboxPreset | null
-  existing?: { id: string; provider: string } | null
+  existing?: { id: string; provider: string; connectedEmail?: string } | null
 } = {}) {
   const createUserInstance = vi.fn(async () => ({ id: 'inst_new' }))
   const update = vi.fn(async () => ({ id: 'inst_existing' }))
@@ -121,19 +122,71 @@ describe('[COMP:api/mailbox-connect-routes] POST /imap/connect', () => {
     expect(update).not.toHaveBeenCalled()
   })
 
-  it('updates the existing instance instead of creating a second (D11 single-account)', async () => {
-    const { app, createUserInstance, update } = makeApp({ existing: { id: 'inst_existing', provider: 'imap' } })
+  it('reconnecting the SAME address updates that instance in place (rotated app password)', async () => {
+    const { app, createUserInstance, update } = makeApp({
+      existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'maya@harborlane.example' },
+    })
     const res = await request(app).post('/api/connectors/imap/connect').send({
-      email: 'maya@harborlane.example', appPassword: 'pw',
+      email: 'maya@harborlane.example', appPassword: 'rotated-pw',
     })
     expect(res.status).toBe(200)
     expect(update).toHaveBeenCalledWith(USER, 'inst_existing', expect.objectContaining({ connected: true }))
     expect(createUserInstance).not.toHaveBeenCalled()
   })
 
+  it('connecting a DIFFERENT address adds another mailbox (multi-account, D11 retired)', async () => {
+    const { app, createUserInstance, update } = makeApp({
+      existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'ops@other.example' },
+    })
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalledWith(expect.objectContaining({
+      provider: 'imap', connectedEmail: 'maya@harborlane.example', connected: true,
+    }))
+    expect(update).not.toHaveBeenCalled()
+  })
+
   it('rejects missing password / invalid email', async () => {
     const { app } = makeApp()
     expect((await request(app).post('/api/connectors/imap/connect').send({ email: 'a@b.c' })).status).toBe(400)
     expect((await request(app).post('/api/connectors/imap/connect').send({ email: 'nope', appPassword: 'x' })).status).toBe(400)
+  })
+})
+
+describe('[COMP:api/mailbox-connect-routes] sync-on-connect', () => {
+  afterEach(() => setGlobalMailboxSyncDeps(null))
+
+  it('fire-and-forgets a first sync of the newly created instance', async () => {
+    const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
+    setGlobalMailboxSyncDeps({ syncInstanceById })
+    const { app } = makeApp()
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(syncInstanceById).toHaveBeenCalledWith('inst_new')
+  })
+
+  it('triggers a sync for the reconnected (existing) instance', async () => {
+    const syncInstanceById = vi.fn(async () => ({ synced: true as const, newMessages: 0 }))
+    setGlobalMailboxSyncDeps({ syncInstanceById })
+    const { app } = makeApp({ existing: { id: 'inst_existing', provider: 'imap', connectedEmail: 'maya@harborlane.example' } })
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(syncInstanceById).toHaveBeenCalledWith('inst_existing')
+  })
+
+  it('connect still succeeds when the sync seam is unarmed', async () => {
+    setGlobalMailboxSyncDeps(null)
+    const { app, createUserInstance } = makeApp()
+    const res = await request(app).post('/api/connectors/imap/connect').send({
+      email: 'maya@harborlane.example', appPassword: 'pw',
+    })
+    expect(res.status).toBe(200)
+    expect(createUserInstance).toHaveBeenCalled()
   })
 })

@@ -12,6 +12,8 @@ import { isAllowedMime } from './files.js'
 import type { LinkedAccountStore } from '../db/linked-accounts.js'
 import type { LinkCodeStore } from '../db/link-codes.js'
 import type { GcsFilesClient } from '../files/gcs-client.js'
+import { buildStorageKey, buildStorageUri } from '../files/gcs-client.js'
+import type { FilesClientResolver } from '../files/files-api.js'
 
 type AccountRouteOptions = {
   linkedAccountStore?: LinkedAccountStore
@@ -36,11 +38,31 @@ type AccountRouteOptions = {
    */
   getWhatsappOfficialNumber?: () => Promise<string | null>
   /**
-   * GCS blob client for avatar upload/remove/proxy. When absent (prod without
-   * GCS_FILES_BUCKET), the avatar routes are not registered — same gating as
-   * the file tools. See user-profile.md → "Uploading your own photo".
+   * Default blob client for legacy avatar rows and files-less route gating.
+   * New writes route through `filesResolver` instead.
    */
   blobClient?: GcsFilesClient
+  /** Routes avatar bytes through the active/recorded workspace backend. */
+  filesResolver?: FilesClientResolver
+  /** Authorizes the workspace selected by app-web for a new avatar write. */
+  workspaceMembership?: (userId: string, workspaceId: string) => Promise<unknown | null>
+}
+
+type StoredAvatar = {
+  avatarStorageKey: string | null
+  avatarStorageWorkspaceId: string | null
+  avatarStorageUri: string | null
+}
+
+async function clientForStoredAvatar(
+  avatar: StoredAvatar,
+  blobClient: GcsFilesClient,
+  filesResolver: FilesClientResolver,
+): Promise<GcsFilesClient> {
+  if (avatar.avatarStorageWorkspaceId && avatar.avatarStorageUri) {
+    return filesResolver.forUri(avatar.avatarStorageWorkspaceId, avatar.avatarStorageUri)
+  }
+  return blobClient
 }
 
 // Avatars are small: cap at 5 MB and a single file. Memory storage keeps the
@@ -488,14 +510,16 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
     }
   })
 
-  // ── Avatar upload / remove (only when a blob client is configured) ──
+  // ── Avatar upload / remove (only when storage + membership are wired) ──
   // GET /api/account/avatar/:userId is served by the separate PUBLIC router
   // (accountAvatarPublicRoutes) — it must be reachable without a Bearer token.
 
-  if (options.blobClient) {
+  if (options.blobClient && options.filesResolver && options.workspaceMembership) {
     const blobClient = options.blobClient
+    const filesResolver = options.filesResolver
+    const workspaceMembership = options.workspaceMembership
 
-    // POST /api/account/avatar — multipart field "file", image/* only, ≤5 MB.
+    // POST /api/account/avatar — multipart fields "file" + "workspaceId".
     router.post('/avatar', upload.single('file'), async (req, res) => {
       const userId = req.userId
       if (!userId) {
@@ -513,27 +537,58 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
         return
       }
 
+      const workspaceId = typeof req.body.workspaceId === 'string' ? req.body.workspaceId.trim() : ''
+      if (!workspaceId) {
+        res.status(400).json({ error: 'Missing workspaceId' })
+        return
+      }
+
       try {
-        const key = `avatars/${userId}/${crypto.randomUUID()}`
-        await blobClient.writeBlob(key, file.buffer, {
-          workspaceId: userId,
+        if (!(await workspaceMembership(userId, workspaceId))) {
+          res.status(403).json({ error: 'Not a member of this workspace' })
+          return
+        }
+
+        const current = await findUserById(userId)
+        const avatarId = crypto.randomUUID()
+        const key = buildStorageKey(workspaceId, avatarId)
+        const resolved = await filesResolver.forWorkspace(workspaceId)
+        const storageUri = buildStorageUri(resolved.bucket, workspaceId, avatarId, resolved.uriScheme)
+        await resolved.gcs.writeBlob(key, file.buffer, {
+          workspaceId,
           createdByUserId: userId,
           mime: file.mimetype,
         })
 
-        // Best-effort delete of the previous uploaded blob so storage doesn't
-        // accumulate orphans. A failed delete must not fail the upload.
-        const current = await findUserById(userId)
-        if (current?.avatarStorageKey) {
-          await blobClient.deleteBlob(current.avatarStorageKey).catch(() => {})
-        }
-
         // Absolute proxy URL composed from the request so it works across the
         // api / dev / prod hosts. The `?v=` cache-bust forces the <img> to
         // refetch after a re-upload (the proxy URL path is otherwise stable).
-        const v = crypto.randomUUID().slice(0, 8)
+        const v = avatarId.slice(0, 8)
         const avatarUrl = `${req.protocol}://${req.get('host')}/api/account/avatar/${userId}?v=${v}`
-        await updateUserAvatar(userId, { url: avatarUrl, storageKey: key })
+        try {
+          const updated = await updateUserAvatar(userId, {
+            url: avatarUrl,
+            storageKey: key,
+            storageWorkspaceId: workspaceId,
+            storageUri,
+            previousStorageKey: current?.avatarStorageKey ?? null,
+          })
+          if (!updated) {
+            await resolved.gcs.deleteBlob(key).catch(() => {})
+            res.status(409).json({ error: 'Avatar changed concurrently. Try again.' })
+            return
+          }
+        } catch (err) {
+          await resolved.gcs.deleteBlob(key).catch(() => {})
+          throw err
+        }
+
+        // Persist the new provenance before deleting the old object. A failed
+        // cleanup leaves an orphan, not a user with a broken avatar URL.
+        if (current?.avatarStorageKey) {
+          const previousClient = await clientForStoredAvatar(current, blobClient, filesResolver).catch(() => null)
+          await previousClient?.deleteBlob(current.avatarStorageKey).catch(() => {})
+        }
         res.json({ avatarUrl })
       } catch (err) {
         console.error('[account] avatar upload failed:', err)
@@ -552,9 +607,14 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
       try {
         const current = await findUserById(userId)
         if (current?.avatarStorageKey) {
-          await blobClient.deleteBlob(current.avatarStorageKey).catch(() => {})
+          const storedClient = await clientForStoredAvatar(current, blobClient, filesResolver)
+          await storedClient.deleteBlob(current.avatarStorageKey).catch(() => {})
         }
-        await clearUserAvatar(userId)
+        const cleared = await clearUserAvatar(userId, current?.avatarStorageKey ?? null)
+        if (!cleared) {
+          res.status(409).json({ error: 'Avatar changed concurrently. Try again.' })
+          return
+        }
         res.json({ ok: true })
       } catch (err) {
         console.error('[account] avatar delete failed:', err)
@@ -577,7 +637,10 @@ export function accountRoutes(options: AccountRouteOptions = {}): Router {
  *
  * See docs/architecture/platform/user-profile.md → "Uploading your own photo".
  */
-export function accountAvatarPublicRoutes(blobClient: GcsFilesClient): Router {
+export function accountAvatarPublicRoutes(options: {
+  blobClient: GcsFilesClient
+  filesResolver: FilesClientResolver
+}): Router {
   const router = Router()
 
   router.get('/:userId', async (req, res) => {
@@ -587,7 +650,8 @@ export function accountAvatarPublicRoutes(blobClient: GcsFilesClient): Router {
         res.status(404).json({ error: 'Not found' })
         return
       }
-      const blob = await blobClient.readBlob(user.avatarStorageKey)
+      const storedClient = await clientForStoredAvatar(user, options.blobClient, options.filesResolver)
+      const blob = await storedClient.readBlob(user.avatarStorageKey)
       if (!blob) {
         res.status(404).json({ error: 'Not found' })
         return

@@ -89,7 +89,7 @@ export function TaskRecordDetail({
   >;
 
   const statusOptions: SelectPropertyOption[] = (
-    ["todo", "in_progress", "blocked", "done", "archived"] as TaskStatus[]
+    ["todo", "in_progress", "in_review", "blocked", "done", "archived"] as TaskStatus[]
   ).map((s) => ({
     value: s,
     label: statusLabels[s] ?? s,

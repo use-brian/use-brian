@@ -31,6 +31,7 @@
 
 import type { TokenUsage } from '../providers/types.js'
 import type { GoogleTransport } from '../providers/google-transport.js'
+import sharp from 'sharp'
 
 export type MediaBackend =
   | { kind: 'google'; transport: GoogleTransport }
@@ -66,6 +67,30 @@ export type MediaResult = {
 /** DashScope substitutes these — a Gemini model id is meaningless there. */
 export const DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
 export const DASHSCOPE_ASR_MODEL = 'qwen3-asr-flash'
+
+// DashScope's OpenAI-compatible endpoint rejects request bodies around 10 MB.
+// Leave room for base64 expansion and JSON/prompt overhead rather than relying
+// on the provider's edge to reject an otherwise valid camera image.
+export const DASHSCOPE_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+
+async function prepareDashScopeImage(buffer: Buffer, mime: string): Promise<{ buffer: Buffer; mime: string }> {
+  if (buffer.length <= DASHSCOPE_MAX_INLINE_IMAGE_BYTES) return { buffer, mime }
+
+  const resized = await sharp(buffer, { failOn: 'warning' })
+    .rotate()
+    .resize({ width: 4096, height: 4096, fit: 'inside', withoutEnlargement: true })
+    .flatten({ background: '#ffffff' })
+    .jpeg({ quality: 82, mozjpeg: true })
+    .toBuffer()
+
+  if (resized.length > DASHSCOPE_MAX_INLINE_IMAGE_BYTES) {
+    throw new Error(
+      `DashScope image remains too large after downscaling (${resized.length} bytes; ` +
+      `limit ${DASHSCOPE_MAX_INLINE_IMAGE_BYTES}). Resize or compress the image and try again.`,
+    )
+  }
+  return { buffer: resized, mime: 'image/jpeg' }
+}
 
 // ── Google (AI Studio + Vertex) ────────────────────────────────
 
@@ -170,8 +195,6 @@ async function runDashScope(
   req: MediaRequest,
 ): Promise<MediaResult> {
   const fetchFn = req.fetchFn ?? fetch
-  const base64 = req.buffer.toString('base64')
-
   let model: string
   let content: unknown[]
 
@@ -180,6 +203,7 @@ async function runDashScope(
       throw new Error(`DashScope transcription expects an audio/* mime, got "${req.mime}".`)
     }
     model = DASHSCOPE_ASR_MODEL
+    const base64 = req.buffer.toString('base64')
     // `qwen3-asr-flash` is a DEDICATED ASR task model, not a chat model with
     // ears: any text part in the same message is rejected outright with
     // `InternalError.Algo.InvalidParameter: The dedicated task 'asr' ... does
@@ -205,9 +229,11 @@ async function runDashScope(
       )
     }
     model = DASHSCOPE_VISION_MODEL
+    const image = await prepareDashScopeImage(req.buffer, req.mime)
+    const base64 = image.buffer.toString('base64')
     content = [
       { type: 'text', text: req.prompt },
-      { type: 'image_url', image_url: { url: `data:${req.mime};base64,${base64}` } },
+      { type: 'image_url', image_url: { url: `data:${image.mime};base64,${base64}` } },
     ]
   }
 

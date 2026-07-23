@@ -52,6 +52,8 @@ export {
   verifyGithubSignature,
 }
 export { extractWritesFromGithubEvent } from './extract-writes.js'
+export { githubTaskIntent, parseCloseRefs } from './task-lifecycle.js'
+export type { GithubTaskIntent, GithubTaskRef } from './task-lifecycle.js'
 export type {
   GithubConnectorAdapter,
   GithubDefaultRule,

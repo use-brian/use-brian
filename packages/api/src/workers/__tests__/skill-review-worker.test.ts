@@ -155,6 +155,9 @@ const CANDIDATE = {
   userId: '00000000-0000-0000-0000-0000000000a4',
   currentTurnCount: 10,
   lastReviewedTurn: null,
+  origin: 'interactive' as const,
+  sourceWorkflowId: null,
+  sourceWorkflowStepId: null,
 }
 
 describe('[COMP:workers/skill-review-worker] reviewSession', () => {
@@ -495,6 +498,9 @@ describe('[COMP:workers/skill-review-worker] selectCandidateSessions', () => {
         userId: '00000000-0000-0000-0000-0000000000b4',
         currentTurnCount: 12,
         lastReviewedTurn: null,
+        origin: 'interactive',
+        sourceWorkflowId: null,
+        sourceWorkflowStepId: null,
       },
     ])
 
@@ -507,5 +513,314 @@ describe('[COMP:workers/skill-review-worker] selectCandidateSessions', () => {
     const sql = mockedQuery.mock.calls[0]![0] as string
     expect(sql).toContain('COALESCE(s.workspace_id, a.workspace_id)')
     expect(sql).not.toMatch(/AND s\.workspace_id IS NOT NULL/)
+  })
+})
+
+// ── Origin-aware induction (workflow-origin sessions) ──────────────
+
+import { classifySessionOrigin } from '../skill-review-worker.js'
+
+describe('[COMP:workers/skill-review-worker] classifySessionOrigin', () => {
+  const WF_ID = '11111111-2222-3333-4444-555555555555'
+
+  it('classifies a persistent workflow session (sessionKey channel id) with workflow + step', () => {
+    expect(classifySessionOrigin('assistant-call', `workflow:${WF_ID}:step-2`)).toEqual({
+      origin: 'workflow',
+      sourceWorkflowId: WF_ID,
+      sourceWorkflowStepId: 'step-2',
+    })
+  })
+
+  it('classifies a per-run workflow consult (stamped channel id) with workflow only', () => {
+    expect(classifySessionOrigin('assistant-call', `workflow-run:${WF_ID}:1753000000000`)).toEqual({
+      origin: 'workflow',
+      sourceWorkflowId: WF_ID,
+      sourceWorkflowStepId: null,
+    })
+  })
+
+  it('classifies legacy cron/workflow channel types as workflow-origin without a workflow id', () => {
+    expect(classifySessionOrigin('cron', 'anything')).toEqual({
+      origin: 'workflow',
+      sourceWorkflowId: null,
+      sourceWorkflowStepId: null,
+    })
+    expect(classifySessionOrigin('workflow', null)).toEqual({
+      origin: 'workflow',
+      sourceWorkflowId: null,
+      sourceWorkflowStepId: null,
+    })
+  })
+
+  it('keeps ordinary chat and plain assistant-call consults interactive', () => {
+    expect(classifySessionOrigin('web', null).origin).toBe('interactive')
+    expect(classifySessionOrigin('telegram', '880211324').origin).toBe('interactive')
+    expect(
+      classifySessionOrigin('assistant-call', `${WF_ID}:1753000000000`).origin,
+    ).toBe('interactive')
+  })
+})
+
+describe('[COMP:workers/skill-review-worker] workflow-origin review cycle', () => {
+  const WF_ID = '11111111-2222-3333-4444-555555555555'
+  const WORKFLOW_CANDIDATE = {
+    ...CANDIDATE,
+    origin: 'workflow' as const,
+    sourceWorkflowId: WF_ID,
+    sourceWorkflowStepId: 'step-1',
+  }
+  const SOURCE_WORKFLOW = {
+    id: WF_ID,
+    name: 'Daily team standup',
+    description: null,
+    steps: [{ id: 'step-1', kind: 'assistant_call', prompt: 'Summarize GitHub activity' }],
+  }
+
+  function makeWorkflowPort() {
+    return {
+      getWorkflowForReview: vi.fn(async () => SOURCE_WORKFLOW),
+      listActiveWorkflows: vi.fn(async () => [{ id: WF_ID, name: 'Daily team standup' }]),
+    }
+  }
+
+  function makeRefinementApprovalsStore(opts?: { pendingRefinement?: boolean }) {
+    const staged: unknown[] = []
+    return {
+      staged,
+      async createStagedSkillUpdate() { return { id: 'a' } },
+      async createStagedSkillCreation() { return { id: 'a' } },
+      findPendingWorkflowRefinement: vi.fn(async () =>
+        opts?.pendingRefinement ? { id: 'existing-approval' } : null,
+      ),
+      createWorkflowRefinement: vi.fn(async (params: unknown) => {
+        staged.push(params)
+        return { id: 'new-approval' }
+      }),
+    } as unknown as import('../../db/pending-approvals-store.js').PendingApprovalsStore & {
+      staged: unknown[]
+      createWorkflowRefinement: ReturnType<typeof vi.fn>
+      findPendingWorkflowRefinement: ReturnType<typeof vi.fn>
+    }
+  }
+
+  it('passes origin + sourceWorkflow to the LLM plan call', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore()
+    const llm = makeLLM({ actions: [] })
+    const workflowPort = makeWorkflowPort()
+
+    await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort,
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(workflowPort.getWorkflowForReview).toHaveBeenCalledWith(
+      WORKFLOW_CANDIDATE.userId,
+      WORKFLOW_CANDIDATE.workspaceId,
+      WF_ID,
+    )
+    const planInput = vi.mocked(llm.plan).mock.calls[0]![0]
+    expect(planInput.origin).toBe('workflow')
+    expect(planInput.sourceWorkflow).toEqual(SOURCE_WORKFLOW)
+  })
+
+  it('stages a workflow refinement through the approvals store', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore()
+    const llm = makeLLM({
+      actions: [
+        {
+          action: 'propose_workflow_refinement',
+          stepId: 'step-1',
+          patch: { prompt: 'Summarize GitHub activity, paging past 30 events' },
+          rationale: 'The run truncated at 30 events every fire',
+        },
+      ],
+    })
+
+    const outcome = await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort: makeWorkflowPort(),
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(outcome).toBe('reviewed')
+    expect(approvalsStore.createWorkflowRefinement).toHaveBeenCalledTimes(1)
+    const params = approvalsStore.createWorkflowRefinement.mock.calls[0]![0]
+    expect(params).toMatchObject({
+      workflowId: WF_ID,
+      stepId: 'step-1',
+      proposedPatch: { prompt: 'Summarize GitHub activity, paging past 30 events' },
+      sourceSessionId: WORKFLOW_CANDIDATE.sessionId,
+    })
+    expect(analytics.recorded.map((e) => e.eventName)).toContain('skill_review_action_succeeded')
+  })
+
+  it('dedupes a refinement when one is already pending for the step', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore({ pendingRefinement: true })
+    const llm = makeLLM({
+      actions: [
+        {
+          action: 'propose_workflow_refinement',
+          stepId: 'step-1',
+          patch: { prompt: 'improved' },
+          rationale: 'because',
+        },
+      ],
+    })
+
+    await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort: makeWorkflowPort(),
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(approvalsStore.createWorkflowRefinement).not.toHaveBeenCalled()
+    expect(analytics.recorded.map((e) => e.eventName)).toContain('skill_review_action_deduped')
+  })
+
+  it('fails the refinement action (not the cycle) on a hallucinated stepId', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore()
+    const llm = makeLLM({
+      actions: [
+        {
+          action: 'propose_workflow_refinement',
+          stepId: 'no-such-step',
+          patch: { prompt: 'improved' },
+          rationale: 'because',
+        },
+      ],
+    })
+
+    const outcome = await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort: makeWorkflowPort(),
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(outcome).toBe('failed')
+    expect(approvalsStore.createWorkflowRefinement).not.toHaveBeenCalled()
+    expect(analytics.recorded.map((e) => e.eventName)).toContain('skill_review_action_failed')
+  })
+
+  it('suppresses a create_umbrella that mirrors an active workflow (subsumption gate)', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore()
+    const llm = makeLLM({
+      actions: [
+        {
+          action: 'create_umbrella',
+          umbrella: {
+            name: 'Daily team standup workflow',
+            description: 'Orchestrates automated cross-functional reporting',
+            content: '# Daily team standup workflow\nAggregate GitHub activity...',
+          },
+        },
+      ],
+    })
+
+    const outcome = await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort: makeWorkflowPort(),
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(outcome).toBe('reviewed')
+    expect(analytics.recorded.map((e) => e.eventName)).toContain(
+      'skill_review_subsumed_by_workflow',
+    )
+    // The action never reached skill_manage — nothing was staged.
+    expect(vi.mocked(createSkillManageTool)).not.toHaveBeenCalled()
+    expect(analytics.recorded.map((e) => e.eventName)).not.toContain(
+      'skill_review_action_succeeded',
+    )
+  })
+
+  it('stages a genuinely novel create_umbrella with workflow provenance + attach offer', async () => {
+    const analytics = makeAnalyticsStore()
+    const workspaceSkillStore = makeWorkspaceSkillStore({ skills: [] })
+    const { fileStore } = makeMinimalDeps()
+    const approvalsStore = makeRefinementApprovalsStore()
+    const llm = makeLLM({
+      actions: [
+        {
+          action: 'create_umbrella',
+          umbrella: {
+            name: 'Paging through GitHub activity',
+            description: 'How to enumerate events past the API page limit',
+            content: '# Paging through GitHub activity\nUse per_page + since...',
+          },
+        },
+      ],
+    })
+
+    const outcome = await reviewSession(WORKFLOW_CANDIDATE, {
+      workspaceSkillStore,
+      fileStore,
+      approvalsStore,
+      analyticsStore: analytics as unknown as import('@use-brian/core').AnalyticsStore,
+      reviewLLM: llm,
+      workflowPort: makeWorkflowPort(),
+      leaseHolderId: 'lease-1',
+      leaseMinutes: 5,
+      dailyOpCap: 10,
+      now: () => new Date(),
+    })
+
+    expect(outcome).toBe('reviewed')
+    const toolDeps = vi.mocked(createSkillManageTool).mock.calls[0]![0]
+    expect(toolDeps.stagingContext).toEqual({
+      origin: 'workflow-session',
+      sourceWorkflowIds: [WF_ID],
+      attachTo: { workflowId: WF_ID, stepId: 'step-1' },
+    })
   })
 })
