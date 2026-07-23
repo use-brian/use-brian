@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * [COMP:app-web/connect-browser-row] "My Browser" sidebar row.
+ * [COMP:app-web/connect-browser-button] "My Browser" sidebar button.
  *
  * The row's whole value is that it never dead-ends: it hides where no relay
  * exists, pairs in one click where the extension answers, and hands off to the
@@ -38,7 +38,7 @@ vi.mock("@/components/settings-modal/settings-modal", () => ({
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { Dictionary } from "@/lib/i18n/dictionaries";
-import { ConnectBrowserRow } from "../connect-browser-row";
+import { ConnectBrowserButton } from "../connect-browser-button";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -54,7 +54,7 @@ async function mount(): Promise<{ el: HTMLElement; root: Root }> {
   await act(async () => {
     root.render(
       <I18nProvider locale="en" dict={dict}>
-        <ConnectBrowserRow workspaceId="ws-1" />
+        <ConnectBrowserButton workspaceId="ws-1" />
       </I18nProvider>,
     );
   });
@@ -69,7 +69,21 @@ async function click(el: HTMLElement) {
   });
 }
 
-describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
+/**
+ * The button carries no text - it is a 28px icon square in the app-bar strip -
+ * so its state reads off the accessible name and the corner dot.
+ */
+function labelOf(el: HTMLElement): string {
+  return el.querySelector("button")?.getAttribute("aria-label") ?? "";
+}
+/** "primary" = connected, "amber" = paired but not allowed, null = neither. */
+function dotOf(el: HTMLElement): "primary" | "amber" | null {
+  const dot = el.querySelector("button > span[class*=rounded-full]");
+  if (!dot) return null;
+  return dot.className.includes("bg-amber") ? "amber" : "primary";
+}
+
+describe("[COMP:app-web/connect-browser-button] My Browser sidebar button", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     pairBrowserExtension.mockResolvedValue(PAIRING);
@@ -87,8 +101,8 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
   it("offers to connect once a configured-but-disconnected status resolves", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: false });
     const { el } = await mount();
-    expect(el.textContent).toContain(c.connect);
-    expect(el.textContent).not.toContain(c.connectedBadge);
+    expect(labelOf(el)).toBe(c.connectAria);
+    expect(dotOf(el)).toBeNull();
   });
 
   it("pairs in one click and flips to connected without opening Settings", async () => {
@@ -104,8 +118,8 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
       expect.objectContaining({ relayUrl: PAIRING.relayUrl, pairingToken: PAIRING.pairingToken }),
     );
     expect(openWorkspaceSettings).not.toHaveBeenCalled();
-    expect(el.textContent).toContain(c.connected);
-    expect(el.textContent).toContain(c.connectedBadge);
+    expect(labelOf(el)).toBe(c.manageAria);
+    expect(dotOf(el)).toBe("primary");
   });
 
   it("falls back to the Settings panel when no extension answers", async () => {
@@ -144,9 +158,10 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
     extensionHasControl.mockResolvedValue(false);
     const { el } = await mount();
 
-    expect(el.textContent).toContain(c.allow);
+    expect(labelOf(el)).toBe(c.allowAria);
+    expect(dotOf(el)).toBe("amber");
     // "Connected" would be a lie here: the socket is up but nothing can run.
-    expect(el.textContent).not.toContain(c.connectedBadge);
+    expect(dotOf(el)).not.toBe("primary");
 
     await click(el);
 
@@ -173,14 +188,14 @@ describe("[COMP:app-web/connect-browser-row] My Browser sidebar row", () => {
     extensionHasControl.mockResolvedValue(null);
     const { el } = await mount();
 
-    expect(el.textContent).not.toContain(c.allow);
-    expect(el.textContent).toContain(c.connectedBadge);
+    expect(labelOf(el)).toBe(c.manageAria);
+    expect(dotOf(el)).toBe("primary");
   });
 
   it("opens the panel to manage an already-connected browser instead of re-pairing", async () => {
     getBrowserExtensionStatus.mockResolvedValue({ configured: true, connected: true });
     const { el } = await mount();
-    expect(el.textContent).toContain(c.connectedBadge);
+    expect(dotOf(el)).toBe("primary");
 
     await click(el);
 

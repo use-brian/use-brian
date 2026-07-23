@@ -79,7 +79,6 @@ import {
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { operatorAppFromSurface } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
-import { ConnectBrowserRow } from "./connect-browser-row";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -690,25 +689,20 @@ export function DocSidebar(props: Props) {
         )}
       </nav>
 
-      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / Feed),
-          between the icon row and the surface body. Shown only while an
-          operator app is active; clicking a pill navigates AND persists the
-          per-workspace selection the Home icon resumes. See
-          operator-app-bar.tsx / lib/operator-apps.ts. */}
-      {activeOperatorApp && (
-        <OperatorAppBar
-          workspaceId={workspaceId}
-          active={activeOperatorApp}
-          feedEnabled={props.feedEnabled}
-        />
-      )}
-
-      {/* "My Browser" — connect / reconnect the local browser extension in one
-          click, from every surface. The pairing flow itself still lives in
-          Settings → Browser profiles; this row is the way in, and falls back to
-          opening that panel whenever one-click cannot finish. Renders nothing
-          where no relay is configured. See connect-browser-row.tsx. */}
-      <ConnectBrowserRow workspaceId={workspaceId} />
+      {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
+          Feed), between the icon row and the surface body. Clicking an app
+          navigates AND persists the per-workspace selection the Home icon
+          resumes. It also carries "My Browser" as a trailing square: that is
+          workspace-wide chrome rather than an operator app, so the strip is
+          rendered unconditionally and `active` may be null (Brain / Studio /
+          Workflow), which hides the app switcher while keeping the browser
+          button reachable from every surface. See operator-app-bar.tsx /
+          lib/operator-apps.ts. */}
+      <OperatorAppBar
+        workspaceId={workspaceId}
+        active={activeOperatorApp}
+        feedEnabled={props.feedEnabled}
+      />
 
       {/* Search input — revealed by the Search icon (Home only). */}
       {searchOpen && props.activeSurface === "p" && (

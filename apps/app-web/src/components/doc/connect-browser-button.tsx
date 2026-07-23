@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * "My Browser" sidebar row — connect or reconnect the local browser extension
+ * "My Browser" — connect, allow, or reconnect the local browser extension
  * from the persistent chrome, without going through Settings.
  *
  * The pairing machinery already exists (`connect-browser-panel.tsx` +
@@ -11,24 +11,36 @@
  * actually matter: connecting the first time, and reconnecting after Chrome
  * has been restarted and the relay socket is gone. Both are one click here.
  *
- * The row sits directly under the icon nav, so it is reachable from every
- * surface (the sidebar is mounted by `WorkspaceChrome`, above the surfaces).
+ * **Shape.** A 28px icon square in the operator app-bar strip, sitting after
+ * the apps — same square, same hover wash, same glyph weight, so the browser
+ * reads as one more thing the sidebar can take you to rather than a band of
+ * chrome bolted under the strip. It was a full-width labelled row first; that
+ * added a second horizontal band under an icon strip that had been through
+ * four iterations specifically to stay one fixed-height row.
+ *
+ * State lives in the glyph, since an icon has no room for a label: a primary
+ * dot when connected, an amber dot when paired but not yet allowed to drive,
+ * and no dot when there is nothing connected. The tooltip carries the words.
+ *
  * It renders nothing at all when the deployment has no relay configured
  * (`status.configured === false`) or before the first status resolves — a
- * permanently dead "Connect" button teaches people to ignore the row.
+ * permanently dead button teaches people to ignore that slot.
  *
  * Clicking while disconnected runs the same one-click path the panel uses:
- * mint a token, hand it straight to the extension. Anything other than a
- * clean pair (no extension, wrong build id, refused origin) falls back to
+ * mint a token, hand it straight to the extension. Paired-but-not-allowed
+ * asks the extension to raise Chrome's permission prompt. Anything other than
+ * a clean result (no extension, wrong build id, refused origin) falls back to
  * opening the panel, which owns the install CTA and the copy-paste fields —
- * this row never becomes a dead end. Clicking while connected opens the panel
- * to manage the connection.
+ * this button never becomes a dead end. Connected, it opens the panel to
+ * manage the connection.
  *
- * [COMP:app-web/connect-browser-row]
+ * [COMP:app-web/connect-browser-button]
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Globe } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Tooltip } from "@/components/ui/tooltip";
 import { useT } from "@/lib/i18n/client";
 import { openWorkspaceSettings } from "@/components/settings-modal/settings-modal";
 import {
@@ -52,7 +64,7 @@ import {
  */
 const STATUS_POLL_MS = 60_000;
 
-export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
+export function ConnectBrowserButton({ workspaceId }: { workspaceId: string }) {
   const c = useT().computer.connectBrowser.sidebarRow;
 
   const [status, setStatus] = useState<BrowserExtensionStatus | null>(null);
@@ -146,38 +158,52 @@ export function ConnectBrowserRow({ workspaceId }: { workspaceId: string }) {
   }, [busy, connected, needsControl, workspaceId, refreshStatus]);
 
   // No relay on this deployment (OSS, or unconfigured) — and nothing rendered
-  // until the first probe answers, so the label never flips under the cursor.
+  // until the first probe answers, so the slot never flips under the cursor.
   if (!status?.configured) return null;
 
+  // One label does the work a row's text used to: the icon carries only state.
+  const label = busy
+    ? c.connecting
+    : needsControl
+      ? c.allowAria
+      : connected
+        ? c.manageAria
+        : c.connectAria;
+
   return (
-    <div className="px-2 pb-1.5">
+    <Tooltip label={label}>
       <button
         type="button"
         onClick={() => void onClick()}
         disabled={busy}
-        aria-label={
-          needsControl ? c.allowAria : connected ? c.manageAria : c.connectAria
-        }
-        title={needsControl ? c.allowAria : connected ? c.manageAria : c.connectAria}
-        className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-foreground disabled:opacity-60"
+        aria-label={label}
+        className="group relative flex size-7 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent disabled:opacity-60"
       >
-        <Globe className="size-[15px] shrink-0" />
-        <span className="min-w-0 flex-1 truncate">
-          {busy
-            ? c.connecting
-            : needsControl
-              ? c.allow
-              : connected
-                ? c.connected
-                : c.connect}
-        </span>
-        {connected && !needsControl && !busy ? (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] font-medium text-muted-foreground">
-            <span className="size-1.5 rounded-full bg-primary" aria-hidden />
-            {c.connectedBadge}
-          </span>
+        <Globe
+          className={cn(
+            "size-4 shrink-0",
+            connected && !needsControl
+              ? "text-primary"
+              : "text-sidebar-foreground/55 group-hover:text-sidebar-accent-foreground",
+          )}
+          strokeWidth={1.8}
+          aria-hidden
+        />
+        {/* State dot — the icon's only affordance for saying which of the
+            three states this is. Amber for "paired but not allowed to drive",
+            because it is the one state that looks connected from the relay's
+            side and still refuses every task. `ring-sidebar` keeps it legible
+            over the hover wash. */}
+        {!busy && (connected || needsControl) ? (
+          <span
+            aria-hidden
+            className={cn(
+              "absolute -right-0.5 -top-0.5 size-1.5 rounded-full ring-2 ring-sidebar",
+              needsControl ? "bg-amber-500" : "bg-primary",
+            )}
+          />
         ) : null}
       </button>
-    </div>
+    </Tooltip>
   );
 }

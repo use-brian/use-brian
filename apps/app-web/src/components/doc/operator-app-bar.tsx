@@ -46,6 +46,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
+import { ConnectBrowserButton } from "./connect-browser-button";
 import {
   OPERATOR_APP_KEYS,
   operatorAppPath,
@@ -69,8 +70,14 @@ export function OperatorAppBar({
   feedEnabled,
 }: {
   workspaceId: string;
-  /** The operator app the current route belongs to. */
-  active: OperatorAppKey;
+  /**
+   * The operator app the current route belongs to, or `null` off the family
+   * (Brain / Studio / Workflow). The app SWITCHER stays scoped to the family —
+   * offering Page/Tasks/CRM/Feed from Studio would claim a relationship the
+   * routes do not have — but the strip itself still renders, because "My
+   * Browser" is workspace-wide chrome that belongs on every surface.
+   */
+  active: OperatorAppKey | null;
   /** Whether the Feed app is available for this workspace. */
   feedEnabled: boolean;
 }) {
@@ -81,9 +88,10 @@ export function OperatorAppBar({
     feed: t.feed,
     crm: t.crm,
   };
-  const apps = OPERATOR_APP_KEYS.filter(
-    (key) => key !== "feed" || feedEnabled,
-  );
+  const apps =
+    active === null
+      ? []
+      : OPERATOR_APP_KEYS.filter((key) => key !== "feed" || feedEnabled);
   return (
     <nav
       aria-label={t.aria}
@@ -120,6 +128,14 @@ export function OperatorAppBar({
           </Tooltip>
         );
       })}
+      {/* "My Browser" — same square, same hover wash, trailing the apps. It is
+          chrome rather than an operator app (it navigates nowhere; it connects
+          a browser), so it sits after them and takes no active state, but it
+          shares the strip because a second labelled band under a strip built
+          across four iterations to stay ONE fixed-height row is exactly what
+          that design was avoiding. Hides itself where no relay is configured,
+          which is what keeps the strip from ending in a dead square. */}
+      <ConnectBrowserButton workspaceId={workspaceId} />
     </nav>
   );
 }
