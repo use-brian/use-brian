@@ -1089,15 +1089,12 @@ export async function injectMcpTools(params: {
       if (hasEntries || sources.length > 0) {
         const repoConnected = sources.length > 0
 
-        // KB write exposure (docs/architecture/features/knowledge-base.md →
-        // "Assistant direct edits"): repo write tools exist only when this
-        // surface allows knowledge writes (interactive chat), the writer
-        // port is wired, AND a source's cached PAT probe says push access
-        // (`write_access` — migration 310; NULL/false = read-only, fail
-        // closed). Not injected ⇒ not `mcp_search`-discoverable.
+        // KB write exposure: GitHub sources require a cached push-capability
+        // probe; local sources are writable through the filesystem writer.
+        // The interactive-surface and writer-port gates apply to both.
         const writableSources = sources
-          .filter((s) => s.writeAccess === true)
-          .map((s) => ({ id: s.id, repo: s.repo }))
+          .filter((s) => s.sourceType === 'local' || s.writeAccess === true)
+          .map((s) => ({ id: s.id, repo: s.repo, sourceType: s.sourceType }))
         const writeEnabled =
           allowKnowledgeWrites && !!knowledgeRepoWriter && writableSources.length > 0
 
@@ -1113,15 +1110,16 @@ export async function injectMcpTools(params: {
           kbToolNames.push(tool.name)
         }
 
-        // Capability honesty: on a write-capable surface with a repo-synced
-        // KB but no writable source, say so precisely — the model can then
-        // explain the fix instead of hunting for a tool that isn't there.
+        // Capability honesty: explain why source write-back is unavailable
+        // instead of letting the model hunt for a tool that is not present.
         if (allowKnowledgeWrites && repoConnected && !writeEnabled) {
-          const repos = sources.map((s) => s.repo).join(', ')
+          const githubRepos = sources.filter((s) => s.sourceType !== 'local').map((s) => s.repo).join(', ')
           unavailable.push(
-            knowledgeRepoWriter
-              ? `knowledge base editing (the GitHub token backing ${repos} is read-only — needs push permission; reconnect it with a read-write token in Studio → Connectors to enable assistant edits)`
-              : 'knowledge base editing (not configured on this server)',
+            !knowledgeRepoWriter
+              ? 'knowledge base editing (source write-back is not configured on this server)'
+              : githubRepos
+                ? `knowledge base editing (the GitHub token backing ${githubRepos} is read-only — needs push permission; reconnect it with a read-write token in Studio → Connectors to enable assistant edits)`
+                : 'knowledge base editing (no writable source is available)',
           )
         }
 

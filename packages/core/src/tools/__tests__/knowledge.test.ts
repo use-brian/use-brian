@@ -17,10 +17,10 @@ const mockStore: KnowledgeStoreInterface = {
 function makeWriter(): KnowledgeRepoWriter {
   return {
     commitEntryUpdate: vi.fn(async () => ({
-      ok: true as const, entryId: 'e1', path: 'products/vault', commitSha: 'abc1234', commitUrl: 'https://github.com/o/r/commit/abc1234',
+      ok: true as const, entryId: 'e1', path: 'products/vault', sourceType: 'github' as const, commitSha: 'abc1234', commitUrl: 'https://github.com/o/r/commit/abc1234',
     })),
     commitEntryCreate: vi.fn(async () => ({
-      ok: true as const, entryId: 'e2', path: 'docs/new', commitSha: 'def5678', commitUrl: null,
+      ok: true as const, entryId: 'e2', path: 'docs/new', sourceType: 'github' as const, commitSha: 'def5678', commitUrl: null,
     })),
   }
 }
@@ -244,7 +244,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       )
 
       expect(result.isError).toBe(true)
-      expect(result.data).toContain('synced from a GitHub repository')
+      expect(result.data).toContain('No writable knowledge source')
       expect(mockStore.create).not.toHaveBeenCalled()
     })
 
@@ -266,7 +266,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         repoConnected: true,
         allowWrites: true,
         repoWriter: writer,
-        writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+        writableSources: [{ id: 'src1', repo: 'acme/kb', sourceType: 'github' }],
         requesterLabel: 'neal@example.com',
       })
       const result = await byName(tools, 'addKnowledgeEntry').execute(
@@ -292,6 +292,27 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       expect(mockStore.create).not.toHaveBeenCalled()
     })
 
+    it('writes through the same tool for a local source without commit metadata', async () => {
+      const writer = makeWriter()
+      vi.mocked(writer.commitEntryCreate).mockResolvedValueOnce({
+        ok: true, entryId: 'e-local', path: 'docs/local', sourceType: 'local', commitSha: null, commitUrl: null,
+      })
+      const tools = createKnowledgeTools(mockStore, {
+        repoConnected: true,
+        allowWrites: true,
+        repoWriter: writer,
+        writableSources: [{ id: 'local1', repo: '/srv/kb', sourceType: 'local' }],
+      })
+
+      const result = await byName(tools, 'addKnowledgeEntry').execute(
+        { path: 'docs/local', title: 'Local', content: 'Body' },
+        ctx,
+      )
+
+      expect(writer.commitEntryCreate).toHaveBeenCalledWith(expect.objectContaining({ sourceId: 'local1' }))
+      expect(result.data).toMatchObject({ id: 'e-local', message: 'Knowledge entry created in the local source directory.' })
+    })
+
     it('requires a repo argument when several sources are writable', async () => {
       const writer = makeWriter()
       const tools = createKnowledgeTools(mockStore, {
@@ -299,8 +320,8 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         allowWrites: true,
         repoWriter: writer,
         writableSources: [
-          { id: 'src1', repo: 'acme/kb' },
-          { id: 'src2', repo: 'acme/kb-two' },
+          { id: 'src1', repo: 'acme/kb', sourceType: 'github' },
+          { id: 'src2', repo: 'acme/kb-two', sourceType: 'github' },
         ],
       })
       const missing = await byName(tools, 'addKnowledgeEntry').execute(
@@ -328,7 +349,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         repoConnected: true,
         allowWrites: true,
         repoWriter: writer,
-        writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+        writableSources: [{ id: 'src1', repo: 'acme/kb', sourceType: 'github' }],
       })
       await byName(tools, 'addKnowledgeEntry').execute(
         { path: 'docs/x', title: 'X', content: 'Body', sensitivity: 'public' },
@@ -344,7 +365,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
       repoConnected: true,
       allowWrites: true,
       repoWriter: makeWriter(),
-      writableSources: [{ id: 'src1', repo: 'acme/kb' }],
+      writableSources: [{ id: 'src1', repo: 'acme/kb', sourceType: 'github' as const }],
       requesterLabel: 'neal@example.com',
     })
 
@@ -446,7 +467,7 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
         ctx,
       )
       expect(result.isError).toBe(true)
-      expect(result.data).toContain('read-only')
+      expect(result.data).toContain('source write-back is unavailable')
     })
 
     it('describes the confirmation with entry title, repo, and preview', async () => {

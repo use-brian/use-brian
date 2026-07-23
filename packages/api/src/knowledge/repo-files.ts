@@ -34,9 +34,27 @@ export function resolveRepoFilePath(
   const prefix = rootPath.replace(/\/+$/, '')
   for (const p of treePaths) {
     if (!p.endsWith('.md')) continue
-    if (prefix && !p.startsWith(prefix)) continue
+    if (prefix && p !== prefix && !p.startsWith(`${prefix}/`)) continue
     const relative = prefix ? p.slice(prefix.length).replace(/^\//, '') : p
     if (normalisePath(relative) === entryPath) return p
   }
   return null
+}
+
+/** Validate and canonicalise a model-supplied logical KB entry path. */
+export function validateKnowledgeEntryPath(input: string): string | null {
+  const candidate = input.trim()
+  if (
+    !candidate
+    || candidate.includes('\0')
+    || candidate.includes('\\')
+    || candidate.startsWith('/')
+    || /^[A-Za-z]:/.test(candidate)
+    || candidate.includes('//')
+  ) return null
+
+  const entryPath = normalisePath(candidate)
+  const segments = entryPath.split('/')
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) return null
+  return entryPath
 }

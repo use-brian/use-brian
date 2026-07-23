@@ -64,6 +64,7 @@ export type KnowledgeStoreInterface = {
   listSourcesForAssistant(assistantId: string): Promise<Array<{
     id: string
     repo: string
+    sourceType: 'github' | 'local'
     /**
      * Cached PAT write-capability probe (migration 310). `true` = the bound
      * PAT can push; `false`/`null`/absent = read-only (fail closed). Drives
@@ -87,6 +88,7 @@ export type KnowledgeRepoWriteResult =
       ok: true
       entryId: string
       path: string
+      sourceType: 'github' | 'local'
       commitSha: string | null
       commitUrl: string | null
     }

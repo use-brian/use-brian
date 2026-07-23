@@ -4,10 +4,11 @@
  * Built-in tools injected directly into the tool map (no MCP indirection).
  *
  * Write surface (docs/architecture/features/knowledge-base.md → "Assistant
- * direct edits"): repo-synced knowledge bases are assistant-editable only
+ * direct edits"): source-backed knowledge bases are assistant-editable only
  * when the injector passes a `repoWriter` — which it does only on
- * interactive, confirmation-capable surfaces AND when a source's cached
- * PAT write-capability probe passed. Every write carries
+ * interactive, confirmation-capable surfaces AND when a source is writable.
+ * GitHub uses its cached PAT probe; local sources use the filesystem writer.
+ * Every write carries
  * `requiresConfirmation` (per-edit Approve/Deny) and the descriptions
  * forbid proactive use: the assistant edits the KB only when the user
  * explicitly asked in the conversation.
@@ -20,7 +21,7 @@ import { RANK, researchWriteFloor, type Sensitivity } from '../../security/sensi
 import { unionCompartments } from '../../security/compartments.js'
 
 export type KnowledgeToolOptions = {
-  /** Whether any GitHub sync source is connected for this workspace. */
+  /** Whether any sync source is connected for this workspace. */
   repoConnected?: boolean
   /**
    * Repo write-back port. Present ONLY when the surface allows knowledge
@@ -29,8 +30,8 @@ export type KnowledgeToolOptions = {
    * repo routing in `updateKnowledgeEntry`.
    */
   repoWriter?: KnowledgeRepoWriter
-  /** Sources whose cached write probe passed — creates target one of these. */
-  writableSources?: Array<{ id: string; repo: string }>
+  /** Writable source targets. Local sources do not require a PAT probe. */
+  writableSources?: Array<{ id: string; repo: string; sourceType: 'github' | 'local' }>
   /**
    * Interactive-surface flag: gates emission of `updateKnowledgeEntry`
    * entirely. Non-interactive surfaces (workflow, scheduled, A2A, public
@@ -242,7 +243,9 @@ export function createKnowledgeTools(
   }
 
   /** Pick the create target among writable sources; string = error message. */
-  function pickWritableSource(requestedRepo: string | undefined): { id: string; repo: string } | string {
+  function pickWritableSource(
+    requestedRepo: string | undefined,
+  ): NonNullable<KnowledgeToolOptions['writableSources']>[number] | string {
     const writable = opts?.writableSources ?? []
     if (writable.length === 0) return 'No writable knowledge source is available.'
     if (requestedRepo) {
@@ -260,7 +263,7 @@ export function createKnowledgeTools(
     description:
       `Add a new entry to the knowledge base. ${EXPLICIT_ASK_RULE} ` +
       'Requires a path (directory-like), title, and content. The knowledge base is for curated, reusable information — not personal notes. ' +
-      'When the knowledge base is synced from a GitHub repository, the entry is committed directly to the repository on approval. ' +
+      'When the knowledge base is synced from a source, the entry is written directly to that source on approval. ' +
       'Sensitivity controls which assistants can read the entry: `public` (safe for external output), `internal` (team-wide, default), `confidential` (restricted to high-clearance assistants only). ' +
       'If the turn has drawn on confidential sources, the entry will be stamped `confidential` even if a lower tier was requested — no silent downgrade.',
     inputSchema: z.object({
@@ -272,7 +275,7 @@ export function createKnowledgeTools(
         'Access tier for this entry. Defaults to `internal`. Use `public` only for customer-facing content.',
       ),
       repo: z.string().optional().describe(
-        'Target repository (owner/name). Only needed when more than one knowledge source is writable.',
+        'Target source (GitHub owner/name or local directory). Only needed when more than one source is writable.',
       ),
     }),
     isConcurrencySafe: true,
@@ -286,7 +289,7 @@ export function createKnowledgeTools(
       const lines = [
         `Create knowledge entry "${args.title ?? ''}" at ${args.path ?? ''}`,
         target && typeof target !== 'string'
-          ? `Commits directly to ${target.repo}`
+          ? target.sourceType === 'local' ? `Writes directly to ${target.repo}` : `Commits directly to ${target.repo}`
           : 'Saves to the workspace knowledge base',
         `Sensitivity: ${args.sensitivity ?? 'internal'} (raised automatically if this turn used higher-tier sources)`,
       ]
@@ -323,7 +326,7 @@ export function createKnowledgeTools(
         // edits"); its absence here is a normal, explainable state.
         if (!opts.repoWriter || (opts.writableSources ?? []).length === 0) {
           return {
-            data: 'This knowledge base is synced from a GitHub repository and cannot be edited from here — the connected GitHub token is read-only (or knowledge editing is not available on this surface). Edits land in the repository and sync automatically; to enable direct edits, reconnect the source with a read-write token in Studio → Connectors.',
+            data: 'No writable knowledge source is available on this surface. GitHub sources require a read-write token; local sources require filesystem write-back to be enabled.',
             isError: true,
           }
         }
@@ -355,7 +358,9 @@ export function createKnowledgeTools(
             sensitivity: stamp,
             commit: result.commitSha ?? undefined,
             commitUrl: result.commitUrl ?? undefined,
-            message: 'Knowledge entry created and committed to the repository.',
+            message: result.sourceType === 'local'
+              ? 'Knowledge entry created in the local source directory.'
+              : 'Knowledge entry created and committed to the repository.',
           },
         }
       }
@@ -406,13 +411,15 @@ export function createKnowledgeTools(
       try {
         const entry = await readEntry(context, args.id)
         if (!entry) return null
-        const repo = entry.sourceId
-          ? opts?.writableSources?.find((s) => s.id === entry.sourceId)?.repo
+        const target = entry.sourceId
+          ? opts?.writableSources?.find((s) => s.id === entry.sourceId)
           : null
         const lines = [
           `Update knowledge entry "${entry.title}" (${entry.path})`,
           entry.sourceId
-            ? `Commits directly to ${repo ?? 'the knowledge repository'}`
+            ? target?.sourceType === 'local'
+              ? `Writes directly to ${target.repo}`
+              : `Commits directly to ${target?.repo ?? 'the knowledge repository'}`
             : 'Manual entry — updates the workspace knowledge base',
         ]
         if (args.changeSummary) lines.push(`Change: ${args.changeSummary}`)
@@ -456,7 +463,7 @@ export function createKnowledgeTools(
         // Repo-synced entry — direct commit through the write-back port.
         if (!opts?.repoWriter) {
           return {
-            data: 'This entry is synced from a GitHub repository and cannot be edited from here — the connected GitHub token is read-only (or knowledge editing is not available on this surface). Reconnect the source with a read-write token in Studio → Connectors to enable direct edits.',
+            data: 'This source-backed entry cannot be edited from here because source write-back is unavailable on this surface.',
             isError: true,
           }
         }
@@ -476,7 +483,9 @@ export function createKnowledgeTools(
             path: result.path,
             commit: result.commitSha ?? undefined,
             commitUrl: result.commitUrl ?? undefined,
-            message: 'Entry updated and committed to the repository.',
+            message: result.sourceType === 'local'
+              ? 'Entry updated in the local source directory.'
+              : 'Entry updated and committed to the repository.',
           },
         }
       }

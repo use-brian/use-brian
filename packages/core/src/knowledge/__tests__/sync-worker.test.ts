@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createKnowledgeSyncWorker, type SyncGitHubApi, type SyncStore, type SyncCredentials } from '../sync-worker.js'
@@ -292,6 +292,36 @@ describe('[COMP:knowledge/sync-worker] createKnowledgeSyncWorker', () => {
         expect(mockStore.updateSourceSync).toHaveBeenCalledWith('src1', expect.stringMatching(/^[a-f0-9]{40}$/))
       } finally {
         await rm(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('rejects a rootPath symlink that escapes the local source', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'brian-kb-contained-'))
+      const outside = await mkdtemp(join(tmpdir(), 'brian-kb-outside-'))
+      try {
+        await mkdir(join(dir, 'docs'))
+        await writeFile(join(outside, 'secret.md'), '# Outside\n')
+        await symlink(outside, join(dir, 'docs', 'kb'))
+        vi.mocked(mockStore.getSourcesDueForSync).mockResolvedValueOnce([{
+          ...SOURCE,
+          sourceType: 'local',
+          repo: dir,
+          branch: 'local',
+          rootPath: 'docs/kb',
+        }])
+
+        const worker = createKnowledgeSyncWorker({ store: mockStore, api: mockApi, credentials: mockCreds })
+        await worker.tick()
+
+        expect(mockStore.upsertByPath).not.toHaveBeenCalled()
+        expect(mockStore.updateSourceSync).toHaveBeenCalledWith(
+          'src1', '', expect.stringContaining('escapes its source directory'),
+        )
+      } finally {
+        await Promise.all([
+          rm(dir, { recursive: true, force: true }),
+          rm(outside, { recursive: true, force: true }),
+        ])
       }
     })
   })

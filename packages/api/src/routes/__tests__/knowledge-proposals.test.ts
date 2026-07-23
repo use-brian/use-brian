@@ -25,6 +25,7 @@ vi.mock('../../db/client.js', () => ({
 }))
 
 import { workspaceKnowledgeRoutes, splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge.js'
+import { validateKnowledgeEntryPath } from '../../knowledge/repo-files.js'
 import { query, queryWithRLS } from '../../db/client.js'
 
 const mockQuery = vi.mocked(query)
@@ -269,9 +270,19 @@ describe('[COMP:api/knowledge-proposals] helpers', () => {
   })
 
   it('resolveRepoFilePath honours rootPath and the index.md convention', () => {
-    const tree = ['docs/kb/products/vault.md', 'docs/kb/products/fees/index.md', 'docs/other.md']
+    const tree = ['docs/kb/products/vault.md', 'docs/kb/products/fees/index.md', 'docs/kb-other/products/leak.md', 'docs/other.md']
     expect(resolveRepoFilePath(tree, 'docs/kb', 'products/vault')).toBe('docs/kb/products/vault.md')
     expect(resolveRepoFilePath(tree, 'docs/kb', 'products/fees')).toBe('docs/kb/products/fees/index.md')
+    expect(resolveRepoFilePath(tree, 'docs/kb', 'products/leak')).toBeNull()
     expect(resolveRepoFilePath(tree, 'docs/kb', 'missing')).toBeNull()
+  })
+
+  it('validateKnowledgeEntryPath rejects filesystem traversal and ambiguous paths', () => {
+    expect(validateKnowledgeEntryPath('products/vault.md')).toBe('products/vault')
+    expect(validateKnowledgeEntryPath('products/vault/index.md')).toBe('products/vault')
+    expect(validateKnowledgeEntryPath('../outside')).toBeNull()
+    expect(validateKnowledgeEntryPath('products//vault')).toBeNull()
+    expect(validateKnowledgeEntryPath('/absolute')).toBeNull()
+    expect(validateKnowledgeEntryPath('products\\vault')).toBeNull()
   })
 })
