@@ -54,7 +54,10 @@ describe("[COMP:app-web/feed-sse] openFeedStream", () => {
     expect(url.pathname).toBe("/api/distribution/t/ws-1/events");
     expect(url.searchParams.get("access_token")).toBe("tok-1");
     expect(url.searchParams.has("lastEventId")).toBe(false);
-    expect(source.withCredentials).toBe(true);
+    // Auth rides the URL token, not cookies — a credentialed cross-origin
+    // EventSource would demand `Access-Control-Allow-Credentials: true` (the
+    // API doesn't send it) and reconnect-storm. Must stay uncredentialed.
+    expect(source.withCredentials).toBe(false);
     handle.close();
   });
 
