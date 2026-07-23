@@ -135,6 +135,7 @@ import {
   type PendingConfirmation,
   type ToolUsed,
 } from "@use-brian/chat-ui";
+import remarkGfm from "remark-gfm";
 import { ChatFileAttachments } from "@/components/chrome/chat-file-attachment";
 import { ChatCodeBlock } from "@/components/chrome/chat-code-block";
 import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
@@ -3337,6 +3338,8 @@ function ChatPageLink({
   return <>{children}</>;
 }
 
+const CHAT_REMARK_PLUGINS = [remarkGfm];
+
 /**
  * `ChatMarkdown` with in-app page links wired up (see {@link ChatPageLink}).
  * Used for both finalised assistant messages and the live streaming buffer so
@@ -3361,7 +3364,7 @@ function ChatMarkdownWithLinks({
     }),
     [workspaceId, onOpenPage],
   );
-  return <ChatMarkdown text={text} components={components} />;
+  return <ChatMarkdown text={text} components={components} remarkPlugins={CHAT_REMARK_PLUGINS} />;
 }
 
 function MessageBubble({
