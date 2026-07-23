@@ -869,6 +869,19 @@ async function recordExtractionUsage(
   deps: PipelineBDeps,
   episode: PipelineBEpisode,
   usage: TokenUsage | null,
+  /**
+   * Overrides for the non-extraction calls this ingest also makes. The
+   * sensitivity classifier fires once per episode and was computing its usage,
+   * returning it on `PipelineBResult.sensitivity.usage`, and finding no
+   * consumer anywhere in the repo — 2,827 unrecorded LLM calls over 90 days,
+   * roughly 59x the entire transcription bucket's row count. Cheap in dollars,
+   * but an unmetered call path is how a ledger starts drifting from reality.
+   *
+   * `overhead:classifier` is deliberate: it is already in `OVERHEAD_SOURCES`
+   * and the `valid_source` CHECK, so metering this needs no migration, and the
+   * `trigger_key` keeps it separable from the routing classifiers.
+   */
+  over: { model?: string; source?: string; triggerKey?: string } = {},
 ): Promise<void> {
   if (!deps.usage || !usage) return
   const userId = episode.createdByUserId || episode.userId
@@ -879,14 +892,19 @@ async function recordExtractionUsage(
       assistantId: episode.assistantId ?? '',
       workspaceId: episode.workspaceId,
       sessionId: null,
-      model: deps.model,
+      model: over.model ?? deps.model,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cacheReadTokens,
       cacheWriteTokens: usage.cacheWriteTokens,
-      actualCostUsd: calculateCost(deps.model, usage),
-      source: 'overhead:extraction',
-      triggerKey: 'pipeline_b_extraction',
+      actualCostUsd: calculateCost(over.model ?? deps.model, usage),
+      source: over.source ?? 'overhead:extraction',
+      triggerKey: over.triggerKey ?? 'pipeline_b_extraction',
+      // The episode itself, NOT its parent. Rolling up to the originating
+      // recording is `COALESCE(parent_episode_id, id)` at query time — cheap
+      // at the current depth of 1, and it keeps which child drove the spend,
+      // which a denormalized root would discard permanently.
+      sourceEpisodeId: episode.id,
     })
   } catch (err) {
     console.warn(
@@ -1371,6 +1389,19 @@ export async function processEpisode(
           summary: payload.summary,
           memories: memoriesWritten.map((m) => ({ summary: m.summary })),
         },
+      })
+      // Meter it. This call was invisible to the ledger until migration 365's
+      // audit; it fires once per ingested episode, so it is the highest-count
+      // LLM call in the system. Best-effort, exactly like extraction — a
+      // metering failure must never break ingestion.
+      // `classifySensitivity` returns NULL when it throws internally, so this
+      // must be null-safe: metering is instrumentation and may never be the
+      // thing that breaks an ingest. `recordExtractionUsage` already no-ops on
+      // a null usage, so the guard only has to survive the property read.
+      await recordExtractionUsage(deps, episode, sensitivity?.usage ?? null, {
+        model: sensitivity?.model ?? classifierModel,
+        source: 'overhead:classifier',
+        triggerKey: 'sensitivity_classifier',
       })
     }
   }

@@ -146,8 +146,9 @@ export type RecordingTranscriptionResult = {
    *  `audioSeconds` is the duration THIS entry covers — per window, not per
    *  file, so a windowed transcriber's entries sum to the file duration
    *  instead of multiplying it. Providers that cannot attribute duration to a
-   *  window leave it unset; the ingest path then falls back to the file
-   *  duration only when there is exactly one entry to attribute it to. */
+   *  window leave it unset; the ingest path then shares the file duration
+   *  evenly across every entry that did not self-report, so the set still sums
+   *  to the file and every row stays metered (see `ingest-recording.ts`). */
   usages: Array<{ usage: TokenUsage | null; model: string; costUsd?: number; audioSeconds?: number }>
   /** Number of continuation windows used (1 = no continuation). */
   windows: number

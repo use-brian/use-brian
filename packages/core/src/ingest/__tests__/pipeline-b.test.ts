@@ -1932,8 +1932,14 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
     ])
     await processEpisode(baseEpisode(), 'note', makeDeps({ provider, usage: usage.store }))
 
-    expect(usage.recordUsage).toHaveBeenCalledTimes(1)
-    const row = usage.recordUsage.mock.calls[0]![0]
+    // Two metered calls: the extraction, and the sensitivity classifier that
+    // runs once per episode. The classifier was computing its usage and
+    // returning it with no consumer anywhere in the repo, so it spent real
+    // tokens while staying invisible to the ledger.
+    const rows = usage.recordUsage.mock.calls.map((c) => c[0])
+    expect(rows).toHaveLength(2)
+
+    const row = rows.find((r) => r.source === 'overhead:extraction')!
     expect(row).toMatchObject({
       userId: 'u-1',
       assistantId: 'a-1',
@@ -1946,6 +1952,16 @@ describe('[COMP:brain/pipeline-b] extraction usage attribution', () => {
       triggerKey: 'pipeline_b_extraction',
     })
     expect(row.actualCostUsd).toBeGreaterThan(0)
+
+    // The classifier row rides an existing `valid_source` label, so metering
+    // it needed no migration; `trigger_key` keeps it separable from the
+    // routing classifiers that share that source.
+    const classifier = rows.find((r) => r.triggerKey === 'sensitivity_classifier')!
+    expect(classifier).toMatchObject({ source: 'overhead:classifier' })
+
+    // Both rows carry the originating episode, so a recording's full cost
+    // sums back to it (migration 354).
+    for (const r of rows) expect(r.sourceEpisodeId).toBe('ep-1')
   })
 
   it('still records when the model output fails to parse — the tokens were spent', async () => {

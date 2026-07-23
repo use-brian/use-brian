@@ -44,7 +44,7 @@ export type RecordOverheadUsageParams = {
   /**
    * Seconds of audio this overhead call processed — see
    * UsageStore.recordUsage. Set by the voice-transcription paths so the
-   * admin rollup can price speech-to-text per audio hour. Migration 347.
+   * admin rollup can price speech-to-text per audio hour. Migration 353.
    */
   audioSeconds?: number
 }
