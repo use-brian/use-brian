@@ -1,4 +1,5 @@
 import type { DeckChart, DeckImage, DeckSlide, DeckSpec, DeckStat } from './spec.js';
+import { fitOneLine } from './text-metrics.js';
 import type { DeckStyle } from './theme.js';
 
 /**
@@ -19,6 +20,44 @@ export const DECK_PAGE_W = 13.33;
 export const DECK_PAGE_H = 7.5;
 const MARGIN = 0.9;
 const BODY_W = DECK_PAGE_W - 2 * MARGIN;
+
+/**
+ * The type scale. Every font size in this module comes from here — no literals
+ * in the layout functions, so the relationships stay visible and adjustable.
+ *
+ * What reads as "designed" is the *spread* between display and body (~5x), not
+ * absolute size. Sizes are points on the 13.33in canvas; tools that export at
+ * 20in (Canva) run roughly 1.5x these numbers for the same optical size.
+ *
+ * `LAYOUT_LIMITS` in spec.ts is measured against these values. The two move
+ * together: retune a display size here and the character budget that keeps it
+ * on the slide is no longer the measured one.
+ */
+export const TYPE = {
+  deckTitle: 72,
+  deckSubtitle: 15,
+  statement: 60,
+  section: 56,
+  /** Supporting line under a display headline (section / statement). */
+  displaySub: 14,
+  header: 30,
+  body: 17,
+  /** Body set beside a chart or image, where the column is ~5.3in not 11.5in. */
+  bodyTight: 15,
+  statValue: 54,
+  // Floor for the measured fit: below this a "big number" stops reading as one.
+  // Only reachable at 4 tiles with a value near the schema's 20-char cap.
+  statValueMin: 26,
+  statLabel: 11,
+  statSupport: 12,
+  quote: 28,
+  quoteAttr: 14,
+  quoteMark: 120,
+  chartValue: 10,
+  chartLabel: 11,
+  caption: 12,
+  footer: 9,
+} as const;
 
 export interface DeckBox {
   x: number;
@@ -140,7 +179,7 @@ function plainText(
   };
 }
 
-function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSizePt = 18): DeckPrimitive {
+function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSizePt: number = TYPE.body): DeckPrimitive {
   return {
     kind: 'text',
     box,
@@ -165,7 +204,7 @@ function layoutTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
     { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.1, h: 0.14 }, fill: style.accent },
     plainText(spec.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 1.9 }, {
       fontFace: style.headingFont,
-      fontSizePt: 54,
+      fontSizePt: TYPE.deckTitle,
       bold: true,
       shrinkToFit: true,
     }),
@@ -174,7 +213,7 @@ function layoutTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
     primitives.push(
       plainText(spec.subtitle, style.muted, { x: MARGIN, y: 4.55, w: BODY_W, h: 0.9 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 20,
+        fontSizePt: TYPE.deckSubtitle,
       }),
     );
   }
@@ -185,7 +224,7 @@ function header(style: DeckStyle, title: string): DeckPrimitive[] {
   return [
     plainText(title, style.text, { x: MARGIN, y: 0.5, w: BODY_W, h: 0.85 }, {
       fontFace: style.headingFont,
-      fontSizePt: 28,
+      fontSizePt: TYPE.header,
       bold: true,
       shrinkToFit: true,
     }),
@@ -197,11 +236,11 @@ function withFooter(slide: DeckSlideLayout, style: DeckStyle, deckTitle: string,
   slide.primitives.push(
     plainText(deckTitle, style.muted, { x: MARGIN, y: DECK_PAGE_H - 0.5, w: 6, h: 0.3 }, {
       fontFace: style.bodyFont,
-      fontSizePt: 9,
+      fontSizePt: TYPE.footer,
     }),
     plainText(String(pageNum), style.muted, { x: DECK_PAGE_W - MARGIN - 1, y: DECK_PAGE_H - 0.5, w: 1, h: 0.3 }, {
       fontFace: style.bodyFont,
-      fontSizePt: 9,
+      fontSizePt: TYPE.footer,
       align: 'right',
     }),
   );
@@ -221,12 +260,12 @@ function layoutContentSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
   const fullBox: DeckBox = { x: MARGIN, y: top, w: BODY_W, h: bodyH };
 
   if (slide.chart && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, TYPE.bodyTight));
     primitives.push(...layoutChart(slide.chart, style, sideBox));
   } else if (slide.chart) {
     primitives.push(...layoutChart(slide.chart, style, fullBox));
   } else if (slide.image && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, TYPE.bodyTight));
     primitives.push(...layoutImage(slide.image, style, sideBox));
   } else if (slide.image) {
     primitives.push(...layoutImage(slide.image, style, fullBox));
@@ -249,7 +288,7 @@ function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrim
     primitives.push(
       plainText(image.caption, style.muted, { x: box.x, y: box.y + box.h - captionH, w: box.w, h: captionH }, {
         fontFace: style.bodyFont,
-        fontSizePt: 12,
+        fontSizePt: TYPE.caption,
         align: 'center',
       }),
     );
@@ -261,7 +300,7 @@ function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
   const primitives: DeckPrimitive[] = [
     plainText(slide.title, style.background, { x: MARGIN, y: 2.75, w: BODY_W, h: 1.6 }, {
       fontFace: style.headingFont,
-      fontSizePt: 44,
+      fontSizePt: TYPE.section,
       bold: true,
       align: 'center',
       shrinkToFit: true,
@@ -271,7 +310,7 @@ function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
     primitives.push(
       plainText(slide.subtext, style.background, { x: MARGIN, y: 4.4, w: BODY_W, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: TYPE.displaySub,
         align: 'center',
       }),
     );
@@ -285,7 +324,7 @@ function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayo
     { kind: 'rect', box: { x: DECK_PAGE_W / 2 - 0.55, y: 2.1, w: 1.1, h: 0.12 }, fill: style.accent },
     plainText(slide.title, style.text, { x: MARGIN, y: 2.5, w: BODY_W, h: 2.0 }, {
       fontFace: style.headingFont,
-      fontSizePt: 40,
+      fontSizePt: TYPE.statement,
       bold: true,
       align: 'center',
       shrinkToFit: true,
@@ -295,7 +334,7 @@ function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayo
     primitives.push(
       plainText(slide.subtext, style.muted, { x: MARGIN + 1.2, y: 4.6, w: BODY_W - 2.4, h: 0.9 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: TYPE.displaySub,
         align: 'center',
       }),
     );
@@ -310,26 +349,40 @@ function layoutStatsSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const tileW = (BODY_W - gap * (stats.length - 1)) / stats.length;
   const tileY = 2.35;
   const tileH = 2.7;
+  // ONE measured size for every tile in the row. Sizing each box on its own —
+  // which is all `shrinkToFit` can do — renders "47,000" visibly smaller than
+  // "68%" beside it, and only in PowerPoint. See text-metrics.ts.
+  const valueSize = fitOneLine(
+    stats.map((s) => s.value),
+    tileW,
+    style.headingFont,
+    TYPE.statValue,
+    TYPE.statValueMin,
+  );
   stats.forEach((stat, i) => {
     const x = MARGIN + i * (tileW + gap);
     primitives.push(
       { kind: 'rect', box: { x, y: tileY, w: tileW, h: tileH }, fill: style.panel, radiusIn: 0.08 },
       plainText(stat.value, style.accent, { x, y: tileY + 0.45, w: tileW, h: 1.2 }, {
         fontFace: style.headingFont,
-        fontSizePt: 40,
+        fontSizePt: valueSize,
         bold: true,
         align: 'center',
+        // Net for the TYPE.statValueMin clamp only; never engages for input
+        // the schema admits.
         shrinkToFit: true,
       }),
       plainText(stat.label, style.muted, { x: x + 0.15, y: tileY + 1.7, w: tileW - 0.3, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 13,
+        fontSizePt: TYPE.statLabel,
         align: 'center',
       }),
     );
   });
   if (slide.bullets?.length) {
-    primitives.push(bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.35, w: BODY_W, h: 1.4 }, 14));
+    primitives.push(
+      bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.35, w: BODY_W, h: 1.4 }, TYPE.statSupport),
+    );
   }
   return { background: style.background, primitives };
 }
@@ -340,12 +393,12 @@ function layoutQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
     ? [
         plainText('“', style.accent, { x: MARGIN - 0.15, y: 0.9, w: 1.6, h: 1.6 }, {
           fontFace: 'Georgia',
-          fontSizePt: 120,
+          fontSizePt: TYPE.quoteMark,
           bold: true,
         }),
         plainText(quote.text, style.text, { x: MARGIN + 0.7, y: 2.4, w: BODY_W - 1.4, h: 2.5 }, {
           fontFace: style.bodyFont,
-          fontSizePt: 26,
+          fontSizePt: TYPE.quote,
           italic: true,
           shrinkToFit: true,
           lineSpacingMultiple: 1.2,
@@ -356,7 +409,7 @@ function layoutQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
     primitives.push(
       plainText(quote.attribution, style.muted, { x: MARGIN + 0.7, y: 5.1, w: BODY_W - 1.4, h: 0.5 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 15,
+        fontSizePt: TYPE.quoteAttr,
       }),
     );
   }
@@ -424,7 +477,7 @@ function layoutBarChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckP
           : { x: plot.x + i * slotW, y: barY + barH + 0.02, w: slotW, h: valueH },
         {
           fontFace: style.bodyFont,
-          fontSizePt: 10,
+          fontSizePt: TYPE.chartValue,
           align: 'center',
           valign: value >= 0 ? 'bottom' : 'top',
         },
@@ -433,7 +486,7 @@ function layoutBarChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckP
     primitives.push(
       plainText(chart.labels[i], style.muted, { x: plot.x + i * slotW, y: plot.y + plot.h + 0.06, w: slotW, h: labelH }, {
         fontFace: style.bodyFont,
-        fontSizePt: 11,
+        fontSizePt: TYPE.chartLabel,
         align: 'center',
       }),
     );
@@ -482,7 +535,7 @@ function layoutLineChart(chart: DeckChart, style: DeckStyle, box: DeckBox): Deck
       primitives.push(
         plainText(formatChartValue(value, chart.unit), style.text, { x: px(i) - 0.6, y: py(value) - marker / 2 - valueH, w: 1.2, h: valueH }, {
           fontFace: style.bodyFont,
-          fontSizePt: 10,
+          fontSizePt: TYPE.chartValue,
           align: 'center',
           valign: 'bottom',
         }),
@@ -491,7 +544,7 @@ function layoutLineChart(chart: DeckChart, style: DeckStyle, box: DeckBox): Deck
     primitives.push(
       plainText(chart.labels[i], style.muted, { x: px(i) - 0.75, y: baselineY + 0.06, w: 1.5, h: labelH }, {
         fontFace: style.bodyFont,
-        fontSizePt: 11,
+        fontSizePt: TYPE.chartLabel,
         align: 'center',
       }),
     );
@@ -549,7 +602,7 @@ function layoutPieChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckP
         },
       ],
       fontFace: style.bodyFont,
-      fontSizePt: 12,
+      fontSizePt: TYPE.chartLabel,
       align: 'left',
       valign: 'middle',
     });

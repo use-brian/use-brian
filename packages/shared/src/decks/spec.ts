@@ -15,6 +15,9 @@ export type DeckTheme = (typeof DECK_THEMES)[number];
 export const DECK_CHART_TYPES = ['bar', 'line', 'pie', 'doughnut'] as const;
 export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
 
+export const DECK_LAYOUTS = ['content', 'section', 'statement', 'stats', 'quote'] as const;
+export type DeckLayout = (typeof DECK_LAYOUTS)[number];
+
 const statSchema = z.object({
   value: z.string().min(1).max(20).describe("The big number, e.g. '$2.1M' or '40%'"),
   label: z.string().min(1).max(60).describe("What it measures, e.g. 'ARR' or 'MoM growth'"),
@@ -93,7 +96,7 @@ export const deckSlideSchema = z
       .describe('Optional image on a content slide (beside bullets, or large without them); not combinable with chart'),
     notes: z.string().max(4000).optional().describe('Speaker notes for the slide'),
     layout: z
-      .enum(['content', 'section', 'statement', 'stats', 'quote'])
+      .enum(DECK_LAYOUTS)
       .optional()
       .describe(
         "'content' (default) = title + bullets and/or chart; 'section' = divider; 'statement' = one big centered claim; 'stats' = row of big-number tiles; 'quote' = testimonial",
@@ -139,6 +142,106 @@ export const deckSlideSchema = z
     }
   });
 
+// ---------------------------------------------------------------------------
+// Content budgets — enforced on MODEL INPUT only, never on a stored spec.
+//
+// applyDeckOps re-parses the whole deck with deckSpecSchema after every edit
+// (see below). Putting these caps there would make decks that predate them
+// fail on their next edit even when the edit itself is fine — a deck the user
+// can no longer touch. So the caps live on the *input* schemas: new content is
+// held to them, existing decks stay editable.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-layout caps, measured against the `TYPE` scale in layout.ts — not derived.
+ * They exist because `shrinkToFit` never fails: hand a title box a wall of text
+ * and PowerPoint silently scales it to unreadable rather than erroring.
+ *
+ * Re-measure after any change to the display sizes in `TYPE`; a retuned scale
+ * invalidates every number here. Chars/line is ~0.6 for Georgia headings and
+ * ~0.5 for Arial body.
+ */
+const LAYOUT_LIMITS: Record<DeckLayout, { title: number; bullets?: { max: number; chars: number } }> = {
+  statement: { title: 65 }, // 60pt Georgia, 23 ch/line, 3 lines in a 2.0in box
+  section: { title: 48 }, // 56pt centred, 2 lines in a 1.6in box
+  content: { title: 48, bullets: { max: 5, chars: 100 } }, // 30pt header, 1 line; body 17pt
+  stats: { title: 48, bullets: { max: 2, chars: 120 } }, // 12pt supporting line
+  quote: { title: 48 },
+};
+
+/**
+ * Which content fields each layout actually renders. Anything else is dropped
+ * on the floor by layout.ts — layoutQuoteSlide never reads `bullets` — so
+ * accepting it is silent content loss. Reject instead.
+ *
+ * Note `quote` also ignores `title`; the schema requires it, but it renders
+ * only as a label.
+ */
+const LAYOUT_FIELDS: Record<DeckLayout, readonly string[]> = {
+  content: ['bullets', 'chart', 'image'],
+  section: ['subtext'],
+  statement: ['subtext'],
+  stats: ['stats', 'bullets'],
+  quote: ['quote'],
+};
+
+/** Content-bearing fields; `title`, `layout` and `notes` are valid everywhere. */
+const CONTENT_FIELDS = ['bullets', 'subtext', 'stats', 'quote', 'chart', 'image'] as const;
+
+/**
+ * The slide schema the TOOLS accept: everything deckSlideSchema enforces, plus
+ * the content budgets above. Used by generatePowerpoint's `slides` and by the
+ * `slide` payload of replaceSlide / insertSlide.
+ */
+export const deckSlideInputSchema = deckSlideSchema.superRefine((slide, ctx) => {
+  const layout: DeckLayout = slide.layout ?? 'content';
+  const limits = LAYOUT_LIMITS[layout];
+
+  if (slide.title.length > limits.title) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `title is ${slide.title.length} chars — layout '${layout}' fits ${limits.title}. Shorten it, or move the detail into \`subtext\`/\`bullets\`.`,
+    });
+  }
+
+  const rendered = LAYOUT_FIELDS[layout];
+  for (const field of CONTENT_FIELDS) {
+    if (slide[field] !== undefined && !rendered.includes(field)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `layout '${layout}' does not render \`${field}\` — it would be dropped silently. Use ${rendered.map((f) => `\`${f}\``).join(' / ')}, or change the layout.`,
+      });
+    }
+  }
+
+  if (limits.bullets && slide.bullets?.length) {
+    if (slide.bullets.length > limits.bullets.max) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${slide.bullets.length} bullets on a '${layout}' slide — max ${limits.bullets.max}. Split across two slides.`,
+      });
+    }
+    const overlong = slide.bullets.filter((b) => b.length > limits.bullets!.chars);
+    if (overlong.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `${overlong.length} bullet(s) exceed ${limits.bullets.chars} chars on a '${layout}' slide — they wrap past the body box. Tighten them.`,
+      });
+    }
+  }
+});
+
+/** Deck-level cap shared by the stored and input specs. */
+function assertImageCap(deck: { slides: { image?: unknown }[] }, ctx: z.RefinementCtx): void {
+  const imageCount = deck.slides.filter((s) => s.image).length;
+  if (imageCount > 10) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `deck uses ${imageCount} images — max 10 per deck`,
+    });
+  }
+}
+
 export const deckSpecShape = {
   title: z.string().min(1).max(200).describe('Deck title, shown on the title slide'),
   subtitle: z.string().max(300).optional().describe('Optional subtitle for the title slide'),
@@ -153,15 +256,24 @@ export const deckSpecShape = {
     .describe('Content slides, in order (1-50). The title slide is generated automatically.'),
 };
 
-export const deckSpecSchema = z.object(deckSpecShape).superRefine((deck, ctx) => {
-  const imageCount = deck.slides.filter((s) => s.image).length;
-  if (imageCount > 10) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: `deck uses ${imageCount} images — max 10 per deck`,
-    });
-  }
-});
+/** The stored spec: what a deck row holds and what applyDeckOps re-validates. */
+export const deckSpecSchema = z.object(deckSpecShape).superRefine(assertImageCap);
+
+/**
+ * The spec the tools accept — identical shape, but each slide is held to the
+ * content budgets. `generatePowerpoint` parses with this; `applyDeckOps` does
+ * not (see the note above LAYOUT_LIMITS).
+ */
+export const deckSpecInputShape = {
+  ...deckSpecShape,
+  slides: z
+    .array(deckSlideInputSchema)
+    .min(1)
+    .max(50)
+    .describe('Content slides, in order (1-50). The title slide is generated automatically.'),
+};
+
+export const deckSpecInputSchema = z.object(deckSpecInputShape).superRefine(assertImageCap);
 
 export type DeckStat = z.infer<typeof statSchema>;
 export type DeckImage = z.infer<typeof imageSchema>;
@@ -179,11 +291,11 @@ export type DeckSpec = z.infer<typeof deckSpecSchema>;
 const slideIndex = z.number().int().min(0).max(49).describe('0-based slide index (title slide excluded)');
 
 export const deckOpSchema = z.discriminatedUnion('op', [
-  z.object({ op: z.literal('replaceSlide'), index: slideIndex, slide: deckSlideSchema }),
+  z.object({ op: z.literal('replaceSlide'), index: slideIndex, slide: deckSlideInputSchema }),
   z.object({
     op: z.literal('insertSlide'),
     index: slideIndex.describe('0-based position to insert at (existing slides shift right)'),
-    slide: deckSlideSchema,
+    slide: deckSlideInputSchema,
   }),
   z.object({ op: z.literal('deleteSlide'), index: slideIndex }),
   z.object({ op: z.literal('moveSlide'), from: slideIndex, to: slideIndex }),

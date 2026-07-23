@@ -3,8 +3,8 @@ import { z } from 'zod'
 import {
   applyDeckOps,
   deckOpSchema,
-  deckSpecSchema,
-  deckSpecShape,
+  deckSpecInputSchema,
+  deckSpecInputShape,
   type DeckSpec,
   type DeckStyle,
 } from '@use-brian/shared/decks'
@@ -160,7 +160,7 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
       'Share `previewUrl` so the user can watch the deck live while you iterate with updatePowerpoint. ' +
       'This tool does NOT send anything by itself.',
     inputSchema: z.object({
-      ...deckSpecShape,
+      ...deckSpecInputShape,
       styleFromFile: z
         .string()
         .min(1)
@@ -172,7 +172,7 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
       const gate = workspaceGate(context.workspaceId)
       if (gate) return gate
       const { styleFromFile, ...specInput } = input
-      const parsed = deckSpecSchema.safeParse(specInput)
+      const parsed = deckSpecInputSchema.safeParse(specInput)
       if (!parsed.success) {
         const issues = parsed.error.issues.map((i) => `${i.path.join('.') || 'spec'}: ${i.message}`).join('; ')
         return { data: `Invalid deck spec — ${issues}`, isError: true }
