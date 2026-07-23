@@ -23,8 +23,6 @@
  * `env` option, not `getEnv()`.
  */
 
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type http from 'node:http'
 
@@ -57,6 +55,10 @@ import {
   createInterAssistantTools,
   createReportBugTool,
   createConfirmRecordingProcessingTool,
+  geminiTranscriber,
+  qwenFiletransTranscriber,
+  withTranscriberFallback,
+  type RecordingTranscriber,
   createIngestStoredFileTool,
   createReprocessRecordingTool,
   createReviewDataRequestTool,
@@ -185,7 +187,14 @@ import {
   deletePendingRecordingConfirmation,
   buildChannelSessionKey,
 } from './db/pending-recording-confirmations-store.js'
-import { enqueueRecordingJob, hasCompletedRecordingJob } from './db/recording-jobs-store.js'
+import {
+  enqueueRecordingJob,
+  hasCompletedRecordingJob,
+  claimNextRecordingJob,
+  markRecordingJobDone,
+  markRecordingJobFailed,
+  getRecordingJob,
+} from './db/recording-jobs-store.js'
 import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
 import { createSnapshotStore } from './db/snapshot-store.js'
@@ -278,7 +287,7 @@ import { createDbCrmStore } from './db/crm-store.js'
 import { createDbWorkspaceFilesStore } from './db/workspace-files-store.js'
 import { getWorkspaceFileById } from './db/workspace-files.js'
 import { createGcsFilesClient, type GcsFilesClient } from './files/gcs-client.js'
-import { createLocalFilesClient } from './files/local-files-client.js'
+import { createLocalFilesClient, resolveLocalFilesBaseDir } from './files/local-files-client.js'
 import { createFilesApi, createSingletonFilesClientResolver, type FilesClientResolver } from './files/files-api.js'
 import { createSearchFileContentTool } from './files/file-artifact-tools.js'
 import {
@@ -344,6 +353,10 @@ import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanou
 import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
+import { processOpenRecording } from './recordings/process-recording.js'
+import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
+import { updateRecording } from './db/recordings-store.js'
+import { mergeEpisodeSourceRef } from './db/episodes-store.js'
 import { createResearchSynthesizer } from './synthesis/research-synthesizer.js'
 import { createGenerateSynthesizer, type GenerateSynthesizeFn } from './synthesis/generate-synthesizer.js'
 import { createGenerateBlueprintTool } from './synthesis/generate-blueprint-tool.js'
@@ -509,8 +522,12 @@ export interface OpenApiEnv {
   WECHAT_CONNECTOR_URL?: string
   WECHAT_CONNECTOR_SECRET?: string
   LLM_PROVIDER_KEY_ENCRYPTION_KEY?: string
-  // Blob storage (open uses local-disk fallback when unset).
+  // Blob storage. GCS wins when set; LOCAL_FILES_DIR enables durable
+  // self-hosted local storage; otherwise non-Cloud-Run dev falls back to /tmp.
   GCS_FILES_BUCKET?: string
+  LOCAL_FILES_DIR?: string
+  /** Standalone OSS trust boundary for admin-selected server filesystem paths. */
+  LOCAL_FILESYSTEM_SOURCES_ENABLED?: boolean
   // Weekly skill-hygiene passes ship dark unless on.
   SKILLS_AUTO_GEN_ENABLED?: boolean
   // Workflow staleness/digestion/archival sweep ships dark unless on.
@@ -734,12 +751,13 @@ export interface OpenApiPorts {
    * — workspace channels management, Telegram/Slack webhooks, the Discord
    * connector inbound — are mounted by `bootOpenApi` itself for BOTH editions;
    * this factory lets the hosted platform bind the parts that stay closed:
-   * Pipeline-C Slack ingest, GCS channel-media intake, and the
-   * recording-to-brain surcharge pipeline. Called right after `BootContext`
-   * assembly (same effective mount position the closed app used). Open build
-   * leaves it unset → chat over channels works, those enrichments are inert.
+   * Pipeline-C Slack ingest and recording billing policy. The standalone app
+   * supplies `buildOpenChannelHosts` for generic media intake; hosted supplies
+   * its policy-enriched host. Called right after `BootContext` assembly.
    */
   buildChannelHosts?: (ctx: BootContext) => ChannelHostHooks | Promise<ChannelHostHooks>
+  /** Hosted runs its billing-aware recording worker; OSS defaults this on. */
+  runOpenRecordingWorker?: boolean
 
   /** Hosted has a pending-ingest batch worker; OSS executes WhatsApp realtime. */
   whatsappScheduledBatching?: boolean
@@ -811,21 +829,19 @@ export interface BootOpenApiOptions {
 }
 
 /**
- * Hosted-only enrichments the platform injects into the open channel routes
- * via `OpenApiPorts.buildChannelHosts`. Every field is optional — the OSS
- * edition runs the channel routes without any of them.
+ * Host hooks injected into the open channel routes. OSS supplies the generic
+ * media hooks; hosted additionally supplies passive ingest and billing policy.
  */
 export interface ChannelHostHooks {
   /** Pipeline-C rules-engine ingest for Slack channel traffic (closed). */
   slackWebhookIngestor?: import('./routes/slack.js').SlackWebhookIngestor
   /** Pipeline-C rules-engine ingest for Microsoft Teams channel traffic (closed). */
   msteamsWebhookIngestor?: import('./routes/msteams.js').MsTeamsWebhookIngestor
-  /** GCS channel-media intake for Slack pulled attachments (closed). */
+  /** Universal channel-media intake for Slack pulled attachments. */
   slackIngestChannelMediaRef?: Parameters<typeof slackRoutes>[0]['ingestChannelMediaRef']
-  /** GCS channel-media intake for Discord attachments (closed). */
+  /** Universal channel-media intake for Discord attachments. */
   discordIngestChannelMediaRef?: Parameters<typeof discordRoutes>[0]['ingestChannelMediaRef']
-  /** GCS channel-media intake for Telegram BYO files (closed; the official
-   *  shared-bot route stays closed and uses the same closed builder). */
+  /** Universal channel-media intake for Telegram BYO files. */
   telegramIngestChannelMediaRef?: Parameters<typeof telegramByoRoutes>[0]['ingestChannelMediaRef']
   /** Recording-to-brain transcription + credit surcharge (closed). */
   recordingIngest?: import('./routes/telegram-byo.js').ChannelRecordingIngest
@@ -907,6 +923,19 @@ export interface BootContext {
   ingestRulesStore: ReturnType<typeof createIngestRulesStore>
   gdriveFilesStore: GDriveFilesStore | undefined
   filesApi: ReturnType<typeof createFilesApi> | null
+  /** Existing backend-agnostic resolver used by files, channel media, and recordings. */
+  filesResolver: FilesClientResolver | null
+  /** App-default GCS/local client for legacy refs without a storageUri. */
+  filesBlobClient: GcsFilesClient | null
+  /** Open Pipeline B ingestor built over this boot's store graph. */
+  brainEpisodeIngestor: BrainEpisodeIngestor | undefined
+  /** Open recording queue operations for edition-specific routes. */
+  recordingJobs: {
+    enqueue: typeof enqueueRecordingJob
+    claim: typeof claimNextRecordingJob
+    markDone: typeof markRecordingJobDone
+    markFailed: typeof markRecordingJobFailed
+  }
   entityKindClassifier: ReturnType<typeof createEntityKindClassifier>
   workflowEventDispatcher: WorkflowEventDispatcher
   voiceTranscription: { enabled: boolean; apiKey: string; backend?: MediaBackend; model: string | undefined }
@@ -2801,14 +2830,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const brainRetrievalTools = createRetrievalTools(retrievalStore)
 
   // ── Workspace filesystem ──
-  const LOCAL_FILES_DIR = join(tmpdir(), 'sidanclaw-files')
+  const configuredLocalFilesDir = env.LOCAL_FILES_DIR?.trim()
+  const localFilesDir = resolveLocalFilesBaseDir(configuredLocalFilesDir)
   const filesBlobClient = env.GCS_FILES_BUCKET
     ? createGcsFilesClient({ bucket: env.GCS_FILES_BUCKET, projectId: process.env.GOOGLE_CLOUD_PROJECT })
-    : process.env.K_SERVICE
+    : process.env.K_SERVICE && !configuredLocalFilesDir
       ? null
-      : createLocalFilesClient({ baseDir: LOCAL_FILES_DIR })
+      : createLocalFilesClient({ baseDir: localFilesDir })
   if (filesBlobClient && !env.GCS_FILES_BUCKET) {
-    console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${LOCAL_FILES_DIR} (dev only).`)
+    const mode = configuredLocalFilesDir ? 'configured self-hosted storage' : 'ephemeral dev fallback'
+    console.warn(`[files] GCS_FILES_BUCKET unset — using local-disk file storage at ${localFilesDir} (${mode}).`)
   }
   let brainFileTools:
     | Pick<
@@ -2825,7 +2856,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // credential. See docs/plans/byo-google-storage.md.
     const defaultFilesResolver = createSingletonFilesClientResolver(
       filesBlobClient,
-      env.GCS_FILES_BUCKET ?? 'local-dev',
+      env.GCS_FILES_BUCKET ?? localFilesDir,
+      env.GCS_FILES_BUCKET ? undefined : 'file',
     )
     const lookupStorageBinding = async (workspaceId: string): Promise<WorkspaceStorageBinding | null> => {
       // A binding resolves only while we hold the key. Disconnect wipes the key
@@ -2852,6 +2884,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
             endpoint: creds.endpoint,
             forcePathStyle: creds.forcePathStyle,
           }
+        }
+      }
+      const localInst = await connectorInstanceStore.findByWorkspaceProviderSystem(workspaceId, 'local')
+      if (localInst) {
+        const creds = await connectorInstanceStore.getAuthCredentialsSystem(localInst.id)
+        if (creds && creds.type === 'local') {
+          return { kind: 'local', path: creds.path }
         }
       }
       return null
@@ -3594,8 +3633,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     }))
   }
 
-  if (filesBlobClient) {
-    app.use('/api/account/avatar', accountAvatarPublicRoutes(filesBlobClient))
+  if (filesBlobClient && filesResolver) {
+    app.use('/api/account/avatar', accountAvatarPublicRoutes({
+      blobClient: filesBlobClient,
+      filesResolver,
+    }))
   }
   app.use('/api/account', requireAuth(env.JWT_SECRET), accountRoutes({
     linkedAccountStore,
@@ -3603,6 +3645,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     getTelegramBotUsername,
     getWhatsappOfficialNumber: ports.getWhatsappOfficialNumber,
     blobClient: filesBlobClient ?? undefined,
+    filesResolver: filesResolver ?? undefined,
+    workspaceMembership: getWorkspaceMembershipWithClearanceSystem,
   }))
 
   // Built-in connector lifecycle (list / store-credentials / disconnect /
@@ -3621,6 +3665,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         },
       },
       s3Byo: {
+        requireWorkspaceAdmin: async (userId, workspaceId) => {
+          const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
+          return m?.role === 'owner' || m?.role === 'admin'
+        },
+      },
+      localStorage: {
         requireWorkspaceAdmin: async (userId, workspaceId) => {
           const m = await getWorkspaceMembershipWithClearanceSystem(userId, workspaceId)
           return m?.role === 'owner' || m?.role === 'admin'
@@ -4172,6 +4222,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // same `syncCredentials` resolver the sync worker uses.
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
+    allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,
     connectorInstanceStore,
     connectorGrantStore,
     syncCredentials,
@@ -4884,6 +4935,60 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     : null
   if (runWorkers && fileIngestWorker) fileIngestWorker.start()
 
+  // ── Recording worker ──
+  // Always construct the drain when storage exists. If ffmpeg/ffprobe or a
+  // transcriber is unavailable, the claimed job is retried then parked FAILED
+  // with that explicit prerequisite error instead of remaining pending forever.
+  const recordingTranscribers: RecordingTranscriber[] = []
+  if (env.GEMINI_API_KEY) {
+    recordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
+  }
+  if (env.DASHSCOPE_API_KEY) {
+    recordingTranscribers.push(qwenFiletransTranscriber({ apiKey: env.DASHSCOPE_API_KEY }))
+  }
+  const recordingTranscriber = recordingTranscribers.length === 0
+    ? undefined
+    : recordingTranscribers.length === 1
+      ? recordingTranscribers[0]
+      : withTranscriberFallback(recordingTranscribers[0], ...recordingTranscribers.slice(1))
+  const recordingProcessWorker = filesResolver && filesBlobClient
+    ? createOpenRecordingProcessWorker({
+        claim: claimNextRecordingJob,
+        process: async (job) => {
+          await updateRecording(job.recordingId, { status: 'processing', lastError: null })
+          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processing' })
+          const result = await processOpenRecording(job, {
+            filesResolver,
+            fallbackStorage: filesBlobClient,
+            transcriber: recordingTranscriber,
+            brainIngestor: brainEpisodeIngestor,
+          })
+          await updateRecording(job.recordingId, {
+            status: 'processed',
+            truncated: result.truncated,
+            durationMs: result.durationMs,
+            lastError: null,
+          })
+          await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, { status: 'processed' })
+        },
+        markDone: markRecordingJobDone,
+        markFailed: async (id, error) => {
+          const result = await markRecordingJobFailed(id, error)
+          const job = await getRecordingJob(id).catch(() => null)
+          if (job) {
+            const status = result.retrying ? 'queued' : 'failed'
+            await updateRecording(job.recordingId, { status, lastError: error }).catch(() => null)
+            await mergeEpisodeSourceRef(job.actingUserId, job.recordingId, {
+              status,
+              lastError: error.slice(0, 300),
+            }).catch(() => null)
+          }
+          return result
+        },
+      })
+    : null
+  if (runWorkers && ports.runOpenRecordingWorker !== false && recordingProcessWorker) recordingProcessWorker.start()
+
   // ── file_cache reaper ──
   // Cached files are read with an `expires_at > now()` filter, so a lapsed row
   // is already invisible; this jittered 6h sweep reclaims its storage. Gated on
@@ -5112,6 +5217,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     ingestRulesStore,
     gdriveFilesStore,
     filesApi,
+    filesResolver,
+    filesBlobClient,
+    brainEpisodeIngestor,
+    recordingJobs: {
+      enqueue: enqueueRecordingJob,
+      claim: claimNextRecordingJob,
+      markDone: markRecordingJobDone,
+      markFailed: markRecordingJobFailed,
+    },
     entityKindClassifier,
     workflowEventDispatcher,
     voiceTranscription,
@@ -5371,6 +5485,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     externalSinkRelay.stop()
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
+    recordingProcessWorker?.stop()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
