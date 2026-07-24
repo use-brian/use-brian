@@ -18,7 +18,7 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
+import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -31,6 +31,7 @@ import type { AssistantConnectorStore } from '../db/assistant-connector-store.js
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
 import { workspacePolicyAsSettingsStore } from '../db/workspace-tool-policy-store.js'
 import { discoverMcpServer, callRemoteMcpTool } from './client.js'
+import { discoverCliServer, callCliMcpTool, type CliServerParams } from './cli-transport.js'
 import { gateToolsOnActionGrants } from '../safety/assert-action-allowed.js'
 import { createHealthReporter, wrapToolsWithHealthProbe, connectorReconnectNotice, classifyConnectorAuthError, type HealthReporter } from './connector-health.js'
 import { buildConnectorAuthHeaders, mergeValidatedHeaders, preflightHeadersToRecord, actorIdentityHeaders, type ActorIdentity } from './auth-headers.js'
@@ -716,6 +717,74 @@ export async function injectMcpTools(params: {
       console.debug(`[mcp-inject] granted custom MCP ${name}: discovered ${server.tools.length} tools`)
     } catch (err) {
       console.error(`[mcp-inject] granted custom MCP discovery failed (${name}):`, err)
+    }
+  }
+
+  // ── CLI connectors (MCP stdio — OSS edition) ─────────────────
+  // Local binaries that speak MCP over stdin/stdout. Discovered like
+  // remote custom MCPs but dispatched via subprocess. Each connected
+  // CLI instance becomes a LocalSource with wrapMcpTools policy
+  // enforcement. Multi-instance: each connected `provider='cli'` row
+  // is its own source keyed by its label.
+  // See docs/architecture/integrations/cli-connector.md.
+  const cliLocalSources: LocalSource[] = []
+  {
+    const cliInstances = connectors.filter(
+      (c) => c.connectorId === 'cli' && c.connected,
+    )
+    if (cliInstances.length > 0 && connectorInstanceStore) {
+      const cliDiscoveries = await Promise.allSettled(
+        cliInstances.map(async (inst) => {
+          const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+          if (!creds || typeof creds !== 'object') return null
+          const credObj = creds as Record<string, unknown>
+          if (credObj.type !== 'cli' || typeof credObj.binaryPath !== 'string') return null
+
+          const serverParams: CliServerParams = {
+            binaryPath: credObj.binaryPath,
+            args: Array.isArray(credObj.args) ? (credObj.args as string[]) : undefined,
+            env: (inst.config?.env as Record<string, string>) ?? undefined,
+            cwd: typeof inst.config?.cwd === 'string' ? inst.config.cwd : undefined,
+            timeoutMs: typeof inst.config?.timeoutMs === 'number' ? inst.config.timeoutMs : undefined,
+          }
+
+          const cacheKey = `${userId}:cli:${inst.id}:${inst.updatedAt?.getTime() ?? 0}`
+          let server = getCachedDiscovery(cacheKey)
+          if (!server) {
+            server = await Promise.race([
+              discoverCliServer(serverParams, inst.name),
+              new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error(`CLI discovery timeout for ${inst.name}`)), DISCOVERY_TIMEOUT),
+              ),
+            ])
+            setCachedDiscovery(cacheKey, server)
+          }
+
+          const wrappedTools = wrapMcpTools({
+            server,
+            settingsStore,
+            assistantId,
+            userId,
+            callMcpTool: (_serverName, toolName, input) =>
+              callCliMcpTool(serverParams, toolName, input),
+          })
+
+          return { label: inst.name, tools: wrappedTools }
+        }),
+      )
+
+      for (const result of cliDiscoveries) {
+        if (result.status === 'fulfilled' && result.value) {
+          cliLocalSources.push({
+            kind: 'local',
+            serverName: result.value.label,
+            tools: result.value.tools,
+          })
+          console.debug(`[mcp-inject] CLI ${result.value.label}: ${result.value.tools.length} tools`)
+        } else if (result.status === 'rejected') {
+          console.error('[mcp-inject] CLI connector discovery failed:', result.reason)
+        }
+      }
     }
   }
 

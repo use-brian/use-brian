@@ -45,7 +45,7 @@ export type BuiltinToolDefaultPolicy = 'allow' | 'ask'
  * connector auth", docs/plans/byo-google-storage.md, and
  * docs/plans/byo-s3-storage.md.
  */
-export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs', 's3', 'imap', 'local'] as const
+export const CONNECTOR_AUTH_TYPES = ['none', 'oauth', 'bearer', 'custom_header', 'gcs', 's3', 'imap', 'local', 'cli'] as const
 export type ConnectorAuthType = (typeof CONNECTOR_AUTH_TYPES)[number]
 
 export type BuiltinConnectorTool = {
@@ -229,6 +229,7 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
   gcs: [],
   s3: [],
   local: [],
+  cli: [],
   // Computer use — governance display for the browser/sandbox tool surface
   // (docs/architecture/engine/computer-use.md §3). Boot-injected like `files`
   // (see BOOT_INJECTED_BUILTIN_TOOLS below), NOT through mcp/inject.ts.

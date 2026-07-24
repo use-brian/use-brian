@@ -110,6 +110,7 @@ export type ConnectorCredentials =
       forcePathStyle?: boolean
     }
   | { type: 'local'; path: string }
+  | { type: 'cli'; binaryPath: string; args?: string[] }
   | { type: 'none' }
 
 /** Normalize a decrypted credentials blob into the typed union. */
@@ -186,6 +187,16 @@ export function normalizeStoredCredentials(raw: unknown): ConnectorCredentials |
       return { type: 'none' }
     case 'local':
       return typeof obj.path === 'string' ? { type: 'local', path: obj.path } : null
+    case 'cli':
+      return typeof obj.binaryPath === 'string'
+        ? {
+            type: 'cli',
+            binaryPath: obj.binaryPath,
+            ...(Array.isArray(obj.args) && obj.args.every((a: unknown) => typeof a === 'string')
+              ? { args: obj.args as string[] }
+              : {}),
+          }
+        : null
     case 'oauth':
     case undefined:
       // Legacy blobs predate the discriminator — every stored pair is OAuth-shaped.
