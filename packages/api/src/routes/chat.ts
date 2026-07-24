@@ -1923,6 +1923,13 @@ export function chatRoutes(options: WebChatOptions): Router {
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
 
         if (validFiles.length > 0) {
+          // Does the model this turn resolves to read `application/pdf` inline?
+          // Gemini (inlineData) and Anthropic do; the OpenAI-compatible
+          // providers (Qwen/DashScope) don't — they reject a PDF sent as an
+          // image_url with HTTP 400. Routing is per-model, so this is resolved
+          // from the requested model's registry row, not the deployment.
+          const turnProviderKey = registryRow(resolveModel(requestedModel, userPlan, 'ok'))?.provider ?? ''
+          const providerReadsPdfInline = !turnProviderKey.startsWith('openai-compat')
           const textParts: string[] = []
           for (const file of validFiles) {
             const isImage = file.mimeType.startsWith('image/')
@@ -1948,7 +1955,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 textParts.push(
                   `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[This ${isPdf ? 'PDF' : 'image'} was uploaded before the current file pipeline and can't be read. Ask the user to re-upload it.]</attached_file>`,
                 )
-              } else if (isPdf && options.inlineDocumentDistill) {
+              } else if (isPdf && options.inlineDocumentDistill && !providerReadsPdfInline) {
                 // This provider can't ingest a PDF inline — only Gemini reads
                 // `application/pdf` as inlineData; the OpenAI-compatible
                 // adapter maps every image block to an `image_url` data URL,

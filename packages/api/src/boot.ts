@@ -1114,11 +1114,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
-  // Only Gemini ingests `application/pdf` inline; the OpenAI-compatible adapter
-  // sends every image block as an `image_url`, which Qwen-VL rejects. On a
-  // Qwen-only (DashScope) deployment, chat distills inline PDFs to text first.
-  const inlineDocumentDistill =
-    mediaBackend.kind === 'dashscope' ? { backend: mediaBackend } : undefined
+  // Only Gemini/Anthropic ingest `application/pdf` inline; the OpenAI-compatible
+  // adapter (Qwen) sends every image block as an `image_url` and rejects a PDF.
+  // The media backend is always available for distillation; chat.ts decides
+  // per-turn whether the resolved model needs it (routing is per-model, so this
+  // can't be gated on the deployment).
+  const inlineDocumentDistill = { backend: mediaBackend }
   const memoryStore = createDbMemoryStore()
   const brainCandidateStore = ports.brainCandidateStore
   const memoryRecallEventsStore = createMemoryRecallEventsStore()
