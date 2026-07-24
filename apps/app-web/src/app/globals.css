@@ -708,11 +708,10 @@
   .doc-public-body ol > li::before {
     content: counter(list-item, decimal) ".";
     position: absolute;
-    left: -30px;
-    width: 14px;
+    right: calc(100% + 16px);
     top: 0;
     padding: 3px 0;
-    text-align: right;
+    white-space: nowrap;
     color: currentColor;
     font-variant-numeric: tabular-nums;
   }
@@ -980,18 +979,26 @@
      `::before` carries the same `padding: 3px 0` as `li > p` so the number sits
      on the row's first text line at every depth (`li` is `position: relative`).
      Style cycles decimal -> lower-alpha -> lower-roman every three levels via
-     specificity, matching the bullet cycle above. */
+     specificity, matching the bullet cycle above.
+     GEOMETRY IS `right`-ANCHORED, NOT a fixed-width `left` column: the marker's
+     right edge sits exactly 16px left of the li's left edge (== the text edge),
+     and `white-space: nowrap` forbids wrapping. A fixed `width: 14px` +
+     `text-align: right` box measured (2026-07-24, headless): tabular "1" + "."
+     overflow 14px, and the "." WRAPPED to a second line inside the ::before box,
+     rendering "1" with no period on its row and painting the orphaned period one
+     row below (a stray dot floating in the marker column). Right-anchoring keeps
+     the 16px gap for ANY digit count, with wide numbers growing leftward into
+     the margin - exactly Notion's column behaviour. */
   .doc-collab-editor .ProseMirror ol {
     list-style: none;
   }
   .doc-collab-editor .ProseMirror ol > li::before {
     content: counter(list-item, decimal) ".";
     position: absolute;
-    left: -30px;
-    width: 14px;
+    right: calc(100% + 16px);
     top: 0;
     padding: 3px 0;
-    text-align: right;
+    white-space: nowrap;
     color: currentColor;
     font-variant-numeric: tabular-nums;
   }

@@ -36,9 +36,18 @@
  * presses already known to be an area select (`pressStartsDefiniteAreaSelect` —
  * the margin, or empty space). The browser then never starts a selection gesture
  * at all. A press on a block's own text is undecidable at mousedown and is left
- * alone, so ordinary word-level selection is untouched; the every-move clear and
- * `needsBandResync` remain as the defense for that one case, where the drag can
- * still convert to an area select by crossing a block boundary.
+ * alone, so ordinary word-level selection is untouched. When such a drag DOES
+ * cross a block boundary and engage, the in-flight native gesture is killed by
+ * `pointer-events: none` on the editor content for the rest of the drag
+ * (`setSuppressed`): the browser re-extends its selection by hit-testing the
+ * text under the cursor, and content removed from hit-testing gives it nothing
+ * to re-extend against — so the every-move clear finally sticks and the band
+ * paints. Measured headless 2026-07-24 (trusted CDP input): without it the
+ * text-start cross-block drag grew a 100-char visible native selection with
+ * zero bands and ended with NOTHING selected; with it the band paints from the
+ * engage tick and survives mouseup. The every-move clear and `needsBandResync`
+ * remain as the second layer for the sub-frame between engage and the style
+ * taking effect.
  *
  * Cancelling the browser's gesture also cancels the **auto-scroll** that used to
  * ride along with it, so the gesture drives its own (`autoScrollTick`) on a frame
@@ -520,11 +529,29 @@ export const BlockAreaSelect = Extension.create({
             dom.focus({ preventScroll: true });
           };
 
-          /** Belt to the clear's braces: stops the browser starting a *fresh*
-           *  selection while we own the gesture. Inert against the one already in
-           *  flight (see the module note), which is why it is not the whole fix. */
+          /** Engaged-drag suppression, two halves:
+           *  - `user-select: none` stops the browser starting a *fresh* selection
+           *    while we own the gesture (inert against one already in flight).
+           *  - `pointer-events: none` is what finally KILLS the in-flight gesture
+           *    for a drag that started ON a block's text (the one press
+           *    `pressStartsDefiniteAreaSelect` cannot preventDefault). The
+           *    browser re-extends its selection each frame by HIT-TESTING the
+           *    text under the cursor; with the editor content removed from
+           *    hit-testing there is nothing to re-extend against, so the
+           *    every-move clear finally sticks and the dispatched
+           *    `NodeRangeSelection` band survives to paint. Measured headless
+           *    2026-07-24: without it — native selection grows 51→95→100 chars,
+           *    ZERO bands, and mouseup ends with nothing selected; with it — the
+           *    native selection freezes at engage, the band paints on the next
+           *    move and holds through mouseup. Our own gesture is unaffected:
+           *    its listeners ride the document (capture) and the band geometry
+           *    is `getBoundingClientRect`, neither of which consults
+           *    pointer-events; `probe.posAt` is only read at press / while
+           *    pending, before suppression starts. Side bonus: an embed iframe
+           *    under the drag can no longer swallow the mouseup. */
           const setSuppressed = (on: boolean) => {
             dom.style.userSelect = on ? "none" : "";
+            dom.style.pointerEvents = on ? "none" : "";
           };
 
           const dispatchBand = (band: BlockBand) => {
@@ -709,6 +736,9 @@ export const BlockAreaSelect = Extension.create({
             destroy() {
               stopAutoScroll();
               clearMarquee();
+              // A destroy mid-drag (view torn down while engaged) must not
+              // strand the suppression styles on a DOM node React may reuse.
+              setSuppressed(false);
               pane.removeEventListener("mousedown", onDown, true);
               untrackPointer();
             },
