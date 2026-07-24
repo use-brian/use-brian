@@ -115,7 +115,6 @@ export function pageIdFromInAppHref(
  *                       The recordings BOARD is a doc-shell panel, not this;
  *                       classified so the detail route is not an unclassified
  *                       hole in the sidebar's highlight logic.
- *   - `'knowledge-base'``/knowledge-base/...`
  *   - `'inbox'`         the legacy `/inbox` route (now a flyout; the route
  *                       redirects to `/p`, but the segment is still classified)
  *   - `null`            the workspace root, a non-workspace path, or nullish
@@ -132,7 +131,6 @@ export type WorkspaceSurface =
   | "goals"
   | "approvals"
   | "recordings"
-  | "knowledge-base"
   | "inbox";
 
 /** Matches the first path segment after `/w/<workspaceId>/`. */
@@ -150,7 +148,6 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "goals",
   "approvals",
   "recordings",
-  "knowledge-base",
   "inbox",
 ]);
 

@@ -405,7 +405,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
 
   // ── Wave-1 ports (plan §5.1, locked 2026-07-21; DashScope intl) ──
   //
-  // All metered-first (L14): billed 5 + ceil(cost/$0.020) credits through
+  // All metered-first (L14): billed 5 + ceil(cost/$0.040) credits through
   // the metered ledger, never CREDIT_PER_TIER (tier 'other' keeps them out
   // of the per-tier credit counts). Every row is TEXT-ONLY — the L7
   // capability gate serves vision turns via the class default. Curated

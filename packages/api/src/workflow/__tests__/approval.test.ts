@@ -60,7 +60,7 @@ function makeStores() {
         researchMode: params.researchMode ?? false,
         nameManuallySet: false,
         lifecycleState: 'active', lifecycleTransitionedAt: null, lifecycleReason: null,
-        pinned: false, digestedAt: null, digestVerdict: null,
+        pinned: false,
         createdAt: now, updatedAt: now,
       }
       workflows.set(r.id, r); return r

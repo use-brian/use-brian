@@ -3,10 +3,9 @@
  * Component tag: [COMP:a2a/transport-in-process].
  *
  * Verifies createInProcessTransport().send: the cycle / depth / budget
- * chain guards, cross-workspace mode resolution (sharing-blocked + a
- * bound mode), the input_required short-circuit, and the free vs
- * restricted completed-Task shapes. Deps (mode lookups, runConsult,
- * clock) are injected, so every path is deterministic.
+ * chain guards, the workspace boundary (cross-workspace consults are
+ * rejected outright), and the free vs restricted completed-Task shapes.
+ * Deps (runConsult, clock) are injected, so every path is deterministic.
  */
 
 import { describe, it, expect } from 'vitest'
@@ -14,30 +13,10 @@ import {
   createInProcessTransport,
   type InProcessTransportDeps,
 } from '../transport-in-process.js'
-import type { AssistantMode, ConsultRequest, ConsultResponse } from '../types.js'
-
-function mode(over: Partial<AssistantMode> = {}): AssistantMode {
-  return {
-    id: 'mode-1',
-    assistantId: 'callee-1',
-    name: 'Restricted',
-    description: null,
-    exposedTools: [],
-    freshness: 'live',
-    requireApproval: false,
-    allowOnwardConsults: false,
-    knowledgeMaxSensitivity: null,
-    memoryCategories: null,
-    createdAt: new Date('2026-05-16T00:00:00Z'),
-    updatedAt: new Date('2026-05-16T00:00:00Z'),
-    ...over,
-  }
-}
+import type { ConsultRequest, ConsultResponse } from '../types.js'
 
 function deps(over: Partial<InProcessTransportDeps> = {}): InProcessTransportDeps {
   return {
-    getConnectionModeId: async () => null,
-    getMode: async () => null,
     runConsult: async () => ({ text: 'ok' }),
     now: () => 1_700_000_000_000,
     ...over,
@@ -109,30 +88,21 @@ describe('[COMP:a2a/transport-in-process] send — chain guards', () => {
   })
 })
 
-describe('[COMP:a2a/transport-in-process] send — mode resolution', () => {
-  it('rejects a cross-workspace consult with no accepted connection', async () => {
-    const t = createInProcessTransport(deps({ getConnectionModeId: async () => undefined }))
-    const res = await t.send(request({ callerWorkspace: 'ws-A', targetWorkspace: 'ws-B' }))
-    expect(res.task.status.state).toBe('failed')
-    expect(failureText(res)).toContain('connection')
-  })
-
-  it('resolves a bound mode cross-workspace and hands it to runConsult', async () => {
-    const m = mode({ id: 'mode-42' })
-    let seenMode: AssistantMode | null = null
+describe('[COMP:a2a/transport-in-process] send — workspace boundary', () => {
+  it('rejects a cross-workspace consult outright', async () => {
+    let ran = false
     const t = createInProcessTransport(
       deps({
-        getConnectionModeId: async () => 'mode-42',
-        getMode: async () => m,
-        runConsult: async ({ mode: resolved }) => {
-          seenMode = resolved
-          return { text: 'answered' }
+        runConsult: async () => {
+          ran = true
+          return { text: 'should not run' }
         },
       }),
     )
     const res = await t.send(request({ callerWorkspace: 'ws-A', targetWorkspace: 'ws-B' }))
-    expect(res.task.status.state).toBe('completed')
-    expect(seenMode).toBe(m)
+    expect(res.task.status.state).toBe('failed')
+    expect(failureText(res)).toContain('Cross-workspace')
+    expect(ran).toBe(false)
   })
 })
 
@@ -150,13 +120,5 @@ describe('[COMP:a2a/transport-in-process] send — result shaping', () => {
     const res = await t.send(request({ capabilityId: 'cap-1', depth: 1 }))
     expect(res.task.status.state).toBe('completed')
     expect(res.task.history).toBeUndefined()
-  })
-
-  it('short-circuits to an input_required Task when runConsult queues for approval', async () => {
-    const t = createInProcessTransport(
-      deps({ runConsult: async () => ({ text: '', inputRequired: true }) }),
-    )
-    const res = await t.send(request())
-    expect(res.task.status.state).toBe('input_required')
   })
 })

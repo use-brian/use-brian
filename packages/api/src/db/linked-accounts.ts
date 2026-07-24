@@ -110,7 +110,8 @@ export type MergeReason =
  * is provider-shaped:
  *
  *   - `api` — uses `partnerKeyId`-namespaced auth_provider_id format
- *     `api:<keyId>:<externalUserId>`. See docs/architecture/features/shadow-claim.md.
+ *     `api:<keyId>:<externalUserId>` (historical: the partner-mediated
+ *     shadow-claim flow, retired 2026-07-24; no live caller passes `api`).
  *   - everything else (`slack`, `telegram`, `whatsapp`, future channels) — finds
  *     users with either old-style `auth_provider=<provider>` or new-style
  *     `auth_provider='channel'` + `auth_provider_id='<provider>:<id>'`.

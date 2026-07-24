@@ -86,7 +86,6 @@ export const WORKSPACE_FLUSH_TABLES = [
   'sensitivity_reclassifications',
   'memory_verifications',
   'memory_recall_events',
-  'retrieval_miss',
   'brain_candidates',
   'brain_verifications',
   // Brain graph — entities/links/connector_actions before episodes (NO ACTION
@@ -105,7 +104,6 @@ export const WORKSPACE_FLUSH_TABLES = [
   'goal_recipes',
   // Knowledge
   'kb_chunks',
-  'kb_gap_candidate',
   'knowledge_entries',
   // Evolution logs (describe the data being deleted)
   'workspace_brain_evolution',
@@ -124,12 +122,10 @@ export const WORKSPACE_FLUSH_TABLES = [
 export const ASSISTANT_SCOPED_FLUSH_TABLES = [
   'scheduled_jobs',
   'domain_summaries',
-  'sharing_snapshots',
   'external_entities',
   'deferred_confirmations',
   'distribution_events',
   'episodic_memories',
-  'assistant_pending_messages', // target_assistant_id / source_assistant_id
 ] as const
 
 /**
@@ -163,7 +159,6 @@ export const WORKSPACE_FLUSH_PRESERVED_TABLES = [
   'entity_types',
   'doc_themes',
   'home_dock_layouts',
-  'model_routing_config',
   'classifier_rule_supersede_counters',
   // Capabilities
   'workspace_skills',
@@ -246,17 +241,10 @@ export async function flushWorkspaceData(
         deleted[table] = 0
         continue
       }
-      const result =
-        table === 'assistant_pending_messages'
-          ? await client.query(
-              `DELETE FROM assistant_pending_messages
-                WHERE target_assistant_id = ANY($1::uuid[])
-                   OR source_assistant_id = ANY($1::uuid[])`,
-              [assistantIds],
-            )
-          : await client.query(`DELETE FROM ${table} WHERE assistant_id = ANY($1::uuid[])`, [
-              assistantIds,
-            ])
+      const result = await client.query(
+        `DELETE FROM ${table} WHERE assistant_id = ANY($1::uuid[])`,
+        [assistantIds],
+      )
       deleted[table] = result.rowCount ?? 0
     }
 

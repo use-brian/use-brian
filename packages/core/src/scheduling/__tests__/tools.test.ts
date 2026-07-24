@@ -175,8 +175,6 @@ function makeFakeWorkflowStore(): WorkflowStore & { rows: WorkflowRecord[] } {
         lifecycleTransitionedAt: null,
         lifecycleReason: null,
         pinned: false,
-        digestedAt: null,
-        digestVerdict: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       }

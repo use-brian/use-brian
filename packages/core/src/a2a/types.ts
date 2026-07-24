@@ -89,7 +89,7 @@ export type Artifact = {
 export type TaskState =
   | 'submitted'
   | 'working'
-  /** Destination is asking caller for more (ask-mode share, owner approval). */
+  /** Destination is asking caller for more input (A2A spec state; unused by the in-process transport). */
   | 'input_required'
   /** External caller needs auth (deferred — external endpoints only). */
   | 'auth_required'
@@ -118,45 +118,6 @@ export type Task = {
    * Restricted-mode capability invocations leave this undefined.
    */
   history?: A2AMessage[]
-}
-
-// ── Modes (destination-side access policy) ──────────────────────────────
-
-/**
- * An owner-curated bundle of (exposed_tools, freshness, data scopes, policy)
- * that a destination assistant offers to inbound callers. A connection can
- * bind to exactly one mode (decision #4); absence of binding = full access
- * (free, decision #3). When a `ConsultRequest` lands on the destination, the
- * destination resolves the caller's connection's mode and applies its filter
- * before running the query loop.
- *
- * Modes are NOT on the wire — they're destination config. The wire format
- * (`ConsultRequest`) carries caller identity; the destination looks up the
- * mode-bound connection and applies the mode locally. See
- * `docs/architecture/integrations/a2a.md` and
- * `docs/architecture/integrations/a2a.md`.
- */
-export type AssistantMode = {
-  id: string
-  assistantId: string
-  name: string
-  description: string | null
-  /** Tool names the destination's query loop is allowed to use under this mode. */
-  exposedTools: string[]
-  freshness: 'live' | 'snapshot'
-  /**
-   * If true, every consult on a connection bound to this mode enters
-   * `Task.status.state='input_required'` and waits for owner approval.
-   * Replaces today's per-category `share_mode='ask'`.
-   */
-  requireApproval: boolean
-  allowOnwardConsults: boolean
-  /** Knowledge sensitivity ceiling. NULL = unrestricted. */
-  knowledgeMaxSensitivity: string | null
-  /** Memory categories. NULL = unrestricted, [] = none, list = specific. */
-  memoryCategories: string[] | null
-  createdAt: Date
-  updatedAt: Date
 }
 
 // ── Capability surface ──────────────────────────────────────────────────

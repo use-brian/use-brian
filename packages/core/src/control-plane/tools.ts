@@ -23,7 +23,6 @@ export type ControlPlaneTools = {
   listConnectors: Tool
   listSkills: Tool
   listChannels: Tool
-  listModes: Tool
 }
 
 /** Resolve the acting (userId, workspaceId) pair or a tool-friendly error. */
@@ -121,23 +120,5 @@ export function createControlPlaneTools(reader: ControlPlaneReader): ControlPlan
     },
   })
 
-  const listModes = buildTool({
-    name: 'listModes',
-    description:
-      'List the consult modes defined on one assistant of this workspace: id, name, ' +
-      'description, freshness (live / snapshot), and whether invocations require approval.',
-    inputSchema: z.object({
-      assistantId: z.string().uuid().describe('The assistant id (from listAssistants)'),
-    }),
-    isReadOnly: true,
-    isConcurrencySafe: true,
-    async execute(input, ctx) {
-      const p = principalFrom(ctx)
-      if ('error' in p) return { data: p.error, isError: true }
-      const rows = await reader.listModes(p.userId, p.workspaceId, input.assistantId)
-      return { data: { modes: rows } }
-    },
-  })
-
-  return { listAssistants, getAssistant, listConnectors, listSkills, listChannels, listModes }
+  return { listAssistants, getAssistant, listConnectors, listSkills, listChannels }
 }

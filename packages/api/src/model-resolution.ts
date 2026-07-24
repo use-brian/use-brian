@@ -254,10 +254,10 @@ function allowedModelsForPlan(plan: string): Set<string> {
  *
  * Derived from `PLAN_ALLOWED_MODELS` rather than hard-coded so it stays
  * correct if a plan's tier access changes: any plan that may use Pro defaults
- * to Pro, everything else to Standard. This is the per-plan resolver default;
- * the per-workspace `minimum_tier` override (migration 151) is a separate,
- * not-yet-wired follow-up — see `docs/architecture/platform/cost-and-pricing.md`
- * → "Model routing".
+ * to Pro, everything else to Standard. This is the per-plan resolver default
+ * (the never-wired per-workspace `minimum_tier` override was retired with the
+ * model-routing tables, migration 374) — see
+ * `docs/architecture/platform/cost-and-pricing.md` → "Model routing".
  */
 export function defaultTierForPlan(plan: string): string {
   const allowed = allowedModelsForPlan(plan)

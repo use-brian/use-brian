@@ -86,7 +86,7 @@ function notifyJobChange(jobId: string, assistantId: string, action: 'create' | 
  *
  * Archive, not delete: reversible via PATCH `lifecycleState:'active'`; the only
  * hard delete stays the sweep's grace-gated, digest-gated one-off delete. The
- * `pinned = false` guard honors the user's pin veto, mirroring `decideLifecycle`
+ * `pinned = false` guard honors the user's pin veto
  * and `applyLifecycleTransitionSystem` (which also flips `enabled = false` on
  * archive). Best-effort like every cross-table write here — a failure logs and
  * never affects the job write. Spec: docs/architecture/features/

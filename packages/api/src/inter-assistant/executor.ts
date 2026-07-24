@@ -14,8 +14,8 @@
  *   today (every `ConsultRequest` producer initializes a fresh
  *   `{ path: [], depth: 0, budget }`), so the tool-level strip is what
  *   actually keeps free-mode delegation single-hop.
- * - Mode-scoped tools: only tools listed in mode.exposedTools (mode==null
- *   means free / full caller-visible tool surface).
+ * - Full caller-visible tool surface (the destination-side mode filter was
+ *   retired 2026-07-24), optionally narrowed by a per-consult allow-list.
  * - Turn-limited: max 5 turns.
  * - Runs under callee owner's userId for RLS.
  * - MCP tools injected per-callee (owner's credentials).
@@ -29,7 +29,6 @@ import type {
   MemoryStore,
   Message,
   CapabilityStore,
-  AssistantMode,
   ResearchDepthConfig,
   WorkerRunsStore,
 } from '@use-brian/core'
@@ -41,7 +40,6 @@ import {
   calculateCost,
   sanitize,
   canRead,
-  filterToolsForMode,
   filterToolsByAllowList,
   filterToolsByCapabilities,
   createMemoryTools,
@@ -229,12 +227,6 @@ export type CalleeExecutorOptions = {
 export type CalleeQueryParams = {
   callerAssistantId: string
   calleeAssistantId: string
-  /**
-   * Resolved mode for the (caller, callee) connection.
-   *   - `null`: free mode (no mode bound) — full caller-visible tool surface.
-   *   - non-null: filter tools to mode.exposedTools, apply data scopes, etc.
-   */
-  mode: AssistantMode | null
   question: string
   callerSessionId: string
   /**
@@ -647,18 +639,18 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       }
     }
 
-    // 4. Filter tools to the bound mode (or no filter for free mode).
-    const modeTools = filterToolsForMode(calleeTools, params.mode)
+    // 4. The callee's consult tool surface (full caller-visible set — the
+    // destination-side mode filter was retired 2026-07-24).
+    const modeTools = new Map(calleeTools)
 
-    // For free mode: include memory READ on every consult. A WORKFLOW-origin
-    // consult (`assistant_call` step / scheduled-job reminder, both arrive
-    // with `callerChannelType === 'workflow'`) ALSO gets memory WRITE — a
+    // Include memory READ on every consult. A WORKFLOW-origin consult
+    // (`assistant_call` step / scheduled-job reminder, both arrive with
+    // `callerChannelType === 'workflow'`) ALSO gets memory WRITE — a
     // "save this to memory" / "load to the brain" step otherwise has no tool
     // to call and silently no-ops (the structural hole behind the
     // workflow-reliability incident: callees could read but never persist).
-    // Ordinary askAssistant free-mode consults keep read-only memory; write
-    // stays workflow-scoped. For restricted mode the mode's exposedTools list
-    // is the source of truth (the owner lists `getMemory` / `saveMemory`).
+    // Ordinary askAssistant consults keep read-only memory; write stays
+    // workflow-scoped.
     //
     // Read ceilings are resolved once here when brain retrieval tools are
     // injected below, and threaded onto the query-loop ToolContext so the
@@ -667,7 +659,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     let retrievalReadCeilings:
       | Awaited<ReturnType<typeof resolveReadCeilingsSystem>>
       | null = null
-    if (params.mode === null) {
+    {
       // Workflow-origin consults auto-tag every created memory `workflow:<id>`
       // (memory continuity — the deterministic key prior-run visibility reads
       // back). Ordinary askAssistant consults get no injected tag.
@@ -772,8 +764,8 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
 
     // 4b. Per-consult tool allow-list. When the caller pins `allowedTools`
     // (a workflow `assistant_call.tools` restriction), the callee is narrowed
-    // to exactly that set — applied last so it overrides the mode filter and
-    // the free-mode memory default. Absent → unchanged.
+    // to exactly that set — applied last so it overrides the default consult
+    // surface and the memory default. Absent → unchanged.
     const finalTools = filterToolsByAllowList(modeTools, params.allowedTools)
 
     // Fail fast when a pinned allow-list survives as NOTHING — the step's
@@ -811,7 +803,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // workflow steps (the DAG orchestrates each hop), never through a callee
     // spawning a nested askAssistant. Applied to ALL callees (free-mode +
     // workflow `assistant_call`, which is itself free-mode in V1) and applied
-    // last so it overrides even a mode/allow-list that mistakenly named them.
+    // last so it overrides even an allow-list that mistakenly named them.
     //
     // This — not the transport's chain gates — is the operative bound: both
     // `ConsultRequest` producers (`tools/base/ask-assistant.ts` +
@@ -903,7 +895,7 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     if (calleeAssistant.kind === 'app') {
       const { resolveLayer1Prompt } = await import('../routes/_prompt-builder.js')
       const soul = resolveLayer1Prompt({
-        defaultPrompt: buildCalleeSystemPrompt({ callerAssistantName: callerName, mode: params.mode }),
+        defaultPrompt: buildCalleeSystemPrompt({ callerAssistantName: callerName }),
         assistant: {
           kind: calleeAssistant.kind,
           name: calleeAssistant.name,
@@ -918,7 +910,6 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     } else {
       systemPrompt = buildCalleeSystemPrompt({
         callerAssistantName: callerName,
-        mode: params.mode,
       })
     }
 
@@ -935,15 +926,11 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
       timeZoneName: 'short',
     })
 
-    // Memory context: personal always; workspace memory included when mode
-    // permits (free mode = always; restricted mode = mode.memoryCategories
-    // is null = unrestricted; empty/specific list = excluded for now since
-    // per-category memory filtering needs deeper memory-store plumbing —
-    // tracked for a follow-up).
+    // Memory context: personal always; workspace memory whenever the callee
+    // is workspace-scoped (consults are same-workspace, full workspace trust).
     const includeWorkspaceMemories =
       calleeAssistant.workspaceId !== null &&
-      calleeAssistant.workspaceId !== undefined &&
-      (params.mode === null || params.mode.memoryCategories === null)
+      calleeAssistant.workspaceId !== undefined
 
     const calleeCtx = {
       workspaceId: calleeAssistant.workspaceId ?? '',

@@ -1,15 +1,12 @@
 /**
  * Inter-assistant communication tools.
  *
- * Built-in tools for querying connected assistants. Mode-based since
- * migration 111 — the per-category sharing model (calendar / knowledge /
- * tasks / memories with allow/ask/block share modes) was replaced by
- * destination-side modes that bundle exposed_tools + freshness + policy.
- *
- * The wire format is A2A (`ConsultTransport.send()`); the destination's
- * `runConsult` handles mode resolution, require_approval routing, and
- * query-loop execution. See:
- * - docs/architecture/integrations/a2a.md
+ * Built-in tools for querying connected assistants. Connections are
+ * workspace-internal (auto-seeded primary → sibling edges); the wire format
+ * is A2A (`ConsultTransport.send()`), and the destination's `runConsult`
+ * handles query-loop execution. The destination-side mode/approval policy
+ * layer was retired 2026-07-24 — same-workspace consults run with full
+ * workspace trust. See:
  * - docs/architecture/integrations/a2a.md
  * - docs/architecture/channels/inter-assistant.md
  */
@@ -24,10 +21,7 @@ export type InterAssistantDeps = {
   /** Check if caller follows callee (accepted status). */
   isFollowing: (followerAssistantId: string, followingAssistantId: string) => Promise<boolean>
 
-  /**
-   * List assistants I follow (accepted), with mode info for each.
-   * `mode` is null when the connection is free (no mode bound).
-   */
+  /** List assistants I follow (accepted). */
   getFollowing: (assistantId: string) => Promise<Array<{
     followingAssistantId: string
     /** The assistant's workspaceId — needed for ConsultRequest.target.workspaceId. */
@@ -46,32 +40,17 @@ export type InterAssistantDeps = {
     followingAppType?: 'distribution' | 'doc' | null
     /** Follower-side note set by the caller's owner (e.g. "for restaurant picks"). */
     callerNote?: string | null
-    /**
-     * Mode bound to this connection, if any. Null = free.
-     * `requireApproval` is surfaced so the calling LLM can hint to the user
-     * that approval may be needed.
-     */
-    mode: { id: string; name: string; description: string | null; requireApproval: boolean } | null
   }>>
 
-  /** A2A transport — applies cycle/depth/budget gates, mode resolution, and runs the destination's query loop. */
+  /** A2A transport — applies cycle/depth/budget gates and runs the destination's query loop. */
   consultTransport: ConsultTransport
-
-  /** Get a published snapshot for a callee's category. (Snapshots remain a separate read primitive — see Phase 3 of the migration plan.) */
-  getSnapshot?: (assistantId: string, category: string) => Promise<{ content: Record<string, unknown> } | null>
-
-  /** Generate and publish a snapshot for a category. */
-  generateAndPublishSnapshot?: (assistantId: string, userId: string, category: string) => Promise<string>
 }
-
-// Snapshot categories preserved from the legacy model (Phase 3 reformulation deferred).
-const SNAPSHOT_CATEGORIES = ['calendar', 'knowledge', 'tasks', 'memories'] as const
 
 export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
   const listConnectedAssistants = buildTool({
     name: 'listConnectedAssistants',
     description:
-      'List all assistants connected to you. Each entry includes a `purpose` string (the callee owner\'s bio), an optional `note` (your own user\'s note about why they follow that assistant), a `mode` describing the access level the callee\'s owner has granted, and a `trigger` field. Use these to decide whether the question you have is actually relevant to that assistant. If nothing in `purpose` or `note` matches the user\'s question, do NOT call askAssistant for that assistant.\n\nThe `trigger` field is decisive:\n- `trigger: "relevance"` — an assistant you explicitly follow. Call askAssistant when the user\'s question plainly matches its `purpose`/`note`.\n- `trigger: "explicit-only"` — a specialist assistant in your own workspace (e.g. a doc or feed app). NEVER call askAssistant for it on your own initiative, for relevance, summaries, or background context. Delegate ONLY when the user explicitly asks for that assistant\'s capability by name or action (e.g. "make a doc page/view", "post this to the feed"). Otherwise answer with your own tools and knowledge.',
+      'List all assistants connected to you. Each entry includes a `purpose` string (the callee owner\'s bio), an optional `note` (your own user\'s note about why they follow that assistant), and a `trigger` field. Use these to decide whether the question you have is actually relevant to that assistant. If nothing in `purpose` or `note` matches the user\'s question, do NOT call askAssistant for that assistant.\n\nThe `trigger` field is decisive:\n- `trigger: "relevance"` — an assistant you explicitly follow. Call askAssistant when the user\'s question plainly matches its `purpose`/`note`.\n- `trigger: "explicit-only"` — a specialist assistant in your own workspace (e.g. a doc or feed app). NEVER call askAssistant for it on your own initiative, for relevance, summaries, or background context. Delegate ONLY when the user explicitly asks for that assistant\'s capability by name or action (e.g. "make a doc page/view", "post this to the feed"). Otherwise answer with your own tools and knowledge.',
     inputSchema: z.object({}),
     isConcurrencySafe: true,
     isReadOnly: true,
@@ -82,7 +61,7 @@ export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
         const following = await deps.getFollowing(context.assistantId)
 
         if (following.length === 0) {
-          return { data: 'You are not following any assistants. Your user can follow other assistants via the Network tab.' }
+          return { data: 'You are not connected to any assistants. Workspace assistants are connected automatically when they join the workspace.' }
         }
 
         const results = following.map((f) => {
@@ -106,9 +85,6 @@ export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
             note,
             // Decisive gate for the model — see the tool description.
             trigger: explicitOnly ? 'explicit-only' : 'relevance',
-            mode: f.mode === null
-              ? { name: 'Free', description: 'Full access — no mode binding.', requireApproval: false }
-              : { name: f.mode.name, description: f.mode.description, requireApproval: f.mode.requireApproval },
           }
         })
 
@@ -122,10 +98,10 @@ export function createInterAssistantTools(deps: InterAssistantDeps): Tool[] {
   const askAssistant = buildTool({
     name: 'askAssistant',
     description:
-      `Ask a connected assistant a question on behalf of your user. The other assistant runs its own query loop and responds with its own knowledge, tools, and data, scoped by the mode the callee's owner has set for your connection.
+      `Ask a connected assistant a question on behalf of your user. The other assistant runs its own query loop and responds with its own knowledge, tools, and data.
 
 WHEN TO USE:
-- The user explicitly references the other assistant by name or handle ("ask DD Lobster…", "check with @fast-turtle").
+- The user explicitly references the other assistant by name ("ask DD Lobster…").
 - The user asks for data that only that assistant has access to, AND the assistant's purpose/note (from listConnectedAssistants) clearly matches the question.
 
 WHEN NOT TO USE:
@@ -133,8 +109,6 @@ WHEN NOT TO USE:
 - The user did not name the other assistant and the question is not obviously about their data.
 - The connected assistant's purpose/note does not match the topic.
 - The target's \`trigger\` (from listConnectedAssistants) is \`"explicit-only"\` and the user has NOT explicitly asked for that assistant's capability. These are specialist apps in your own workspace (e.g. doc, feed); calling them on inferred relevance, for context, or speculatively pollutes the conversation. Engage them ONLY on a direct user request to perform that capability ("create a doc view", "post to the feed").
-
-If the connection's mode requires approval, your question will be queued for the callee's owner and answered later — surface that to the user. If the connection is free or auto-approve, the response comes back inline.
 
 If unsure whether to call this, do not call it. Answer with your own tools first, and only escalate to a connected assistant when the question is plainly about their domain.`,
     inputSchema: z.object({
@@ -151,7 +125,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
         const following = await deps.isFollowing(context.assistantId, input.targetAssistantId)
         if (!following) {
           return {
-            data: 'Not following this assistant. Your user needs to follow them first via the Network tab.',
+            data: 'Not connected to this assistant. Only assistants in your own workspace are reachable.',
             isError: true,
           }
         }
@@ -166,9 +140,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
           }
         }
 
-        // 3. Build the A2A ConsultRequest. Free-mode (no capabilityId) — the
-        //    destination resolves the mode from the connection and applies its
-        //    filter at runConsult time.
+        // 3. Build the A2A ConsultRequest. Free-mode (no capabilityId).
         const request: ConsultRequest = {
           target: {
             workspaceId: target.followingWorkspaceId,
@@ -209,11 +181,6 @@ If unsure whether to call this, do not call it. Answer with your own tools first
               .join('\n') ?? ''
             return { data: text || 'The assistant did not produce a response.' }
           }
-          case 'input_required': {
-            return {
-              data: 'Your question requires the assistant owner\'s approval (the connection\'s mode is approval-gated). You will be notified when they respond.',
-            }
-          }
           case 'failed': {
             const errMsg = task.status.message?.parts
               ?.filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
@@ -221,6 +188,7 @@ If unsure whether to call this, do not call it. Answer with your own tools first
               .join(' ') ?? 'unknown error'
             return { data: `Cross-assistant query failed: ${errMsg}`, isError: true }
           }
+          case 'input_required':
           case 'auth_required':
           case 'canceled':
           case 'submitted':
@@ -239,34 +207,5 @@ If unsure whether to call this, do not call it. Answer with your own tools first
     },
   })
 
-  const tools: Tool[] = [listConnectedAssistants, askAssistant]
-
-  // publishSnapshot — only if generator is available. Snapshots stay as a
-  // separate read primitive (Phase 3 reformulation deferred per migration plan).
-  if (deps.generateAndPublishSnapshot) {
-    const generateFn = deps.generateAndPublishSnapshot
-    const publishSnapshot = buildTool({
-      name: 'publishSnapshot',
-      description:
-        'Generate and publish a shareable snapshot of your data for a category. This creates a frozen summary that other assistants can access without triggering a live query. Use when the user says things like "update my shared calendar" or "refresh my public profile".',
-      inputSchema: z.object({
-        category: z.enum(SNAPSHOT_CATEGORIES).describe('The category to snapshot: calendar, knowledge, tasks, or memories.'),
-      }),
-      isConcurrencySafe: false,
-      isReadOnly: false,
-      timeoutMs: 60_000,
-
-      async execute(input, context) {
-        try {
-          const content = await generateFn(context.assistantId, context.userId, input.category)
-          return { data: `Snapshot published for ${input.category}:\n\n${content}` }
-        } catch (err) {
-          return { data: `Failed to generate snapshot: ${err instanceof Error ? err.message : String(err)}`, isError: true }
-        }
-      },
-    })
-    tools.push(publishSnapshot)
-  }
-
-  return tools
+  return [listConnectedAssistants, askAssistant]
 }

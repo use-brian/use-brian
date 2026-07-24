@@ -33,7 +33,6 @@ import {
   WORKFLOW_EVENT_SOURCE_TYPES,
 } from './schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
-import { isRecurringTrigger } from './lifecycle.js'
 import { stepAdvisories } from './advisories.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
@@ -1018,6 +1017,14 @@ function triggerWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): st
  * mean cross-run state). Stays quiet on recurring workflows, where the capture
  * is the intended use. Only `assistant_call` / `tool_call` apply `storeOutputAs`.
  */
+/** A trigger that fires more than once (event / webhook / non-once schedule). */
+function isRecurringTrigger(trigger?: WorkflowTrigger): boolean {
+  if (!trigger) return false
+  if (trigger.kind === 'event' || trigger.kind === 'webhook') return true
+  if (trigger.kind === 'schedule') return trigger.schedule.type !== 'once'
+  return false
+}
+
 function reservedOutcomeVarWarnings(def: WorkflowDefinition, trigger?: WorkflowTrigger): string[] {
   if (isRecurringTrigger(trigger)) return []
   const reserved = RESERVED_OUTCOME_VAR_NAMES as readonly string[]

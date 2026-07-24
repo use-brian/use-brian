@@ -153,7 +153,6 @@ type SlackRouteOptions = {
   }) => Promise<import('../ingest/channel-media-intake.js').ChannelMediaIntakeResult>
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   deferredConfirmationStore?: DeferredConfirmationStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
@@ -1017,7 +1016,6 @@ type ProcessMessageParams = {
   skillStore?: import('../db/skill-store.js').SkillStore
   pendingSlackConfirmations: Map<string, { resolver: ConfirmationResolver; toolCallId: string }>
   activeAbortControllers: Map<string, AbortController>
-  pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
@@ -1234,7 +1232,6 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
     filesApi: params.filesApi,
     artifactPromoter: params.artifactPromoter ?? null,
     skillStore: params.skillStore,
-    pendingMessageStore: params.pendingMessageStore,
     workerManager: params.workerManager,
     episodicStore: params.episodicStore,
     sessionStateStore: params.sessionStateStore,
