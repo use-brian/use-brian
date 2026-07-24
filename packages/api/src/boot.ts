@@ -1114,6 +1114,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
+  // Only Gemini ingests `application/pdf` inline; the OpenAI-compatible adapter
+  // sends every image block as an `image_url`, which Qwen-VL rejects. On a
+  // Qwen-only (DashScope) deployment, chat distills inline PDFs to text first.
+  const inlineDocumentDistill =
+    mediaBackend.kind === 'dashscope' ? { backend: mediaBackend } : undefined
   const memoryStore = createDbMemoryStore()
   const brainCandidateStore = ports.brainCandidateStore
   const memoryRecallEventsStore = createMemoryRecallEventsStore()
@@ -3565,6 +3570,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     planStore,
     jobStore,
     voiceTranscription,
+    inlineDocumentDistill,
     connectorActionStore,
     episodesStore,
     buildConnectorActionAudit: ports.buildConnectorActionAudit,
