@@ -700,11 +700,31 @@
     width: 7px;
     height: 7px;
   }
-  /* Numbered lists keep native counters (preserve sequencing + start). */
-  .doc-public-body ol { list-style-type: decimal; }
-  .doc-public-body ol ol { list-style-type: lower-alpha; }
-  .doc-public-body ol ol ol { list-style-type: lower-roman; }
-  .doc-public-body ol ol ol ol { list-style-type: decimal; }
+  /* Numbered lists draw their marker with the built-in `list-item` counter,
+     identical to the editor (see the `.ProseMirror ol` note): a fixed
+     right-aligned column ending ~16px before the 30px text indent, so a shared /
+     published page reads pixel-identical to the authored one. `<ol start>` and
+     item `value` are preserved (the `list-item` counter honours them). */
+  .doc-public-body ol > li::before {
+    content: counter(list-item, decimal) ".";
+    position: absolute;
+    left: -30px;
+    width: 14px;
+    top: 0;
+    padding: 3px 0;
+    text-align: right;
+    color: currentColor;
+    font-variant-numeric: tabular-nums;
+  }
+  .doc-public-body ol ol > li::before {
+    content: counter(list-item, lower-alpha) ".";
+  }
+  .doc-public-body ol ol ol > li::before {
+    content: counter(list-item, lower-roman) ".";
+  }
+  .doc-public-body ol ol ol ol > li::before {
+    content: counter(list-item, decimal) ".";
+  }
   /* Toggle (details/summary) — clickable disclosure with a rotating triangle.
      Geometry mirrors the editor's `.doc-toggle`: the triangle sits in the SAME
      gutter as a bullet's disc (~7px from the margin) and the summary text + body
@@ -946,16 +966,50 @@
     width: 7px;
     height: 7px;
   }
-  /* Numbered lists keep NATIVE counters (decimal → lower-alpha → lower-roman,
-     cycling every three levels) — native numbering preserves `<ol start>` and
-     item `value`, which custom CSS counters can't read; the same `padding-left`
-     above lands their text at the SAME ~30px indent as the bullets. */
-  .doc-collab-editor .ProseMirror ol { list-style-type: decimal; }
-  .doc-collab-editor .ProseMirror ol ol { list-style-type: lower-alpha; }
-  .doc-collab-editor .ProseMirror ol ol ol { list-style-type: lower-roman; }
-  .doc-collab-editor .ProseMirror ol ol ol ol { list-style-type: decimal; }
-  .doc-collab-editor .ProseMirror ol ol ol ol ol { list-style-type: lower-alpha; }
-  .doc-collab-editor .ProseMirror ol ol ol ol ol ol { list-style-type: lower-roman; }
+  /* Numbered lists DRAW their marker as a pseudo-element (like the bullets),
+     using the browser's BUILT-IN `list-item` counter. That counter is
+     incremented by every `display:list-item` `<li>` regardless of `list-style`,
+     and it still honours `<ol start>` and item `value` (only a *user-defined*
+     `counter-reset` counter can't read those - which is why the old code fell
+     back to a native `::marker`). A native outside `::marker` right-aligns hard
+     against the text with a browser-fixed, un-widenable gap (~1px), so numbers
+     read as "too close to the text". The drawn number instead right-aligns in a
+     fixed column whose right edge lands ~16px before the 30px text indent - the
+     SAME marker-to-text gap as the drawn bullet disc - so single- and multi-digit
+     numbers line up in a Notion-style column (a wide number grows leftward). The
+     `::before` carries the same `padding: 3px 0` as `li > p` so the number sits
+     on the row's first text line at every depth (`li` is `position: relative`).
+     Style cycles decimal -> lower-alpha -> lower-roman every three levels via
+     specificity, matching the bullet cycle above. */
+  .doc-collab-editor .ProseMirror ol {
+    list-style: none;
+  }
+  .doc-collab-editor .ProseMirror ol > li::before {
+    content: counter(list-item, decimal) ".";
+    position: absolute;
+    left: -30px;
+    width: 14px;
+    top: 0;
+    padding: 3px 0;
+    text-align: right;
+    color: currentColor;
+    font-variant-numeric: tabular-nums;
+  }
+  .doc-collab-editor .ProseMirror ol ol > li::before {
+    content: counter(list-item, lower-alpha) ".";
+  }
+  .doc-collab-editor .ProseMirror ol ol ol > li::before {
+    content: counter(list-item, lower-roman) ".";
+  }
+  .doc-collab-editor .ProseMirror ol ol ol ol > li::before {
+    content: counter(list-item, decimal) ".";
+  }
+  .doc-collab-editor .ProseMirror ol ol ol ol ol > li::before {
+    content: counter(list-item, lower-alpha) ".";
+  }
+  .doc-collab-editor .ProseMirror ol ol ol ol ol ol > li::before {
+    content: counter(list-item, lower-roman) ".";
+  }
   /* List rows carry the SAME 3px block padding as free paragraphs — Notion
      does NOT pack list items at pure line-height. Measured Notion list pitch
      is ~30px (1.5 × 16 + 3px top + 3px bottom), identical to its paragraph

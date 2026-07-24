@@ -30,6 +30,7 @@ import { BlockIndent } from "./block-indent";
 import { ListNormalizer } from "./list-normalizer";
 import { BlockAreaSelect } from "./block-area-select";
 import { DocMediaPaste } from "./doc-media-paste";
+import { DocPlainPaste } from "./doc-plain-paste";
 import { SmartArrows } from "./smart-arrows";
 import { timecodeDecoration } from "./timecode-decoration";
 
@@ -125,6 +126,10 @@ export function browserDocExtensions(opts?: {
     // Paste / drag-drop of image + file media → durable `/api/doc-files`
     // upload + embed insert. No-ops without a workspaceId (test editors).
     DocMediaPaste.configure({ workspaceId: opts?.workspaceId }),
+    // Paste without formatting — Shift+Cmd/Ctrl+V. Reads the clipboard text and
+    // inserts it plain via `view.pasteText`, so it bypasses the markdown-paste
+    // conversion + HTML parsing. Keyboard-only, no schema change (Yjs parity).
+    DocPlainPaste,
     // Notion-style smart arrows: typing `->`/`<-` becomes `→`/`←`. Pure text
     // input rule — no node/mark schema change, so Yjs parity holds.
     SmartArrows,

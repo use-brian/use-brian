@@ -97,6 +97,24 @@ export function crossesBlocks(doc: PMNode, a: number, h: number): boolean {
   return !$a.sameParent($h);
 }
 
+/** True when two positions sit in DIFFERENT TOP-LEVEL blocks (different children
+ *  of the doc). This — not the immediate-parent `crossesBlocks` — is the correct
+ *  area-select engage test: a drag that stays WITHIN one top-level block (two
+ *  cells of the same table, two rows of the same list, two lines of the same
+ *  callout / blockquote) is that block's OWN gesture — a `prosemirror-tables`
+ *  cell selection, or a plain in-block text selection — NOT a page rubber-band,
+ *  so area-select must leave it native. The old immediate-parent test engaged an
+ *  area select over the WHOLE table the moment a drag crossed a cell boundary
+ *  (different parent paragraphs), fighting `tableEditing` every frame and making
+ *  in-table selection impossible. Only endpoints in different top-level children
+ *  are a multi-block area select. Pure/testable. */
+export function crossesTopLevelBlocks(doc: PMNode, a: number, h: number): boolean {
+  const size = doc.content.size;
+  const $a = doc.resolve(Math.max(0, Math.min(a, size)));
+  const $h = doc.resolve(Math.max(0, Math.min(h, size)));
+  return $a.index(0) !== $h.index(0);
+}
+
 /** A run of top-level blocks, as the position before the first and after the
  *  last — what a `NodeRangeSelection` is built from. */
 type BlockBand = { from: number; to: number };
@@ -204,7 +222,8 @@ export type AreaSelectProbe = {
   posAt: (x: number, y: number) => number | null;
   /** Top-level blocks whose vertical extent intersects the band, or null. */
   bandInY: (yMin: number, yMax: number) => BlockBand | null;
-  /** Whether two document positions sit in different blocks. */
+  /** Whether two document positions sit in different TOP-LEVEL blocks (the
+   *  area-select engage test — an intra-block drag stays native). */
   crossesBlocks: (a: number, b: number) => boolean;
   /** Whether the editor's current selection is still a `NodeRangeSelection`. */
   selectionIsNodeRange: () => boolean;
@@ -452,7 +471,10 @@ export const BlockAreaSelect = Extension.create({
           const probe: AreaSelectProbe = {
             posAt: (x, y) => view.posAtCoords({ left: x, top: y })?.pos ?? null,
             bandInY: (yMin, yMax) => blockRangeInBand(view, yMin, yMax),
-            crossesBlocks: (a, b) => crossesBlocks(view.state.doc, a, b),
+            // Top-level semantics: a drag that stays inside one top-level block
+            // (a table's cells, a list's rows) is that block's own gesture, not a
+            // page area select — so it must NOT engage. See `crossesTopLevelBlocks`.
+            crossesBlocks: (a, b) => crossesTopLevelBlocks(view.state.doc, a, b),
             selectionIsNodeRange: () => isNodeRangeSelection(view.state.selection),
             scrollTop: () => pane.scrollTop,
           };
@@ -465,7 +487,19 @@ export const BlockAreaSelect = Extension.create({
            *  ProseMirror's observer has nothing to derive a `TextSelection` from. */
           const clearNativeSelection = () => {
             const sel = view.dom.ownerDocument.getSelection();
-            if (sel && sel.rangeCount > 0) sel.removeAllRanges();
+            if (!sel || sel.rangeCount === 0) return;
+            // Scope the wipe to a selection the gesture ITSELF grew — one anchored
+            // inside the editor's own scroll pane. A user's unrelated highlight
+            // elsewhere on the page (a side panel outside the pane) must survive an
+            // area drag; `removeAllRanges` is document-wide, so gate it on an
+            // endpoint being inside the pane.
+            const { anchorNode, focusNode } = sel;
+            if (
+              (anchorNode && pane.contains(anchorNode)) ||
+              (focusNode && pane.contains(focusNode))
+            ) {
+              sel.removeAllRanges();
+            }
           };
 
           /** Focus the editor so the resulting selection can be acted on by the
@@ -529,11 +563,24 @@ export const BlockAreaSelect = Extension.create({
             if (state.phase === "engaged") e.preventDefault();
           }
 
+          /** End the gesture on any signal that the mouseup will never arrive or
+           *  the user bailed: Escape, a lost window focus (the pointer went into an
+           *  embed iframe — where `mouseup` fires on the iframe's document, not
+           *  ours, so `onUp` never runs and the gesture would hang with the marquee
+           *  up and `user-select:none` stuck), or a cancelled pointer. */
+          function onCancel(e: Event) {
+            if (e.type === "keydown" && (e as KeyboardEvent).key !== "Escape") return;
+            if (state.phase !== "idle") apply({ type: "release" });
+          }
+
           const trackPointer = () => {
             const d = view.dom.ownerDocument;
             d.addEventListener("mousemove", onMove, true);
             d.addEventListener("mouseup", onUp, true);
             d.addEventListener("selectstart", onSelectStart, true);
+            d.addEventListener("keydown", onCancel, true);
+            d.addEventListener("pointercancel", onCancel, true);
+            d.defaultView?.addEventListener("blur", onCancel, true);
           };
 
           const untrackPointer = () => {
@@ -541,6 +588,9 @@ export const BlockAreaSelect = Extension.create({
             d.removeEventListener("mousemove", onMove, true);
             d.removeEventListener("mouseup", onUp, true);
             d.removeEventListener("selectstart", onSelectStart, true);
+            d.removeEventListener("keydown", onCancel, true);
+            d.removeEventListener("pointercancel", onCancel, true);
+            d.defaultView?.removeEventListener("blur", onCancel, true);
             stopAutoScroll();
           };
 
@@ -630,6 +680,15 @@ export const BlockAreaSelect = Extension.create({
 
           function onDown(e: MouseEvent) {
             if (e.button !== 0 || !view.editable || isInteractiveTarget(e.target)) return;
+            // A Mod-drag (Cmd on mac / Ctrl elsewhere) is NodeRange's OWN
+            // node-range gesture (`NodeRange.configure({ key: "Mod" })`); don't
+            // double-drive it with an area select — two selection drivers on one
+            // drag dispatch against each other every frame.
+            if (e.metaKey || e.ctrlKey) return;
+            // Defensive: if a previous gesture never got its mouseup (swallowed by
+            // an embed iframe, a lost window focus), a fresh press must not stack a
+            // second tracker over a stuck one. Tear the old gesture down first.
+            if (state.phase !== "idle") apply({ type: "release" });
             const r = apply({
               type: "press",
               x: e.clientX,

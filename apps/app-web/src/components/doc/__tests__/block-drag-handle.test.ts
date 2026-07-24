@@ -489,6 +489,43 @@ describe("[COMP:app-web/block-drag-handle] gripVerticalOffset", () => {
     stubRect(embed, 100, 320);
     expect(gripVerticalOffset(embed)).toBe(0);
   });
+
+  it("anchors a table's grip to the first cell's first line, not the wrapper top", () => {
+    // The node DOM is the OUTER `node-table` wrapper (no padding / no text line);
+    // the first content line is the first cell's `<p>`. Reading the metric off the
+    // wrapper would pin the grip to its top, misaligned with the first row. Off the
+    // first cell: cell delta 8 + pad-top 6 + line 20/2 − grip 24/2 = 12px down.
+    const outer = document.createElement("div");
+    outer.className = "node-table";
+    const table = document.createElement("table");
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.style.paddingTop = "6px";
+    td.style.lineHeight = "20px";
+    td.style.fontSize = "16px";
+    tr.appendChild(td);
+    table.appendChild(tr);
+    outer.appendChild(table);
+    stubRect(outer, 100, 80);
+    stubRect(td, 108, 30); // first cell sits 8px below the wrapper top
+    expect(gripVerticalOffset(outer)).toBe(12);
+  });
+
+  it("anchors a list row's grip to the inner <p> (row padding is on the <p>, not the <li>)", () => {
+    // A `<li>` has no padding of its own (the 3px row padding lives on `li > p`),
+    // so the metric read off the `<li>` sees pad-top 0 and pins the grip a few px
+    // above the marker's optical centre. Read the direct `<p>` child instead:
+    // p delta 0 + pad-top 3 + line 24/2 − grip 24/2 = 3px down.
+    const li = document.createElement("li");
+    const p = document.createElement("p");
+    p.style.paddingTop = "3px";
+    p.style.lineHeight = "24px";
+    p.style.fontSize = "16px";
+    li.appendChild(p);
+    stubRect(li, 100, 30);
+    stubRect(p, 100, 30); // <p> flush with the <li> top
+    expect(gripVerticalOffset(li)).toBe(3);
+  });
 });
 
 describe("[COMP:app-web/block-drag-handle] hasLayoutBox", () => {
