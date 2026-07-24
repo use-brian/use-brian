@@ -230,3 +230,45 @@ describe('[COMP:providers/openai-compat] pure helpers', () => {
       .toEqual({ inputTokens: 0, outputTokens: 5, cacheReadTokens: 150 })
   })
 })
+
+describe('[COMP:providers/openai-compat] non-image inline documents', () => {
+  it('degrades a PDF image block to a text note instead of a broken image_url', async () => {
+    // Regression: the engine models an attached PDF as an `image` block (for
+    // Gemini's native inlineData reader). Sending it here as an image_url made
+    // Qwen-VL return HTTP 400 "The image format is illegal and cannot be
+    // opened" — and, once persisted to history, wedged every later turn.
+    fetchMock.mockResolvedValueOnce(sseResponse([
+      { choices: [{ delta: { content: 'ok' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+      '[DONE]',
+    ]))
+
+    await collect(provider.stream({
+      model: 'qwen-test-model',
+      systemPrompt: 'sys',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: 'read this' },
+          { type: 'image', mimeType: 'application/pdf', data: 'JVBERi0xLjQ=' },
+          { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+        ],
+      }],
+    }))
+
+    const body = lastRequestBody()
+    const userMsg = (body.messages as Array<{ role: string; content: unknown }>).find((m) => m.role === 'user')!
+    const parts = userMsg.content as Array<Record<string, unknown>>
+
+    // Only the real image survives as image_url; the PDF must NOT.
+    const imageUrls = parts.filter((p) => p.type === 'image_url')
+    expect(imageUrls).toHaveLength(1)
+    expect((imageUrls[0] as { image_url: { url: string } }).image_url.url).toMatch(/^data:image\/png;base64,/)
+
+    // The PDF is replaced by an inline text note the model can act on.
+    const note = parts.find(
+      (p) => p.type === 'text' && /application\/pdf.*cannot be read inline/i.test(String(p.text)),
+    )
+    expect(note).toBeTruthy()
+  })
+})

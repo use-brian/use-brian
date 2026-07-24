@@ -132,7 +132,20 @@ function toCCMessages(messages: Message[]): CCMessage[] {
     const parts: CCContentPart[] = []
     for (const block of msg.content) {
       if (block.type === 'text' && block.text.length > 0) parts.push({ type: 'text', text: block.text })
-      if (block.type === 'image') parts.push({ type: 'image_url', image_url: { url: `data:${block.mimeType};base64,${block.data}` } })
+      if (block.type === 'image') {
+        // OpenAI-compatible vision (Qwen-VL) decodes ONLY images via image_url.
+        // A non-image inline document (e.g. `application/pdf`, which the engine
+        // models as an `image` block for Gemini's native inlineData reader)
+        // returns HTTP 400 "The image format is illegal and cannot be opened".
+        // Content must be distilled to text upstream (chat.ts
+        // `inlineDocumentDistill`); this guard degrades an undistilled or
+        // history-replayed non-image block to a note so it can't wedge a turn.
+        if (block.mimeType.startsWith('image/')) {
+          parts.push({ type: 'image_url', image_url: { url: `data:${block.mimeType};base64,${block.data}` } })
+        } else {
+          parts.push({ type: 'text', text: `[A ${block.mimeType} document was attached but cannot be read inline by this model.]` })
+        }
+      }
     }
     if (parts.length > 0) {
       if (msg.role === 'system') {
