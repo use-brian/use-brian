@@ -62,6 +62,15 @@ export type ImapFetchedMessage = {
 
 export const MAILBOX_SESSION_IDLE_MS = 60_000
 export const MAILBOX_SESSION_MAX_LIFETIME_MS = 10 * 60_000
+/**
+ * Max inactivity on the IMAP socket before imapflow aborts the read as an
+ * error. Without it a server that stops responding mid-FETCH hangs the sync
+ * tick indefinitely; with it the backfill's chunk bisection (sync-worker.ts)
+ * gets a throw it can isolate and step over. Inactivity-based, so a slow but
+ * still-streaming large fetch is not killed.
+ */
+export const MAILBOX_SOCKET_TIMEOUT_MS = 90_000
+export const MAILBOX_GREETING_TIMEOUT_MS = 20_000
 
 export function createImapClient(settings: MailboxAccountSettings): ImapClientLike {
   return new ImapFlow({
@@ -70,6 +79,8 @@ export function createImapClient(settings: MailboxAccountSettings): ImapClientLi
     secure: true,
     auth: { user: settings.email, pass: settings.appPassword },
     logger: false,
+    greetingTimeout: MAILBOX_GREETING_TIMEOUT_MS,
+    socketTimeout: MAILBOX_SOCKET_TIMEOUT_MS,
   }) as unknown as ImapClientLike
 }
 

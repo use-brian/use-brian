@@ -53,7 +53,15 @@ type FakeFolderState = {
   sources: Record<number, Buffer>
 }
 
-function makeFakeImap(folders: Record<string, FakeFolderState>) {
+function makeFakeImap(
+  folders: Record<string, FakeFolderState>,
+  fault?: {
+    /** The server errors on any FETCH whose range covers this UID. */
+    fetchUid: number
+    /** Also drop the session (usable=false) — a connection loss, not one poison message. */
+    dead?: boolean
+  },
+) {
   let openFolder = ''
   const client = {
     usable: true,
@@ -96,6 +104,12 @@ function makeFakeImap(folders: Record<string, FakeFolderState>) {
       }
       return (async function* (): AsyncGenerator<ImapFetchedMessage> {
         for (const uid of uids) {
+          if (fault && uid === fault.fetchUid) {
+            // Real imapflow throws mid-stream; a poison message keeps the
+            // session usable, a connection loss does not.
+            if (fault.dead) (client as { usable: boolean }).usable = false
+            throw new Error(`FETCH failed for UID ${uid}`)
+          }
           const source = f.sources[uid]
           if (source) yield { uid, source }
         }
@@ -146,7 +160,9 @@ function instanceRow(over: Partial<ConnectorInstance> = {}): ConnectorInstance {
 function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientLike; instance?: ConnectorInstance }) {
   const instance = over.instance ?? instanceRow()
   const { store, configs } = makeInstanceStore(instance)
-  const insertMessage = vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
+  const insertMessage =
+    (over.insertMessage as never) ??
+    vi.fn(async (_input: EmailArchiveMessageInput) => ({ inserted: true, messageId: 'am-1', segmentCount: 1 }))
   const deleteFolder = vi.fn(async (_instanceId: string, _folder: string) => 0)
   const worker = createMailboxSyncWorker({
     connectorInstanceStore: store,
@@ -292,6 +308,92 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
     // called at construction; route() only fires on delta inserts).
     await worker.tick()
     expect(route).not.toHaveBeenCalled()
+  })
+})
+
+// ── Poison tolerance: one bad message never wedges the walk ──────
+
+describe('[COMP:api/mailbox-sync-worker] poison tolerance', () => {
+  // A backfill armed over a 6-message INBOX, cursor already at the top so the
+  // delta path is a no-op and the tick goes straight to the historical walk.
+  function armedBackfill() {
+    const sources = Object.fromEntries([1, 2, 3, 4, 5, 6].map((u) => [u, rfc822(u)]))
+    const folders: Record<string, FakeFolderState> = {
+      INBOX: { uidvalidity: '7', uids: [1, 2, 3, 4, 5, 6], sources },
+    }
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 6 } },
+          backfill: { scope: 'all', requestedAt: '2026-07-24T00:00:00Z', status: 'running', totalEstimate: 6 },
+        },
+      },
+    } as never)
+    return { folders, instance }
+  }
+
+  it('an un-insertable message is quarantined and stepped over — the walk finishes (no stall)', async () => {
+    const { folders, instance } = armedBackfill()
+    const client = makeFakeImap(folders)
+    const insertMessage = vi.fn(async (input: EmailArchiveMessageInput) => {
+      if (input.providerMessageId === 'INBOX:3') throw new Error('body segment too long')
+      return { inserted: true, messageId: 'am', segmentCount: 1 }
+    })
+    const { worker, configs } = makeWorker({
+      client,
+      instance,
+      backfillChunk: 10,
+      insertMessage: insertMessage as never,
+    })
+    await worker.tick()
+
+    // Every message was ATTEMPTED (all 6); only #3 was rejected and skipped.
+    expect(insertMessage).toHaveBeenCalledTimes(6)
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.skippedCount).toBe(1)
+    expect(state.recentSkips?.[0]).toMatchObject({ folder: 'INBOX', uid: 3 })
+    expect(state.recentSkips?.[0].reason).toMatch(/^insert:/)
+    // The walk reached the bottom and completed — the forever-stall is gone.
+    expect(state.folders.INBOX.backfillLow).toBe(1)
+    expect(state.folders.INBOX.backfillDone).toBe(true)
+    expect(state.backfill?.status).toBe('done')
+    expect(state.lastError ?? null).toBeNull()
+  })
+
+  it('an un-fetchable UID (server errors its FETCH) is bisected out, quarantined, and stepped over', async () => {
+    const { folders, instance } = armedBackfill()
+    const client = makeFakeImap(folders, { fetchUid: 3 }) // session stays usable — one poison message
+    const { worker, insertMessage, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+    await worker.tick()
+
+    // Poison UID never reached the archive; every other message did.
+    const ids = insertMessage.mock.calls.map((c) => c[0].providerMessageId)
+    expect(ids).toEqual(['INBOX:6', 'INBOX:5', 'INBOX:4', 'INBOX:2', 'INBOX:1'])
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.skippedCount).toBe(1)
+    expect(state.recentSkips?.[0]).toMatchObject({ folder: 'INBOX', uid: 3 })
+    expect(state.recentSkips?.[0].reason).toMatch(/^fetch:/)
+    expect(state.folders.INBOX.backfillLow).toBe(1)
+    expect(state.folders.INBOX.backfillDone).toBe(true)
+    expect(state.backfill?.status).toBe('done')
+  })
+
+  it('a dropped session (not a poison message) rethrows and quarantines NOTHING — retried later intact', async () => {
+    const { folders, instance } = armedBackfill()
+    const client = makeFakeImap(folders, { fetchUid: 3, dead: true })
+    const { worker, insertMessage, configs } = makeWorker({ client, instance, backfillChunk: 10 })
+    await worker.tick() // tick swallows the throw (logs), never crashes
+
+    // A connection loss is NOT a poison message: nothing archived, nothing skipped.
+    expect(insertMessage).not.toHaveBeenCalled()
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.skippedCount ?? 0).toBe(0)
+    expect(state.recentSkips ?? []).toHaveLength(0)
+    // Backfill stays running (resumes from the same checkpoint) and surfaces the
+    // error rather than silently discarding a whole good batch.
+    expect(state.lastError).toContain('FETCH failed')
+    expect(state.backfill?.status).toBe('running')
+    expect(state.folders.INBOX.backfillDone).toBeFalsy()
   })
 })
 

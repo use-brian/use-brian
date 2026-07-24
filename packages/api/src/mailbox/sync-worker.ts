@@ -96,11 +96,24 @@ export type MailboxBackfillState = {
   totalEstimate?: number
 }
 
+/** A message the backfill permanently quarantined (un-fetchable / un-insertable). */
+export type MailboxSkip = {
+  folder: string
+  uid: number
+  /** `fetch: …` or `insert: …` — which stage rejected it, and why. */
+  reason: string
+  at: string
+}
+
 export type MailboxSyncState = {
   folders: Record<string, MailboxFolderCursor>
   backfill?: MailboxBackfillState
   lastSyncAt?: string
   lastError?: string | null
+  /** Total messages quarantined so one bad message can't wedge the walk. */
+  skippedCount?: number
+  /** Bounded tail of recent quarantines for diagnosis (last MAX_RECENT_SKIPS). */
+  recentSkips?: MailboxSkip[]
 }
 
 export function readMailboxSyncState(config: Record<string, unknown> | null | undefined): MailboxSyncState {
@@ -110,7 +123,24 @@ export function readMailboxSyncState(config: Record<string, unknown> | null | un
     ...(raw.backfill ? { backfill: raw.backfill } : {}),
     ...(raw.lastSyncAt ? { lastSyncAt: raw.lastSyncAt } : {}),
     ...(raw.lastError !== undefined ? { lastError: raw.lastError } : {}),
+    ...(raw.skippedCount !== undefined ? { skippedCount: raw.skippedCount } : {}),
+    ...(raw.recentSkips ? { recentSkips: raw.recentSkips } : {}),
   }
+}
+
+/** Bound on the diagnostic `recentSkips` tail — the count is unbounded, the list is not. */
+const MAX_RECENT_SKIPS = 25
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Record one quarantined message on the sync state (count + bounded recent tail). */
+function recordSkip(state: MailboxSyncState, skip: MailboxSkip): void {
+  state.skippedCount = (state.skippedCount ?? 0) + 1
+  const recent = state.recentSkips ?? []
+  recent.push(skip)
+  state.recentSkips = recent.length > MAX_RECENT_SKIPS ? recent.slice(-MAX_RECENT_SKIPS) : recent
 }
 
 export function backfillFloorDate(scope: MailboxBackfillScope, now: Date): Date | null {
@@ -478,6 +508,60 @@ export type MailboxSyncWorker = {
   syncInstanceById(instanceId: string): Promise<MailboxSyncSummary>
 }
 
+/**
+ * Fetch a set of UIDs, isolating any the server errors on. An IMAP `FETCH`
+ * over many UIDs dies as a unit — one poison message aborts the whole batch,
+ * and because the backfill walks newest-first over a floor checkpoint that
+ * same batch is retried first on every tick, stalling forever. On failure we
+ * bisect until the offending UID is alone, then report it as `poison` for the
+ * caller to quarantine and step over.
+ *
+ * Guarded by `client.usable`: if the session itself dropped (connection lost
+ * mid-fetch) we rethrow instead of bisecting, so a transient network failure
+ * fails the whole tick (retried later, nothing discarded) rather than falsely
+ * condemning every good message in the batch one UID at a time.
+ *
+ * Must run INSIDE an already-held mailbox lock — it never re-locks (imapflow's
+ * lock is a non-reentrant mutex).
+ */
+async function fetchChunkResilient(
+  client: ImapClientLike,
+  uids: number[],
+  query: Record<string, unknown>,
+): Promise<{ fetched: ImapFetchedMessage[]; poison: number[] }> {
+  const fetched: ImapFetchedMessage[] = []
+  const poison: number[] = []
+
+  async function drain(range: number[]): Promise<ImapFetchedMessage[]> {
+    const want = new Set(range)
+    const out: ImapFetchedMessage[] = []
+    for await (const msg of client.fetch(range.join(','), query, { uid: true })) {
+      if (want.has(msg.uid)) out.push(msg)
+    }
+    return out
+  }
+
+  async function recurse(range: number[]): Promise<void> {
+    if (range.length === 0) return
+    try {
+      fetched.push(...(await drain(range)))
+    } catch (err) {
+      // Dead session, not a poison message — abort the walk, quarantine nothing.
+      if (!client.usable) throw err
+      if (range.length === 1) {
+        poison.push(range[0])
+        return
+      }
+      const mid = Math.ceil(range.length / 2)
+      await recurse(range.slice(0, mid))
+      await recurse(range.slice(mid))
+    }
+  }
+
+  await recurse(uids)
+  return { fetched, poison }
+}
+
 const DEFAULT_INTERVAL_MS = 5 * 60_000
 const DEFAULT_DELTA_CHUNK = 100
 const DEFAULT_BACKFILL_CHUNK = 200
@@ -585,26 +669,33 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       for (const msg of fetched) {
         const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg })
         if (parsed) {
-          const { inserted } = await insertMessage({
-            ...parsed.archive,
-            instanceId: inst.id,
-            workspaceId,
-            ownerUserId,
-          })
-          if (inserted) deltaInserted++
-          // Brain flow: NEW mail only, rule-selected, only when ingestion is
-          // enabled on the instance (the connected card's toggle).
-          if (inserted && router && inst.ingestionEnabled) {
-            try {
-              await router.route(parsed.brain, {
-                workspaceId,
-                connectorInstanceId: inst.id,
-                userId: ownerUserId,
-                assistantId,
-              })
-            } catch (err) {
-              console.error('[mailbox-sync] brain route failed (archive kept):', err)
+          try {
+            const { inserted } = await insertMessage({
+              ...parsed.archive,
+              instanceId: inst.id,
+              workspaceId,
+              ownerUserId,
+            })
+            if (inserted) deltaInserted++
+            // Brain flow: NEW mail only, rule-selected, only when ingestion is
+            // enabled on the instance (the connected card's toggle).
+            if (inserted && router && inst.ingestionEnabled) {
+              try {
+                await router.route(parsed.brain, {
+                  workspaceId,
+                  connectorInstanceId: inst.id,
+                  userId: ownerUserId,
+                  assistantId,
+                })
+              } catch (err) {
+                console.error('[mailbox-sync] brain route failed (archive kept):', err)
+              }
             }
+          } catch (err) {
+            // One un-insertable message must not wedge the delta cursor — skip
+            // it (the advance below always runs). Same posture as an
+            // unparseable message; here the archive insert itself rejected.
+            recordSkip(state, { folder, uid: msg.uid, reason: `insert: ${errText(err)}`, at: now().toISOString() })
           }
         }
         cursor.lastUid = Math.max(cursor.lastUid, msg.uid)
@@ -634,23 +725,23 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         return deltaInserted
       }
       const chunk = pending.slice(0, backfillChunk)
-      const chunkSet = new Set(chunk)
-      const fetched: ImapFetchedMessage[] = []
+      const query = {
+        uid: true,
+        envelope: true,
+        internalDate: true,
+        headers: ['references'],
+        source: { start: 0, maxLength: SYNC_SOURCE_BYTES },
+      }
+      // Resilient fetch: a poison UID the server errors on is bisected out and
+      // returned as `poison` rather than aborting the whole batch. A dropped
+      // session rethrows here (quarantines nothing) and fails the tick.
+      let fetched: ImapFetchedMessage[] = []
+      let poison: number[] = []
       const lock2 = await client.getMailboxLock(folder)
       try {
-        for await (const msg of client.fetch(
-          chunk.join(','),
-          {
-            uid: true,
-            envelope: true,
-            internalDate: true,
-            headers: ['references'],
-            source: { start: 0, maxLength: SYNC_SOURCE_BYTES },
-          },
-          { uid: true },
-        )) {
-          if (chunkSet.has(msg.uid)) fetched.push(msg)
-        }
+        const r = await fetchChunkResilient(client, chunk, query)
+        fetched = r.fetched
+        poison = r.poison
       } finally {
         lock2.release()
       }
@@ -659,14 +750,28 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       for (const msg of fetched) {
         const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg })
         if (parsed) {
-          await insertMessage({
-            ...parsed.archive,
-            instanceId: inst.id,
-            workspaceId,
-            ownerUserId,
-          })
+          try {
+            await insertMessage({
+              ...parsed.archive,
+              instanceId: inst.id,
+              workspaceId,
+              ownerUserId,
+            })
+          } catch (err) {
+            // One un-insertable message never wedges the walk — quarantine it;
+            // the checkpoint advance below always runs, so the walk steps over.
+            recordSkip(state, { folder, uid: msg.uid, reason: `insert: ${errText(err)}`, at: now().toISOString() })
+          }
         }
         cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, msg.uid)
+        state.folders[folder] = cursor
+      }
+      // UIDs the server errored on: quarantine each and advance the checkpoint
+      // past it. Without this the next tick re-selects it and the newest-first
+      // walk re-fails on it first — the exact 5-minute-forever stall this fixes.
+      for (const uid of poison) {
+        recordSkip(state, { folder, uid, reason: 'fetch: server errored on FETCH', at: now().toISOString() })
+        cursor.backfillLow = Math.min(cursor.backfillLow ?? Number.MAX_SAFE_INTEGER, uid)
         state.folders[folder] = cursor
       }
       if (chunk.length === pending.length) {
