@@ -51,13 +51,13 @@ describe('[COMP:api/link-codes-store] create', () => {
     expect(code).toMatch(/^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{6}$/)
   })
 
-  it('sets a 5-minute TTL on the inserted code', async () => {
+  it('sets a 15-minute TTL on the inserted code', async () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
       .mockResolvedValueOnce({ rows: [{ id: 'lc_1' }], rowCount: 1 } as never)
     await store.create({ userId: 'u_1', assistantId: 'a_1' })
     const sql = mockQuery.mock.calls[1][0] as string
-    expect(sql).toContain("interval '5 minutes'")
+    expect(sql).toContain("interval '15 minutes'")
   })
 })
 
@@ -79,13 +79,21 @@ describe('[COMP:api/link-codes-store] findValidCode', () => {
 })
 
 describe('[COMP:api/link-codes-store] claim', () => {
-  it('sets claimed_at and claimed_by_provider_id, gated on claimed_at IS NULL', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never)
-    await store.claim('ABC234', 'telegram_user_12345')
+  it('atomically claims only an unclaimed, unexpired code', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ code: 'ABC234' }], rowCount: 1 } as never)
+    const result = await store.claim('ABC234', 'telegram_user_12345')
     const [sql, params] = mockQuery.mock.calls[0]
     expect(sql).toContain('SET claimed_at = now()')
-    expect(sql).toContain('claimed_at IS NULL')  // race condition guard
+    expect(sql).toContain('claimed_at IS NULL')
+    expect(sql).toContain('expires_at > now()')
+    expect(sql).toContain('RETURNING')
     expect(params).toEqual(['ABC234', 'telegram_user_12345'])
+    expect(result?.code).toBe('ABC234')
+  })
+
+  it('returns null when another claimant already won', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await expect(store.claim('ABC234', 'telegram_user_2')).resolves.toBeNull()
   })
 })
 

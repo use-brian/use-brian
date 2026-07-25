@@ -572,9 +572,11 @@ export function slackRoutes(options: SlackRouteOptions): Router {
     ) {
       const trimmed = incoming.text.trim().toUpperCase()
       if (/^[A-Z0-9]{6}$/.test(trimmed)) {
-        const code = await options.linkCodeStore.findValidCode(trimmed)
-        if (code) {
+        const candidate = await options.linkCodeStore.findValidCode(trimmed)
+        if (candidate) {
           try {
+            const code = await options.linkCodeStore.claim(trimmed, incoming.userId)
+            if (!code) return
             await options.linkedAccountStore.upsert({
               userId: code.userId,
               assistantId: code.assistantId,
@@ -582,7 +584,6 @@ export function slackRoutes(options: SlackRouteOptions): Router {
               providerId: incoming.userId,
               providerMetadata: { channelId: incoming.channelId },
             })
-            await options.linkCodeStore.claim(trimmed, incoming.userId)
             mergeShadowUser(code.userId, incoming.userId, 'slack', {
               reason: 'link-code',
               evidence: { codeId: code.id, channelId: incoming.channelId },
