@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { planGateApplies, planGateDismissKey } from "../plan-gate";
+import {
+  modelTierPlanGateApplies,
+  planGateApplies,
+  planGateDismissKey,
+} from "../plan-gate";
 
 describe("[COMP:app-web/plan-gate] Plan gate decision", () => {
   it("gates a hosted workspace with no active plan ('free')", () => {
@@ -21,6 +25,20 @@ describe("[COMP:app-web/plan-gate] Plan gate decision", () => {
   it("does not gate while the plan is unknown (usage fetch in flight)", () => {
     expect(planGateApplies("hosted", null)).toBe(false);
     expect(planGateApplies("hosted", undefined)).toBe(false);
+  });
+
+  it("gates model tiers by plan only in hosted", () => {
+    expect(modelTierPlanGateApplies("hosted", "free", "pro")).toBe(true);
+    expect(modelTierPlanGateApplies("hosted", "free", "max")).toBe(true);
+    expect(modelTierPlanGateApplies("hosted", "pro", "pro")).toBe(false);
+    expect(modelTierPlanGateApplies("hosted", "pro", "max")).toBe(true);
+    expect(modelTierPlanGateApplies("hosted", "max_5x", "max")).toBe(false);
+  });
+
+  it("never gates OSS model tiers even when its persisted plan is free", () => {
+    expect(modelTierPlanGateApplies("oss", "free", "standard")).toBe(false);
+    expect(modelTierPlanGateApplies("oss", "free", "pro")).toBe(false);
+    expect(modelTierPlanGateApplies("oss", "free", "max")).toBe(false);
   });
 
   it("scopes the dismissal key per workspace", () => {
