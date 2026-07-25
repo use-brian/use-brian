@@ -43,6 +43,7 @@ import {
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import { createConnectionStore } from '../db/connection-store.js'
+import { isOssEdition } from '../edition.js'
 import type { WorkspaceAuditStore, WorkspaceAuditEventType } from '../db/workspace-audit-store.js'
 import type { WorkspaceInvitationStore } from '../db/workspace-invitation-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
@@ -107,7 +108,7 @@ export function workspaceRoutes({
   //
   // Every user already has a Personal workspace (auto-created at signup;
   // see findOrCreateUser in db/users.ts). This route creates *additional*
-  // workspaces, gated by a free-plan cap: a user may own at most 2
+  // workspaces, gated in hosted by a free-plan cap: a user may own at most 2
   // free-plan workspaces (Personal counts), so a user with no paid
   // workspace gets Personal + 1 more. Owning any paid workspace lifts the
   // cap to unlimited. Only ownership counts — joined workspaces never do.
@@ -140,21 +141,23 @@ export function workspaceRoutes({
       const user = await findUserById(userId)
       if (!user) { res.status(401).json({ error: 'User not found' }); return }
 
-      // Billing is per-workspace (migration 143). A user who owns no paid
+      // Hosted billing is per-workspace (migration 143). A user who owns no paid
       // workspace is capped at 2 free-plan workspaces (the Personal one
       // counts). Owning any paid workspace lifts the cap.
-      const ownsPaid = await query<{ ok: number }>(
-        `SELECT 1 AS ok FROM workspaces WHERE owner_user_id = $1 AND plan <> 'free' LIMIT 1`,
-        [userId],
-      )
-      if (ownsPaid.rows.length === 0) {
-        const freeOwned = await workspaceStore.countFreeOwned(userId)
-        if (freeOwned >= 2) {
-          res.status(403).json({
-            error: 'plan_required',
-            message: 'Free accounts can own up to 2 workspaces. Upgrade a workspace to a paid plan to create more.',
-          })
-          return
+      if (!isOssEdition()) {
+        const ownsPaid = await query<{ ok: number }>(
+          `SELECT 1 AS ok FROM workspaces WHERE owner_user_id = $1 AND plan <> 'free' LIMIT 1`,
+          [userId],
+        )
+        if (ownsPaid.rows.length === 0) {
+          const freeOwned = await workspaceStore.countFreeOwned(userId)
+          if (freeOwned >= 2) {
+            res.status(403).json({
+              error: 'plan_required',
+              message: 'Free accounts can own up to 2 workspaces. Upgrade a workspace to a paid plan to create more.',
+            })
+            return
+          }
         }
       }
 
@@ -1076,23 +1079,24 @@ export function workspaceRoutes({
       const { workspaceId } = req.params as { workspaceId: string }
       const workspacePlan = await getWorkspacePlan(workspaceId)
 
-      const countResult = await query<{ count: string }>(
-        `SELECT COUNT(*) AS count FROM assistant_members WHERE user_id = $1 AND role = 'owner'`,
-        [userId],
-      )
-      const currentCount = Number(countResult.rows[0].count)
-
-      const maxAssistants = workspacePlan === 'free' ? 1 : 10
-      if (currentCount >= maxAssistants) {
-        res.status(403).json({
-          error: 'assistant_limit',
-          plan: workspacePlan,
-          limit: maxAssistants,
-          message: workspacePlan === 'free'
-            ? 'Free plan is limited to 1 assistant. Upgrade to Pro to create more.'
-            : `You've reached the ${maxAssistants}-assistant limit. Contact us for higher limits.`,
-        })
-        return
+      if (!isOssEdition()) {
+        const countResult = await query<{ count: string }>(
+          `SELECT COUNT(*) AS count FROM assistant_members WHERE user_id = $1 AND role = 'owner'`,
+          [userId],
+        )
+        const currentCount = Number(countResult.rows[0].count)
+        const maxAssistants = workspacePlan === 'free' ? 1 : 10
+        if (currentCount >= maxAssistants) {
+          res.status(403).json({
+            error: 'assistant_limit',
+            plan: workspacePlan,
+            limit: maxAssistants,
+            message: workspacePlan === 'free'
+              ? 'Free plan is limited to 1 assistant. Upgrade to Pro to create more.'
+              : `You've reached the ${maxAssistants}-assistant limit. Contact us for higher limits.`,
+          })
+          return
+        }
       }
 
       // Post-089: team-owned assistants satisfy the ownership XOR by

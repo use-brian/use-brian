@@ -1,6 +1,9 @@
 import { Router } from 'express'
 import { createTokens } from '../auth/jwt.js'
 import { findOrCreateUser, type User } from '../db/users.js'
+import { isOssEdition } from '../edition.js'
+
+export { isOssEdition } from '../edition.js'
 
 /**
  * OSS LOCAL-OWNER SESSION — `GET|POST /auth/local-session`.
@@ -31,19 +34,6 @@ import { findOrCreateUser, type User } from '../db/users.js'
  *
  * Component-map tag: [COMP:api/local-session].
  */
-
-/**
- * True in the open single-player edition. The launcher exports
- * `USEBRIAN_EDITION=oss` (and `NEXT_PUBLIC_USEBRIAN_EDITION=oss` for app-web)
- * into every child's env; either satisfies the server-side gate. Defaults to the
- * hosted edition when unset, so a hosted deploy never opts in by accident.
- */
-export function isOssEdition(): boolean {
-  return (
-    process.env.USEBRIAN_EDITION === 'oss' ||
-    process.env.NEXT_PUBLIC_USEBRIAN_EDITION === 'oss'
-  )
-}
 
 /** OSS single-owner auth is valid in local and production-mode self-hosts. */
 export function isSelfHostedOssEnv(): boolean {
