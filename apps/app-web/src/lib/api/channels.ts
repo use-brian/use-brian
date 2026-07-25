@@ -227,7 +227,7 @@ export type ConnectTelegramResult = {
   channel: Channel;
   reused: boolean;
   botUsername: string;
-  /** OSS owner-pairing code. Hosted deployments return null and use SSO. */
+  /** BYO account-pairing code; null when the channel has no default routing. */
   pairingCode: string | null;
   pairingCodeExpiresAt: string | null;
 };
