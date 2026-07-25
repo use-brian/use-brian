@@ -94,7 +94,11 @@ function buildApp(
     apiUrl?: string
     discordConnector?: DiscordConnectorClient
     telegramBotToken?: string
-    ownerPairing?: { enabled: boolean; linkCodeStore: LinkCodeStore }
+    ownerPairing?: {
+      enabled: boolean
+      requiredOnConnect?: boolean
+      linkCodeStore: LinkCodeStore
+    }
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -577,11 +581,49 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
     })
   })
 
+  it('POST /telegram keeps hosted pairing optional without a default assistant', async () => {
+    vi.mocked(validateTelegramCredentials).mockResolvedValue({
+      botId: 12345,
+      botUsername: 'mybot',
+      firstName: 'My Bot',
+    })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({
+      channelId: 'chan-tg',
+      reused: false,
+    })
+    vi.mocked(resolveRoutingForSurface).mockResolvedValue(null)
+    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook: vi.fn() } as never)
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
+    )
+    const integrationStore = {
+      upsert: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    } as unknown as ChannelIntegrationStore
+    const create = vi.fn()
+
+    const res = await request(buildApp({
+      integrationStore,
+      apiUrl: 'https://api.example.com',
+      ownerPairing: { enabled: true, linkCodeStore: { create } as never },
+    }))
+      .post('/api/workspaces/ws-1/channels/telegram')
+      .send({ botToken: '12345:ABC-token' })
+
+    expect(res.status).toBe(201)
+    expect(create).not.toHaveBeenCalled()
+    expect(res.body.pairingCode).toBeNull()
+  })
+
   it('POST /telegram requires a default assistant for OSS owner pairing', async () => {
     const res = await request(buildApp({
       integrationStore: {} as ChannelIntegrationStore,
       apiUrl: 'https://api.example.com',
-      ownerPairing: { enabled: true, linkCodeStore: {} as LinkCodeStore },
+      ownerPairing: {
+        enabled: true,
+        requiredOnConnect: true,
+        linkCodeStore: {} as LinkCodeStore,
+      },
     }))
       .post('/api/workspaces/ws-1/channels/telegram')
       .send({ botToken: '12345:ABC-token' })

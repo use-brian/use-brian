@@ -339,7 +339,7 @@ describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
       'telegram',
       expect.objectContaining({ reason: 'link-code' }),
     )
-    expect(adapterSendCalls.at(-1)?.text).toContain('recognized as the owner')
+    expect(adapterSendCalls.at(-1)?.text).toContain('linked to your Brian account')
     expect(pipelineCalls).toHaveLength(0)
   })
 

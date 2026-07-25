@@ -96,9 +96,11 @@ type TelegramByoRouteOptions = {
   apiUrl: string
   integrationStore: ChannelIntegrationStore
   linkedAccountStore?: LinkedAccountStore
-  /** OSS-only one-time owner pairing; hosted BYO bots keep the SSO flow. */
+  /** One-time account pairing for OSS and hosted BYO Telegram bots. */
   ownerPairing?: {
     enabled: boolean
+    /** Replace hosted SSO redirect copy with standalone Studio pairing copy. */
+    standaloneOnboarding?: boolean
     linkCodeStore: LinkCodeStore
   }
   channelUserStore?: ChannelUserStore
@@ -696,7 +698,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         }
       }
 
-      // OSS owner pairing. The code is generated while connecting this BYO bot
+      // BYO account pairing. The code is generated while connecting this bot
       // and is bound to its default assistant. Claim is atomic, so only one
       // Telegram account can win even if the same code is sent concurrently.
       if (
@@ -738,7 +740,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
                 console.error('[telegram-byo] owner pairing shadow merge failed:', err)
               })
               await adapter.sendMessage(incoming.channelId, {
-                text: 'Telegram connected. You are now recognized as the owner of this Brian instance.',
+                text: 'Telegram connected. This Telegram account is now linked to your Brian account.',
               }).catch((err) => {
                 console.error('[telegram-byo] owner pairing confirmation failed:', err)
               })
@@ -765,7 +767,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ? await options.linkedAccountStore.findByProvider('telegram', telegramUserIdStr)
           : null
         const isOwner = !!linked && linked.userId === ownerId
-        if (options.ownerPairing?.enabled && !linked) {
+        if (options.ownerPairing?.standaloneOnboarding && !linked) {
           await adapter.sendMessage(incoming.channelId, {
             text: 'This bot is not paired yet. Reconnect it in Studio, then send the one-time owner code shown there.',
           }).catch((err) => {
@@ -920,7 +922,7 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 
       if (privateChatRedirect) {
         await adapter.sendMessage(incoming.channelId, {
-          text: options.ownerPairing?.enabled
+          text: options.ownerPairing?.standaloneOnboarding
             ? 'This private bot is not paired with your Telegram account. Reconnect it in Studio and send the new one-time owner code here.'
             : 'This is a private bot. To try Use Brian, DM @use_brian_bot to sign in and link your account.',
         }).catch((err) => {
