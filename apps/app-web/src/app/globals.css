@@ -1996,12 +1996,12 @@ html[data-vt-back="true"]::view-transition-new(root) {
      gap. The sidebar's first row is indented by this so the lights share it. */
   --doc-titlebar-lights: 4.75rem;
 }
-/* Windows keeps a standard OS frame (apps/app-desktop branches `titleBarStyle`
-   to macOS only), so there are no traffic lights to clear — zero the inset. Every
-   consumer below reads `--doc-titlebar-lights`, so this one override neutralizes
-   the sidebar/topbar/mobile-menu indents at once. Set from the desktop preload's
-   `platform` (layout.tsx pre-paint + doc-shell.tsx effect). */
-.is-canvas-desktop-win {
+/* Windows and Linux keep a standard OS frame (apps/app-desktop branches
+   `titleBarStyle` to macOS only), so there are no traffic lights to clear — zero
+   the inset. Every consumer below reads `--doc-titlebar-lights`, so this one
+   override neutralizes the sidebar/topbar/mobile-menu indents at once. Set from
+   the desktop preload's `platform` (layout.tsx pre-paint + doc-shell.tsx effect). */
+.is-canvas-desktop-standard-frame {
   --doc-titlebar-lights: 0rem;
 }
 

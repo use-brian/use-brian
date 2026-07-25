@@ -357,7 +357,8 @@ function ignoreAbortedLoad(label: string, err: unknown): void {
  * stays draggable. Mirrors app-web's own `[data-doc-chrome] :is(button, a, …)`
  * rule, generalized so the shell never depends on the page tagging perfectly.
  */
-const INTERACTIVE_NO_DRAG_CSS = `
+const DESKTOP_CHROME_SAFETY_CSS = `
+  ${process.platform === "darwin" ? "" : ":root { --doc-titlebar-lights: 0rem !important; }"}
   a, button, input, textarea, select, label, summary,
   [role="button"], [role="link"], [role="menuitem"], [role="tab"],
   [role="option"], [contenteditable], [data-no-drag] {
@@ -411,12 +412,12 @@ function createWindow(): BrowserWindow {
     if (!win.webContents.isDestroyed()) win.webContents.focus();
   });
 
-  // Re-apply the drag-region safety net (see INTERACTIVE_NO_DRAG_CSS) on every
+  // Re-apply the chrome safety net (see DESKTOP_CHROME_SAFETY_CSS) on every
   // full load, so controls on the loaded page can never be silently turned into
   // window-drag handles that eat clicks. insertCSS persists across the page's
   // own SPA navigations, so re-applying per full load is enough.
   win.webContents.on("did-finish-load", () => {
-    if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(INTERACTIVE_NO_DRAG_CSS);
+    if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
     if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
   });
 

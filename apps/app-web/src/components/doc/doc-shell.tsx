@@ -748,10 +748,10 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     const desktop = w.usebrianDesktop ?? w.sidanclawDesktop;
     if (!desktop) return;
     document.documentElement.classList.add("is-canvas-desktop");
-    // Windows keeps a standard OS frame (no macOS traffic lights), so zero the
-    // title-bar inset via `is-canvas-desktop-win` — see globals.css.
-    if (desktop.platform === "win32") {
-      document.documentElement.classList.add("is-canvas-desktop-win");
+    // Windows and Linux keep a standard OS frame (no macOS traffic lights), so
+    // zero the title-bar inset — see globals.css.
+    if (desktop.platform && desktop.platform !== "darwin") {
+      document.documentElement.classList.add("is-canvas-desktop-standard-frame");
     }
   }, []);
 
