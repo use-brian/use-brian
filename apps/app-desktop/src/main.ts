@@ -2001,7 +2001,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {
-    if (mainWindow) focusWindow(mainWindow);
+    focusWindow(ensureWindow());
     const url = appUrlFromArgv(argv);
     if (url) handleIncomingUrl(url);
   });
