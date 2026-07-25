@@ -9,7 +9,7 @@
  * on PATCH (admin) and DELETE (owner), and the add-member lookup.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
 
@@ -83,6 +83,11 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
+afterEach(() => {
+  delete process.env.USEBRIAN_EDITION
+  delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION
+})
+
 describe('[COMP:api/workspaces-route] POST /', () => {
   it('rejects an unauthenticated request with 401', async () => {
     expect((await request(app()).post('/api/workspaces').send({})).status).toBe(401)
@@ -127,6 +132,20 @@ describe('[COMP:api/workspaces-route] POST /', () => {
       .send({ name: 'New WS', purpose: LONG_PURPOSE })
     expect(res.status).toBe(201)
     expect(res.body.id).toBe('ws-new')
+  })
+
+  it('does not apply the hosted workspace cap in OSS', async () => {
+    process.env.USEBRIAN_EDITION = 'oss'
+    mockFindUser.mockResolvedValueOnce({ id: 'u-1' } as never)
+    workspaceStore.create.mockResolvedValueOnce({ id: 'ws-new', name: 'New WS' })
+
+    const res = await request(app('u-1'))
+      .post('/api/workspaces')
+      .send({ name: 'New WS', purpose: LONG_PURPOSE })
+
+    expect(res.status).toBe(201)
+    expect(mockQuery).not.toHaveBeenCalled()
+    expect(workspaceStore.countFreeOwned).not.toHaveBeenCalled()
   })
 })
 

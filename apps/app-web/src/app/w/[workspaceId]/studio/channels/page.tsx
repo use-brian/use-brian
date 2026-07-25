@@ -64,6 +64,7 @@ import {
   type WhatsappOfficialBinding,
 } from "@/lib/api/whatsapp-ingest";
 import { isHostedEdition } from "@/lib/edition";
+import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   API_URL,
@@ -933,10 +934,9 @@ function ChannelDetail({
 
 /**
  * Per-routing model picker. Patches `channel_assistants.model_alias` so each
- * routed surface can run on its own LLM tier (migration 197). Pro is gated
- * behind the Pro plan, Max behind Pro+Max — same gate as the Assistant →
- * Settings → Channel Models row in `assistant-detail.tsx`. The backend
- * re-validates the plan, so this is a UX guard not a security boundary.
+ * routed surface can run on its own LLM tier (migration 197). Hosted Pro is
+ * gated behind the Pro plan and Max behind Pro+Max; OSS has no plans. The
+ * backend re-validates the same edition-aware policy.
  *
  * Gates on the *workspace* plan (billing is per-workspace, migration 143) —
  * the legacy `users.plan` cookie field is stale post-migration and would
@@ -956,8 +956,9 @@ function RoutingModelPicker({
   const t = useT();
   const { workspaces } = useWorkspaces();
   const plan = workspaces.find((w) => w.id === workspaceId)?.plan ?? "free";
-  const proDisabled = plan === "free";
-  const maxDisabled = plan === "free" || plan === "pro";
+  const edition = isHostedEdition() ? "hosted" : "oss";
+  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
   const [saving, setSaving] = useState(false);
   const [value, setValue] = useState<ChannelModelAlias>(routing.modelAlias);
 

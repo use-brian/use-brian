@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect } from 'vitest'
 import {
   MODEL_MAP,
   STANDARD_TIER_MODELS,
@@ -29,6 +29,11 @@ const RESEARCH = 'gemini-3-pro-research'
 // Pro. Flash Lite stays the background/extraction workhorse and is still
 // classified as Standard tier for analytics.
 const STANDARD = 'gemini-3-flash-standard'
+
+afterEach(() => {
+  delete process.env.USEBRIAN_EDITION
+  delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION
+})
 
 describe('[COMP:api/model-resolution] MODEL_MAP', () => {
   it('points the Standard chat tier at the synthetic Flash 3 id', () => {
@@ -120,6 +125,11 @@ describe('[COMP:api/model-resolution] defaultTierForPlan', () => {
     expect(defaultTierForPlan('max_10x')).toBe('pro')
     expect(defaultTierForPlan('enterprise')).toBe('pro')
   })
+
+  it('defaults OSS to Pro regardless of the persisted workspace plan', () => {
+    process.env.USEBRIAN_EDITION = 'oss'
+    expect(defaultTierForPlan('free')).toBe('pro')
+  })
 })
 
 describe('[COMP:api/model-resolution] resolveModel', () => {
@@ -142,6 +152,14 @@ describe('[COMP:api/model-resolution] resolveModel', () => {
     // Free plan can only use 'standard'
     expect(resolveModel('pro', 'free')).toBe(STANDARD)
     expect(resolveModel('max', 'free')).toBe(STANDARD)
+  })
+
+  it('honours every built-in tier in OSS regardless of the persisted plan', () => {
+    process.env.USEBRIAN_EDITION = 'oss'
+    expect(resolveModel('standard', 'free')).toBe(STANDARD)
+    expect(resolveModel('pro', 'free')).toBe('gemini-flash-3')
+    expect(resolveModel('max', 'free')).toBe('gemini-3.5-flash')
+    expect(resolveModel('research', 'free')).toBe(RESEARCH)
   })
 
   it('forces Standard when the budget is downgraded, regardless of alias', () => {

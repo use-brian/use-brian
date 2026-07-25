@@ -35,6 +35,8 @@ import {
 } from "@/components/ui/select";
 import { useChatModelTier, type ModelTier } from "@/lib/chat-model";
 import { webAppUrl } from "@/lib/primary-auth";
+import { isHostedEdition } from "@/lib/edition";
+import { modelTierPlanGateApplies, planGateApplies } from "@/lib/plan-gate";
 
 /** Remaining free-research quota the server reports on a research turn. */
 type ResearchQuota = { used: number; quota: number; isPaid: boolean };
@@ -127,6 +129,10 @@ export function ComposerControls({
   className,
 }: Props) {
   const t = useT().chat;
+  const edition = isHostedEdition() ? "hosted" : "oss";
+  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
+  const meteredDisabled = planGateApplies(edition, plan);
   const tc = useT().comments;
   // The AI-reply toggle shows only where a host wires it (the comment
   // composers). When the AI won't reply, the research + model controls — which
@@ -228,13 +234,13 @@ export function ComposerControls({
               <span className="text-[11px] text-muted-foreground">{t.modelStandardDesc}</span>
             </div>
           </SelectItem>
-          <SelectItem value="pro" disabled={plan === "free"}>
+          <SelectItem value="pro" disabled={proDisabled}>
             <div className="flex flex-col gap-0.5 py-0.5">
               <span className="text-sm font-medium">{t.modelPro}</span>
               <span className="text-[11px] text-muted-foreground">{t.modelProDesc}</span>
             </div>
           </SelectItem>
-          <SelectItem value="max" disabled={plan === "free" || plan === "pro"}>
+          <SelectItem value="max" disabled={maxDisabled}>
             <div className="flex flex-col gap-0.5 py-0.5">
               <span className="text-sm font-medium">{t.modelMax}</span>
               <span className="text-[11px] text-muted-foreground">{t.modelMaxDesc}</span>
@@ -246,7 +252,7 @@ export function ComposerControls({
                 {t.modelMeteredGroup}
               </div>
               {meteredOptions.map((o) => (
-                <SelectItem key={o.key} value={`metered:${o.key}`} disabled={plan === "free"}>
+                <SelectItem key={o.key} value={`metered:${o.key}`} disabled={meteredDisabled}>
                   <div className="flex flex-col gap-0.5 py-0.5">
                     <span className="text-sm font-medium">{o.label}</span>
                     <span className="text-[11px] text-muted-foreground">{o.sublabel}</span>

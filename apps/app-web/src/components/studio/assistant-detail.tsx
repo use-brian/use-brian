@@ -21,6 +21,8 @@ import { RecordingUploadButton } from "@/components/recordings/recording-upload-
 import { useT } from "@/lib/i18n/client";
 import type { Dictionary } from "@/lib/i18n";
 import { format } from "@/lib/i18n";
+import { isHostedEdition } from "@/lib/edition";
+import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 
 /**
  * Assistant detail (app-web) — the tabbed editor for one assistant.
@@ -1205,8 +1207,8 @@ function Section({
 }
 
 // Per-platform model picker row used in SettingsTab → Channel Models.
-// Pro is disabled on the free plan; Max is disabled on free + pro. The
-// backend re-validates the plan on PATCH, so this is purely a UX guard.
+// Hosted plan access matches the backend resolver. OSS has no plans, so all
+// built-in tiers remain selectable.
 //
 // `plan` is the *workspace* plan (billing is per-workspace, migration 143);
 // the parent reads it from the workspace context. The legacy `users.plan`
@@ -1228,8 +1230,9 @@ function ChannelModelRow({
   plan: string;
 }) {
   const t = useT();
-  const proDisabled = plan === "free";
-  const maxDisabled = plan === "free" || plan === "pro";
+  const edition = isHostedEdition() ? "hosted" : "oss";
+  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
   return (
     <div className="px-5 py-3 flex items-center justify-between gap-3">
       <span className="text-[14px] font-medium text-foreground">{label}</span>
@@ -2534,4 +2537,3 @@ function PrimitiveGrantsPanel({ assistantId }: { assistantId: string }) {
     </section>
   );
 }
-
