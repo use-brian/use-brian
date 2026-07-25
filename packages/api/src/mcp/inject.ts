@@ -729,20 +729,42 @@ export async function injectMcpTools(params: {
   // See docs/architecture/integrations/cli-connector.md.
   const cliLocalSources: LocalSource[] = []
   {
-    const cliInstances = connectors.filter(
-      (c) => c.connectorId === 'cli' && c.connected,
-    )
+    const cliInstances: Array<{
+      id: string
+      name: string
+      updatedAt: Date | null
+      config?: Record<string, unknown>
+    }> = connectors
+      .filter((c) => c.connectorId === 'cli' && c.connected)
+      .map((c) => ({ id: c.id, name: c.name, updatedAt: c.updatedAt, config: c.config }))
+
+    // Workspace assistants suppress all owner-personal base loading. A CLI
+    // reaches them only through an explicit workspace grant or team ownership,
+    // matching every other connector's security boundary. Keep every instance:
+    // unlike canonical built-ins, CLI servers have independent tool catalogs.
+    if (assistantTeamId && connectorInstanceStore) {
+      const [teamNative, grants] = await Promise.all([
+        connectorInstanceStore.listByWorkspaceSystem(assistantTeamId).catch(() => []),
+        connectorGrantStore
+          ? connectorGrantStore.listForTargetSystem('workspace', assistantTeamId).catch(() => [])
+          : Promise.resolve([]),
+      ])
+      const seen = new Set(cliInstances.map((inst) => inst.id))
+      for (const inst of [...teamNative, ...grants.map((grant) => grant.instance)]) {
+        if (inst.provider !== 'cli' || !inst.connected || seen.has(inst.id)) continue
+        seen.add(inst.id)
+        cliInstances.push({ id: inst.id, name: inst.label, updatedAt: inst.updatedAt, config: inst.config })
+      }
+    }
     if (cliInstances.length > 0 && connectorInstanceStore) {
       const cliDiscoveries = await Promise.allSettled(
         cliInstances.map(async (inst) => {
-          const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
-          if (!creds || typeof creds !== 'object') return null
-          const credObj = creds as Record<string, unknown>
-          if (credObj.type !== 'cli' || typeof credObj.binaryPath !== 'string') return null
+          const creds = await connectorInstanceStore.getAuthCredentialsSystem(inst.id)
+          if (creds?.type !== 'cli') return null
 
           const serverParams: CliServerParams = {
-            binaryPath: credObj.binaryPath,
-            args: Array.isArray(credObj.args) ? (credObj.args as string[]) : undefined,
+            binaryPath: creds.binaryPath,
+            args: creds.args,
             env: (inst.config?.env as Record<string, string>) ?? undefined,
             cwd: typeof inst.config?.cwd === 'string' ? inst.config.cwd : undefined,
             timeoutMs: typeof inst.config?.timeoutMs === 'number' ? inst.config.timeoutMs : undefined,
@@ -1271,6 +1293,10 @@ export async function injectMcpTools(params: {
   if (!keepBuiltinsDirect && introspectionTools && introspectionTools.length > 0) {
     localSources.push({ kind: 'local', serverName: 'introspection', tools: introspectionTools })
     console.log(`[mcp-inject] introspection lane: ${introspectionTools.length} on-demand tools`)
+  }
+
+  if (cliLocalSources.length > 0) {
+    localSources.push(...cliLocalSources)
   }
 
   // Build + inject the search pair whenever **any** source is present.

@@ -132,7 +132,7 @@ function isBuiltinPrimitive(c: { id: string; custom?: boolean }): boolean {
 }
 
 /** Built-in connectors that have a configurable settings tab. */
-const CONFIGURABLE_CONNECTORS = new Set(["gcal", "gdrive"]);
+const CONFIGURABLE_CONNECTORS = new Set(["gcal", "gdrive", "cli"]);
 
 /** Storage bindings route Workspace Files bytes and expose no tools of their own. */
 const STORAGE_CONNECTOR_IDS = new Set(
@@ -698,6 +698,15 @@ function ConnectorsList() {
   const [localDirPath, setLocalDirPath] = useState("");
   const [localDirError, setLocalDirError] = useState<string | null>(null);
 
+  const [showCliForm, setShowCliForm] = useState<string | null>(null);
+  const [cliLabel, setCliLabel] = useState("");
+  const [cliBinaryPath, setCliBinaryPath] = useState("");
+  const [cliArgs, setCliArgs] = useState("");
+  const [cliCwd, setCliCwd] = useState("");
+  const [cliError, setCliError] = useState<string | null>(null);
+  const [cliTimeoutMs, setCliTimeoutMs] = useState("30000");
+  const [cliEnvKeys, setCliEnvKeys] = useState<string[]>([]);
+
   // Company mailbox (imap) form state — one dialog with progressive
   // disclosure: email (MX-resolves the preset on blur) + app password, with
   // Advanced host/port fields for unrecognized servers. The server verifies
@@ -992,18 +1001,19 @@ function ConnectorsList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [justConnected, connectors, active, exposedGrants]);
 
-  const loadTools = useCallback(async (connectorId: string) => {
-    setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: [], serverName: "", loading: true } }));
+  const loadTools = useCallback(async (connectorId: string, instanceId?: string) => {
+    const key = instanceId ?? connectorId;
+    setToolsMap((prev) => ({ ...prev, [key]: { tools: [], serverName: "", loading: true } }));
     try {
-      const res = await authFetch(`${API_URL}/api/connectors/${connectorId}/tools`);
+      const res = await authFetch(`${API_URL}/api/connectors/${instanceId ?? connectorId}/tools`);
       if (res.ok) {
         const data = await res.json();
-        setToolsMap((prev) => ({ ...prev, [connectorId]: { tools: data.tools ?? [], serverName: data.serverName ?? "", loading: false } }));
+        setToolsMap((prev) => ({ ...prev, [key]: { tools: data.tools ?? [], serverName: data.serverName ?? "", loading: false } }));
       } else {
-        setToolsMap((prev) => ({ ...prev, [connectorId]: { ...prev[connectorId], loading: false } }));
+        setToolsMap((prev) => ({ ...prev, [key]: { ...prev[key], loading: false } }));
       }
     } catch {
-      setToolsMap((prev) => ({ ...prev, [connectorId]: { ...prev[connectorId], loading: false } }));
+      setToolsMap((prev) => ({ ...prev, [key]: { ...prev[key], loading: false } }));
     }
   }, []);
 
@@ -1014,6 +1024,22 @@ function ConnectorsList() {
         const data = await res.json();
         setConfigMap((prev) => ({ ...prev, [connectorId]: data.config ?? {} }));
       }
+    } catch {}
+  }, []);
+
+  const loadCliConfig = useCallback(async (instanceId: string) => {
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/cli/${instanceId}`);
+      if (!res.ok) return;
+      const data = await res.json() as { connector?: { label?: string; binaryPath?: string; args?: string[]; cwd?: string; timeoutMs?: number; envKeys?: string[] } };
+      const config = data.connector;
+      if (!config) return;
+      setCliLabel(config.label ?? "");
+      setCliBinaryPath(config.binaryPath ?? "");
+      setCliArgs((config.args ?? []).join(" "));
+      setCliCwd(config.cwd ?? "");
+      setCliTimeoutMs(String(config.timeoutMs ?? 30000));
+      setCliEnvKeys(config.envKeys ?? []);
     } catch {}
   }, []);
 
@@ -1095,6 +1121,14 @@ function ConnectorsList() {
     if (id === "local") {
       setShowLocalForm(rid);
       setLocalDirError(null);
+      setConnecting(null);
+      return;
+    }
+
+    if (id === "cli") {
+      setShowCliForm(rid);
+      setCliLabel(c.label ?? "");
+      setCliError(null);
       setConnecting(null);
       return;
     }
@@ -1203,6 +1237,16 @@ function ConnectorsList() {
 
   // Connect ANOTHER account for a provider that already has one.
   async function handleAddAnother(c: Connector) {
+    if (c.id === "cli") {
+      setShowCliForm(rowId(c));
+      setCliLabel("");
+      setCliBinaryPath("");
+      setCliArgs("");
+      setCliCwd("");
+      setCliError(null);
+      setSelected(rowId(c));
+      return;
+    }
     if (PAT_CONNECTORS.has(c.id)) {
       // GitHub PAT → inline label + token form (createNew).
       setAddAnotherFor(c.id);
@@ -1627,6 +1671,76 @@ function ConnectorsList() {
       }
     } catch {
       setLocalDirError(tc.local.errGeneric);
+    }
+    setConnecting(null);
+  }
+
+  async function handleSaveCli(c: Connector) {
+    if (!cliLabel.trim() || !cliBinaryPath.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setCliError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/cli/connect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: cliLabel.trim(),
+          binaryPath: cliBinaryPath.trim(),
+          args: cliArgs.trim() ? cliArgs.trim().split(/\s+/) : undefined,
+          cwd: cliCwd.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
+        setShowCliForm(null);
+        setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd("");
+        fetchConnectors();
+        if (data.connectorInstanceId) {
+          setSelected(data.connectorInstanceId);
+          setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId });
+        }
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setCliError(data.error ?? tc.cli.errGeneric);
+      }
+    } catch {
+      setCliError(tc.cli.errGeneric);
+    }
+    setConnecting(null);
+  }
+
+  async function handleUpdateCli(c: Connector) {
+    if (!c.connectorInstanceId || !cliLabel.trim() || !cliBinaryPath.trim()) return;
+    const rid = rowId(c);
+    setConnecting(rid);
+    setCliError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/cli/${c.connectorInstanceId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: cliLabel.trim(),
+          binaryPath: cliBinaryPath.trim(),
+          args: cliArgs.trim() ? cliArgs.trim().split(/\s+/) : [],
+          cwd: cliCwd.trim(),
+          timeoutMs: Number(cliTimeoutMs),
+        }),
+      });
+      if (res.ok) {
+        setToolsMap((prev) => {
+          const next = { ...prev };
+          delete next[c.connectorInstanceId!];
+          return next;
+        });
+        await fetchConnectors();
+        await loadTools(c.id, c.connectorInstanceId);
+      } else {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setCliError(data.error ?? tc.cli.errGeneric);
+      }
+    } catch {
+      setCliError(tc.cli.errGeneric);
     }
     setConnecting(null);
   }
@@ -2081,7 +2195,10 @@ function ConnectorsList() {
     if (sel.readonly && sel.source === "team_native" && sel.connectorInstanceId) {
       loadWsToolPolicies(sel.connectorInstanceId);
     }
-    if ((sel.connected || isBuiltinPrimitive(sel)) && !toolsMap[sel.id]) loadTools(sel.id);
+    const toolKey = sel.id === "cli" ? sel.connectorInstanceId : sel.id;
+    if ((sel.connected || isBuiltinPrimitive(sel)) && toolKey && !toolsMap[toolKey]) {
+      loadTools(sel.id, sel.id === "cli" ? sel.connectorInstanceId : undefined);
+    }
     if (sel.custom) {
       setEditName(sel.name); setEditUrl(sel.url ?? "");
       setEditAuthType(sel.authType ?? "none");
@@ -3038,6 +3155,58 @@ function ConnectorsList() {
                   </div>
                 )}
 
+                {showCliForm === rid && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-muted-foreground">{tc.cli.formHelp}</p>
+                    <input
+                      type="text"
+                      placeholder={tc.cli.labelPlaceholder}
+                      value={cliLabel}
+                      onChange={(e) => setCliLabel(e.target.value)}
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.cli.pathPlaceholder}
+                      value={cliBinaryPath}
+                      onChange={(e) => setCliBinaryPath(e.target.value)}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.cli.argsPlaceholder}
+                      value={cliArgs}
+                      onChange={(e) => setCliArgs(e.target.value)}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <input
+                      type="text"
+                      placeholder={tc.cli.cwdPlaceholder}
+                      value={cliCwd}
+                      onChange={(e) => setCliCwd(e.target.value)}
+                      className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    <p className="text-[11px] text-muted-foreground">{tc.cli.pathNote}</p>
+                    {cliError && <p className="text-xs text-destructive">{cliError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { setShowCliForm(null); setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd(""); setCliError(null); }}
+                        className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+                      >
+                        {tc.cancel}
+                      </button>
+                      <button
+                        onClick={() => handleSaveCli(sel)}
+                        disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid}
+                        className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
+                      >
+                        {connecting === rid ? tc.cli.connectingBtn : tc.cli.connectBtn}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Company mailbox (imap) connected card — archive sync status
                     + the D9 backfill consent (preflight counts, scope choices,
                     Later first-class). Bound to THIS mailbox instance
@@ -3298,14 +3467,22 @@ function ConnectorsList() {
                   <>
                     <div className="flex gap-0 border-b border-border">
                       <button
-                        onClick={() => { setExpandTab("tools"); if (!toolsMap[sel.id]) loadTools(sel.id); }}
+                        onClick={() => {
+                          const toolKey = sel.id === "cli" ? sel.connectorInstanceId : sel.id;
+                          setExpandTab("tools");
+                          if (toolKey && !toolsMap[toolKey]) loadTools(sel.id, sel.id === "cli" ? sel.connectorInstanceId : undefined);
+                        }}
                         className={`text-xs font-medium px-3 py-1.5 border-b-2 transition-colors ${expandTab === "tools" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                       >
                         {tc.tabTools}
                       </button>
                       {(sel.custom || CONFIGURABLE_CONNECTORS.has(sel.id)) && (
                         <button
-                          onClick={() => { setExpandTab("settings"); if ((CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) && !configMap[sel.id]) loadConfig(sel.id); }}
+                          onClick={() => {
+                            setExpandTab("settings");
+                            if (sel.id === "cli" && sel.connectorInstanceId) void loadCliConfig(sel.connectorInstanceId);
+                            else if ((CONFIGURABLE_CONNECTORS.has(sel.id) || sel.custom) && !configMap[sel.id]) loadConfig(sel.id);
+                          }}
                           className={`text-xs font-medium px-3 py-1.5 border-b-2 transition-colors ${expandTab === "settings" ? "border-primary text-primary" : "border-transparent text-muted-foreground hover:text-foreground"}`}
                         >
                           {tc.tabSettings}
@@ -3315,7 +3492,8 @@ function ConnectorsList() {
 
                     {/* Tools tab */}
                     {expandTab === "tools" && (() => {
-                      const entry = toolsMap[sel.id];
+                      const toolKey = sel.id === "cli" ? sel.connectorInstanceId : sel.id;
+                      const entry = toolKey ? toolsMap[toolKey] : undefined;
                       return (
                         <ConnectorToolList
                           connectorId={sel.id}
@@ -3414,6 +3592,22 @@ function ConnectorsList() {
                             onSave={(enabled) => saveConfig(sel.id, { sendMediaToken: enabled })}
                           />
                         )}
+                      </div>
+                    )}
+
+                    {expandTab === "settings" && sel.id === "cli" && sel.connectorInstanceId && (
+                      <div className="space-y-2">
+                        <input type="text" placeholder={tc.cli.labelPlaceholder} value={cliLabel} onChange={(e) => setCliLabel(e.target.value)} className="w-full text-sm bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        <input type="text" placeholder={tc.cli.pathPlaceholder} value={cliBinaryPath} onChange={(e) => setCliBinaryPath(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        <input type="text" placeholder={tc.cli.argsPlaceholder} value={cliArgs} onChange={(e) => setCliArgs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        <input type="text" placeholder={tc.cli.cwdPlaceholder} value={cliCwd} onChange={(e) => setCliCwd(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        <input type="number" min={1000} max={300000} step={1000} placeholder={tc.cli.timeoutPlaceholder} value={cliTimeoutMs} onChange={(e) => setCliTimeoutMs(e.target.value)} className="w-full text-sm font-mono bg-background border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30" />
+                        {cliEnvKeys.length > 0 && <p className="text-[11px] text-muted-foreground">{tc.cli.envKeys.replace("{keys}", cliEnvKeys.join(", "))}</p>}
+                        <p className="text-[11px] text-muted-foreground">{tc.cli.updateNote}</p>
+                        {cliError && <p className="text-xs text-destructive">{cliError}</p>}
+                        <button onClick={() => handleUpdateCli(sel)} disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid} className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1.5 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors">
+                          {connecting === rid ? tc.cli.connectingBtn : tc.cli.updateBtn}
+                        </button>
                       </div>
                     )}
 

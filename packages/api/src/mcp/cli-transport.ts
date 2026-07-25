@@ -24,6 +24,7 @@ import type { McpServerConfig, McpToolInfo } from '@use-brian/core'
 const CONNECT_TIMEOUT = 10_000
 const CALL_TIMEOUT = 30_000
 const MAX_CALL_TIMEOUT = 300_000
+const MAX_ENV_VARS = 50
 
 export type CliServerParams = {
   binaryPath: string
@@ -125,4 +126,26 @@ export function validateCliArgs(args: string[]): string | null {
     if (/[\r\n]/.test(arg)) return 'Arguments must not contain CR/LF characters'
   }
   return null
+}
+
+export function validateCliEnv(env: unknown): string | null {
+  if (env === undefined) return null
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return 'env must be an object of string values'
+  const entries = Object.entries(env)
+  if (entries.length > MAX_ENV_VARS) return `Maximum ${MAX_ENV_VARS} environment variables allowed`
+  for (const [key, value] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) return `Invalid environment variable name: ${key}`
+    if (typeof value !== 'string') return `Environment variable ${key} must be a string`
+    if (value.length > 4096) return `Environment variable ${key} must be at most 4096 characters`
+    if (/\0/.test(value)) return `Environment variable ${key} must not contain NUL characters`
+  }
+  return null
+}
+
+export function normalizeCliTimeout(timeoutMs: unknown): number | undefined {
+  if (timeoutMs === undefined) return undefined
+  if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > MAX_CALL_TIMEOUT) {
+    throw new Error(`timeoutMs must be an integer between 1000 and ${MAX_CALL_TIMEOUT}`)
+  }
+  return timeoutMs
 }
