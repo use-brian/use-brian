@@ -1008,6 +1008,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     const origin = req.headers.origin
     if (origin && allowedOrigins.has(origin)) {
       res.header('Access-Control-Allow-Origin', origin)
+      res.header('Access-Control-Allow-Credentials', 'true')
       res.header('Vary', 'Origin')
     }
     res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Client-Timezone')
