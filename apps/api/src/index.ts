@@ -66,7 +66,7 @@ const env: OpenApiEnv = {
   GCS_FILES_BUCKET: process.env.GCS_FILES_BUCKET,
   LOCAL_FILES_DIR: process.env.LOCAL_FILES_DIR,
   LOCAL_FILES_PUBLIC_URL: process.env.LOCAL_FILES_PUBLIC_URL,
-  LOCAL_FILESYSTEM_SOURCES_ENABLED: true,
+  LOCAL_FILESYSTEM_SOURCES_ENABLED: process.env.LOCAL_FILESYSTEM_SOURCES_ENABLED === 'true',
   // Default ON (2026-07-23): the skill curator is core self-improving-brain
   // value, so it runs unless a deploy opts out with an explicit false/0.
   // Spend is bounded (active sessions only, 10-turn nudge, 10 ops/day cap).

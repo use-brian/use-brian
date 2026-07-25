@@ -529,6 +529,8 @@ export interface OpenApiEnv {
   LOCAL_FILES_DIR?: string
   /** Public HTTPS base used only for signed local-file transfer URLs. */
   LOCAL_FILES_PUBLIC_URL?: string
+  /** Enables admin-selected server filesystem paths for knowledge sources. */
+  LOCAL_FILESYSTEM_SOURCES_ENABLED?: boolean
   // Weekly skill-hygiene passes ship dark unless on.
   SKILLS_AUTO_GEN_ENABLED?: boolean
   // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
@@ -4122,6 +4124,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // same `syncCredentials` resolver the sync worker uses.
   app.use('/api/workspaces/:workspaceId/knowledge', requireAuth(env.JWT_SECRET), workspaceKnowledgeRoutes({
     knowledgeStore,
+    allowLocalSources: env.LOCAL_FILESYSTEM_SOURCES_ENABLED === true,
     connectorInstanceStore,
     connectorGrantStore,
     syncCredentials,
