@@ -337,6 +337,12 @@ function authenticateGateway(
   return run;
 }
 
+function ignoreAbortedLoad(label: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("ERR_ABORTED") || (err as { code?: number })?.code === -3) return;
+  console.warn(`${label} failed to load:`, err);
+}
+
 // ── Window ─────────────────────────────────────────────────────
 
 /**
@@ -682,8 +688,16 @@ async function recoverBackgroundGatewayRequest(requestUrl: string): Promise<void
 /** Show the built-in sign-in landing (never a blank window). */
 function promptSignIn(): void {
   stopRetryWatchers(); // leaving the offline/brain-down state for a real sign-out
-  const win = ensureWindow();
-  void win.webContents.loadFile(SIGNIN_PAGE).then(() => focusWindow(win));
+  // A redirect handler can call this while Chromium is still cancelling the
+  // intercepted navigation. Replacing it synchronously races that cancellation
+  // and aborts this file load too, so start the landing on the next turn.
+  setImmediate(() => {
+    const win = ensureWindow();
+    void win.webContents.loadFile(SIGNIN_PAGE).then(
+      () => focusWindow(win),
+      (err) => ignoreAbortedLoad("Sign-in landing", err),
+    );
+  });
 }
 
 // ── Offline landing + auto-retry ───────────────────────────────
