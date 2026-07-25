@@ -23,6 +23,7 @@ import {
   type ModelClass,
   type ModelTier,
 } from '@use-brian/shared/model-registry'
+import { isOssEdition } from './edition.js'
 
 /**
  * The background-lane workhorse: extraction / classification / structured
@@ -222,8 +223,9 @@ export const MODEL_TIER_SQL_CASE = tierCaseExpression('model')
 export const MODEL_TIER_CLASSIFIER_SQL = tierClassifierExpression('model', 'model_tier')
 
 /**
- * Models each plan tier is allowed to use (plan = `workspaces.plan`).
- * Free → Standard only. Paid tiers → Standard + Pro + Max.
+ * Models each hosted plan tier is allowed to use (plan = `workspaces.plan`).
+ * Free → Standard only. Paid tiers → Standard + Pro + Max. OSS bypasses this
+ * table and allows every built-in tier because it has no billing plans.
  * The backend silently downgrades unauthorized requests to the best
  * model the plan allows (no error — matches the "downgrade" spec).
  *
@@ -238,10 +240,17 @@ export const PLAN_ALLOWED_MODELS: Record<string, Set<string>> = {
   enterprise: new Set(['standard', 'pro', 'max', 'research']),
 }
 
+const OSS_ALLOWED_MODELS = new Set(['standard', 'pro', 'max', 'research'])
+
+function allowedModelsForPlan(plan: string): Set<string> {
+  if (isOssEdition()) return OSS_ALLOWED_MODELS
+  return PLAN_ALLOWED_MODELS[plan] ?? PLAN_ALLOWED_MODELS.free
+}
+
 /**
- * The default tier alias for a billing plan when no tier is explicitly
- * requested. Paid plans default to **Pro** (per the cost-and-pricing spec —
- * "Default chat is Pro, not Max"); free / unknown plans default to Standard.
+ * The default tier alias when no tier is explicitly requested. Paid plans and
+ * OSS default to **Pro** (per the cost-and-pricing spec — "Default chat is Pro,
+ * not Max"); hosted free / unknown plans default to Standard.
  *
  * Derived from `PLAN_ALLOWED_MODELS` rather than hard-coded so it stays
  * correct if a plan's tier access changes: any plan that may use Pro defaults
@@ -251,7 +260,7 @@ export const PLAN_ALLOWED_MODELS: Record<string, Set<string>> = {
  * → "Model routing".
  */
 export function defaultTierForPlan(plan: string): string {
-  const allowed = PLAN_ALLOWED_MODELS[plan] ?? PLAN_ALLOWED_MODELS.free
+  const allowed = allowedModelsForPlan(plan)
   return allowed.has('pro') ? 'pro' : 'standard'
 }
 
@@ -274,7 +283,7 @@ export function resolveModel(
     return MODEL_MAP.standard
   }
   const alias = requestedModel ?? defaultTierForPlan(plan)
-  const allowed = PLAN_ALLOWED_MODELS[plan] ?? PLAN_ALLOWED_MODELS.free
+  const allowed = allowedModelsForPlan(plan)
   const effectiveAlias = allowed.has(alias) ? alias : 'standard'
   return MODEL_MAP[effectiveAlias] ?? MODEL_MAP.standard
 }
