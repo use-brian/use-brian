@@ -139,7 +139,7 @@ import { createBrowserSkillsStore } from './db/browser-skills-store.js'
 import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
-import { localSessionRoutes, isOssEdition } from './routes/local-session.js'
+import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
@@ -1456,15 +1456,16 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (isLocalDevEnv()) {
     app.use('/auth', devAuthRoutes({ jwtSecret: env.JWT_SECRET }))
     console.warn('[dev-auth] LOCAL /auth/dev-login enabled — debug-only bypass.')
-    // The oss single-player edition's consumer front door (not a dev bypass):
-    // a neutral local-owner session the launcher opens. Gated to local + oss.
-    if (isOssEdition()) {
-      app.use(
-        '/auth',
-        localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.USEBRIAN_OWNER_NAME }),
-      )
-      console.log('[local-session] oss local-owner session enabled at /auth/local-session.')
-    }
+  }
+  // The OSS single-player edition's consumer front door (not a dev bypass):
+  // enabled for local launches and production-mode self-hosts, but never the
+  // hosted edition or Cloud Run. Debug /auth/dev-login remains local-dev-only.
+  if (isSelfHostedOssEnv()) {
+    app.use(
+      '/auth',
+      localSessionRoutes({ jwtSecret: env.JWT_SECRET, ownerName: process.env.USEBRIAN_OWNER_NAME }),
+    )
+    console.log('[local-session] oss local-owner session enabled at /auth/local-session.')
   }
 
   const { createConnectorGrantStore } = await import('./db/connector-grant-store.js')
