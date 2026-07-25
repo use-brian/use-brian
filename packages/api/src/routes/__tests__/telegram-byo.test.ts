@@ -29,6 +29,11 @@ const leaveChatCalls: string[] = []
 // Capture createTelegramApi().setWebhook calls so the legacy-URL self-heal
 // path can be asserted without touching api.telegram.org.
 const setWebhookCalls: Array<{ url: string; secret: string }> = []
+const { mergeShadowUser } = vi.hoisted(() => ({
+  mergeShadowUser: vi.fn(async () => ({ merged: false })),
+}))
+
+vi.mock('../../db/linked-accounts.js', () => ({ mergeShadowUser }))
 
 // Use the real Telegram adapter so parseIncoming runs the real topic-encoding
 // logic (we want to assert the route's behaviour on real parse output), but
@@ -58,7 +63,10 @@ vi.mock('@use-brian/channels', async () => {
     createTelegramAdapter: (opts: Parameters<typeof actual.createTelegramAdapter>[0]) => {
       const real = actual.createTelegramAdapter(opts)
       return Object.assign(real, {
-        sendMessage: vi.fn(async () => 'msg_stub'),
+        sendMessage: vi.fn(async (channelId: string, message: { text: string }) => {
+          adapterSendCalls.push({ channelId, text: message.text })
+          return 'msg_stub'
+        }),
         sendStatus: vi.fn(async () => 'status_stub'),
         sendTypingIndicator: vi.fn(async () => {}),
         editMessage: vi.fn(async () => {}),
@@ -267,6 +275,116 @@ beforeEach(() => {
   teamRoleCalls.length = 0
   teamRoleResponse = null
   setWebhookCalls.length = 0
+  mergeShadowUser.mockClear()
+})
+
+describe('[COMP:api/telegram-byo-route] OSS owner pairing', () => {
+  it('claims a setup code once and links the Telegram sender to the local owner', async () => {
+    const code = {
+      id: 'code-1',
+      userId: 'owner_1',
+      assistantId: 'assistant_1',
+      code: 'ABC234',
+      expiresAt: new Date(Date.now() + 60_000),
+      claimedAt: null,
+      claimedByProviderId: null,
+      createdAt: new Date(),
+    }
+    const linkCodeStore = {
+      findValidCode: vi.fn().mockResolvedValue(code),
+      claim: vi.fn().mockResolvedValue(code),
+    }
+    const linkedAccountStore = {
+      upsert: vi.fn().mockResolvedValue({}),
+      findByProvider: vi.fn().mockResolvedValue(null),
+    }
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        linkedAccountStore: linkedAccountStore as never,
+        ownerPairing: { enabled: true, linkCodeStore: linkCodeStore as never },
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+
+    await postUpdate(app, {
+      update_id: 1,
+      message: {
+        message_id: 10,
+        from: { id: 42, first_name: 'Owner', username: 'localowner' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: '/start ABC234',
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(linkCodeStore.claim).toHaveBeenCalledWith('ABC234', '42')
+    expect(linkedAccountStore.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'owner_1',
+      assistantId: 'assistant_1',
+      provider: 'telegram',
+      providerId: '42',
+    }))
+    expect(mergeShadowUser).toHaveBeenCalledWith(
+      'owner_1',
+      '42',
+      'telegram',
+      expect.objectContaining({ reason: 'link-code' }),
+    )
+    expect(adapterSendCalls.at(-1)?.text).toContain('recognized as the owner')
+    expect(pipelineCalls).toHaveLength(0)
+  })
+
+  it('does not link when the atomic claim has already been won', async () => {
+    const candidate = {
+      id: 'code-1', userId: 'owner_1', assistantId: 'assistant_1', code: 'ABC234',
+    }
+    const linkCodeStore = {
+      findValidCode: vi.fn().mockResolvedValue(candidate),
+      claim: vi.fn().mockResolvedValue(null),
+    }
+    const linkedAccountStore = {
+      upsert: vi.fn(),
+      findByProvider: vi.fn().mockResolvedValue(null),
+    }
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        linkedAccountStore: linkedAccountStore as never,
+        ownerPairing: { enabled: true, linkCodeStore: linkCodeStore as never },
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+
+    await postUpdate(app, {
+      update_id: 2,
+      message: {
+        message_id: 11,
+        from: { id: 43, first_name: 'Imposter' },
+        chat: { id: 43, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'ABC234',
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(linkedAccountStore.upsert).not.toHaveBeenCalled()
+  })
 })
 
 describe('[COMP:api/telegram-byo-route] OSS audio intake fallback', () => {

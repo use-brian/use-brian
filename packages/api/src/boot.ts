@@ -5428,6 +5428,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       wechatConnector,
       // Fallback bot for naming sessions-derived telegram delivery destinations.
       telegramBotToken: env.TELEGRAM_BOT_TOKEN,
+      ownerPairing: { enabled: isOssEdition(), linkCodeStore },
     }))
 
     if (integrationStore && env.WA_CONNECTOR_URL && env.WA_CONNECTOR_SECRET) {
@@ -5533,7 +5534,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         provider, systemPrompt: LAYER_1_SYSTEM_PROMPT, tools: allTools, capabilityStore,
         memoryStore, usageStore, checkCreditBudget: ports.checkCreditBudget,
         appUrl: env.APP_URL, apiUrl: env.API_URL, integrationStore,
-        linkedAccountStore, channelUserStore, workerManager, connectorStore, mcpSettingsStore,
+        linkedAccountStore, ownerPairing: { enabled: isOssEdition(), linkCodeStore },
+        channelUserStore, workerManager, connectorStore, mcpSettingsStore,
         assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
         skillStore, pendingMessageStore, deferredConfirmationStore, episodicStore,

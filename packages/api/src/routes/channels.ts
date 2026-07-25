@@ -29,6 +29,7 @@ import {
   createSlackApi,
 } from '@use-brian/channels'
 import type { WorkspaceStore } from '../db/workspace-store.js'
+import type { LinkCodeStore } from '../db/link-codes.js'
 import type { DiscordConnectorClient } from '../discord/connector-client.js'
 import type { WhatsappConnectorClient } from '../whatsapp/connector-client.js'
 import type { WechatConnectorClient } from '../wechat/connector-client.js'
@@ -43,6 +44,7 @@ import {
   detachAssistant,
   updateChannelAssistant,
   findOrCreateChannelForWorkspaceConnect,
+  resolveRoutingForSurface,
   type Channel,
   type ChannelAssistant,
 } from '../db/channels-store.js'
@@ -116,6 +118,11 @@ export type ChannelsRouteOptions = {
    * the picker shows raw chat ids.
    */
   telegramBotToken?: string
+  /** OSS-only owner pairing. Hosted Telegram continues to use its SSO flow. */
+  ownerPairing?: {
+    enabled: boolean
+    linkCodeStore: LinkCodeStore
+  }
 }
 
 const updateSchema = z.object({
@@ -677,6 +684,10 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       res.status(400).json({ error: 'Invalid input', detail: parsed.error.message })
       return
     }
+    if (opts.ownerPairing?.enabled && !parsed.data.defaultAssistantId) {
+      res.status(400).json({ error: 'Select a default assistant to pair the Telegram owner' })
+      return
+    }
 
     let info
     try {
@@ -748,10 +759,33 @@ export function channelsRoutes(opts: ChannelsRouteOptions): Router {
       return
     }
     const integrations = await loadIntegrations(userId, workspaceId)
+    let pairingCode: string | null = null
+    let pairingCodeExpiresAt: Date | null = null
+    if (opts.ownerPairing?.enabled) {
+      const routing = await resolveRoutingForSurface(provisioned.channelId, null)
+      if (!routing) {
+        res.status(500).json({ error: 'Telegram channel has no default assistant for owner pairing' })
+        return
+      }
+      try {
+        const code = await opts.ownerPairing.linkCodeStore.create({
+          userId,
+          assistantId: routing.assistantId,
+        })
+        pairingCode = code.code
+        pairingCodeExpiresAt = code.expiresAt
+      } catch (err) {
+        console.error('[channels] telegram owner pairing code creation failed:', err)
+        res.status(500).json({ error: 'Failed to create Telegram owner pairing code' })
+        return
+      }
+    }
     res.status(provisioned.reused ? 200 : 201).json({
       channel: serializeChannel(channel, integrations.get(provisioned.channelId)),
       reused: provisioned.reused,
       botUsername: info.botUsername,
+      pairingCode,
+      pairingCodeExpiresAt,
     })
   })
 
