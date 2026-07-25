@@ -48,8 +48,6 @@ function makeWorkflow(overrides?: Partial<WorkflowRecord>): WorkflowRecord {
     lifecycleTransitionedAt: null,
     lifecycleReason: null,
     pinned: false,
-    digestedAt: null,
-    digestVerdict: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,

@@ -61,7 +61,6 @@ import {
   type RecordingTranscriber,
   createIngestStoredFileTool,
   createReprocessRecordingTool,
-  createReviewDataRequestTool,
   createWorkflowTools,
   createWorkflowBrainTools,
   createCorrectionTools,
@@ -178,11 +177,9 @@ import { skillRoutes } from './routes/skills.js'
 import { workspaceRoutes } from './routes/workspaces.js'
 import { invitationRoutes } from './routes/invitations.js'
 import { createWorkspaceInvitationStore } from './db/workspace-invitation-store.js'
-import { kbGapsRoutes } from './routes/kb-gaps.js'
 import { createWorkspaceStore, getWorkspaceMembershipWithClearanceSystem, getWorkspacePlan, getWorkspaceTranscriptionPrefs, setWorkspaceTranscriptionPrefs } from './db/workspace-store.js'
 import { createWorkspaceAuditStore } from './db/workspace-audit-store.js'
 import { createConnectionStore } from './db/connection-store.js'
-import { createPendingMessageStore } from './db/pending-message-store.js'
 import {
   getPendingRecordingConfirmation,
   deletePendingRecordingConfirmation,
@@ -198,7 +195,6 @@ import {
 } from './db/recording-jobs-store.js'
 import { createChatConfirmationStore } from './db/chat-confirmation-store.js'
 import { createDeferredConfirmationStore } from './db/deferred-confirmation-store.js'
-import { createSnapshotStore } from './db/snapshot-store.js'
 import { createDbKnowledgeStore } from './db/knowledge-store.js'
 import { createKnowledgeRepoWriter } from './knowledge/repo-writer.js'
 import { knowledgeRoutes, workspaceKnowledgeRoutes } from './routes/knowledge.js'
@@ -225,22 +221,17 @@ import { createDbSkillCuratorDigestStore } from './db/skill-curator-digest-store
 import { skillApprovalsRoutes } from './routes/skill-approvals.js'
 import { createSkillReviewWorker } from './workers/skill-review-worker.js'
 import { createGeminiSkillReviewLLM } from './workers/skill-review-llm.js'
-import { createWorkflowLifecycleWorker } from './workers/workflow-lifecycle-worker.js'
-import {
-  createGeminiWorkflowDigestLLM,
-} from './workers/workflow-digest-llm.js'
 import { buildWorkspaceCuratorScope } from './workers/workspace-curator-scope.js'
 import { loadSkillRegistry } from './registry/load-skill-registry.js'
 import { handleRoutes } from './routes/handles.js'
-import { connectionRoutes } from './routes/connections.js'
 import { connectorRoutes } from './routes/connectors.js'
 import {
   memberConnectorInstanceRoutes,
   workspaceConnectorInstanceRoutes,
 } from './routes/connector-instances.js'
-import { discoverRoutes } from './routes/discover.js'
-import { createModesRouter } from './routes/modes.js'
-import { pendingMessageRoutes } from './routes/pending-messages.js'
+import { publicChatRoutes } from './routes/public-chat.js'
+import { chatLinkRoutes } from './routes/chat-links.js'
+import { createChatLinkStore } from './db/chat-link-store.js'
 import { channelsRoutes } from './routes/channels.js'
 import { whatsappByonRoutes } from './routes/whatsapp-byon.js'
 import { whatsappIngestAdminRoutes } from './routes/whatsapp-byon-admin.js'
@@ -260,7 +251,6 @@ import { createIngestRulesStore } from './db/ingest-rules-store.js'
 import { createIngestRuleEditorStore } from './db/ingest-rules-editor-store.js'
 import { ingestRoutes } from './routes/ingest.js'
 import { processChannelMessage } from './routes/channel-pipeline.js'
-import { snapshotRoutes } from './routes/snapshots.js'
 import { loadConnectorRegistry } from './registry/load-registry.js'
 import { createDbLinkedAccountStore } from './db/linked-accounts.js'
 import { createChannelRouteStore } from './db/channel-route-store.js'
@@ -318,10 +308,6 @@ import {
   createWorkflowRunQueueStore,
   countRecentRunsForWorkflowSystem,
   pauseWorkflowSystem,
-  listLifecycleSweepRowsSystem,
-  applyLifecycleTransitionSystem,
-  markWorkflowsDigestedSystem,
-  deleteWorkflowSystem,
 } from './db/workflow-store.js'
 import { buildWorkflowToolRegistry } from './workflow/mcp-bridge.js'
 import { createPendingApprovalsStore } from './db/pending-approvals-store.js'
@@ -411,9 +397,6 @@ import { createMemoryRetractionStore } from './db/retraction-store.js'
 import { createSoftDeleteStore } from './db/soft-delete-store.js'
 import { createSensitivityReclassificationStore } from './db/sensitivity-reclassification-store.js'
 import { createDbMarkUsefulStore } from './db/mark-useful-store.js'
-import { createDbRetrievalMissStore } from './db/retrieval-miss-store.js'
-import { createDbKbGapCandidateStore } from './db/kb-gap-candidate-store.js'
-import { createRetrievalMissDetector } from './retrieval/retrieval-miss-detector.js'
 import { createDbEmbeddingStore } from './db/embedding-store.js'
 import { createDbSessionStateStore } from './db/session-state-store.js'
 import { createDbPlanStore } from './db/plan-steps-store.js'
@@ -430,7 +413,6 @@ import {
   loadChannelCredentialKey,
 } from './db/channel-integrations.js'
 import { createDbApiKeyStore } from './db/api-key-store.js'
-import { createShadowClaimStore } from './db/shadow-claim-store.js'
 import { publicApiRoutes } from './routes/public-api.js'
 import { assistantMcpRoutes } from './routes/assistant-mcp.js'
 import { createControlPlaneReader } from './agent-surface/control-plane-reader.js'
@@ -452,7 +434,6 @@ import { createStuckSessionSweeper } from './scheduling/stuck-session-sweeper.js
 import { createViewsPruneWorker } from './scheduling/views-prune-worker.js'
 import { createCleanupWorker } from './scheduling/cleanup-worker.js'
 import { createCalleeExecutor } from './inter-assistant/executor.js'
-import { createSnapshotGenerator } from './inter-assistant/snapshot-generator.js'
 import { deliverToChannel } from './inter-assistant/deliver.js'
 import { query, queryWithRLS, getPool } from './db/client.js'
 
@@ -548,12 +529,10 @@ export interface OpenApiEnv {
   LOCAL_FILES_DIR?: string
   /** Public HTTPS base used only for signed local-file transfer URLs. */
   LOCAL_FILES_PUBLIC_URL?: string
-  /** Standalone OSS trust boundary for admin-selected server filesystem paths. */
+  /** Enables admin-selected server filesystem paths for knowledge sources. */
   LOCAL_FILESYSTEM_SOURCES_ENABLED?: boolean
   // Weekly skill-hygiene passes ship dark unless on.
   SKILLS_AUTO_GEN_ENABLED?: boolean
-  // Workflow staleness/digestion/archival sweep ships dark unless on.
-  WORKFLOW_LIFECYCLE_ENABLED?: boolean
   // Computer-use local mode (docs/architecture/engine/computer-use.md §4):
   // the browser-relay's HTTP base + shared secret. Unset (open default) →
   // the local browser backend reports not_configured.
@@ -659,7 +638,7 @@ export interface OpenApiPorts {
   ingestCharge?: (episode: { id: string; workspaceId: string; sourceKind: string; createdByUserId: string }) => Promise<void>
   /**
    * Metered model lane billing (model-registry.md L8/L15) — the closed
-   * `5 + ceil(cost/$0.020)` estimate / spend-cap / charge seams. Default
+   * `5 + ceil(cost/$0.040)` estimate / spend-cap / charge seams. Default
    * absent: the OSS build serves metered-class picks unbilled (self-host
    * pays its own provider bill) and the UI hides credit figures.
    */
@@ -925,11 +904,8 @@ export interface BootContext {
   workflowStore: ReturnType<typeof createDbWorkflowStore>
   workflowRunStore: ReturnType<typeof createDbWorkflowRunStore>
   workflowExecutorDeps: WorkflowExecutorDeps
-  pendingMessageStore: ReturnType<typeof createPendingMessageStore>
   deferredConfirmationStore: ReturnType<typeof createDeferredConfirmationStore>
   chatConfirmationStore: ReturnType<typeof createChatConfirmationStore>
-  snapshotStore: ReturnType<typeof createSnapshotStore>
-  snapshotGenerator: ReturnType<typeof createSnapshotGenerator>
   episodicStore: ReturnType<typeof createDbEpisodicStore>
   sessionStateStore: ReturnType<typeof createDbSessionStateStore>
   workerManager: ReturnType<typeof createWorkerManager>
@@ -962,7 +938,6 @@ export interface BootContext {
   workflowEventDispatcher: WorkflowEventDispatcher
   voiceTranscription: { enabled: boolean; apiKey: string; backend?: MediaBackend; model: string | undefined }
   resolvePrimaryAssistantForWorkspace: (workspaceId: string) => Promise<string | null>
-  resolveDataRequest: (messageId: string, decision: 'approved' | 'rejected') => Promise<void>
   emailAuth: EmailAuth | undefined
   approvalBridgeDeps: ApprovalBridgeDeps
 }
@@ -1233,16 +1208,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     rowHistory: createDbRowHistoryStore(),
   })
 
-  const retrievalMissStore = createDbRetrievalMissStore()
-  const kbGapCandidateStore = createDbKbGapCandidateStore()
-  const _detectorEmbedder = sharedEmbedder
-  const retrievalMissDetector = createRetrievalMissDetector({
-    retrievalMissStore,
-    getEmbedding: async (text) => {
-      const [vec] = await _detectorEmbedder.embed([text])
-      return vec ?? []
-    },
-  })
   const sessionStateStore = createDbSessionStateStore()
   const planStore = createDbPlanStore()
   const cacheStore = createDbCacheStore()
@@ -1387,7 +1352,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const oauthClientStore = createDbOAuthClientStore()
   const oauthAuthorizationStore = createDbOAuthAuthorizationStore()
   const desktopAuthStore = createDbDesktopAuthStore()
-  const shadowClaimStore = createShadowClaimStore()
   // Channel shadow-identity resolution (channel_user_cache) — shared by the
   // open BYO webhooks mounted below and the closed official-bot/WhatsApp
   // routes (via BootContext).
@@ -1446,8 +1410,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       env.GOOGLE_CLIENT_ID ?? '',
       linkedAccountStore,
       notifyTelegramLinked,
-      shadowClaimStore,
-      apiKeyStore,
       emailAuth,
       desktopAuthStore,
     ),
@@ -1518,10 +1480,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   const workspaceAuditStore = createWorkspaceAuditStore()
   const connectionStore = createConnectionStore()
-  const pendingMessageStore = createPendingMessageStore()
+  const chatLinkStore = createChatLinkStore()
   const chatConfirmationStore = createChatConfirmationStore()
   const deferredConfirmationStore = createDeferredConfirmationStore()
-  const snapshotStore = createSnapshotStore()
   const knowledgeStore = createDbKnowledgeStore()
 
   // ── Assistant KB repo writer ──
@@ -1896,44 +1857,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     buildBlueprintPromptFragment,
   })
 
-  const { createAssistantModesStore } = await import('./db/assistant-modes-store.js')
-  const assistantModesStore = createAssistantModesStore()
-
   const { createInProcessTransport } = await import('@use-brian/core')
   const consultTransport = createInProcessTransport({
-    getConnectionModeId: (caller, callee) => connectionStore.getConnectionModeId(caller, callee),
-    getMode: (modeId) => assistantModesStore.get(modeId),
-    runConsult: async ({ request, mode }) => {
-      if (mode?.requireApproval) {
-        const targetUserId = await findAssistantById(request.target.assistantId).then((a) => a?.ownerUserId ?? null)
-        if (targetUserId) {
-          const questionText = request.message.parts
-            .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
-            .map((p) => p.text)
-            .join(' ')
-          await pendingMessageStore.create({
-            targetAssistantId: request.target.assistantId,
-            targetUserId,
-            sourceAssistantId: request.caller.assistantId,
-            messageType: 'ask_confirmation',
-            category: undefined,
-            payload: {
-              question: questionText,
-              callerAssistantId: request.caller.assistantId,
-              callerSessionId: '',
-              callerChannelType: request.caller.channelType,
-              callerChannelId: undefined,
-              freshness: mode.freshness,
-              modeId: mode.id,
-            },
-          })
-        }
-        return { text: '', inputRequired: true }
-      }
+    runConsult: async ({ request }) => {
       const text = await calleeExecutor({
         callerAssistantId: request.caller.assistantId,
         calleeAssistantId: request.target.assistantId,
-        mode,
         question: request.message.parts
           .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
           .map((p) => p.text)
@@ -1956,18 +1885,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
 
-  const snapshotGenerator = createSnapshotGenerator({ snapshotStore })
-
   const interAssistantTools = createInterAssistantTools({
     isFollowing: (follower, following) => connectionStore.isFollowing(follower, following),
     getFollowing: async (id) => {
       const conns = await connectionStore.getFollowing(id)
       return Promise.all(conns.map(async (c) => {
-        let mode: { id: string; name: string; description: string | null; requireApproval: boolean } | null = null
-        if (c.modeId) {
-          const m = await assistantModesStore.get(c.modeId)
-          if (m) mode = { id: m.id, name: m.name, description: m.description, requireApproval: m.requireApproval }
-        }
         const followingAssistant = await findAssistantById(c.followingAssistantId)
         return {
           followingAssistantId: c.followingAssistantId,
@@ -1978,14 +1900,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           followingAppType: followingAssistant?.appType ?? null,
           origin: c.origin,
           callerNote: c.callerNote,
-          mode,
         }
       }))
     },
     consultTransport,
-    getSnapshot: (id, cat) => snapshotStore.getPublished(id, cat),
-    generateAndPublishSnapshot: async (assistantId, userId, category) =>
-      snapshotGenerator(assistantId, userId, category),
   })
   for (const tool of interAssistantTools) allTools.set(tool.name, tool)
 
@@ -2512,141 +2430,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   allTools.set('renderView', renderView)
   allTools.set('saveView', saveView)
-
-  // ── resolveDataRequest (inter-assistant approval resolution) ──
-  async function resolveDataRequest(messageId: string, decision: 'approved' | 'rejected'): Promise<void> {
-    const result = await query<{
-      id: string
-      targetAssistantId: string
-      payload: { question?: string; callerAssistantId?: string; callerSessionId?: string; callerChannelType?: string; callerChannelId?: string; freshness?: string; modeId?: string }
-      category: string | null
-    }>(
-      `UPDATE assistant_pending_messages
-       SET status = 'resolved', resolution = $2, resolved_at = now()
-       WHERE id = $1 AND status IN ('pending', 'delivered')
-       RETURNING id, target_assistant_id AS "targetAssistantId", payload, category`,
-      [messageId, decision],
-    )
-    const msg = result.rows[0]
-    if (!msg) return
-
-    if (decision === 'approved' && msg.payload.callerAssistantId) {
-      const callerOwner = await query<{ ownerUserId: string }>(
-        `SELECT owner_user_id AS "ownerUserId" FROM assistants WHERE id = $1`,
-        [msg.payload.callerAssistantId],
-      )
-      if (callerOwner.rows[0]) {
-        let responseText: string
-        try {
-          if (msg.payload.freshness === 'snapshot') {
-            const snapshot = await snapshotStore.getPublished(msg.targetAssistantId, msg.category ?? '')
-            if (snapshot) {
-              responseText = JSON.stringify(snapshot.content)
-              try {
-                const { findOrCreateSession, addSessionMessage } = await import('./db/sessions.js')
-                const auditSession = await findOrCreateSession({
-                  assistantId: msg.targetAssistantId,
-                  userId: callerOwner.rows[0].ownerUserId,
-                  channelType: 'assistant-call',
-                  channelId: `${msg.payload.callerAssistantId}:${Date.now()}`,
-                })
-                await addSessionMessage({ sessionId: auditSession.id, role: 'user', content: [{ type: 'text', text: msg.payload.question ?? '' }] })
-                const formattedResponse = responseText.startsWith('{')
-                  ? formatSnapshotResponse(responseText, msg.category)
-                  : responseText
-                await addSessionMessage({ sessionId: auditSession.id, role: 'assistant', content: [{ type: 'text', text: formattedResponse }] })
-              } catch { /* audit logging is non-fatal */ }
-            } else {
-              const approvedMode = msg.payload.modeId ? await assistantModesStore.get(msg.payload.modeId) : null
-              responseText = await calleeExecutor({
-                callerAssistantId: msg.payload.callerAssistantId,
-                calleeAssistantId: msg.targetAssistantId,
-                mode: approvedMode,
-                question: msg.payload.question ?? '',
-                callerSessionId: msg.payload.callerSessionId ?? '',
-              })
-            }
-          } else {
-            const approvedMode = msg.payload.modeId ? await assistantModesStore.get(msg.payload.modeId) : null
-            responseText = await calleeExecutor({
-              callerAssistantId: msg.payload.callerAssistantId,
-              calleeAssistantId: msg.targetAssistantId,
-              mode: approvedMode,
-              question: msg.payload.question ?? '',
-              callerSessionId: msg.payload.callerSessionId ?? '',
-            })
-          }
-        } catch (err) {
-          console.error('[resolveDataRequest] callee execution failed:', err)
-          responseText = `Failed to retrieve ${msg.category ?? 'data'}: ${err instanceof Error ? err.message : 'unknown error'}`
-        }
-        if (!responseText) responseText = 'The assistant did not produce a response.'
-
-        await pendingMessageStore.create({
-          targetAssistantId: msg.payload.callerAssistantId,
-          targetUserId: callerOwner.rows[0].ownerUserId,
-          sourceAssistantId: msg.targetAssistantId,
-          messageType: 'async_response',
-          category: msg.category ?? undefined,
-          payload: { question: msg.payload.question, response: responseText },
-        })
-
-        const sourceName = await query<{ name: string }>(
-          `SELECT name FROM assistants WHERE id = $1`,
-          [msg.targetAssistantId],
-        ).then((r) => r.rows[0]?.name ?? 'An assistant')
-
-        const deliveryText = `${sourceName} approved your ${msg.category ?? 'data'} request. Here's what they shared:\n\n${
-          responseText.startsWith('{') ? formatSnapshotResponse(responseText, msg.category) : responseText
-        }`
-
-        deliverToChannel({
-          assistantId: msg.payload.callerAssistantId,
-          userId: callerOwner.rows[0].ownerUserId,
-          text: deliveryText,
-          sessionId: msg.payload.callerSessionId,
-          channelType: msg.payload.callerChannelType,
-          channelId: msg.payload.callerChannelId,
-          integrationStore: integrationStore ?? undefined,
-          defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
-          waConnectorUrl: env.WA_CONNECTOR_URL,
-          waConnectorSecret: env.WA_CONNECTOR_SECRET,
-        }).catch((err) => console.error('[resolveDataRequest] delivery failed:', err))
-      }
-    }
-  }
-
-  const reviewDataRequestTool = createReviewDataRequestTool({
-    getPendingRequests: async (assistantId) => {
-      const result = await query<{
-        id: string
-        sourceAssistantName: string | null
-        sourceOwnerHandle: string | null
-        category: string | null
-        payload: { question?: string; draftResponse?: string }
-      }>(
-        `SELECT apm.id, sa.name AS "sourceAssistantName", su.handle AS "sourceOwnerHandle",
-                apm.category, apm.payload
-         FROM assistant_pending_messages apm
-         JOIN assistants sa ON sa.id = apm.source_assistant_id
-         JOIN users su ON su.id = sa.owner_user_id
-         WHERE apm.target_assistant_id = $1
-           AND apm.message_type = 'ask_confirmation'
-           AND apm.status IN ('pending', 'delivered')
-         ORDER BY apm.created_at DESC`,
-        [assistantId],
-      )
-      return result.rows.map((r) => ({
-        id: r.id,
-        sourceAssistantName: r.sourceAssistantName ?? undefined,
-        sourceOwnerHandle: r.sourceOwnerHandle ?? undefined,
-        category: r.category,
-        payload: r.payload,
-      }))
-    },
-    resolveRequest: resolveDataRequest,
-  })
-  allTools.set('reviewDataRequest', reviewDataRequestTool)
 
   // ── Primitive tools (Tasks + CRM) ──
   const taskTools = createTaskTools(taskStore, {
@@ -3475,7 +3258,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     workspaceSkillStore,
-    modesStore: assistantModesStore,
   })
   const resolveAgentApprover = async (ctx: { channelType: string; channelId: string; userId: string }) => {
     try {
@@ -3578,7 +3360,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workspaceSkillEnablementStore,
     workspaceSkillFilesStore,
     communitySkills: communitySkillRegistry,
-    pendingMessageStore,
     deferredConfirmationStore,
     pendingApprovalsStore,
     sessionResumeStore,
@@ -3594,7 +3375,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     assistantConnectorGrantsStore,
     retrievalStore,
     memoryRecallEventsStore,
-    retrievalMissDetector,
     inspectionTools: brainInspectionTools,
     generateBlueprintTool,
     blueprintRecordTools,
@@ -3615,7 +3395,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     analytics,
     episodicStore,
     sessionStateStore,
-    shadowClaimStore,
     connectorStore,
     mcpSettingsStore,
     assistantConnectorStore,
@@ -3936,9 +3715,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   app.use('/api/invitations', optionalAuth(env.JWT_SECRET), invitationRouter)
 
-  const kbGapsRouter = kbGapsRoutes({ kbGapStore: kbGapCandidateStore, workspaceStore })
-  app.use('/api/kb-gaps', requireAuth(env.JWT_SECRET), kbGapsRouter)
-
   app.use('/api/workspaces/:workspaceId/brain-keys', requireAuth(env.JWT_SECRET), brainKeysRoutes({ brainKeyStore, workspaceStore }))
 
   if (llmProviderSettingsStore) {
@@ -4012,6 +3788,36 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       : {}),
   }))
 
+  // Public chat link — anonymous browser chat behind a chat-link token
+  // (`/c/<token>` in app-web). PUBLIC, same containment + mount slot as
+  // publicShareRoutes above: MUST stay before the bare `/api` requireAuth
+  // guards below. Reuses the public-API turn pipeline (public-turn.ts).
+  // See docs/architecture/features/public-chat-link.md.
+  app.use('/api', publicChatRoutes({
+    provider,
+    configuredProviders,
+    tools: allTools,
+    systemPrompt: LAYER_1_SYSTEM_PROMPT,
+    memoryStore,
+    usageStore,
+    knowledgeStore,
+    capabilityStore,
+    analytics,
+    episodicStore,
+    sessionStateStore,
+    connectorStore,
+    mcpSettingsStore,
+    assistantConnectorStore,
+    connectorGrantStore,
+    connectorInstanceStore,
+    gdriveFilesStore,
+    filesApi: filesApi ?? undefined,
+    assistantConnectorGrantsStore,
+    engineHooks: ports.engineHooks,
+    checkCreditBudget: ports.checkCreditBudget,
+    chatLinkStore,
+  }))
+
   // PUBLIC closed routes mount HERE — before the bare `/api` requireAuth guards
   // below. Mounting them via `mountExtraRoutes` (which runs last) lets the first
   // bare guard 401 them first. See OpenApiPorts.mountPublicExtraRoutes.
@@ -4044,11 +3850,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // ever surfaced). See docs/architecture/platform/realtime-sync.md.
   app.use('/api/brain/stream', brainStreamRoutes({ workspaceStore, jwtSecret: env.JWT_SECRET }))
   startBrainStreamFanout()
-
-  // Public assistant directory — world-readable by design (its module header:
-  // "no auth required"). Same shadowing victim as the stream above: it sat
-  // below the bare guards and 401'd for everyone (route-mount-order rule 2).
-  app.use('/api/discover', discoverRoutes())
 
   app.use('/api', requireAuth(env.JWT_SECRET), workflowApprovalsRoutes({
     approvalsStore: pendingApprovalsStore,
@@ -4308,11 +4109,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/teams', requireAuth(env.JWT_SECRET), workspaceRouter) // legacy
 
   app.use('/api/handles', requireAuth(env.JWT_SECRET), handleRoutes())
-  app.use('/api/connections', requireAuth(env.JWT_SECRET), connectionRoutes({ connectionStore }))
-  // (/api/discover moved to the early-public block above the bare guards.)
-  app.use('/api/assistants/:assistantId/modes', requireAuth(env.JWT_SECRET), createModesRouter({ modesStore: assistantModesStore }))
-  app.use('/api/pending-messages', requireAuth(env.JWT_SECRET), pendingMessageRoutes({ pendingMessageStore, integrationStore: integrationStore ?? undefined, defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN, waConnectorUrl: env.WA_CONNECTOR_URL, waConnectorSecret: env.WA_CONNECTOR_SECRET }))
-  app.use('/api/snapshots', requireAuth(env.JWT_SECRET), snapshotRoutes({ snapshotStore, generateSnapshot: snapshotGenerator }))
+  app.use('/api/assistants/:assistantId/chat-links', requireAuth(env.JWT_SECRET), chatLinkRoutes({ chatLinkStore }))
 
   app.use('/api/assistants/:assistantId/memories', requireAuth(env.JWT_SECRET), memoryRoutes())
 
@@ -4772,110 +4569,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   if (runWorkers) skillReviewWorker.start()
 
-  // ── Workflow lifecycle sweep worker (mig 308) ──
-  // Stales / archives / one-off-deletes unused workflows and digests
-  // retiring patterns into staged skill candidates. Ships dark behind
-  // WORKFLOW_LIFECYCLE_ENABLED; spec: docs/architecture/features/
-  // workflow-lifecycle.md.
-  const workflowDigestLLM = createGeminiWorkflowDigestLLM(
-    async ({ systemPrompt, prompt, maxTokens, attribution }) => {
-      const response = await collectStream(provider.stream({
-        model: backgroundModel,
-        messages: [{ role: 'user', content: prompt }],
-        systemPrompt,
-        maxTokens,
-      }))
-      if (response.usage && usageStore) {
-        const cost = calculateCost(backgroundModel, response.usage)
-        usageStore.recordUsage({
-          userId: attribution.userId,
-          // Blank assistant + workspace fallback — the mig-305 attribution
-          // axis for recorders with no single assistant.
-          assistantId: '',
-          workspaceId: attribution.workspaceId,
-          sessionId: null,
-          model: backgroundModel,
-          inputTokens: response.usage.inputTokens,
-          outputTokens: response.usage.outputTokens,
-          cacheReadTokens: response.usage.cacheReadTokens,
-          cacheWriteTokens: response.usage.cacheWriteTokens,
-          actualCostUsd: cost,
-          source: 'overhead:workflow-digest',
-        }).catch((err) => console.error('[workflow-lifecycle] usage tracking failed:', err))
-      }
-      return response.content
-        .filter((b) => b.type === 'text')
-        .map((b) => (b.type === 'text' ? b.text : ''))
-        .join('')
-    },
-  )
-  const workflowLifecycleWorker = createWorkflowLifecycleWorker({
-    store: {
-      listSweepRows: listLifecycleSweepRowsSystem,
-      applyTransition: applyLifecycleTransitionSystem,
-      markDigested: markWorkflowsDigestedSystem,
-      deleteWorkflow: deleteWorkflowSystem,
-      getWorkflow: (id) => workflowStore.findByIdSystem(id),
-    },
-    digestLLM: workflowDigestLLM,
-    skillPort: {
-      async listSkillSummaries(workspaceId, actingUserId) {
-        const skills = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId })
-        return skills.map((s) => ({
-          slug: s.slug,
-          name: s.name,
-          description: s.description ?? '',
-        }))
-      },
-      async hasPendingOrExistingSlug(workspaceId, slug) {
-        const existing = await query(
-          `SELECT 1 FROM workspace_skills
-            WHERE workspace_id = $1 AND slug = $2 AND valid_to IS NULL
-            LIMIT 1`,
-          [workspaceId, slug],
-        )
-        if ((existing.rowCount ?? 0) > 0) return true
-        const staged = await query(
-          `SELECT 1 FROM pending_approvals
-            WHERE workspace_id = $1
-              AND kind = 'staged_skill_creation'
-              AND responded_at IS NULL
-              AND arguments->'umbrella'->>'slug' = $2
-            LIMIT 1`,
-          [workspaceId, slug],
-        )
-        return (staged.rowCount ?? 0) > 0
-      },
-      async stageCandidate({ workspaceId, umbrella, approverUserId, sourceWorkflowIds }) {
-        await pendingApprovalsStore.createStagedSkillCreation({
-          workspaceId,
-          proposedUmbrella: umbrella,
-          approverUserId,
-          originatingAssistantId: null,
-          origin: 'workflow-digest',
-          sourceWorkflowIds,
-        })
-      },
-    },
-    emitAudit: (event) =>
-      workspaceAuditStore.append({
-        workspaceId: event.workspaceId,
-        actorUserId: null,
-        eventType: event.eventType,
-        subjectId: event.subjectId,
-        details: event.details,
-      }),
-    enabled: env.WORKFLOW_LIFECYCLE_ENABLED ?? false,
-    onEvent: (event) => {
-      if (event.type === 'tick_complete') {
-        console.log(
-          `[workflow-lifecycle] tick complete — staled:${event.staled} archived:${event.archived} reactivated:${event.reactivated} deleted:${event.deleted} digested:${event.digested} staged:${event.staged}`,
-        )
-      }
-    },
-  })
-  if (runWorkers) workflowLifecycleWorker.start()
-
   // ── Sandbox lifecycle reaper (computer-use.md §7) — kills tasks idle past
   //    the Take-Over abandonment window + runs the vault's per-plan purge.
   //    Only exists when a sandbox provider is configured. ──
@@ -5000,39 +4693,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
   if (runWorkers) brainEvolutionWorker.start()
-
-  // ── CL-9 weekly retrieval-miss aggregator ──
-  if (process.env.CL9_AGGREGATOR_ENABLED === 'true') {
-    const { startRetrievalMissAggregator } = await import('./workers/retrieval-miss-aggregator.js')
-    const { query: rawQuery } = await import('./db/client.js')
-    const _aggregatorEmbedder = sharedEmbedder
-    const retrievalMissAggregator = startRetrievalMissAggregator({
-      retrievalMissStore,
-      kbGapStore: kbGapCandidateStore,
-      getEmbedding: async (text) => {
-        const [vec] = await _aggregatorEmbedder.embed([text])
-        return vec ?? []
-      },
-      listActiveWorkspaces: async () => {
-        const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-        const r = await rawQuery<{ workspaceId: string }>(
-          `SELECT DISTINCT workspace_id AS "workspaceId" FROM retrieval_miss WHERE at >= $1`,
-          [since],
-        )
-        return r.rows.map((row) => row.workspaceId)
-      },
-      onEvent: (event) => {
-        if (event.type === 'kb_gap_candidate_emitted') {
-          console.log(`[retrieval-miss-aggregator] emitted ${event.count} candidate(s) for workspace ${event.workspaceId}`)
-        } else if (event.type === 'error') {
-          console.error(`[retrieval-miss-aggregator] error for workspace ${event.workspaceId ?? '<global>'}: ${event.error}`)
-        } else if (event.type === 'tick_complete') {
-          console.log(`[retrieval-miss-aggregator] tick complete: processed=${event.processedCount} emitted=${event.emittedCount} errors=${event.errorCount}`)
-        }
-      },
-    })
-    if (runWorkers) retrievalMissAggregator.start()
-  }
 
   // ── Embedding worker ──
   // primitivesWithVectorColumn is closed (api-platform/admin). Open uses the
@@ -5347,11 +5007,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowStore,
     workflowRunStore,
     workflowExecutorDeps,
-    pendingMessageStore,
     deferredConfirmationStore,
     chatConfirmationStore,
-    snapshotStore,
-    snapshotGenerator,
     episodicStore,
     sessionStateStore,
     workerManager,
@@ -5379,7 +5036,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     workflowEventDispatcher,
     voiceTranscription,
     resolvePrimaryAssistantForWorkspace,
-    resolveDataRequest,
     emailAuth,
     approvalBridgeDeps,
   }
@@ -5547,7 +5203,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         channelUserStore, workerManager, connectorStore, mcpSettingsStore,
         assistantConnectorStore, connectorGrantStore, connectorInstanceStore, knowledgeStore,
         gdriveFilesStore, workspaceFilesStore, filesApi: filesApi ?? undefined, analytics,
-        skillStore, pendingMessageStore, deferredConfirmationStore, episodicStore,
+        skillStore, deferredConfirmationStore, episodicStore,
         sessionStateStore, voiceTranscription, workspaceToolPolicyStore,
         recordingIngest: channelHosts.recordingIngest,
         ingestChannelMediaRef: channelHosts.telegramIngestChannelMediaRef,
@@ -5562,7 +5218,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         integrationStore, channelUserStore, linkedAccountStore, linkCodeStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
-        filesApi: filesApi ?? undefined, analytics, skillStore, pendingMessageStore,
+        filesApi: filesApi ?? undefined, analytics, skillStore,
         deferredConfirmationStore, episodicStore, sessionStateStore, workflowEventDispatcher,
         slackWebhookIngestor: channelHosts.slackWebhookIngestor, connectorActionStore, episodesStore,
         buildConnectorActionAudit: ports.buildConnectorActionAudit,
@@ -5577,7 +5233,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         integrationStore, channelUserStore,
         workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
         connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore,
-        analytics, skillStore, pendingMessageStore,
+        analytics, skillStore,
         episodicStore, sessionStateStore, artifactPromoter,
         msteamsWebhookIngestor: channelHosts.msteamsWebhookIngestor,
       }))
@@ -5591,7 +5247,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, pendingMessageStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore,
         }))
       }
       if (env.WECHAT_CONNECTOR_SECRET) {
@@ -5603,7 +5259,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
           checkCreditBudget: ports.checkCreditBudget, integrationStore, channelUserStore,
           workerManager, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore,
           connectorInstanceStore, knowledgeStore, gdriveFilesStore, workspaceFilesStore, analytics,
-          skillStore, pendingMessageStore, episodicStore, sessionStateStore,
+          skillStore, episodicStore, sessionStateStore,
         }))
       }
     }
@@ -5652,25 +5308,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   }
 
   return { app, ctx, start, shutdown }
-}
-
-// ── Helper (snapshot response formatter) ──
-function formatSnapshotResponse(json: string, category: string | null): string {
-  try {
-    const data = JSON.parse(json)
-    if (category === 'tasks' && data.jobs) {
-      const active = (data.jobs as Array<{ instructions: string; enabled: boolean }>).filter((j) => j.enabled)
-      return active.length > 0 ? active.map((j) => `• ${j.instructions}`).join('\n') : 'No active tasks.'
-    }
-    if (category === 'knowledge' && data.entries) {
-      return (data.entries as Array<{ title: string; summary?: string }>)
-        .slice(0, 10).map((e) => `• ${e.title}${e.summary ? ` — ${e.summary}` : ''}`).join('\n')
-    }
-    if (category === 'memories' && data.memories) {
-      return (data.memories as Array<{ summary: string }>).slice(0, 10).map((m) => `• ${m.summary}`).join('\n')
-    }
-    return json.slice(0, 500)
-  } catch { return json.slice(0, 500) }
 }
 
 // Re-export getPool so the platform can reuse the same pool accessor for its

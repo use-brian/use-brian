@@ -14,10 +14,10 @@
  * same way the root landing does and issues the redirect. Unknown paths
  * return `null` so genuinely wrong URLs still 404.
  *
- * Two surfaces have no index route here, so their bare heads map to their
- * default sub-surface: `/knowledge-base` → `/w/<id>/knowledge-base/gaps`
- * and `/memories` → `/w/<id>/memories/review`. Deeper sub-paths pass
- * through unchanged. `/workspaces/<id>` (old bookmarks, also produced by
+ * `/memories` has no index route here, so its bare head maps to its
+ * default sub-surface `/w/<id>/memories/review`; deeper sub-paths pass
+ * through unchanged. `/knowledge-base/*` (the retired KB-gaps slice) maps
+ * to Studio → Knowledge. `/workspaces/<id>` (old bookmarks, also produced by
  * the apps/web `/teams/:path*` redirects) carries the workspace id, so it
  * maps straight to `/w/<id>` instead of dropping to the picker.
  *
@@ -73,11 +73,13 @@ export function resolveLegacyPath(
     return { kind: "workspace", suffix: "" };
   }
   if (WORKSPACE_SURFACES.has(head)) {
-    // Bare heads with no index route land on their default sub-surface —
-    // `/w/<id>/knowledge-base` and `/w/<id>/memories` have no page.tsx.
-    if (rest.length === 0 && head === "knowledge-base") {
-      return { kind: "workspace", suffix: "/knowledge-base/gaps" };
+    // The KB-gaps slice was retired 2026-07-24 — every legacy
+    // `/knowledge-base` URL now lands on Studio → Knowledge.
+    if (head === "knowledge-base") {
+      return { kind: "workspace", suffix: "/studio/knowledge" };
     }
+    // Bare heads with no index route land on their default sub-surface —
+    // `/w/<id>/memories` has no page.tsx.
     if (rest.length === 0 && head === "memories") {
       return { kind: "workspace", suffix: "/memories/review" };
     }

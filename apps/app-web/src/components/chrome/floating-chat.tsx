@@ -223,8 +223,7 @@ export type ChatSurface =
   | "brain"
   | "studio"
   | "workflow"
-  | "approvals"
-  | "knowledge-base";
+  | "approvals";
 
 /**
  * Where the dock is mounted: the doc page surface (`'doc'`, the default —

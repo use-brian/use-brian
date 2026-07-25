@@ -6,5 +6,4 @@ export type {
   ControlPlaneConnector,
   ControlPlaneSkill,
   ControlPlaneChannel,
-  ControlPlaneMode,
 } from './types.js'

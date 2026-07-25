@@ -156,6 +156,8 @@ export function ApiKeysTab({ assistantId }: { assistantId: string }) {
         </Button>
       </header>
 
+      <PublicChatLinkPanel assistantId={assistantId} t={t} />
+
       <AssistantIdPanel assistantId={assistantId} t={t} />
 
       <McpEndpointPanel assistantId={assistantId} t={t} />
@@ -225,6 +227,144 @@ export function ApiKeysTab({ assistantId }: { assistantId: string }) {
 }
 
 // ── Subcomponents ──────────────────────────────────────────────
+
+type ChatLinkRow = {
+  id: string;
+  token: string;
+  label: string;
+  status: "active" | "revoked";
+  dailyMessageLimit: number;
+  dailyUsed: number;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+/**
+ * Public chat link — mint/copy/revoke the anonymous chat URL for this
+ * assistant (`/c/<token>`, docs/architecture/features/public-chat-link.md).
+ * Creation sits behind a confirmDialog per the pre-flight-confirmation
+ * invariant: the owner pays for anonymous usage, so the cost posture is
+ * stated before the link exists.
+ */
+function PublicChatLinkPanel({ assistantId, t }: { assistantId: string; t: Dictionary }) {
+  const [links, setLinks] = useState<ChatLinkRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await authFetch(`${API_URL}/api/assistants/${assistantId}/chat-links`);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = (await r.json()) as { links: ChatLinkRow[] };
+      setLinks(data.links);
+    } catch (err) {
+      setError((err as Error).message);
+      setLinks([]);
+    }
+  }, [assistantId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const chatUrl = (token: string) =>
+    `${typeof window !== "undefined" ? window.location.origin : ""}/c/${token}`;
+
+  async function create() {
+    const ok = await confirmDialog({
+      title: t.apiKeys.chatLink.confirmCreateTitle,
+      description: t.apiKeys.chatLink.confirmCreateBody,
+      confirmLabel: t.apiKeys.chatLink.create,
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await authFetch(`${API_URL}/api/assistants/${assistantId}/chat-links`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await load();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revoke(link: ChatLinkRow) {
+    const ok = await confirmDialog({
+      title: t.apiKeys.chatLink.confirmRevokeTitle,
+      description: t.apiKeys.chatLink.confirmRevokeBody,
+      confirmLabel: t.apiKeys.chatLink.revoke,
+      variant: "destructive",
+    });
+    if (!ok) return;
+    const r = await authFetch(
+      `${API_URL}/api/assistants/${assistantId}/chat-links/${link.id}`,
+      { method: "DELETE" },
+    );
+    if (r.ok) {
+      setLinks((prev) => prev?.map((l) => (l.id === link.id ? { ...l, status: "revoked" } : l)) ?? null);
+    }
+  }
+
+  async function copy(link: ChatLinkRow) {
+    try {
+      await navigator.clipboard.writeText(chatUrl(link.token));
+      setCopiedId(link.id);
+      window.setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      // Fall through — user can select & copy manually
+    }
+  }
+
+  const active = (links ?? []).filter((l) => l.status === "active");
+
+  return (
+    <section className="border border-border rounded-lg p-4 space-y-3">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h3 className="text-[13px] font-semibold">{t.apiKeys.chatLink.title}</h3>
+          <p className="text-[12px] text-muted-foreground mt-0.5 max-w-prose">
+            {t.apiKeys.chatLink.description}
+          </p>
+        </div>
+        {active.length === 0 && links !== null && (
+          <Button size="sm" onClick={create} disabled={busy} className="shrink-0">
+            {busy ? t.apiKeys.chatLink.creating : t.apiKeys.chatLink.create}
+          </Button>
+        )}
+      </div>
+
+      {error && <p className="text-[12px] text-red-500">{error}</p>}
+
+      {active.map((link) => (
+        <div key={link.id} className="flex items-center gap-2">
+          <code className="flex-1 truncate rounded-md bg-muted px-2.5 py-1.5 text-[12px]">
+            {chatUrl(link.token)}
+          </code>
+          <Button size="sm" variant="outline" onClick={() => copy(link)}>
+            {copiedId === link.id ? t.apiKeys.chatLink.copied : t.apiKeys.chatLink.copy}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => revoke(link)}>
+            {t.apiKeys.chatLink.revoke}
+          </Button>
+        </div>
+      ))}
+      {active.length > 0 && (
+        <p className="text-[11px] text-muted-foreground">
+          {active[0].dailyMessageLimit === 0
+            ? t.apiKeys.chatLink.unlimited
+            : format(t.apiKeys.chatLink.dailyLimit, { count: active[0].dailyMessageLimit })}
+        </p>
+      )}
+    </section>
+  );
+}
 
 function AssistantIdPanel({ assistantId, t }: { assistantId: string; t: Dictionary }) {
   const [copied, setCopied] = useState(false);

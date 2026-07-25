@@ -69,7 +69,7 @@ const DEFAULT_GITHUB_OPS: KnowledgeGithubOps = {
 
 type KnowledgeRouteOptions = {
   knowledgeStore: KnowledgeStore
-  /** Enables server-local source paths. Only the standalone OSS composition sets this. */
+  /** Enables server-local source paths. Only trusted standalone deployments set this. */
   allowLocalSources?: boolean
   /**
    * Resolves credentials for the GitHub repo/branch lookups behind the KB
@@ -481,8 +481,8 @@ async function createLocalKnowledgeSource(opts: {
   }
 
   const EXCLUDED_NAMES = new Set(['readme', 'changelog', 'contributing', 'license', 'code_of_conduct'])
-  const contentMdFiles = mdFiles.filter((f) => {
-    const name = nodePath.basename(f).replace(/\.md$/i, '').toLowerCase()
+  const contentMdFiles = mdFiles.filter((file) => {
+    const name = nodePath.basename(file).replace(/\.md$/i, '').toLowerCase()
     return !EXCLUDED_NAMES.has(name)
   })
 
@@ -506,8 +506,8 @@ async function createLocalKnowledgeSource(opts: {
       ...source,
       validation: {
         markdownFiles: contentMdFiles.length,
-        hasIndexFile: mdFiles.some((f) => nodePath.basename(f) === 'index.md'),
-        hasNesting: contentMdFiles.some((f) => nodePath.relative(scanDir, f).includes(nodePath.sep)),
+        hasIndexFile: mdFiles.some((file) => nodePath.basename(file) === 'index.md'),
+        hasNesting: contentMdFiles.some((file) => nodePath.relative(scanDir, file).includes(nodePath.sep)),
         hasFrontmatter: null,
         frontmatterRatio: null,
         warning: null,
@@ -522,6 +522,7 @@ async function createLocalKnowledgeSource(opts: {
     res.status(500).json({ error: 'Failed to connect source' })
   }
 }
+
 
 export function knowledgeRoutes({
   knowledgeStore,
@@ -1326,12 +1327,18 @@ export function workspaceKnowledgeRoutes({
         res.status(403).json({ error: 'Workspace owner or admin required for local filesystem sources.' })
         return
       }
-      const lp = typeof localPath === 'string' && localPath.trim() ? localPath.trim() : (repo ?? '')
-      if (!lp) {
+      const resolvedLocalPath = typeof localPath === 'string' && localPath.trim() ? localPath.trim() : (repo ?? '')
+      if (!resolvedLocalPath) {
         res.status(400).json({ error: 'localPath (or repo) is required for local sources' })
         return
       }
-      await createLocalKnowledgeSource({ knowledgeStore, workspaceId: auth.workspaceId, localPath: lp, rootPath, res })
+      await createLocalKnowledgeSource({
+        knowledgeStore,
+        workspaceId: auth.workspaceId,
+        localPath: resolvedLocalPath,
+        rootPath,
+        res,
+      })
       return
     }
 

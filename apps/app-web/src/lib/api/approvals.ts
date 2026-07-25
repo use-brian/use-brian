@@ -6,7 +6,7 @@
  * wire contract — wraps `authFetch` with typed signatures matching the REST
  * routes mounted at `/api/approvals` in `apps/api/src/index.ts`. Kept as its
  * own file (not imported from apps/web) per the same convention as
- * `lib/api/views.ts` / `lib/api/kb-gaps.ts`.
+ * `lib/api/views.ts`.
  *
  *   GET  /api/approvals?workspaceId=
  *   GET  /api/approvals/count?workspaceId=

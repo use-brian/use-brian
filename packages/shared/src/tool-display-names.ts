@@ -181,8 +181,6 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   // Inter-assistant
   askAssistant: 'Ask another assistant',
   listConnectedAssistants: 'List connected assistants',
-  publishSnapshot: 'Publish sharing snapshot',
-  reviewDataRequest: 'Data access request',
 
   // Q5 Views (§16)
   renderView: 'Render a view',

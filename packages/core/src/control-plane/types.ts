@@ -5,7 +5,7 @@
  * `packages/api/src/agent-surface/control-plane-reader.ts`.
  *
  * Every method is a READ over apparatus the workspace already exposes in
- * Studio: assistants, connectors, skills, channels, modes. Rows are plain
+ * Studio: assistants, connectors, skills, channels. Rows are plain
  * serializable projections — compact enough for an agent's context window,
  * concrete enough to act on (ids are always included so a follow-up call
  * can target the row).
@@ -62,19 +62,10 @@ export type ControlPlaneChannel = {
   status: string
 }
 
-export type ControlPlaneMode = {
-  id: string
-  name: string
-  description: string | null
-  freshness: 'live' | 'snapshot'
-  requireApproval: boolean
-}
-
 export type ControlPlaneReader = {
   listAssistants(userId: string, workspaceId: string): Promise<ControlPlaneAssistant[]>
   getAssistant(userId: string, workspaceId: string, assistantId: string): Promise<ControlPlaneAssistant | null>
   listConnectors(userId: string, workspaceId: string): Promise<ControlPlaneConnector[]>
   listSkills(userId: string, workspaceId: string): Promise<ControlPlaneSkill[]>
   listChannels(userId: string, workspaceId: string): Promise<ControlPlaneChannel[]>
-  listModes(userId: string, workspaceId: string, assistantId: string): Promise<ControlPlaneMode[]>
 }

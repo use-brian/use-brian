@@ -7,7 +7,6 @@ export type {
   TaskState,
   TaskStatus,
   Task,
-  AssistantMode,
   Capability,
   SpecialistCard,
   ConsultChain,

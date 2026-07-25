@@ -1405,13 +1405,12 @@ export function workspaceRoutes({
     }
   })
 
-  // /:workspaceId/memory-sharing routes deleted in migration 111. Workspace
-  // memory sharing is now expressed via assistant_modes.memory_categories
-  // on each assistant's mode bundles. See
-  // docs/architecture/integrations/a2a.md.
+  // /:workspaceId/memory-sharing routes deleted in migration 111; the
+  // assistant-modes system that replaced them was itself retired 2026-07-24
+  // (network teardown). Kept as a tombstone so stale clients get a clear 410.
   router.all('/:workspaceId/memory-sharing', (_req, res) => {
     res.status(410).json({
-      error: 'Workspace memory sharing has moved to assistant modes. See /api/assistants/:id/modes.',
+      error: 'Workspace memory sharing has been removed.',
     })
   })
 

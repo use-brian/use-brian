@@ -30,7 +30,6 @@ import type { Message, LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogg
 
 import { resolveModel, ensureServableModel, backgroundLatencyBudgetMs, backgroundModelFor, isStandardTier, chatTierBudget, planNudgeCap } from '../model-resolution.js'
 import { registryRow } from '@use-brian/shared/model-registry'
-import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import { getToolDisplayName, stripFollowUps, stripCommentThreadReplyTag } from '@use-brian/shared'
 import { resolveUser, buildBrowserEscalationPrompt, buildUnavailableCapabilitiesPrompt, injectSkills, checkUsageBudget, applyMcpInjection, type CreditBudgetGate } from './route-helpers.js'
@@ -254,7 +253,7 @@ type WebChatOptions = {
    *    budget; returned on `metered_confirm_required` rejections.
    *  - `checkMeteredSpendCap`: per-workspace per-period ceiling (L8 guard
    *    rail); fails closed.
-   *  - `chargeMeteredSurcharge`: the `5 + ceil(cost/$0.020)` debit, charged
+   *  - `chargeMeteredSurcharge`: the `5 + ceil(cost/$0.040)` debit, charged
    *    on turn completion at actual measured cost, idempotent per turn.
    */
   meteredProfileStore?: import('../db/metered-profile-store.js').MeteredProfileStore
@@ -295,7 +294,6 @@ type WebChatOptions = {
   /** Backs load-time `{{kind:name}}` pointer expansion in `useSkill`. */
   workspaceSkillFilesStore?: import('../db/workspace-skill-files-store.js').WorkspaceSkillFilesStore
   communitySkills?: import('@use-brian/core').SkillContent[]
-  pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   deferredConfirmationStore?: DeferredConfirmationStore
   /**
    * Q10 unification (WU-6.3). Required. Backs `kind='tool_invocation'`
@@ -457,18 +455,6 @@ type WebChatOptions = {
    * "Recall-outcome tagging".
    */
   memoryRecallEventsStore?: import('../db/memory-recall-events-store.js').MemoryRecallEventsStore
-  /**
-   * CL-9 retrieval-miss detector. When set and a workspace-scoped
-   * retrieval store is wired, the chat route hands the search tool an
-   * `onAfterSearch` hook that pushes (sessionId, queryText, resultIds)
-   * into the detector. The detector compares against prior queries in
-   * the same session and inserts a `retrieval_miss` row when the
-   * within-session reformulation threshold trips. Optional — without
-   * it, the search tool runs unchanged.
-   *
-   * See `docs/architecture/context-engine/memory-consolidation.md` → CL-9 lock.
-   */
-  retrievalMissDetector?: import('../retrieval/retrieval-miss-detector.js').RetrievalMissDetector
 }
 
 /**
@@ -3044,19 +3030,6 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // ── Pending message delivery hook ──────────────────────────
-      if (options.pendingMessageStore) {
-        try {
-          const pending = await buildPendingContext(options.pendingMessageStore, user.id, assistant.id, 'web')
-          // Per-turn pending-delivery queue → envelope, not the system prompt.
-          if (pending.promptFragment && pending.promptFragment.trim().length > 0) {
-            turnContextParts.push(pending.promptFragment.replace(/^\n+/, ''))
-          }
-        } catch (err) {
-          console.error('[chat] pending message delivery failed:', err)
-        }
-      }
-
       // ── Host system-prompt addendum ──────────────────────────
       // A host may add a session-specific prompt block (e.g. a draft-session
       // authoring addendum). Open default: none. Pairs with injectExtraTools
@@ -3129,30 +3102,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // workspace check in `actorFromContext`. See
       // `docs/architecture/brain/retrieval-layer.md`.
       if (options.retrievalStore && assistant.workspaceId) {
-        // CL-9 retrieval-miss hook closure. Bound here so the detector
-        // captures the per-turn user/workspace context — the search
-        // tool's hook signature only passes through what `ToolContext`
-        // already carries (no extra plumbing through queryLoop). When
-        // the detector isn't wired this stays `undefined` and the
-        // search tool falls back to its pre-CL-9 behavior.
-        const missDetector = options.retrievalMissDetector
         const retrievalTools = createRetrievalTools(options.retrievalStore, {
-          onAfterSearch: missDetector
-            ? (info) => {
-                // Skip if the workspaceId isn't bound — the detector's
-                // store is RLS-gated per workspace and a null bind is
-                // a no-op anyway. Fire-and-forget; `observe` swallows
-                // its own exceptions internally (see detector docstring).
-                if (!info.workspaceId) return
-                void missDetector.observe({
-                  sessionId: info.sessionId,
-                  workspaceId: info.workspaceId,
-                  userId: info.userId,
-                  queryText: info.query,
-                  resultIds: info.resultIds,
-                })
-              }
-            : undefined,
           onEvent: (evt) => {
             const metadata: Record<string, number | boolean | ReturnType<typeof sanitize>> = {}
             if (evt.type === 'entity_retrieved') {
@@ -4878,39 +4828,8 @@ export function chatRoutes(options: WebChatOptions): Router {
             })
           }
           if (event.type === 'tool_confirmation_required') {
-            let enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
-            let displayName = getToolDisplayName(event.request.toolName)
-
-            // Enrich reviewDataRequest with human-readable details
-            if (event.request.toolName === 'reviewDataRequest' && enrichedInput.messageId) {
-              try {
-                const { query: dbQuery } = await import('../db/client.js')
-                const msgResult = await dbQuery<{
-                  category: string | null
-                  payload: { question?: string; draftResponse?: string }
-                  sourceName: string | null
-                  sourceHandle: string | null
-                }>(
-                  `SELECT apm.category, apm.payload,
-                          sa.name AS "sourceName", su.handle AS "sourceHandle"
-                   FROM assistant_pending_messages apm
-                   JOIN assistants sa ON sa.id = apm.source_assistant_id
-                   JOIN users su ON su.id = sa.owner_user_id
-                   WHERE apm.id = $1`,
-                  [enrichedInput.messageId],
-                )
-                const msg = msgResult.rows[0]
-                if (msg) {
-                  displayName = `${msg.sourceName ?? 'An assistant'}${msg.sourceHandle ? ` (@${msg.sourceHandle})` : ''} is requesting your ${msg.category ?? 'data'}`
-                  enrichedInput = {
-                    question: msg.payload.question ?? '(no question)',
-                    category: msg.category ?? 'data',
-                    action: enrichedInput.action,
-                    _messageId: enrichedInput.messageId,
-                  }
-                }
-              } catch { /* use original input */ }
-            }
+            const enrichedInput = await enrichConfirmation(event.request.toolName, event.request.input)
+            const displayName = getToolDisplayName(event.request.toolName)
 
             sendEvent('tool_confirmation_required', {
               toolCallId: event.request.toolCallId,
@@ -5008,7 +4927,7 @@ export function chatRoutes(options: WebChatOptions): Router {
                 })
               })
 
-              // Metered lane debit (L8): 5 + ceil(cost/$0.020), charged on
+              // Metered lane debit (L8): 5 + ceil(cost/$0.040), charged on
               // COMPLETION at actual measured cost, idempotent on the stored
               // user message id (a stream retry can't double-charge). A
               // failed turn never reaches here, so it charges nothing.

@@ -137,8 +137,6 @@ const SAMPLE_WORKFLOW: WorkflowRecord = {
   lifecycleTransitionedAt: null,
   lifecycleReason: null,
   pinned: false,
-  digestedAt: null,
-  digestVerdict: null,
   createdAt: new Date(),
   updatedAt: new Date(),
 }

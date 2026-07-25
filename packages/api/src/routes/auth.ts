@@ -6,8 +6,6 @@ import { isValidTimezone } from '../auth/client-timezone.js'
 import { backfillUserProfileFromProvider, findOrCreateUser, findUserById, findUserByEmail, getDefaultAssistant, getUserAssistant, promoteChannelUser, updateUserTimezone, type User } from '../db/users.js'
 import { query } from '../db/client.js'
 import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
-import type { ApiKeyStore } from '../db/api-key-store.js'
-import type { ShadowClaimStore } from '../db/shadow-claim-store.js'
 import type { MagicLinkConsumed, MagicLinkLocale, MagicLinkStore } from '../db/magic-link-store.js'
 import type { DesktopAuthStore } from '../db/desktop-auth-store.js'
 import type { SmtpClient } from '../email/smtp-client.js'
@@ -47,16 +45,12 @@ export type EmailAuthDeps = {
  *                                    (see docs/architecture/platform/auth.md → "Email magic-link flow")
  *   POST /auth/email/verify        — Consume a magic-link token, mint JWT
  *   POST /auth/refresh             — Exchange refresh token for new access token
- *   POST /auth/claim/issue-token   — Mint a shadow-claim consent token
- *                                    (see docs/architecture/features/shadow-claim.md)
  */
 export function authRoutes(
   jwtSecret: string,
   googleClientId?: string,
   linkedAccountStore?: LinkedAccountStore,
   notifyTelegramLinked?: NotifyTelegramLinked,
-  shadowClaimStore?: ShadowClaimStore,
-  apiKeyStore?: ApiKeyStore,
   emailAuth?: EmailAuthDeps,
   desktopAuthStore?: DesktopAuthStore,
 ): Router {
@@ -709,97 +703,6 @@ export function authRoutes(
     }
   })
 
-  /**
-   * Mint a shadow-claim consent token.
-   *
-   * Called by the consent page (apps/web/src/app/auth/claim/page.tsx)
-   * after a logged-in user clicks Approve. Validates that:
-   *   - the partner_key exists and is active,
-   *   - the shadow exists with auth_provider='channel' and the
-   *     auth_provider_id matches `api:<keyId>:<externalUserId>`,
-   *   - the shadow isn't the user themselves.
-   *
-   * Returns a 5-minute single-use token bound to the (real_user, shadow,
-   * partner_key) triple. The page redirects back to the partner with this
-   * token; the partner exchanges it via POST /api/v1/claim-shadow.
-   *
-   * See docs/architecture/features/shadow-claim.md.
-   */
-  router.post('/claim/issue-token', requireAuth(jwtSecret), async (req, res) => {
-    const userId = req.userId
-    if (!userId) {
-      res.status(401).json({ error: 'Unauthorized' })
-      return
-    }
-
-    if (!shadowClaimStore || !apiKeyStore) {
-      res.status(503).json({ error: 'shadow_claim_unavailable' })
-      return
-    }
-
-    const { partnerKeyId, externalUserId, displayLabel } = req.body as {
-      partnerKeyId?: unknown
-      externalUserId?: unknown
-      displayLabel?: unknown
-    }
-    if (typeof partnerKeyId !== 'string' || partnerKeyId.length === 0) {
-      res.status(400).json({ error: 'invalid_input', detail: 'partnerKeyId required' })
-      return
-    }
-    if (typeof externalUserId !== 'string' || externalUserId.length === 0 || externalUserId.length > 256) {
-      res.status(400).json({ error: 'invalid_input', detail: 'externalUserId required (1-256 chars)' })
-      return
-    }
-    const labelClean =
-      typeof displayLabel === 'string' && displayLabel.length > 0
-        ? displayLabel.slice(0, 80)
-        : null
-
-    const keyRow = await apiKeyStore.getByIdSystem(partnerKeyId)
-    if (!keyRow) {
-      res.status(404).json({ error: 'partner_key_not_found' })
-      return
-    }
-    if (keyRow.status !== 'active') {
-      res.status(403).json({ error: 'partner_key_revoked' })
-      return
-    }
-
-    const authProviderId = `api:${keyRow.id}:${externalUserId}`
-    const shadow = await query<{ id: string; auth_provider: string }>(
-      `SELECT id, auth_provider FROM users
-       WHERE auth_provider = 'channel' AND auth_provider_id = $1
-       LIMIT 1`,
-      [authProviderId],
-    )
-    if (shadow.rows.length === 0) {
-      res.status(404).json({ error: 'shadow_not_found' })
-      return
-    }
-    const shadowUserId = shadow.rows[0].id
-    if (shadowUserId === userId) {
-      res.status(400).json({ error: 'cannot_merge_self' })
-      return
-    }
-
-    try {
-      const minted = await shadowClaimStore.create({
-        realUserId: userId,
-        shadowUserId,
-        partnerKeyId: keyRow.id,
-        externalUserId,
-        displayLabel: labelClean,
-      })
-      res.json({
-        claimToken: minted.token,
-        expiresAt: minted.expiresAt.toISOString(),
-      })
-    } catch (err) {
-      console.error('[auth/claim] mint failed:', err)
-      res.status(500).json({ error: 'internal' })
-    }
-  })
-
   return router
 }
 
@@ -884,12 +787,11 @@ function isValidEmail(s: string): boolean {
   return s.length >= 3 && s.length <= 320 && EMAIL_RE.test(s)
 }
 
-// `/invite` carries the workspace-invitation accept page (`?token=` resume);
-// `/auth/claim` carries the partner claim flow resume. The desktop sign-in
-// bridge travels as an absolute app-origin URL through ALLOWED_NEXT_HOSTS
-// below, not this list. Keep in sync with the web verify route and the
-// Google OAuth callback.
-const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onboarding', '/invite', '/auth/claim']
+// `/invite` carries the workspace-invitation accept page (`?token=` resume).
+// The desktop sign-in bridge travels as an absolute app-origin URL through
+// ALLOWED_NEXT_HOSTS below, not this list. Keep in sync with the web verify
+// route and the Google OAuth callback.
+const ALLOWED_NEXT_PREFIXES = ['/brain', '/studio', '/workflow', '/chat', '/onboarding', '/invite']
 
 // Sidan-owned hosts an absolute `nextPath` may target. Lets a magic-link
 // sign-in carry a cross-app return (e.g. the desktop bridge at

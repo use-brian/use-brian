@@ -99,26 +99,6 @@ const rowHistorySchema = z.object({
 
 export type RetrievalToolOptions = {
   onEvent?: (event: RetrievalToolEvent) => void
-  /**
-   * CL-9 retrieval-miss hook — fires once after the `search` tool
-   * returns. Implementation lives in `packages/api/src/retrieval/
-   * retrieval-miss-detector.ts`. Decoupled because the detector
-   * depends on a database store (`retrieval_miss`) which packages/core
-   * cannot reference (it's the orchestration engine; no DB seam).
-   *
-   * Errors from the hook are swallowed by the detector itself; this
-   * surface intentionally forces a fire-and-forget contract so a
-   * detector exception cannot break the search hot path.
-   *
-   * Spec: `docs/architecture/context-engine/memory-consolidation.md` → CL-9 lock.
-   */
-  onAfterSearch?: (info: {
-    query: string
-    sessionId: string
-    workspaceId: string | null | undefined
-    userId: string
-    resultIds: string[]
-  }) => void
 }
 
 /**
@@ -223,22 +203,6 @@ export function createRetrievalTools(
           query: input.query,
           resultCount: result.data.length,
         })
-        // CL-9 retrieval-miss hook. Fire-and-forget — the detector
-        // catches its own exceptions; we still guard here so a
-        // synchronously-throwing hook can never reach the chat path.
-        if (opts?.onAfterSearch) {
-          try {
-            opts.onAfterSearch({
-              query: input.query,
-              sessionId: context.sessionId,
-              workspaceId: context.workspaceId,
-              userId: context.userId,
-              resultIds: result.data.map((row) => row.row_id),
-            })
-          } catch {
-            // Swallow — see RetrievalToolOptions.onAfterSearch contract.
-          }
-        }
         return { data: result satisfies RetrievalResult<unknown> }
       } catch (err) {
         return { data: { error: errorMessage(err) } satisfies RetrievalErrorBody, isError: true }

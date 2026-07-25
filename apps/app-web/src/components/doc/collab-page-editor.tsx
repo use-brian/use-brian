@@ -648,6 +648,14 @@ function CollabEditorInner({
         // real formatted copy) or a single-line/inline paste falls through to
         // the default handler; a schema mismatch is caught and also falls back.
         handlePaste(view, event) {
+          // Inside a code block (or any node whose spec is `code`), a paste is
+          // RAW text — never parse it as Markdown. The converted blocks would be
+          // `replaceSelection`ed into a `codeBlock` (content `text*`), which
+          // ProseMirror can only satisfy by splitting the block and lifting the
+          // parsed blocks out to the document root — the reported "markdown jumps
+          // out of the ``` area". Let the default handler insert the clipboard
+          // text verbatim into the code block instead.
+          if (view.state.selection.$from.parent.type.spec.code) return false;
           const html = event.clipboardData?.getData("text/html") ?? "";
           if (html.trim()) return false;
           const text = event.clipboardData?.getData("text/plain") ?? "";

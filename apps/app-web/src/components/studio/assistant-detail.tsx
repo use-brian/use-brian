@@ -11,7 +11,6 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { AssistantAvatar } from "@/components/assistant-avatar";
 import { getCachedAssistants, setCachedAssistants } from "@/lib/sidebar-cache";
 import { KnowledgeTab } from "@/components/knowledge-tab";
-import { NetworkTab } from "@/components/network-tab";
 import { ApiKeysTab } from "@/components/api-keys-tab";
 import { SensitivityBadge, type Sensitivity } from "@/components/sensitivity-badge";
 import { ConnectorIcon } from "@/components/connectors/connector-icon";
@@ -36,9 +35,10 @@ import { modelTierPlanGateApplies } from "@/lib/plan-gate";
  * Tab consolidation:
  *   Brain     = memory + knowledge
  *   Tools     = connectors (MCP tool catalog) + skills
- *   Network   = connections, data sharing config, modes
- *   Api       = programmatic API keys
- *   Settings  = name, prompt, team, cost, delete
+ *   Api       = programmatic API keys + public chat link
+ *   Settings  = name, bio, prompt, team, cost, delete
+ * (The Network tab was removed 2026-07-24 with the assistant_modes /
+ * sharing teardown; deep links to `?tab=network` fall through to "brain".)
  *
  * Channels are workspace-owned and live entirely on Studio -> Channels;
  * there is no per-assistant channels surface here.
@@ -52,13 +52,12 @@ import { modelTierPlanGateApplies } from "@/lib/plan-gate";
  * [COMP:app-web/assistant-detail] — see docs/architecture/features/assistant-detail-page.md
  */
 
-type Tab = "brain" | "tools" | "network" | "api" | "settings";
+type Tab = "brain" | "tools" | "api" | "settings";
 
 function buildTabs(t: Dictionary): { id: Tab; label: string }[] {
   return [
     { id: "brain", label: t.manage.tabs.brain },
     { id: "tools", label: t.manage.tabs.tools },
-    { id: "network", label: t.manage.tabs.network },
     { id: "api", label: t.manage.tabs.api },
     { id: "settings", label: t.manage.tabs.settings },
   ];
@@ -79,7 +78,7 @@ export function AssistantDetail({
   const TABS = buildTabs(t);
   const searchParams = useSearchParams();
 
-  const VALID_TABS = ["brain", "tools", "network", "api", "settings"];
+  const VALID_TABS = ["brain", "tools", "api", "settings"];
   const TAB_CACHE_KEY = `assistant-tab-${id}`;
 
   const [tab, setTabRaw] = useState<Tab>(() => {
@@ -312,7 +311,6 @@ export function AssistantDetail({
           <BrainTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />
         )}
         {tab === "tools" && <ConnectorsTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />}
-        {tab === "network" && <NetworkTab assistantId={id} workspaceId={assistant.workspaceId ?? null} />}
         {tab === "api" && <ApiKeysTab assistantId={id} />}
         {tab === "settings" && (
           <SettingsTab
@@ -1931,9 +1929,14 @@ function SettingsTab({
   const params = useParams<{ workspaceId: string }>();
   const routeWs = params?.workspaceId ?? "";
   const [name, setName] = useState(assistantName);
+  // Bio: shown on the public chat page (/c/<token>) and surfaced to sibling
+  // assistants as `purpose` in listConnectedAssistants. Lived on the Network
+  // tab until that tab was removed (2026-07-24).
+  const [bio, setBio] = useState("");
+  const [savedBio, setSavedBio] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState<"name" | "prompt" | null>(null);
+  const [saving, setSaving] = useState<"name" | "bio" | "prompt" | null>(null);
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
   const [deleting, setDeleting] = useState(false);
@@ -1968,6 +1971,7 @@ function SettingsTab({
       .then((r) => (r.ok ? r.json() : null))
       .then((data: {
         name?: string;
+        bio?: string | null;
         systemPrompt?: string | null;
         workspaceId?: string | null;
         slackModelAlias?: string;
@@ -1975,6 +1979,8 @@ function SettingsTab({
       } | null) => {
         if (data) {
           setName(data.name ?? assistantName);
+          setBio(data.bio ?? "");
+          setSavedBio(data.bio ?? "");
           setSystemPrompt(data.systemPrompt ?? "");
           if (isModelAlias(data.slackModelAlias)) setSlackModel(data.slackModelAlias);
           if (isModelAlias(data.telegramModelAlias)) setTelegramModel(data.telegramModelAlias);
@@ -2016,6 +2022,31 @@ function SettingsTab({
       } else {
         const err = await res.json().catch(() => ({ error: t.assistant.settingsTab.feedbackFailedToUpdate }));
         showFeedback("error", err.error ?? t.assistant.settingsTab.feedbackFailedToUpdateName);
+      }
+    } catch {
+      showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function saveBio() {
+    if (bio.trim() === savedBio.trim()) return;
+    setSaving("bio");
+    try {
+      const res = await authFetch(`${API_URL}/api/assistants/${assistantId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bio: bio.trim() || null }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setBio(data.bio ?? "");
+        setSavedBio(data.bio ?? "");
+        showFeedback("success", t.assistant.settingsTab.feedbackBioUpdated);
+      } else {
+        const err = await res.json().catch(() => ({ error: t.assistant.settingsTab.feedbackFailedToUpdate }));
+        showFeedback("error", err.error ?? t.assistant.settingsTab.feedbackFailedToUpdate);
       }
     } catch {
       showFeedback("error", t.assistant.settingsTab.feedbackNetworkError);
@@ -2209,6 +2240,29 @@ function SettingsTab({
                 </button>
               )}
             </div>
+          </div>
+          <div>
+            <label className="text-[12px] font-medium text-muted-foreground block mb-1.5">
+              {t.assistant.settings.bio}
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+                maxLength={200}
+                placeholder={t.assistant.settings.bioPlaceholder}
+                className="flex-1 bg-muted/50 border border-border rounded-lg px-3 py-2 text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              />
+              <button
+                onClick={saveBio}
+                disabled={saving === "bio" || bio.trim() === savedBio.trim()}
+                className="px-3 py-2 text-[13px] font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/80 disabled:opacity-50 disabled:pointer-events-none transition-colors"
+              >
+                {saving === "bio" ? t.assistant.settings.saving : t.assistant.settings.save}
+              </button>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1.5">{t.assistant.settings.bioHint}</p>
           </div>
         </div>
       </Section>

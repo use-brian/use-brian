@@ -69,6 +69,7 @@ import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
 import { normalizeShopDomain, packShopifyTokens } from '../shopify/client.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
+import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
 import { verifyMailboxConnection } from '../mailbox/verify.js'
 import { probeMailboxFolders } from '../mailbox/probe.js'
@@ -226,71 +227,6 @@ async function persistConnectorInstance(opts: {
     ...(configPatch ? { config: configPatch } : {}),
   })
   return { ok: true, connectorInstanceId: created.id }
-}
-
-// ── Desktop OAuth code exchange (per provider) ──────────────────────
-//
-// The desktop shell drives an RFC 8252 loopback flow (mirroring desktop
-// sign-in), receives the provider's OAuth `code`, and posts it to
-// `exchange-and-store` with its OWN bearer. The exchange runs HERE, server-side:
-// client secrets are read from the process env (the same names the web callbacks
-// use) and never transit the loopback URL. Each exchanger returns the single
-// secret we persist (`credentialsFor`) plus the connected email + a default
-// multi-account label. Spec: docs/plans/desktop-connector-oauth-return.md.
-//
-// Fathom is intentionally absent: its store path (`fathomTokens` tuple) is not
-// wired in store-credentials, so its desktop path stays on the web-redirect
-// behaviour until that lands (plan §6a). Adding it later is one entry here.
-
-type DesktopOAuthExchangeResult = { secret: string; email: string | null; defaultLabel?: string }
-type DesktopOAuthExchanger = (args: { code: string; redirectUri: string }) => Promise<DesktopOAuthExchangeResult>
-
-async function exchangeGoogleCode({ code, redirectUri }: { code: string; redirectUri: string }): Promise<DesktopOAuthExchangeResult> {
-  const clientId = process.env.GOOGLE_CLIENT_ID
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET
-  if (!clientId || !clientSecret) throw new Error('Google OAuth is not configured')
-  const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ code, client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri, grant_type: 'authorization_code' }),
-  })
-  if (!tokenRes.ok) throw new Error(`Google token exchange failed (HTTP ${tokenRes.status})`)
-  const tokens = (await tokenRes.json()) as { access_token?: string; refresh_token?: string }
-  // Same guard as the web callback: without a refresh_token we can never re-mint
-  // access — the user granted before without revoking. Surface it, don't store.
-  if (!tokens.refresh_token) throw new Error('Google returned no refresh_token (revoke prior access, then reconnect)')
-  let email: string | null = null
-  if (tokens.access_token) {
-    try {
-      const ui = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } })
-      if (ui.ok) email = ((await ui.json()) as { email?: string }).email ?? null
-    } catch { /* email is best-effort */ }
-  }
-  return { secret: tokens.refresh_token, email, defaultLabel: email ?? undefined }
-}
-
-async function exchangeNotionCode({ code, redirectUri }: { code: string; redirectUri: string }): Promise<DesktopOAuthExchangeResult> {
-  const clientId = process.env.NOTION_CLIENT_ID
-  const clientSecret = process.env.NOTION_CLIENT_SECRET
-  if (!clientId || !clientSecret) throw new Error('Notion OAuth is not configured')
-  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64')
-  const tokenRes = await fetch('https://api.notion.com/v1/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${basic}` },
-    body: JSON.stringify({ grant_type: 'authorization_code', code, redirect_uri: redirectUri }),
-  })
-  if (!tokenRes.ok) throw new Error(`Notion token exchange failed (HTTP ${tokenRes.status})`)
-  const tokens = (await tokenRes.json()) as { access_token?: string; workspace_name?: string }
-  if (!tokens.access_token) throw new Error('Notion returned no access_token')
-  return { secret: tokens.access_token, email: null, defaultLabel: tokens.workspace_name }
-}
-
-/** Providers whose desktop connect is wired (plan §6a). */
-const DESKTOP_OAUTH_EXCHANGERS: Record<string, DesktopOAuthExchanger> = {
-  gcal: exchangeGoogleCode,
-  gmail: exchangeGoogleCode,
-  gdrive: exchangeGoogleCode,
-  notion: exchangeNotionCode,
 }
 
 /** A never-connected built-in: the bare "Connect" affordance in the list. */

@@ -99,7 +99,6 @@ export type MsTeamsRouteOptions = {
   artifactPromoter?: import('@use-brian/api/files/artifact-promote.js').ArtifactPromoter | null
   analytics?: AnalyticsLogger
   skillStore?: import('../db/skill-store.js').SkillStore
-  pendingMessageStore?: import('../db/pending-message-store.js').PendingMessageStore
   episodicStore?: import('@use-brian/core').EpisodicStore
   sessionStateStore?: import('@use-brian/core').SessionStateStore
   capabilityStore: import('@use-brian/core').CapabilityStore
@@ -403,7 +402,6 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
       workspaceFilesStore: options.workspaceFilesStore,
       artifactPromoter: options.artifactPromoter ?? null,
       skillStore: options.skillStore,
-      pendingMessageStore: options.pendingMessageStore,
       workerManager: options.workerManager,
       episodicStore: options.episodicStore,
       sessionStateStore: options.sessionStateStore,
