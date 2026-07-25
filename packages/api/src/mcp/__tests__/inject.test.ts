@@ -48,6 +48,13 @@ vi.mock('../client.js', () => ({
   callRemoteMcpTool: (...args: unknown[]) => callRemoteMcpTool(...args),
 }))
 
+const discoverCliServer = vi.fn()
+const callCliMcpTool = vi.fn()
+vi.mock('../cli-transport.js', () => ({
+  discoverCliServer: (...args: unknown[]) => discoverCliServer(...args),
+  callCliMcpTool: (...args: unknown[]) => callCliMcpTool(...args),
+}))
+
 import {
   injectMcpTools,
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
@@ -69,6 +76,8 @@ beforeEach(() => {
   // Reset only the discovery stubs.
   discoverMcpServer.mockReset()
   callRemoteMcpTool.mockReset()
+  discoverCliServer.mockReset()
+  callCliMcpTool.mockReset()
 })
 
 describe('[COMP:api/mcp-inject] injectMcpTools', () => {
@@ -295,6 +304,48 @@ describe('[COMP:api/mcp-inject] granted custom MCP overlay', () => {
     })
     expect(discoverMcpServer).not.toHaveBeenCalled()
     expect(tools.has('mcp_call')).toBe(false)
+  })
+})
+
+describe('[COMP:api/mcp-inject] granted CLI MCP overlay', () => {
+  it('injects every CLI instance exposed to a workspace', async () => {
+    discoverCliServer.mockImplementation(async (_params, name) => ({
+      name,
+      url: `stdio://${name}`,
+      tools: [{ name: `read${name.replace(/\W/g, '')}`, description: `Read from ${name}`, inputSchema: { type: 'object' } }],
+    }))
+    const instances = [
+      { id: 'cli-1', provider: 'cli', label: 'Test Filesystem', connected: true, config: {}, updatedAt: new Date(0) },
+      { id: 'cli-2', provider: 'cli', label: 'Project Filesystem', connected: true, config: {}, updatedAt: new Date(0) },
+    ]
+    const tools = new Map()
+    const connectorGrantStore = {
+      listForTargetSystem: vi.fn().mockResolvedValue(instances.map((instance) => ({
+        grantedByUserId: 'grantor-1',
+        instance,
+      }))),
+    }
+    const connectorInstanceStore = {
+      listByWorkspaceSystem: vi.fn().mockResolvedValue([]),
+      getAuthCredentialsSystem: vi.fn(async (id: string) => ({
+        type: 'cli', binaryPath: '/usr/bin/node', args: [`/tmp/${id}.js`],
+      })),
+    }
+
+    await injectMcpTools({
+      userId: 'owner-1', assistantId: 'a-1', tools,
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorGrantStore: connectorGrantStore as never,
+      connectorInstanceStore: connectorInstanceStore as never,
+      assistantTeamId: 'ws-shared',
+    })
+
+    expect(discoverCliServer).toHaveBeenCalledTimes(2)
+    expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Test Filesystem')
+    expect(discoverCliServer).toHaveBeenCalledWith(expect.anything(), 'Project Filesystem')
+    expect(tools.has('mcp_search')).toBe(true)
+    expect(tools.has('mcp_call')).toBe(true)
   })
 })
 

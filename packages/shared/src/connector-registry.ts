@@ -225,6 +225,16 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['storage', 'local', 'workspace'],
     single_instance: true,
   },
+  {
+    id: 'cli',
+    name: 'CLI Tool (MCP stdio)',
+    description: 'Connect a local MCP-compatible CLI binary. The assistant discovers and calls its tools over stdio. For self-hosted deployments.',
+    category: 'official',
+    auth_type: 'api_key',
+    oauth_required: false,
+    enabled: true,
+    tags: ['developer', 'local', 'oss'],
+  },
 ]
 
 // ── Built-in workspace primitives ─────────────────────────────

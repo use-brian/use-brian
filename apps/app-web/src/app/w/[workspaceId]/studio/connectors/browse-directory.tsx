@@ -217,6 +217,10 @@ export function BrowseDirectory({ open, onClose, onConnectorAdded, onOauthConnec
   }
 
   async function handleConnect(entry: DirectoryEntry) {
+    if (entry.id === "cli") {
+      onClose();
+      return;
+    }
     // Prefer the page's OAuth flow (correct per-provider authorize URL +
     // workspace-scoped return); the block below is the degraded fallback.
     if (entry.oauth_required && onOauthConnect) {
