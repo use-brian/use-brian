@@ -4990,6 +4990,8 @@ export const ja: Dictionary = {
         connecting: "作成中…",
         connectedSlack: "チャネルを作成しました。あと一歩、下記の Webhook URL を Slack アプリの Event Subscriptions に登録してください。",
         connectedTelegram: "@{username} として接続しました。ボットがこのワークスペースで稼働しています。",
+        telegramPairingHint: "15分以内にこのワンタイムコードをボットへ送信してください。最初に使用したTelegramアカウントがオーナーになります。",
+        telegramPairingOpen: "ボットを開いてペアリング",
         connectedDiscord: "{username} として接続しました。ユーザーがメッセージを送れるよう、ボットを Discord サーバーに招待してください。",
         discordConnectorWarning: "保存しましたが、ゲートウェイ接続はまだ確立できていません。自動的に再試行します。",
         discordInviteHint: "次の URL を開いて、ボットを Discord サーバーに追加します:",

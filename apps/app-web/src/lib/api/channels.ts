@@ -227,6 +227,9 @@ export type ConnectTelegramResult = {
   channel: Channel;
   reused: boolean;
   botUsername: string;
+  /** OSS owner-pairing code. Hosted deployments return null and use SSO. */
+  pairingCode: string | null;
+  pairingCodeExpiresAt: string | null;
 };
 
 /** Create or refresh a Telegram channel for a workspace. Auto-registers the webhook. */

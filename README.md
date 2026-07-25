@@ -132,6 +132,9 @@ The brain is the point: the more you drop in, the sharper the rest gets.
 Telegram and Slack bots are configured under **Studio → Channels** and need a
 public HTTPS tunnel to the local API webhook port (`4000`). Discord needs no
 inbound tunnel: the local launcher starts its open Gateway bridge on port `8090`.
+When an OSS Telegram bot is connected, Studio shows a one-time pairing code.
+Send it to that bot within 15 minutes; the first Telegram account to redeem it
+becomes the local owner's linked identity and the code cannot be reused.
 WhatsApp BYON also needs no tunnel: choose WhatsApp under **Studio → Channels**,
 scan the QR code, and the local bridge on port `8091` persists the pairing across
 restarts. Set `WA_CONNECTOR_URL` and `WA_CONNECTOR_SECRET` only when using an

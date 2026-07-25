@@ -1570,7 +1570,11 @@ function AddChannelForm({
   const [success, setSuccess] = useState<
     | null
     | { kind: "slack"; webhookUrl: string }
-    | { kind: "telegram"; botUsername: string }
+    | {
+        kind: "telegram";
+        botUsername: string;
+        pairingCode: string | null;
+      }
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
     | { kind: "email"; address: string }
     | { kind: "msteams"; webhookUrl: string }
@@ -1654,7 +1658,11 @@ function AddChannelForm({
           defaultAssistantId: defaultAssistantId || null,
         });
         await onCreated(result.channel);
-        setSuccess({ kind: "telegram", botUsername: result.botUsername });
+        setSuccess({
+          kind: "telegram",
+          botUsername: result.botUsername,
+          pairingCode: result.pairingCode,
+        });
         setTgBotToken("");
       } else if (platform === "msteams") {
         const result = await connectMsTeamsChannel(workspaceId, {
@@ -1713,7 +1721,8 @@ function AddChannelForm({
     (platform === "slack"
       ? slackBotToken.startsWith("xoxb-") && signingSecret.length >= 16
       : platform === "telegram"
-        ? tgBotToken.length > 0
+        ? tgBotToken.length > 0 &&
+          (isHostedEdition() || defaultAssistantId.length > 0)
         : platform === "msteams"
           ? msAppId.trim().length > 0 && msAppPassword.length > 0 && msTenantId.trim().length > 0
           : platform === "email"
@@ -2171,17 +2180,39 @@ function AddChannelForm({
         </div>
       )}
       {success?.kind === "telegram" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex items-center justify-between gap-2">
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {format(add.connectedTelegram, { username: success.botUsername })}
           </p>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
-          >
-            {add.done}
-          </button>
+          {success.pairingCode && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {add.telegramPairingHint}
+              </p>
+              <code className="w-fit rounded bg-muted px-3 py-1.5 font-mono text-base font-semibold tracking-[0.2em]">
+                {success.pairingCode}
+              </code>
+            </>
+          )}
+          <div className="flex items-center gap-2">
+            {success.pairingCode && (
+              <a
+                href={`https://t.me/${encodeURIComponent(success.botUsername)}?start=${encodeURIComponent(success.pairingCode)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-medium rounded-md bg-primary text-primary-foreground px-2 py-1"
+              >
+                {add.telegramPairingOpen}
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.done}
+            </button>
+          </div>
         </div>
       )}
       {success?.kind === "discord" && (
