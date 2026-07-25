@@ -74,12 +74,14 @@ import {
 import {
   classifyNavigation,
   decideLoginAction,
+  decideRedirectAction,
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
 } from "./window-policy.js";
 import {
   isAllowedGatewayNavigation,
+  hasReturnedToProtectedOrigin,
   isHealthyDocument,
   probeExpectedJson,
   type GatewayProbeFetch,
@@ -222,6 +224,8 @@ let gatewayWindow: BrowserWindow | null = null;
 let gatewayAuthInFlight: Promise<boolean> | null = null;
 /** Origin currently being authenticated; another origin queues behind it. */
 let gatewayAuthOrigin: string | null = null;
+/** Protected target currently being validated from the local-target chooser. */
+let pendingLocalGatewayUrl: string | null = null;
 
 const GATEWAY_RECHECK_INTERVAL_MS = 1000;
 
@@ -238,6 +242,7 @@ function authenticateGateway(
   validate: () => Promise<boolean>,
 ): Promise<boolean> {
   const protectedOrigin = new URL(protectedUrl).origin;
+  console.log(`[gateway-auth] opening authentication for ${protectedOrigin}`);
   if (gatewayAuthInFlight) {
     if (gatewayAuthOrigin === protectedOrigin) return gatewayAuthInFlight;
     const pending = gatewayAuthInFlight;
@@ -281,7 +286,10 @@ function authenticateGateway(
       if (settled || checking) return;
       checking = true;
       try {
-        if (await validate()) finish(true);
+        if (await validate()) {
+          console.log(`[gateway-auth] authenticated ${protectedOrigin}`);
+          finish(true);
+        }
       } catch {
         // The gateway or IdP is still navigating/offline; the next check retries.
       } finally {
@@ -297,7 +305,20 @@ function authenticateGateway(
     win.webContents.on("will-navigate", enforceNavigation);
     win.webContents.on("will-redirect", enforceNavigation);
     win.webContents.on("did-finish-load", () => void checkAccess());
-    win.webContents.on("did-navigate", () => void checkAccess());
+    win.webContents.on("did-navigate", (_event, url, statusCode) => {
+      console.log(`[gateway-auth] navigated ${statusCode} ${url}`);
+      // Returning from an IdP to the protected origin proves the outer
+      // gateway session was established. Close this browser immediately;
+      // the caller still re-probes desktop-config and /health before it can
+      // persist or load the target, so a same-origin 404 is never accepted
+      // as a healthy Brian deployment.
+      if (hasReturnedToProtectedOrigin(url, protectedUrl)) {
+        console.log(`[gateway-auth] returned to protected origin ${protectedOrigin}`);
+        finish(true);
+        return;
+      }
+      void checkAccess();
+    });
     win.once("ready-to-show", () => focusWindow(win));
     win.on("closed", () => finish(false));
 
@@ -561,20 +582,39 @@ function handleNavigation(event: Event, url: string): void {
  * the protected discovery endpoint before resuming the app in Electron's jar.
  */
 function handleRedirect(event: Event, url: string): void {
-  const login = decideLoginAction(url, { auth: cfg.targetAuth, appOrigin: cfg.appOrigin });
-  if (login !== "none") {
-    handleNavigation(event, url);
+  // During Cloud -> Local validation cfg still describes the CURRENT cloud
+  // target; the prospective local target is not persisted until validation
+  // succeeds. Route its server redirects as gateway auth explicitly rather
+  // than consulting cfg.target and accidentally starting cloud PKCE.
+  if (pendingLocalGatewayUrl && isAllowedGatewayNavigation(url, pendingLocalGatewayUrl)) {
+    event.preventDefault();
+    void recoverPendingLocalGatewayRedirect(pendingLocalGatewayUrl);
     return;
   }
-  if (
-    cfg.target === "local" &&
-    isAllowedGatewayNavigation(url, cfg.appUrl)
-  ) {
+  const action = decideRedirectAction(url, {
+    target: cfg.target,
+    auth: cfg.targetAuth,
+    appOrigin: cfg.appOrigin,
+    appUrl: cfg.appUrl,
+  });
+  if (action === "gateway") {
     event.preventDefault();
     void recoverAppGatewayRedirect(url);
     return;
   }
+  if (action !== "none" && action !== "navigation") {
+    handleNavigation(event, url);
+    return;
+  }
   handleNavigation(event, url);
+}
+
+async function recoverPendingLocalGatewayRedirect(protectedUrl: string): Promise<void> {
+  const result = await probeWithGatewayAuthentication(
+    desktopConfigUrl(protectedUrl),
+    () => probeDesktopConfig(protectedUrl),
+  );
+  if (result.kind !== "ready") return;
 }
 
 async function recoverAppGatewayRedirect(redirectUrl: string): Promise<void> {
@@ -758,24 +798,57 @@ async function probeWithGatewayAuthentication<T>(
   return probe();
 }
 
+/**
+ * Electron's session.fetch may follow a Cloudflare Access redirect despite a
+ * manual redirect request, yielding an opaque failed probe instead of the 302.
+ * For an explicitly chosen HTTPS self-host, fall back to opening the protected
+ * endpoint itself: Chromium follows the Access chain visibly, while the same
+ * JSON probe remains the only completion signal.
+ */
+async function probeWithVisibleGatewayFallback<T>(
+  protectedUrl: string,
+  probe: () => Promise<LocalProbeResult<T>>,
+  interactiveUrl = protectedUrl,
+): Promise<LocalProbeResult<T>> {
+  const first = await probe();
+  if (first.kind === "ready") return first;
+  if (first.kind !== "authentication-required" && new URL(protectedUrl).protocol !== "https:") {
+    return first;
+  }
+  const authenticated = await authenticateGateway(interactiveUrl, async () => {
+    const result = await probe();
+    return result.kind === "ready";
+  });
+  if (!authenticated) return { kind: "cancelled" };
+  return probe();
+}
+
 /** Validate both protected origins before loading or adopting a local target. */
 async function validateLocalTarget(
   appUrl: string,
   fallbackApiUrl: string,
 ): Promise<LocalProbeResult<{ apiUrl: string; declaredApiUrl: string | null }>> {
-  const config = await probeWithGatewayAuthentication(
+  console.log(`[gateway-auth] validating app ${appUrl}`);
+  const config = await probeWithVisibleGatewayFallback(
     desktopConfigUrl(appUrl),
     () => probeDesktopConfig(appUrl),
   );
-  if (config.kind !== "ready") return config;
+  if (config.kind !== "ready") {
+    console.warn(`[gateway-auth] app validation ended: ${config.kind}`);
+    return config;
+  }
 
   const target = localTarget(appUrl, config.value) ?? localTarget(appUrl);
   const apiUrl = target?.apiUrl ?? fallbackApiUrl;
-  const health = await probeWithGatewayAuthentication(
+  const health = await probeWithVisibleGatewayFallback(
     healthUrl(apiUrl),
     () => probeLocalBrain(apiUrl),
   );
-  if (health.kind !== "ready") return health;
+  if (health.kind !== "ready") {
+    console.warn(`[gateway-auth] API validation ended: ${health.kind} (${apiUrl})`);
+    return health;
+  }
+  console.log(`[gateway-auth] target ready: app=${appUrl} api=${apiUrl}`);
   return { kind: "ready", value: { apiUrl, declaredApiUrl: config.value } };
 }
 
@@ -1980,7 +2053,10 @@ if (!gotLock) {
     // only reachable via its declaration, since derivation would guess `:4000`.
     const normalized = localTarget(input);
     if (!normalized) return { ok: false, error: "invalid-url", url: input };
-    const validation = await validateLocalTarget(normalized.appUrl, normalized.apiUrl);
+    pendingLocalGatewayUrl = normalized.appUrl;
+    const validation = await validateLocalTarget(normalized.appUrl, normalized.apiUrl).finally(() => {
+      pendingLocalGatewayUrl = null;
+    });
     if (validation.kind !== "ready") {
       return {
         ok: false,

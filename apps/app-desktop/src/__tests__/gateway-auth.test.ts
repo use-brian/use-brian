@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   isAllowedGatewayNavigation,
+  hasReturnedToProtectedOrigin,
   isHealthyDocument,
   probeExpectedJson,
   type GatewayProbeFetch,
@@ -139,5 +140,19 @@ describe("[COMP:app-desktop/gateway-auth] isAllowedGatewayNavigation", () => {
     expect(isAllowedGatewayNavigation("file:///tmp/login", "https://brain.example")).toBe(false);
     expect(isAllowedGatewayNavigation("javascript:alert(1)", "https://brain.example")).toBe(false);
     expect(isAllowedGatewayNavigation("not a url", "https://brain.example")).toBe(false);
+  });
+});
+
+describe("[COMP:app-desktop/gateway-auth] hasReturnedToProtectedOrigin", () => {
+  it("recognizes an IdP callback landing anywhere on the protected origin", () => {
+    expect(hasReturnedToProtectedOrigin(
+      "https://brain.example/404-after-login",
+      "https://brain.example/api/desktop-config",
+    )).toBe(true);
+    expect(hasReturnedToProtectedOrigin(
+      "https://login.example/callback",
+      "https://brain.example/api/desktop-config",
+    )).toBe(false);
+    expect(hasReturnedToProtectedOrigin("not a url", "https://brain.example")).toBe(false);
   });
 });

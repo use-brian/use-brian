@@ -117,3 +117,12 @@ export function isAllowedGatewayNavigation(targetUrl: string, protectedUrl: stri
     return false;
   }
 }
+
+/** True once an interactive identity chain returns to the protected service. */
+export function hasReturnedToProtectedOrigin(targetUrl: string, protectedUrl: string): boolean {
+  try {
+    return new URL(targetUrl).origin === new URL(protectedUrl).origin;
+  } catch {
+    return false;
+  }
+}

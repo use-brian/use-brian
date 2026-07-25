@@ -7,6 +7,7 @@ import {
   parseRefreshBounce,
   decideLoadFailureAction,
   decideLoginAction,
+  decideRedirectAction,
   shouldAttemptLocalMint,
   LOCAL_MINT_COOLDOWN_MS,
 } from "../window-policy.js";
@@ -211,6 +212,29 @@ describe("[COMP:app-desktop/window-policy] decideLoginAction (per-target, §2.3)
     expect(decideLoginAction("https://app.usebrian.ai/w/x/p/y", cloud)).toBe("none");
     expect(decideLoginAction("http://localhost:3003/w/x", local)).toBe("none");
     expect(decideLoginAction("not a url", local)).toBe("none");
+  });
+});
+
+describe("[COMP:app-desktop/window-policy] decideRedirectAction", () => {
+  it("routes a Cloudflare Access redirect through local gateway auth first", () => {
+    expect(decideRedirectAction(
+      "https://awcjack.cloudflareaccess.com/cdn-cgi/access/login/use-brian-app.awcjack.top",
+      {
+        target: "local",
+        auth: "local-session",
+        appOrigin: "https://use-brian-app.awcjack.top",
+        appUrl: "https://use-brian-app.awcjack.top",
+      },
+    )).toBe("gateway");
+  });
+
+  it("keeps cloud login redirects on PKCE", () => {
+    expect(decideRedirectAction("https://app.usebrian.ai/login", {
+      target: "cloud",
+      auth: "pkce",
+      appOrigin: "https://app.usebrian.ai",
+      appUrl: "https://app.usebrian.ai",
+    })).toBe("pkce");
   });
 });
 

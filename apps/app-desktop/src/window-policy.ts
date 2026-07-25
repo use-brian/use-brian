@@ -143,6 +143,40 @@ export function isLoginNavigation(targetUrl: string): boolean {
 
 export type LoginNavAction = "pkce" | "local-session" | "none";
 
+export type RedirectAction = "gateway" | LoginNavAction | "navigation";
+
+/**
+ * Server redirects from a local target are offered to its deployment gateway
+ * before Brian's login/OAuth heuristics. Cloudflare Access redirects to an
+ * off-origin `/cdn-cgi/access/login/...` URL; treating that as ordinary login
+ * navigation opens the wrong recovery path and aborts the target chooser.
+ */
+export function decideRedirectAction(
+  targetUrl: string,
+  opts: {
+    target: "cloud" | "local";
+    auth: "pkce" | "local-session";
+    appOrigin: string;
+    appUrl: string;
+  },
+): RedirectAction {
+  if (opts.target === "local" && classifyNavigation(targetUrl, opts.appOrigin) === "external") {
+    try {
+      const target = new URL(targetUrl);
+      const protectedTarget = new URL(opts.appUrl);
+      if (
+        (target.protocol === "http:" || target.protocol === "https:") &&
+        (protectedTarget.protocol !== "https:" || target.protocol === "https:")
+      ) {
+        return "gateway";
+      }
+    } catch {
+      return "navigation";
+    }
+  }
+  return decideLoginAction(targetUrl, { auth: opts.auth, appOrigin: opts.appOrigin }) || "navigation";
+}
+
 /**
  * Per-target routing of an intercepted login navigation (§2.3 of
  * docs/plans/consumer-local-experience.md). `isLoginNavigation` decides
