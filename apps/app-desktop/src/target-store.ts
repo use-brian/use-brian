@@ -97,6 +97,10 @@ export function deriveLocalApiUrl(appUrl: string): string {
         return `${u.protocol}//api.${u.hostname.slice(prefix.length)}`;
       }
     }
+    // Public HTTPS self-hosts are normally reverse-proxied on 443, with API
+    // routes on the same origin. Older deployments predate desktop-config, so
+    // guessing an unreachable :4000 endpoint makes them impossible to adopt.
+    if (u.protocol === "https:") return u.origin;
     return `${u.protocol}//${u.hostname}:4000`;
   } catch {
     return "http://localhost:4000";
