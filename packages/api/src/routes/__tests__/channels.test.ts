@@ -10,6 +10,7 @@ vi.mock('../../db/channels-store.js', () => ({
   listChannelAssistants: vi.fn(),
   attachAssistant: vi.fn(),
   detachAssistant: vi.fn(),
+  resolveRoutingForSurface: vi.fn(),
   // Pulled in transitively: channels.js → integrations.js (for the shared
   // `channelConfigSchema`) → channels-store.js. Not exercised by these tests.
   findOrCreateChannelForConnect: vi.fn(),
@@ -52,6 +53,7 @@ import {
   attachAssistant,
   detachAssistant,
   findOrCreateChannelForWorkspaceConnect,
+  resolveRoutingForSurface,
   type Channel,
 } from '../../db/channels-store.js'
 import {
@@ -67,6 +69,7 @@ import { queryWithRLS } from '../../db/client.js'
 import type { WorkspaceStore } from '../../db/workspace-store.js'
 import type { ChannelIntegrationStore } from '../../db/channel-integrations.js'
 import type { DiscordConnectorClient } from '../../discord/connector-client.js'
+import type { LinkCodeStore } from '../../db/link-codes.js'
 
 function makeChannel(over: Partial<Channel> = {}): Channel {
   return {
@@ -91,6 +94,11 @@ function buildApp(
     apiUrl?: string
     discordConnector?: DiscordConnectorClient
     telegramBotToken?: string
+    ownerPairing?: {
+      enabled: boolean
+      requiredOnConnect?: boolean
+      linkCodeStore: LinkCodeStore
+    }
   } = {},
 ) {
   const role = opts.role === undefined ? 'admin' : opts.role
@@ -104,6 +112,7 @@ function buildApp(
       apiUrl: opts.apiUrl,
       discordConnector: opts.discordConnector,
       telegramBotToken: opts.telegramBotToken,
+      ownerPairing: opts.ownerPairing,
     }),
     userId ? { userId } : undefined,
   )
@@ -522,6 +531,105 @@ describe('[COMP:api/channels-route] workspace-driven connect', () => {
       'https://api.example.com/webhook/telegram/chan-tg',
       expect.any(String),
     )
+    expect(res.body.pairingCode).toBeNull()
+  })
+
+  it('POST /telegram creates an OSS owner pairing code for the default assistant', async () => {
+    vi.mocked(validateTelegramCredentials).mockResolvedValue({
+      botId: 12345,
+      botUsername: 'mybot',
+      firstName: 'My Bot',
+    })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({
+      channelId: 'chan-tg',
+      reused: false,
+    })
+    vi.mocked(resolveRoutingForSurface).mockResolvedValue({
+      id: 'route-1',
+      channelId: 'chan-tg',
+      assistantId: ASSISTANT_UUID,
+      externalSurfaceId: null,
+      modelAlias: 'standard',
+      createdAt: new Date(),
+    })
+    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook: vi.fn() } as never)
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
+    )
+    const integrationStore = {
+      upsert: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    } as unknown as ChannelIntegrationStore
+    const create = vi.fn().mockResolvedValue({
+      code: 'ABC234',
+      expiresAt: new Date('2026-07-25T12:15:00Z'),
+    })
+
+    const res = await request(buildApp({
+      integrationStore,
+      apiUrl: 'https://api.example.com',
+      ownerPairing: { enabled: true, linkCodeStore: { create } as never },
+    }))
+      .post('/api/workspaces/ws-1/channels/telegram')
+      .send({ botToken: '12345:ABC-token', defaultAssistantId: ASSISTANT_UUID })
+
+    expect(res.status).toBe(201)
+    expect(create).toHaveBeenCalledWith({ userId: 'user-1', assistantId: ASSISTANT_UUID })
+    expect(res.body).toMatchObject({
+      pairingCode: 'ABC234',
+      pairingCodeExpiresAt: '2026-07-25T12:15:00.000Z',
+    })
+  })
+
+  it('POST /telegram keeps hosted pairing optional without a default assistant', async () => {
+    vi.mocked(validateTelegramCredentials).mockResolvedValue({
+      botId: 12345,
+      botUsername: 'mybot',
+      firstName: 'My Bot',
+    })
+    vi.mocked(findOrCreateChannelForWorkspaceConnect).mockResolvedValue({
+      channelId: 'chan-tg',
+      reused: false,
+    })
+    vi.mocked(resolveRoutingForSurface).mockResolvedValue(null)
+    vi.mocked(createTelegramApi).mockReturnValue({ setWebhook: vi.fn() } as never)
+    vi.mocked(getChannelForUser).mockResolvedValue(
+      makeChannel({ id: 'chan-tg', channelType: 'telegram' }),
+    )
+    const integrationStore = {
+      upsert: vi.fn(),
+      listForWorkspace: vi.fn().mockResolvedValue([]),
+    } as unknown as ChannelIntegrationStore
+    const create = vi.fn()
+
+    const res = await request(buildApp({
+      integrationStore,
+      apiUrl: 'https://api.example.com',
+      ownerPairing: { enabled: true, linkCodeStore: { create } as never },
+    }))
+      .post('/api/workspaces/ws-1/channels/telegram')
+      .send({ botToken: '12345:ABC-token' })
+
+    expect(res.status).toBe(201)
+    expect(create).not.toHaveBeenCalled()
+    expect(res.body.pairingCode).toBeNull()
+  })
+
+  it('POST /telegram requires a default assistant for OSS owner pairing', async () => {
+    const res = await request(buildApp({
+      integrationStore: {} as ChannelIntegrationStore,
+      apiUrl: 'https://api.example.com',
+      ownerPairing: {
+        enabled: true,
+        requiredOnConnect: true,
+        linkCodeStore: {} as LinkCodeStore,
+      },
+    }))
+      .post('/api/workspaces/ws-1/channels/telegram')
+      .send({ botToken: '12345:ABC-token' })
+
+    expect(res.status).toBe(400)
+    expect(validateTelegramCredentials).not.toHaveBeenCalled()
   })
 
   it('POST /discord 503s when the connector is not configured', async () => {

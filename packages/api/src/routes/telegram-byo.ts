@@ -34,7 +34,8 @@ import { getWorkspaceRoleSystem } from '../db/workspace-store.js'
 import { query } from '../db/client.js'
 import { resolveChannelUser, fetchTelegramProfile, type ChannelUserStore } from '../db/channel-user-store.js'
 import { resolveAssistantForSurface, resolveRoutingForSurface, getChannelForWebhook } from '../db/channels-store.js'
-import type { LinkedAccountStore } from '../db/linked-accounts.js'
+import { mergeShadowUser, type LinkedAccountStore } from '../db/linked-accounts.js'
+import type { LinkCodeStore } from '../db/link-codes.js'
 import { withChatLock } from '../db/chat-lock.js'
 import { buildDocumentFiledReply, buildOversizeDocReply, classifyMedia } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
@@ -95,6 +96,13 @@ type TelegramByoRouteOptions = {
   apiUrl: string
   integrationStore: ChannelIntegrationStore
   linkedAccountStore?: LinkedAccountStore
+  /** One-time account pairing for OSS and hosted BYO Telegram bots. */
+  ownerPairing?: {
+    enabled: boolean
+    /** Replace hosted SSO redirect copy with standalone Studio pairing copy. */
+    standaloneOnboarding?: boolean
+    linkCodeStore: LinkCodeStore
+  }
   channelUserStore?: ChannelUserStore
   workerManager?: import('@use-brian/core').WorkerManager
   connectorStore?: ConnectorStore
@@ -690,6 +698,64 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
         }
       }
 
+      // BYO account pairing. The code is generated while connecting this bot
+      // and is bound to its default assistant. Claim is atomic, so only one
+      // Telegram account can win even if the same code is sent concurrently.
+      if (
+        options.ownerPairing?.enabled &&
+        options.linkedAccountStore &&
+        !incoming.isGroupChat &&
+        incoming.text
+      ) {
+        const pairingMatch = incoming.text.trim().toUpperCase().match(/^(?:\/START\s+)?([A-Z0-9]{6})$/)
+        if (pairingMatch) {
+          const candidate = await options.ownerPairing.linkCodeStore.findValidCode(pairingMatch[1])
+          if (candidate?.assistantId === boundAssistant.id) {
+            const code = await options.ownerPairing.linkCodeStore.claim(pairingMatch[1], incoming.userId)
+            if (!code) {
+              await adapter.sendMessage(incoming.channelId, {
+                text: 'This pairing code has expired or was already used. Reconnect the bot in Studio to generate a new one.',
+              }).catch(() => {})
+              return
+            }
+            const raw = incoming.raw as {
+              from?: { username?: string; first_name?: string; last_name?: string }
+            }
+            try {
+              await options.linkedAccountStore.upsert({
+                userId: code.userId,
+                assistantId: code.assistantId,
+                provider: 'telegram',
+                providerId: incoming.userId,
+                providerMetadata: {
+                  username: raw.from?.username ?? null,
+                  firstName: raw.from?.first_name ?? null,
+                  lastName: raw.from?.last_name ?? null,
+                },
+              })
+              mergeShadowUser(code.userId, incoming.userId, 'telegram', {
+                reason: 'link-code',
+                evidence: { codeId: code.id, channelId: boundIntegration.channelId },
+              }).catch((err) => {
+                console.error('[telegram-byo] owner pairing shadow merge failed:', err)
+              })
+              await adapter.sendMessage(incoming.channelId, {
+                text: 'Telegram connected. This Telegram account is now linked to your Brian account.',
+              }).catch((err) => {
+                console.error('[telegram-byo] owner pairing confirmation failed:', err)
+              })
+              return
+            } catch (err) {
+              console.error('[telegram-byo] owner pairing failed after code claim:', err)
+              await adapter.sendMessage(incoming.channelId, {
+                text: 'Pairing failed. Generate a new code from Studio and try again.',
+              }).catch(() => {})
+              return
+            }
+          }
+        }
+      }
+
       // 4b.2. /connect intercept — hand the user off to web Settings via
       //       a Mini App button. BYO bots are pinned to a specific assistant,
       //       so only the owner can manage connectors here; non-owners get a
@@ -701,6 +767,14 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
           ? await options.linkedAccountStore.findByProvider('telegram', telegramUserIdStr)
           : null
         const isOwner = !!linked && linked.userId === ownerId
+        if (options.ownerPairing?.standaloneOnboarding && !linked) {
+          await adapter.sendMessage(incoming.channelId, {
+            text: 'This bot is not paired yet. Reconnect it in Studio, then send the one-time owner code shown there.',
+          }).catch((err) => {
+            console.error('[telegram-byo] unpaired /connect reply failed:', err)
+          })
+          return
+        }
         const { message, handled } = handleConnectCommand({
           text: incoming.text ?? '',
           isLinked: !!linked,
@@ -848,7 +922,9 @@ export function telegramByoRoutes(options: TelegramByoRouteOptions): Router {
 
       if (privateChatRedirect) {
         await adapter.sendMessage(incoming.channelId, {
-          text: "This is a private bot. To try Use Brian, DM @use_brian_bot to sign in and link your account.",
+          text: options.ownerPairing?.standaloneOnboarding
+            ? 'This private bot is not paired with your Telegram account. Reconnect it in Studio and send the new one-time owner code here.'
+            : 'This is a private bot. To try Use Brian, DM @use_brian_bot to sign in and link your account.',
         }).catch((err) => {
           console.error('[telegram-byo] redirect message send failed:', err)
         })

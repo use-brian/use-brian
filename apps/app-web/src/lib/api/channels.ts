@@ -227,6 +227,9 @@ export type ConnectTelegramResult = {
   channel: Channel;
   reused: boolean;
   botUsername: string;
+  /** BYO account-pairing code; null when the channel has no default routing. */
+  pairingCode: string | null;
+  pairingCodeExpiresAt: string | null;
 };
 
 /** Create or refresh a Telegram channel for a workspace. Auto-registers the webhook. */

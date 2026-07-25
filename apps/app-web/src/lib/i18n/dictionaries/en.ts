@@ -5199,6 +5199,8 @@ export const en = {
         connecting: "Creating…",
         connectedSlack: "Channel created. One more step: register this webhook URL in your Slack app's Event Subscriptions.",
         connectedTelegram: "Connected as @{username}. The bot is live in this workspace.",
+        telegramPairingHint: "Send this one-time code to the bot within 15 minutes to link your Telegram account.",
+        telegramPairingOpen: "Open bot and pair",
         connectedDiscord: "Connected as {username}. Invite the bot to a Discord server so people can message it.",
         discordConnectorWarning: "Saved, but the Gateway connection didn't open yet. It will retry automatically.",
         discordInviteHint: "Open this URL to add the bot to your Discord server:",

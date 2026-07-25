@@ -1,7 +1,6 @@
 import { Router } from 'express'
 import { createTokens } from '../auth/jwt.js'
 import { findOrCreateUser, type User } from '../db/users.js'
-import { isLocalDevEnv } from './dev-auth.js'
 
 /**
  * OSS LOCAL-OWNER SESSION — `GET|POST /auth/local-session`.
@@ -19,9 +18,10 @@ import { isLocalDevEnv } from './dev-auth.js'
  * session. The only differences from `dev-auth` are the identity and the gate.
  *
  * ## Gate (two independent layers)
- *   1. Mounted in `boot.ts` only when `isLocalDevEnv() && isOssEdition()`.
+ *   1. Mounted in `boot.ts` only for an explicitly OSS, non-Cloud-Run process.
  *   2. Every request re-checks both — so it can never mint a token in the hosted
- *      cloud (`K_SERVICE`/`NODE_ENV=production`) or in the hosted edition.
+ *      cloud (`K_SERVICE`) or in the hosted edition. Production-mode self-hosts
+ *      are allowed because they run the built app with `next start`.
  *
  * The owner's display name is local config, not user-editable server state: the
  * launcher prompts once, persists it to `~/.usebrian/config.json`, and passes
@@ -45,6 +45,11 @@ export function isOssEdition(): boolean {
   )
 }
 
+/** OSS single-owner auth is valid in local and production-mode self-hosts. */
+export function isSelfHostedOssEnv(): boolean {
+  return isOssEdition() && !process.env.K_SERVICE
+}
+
 /** The neutral owner identity. No real email — `@local` is never shown in oss UI. */
 const OWNER_PROVIDER = 'local'
 const OWNER_PROVIDER_ID = 'local-owner'
@@ -63,7 +68,7 @@ export type LocalSessionDeps = {
 
 export function localSessionRoutes(deps: LocalSessionDeps): Router {
   const createUser = deps.createUser ?? findOrCreateUser
-  const isEnabled = deps.isEnabled ?? (() => isLocalDevEnv() && isOssEdition())
+  const isEnabled = deps.isEnabled ?? isSelfHostedOssEnv
   const router = Router()
 
   const handler = async (

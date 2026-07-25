@@ -4944,6 +4944,8 @@ export const zh: Dictionary = {
         connecting: "建立中…",
         connectedSlack: "管道已建立。最後一步：將下方的 Webhook URL 註冊到 Slack 應用程式的 Event Subscriptions。",
         connectedTelegram: "已連結為 @{username}，bot 已在這個工作空間上線。",
+        telegramPairingHint: "請在 15 分鐘內將此一次性代碼傳送給 bot，以連結你的 Telegram 帳號。",
+        telegramPairingOpen: "開啟 bot 並配對",
         connectedDiscord: "已連結為 {username}。請把 bot 邀請到 Discord 伺服器，這樣大家才能傳訊給它。",
         discordConnectorWarning: "已儲存，但 Gateway 連線尚未建立，系統會自動重試。",
         discordInviteHint: "開啟這個 URL，把 bot 加入你的 Discord 伺服器:",

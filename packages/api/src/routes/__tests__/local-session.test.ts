@@ -4,6 +4,7 @@ import request from 'supertest'
 import {
   localSessionRoutes,
   isOssEdition,
+  isSelfHostedOssEnv,
   type LocalSessionDeps,
 } from '../local-session.js'
 import { verifyAccessToken, verifyRefreshToken } from '../../auth/jwt.js'
@@ -87,6 +88,43 @@ describe('[COMP:api/local-session] isOssEdition gate', () => {
     } finally {
       if (prev.s !== undefined) process.env.USEBRIAN_EDITION = prev.s
       if (prev.n !== undefined) process.env.NEXT_PUBLIC_USEBRIAN_EDITION = prev.n
+    }
+  })
+})
+
+describe('[COMP:api/local-session] self-host gate', () => {
+  it('allows an explicit OSS production self-host', () => {
+    const prev = {
+      edition: process.env.USEBRIAN_EDITION,
+      nodeEnv: process.env.NODE_ENV,
+      cloudRun: process.env.K_SERVICE,
+    }
+    try {
+      process.env.USEBRIAN_EDITION = 'oss'
+      process.env.NODE_ENV = 'production'
+      delete process.env.K_SERVICE
+      expect(isSelfHostedOssEnv()).toBe(true)
+    } finally {
+      if (prev.edition === undefined) delete process.env.USEBRIAN_EDITION
+      else process.env.USEBRIAN_EDITION = prev.edition
+      if (prev.nodeEnv === undefined) delete process.env.NODE_ENV
+      else process.env.NODE_ENV = prev.nodeEnv
+      if (prev.cloudRun === undefined) delete process.env.K_SERVICE
+      else process.env.K_SERVICE = prev.cloudRun
+    }
+  })
+
+  it('rejects Cloud Run even when the edition flag is OSS', () => {
+    const prev = { edition: process.env.USEBRIAN_EDITION, cloudRun: process.env.K_SERVICE }
+    try {
+      process.env.USEBRIAN_EDITION = 'oss'
+      process.env.K_SERVICE = 'brian-api'
+      expect(isSelfHostedOssEnv()).toBe(false)
+    } finally {
+      if (prev.edition === undefined) delete process.env.USEBRIAN_EDITION
+      else process.env.USEBRIAN_EDITION = prev.edition
+      if (prev.cloudRun === undefined) delete process.env.K_SERVICE
+      else process.env.K_SERVICE = prev.cloudRun
     }
   })
 })
