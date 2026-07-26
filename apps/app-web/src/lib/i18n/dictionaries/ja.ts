@@ -3834,6 +3834,7 @@ export const ja: Dictionary = {
     dueBucketWeek: "今週",
     dueBucketLater: "それ以降",
     selectAll: "すべて選択",
+    selectAllFiltered: "一致する{count}件をすべて選択",
     selectRowAria: "タスクを選択: {title}",
     selectedCount: "{count}件を選択中",
     bulkStatus: "ステータス変更",

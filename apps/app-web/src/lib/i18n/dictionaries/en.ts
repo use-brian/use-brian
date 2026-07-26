@@ -4040,6 +4040,7 @@ export const en = {
     dueBucketWeek: "This week",
     dueBucketLater: "Later",
     selectAll: "Select all",
+    selectAllFiltered: "Select all {count} matching",
     selectRowAria: "Select task: {title}",
     selectedCount: "{count} selected",
     bulkStatus: "Set status",

@@ -3795,6 +3795,7 @@ export const zh: Dictionary = {
     dueBucketWeek: "本週",
     dueBucketLater: "之後",
     selectAll: "全選",
+    selectAllFiltered: "全選符合篩選的 {count} 項",
     selectRowAria: "選取任務：{title}",
     selectedCount: "已選 {count} 項",
     bulkStatus: "設定狀態",
