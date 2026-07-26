@@ -91,7 +91,7 @@ export function createKnowledgeTools(
   const searchKnowledge = buildTool({
     name: 'searchKnowledge',
     description:
-      'Search the knowledge base by keyword. Returns matching entries with titles, paths, and summaries. Use this when you need to find specific information in the team\'s knowledge base.',
+      'Search the workspace knowledge base (KB) by keyword. Returns matching entries with titles, paths, and summaries. Use this when you need to find specific information in the team\'s knowledge base.',
     inputSchema: z.object({
       query: z.string().describe('Search keywords (e.g. "vault fee structure", "deployment architecture").'),
     }),
