@@ -33,15 +33,6 @@ function completedTask(text: string): Task {
   }
 }
 
-function inputRequiredTask(): Task {
-  return {
-    taskId: 't_1',
-    contextId: 'ctx_1',
-    status: { state: 'input_required', timestamp: '2026-05-09T00:00:00Z' },
-    artifacts: [],
-  }
-}
-
 function makeDeps(overrides: Partial<InterAssistantDeps> = {}): InterAssistantDeps {
   return {
     isFollowing: vi.fn().mockResolvedValue(true),
@@ -53,19 +44,18 @@ function makeDeps(overrides: Partial<InterAssistantDeps> = {}): InterAssistantDe
   }
 }
 
-describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => {
+describe('[COMP:tools/ask-assistant] Inter-assistant tools', () => {
   describe('listConnectedAssistants', () => {
-    it('surfaces bio as `purpose`, caller note, and mode info', async () => {
+    it('surfaces bio as `purpose` and the caller note', async () => {
       const deps = makeDeps({
         getFollowing: vi.fn().mockResolvedValue([
           {
             followingAssistantId: 'a_lobster',
-            followingWorkspaceId: 'ws_lobster',
+            followingWorkspaceId: 'ws_caller',
             followingAssistantName: 'DD Lobster',
             followingOwnerHandle: 'lobster-owner',
             followingBio: 'Hong Kong restaurant scout',
             callerNote: 'lunch picks in Sai Ying Pun',
-            mode: { id: 'm_1', name: 'Calendar', description: 'cal only', requireApproval: false },
           },
         ]),
       })
@@ -75,31 +65,9 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
       const data = result.data as Array<{
         purpose: string | null
         note: string | null
-        mode: { name: string; requireApproval: boolean }
       }>
       expect(data[0].purpose).toBe('Hong Kong restaurant scout')
       expect(data[0].note).toBe('lunch picks in Sai Ying Pun')
-      expect(data[0].mode.name).toBe('Calendar')
-      expect(data[0].mode.requireApproval).toBe(false)
-    })
-
-    it('reports `Free` mode for connections with no mode bound', async () => {
-      const deps = makeDeps({
-        getFollowing: vi.fn().mockResolvedValue([
-          {
-            followingAssistantId: 'a_x',
-            followingWorkspaceId: 'ws_x',
-            followingAssistantName: 'X',
-            followingOwnerHandle: 'x',
-            mode: null,
-          },
-        ]),
-      })
-      const tools = createInterAssistantTools(deps)
-      const list = tools.find((t) => t.name === 'listConnectedAssistants')!
-      const result = await list.execute({}, ctx)
-      const data = result.data as Array<{ mode: { name: string } }>
-      expect(data[0].mode.name).toBe('Free')
     })
 
     it('defaults a user-origin follow to trigger=relevance', async () => {
@@ -107,13 +75,12 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
         getFollowing: vi.fn().mockResolvedValue([
           {
             followingAssistantId: 'a_lobster',
-            followingWorkspaceId: 'ws_lobster',
+            followingWorkspaceId: 'ws_caller',
             followingAssistantName: 'DD Lobster',
             followingOwnerHandle: 'lobster',
             followingBio: 'restaurant scout',
             origin: 'user',
             callerNote: 'lunch picks',
-            mode: null,
           },
         ]),
       })
@@ -137,7 +104,6 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
             followingAppType: 'doc',
             origin: 'workspace',
             callerNote: null,
-            mode: null,
           },
           {
             followingAssistantId: 'a_feed',
@@ -147,7 +113,6 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
             followingAppType: 'distribution',
             origin: 'workspace',
             callerNote: null,
-            mode: null,
           },
         ]),
       })
@@ -173,7 +138,6 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
             followingAppType: 'doc',
             origin: 'workspace',
             callerNote: 'our product spec pages',
-            mode: null,
           },
         ]),
       })
@@ -195,7 +159,7 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
       const ask = tools.find((t) => t.name === 'askAssistant')!
       const result = await ask.execute({ targetAssistantId: 'a_other', question: 'hi' }, ctx)
       expect(result.isError).toBe(true)
-      expect(result.data).toMatch(/Not following/i)
+      expect(result.data).toMatch(/Not connected/i)
     })
 
     it('builds a free-mode ConsultRequest and returns the agent text on completed', async () => {
@@ -204,10 +168,9 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
         getFollowing: vi.fn().mockResolvedValue([
           {
             followingAssistantId: 'a_target',
-            followingWorkspaceId: 'ws_target',
+            followingWorkspaceId: 'ws_caller',
             followingAssistantName: 'Target',
             followingOwnerHandle: 'target',
-            mode: null,
           },
         ]),
         consultTransport: { send },
@@ -219,31 +182,45 @@ describe('[COMP:tools/ask-assistant] Inter-assistant tools (mode-based)', () => 
       expect(send).toHaveBeenCalledTimes(1)
       const req = send.mock.calls[0][0]
       expect(req.target.assistantId).toBe('a_target')
-      expect(req.target.workspaceId).toBe('ws_target')
+      expect(req.target.workspaceId).toBe('ws_caller')
       expect(req.target.capabilityId).toBeUndefined()
       expect(req.chain.depth).toBe(0)
       expect(req.chain.path).toEqual([])
     })
 
-    it('surfaces an approval-pending message on input_required', async () => {
+    it('surfaces a failed Task as a tool error', async () => {
+      const failed: Task = {
+        taskId: 't_1',
+        contextId: 'ctx_1',
+        status: {
+          state: 'failed',
+          message: {
+            messageId: 'm_e',
+            role: 'agent',
+            parts: [{ kind: 'text', text: 'Cross-workspace consults are not supported.' }],
+          },
+          timestamp: '2026-05-09T00:00:00Z',
+        },
+        artifacts: [],
+      }
       const deps = makeDeps({
         getFollowing: vi.fn().mockResolvedValue([
           {
             followingAssistantId: 'a_target',
-            followingWorkspaceId: 'ws_target',
+            followingWorkspaceId: 'ws_other',
             followingAssistantName: 'Target',
             followingOwnerHandle: 'target',
-            mode: { id: 'm_1', name: 'Approval-required', description: null, requireApproval: true },
           },
         ]),
         consultTransport: {
-          send: vi.fn().mockResolvedValue({ task: inputRequiredTask() } satisfies ConsultResponse),
+          send: vi.fn().mockResolvedValue({ task: failed } satisfies ConsultResponse),
         },
       })
       const tools = createInterAssistantTools(deps)
       const ask = tools.find((t) => t.name === 'askAssistant')!
-      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'sensitive q' }, ctx)
-      expect(result.data).toMatch(/approval/i)
+      const result = await ask.execute({ targetAssistantId: 'a_target', question: 'q' }, ctx)
+      expect(result.isError).toBe(true)
+      expect(result.data).toMatch(/Cross-workspace/i)
     })
   })
 })

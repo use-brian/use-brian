@@ -82,8 +82,6 @@ function makeApp(
       undefined,
       tgDeps?.linkedAccountStore,
       tgDeps?.notifyTelegramLinked,
-      undefined,
-      undefined,
       emailAuth,
     ),
   )
@@ -314,11 +312,11 @@ describe('[COMP:api/auth-email-request] POST /auth/email/request-link', () => {
       .send({ email: 'a@b.com', nextPath: abs })
     expect(calls[1]?.nextPath).toBe(abs)
 
-    // Relative /auth/claim (partner claim flow resume) is allowlisted.
+    // Relative /invite (workspace-invitation resume) is allowlisted.
     await request(app)
       .post('/auth/email/request-link')
-      .send({ email: 'a@b.com', nextPath: '/auth/claim?token=xyz' })
-    expect(calls[2]?.nextPath).toBe('/auth/claim?token=xyz')
+      .send({ email: 'a@b.com', nextPath: '/invite?token=xyz' })
+    expect(calls[2]?.nextPath).toBe('/invite?token=xyz')
   })
 
   it('does NOT thread addAccount into the verify link by default', async () => {

@@ -70,8 +70,8 @@ export const OVERHEAD_SOURCES = [
   'overhead:synthesis',
   'overhead:goal-clarity',
   'overhead:goal-verify',
-  // Migration 309 (2026-07-07): the workflow-lifecycle digest pass.
-  'overhead:workflow-digest',
+  // ('overhead:workflow-digest' — mig 309 — was retired with the lifecycle
+  // sweep worker; migration 375 removed its valid_source reservation.)
   // Migration 348 (2026-07-22): the task-autopilot v2 triage judge.
   'overhead:goal-triage',
 ] as const

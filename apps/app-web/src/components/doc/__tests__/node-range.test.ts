@@ -20,6 +20,7 @@ import {
   AREA_SELECT_IDLE,
   areaSelectReducer,
   crossesBlocks,
+  crossesTopLevelBlocks,
   dragRect,
   isAreaSelectDrag,
   needsBandResync,
@@ -52,6 +53,29 @@ describe("[COMP:app-web/doc-schema] NodeRange (area select)", () => {
     expect(crossesBlocks(doc, 2, doc.content.size - 1)).toBe(true);
     // out-of-range positions clamp instead of throwing
     expect(() => crossesBlocks(doc, -10, 9999)).not.toThrow();
+  });
+
+  it("crossesTopLevelBlocks: an intra-container drag stays native, a top-level crossing engages", () => {
+    const schema = docSchema();
+    const p = (t: string) => schema.nodes.paragraph.create(null, schema.text(t));
+    const li = (t: string) => schema.nodes.listItem.create(null, p(t));
+    const list = schema.nodes.bulletList.create(null, [li("one"), li("two")]);
+    const doc = schema.nodes.doc.create(null, [list, p("after")]);
+    // Robust interior positions (no hand-counted offsets).
+    const inside: Record<string, number> = {};
+    doc.descendants((node, pos) => {
+      if (node.isText && node.text) inside[node.text] = pos + 1;
+    });
+    // Two rows of the SAME list have different immediate parents (crossesBlocks
+    // true) but the SAME top-level block — so it is NOT an area select and stays a
+    // native selection. A table's cells behave identically (one top-level block),
+    // which is the whole point: the old immediate-parent test hijacked in-table
+    // drags into a whole-table area select.
+    expect(crossesBlocks(doc, inside.one, inside.two)).toBe(true);
+    expect(crossesTopLevelBlocks(doc, inside.one, inside.two)).toBe(false);
+    // The list vs the following paragraph are different top-level blocks → engage.
+    expect(crossesTopLevelBlocks(doc, inside.one, inside.after)).toBe(true);
+    expect(() => crossesTopLevelBlocks(doc, -10, 9999)).not.toThrow();
   });
 
   it("selects a range spanning multiple top-level blocks over the doc schema", () => {

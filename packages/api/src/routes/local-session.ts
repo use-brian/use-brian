@@ -1,7 +1,9 @@
 import { Router } from 'express'
 import { createTokens } from '../auth/jwt.js'
 import { findOrCreateUser, type User } from '../db/users.js'
-import { isLocalDevEnv } from './dev-auth.js'
+import { isOssEdition } from '../edition.js'
+
+export { isOssEdition } from '../edition.js'
 
 /**
  * OSS LOCAL-OWNER SESSION — `GET|POST /auth/local-session`.
@@ -19,9 +21,10 @@ import { isLocalDevEnv } from './dev-auth.js'
  * session. The only differences from `dev-auth` are the identity and the gate.
  *
  * ## Gate (two independent layers)
- *   1. Mounted in `boot.ts` only when `isLocalDevEnv() && isOssEdition()`.
+ *   1. Mounted in `boot.ts` only for an explicitly OSS, non-Cloud-Run process.
  *   2. Every request re-checks both — so it can never mint a token in the hosted
- *      cloud (`K_SERVICE`/`NODE_ENV=production`) or in the hosted edition.
+ *      cloud (`K_SERVICE`) or in the hosted edition. Production-mode self-hosts
+ *      are allowed because they run the built app with `next start`.
  *
  * The owner's display name is local config, not user-editable server state: the
  * launcher prompts once, persists it to `~/.usebrian/config.json`, and passes
@@ -32,17 +35,9 @@ import { isLocalDevEnv } from './dev-auth.js'
  * Component-map tag: [COMP:api/local-session].
  */
 
-/**
- * True in the open single-player edition. The launcher exports
- * `USEBRIAN_EDITION=oss` (and `NEXT_PUBLIC_USEBRIAN_EDITION=oss` for app-web)
- * into every child's env; either satisfies the server-side gate. Defaults to the
- * hosted edition when unset, so a hosted deploy never opts in by accident.
- */
-export function isOssEdition(): boolean {
-  return (
-    process.env.USEBRIAN_EDITION === 'oss' ||
-    process.env.NEXT_PUBLIC_USEBRIAN_EDITION === 'oss'
-  )
+/** OSS single-owner auth is valid in local and production-mode self-hosts. */
+export function isSelfHostedOssEnv(): boolean {
+  return isOssEdition() && !process.env.K_SERVICE
 }
 
 /** The neutral owner identity. No real email — `@local` is never shown in oss UI. */
@@ -63,7 +58,7 @@ export type LocalSessionDeps = {
 
 export function localSessionRoutes(deps: LocalSessionDeps): Router {
   const createUser = deps.createUser ?? findOrCreateUser
-  const isEnabled = deps.isEnabled ?? (() => isLocalDevEnv() && isOssEdition())
+  const isEnabled = deps.isEnabled ?? isSelfHostedOssEnv
   const router = Router()
 
   const handler = async (

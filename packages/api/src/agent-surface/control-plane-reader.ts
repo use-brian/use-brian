@@ -20,7 +20,6 @@ import type {
   ControlPlaneAssistant,
   ControlPlaneChannel,
   ControlPlaneConnector,
-  ControlPlaneMode,
   ControlPlaneReader,
   ControlPlaneSkill,
 } from '@use-brian/core'
@@ -29,7 +28,6 @@ import { listAccessibleAssistants, getUserAssistant, getWorkspacePrimaryAssistan
 import { listChannelsForWorkspace } from '../db/channels-store.js'
 import type { ConnectorGrantStore } from '../db/connector-grant-store.js'
 import type { ConnectorInstanceStore, ConnectorInstance } from '../db/connector-instance-store.js'
-import type { AssistantModesStore } from '../db/assistant-modes-store.js'
 import type { WorkspaceSkillStore } from '../db/skill-store.js'
 
 export type ControlPlaneReaderDeps = {
@@ -37,7 +35,6 @@ export type ControlPlaneReaderDeps = {
   connectorInstanceStore: ConnectorInstanceStore
   connectorGrantStore: ConnectorGrantStore
   workspaceSkillStore: WorkspaceSkillStore
-  modesStore: AssistantModesStore
 }
 
 /** Project one connector_instance row into the agent-facing shape. */
@@ -140,21 +137,6 @@ export function createControlPlaneReader(deps: ControlPlaneReaderDeps): ControlP
         clearance: c.clearance,
         enabledCapabilities: c.enabledCapabilities,
         status: c.status,
-      }))
-    },
-
-    async listModes(userId, workspaceId, assistantId): Promise<ControlPlaneMode[]> {
-      // Scope gate: the target assistant must belong to this workspace and be
-      // visible to the acting principal (the modes store itself is system-level).
-      const a = await getUserAssistant(userId, assistantId)
-      if (!a || a.workspaceId !== workspaceId) return []
-      const rows = await deps.modesStore.list(assistantId)
-      return rows.map((m) => ({
-        id: m.id,
-        name: m.name,
-        description: m.description ?? null,
-        freshness: m.freshness,
-        requireApproval: m.requireApproval,
       }))
     },
   }

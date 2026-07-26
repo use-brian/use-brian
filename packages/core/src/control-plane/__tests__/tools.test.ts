@@ -63,7 +63,6 @@ function makeReader(): ControlPlaneReader {
     ]),
     listSkills: vi.fn(async () => []),
     listChannels: vi.fn(async () => []),
-    listModes: vi.fn(async () => []),
   }
 }
 
@@ -100,14 +99,6 @@ describe('[COMP:control-plane/read-tools] createControlPlaneTools', () => {
     })
     const result = await tools.getAssistant.execute(parsed, ctx())
     expect(result.isError).toBe(true)
-  })
-
-  it('listModes passes the target assistant through', async () => {
-    const reader = makeReader()
-    const tools = createControlPlaneTools(reader)
-    const parsed = tools.listModes.inputSchema.parse({ assistantId: ASSISTANT })
-    await tools.listModes.execute(parsed, ctx())
-    expect(reader.listModes).toHaveBeenCalledWith('u-1', WS, ASSISTANT)
   })
 
   it('listConnectors surfaces the oauthRequired flag the agent uses for connect-link handoff', async () => {

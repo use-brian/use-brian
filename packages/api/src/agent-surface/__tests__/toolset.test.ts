@@ -60,7 +60,6 @@ const READER_STUB: ControlPlaneReader = {
   listConnectors: vi.fn(async () => []),
   listSkills: vi.fn(async () => []),
   listChannels: vi.fn(async () => []),
-  listModes: vi.fn(async () => []),
 }
 
 function makeApprovalsStore(): Pick<PendingApprovalsStore, 'createStagedWrite' | 'createStagedSkillCreation'> & {

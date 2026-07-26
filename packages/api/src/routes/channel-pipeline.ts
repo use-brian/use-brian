@@ -57,7 +57,6 @@ import {
 import { resolveModel, wouldBudgetDowngradeAffectModel, chatTierBudget, BACKGROUND_MODEL } from '../model-resolution.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
-import type { PendingMessageStore } from '../db/pending-message-store.js'
 import type { SkillStore } from '../db/skill-store.js'
 import { injectMcpTools } from '../mcp/inject.js'
 import { createKnowledgeRepoWriter } from '../knowledge/repo-writer.js'
@@ -70,7 +69,6 @@ import {
   buildChannelSessionKey,
   listPendingRecordingConfirmationsForSession,
 } from '../db/pending-recording-confirmations-store.js'
-import { buildPendingContext } from '../inter-assistant/pending-context.js'
 import { billingPartyForAssistant } from '../billing-party.js'
 import { promotePastedText, shouldPromotePaste } from '../files/paste-promotion.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
@@ -418,7 +416,6 @@ export type ChannelPipelineParams = {
    */
   artifactPromoter?: ArtifactPromoter | null
   skillStore?: SkillStore
-  pendingMessageStore?: PendingMessageStore
   workerManager?: import('@use-brian/core').WorkerManager
   episodicStore?: EpisodicStore
   sessionStateStore?: SessionStateStore
@@ -574,7 +571,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     modelAlias, adaptiveResearchEnabled, abortController,
     provider, systemPrompt, tools, memoryStore, usageStore,
     analytics, connectorStore, mcpSettingsStore, assistantConnectorStore, connectorGrantStore, connectorInstanceStore, workspaceToolPolicyStore,
-    knowledgeStore, gdriveFilesStore, skillStore, pendingMessageStore, workerManager,
+    knowledgeStore, gdriveFilesStore, skillStore, workerManager,
     episodicStore, sessionStateStore, workspaceFilesStore, filesApi,
     replyToMessageId, replyRaw, incomingChannelMessageId,
     voiceTranscriptionUsage,
@@ -1028,16 +1025,6 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // ── Channel formatting hints ──
   if (channelType === 'whatsapp') {
     fullSystemPrompt += `\n\n# Formatting\nYou're on WhatsApp. Supported: *bold*, _italic_, ~strikethrough~, \`code\`, \`\`\`code blocks\`\`\`, > quotes, and lists. NOT supported: tables, headers (#), links ([text](url)). For comparisons, use bullet lists or numbered lists instead of tables.`
-  }
-
-  // ── Pending inter-assistant messages ──
-  if (pendingMessageStore) {
-    try {
-      const pending = await buildPendingContext(pendingMessageStore, ownerId, assistant.id, channelType)
-      fullSystemPrompt += pending.promptFragment
-    } catch (err) {
-      console.error(`[${channelType}] pending message delivery failed:`, err)
-    }
   }
 
   // ── Tools: capability filter + memory ──

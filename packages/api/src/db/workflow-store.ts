@@ -22,7 +22,6 @@ import type {
   PageWorkflowRunSummary,
   RunQueueStore,
   WorkflowDefinition,
-  WorkflowLifecycleRow,
   WorkflowLifecycleState,
   WorkflowModelAlias,
   WorkflowRecord,
@@ -62,8 +61,6 @@ const WORKFLOW_SELECT = `
   lifecycle_transitioned_at AS "lifecycleTransitionedAt",
   lifecycle_reason    AS "lifecycleReason",
   pinned,
-  digested_at         AS "digestedAt",
-  digest_verdict      AS "digestVerdict",
   created_at          AS "createdAt",
   updated_at          AS "updatedAt"
 `
@@ -88,8 +85,6 @@ type WorkflowRow = {
   lifecycleTransitionedAt: Date | null
   lifecycleReason: string | null
   pinned: boolean
-  digestedAt: Date | null
-  digestVerdict: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -143,8 +138,6 @@ function rowToWorkflow(row: WorkflowRow): WorkflowRecord {
     lifecycleTransitionedAt: row.lifecycleTransitionedAt,
     lifecycleReason: row.lifecycleReason,
     pinned: row.pinned,
-    digestedAt: row.digestedAt,
-    digestVerdict: row.digestVerdict,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -1318,134 +1311,3 @@ export async function pauseWorkflowSystem(
   if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', workflowId)
 }
 
-// ── workflow lifecycle sweep (mig 308) ──────────────────────────────────
-// System-level reads/writes for the lifecycle sweep worker
-// (packages/api/src/workers/workflow-lifecycle-worker.ts). The worker has
-// no acting user; the policy lives in @use-brian/core `decideLifecycle`.
-// [COMP:workflow/lifecycle]
-
-type LifecycleSweepRow = {
-  id: string
-  workspaceId: string
-  createdBy: string
-  name: string
-  description: string | null
-  trigger: WorkflowTrigger | null
-  enabled: boolean
-  pinned: boolean
-  lifecycleState: WorkflowLifecycleState
-  lifecycleTransitionedAt: Date | null
-  digestedAt: Date | null
-  createdAt: Date
-  updatedAt: Date
-  lastRunAt: Date | null
-  runCount: number
-  hasLiveFire: boolean
-}
-
-/**
- * Every workflow with the aggregates the lifecycle policy needs: last run
- * start + total run count (lateral over `idx_workflow_runs_workflow`) and
- * whether any enabled `scheduled_jobs` row still points at the workflow
- * (`hasLiveFire` — a pending future fire or wait continuation). One query,
- * all workspaces; the sweep worker partitions per workspace itself.
- */
-export async function listLifecycleSweepRowsSystem(): Promise<
-  Array<WorkflowLifecycleRow & { createdBy: string }>
-> {
-  const result = await query<LifecycleSweepRow>(
-    `SELECT w.id,
-            w.workspace_id              AS "workspaceId",
-            w.created_by                AS "createdBy",
-            w.name,
-            w.description,
-            w.trigger,
-            w.enabled,
-            w.pinned,
-            w.lifecycle_state           AS "lifecycleState",
-            w.lifecycle_transitioned_at AS "lifecycleTransitionedAt",
-            w.digested_at               AS "digestedAt",
-            w.created_at                AS "createdAt",
-            w.updated_at                AS "updatedAt",
-            r."lastRunAt",
-            COALESCE(r."runCount", 0)::int AS "runCount",
-            EXISTS (
-              SELECT 1 FROM scheduled_jobs j
-               WHERE j.workflow_id = w.id AND j.enabled = true
-            ) AS "hasLiveFire"
-       FROM workflows w
-       LEFT JOIN LATERAL (
-         SELECT MAX(started_at) AS "lastRunAt", COUNT(*) AS "runCount"
-           FROM workflow_runs WHERE workflow_id = w.id
-       ) r ON true`,
-  )
-  return result.rows.map((row) => ({
-    ...row,
-    trigger: row.trigger ?? { kind: 'manual' },
-    runCount: Number(row.runCount),
-  }))
-}
-
-/**
- * Apply one sweep transition. Archival also disables the workflow so no
- * trigger path (webhook lookup, event finder, scheduled fire) can start a
- * run on a retired row; restore is the PATCH `lifecycleState: 'active'`
- * path in `createDbWorkflowStore().update`, which re-enables explicitly.
- */
-export async function applyLifecycleTransitionSystem(
-  workflowId: string,
-  state: WorkflowLifecycleState,
-  reason: string | null,
-): Promise<void> {
-  const result = await query<{ workspaceId: string }>(
-    `UPDATE workflows
-        SET lifecycle_state = $2,
-            lifecycle_reason = $3,
-            lifecycle_transitioned_at = now(),
-            enabled = CASE WHEN $2 = 'archived' THEN false ELSE enabled END
-      WHERE id = $1
-      RETURNING workspace_id AS "workspaceId"`,
-    [workflowId, state, reason],
-  )
-  if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'update', workflowId)
-}
-
-/**
- * Stamp the digest pass's verdict on the reviewed rows. Idempotence anchor:
- * the digest batch selects `digested_at IS NULL`, so each workflow is
- * reviewed at most once. (This bumps `updated_at` via the table trigger —
- * harmless: stale-row reactivation is run-only, see `touchedSinceTransition`.)
- */
-export async function markWorkflowsDigestedSystem(
-  workflowIds: string[],
-  verdicts: Map<string, string>,
-): Promise<void> {
-  if (workflowIds.length === 0) return
-  const ids: string[] = []
-  const verdictValues: string[] = []
-  for (const id of workflowIds) {
-    ids.push(id)
-    verdictValues.push(verdicts.get(id) ?? 'not_repeatable')
-  }
-  await query(
-    `UPDATE workflows w
-        SET digested_at = now(), digest_verdict = v.verdict
-       FROM unnest($1::uuid[], $2::text[]) AS v(id, verdict)
-      WHERE w.id = v.id`,
-    [ids, verdictValues],
-  )
-}
-
-/**
- * Hard delete for the sweep's one-off retirement path (archived one-shot
- * workflows past the delete grace). `workflow_runs` cascade via FK — the
- * caller emits the audit event carrying a summary snapshot first.
- */
-export async function deleteWorkflowSystem(workflowId: string): Promise<boolean> {
-  const result = await query<{ workspaceId: string }>(
-    `DELETE FROM workflows WHERE id = $1 RETURNING workspace_id AS "workspaceId"`,
-    [workflowId],
-  )
-  if (result.rows[0]) notifyWorkspaceChange(result.rows[0].workspaceId, 'workflow', 'delete', workflowId)
-  return result.rowCount !== null && result.rowCount > 0
-}

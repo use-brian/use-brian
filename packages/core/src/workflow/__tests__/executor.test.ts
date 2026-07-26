@@ -51,8 +51,6 @@ function makeFakeStores() {
         lifecycleTransitionedAt: null,
         lifecycleReason: null,
         pinned: false,
-        digestedAt: null,
-        digestVerdict: null,
         createdAt: now,
         updatedAt: now,
       }

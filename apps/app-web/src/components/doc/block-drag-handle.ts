@@ -411,6 +411,16 @@ const CALLOUT_NODE_DOM_CLASS = "node-callout";
 const CALLOUT_INNER_CLASS = "doc-callout";
 
 /**
+ * The class on the node DOM `view.nodeDOM()` returns for a `table` node. Like the
+ * embed / callout, Tiptap stamps the React node view's OUTER wrapper `node-table`
+ * (the app's own `<NodeViewWrapper className="doc-table-block">` is that wrapper's
+ * child), and that outer box has no text line of its own - so the first-line
+ * metric reads padding-top 0 and pins the grip to the box top, misaligned with
+ * the first row. The fix anchors the grip to the first cell's first text line.
+ */
+const TABLE_NODE_DOM_CLASS = "node-table";
+
+/**
  * The client rect tippy anchors the grip to. A bulleted/numbered list item's
  * marker (and a task list's checkbox) lives in the parent list's leading column,
  * LEFT of the block's text box — so anchoring to the block's own rect drops the
@@ -535,6 +545,34 @@ export function gripVerticalOffset(dom: HTMLElement): number {
   // padding on the wrapper can't strand the grip). See `CALLOUT_NODE_DOM_CLASS`.
   if (dom.classList.contains(CALLOUT_NODE_DOM_CLASS)) {
     const inner = dom.querySelector<HTMLElement>(`.${CALLOUT_INNER_CLASS}`);
+    if (inner) {
+      const { lineHeight, padTop } = firstLineMetrics(inner);
+      const innerTopDelta =
+        inner.getBoundingClientRect().top - dom.getBoundingClientRect().top;
+      return Math.max(0, innerTopDelta + padTop + lineHeight / 2 - GRIP_HEIGHT / 2);
+    }
+  }
+  // A table's node DOM is the bare `node-table` wrapper (no text line); the first
+  // content line is the first cell's `<p>`, inside a `<tr>` that may sit below the
+  // absolutely-positioned hover control bar. Anchor the grip to that first cell's
+  // first line - box-centring a tall table would strand the grip in its middle.
+  if (dom.classList.contains(TABLE_NODE_DOM_CLASS)) {
+    const firstCell = dom.querySelector<HTMLElement>("td, th");
+    if (firstCell) {
+      const { lineHeight, padTop } = firstLineMetrics(firstCell);
+      const cellTopDelta =
+        firstCell.getBoundingClientRect().top - dom.getBoundingClientRect().top;
+      return Math.max(0, cellTopDelta + padTop + lineHeight / 2 - GRIP_HEIGHT / 2);
+    }
+  }
+  // A list ROW's node DOM is the `<li>`, but its 3px row padding lives on the
+  // inner `<p>` (`.ProseMirror li > p`), not the `<li>` - so the text metric read
+  // off the `<li>` sees padding-top 0 and pins the grip a few px above the
+  // bullet's / number's optical centre. Read the metric off the direct `<p>`
+  // child instead. (Task rows nest their `<p>` under a flex content div and their
+  // checkbox owns the column, so they fall through to the box metric below.)
+  if (dom.tagName === "LI") {
+    const inner = dom.querySelector<HTMLElement>(":scope > p");
     if (inner) {
       const { lineHeight, padTop } = firstLineMetrics(inner);
       const innerTopDelta =
@@ -966,6 +1004,15 @@ export function createBlockDragHandlePlugin({
         },
         mousemove(view, event) {
           if (!element || locked) return false;
+          // A held mouse button means a DRAG in progress (a text selection, a
+          // block-area-select marquee, or a native selection), not a hover.
+          // Recomputing the target + calling show()/setProps()/forceUpdate() on
+          // every move during a drag makes the grip flicker and jump over the
+          // live selection - most visibly it fought the area-select marquee,
+          // which shares this same left gutter (both plugins listen for
+          // mousemove). A hover has no buttons pressed; while one is, leave the
+          // current grip state untouched. See `block-area-select.ts`.
+          if ((event as MouseEvent).buttons !== 0) return false;
           // Ensure a LIVE popup. The old guard bailed only on `!popup`, which a
           // destroyed-but-non-null instance (left by a recreated EditorView)
           // passed — so `show()` below no-op'd and the grip surfaced at the

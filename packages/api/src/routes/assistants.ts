@@ -10,7 +10,7 @@
  *   GET    /:assistantId          — single assistant detail
  *   PATCH  /:assistantId          — update settings: system_prompt (any member),
  *                                   clearance (owner / workspace admin), everything
- *                                   else (name, bio, sharing, model aliases) owner-only
+ *                                   else (name, bio, model aliases) owner-only
  *   DELETE /:assistantId          — delete assistant (owner only, solo-owned)
  */
 
@@ -68,7 +68,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
    * a legacy `assistant_members.role='member'` row could be denied a rename they
    * were entitled to, and — the direction that matters — a workspace `member`
    * carrying a legacy `role='owner'` row could non-deterministically clear the
-   * owner-only gate on `bio`, `sharing_mode`, and the model aliases.
+   * owner-only gate on `bio` and the model aliases.
    */
   async function verifyMembership(
     req: { userId?: string; params: AssistantParams },
@@ -101,7 +101,6 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         name: string
         system_prompt: string | null
         bio: string | null
-        sharing_mode: string
         created_at: string
         slack_model_alias: string
         telegram_model_alias: string
@@ -113,7 +112,7 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         app_type: string | null
       }>(
         member.userId,
-        `SELECT id, name, system_prompt, bio, sharing_mode, created_at,
+        `SELECT id, name, system_prompt, bio, created_at,
                 slack_model_alias, telegram_model_alias, whatsapp_model_alias, icon_seed, workspace_id, clearance, kind, app_type
          FROM assistants WHERE id = $1`,
         [assistantId],
@@ -135,7 +134,6 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
         iconSeed: row.icon_seed ?? 0,
         workspaceId: row.workspace_id,
         bio: row.bio,
-        sharingMode: row.sharing_mode,
         clearance: row.clearance,
         kind: row.kind,
         appType: row.app_type,
@@ -153,14 +151,13 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (!member) return
 
     const { assistantId } = req.params
-    const { name, systemPrompt, slackModelAlias, telegramModelAlias, whatsappModelAlias, bio, sharingMode, clearance } = req.body as {
+    const { name, systemPrompt, slackModelAlias, telegramModelAlias, whatsappModelAlias, bio, clearance } = req.body as {
       name?: string
       systemPrompt?: string | null
       slackModelAlias?: string
       telegramModelAlias?: string
       whatsappModelAlias?: string
       bio?: string | null
-      sharingMode?: string
       clearance?: string
     }
 
@@ -180,11 +177,11 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     //   - `clearance`: the assistant owner, or a team admin/owner of the
     //     assistant's workspace (policy is a team-wide concern — see
     //     docs/architecture/platform/sensitivity.md).
-    //   - everything else (bio, sharingMode, model aliases): owner only.
+    //   - everything else (bio, model aliases): owner only.
     // A non-owner request that bundles an owner-only field is rejected whole
     // (the strictest field in the request governs).
     const ownerOnlyFieldPresent =
-      bio !== undefined || sharingMode !== undefined ||
+      bio !== undefined ||
       slackModelAlias !== undefined || telegramModelAlias !== undefined ||
       whatsappModelAlias !== undefined
 
@@ -281,24 +278,6 @@ export function assistantRoutes(options: AssistantRouteOptions): Router {
     if (bio !== undefined) {
       sets.push(`bio = $${idx++}`)
       values.push(bio === null ? null : (bio.slice(0, 200)))
-    }
-    // Sharing hard-lock: an assistant with any active capability grant
-    // cannot be shared. Privileged bots must stay private — revoke all
-    // grants first, then enable sharing. See
-    // docs/architecture/platform/capability-grants.md → "Sharing hard-lock".
-    if (sharingMode !== undefined && ['off', 'private', 'public'].includes(sharingMode)) {
-      if (sharingMode !== 'off') {
-        const hasGrants = await options.capabilityStore.hasActive(assistantId)
-        if (hasGrants) {
-          res.status(409).json({
-            error: 'Cannot enable sharing on a privileged assistant. Revoke all capability grants first.',
-            code: 'SHARING_LOCKED_BY_GRANTS',
-          })
-          return
-        }
-      }
-      sets.push(`sharing_mode = $${idx++}`)
-      values.push(sharingMode)
     }
     if (clearance !== undefined && ['public', 'internal', 'confidential'].includes(clearance)) {
       sets.push(`clearance = $${idx++}`)

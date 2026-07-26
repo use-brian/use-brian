@@ -22,6 +22,16 @@ export function planGateApplies(
   return edition === "hosted" && plan === "free";
 }
 
+export function modelTierPlanGateApplies(
+  edition: "oss" | "hosted",
+  plan: string | null | undefined,
+  tier: "standard" | "pro" | "max",
+): boolean {
+  if (edition === "oss" || tier === "standard") return false;
+  if (tier === "pro") return plan === "free";
+  return plan === "free" || plan === "pro";
+}
+
 /**
  * Session-storage key for the per-workspace "Continue browsing" dismissal.
  * Session-scoped on purpose: browsing stays reachable, but the gate

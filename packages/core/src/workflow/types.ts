@@ -500,16 +500,15 @@ export type WorkflowStepRunStatus = (typeof WORKFLOW_STEP_RUN_STATUSES)[number]
 export type WorkflowTriggerKind = 'manual' | 'schedule' | 'event' | 'button'
 
 /**
- * Mig 308. The workflow lifecycle ladder — `active` → `stale` (idle past the
- * staleness window) → `archived` (hidden from default listings, restorable).
- * Maintained by the lifecycle sweep worker; a PATCH writing `'active'` is the
- * restore path. See docs/architecture/features/workflow-lifecycle.md.
+ * Mig 308. The workflow lifecycle ladder. Only `active` and `archived` are
+ * written today: spent one-off schedules auto-archive (job-store, mig 369)
+ * and a PATCH writing `'active'` is the restore path. The staleness /
+ * digestion sweep worker that also wrote `'stale'` was retired 2026-07-24
+ * without ever being enabled; the value stays in the enum for the CHECK
+ * constraint's sake.
  */
 export const WORKFLOW_LIFECYCLE_STATES = ['active', 'stale', 'archived'] as const
 export type WorkflowLifecycleState = (typeof WORKFLOW_LIFECYCLE_STATES)[number]
-
-/** Mig 308. Digest-pass verdicts stamped on `workflows.digest_verdict`. */
-export type WorkflowDigestVerdict = 'skill_candidate' | 'not_repeatable'
 
 // ── Records ─────────────────────────────────────────────────────────────
 
@@ -555,20 +554,16 @@ export type WorkflowRecord = {
   /**
    * Mig 308. Lifecycle ladder position. Archived rows are excluded from
    * default listings (web grid, sidebar, chat `listWorkflows`) and restored
-   * via PATCH `lifecycleState: 'active'`. Maintained by the lifecycle sweep
-   * worker — see docs/architecture/features/workflow-lifecycle.md.
+   * via PATCH `lifecycleState: 'active'`. Written by the spent one-off
+   * schedule auto-archive (job-store, mig 369).
    */
   lifecycleState: WorkflowLifecycleState
   /** Mig 308. When `lifecycleState` last changed. Null = never left `active`. */
   lifecycleTransitionedAt: Date | null
   /** Mig 308. Human-readable cause of the current state (mirrors `pausedReason`). */
   lifecycleReason: string | null
-  /** Mig 308. User veto — a pinned workflow is exempt from every lifecycle sweep. */
+  /** Mig 308. User veto — a pinned workflow is exempt from automatic archival. */
   pinned: boolean
-  /** Mig 308. When the digest pass reviewed this workflow. Null = not yet. */
-  digestedAt: Date | null
-  /** Mig 308. `'skill_candidate' | 'not_repeatable'` once digested. */
-  digestVerdict: string | null
   createdAt: Date
   updatedAt: Date
 }
@@ -721,12 +716,13 @@ export type WorkflowStore = {
       researchMode: boolean
       nameManuallySet: boolean
       /**
-       * Mig 308. `'active'` restores a stale/archived workflow (stamps
+       * Mig 308. `'active'` restores an archived workflow (stamps
        * `lifecycle_transitioned_at`, clears `lifecycle_reason`). Routes only
-       * ever write `'active'` — degradation is the sweep worker's job.
+       * ever write `'active'` — archival comes from the spent one-off
+       * schedule path (job-store, mig 369).
        */
       lifecycleState: WorkflowLifecycleState
-      /** Mig 308. The lifecycle-sweep veto flag. */
+      /** Mig 308. The auto-archive veto flag. */
       pinned: boolean
     }>,
   ): Promise<WorkflowRecord | null>

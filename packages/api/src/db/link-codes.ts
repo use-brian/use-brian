@@ -2,7 +2,7 @@
  * Telegram link code store — temporary 6-char codes for the linking handshake.
  *
  * Web UI generates a code, user sends it to the Telegram bot, bot verifies
- * and creates a linked account. Codes expire after 5 minutes.
+ * and creates a linked account. Codes expire after 15 minutes.
  *
  * See docs/architecture/platform/auth.md → "Linked Accounts".
  * Component tag: [COMP:api/link-codes-store].
@@ -37,8 +37,12 @@ export type LinkCodeStore = {
    */
   findValidCode(code: string): Promise<LinkCode | null>
 
-  /** Mark a code as claimed. No RLS. */
-  claim(code: string, providerIdThatClaimed: string): Promise<void>
+  /**
+   * Atomically claim an unexpired code. Returns the claimed row to the one
+   * winner, or null when the code is invalid, expired, or already claimed.
+   * No RLS.
+   */
+  claim(code: string, providerIdThatClaimed: string): Promise<LinkCode | null>
 
   /**
    * Get the most recent code for a (user, assistant) pair.
@@ -72,7 +76,7 @@ type TlcRow = {
 // Alphabet: uppercase alphanumeric without ambiguous chars (0/O, 1/I/L)
 const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
 const CODE_LENGTH = 6
-const TTL_MINUTES = 5
+const TTL_MINUTES = 15
 
 function generateCode(): string {
   let code = ''
@@ -117,12 +121,14 @@ export function createDbLinkCodeStore(): LinkCodeStore {
     },
 
     async claim(code, providerIdThatClaimed) {
-      await query(
+      const result = await query<TlcRow>(
         `UPDATE telegram_link_codes
          SET claimed_at = now(), claimed_by_provider_id = $2
-         WHERE code = $1 AND claimed_at IS NULL`,
+         WHERE code = $1 AND claimed_at IS NULL AND expires_at > now()
+         RETURNING ${TLC_COLS}`,
         [code, providerIdThatClaimed],
       )
+      return result.rows[0] ?? null
     },
 
     async getByUserAndAssistant(userId, assistantId) {

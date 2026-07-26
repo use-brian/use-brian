@@ -167,7 +167,7 @@ export async function findOrCreateUser(params: {
   // a Personal workspace. They can't log in; their turns run entirely inside
   // the bot/assistant's workspace (memory + brain are scoped to
   // `assistant.workspaceId` by the channel + public-API routes, never the
-  // shadow's own workspace), and the shadow-claim merge reassigns
+  // shadow's own workspace), and a shadow merge (link-code flows) reassigns
   // sessions/memories by `user_id` — so a per-shadow personal workspace +
   // primary is dead weight that only pollutes the workspace table (admin list,
   // free-plan cap counts). Excluding them here keeps each customer's API/DM

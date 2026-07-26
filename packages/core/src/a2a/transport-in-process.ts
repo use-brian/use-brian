@@ -4,9 +4,15 @@
  * Implements `ConsultTransport.send()` for callers that live in the same
  * process as their callees (the only supported deployment today). Performs
  * the cycle/depth/budget checks specified in `docs/architecture/integrations/a2a.md`,
- * resolves the destination's mode (via `mode-resolver`), applies the mode's
- * tool filter, then delegates query-loop execution to a callback (`runConsult`)
- * supplied by the consuming app.
+ * then delegates query-loop execution to a callback (`runConsult`) supplied
+ * by the consuming app.
+ *
+ * Consults are workspace-internal: connections only exist between assistants
+ * of the same workspace (auto-seeded primary → sibling edges), so a
+ * cross-workspace request is rejected with SHARING_BLOCKED before any
+ * execution. The destination-side "mode" policy layer (assistant_modes) was
+ * retired 2026-07-24 along with the sharing/discovery feature — same-workspace
+ * consults run with full workspace trust.
  *
  * Why a callback rather than a direct `queryLoop` call: this module lives in
  * `@use-brian/core` which has no `pg` / DB / store-construction surface. The
@@ -17,12 +23,10 @@
  * [COMP:a2a/transport-in-process]
  */
 
-import { resolveMode, type ModeResolverDeps, type ModeResolution } from '../inter-assistant/mode-resolver.js'
 import { CONSULT_LIMITS, ERROR_CODES } from './limits.js'
 import type {
   A2AMessage,
   Artifact,
-  AssistantMode,
   ConsultError,
   ConsultRequest,
   ConsultResponse,
@@ -32,8 +36,6 @@ import type {
 
 export type RunConsultParams = {
   request: ConsultRequest
-  /** Resolved mode for this consult — `null` for free mode (no mode bound), or an AssistantMode. */
-  mode: AssistantMode | null
 }
 
 export type RunConsultResult = {
@@ -41,20 +43,13 @@ export type RunConsultResult = {
   text: string
   /** Optional structured artifacts (restricted-mode capability invocations may surface these). */
   artifacts?: Artifact[]
-  /**
-   * If true, the destination has queued the consult for owner approval (a
-   * `pending_message` was created). The transport returns a Task with
-   * `status.state='input_required'` so the caller's LLM sees it as a
-   * recoverable async event.
-   */
-  inputRequired?: boolean
 }
 
-export type InProcessTransportDeps = ModeResolverDeps & {
+export type InProcessTransportDeps = {
   /**
-   * Run the destination's query loop with mode-filtered tools and return the
-   * response. Implementer is responsible for: tool filtering by `mode.exposedTools`,
-   * memory context, MCP injection, session creation, billing attribution, etc.
+   * Run the destination's query loop and return the response. Implementer is
+   * responsible for: memory context, MCP injection, session creation, billing
+   * attribution, etc.
    */
   runConsult: (params: RunConsultParams) => Promise<RunConsultResult>
 
@@ -73,7 +68,6 @@ export function createInProcessTransport(deps: InProcessTransportDeps): ConsultT
 
   return {
     async send(request: ConsultRequest): Promise<ConsultResponse> {
-      const isCrossWorkspace = request.caller.workspaceId !== request.target.workspaceId
       const isFreeMode = request.target.capabilityId === undefined
 
       // Step 1: cycle check (visited set) — applies to all consults.
@@ -85,7 +79,7 @@ export function createInProcessTransport(deps: InProcessTransportDeps): ConsultT
         })
       }
 
-      // Step 2: depth check (mode-specific).
+      // Step 2: depth check.
       const maxDepth = isFreeMode
         ? CONSULT_LIMITS.MAX_DEPTH_FREE
         : CONSULT_LIMITS.MAX_DEPTH_RESTRICTED
@@ -106,62 +100,22 @@ export function createInProcessTransport(deps: InProcessTransportDeps): ConsultT
         })
       }
 
-      // Step 4: mode resolution. Cross-workspace → mode-or-no-connection.
-      // Within workspace → modes don't apply (full workspace trust).
-      let resolution: ModeResolution
-      if (isCrossWorkspace) {
-        resolution = await resolveMode(
-          deps,
-          request.caller.assistantId,
-          request.target.assistantId,
-        )
-        if (resolution.kind === 'no_connection') {
-          return errorResponse(request, {
-            code: ERROR_CODES.SHARING_BLOCKED,
-            message: 'No accepted connection between caller and destination.',
-            reason: 'sharing_blocked',
-          })
-        }
-      } else {
-        resolution = { kind: 'free' }
+      // Step 4: workspace boundary. Connections are workspace-internal
+      // (auto-seeded primary → sibling); there is no cross-workspace grant
+      // mechanism, so a cross-workspace consult is rejected outright.
+      if (request.caller.workspaceId !== request.target.workspaceId) {
+        return errorResponse(request, {
+          code: ERROR_CODES.SHARING_BLOCKED,
+          message: 'Cross-workspace consults are not supported.',
+          reason: 'sharing_blocked',
+        })
       }
 
-      const mode: AssistantMode | null =
-        resolution.kind === 'mode' ? resolution.mode : null
-
-      // Step 5: capability cap (decision #5: mode caps capability cross-workspace).
-      // If a capability is invoked, its exposedTools must be ⊆ mode.exposedTools.
-      // Within-workspace capability invocations bypass this check (no mode applies).
-      // The capability's own exposedTools are looked up by the runConsult impl
-      // — we surface the check here only when we have both the mode and the
-      // capability id; the runConsult callback is responsible for the actual
-      // intersection (it has access to the SpecialistCard registry).
-      // For the pure free-mode path, no capability check is needed.
-
-      // Step 6: input_required — if mode requires approval, the destination
-      // must store an input_required Task. The runConsult callback is the
-      // place where pending_messages are written; surface that here is
-      // overloading. Instead, we hand the mode to runConsult and let it
-      // decide. The transport's job is to wrap the result.
-
-      const result = await deps.runConsult({ request, mode })
+      const result = await deps.runConsult({ request })
 
       const taskId = `task_${now()}_${Math.random().toString(36).slice(2, 10)}`
       const contextId = request.contextId ?? `ctx_${taskId}`
       const timestamp = new Date(now()).toISOString()
-
-      // input_required short-circuit: destination has queued the consult for
-      // owner approval. Caller's LLM sees a recoverable state and surfaces a
-      // wait message to the user.
-      if (result.inputRequired) {
-        const task: Task = {
-          taskId,
-          contextId,
-          status: { state: 'input_required', timestamp },
-          artifacts: [],
-        }
-        return { task }
-      }
 
       const responseMessage: A2AMessage | undefined = isFreeMode
         ? {

@@ -64,6 +64,7 @@ import {
   type WhatsappOfficialBinding,
 } from "@/lib/api/whatsapp-ingest";
 import { isHostedEdition } from "@/lib/edition";
+import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   API_URL,
@@ -933,10 +934,9 @@ function ChannelDetail({
 
 /**
  * Per-routing model picker. Patches `channel_assistants.model_alias` so each
- * routed surface can run on its own LLM tier (migration 197). Pro is gated
- * behind the Pro plan, Max behind Pro+Max — same gate as the Assistant →
- * Settings → Channel Models row in `assistant-detail.tsx`. The backend
- * re-validates the plan, so this is a UX guard not a security boundary.
+ * routed surface can run on its own LLM tier (migration 197). Hosted Pro is
+ * gated behind the Pro plan and Max behind Pro+Max; OSS has no plans. The
+ * backend re-validates the same edition-aware policy.
  *
  * Gates on the *workspace* plan (billing is per-workspace, migration 143) —
  * the legacy `users.plan` cookie field is stale post-migration and would
@@ -956,8 +956,9 @@ function RoutingModelPicker({
   const t = useT();
   const { workspaces } = useWorkspaces();
   const plan = workspaces.find((w) => w.id === workspaceId)?.plan ?? "free";
-  const proDisabled = plan === "free";
-  const maxDisabled = plan === "free" || plan === "pro";
+  const edition = isHostedEdition() ? "hosted" : "oss";
+  const proDisabled = modelTierPlanGateApplies(edition, plan, "pro");
+  const maxDisabled = modelTierPlanGateApplies(edition, plan, "max");
   const [saving, setSaving] = useState(false);
   const [value, setValue] = useState<ChannelModelAlias>(routing.modelAlias);
 
@@ -1570,7 +1571,11 @@ function AddChannelForm({
   const [success, setSuccess] = useState<
     | null
     | { kind: "slack"; webhookUrl: string }
-    | { kind: "telegram"; botUsername: string }
+    | {
+        kind: "telegram";
+        botUsername: string;
+        pairingCode: string | null;
+      }
     | { kind: "discord"; botUsername: string; inviteUrl: string; connectorError: string | null }
     | { kind: "email"; address: string }
     | { kind: "msteams"; webhookUrl: string }
@@ -1654,7 +1659,11 @@ function AddChannelForm({
           defaultAssistantId: defaultAssistantId || null,
         });
         await onCreated(result.channel);
-        setSuccess({ kind: "telegram", botUsername: result.botUsername });
+        setSuccess({
+          kind: "telegram",
+          botUsername: result.botUsername,
+          pairingCode: result.pairingCode,
+        });
         setTgBotToken("");
       } else if (platform === "msteams") {
         const result = await connectMsTeamsChannel(workspaceId, {
@@ -1713,7 +1722,8 @@ function AddChannelForm({
     (platform === "slack"
       ? slackBotToken.startsWith("xoxb-") && signingSecret.length >= 16
       : platform === "telegram"
-        ? tgBotToken.length > 0
+        ? tgBotToken.length > 0 &&
+          (isHostedEdition() || defaultAssistantId.length > 0)
         : platform === "msteams"
           ? msAppId.trim().length > 0 && msAppPassword.length > 0 && msTenantId.trim().length > 0
           : platform === "email"
@@ -2171,17 +2181,39 @@ function AddChannelForm({
         </div>
       )}
       {success?.kind === "telegram" && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex items-center justify-between gap-2">
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 flex flex-col gap-2">
           <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
             {format(add.connectedTelegram, { username: success.botUsername })}
           </p>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
-          >
-            {add.done}
-          </button>
+          {success.pairingCode && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {add.telegramPairingHint}
+              </p>
+              <code className="w-fit rounded bg-muted px-3 py-1.5 font-mono text-base font-semibold tracking-[0.2em]">
+                {success.pairingCode}
+              </code>
+            </>
+          )}
+          <div className="flex items-center gap-2">
+            {success.pairingCode && (
+              <a
+                href={`https://t.me/${encodeURIComponent(success.botUsername)}?start=${encodeURIComponent(success.pairingCode)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs font-medium rounded-md bg-primary text-primary-foreground px-2 py-1"
+              >
+                {add.telegramPairingOpen}
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-xs font-medium rounded-md border border-border px-2 py-1 hover:bg-muted"
+            >
+              {add.done}
+            </button>
+          </div>
         </div>
       )}
       {success?.kind === "discord" && (

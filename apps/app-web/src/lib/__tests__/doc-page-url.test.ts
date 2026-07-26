@@ -175,10 +175,6 @@ describe("[COMP:app-web/page-url] surfaceFromPathname", () => {
     // The recordings BOARD is a panel under `/p`, so it classifies as "p".
     expect(surfaceFromPathname("/w/w1/recordings/rec-1")).toBe("recordings");
     expect(surfaceFromPathname("/w/w1/p?panel=recordings")).toBe("p");
-    expect(surfaceFromPathname("/w/w1/knowledge-base")).toBe("knowledge-base");
-    expect(surfaceFromPathname("/w/w1/knowledge-base/gaps")).toBe(
-      "knowledge-base",
-    );
     expect(surfaceFromPathname("/w/w1/inbox")).toBe("inbox");
   });
 

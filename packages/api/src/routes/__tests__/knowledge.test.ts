@@ -433,8 +433,6 @@ describe('[COMP:api/knowledge-route] local filesystem sources', () => {
   })
 
   it('allows a workspace admin to connect a readable markdown directory', async () => {
-    // realpath so the expected `repo` matches what the route stores: on macOS
-    // `tmpdir()` (/tmp) is a symlink to /private/tmp, which the route canonicalizes.
     const dir = await realpath(await mkdtemp(join(tmpdir(), 'brian-local-kb-route-')))
     try {
       await writeFile(join(dir, 'index.md'), '# Local knowledge')

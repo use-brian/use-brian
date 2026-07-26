@@ -30,11 +30,12 @@ describe("[COMP:app-web/legacy-redirect] resolveLegacyPath", () => {
   });
 
   it("maps bare heads with no index route to their default sub-surface", () => {
-    // /w/<id>/knowledge-base and /w/<id>/memories have no page.tsx —
-    // the bare heads must land on a route that exists.
+    // /w/<id>/memories has no page.tsx — the bare head must land on a
+    // route that exists. Legacy /knowledge-base (the retired KB-gaps
+    // slice) lands on Studio → Knowledge.
     expect(resolveLegacyPath(["knowledge-base"])).toEqual({
       kind: "workspace",
-      suffix: "/knowledge-base/gaps",
+      suffix: "/studio/knowledge",
     });
     expect(resolveLegacyPath(["memories"])).toEqual({
       kind: "workspace",
@@ -52,10 +53,11 @@ describe("[COMP:app-web/legacy-redirect] resolveLegacyPath", () => {
       suffix: "/workflow/abc-123",
     });
     // Deeper sub-paths under the bare-head-defaulted surfaces keep the
-    // plain join — only the bare heads get rewritten.
+    // plain join — only the bare heads get rewritten. (Retired
+    // /knowledge-base sub-paths all collapse onto Studio → Knowledge.)
     expect(resolveLegacyPath(["knowledge-base", "new"])).toEqual({
       kind: "workspace",
-      suffix: "/knowledge-base/new",
+      suffix: "/studio/knowledge",
     });
     expect(resolveLegacyPath(["memories", "review"])).toEqual({
       kind: "workspace",

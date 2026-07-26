@@ -82,6 +82,8 @@ import {
   pageIdFromPathname,
 } from "@/lib/doc-page-url";
 import { DOC_COMMENTS_CHANGED_EVENT } from "@/lib/comment-events";
+import { isHostedEdition } from "@/lib/edition";
+import { modelTierPlanGateApplies } from "@/lib/plan-gate";
 import {
   ASSISTANT_REFRESH_EVENT,
   type AssistantRefreshDetail,
@@ -221,8 +223,7 @@ export type ChatSurface =
   | "brain"
   | "studio"
   | "workflow"
-  | "approvals"
-  | "knowledge-base";
+  | "approvals";
 
 /**
  * Where the dock is mounted: the doc page surface (`'doc'`, the default —
@@ -587,7 +588,7 @@ export function FloatingChat({
       const saved = localStorage.getItem(MODEL_STORAGE_KEY);
       if (saved === "standard" || saved === "pro" || saved === "max") return saved;
     }
-    return "standard";
+    return isHostedEdition() ? "standard" : "pro";
   });
   const [workspacePlan, setWorkspacePlan] = useState<string | null>(null);
   // Research mode — ON adds `mode:'research'` to the next send (coordinator +
@@ -831,7 +832,7 @@ export function FloatingChat({
 
   // Resolve the workspace plan for model-tier gating (per-workspace billing).
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!workspaceId || !isHostedEdition()) return;
     let cancelled = false;
     authFetch(`${API_URL}/api/usage?workspace_id=${encodeURIComponent(workspaceId)}`)
       .then((r) => (r.ok ? r.json() : null))
@@ -941,8 +942,10 @@ export function FloatingChat({
   );
 
   useEffect(() => {
-    if (workspacePlan === "free" && model !== "standard") setModel("standard");
-    else if (workspacePlan === "pro" && model === "max") setModel("pro");
+    if (!isHostedEdition()) return;
+    if (modelTierPlanGateApplies("hosted", workspacePlan, model)) {
+      setModel(model === "max" && workspacePlan === "pro" ? "pro" : "standard");
+    }
   }, [workspacePlan, model]);
 
   // Paid workspaces default to Pro (cost-and-pricing → "Default chat is Pro").

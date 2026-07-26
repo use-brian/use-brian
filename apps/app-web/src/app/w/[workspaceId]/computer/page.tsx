@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * Browsers surface index (`/w/[id]/computer`) — the right-pane prompt shown
- * when no session is selected. The live-session rail (owned by the layout
- * shell) sits to its left; picking a row routes to `/computer/<sessionId>`.
+ * Browsers surface index (`/w/[id]/computer`) — the full-width prompt shown
+ * when no session is selected. The live-session list (owned by the left
+ * sidebar's `BrowsersSidebarPanel`) picks a session; a row routes to
+ * `/computer/<sessionId>`, which fills this pane with the Take-Over view.
  *
  * [COMP:app-web/browsers-surface]
  */

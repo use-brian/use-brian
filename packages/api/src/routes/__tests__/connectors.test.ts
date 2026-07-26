@@ -170,6 +170,20 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(github?.connectorInstanceId).toBeUndefined()
   })
 
+  it('GET / hides internal WhatsApp channel instances', async () => {
+    const { app, listForUser } = makeApp('u1')
+    listForUser.mockResolvedValue([
+      instance({ provider: 'whatsapp', label: 'WhatsApp', scope: 'workspace', userId: null, workspaceId: 'ws-1' }),
+    ])
+
+    const res = await request(app).get('/api/connectors')
+
+    expect(res.status).toBe(200)
+    expect(res.body.connectors).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'whatsapp' }),
+    ]))
+  })
+
   it('GET /directory lists the official catalog with added/connected flags', async () => {
     const { app, listForUser } = makeApp('u1')
     listForUser.mockResolvedValue([instance({ provider: 'github', connected: true })])
