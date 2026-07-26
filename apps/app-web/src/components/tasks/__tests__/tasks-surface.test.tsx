@@ -223,6 +223,10 @@ describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
         results: body.ids.map((id) => ({ id, ok: true })),
       }),
     );
+    // The batch contract is independent of table rendering. Exercise it from
+    // board view so this test does not build 201 irrelevant table rows while
+    // the full app-web suite is competing for CPU in CI.
+    navigation.search = "view=board";
     await renderSurface();
 
     await act(async () => {
