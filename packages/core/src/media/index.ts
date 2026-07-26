@@ -38,6 +38,7 @@ export {
   type RecordingAudioChunk,
   type RecordingTranscriptionResult,
   type TranscribeRecordingOptions,
+  type TranscriptionAudioUploader,
 } from './transcribe-recording.js'
 export {
   coverageTruncated,

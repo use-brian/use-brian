@@ -5,8 +5,9 @@
  * ingest orchestration stays provider-blind. Providers are pure fetch modules
  * following the core rules (injectable `fetchFn`, no SDK, no env reads):
  * `scribe.ts` (ElevenLabs Scribe), `qwen-filetrans.ts` (DashScope file
- * transcription), and the legacy Gemini File-API path
- * (`transcribe-recording.ts`) wrapped by `geminiTranscriber`.
+ * transcription), and the Gemini file-reference path in
+ * `transcribe-recording.ts` (AI Studio Files API or an injected temporary GCS
+ * upload for Vertex), wrapped by `geminiTranscriber`.
  *
  * The one invariant a provider may NOT weaken: `truncated` must derive from
  * real timestamps vs the ffprobe `durationMs` (the coverage contract), because
@@ -22,6 +23,7 @@ import {
   type RecordingTranscriptionResult,
   type TranscribeRecordingOptions,
 } from './transcribe-recording.js'
+import type { GoogleTransport } from '../providers/google-transport.js'
 
 export type RecordingTranscribeRequest = {
   /** The extracted small audio track (16 kHz mono AAC from the worker). */
@@ -116,11 +118,13 @@ export function withTranscriberFallback(
  *  §Providers, gemini row). Short files single-shot in one window anyway. */
 export const GEMINI_CHUNKED_MIN_DURATION_MS = 12 * 60_000
 
-/** The Gemini File-API transcription behind the seam (OSS default). Long
+/** The Gemini file-reference transcription behind the seam (OSS default). Long
  *  audio uses chunked mode when the caller supplied `getChunks`; a chunk-split
  *  failure degrades to the whole-file path rather than failing the job. */
 export function geminiTranscriber(opts: {
-  apiKey: string
+  apiKey?: string
+  transport?: GoogleTransport
+  uploadAudio?: TranscribeRecordingOptions['uploadAudio']
   model?: string
   fetchFn?: typeof fetch
   /** Per-window progress hook, forwarded to the File-API path (observability —
@@ -128,7 +132,9 @@ export function geminiTranscriber(opts: {
   onWindow?: TranscribeRecordingOptions['onWindow']
 }): RecordingTranscriber {
   const common = (req: RecordingTranscribeRequest) => ({
-    apiKey: opts.apiKey,
+    ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
+    ...(opts.transport ? { transport: opts.transport } : {}),
+    ...(opts.uploadAudio ? { uploadAudio: opts.uploadAudio } : {}),
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.onWindow ? { onWindow: opts.onWindow } : {}),
     ...(req.displayName ? { displayName: req.displayName } : {}),

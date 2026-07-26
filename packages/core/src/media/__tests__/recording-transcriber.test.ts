@@ -150,6 +150,23 @@ describe('[COMP:media/recording-transcriber] geminiTranscriber', () => {
     )
   })
 
+  it('forwards the Vertex transport and external uploader without an AI Studio key', async () => {
+    const ok = result()
+    const spy = vi.mocked(transcribeRecordingModule.transcribeRecording)
+    spy.mockResolvedValue(ok)
+    const transport = {
+      kind: 'vertex' as const,
+      endpoint: vi.fn(() => 'https://vertex.example/generate'),
+      headers: vi.fn(async () => ({ Authorization: 'Bearer token' })),
+    }
+    const uploadAudio = vi.fn(async () => ({ fileUri: 'gs://bucket/temp' }))
+
+    await geminiTranscriber({ transport, uploadAudio }).transcribe(REQ)
+
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ transport, uploadAudio }))
+    expect(spy.mock.calls[0][0]).not.toHaveProperty('apiKey')
+  })
+
   it('uses chunked mode for long audio when getChunks is supplied', async () => {
     const ok = result()
     const chunked = vi.mocked(transcribeRecordingModule.transcribeRecordingChunks)
