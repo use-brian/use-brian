@@ -23,7 +23,10 @@ const nextConfig: NextConfig = {
     root: workspaceRoot,
   },
   env: {
-    NEXT_PUBLIC_GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
+    NEXT_PUBLIC_GOOGLE_CLIENT_ID:
+      process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ??
+      process.env.GOOGLE_CLIENT_ID ??
+      "",
     // Google Drive Picker (components/drive-picker.tsx) needs the browser API key
     // and GCP project number CLIENT-SIDE. Both are non-secret (the API key is a
     // referrer-restricted browser key; the project number is the Picker appId), so
@@ -31,8 +34,14 @@ const nextConfig: NextConfig = {
     // picker's notConfigured guard is permanently true and "Add files from Drive"
     // only ever surfaces the "not configured" banner. Ported from apps/web/next.config.ts
     // (dropped when the picker moved here during app consolidation §9 #5).
-    NEXT_PUBLIC_GOOGLE_API_KEY: process.env.GOOGLE_API_KEY ?? "",
-    NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER: process.env.GOOGLE_PROJECT_NUMBER ?? "",
+    NEXT_PUBLIC_GOOGLE_API_KEY:
+      process.env.NEXT_PUBLIC_GOOGLE_API_KEY ??
+      process.env.GOOGLE_API_KEY ??
+      "",
+    NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER:
+      process.env.NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER ??
+      process.env.GOOGLE_PROJECT_NUMBER ??
+      "",
     // The un-blanked origin for URLs DISPLAYED to users — see lib/display-api-url.ts.
     // This is deliberately inlined: client components render it.
     //
@@ -52,8 +61,6 @@ const nextConfig: NextConfig = {
       process.env.NEXT_PUBLIC_API_URL ??
       (process.env.NODE_ENV === "development" ? "" : API_URL),
     NEXT_PUBLIC_CORE_WEB_URL: process.env.NEXT_PUBLIC_CORE_WEB_URL ?? "https://usebrian.ai",
-    GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ?? "",
-    GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ?? "",
   },
   async rewrites() {
     if (process.env.NODE_ENV !== "development") return [];

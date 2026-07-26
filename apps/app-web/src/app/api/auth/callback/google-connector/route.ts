@@ -26,10 +26,11 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
  * redirects to the workspace-scoped route. A missing workspace id falls back
  * to `/teams`.
  *
- * INFRA (degraded): requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` and a
- * `app.usebrian.ai/...` redirect_uri allowlisted in the Google OAuth client.
- * Doc-web does not set the connector `NEXT_PUBLIC_GOOGLE_CLIENT_ID` env yet,
- * so the connect button can't reach this callback until that lands.
+ * Requires runtime `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` and this
+ * deployment's `/api/auth/callback/google-connector` redirect URI allowlisted
+ * in the Google Web OAuth client. The secret is intentionally absent from
+ * next.config `env`, so Next leaves this server-side process.env read for
+ * runtime instead of replacing it during the build.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
