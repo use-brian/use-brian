@@ -4,6 +4,7 @@ import { Suspense, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { useT } from "@/lib/i18n/client";
+import { ossSignedOutRedirect } from "@/lib/oss-entry";
 
 const GOOGLE_CLIENT_ID = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
 
@@ -61,6 +62,7 @@ function LoginInner() {
   const t = useT().login;
   const searchParams = useSearchParams();
   const nextPath = sanitizeNext(searchParams.get("next"));
+  const ossTarget = ossSignedOutRedirect(nextPath);
   // Add-account flow (the switcher's "Add another account", incl. the desktop
   // shell routing its bridge through here). Forces the Google account chooser and
   // is forwarded to the primary in prod so its reverse-guard doesn't skip login.
@@ -78,6 +80,11 @@ function LoginInner() {
   // the moment between mount and the redirect, then unloads. Dev keeps
   // the local Google button because localhost can't share cookies.
   useEffect(() => {
+    if (ossTarget) {
+      window.location.replace(ossTarget);
+      return;
+    }
+
     const primary = primaryAuthUrl();
     if (!primary) return;
     const target = new URL("/login", primary);
@@ -91,7 +98,12 @@ function LoginInner() {
     // (and its already-signed-in reverse-guard doesn't skip the login screen).
     if (addAccount) target.searchParams.set("addAccount", "1");
     window.location.replace(target.toString());
-  }, [nextPath, addAccount]);
+  }, [nextPath, addAccount, ossTarget]);
+
+  // The OSS edition has no hosted account chooser. Cloudflare Access owns the
+  // interactive sign-in, and the local-session route verifies its signed
+  // identity before mapping an allowed email to the single local owner.
+  if (ossTarget) return null;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4 relative overflow-hidden">
