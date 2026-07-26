@@ -4755,7 +4755,22 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // transcriber is unavailable, the claimed job is retried then parked FAILED
   // with that explicit prerequisite error instead of remaining pending forever.
   const recordingTranscribers: RecordingTranscriber[] = []
-  if (env.GEMINI_API_KEY) {
+  if (vertexTx && env.GCS_FILES_BUCKET && filesBlobClient) {
+    recordingTranscribers.push(geminiTranscriber({
+      transport: vertexTx,
+      uploadAudio: async ({ buffer, mime }) => {
+        const key = `recording-transcription/${randomUUID()}`
+        await filesBlobClient.writeBlob(key, buffer, {
+          workspaceId: 'recording-transcription',
+          mime,
+        })
+        return {
+          fileUri: `gs://${env.GCS_FILES_BUCKET}/${key}`,
+          cleanup: () => filesBlobClient.deleteBlob(key),
+        }
+      },
+    }))
+  } else if (env.GEMINI_API_KEY) {
     recordingTranscribers.push(geminiTranscriber({ apiKey: env.GEMINI_API_KEY }))
   }
   if (env.DASHSCOPE_API_KEY) {
