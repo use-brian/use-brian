@@ -284,6 +284,16 @@ function S3Icon() {
   );
 }
 
+function CliIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+      <rect x="1" y="3" width="22" height="18" rx="2" fill="#1E293B" />
+      <path d="M6 9l3 3-3 3" stroke="#4ADE80" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 15h6" stroke="#4ADE80" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 import type { ReactNode } from "react";
 
 export function ConnectorIcon({
@@ -313,6 +323,7 @@ export function ConnectorIcon({
     case "msteams": return <MsTeamsIcon />;
     case "agentmail": return <AgentmailIcon />;
     case "imap": return <ImapMailboxIcon />;
+    case "cli": return <CliIcon />;
     default:
       if (iconUrl) {
         return (

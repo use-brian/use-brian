@@ -82,6 +82,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const OFFICIAL_BY_ID = new Map<string, ConnectorEntry>(OFFICIAL_CONNECTORS.map((c) => [c.id, c]))
 
+// Channel infrastructure uses connector_instance for credentials/attribution,
+// but these rows are managed in Studio -> Channels and expose no assistant
+// tool catalog. Do not leak them into Studio -> Connectors as empty connectors.
+const CHANNEL_INFRASTRUCTURE_PROVIDERS = new Set(['whatsapp'])
+
 type ConnectorRowOut = {
   id: string
   connectorInstanceId?: string
@@ -596,6 +601,236 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     }
   })
 
+  // ── CLI connector (user-scoped, MCP stdio — OSS edition) ────────
+  //
+  // Connect a local binary that speaks MCP over stdin/stdout. The probe
+  // is mandatory (binary is local, spawn is cheap). Multi-instance: each
+  // connect creates a fresh instance keyed by label.
+  // See docs/architecture/integrations/cli-connector.md.
+
+  router.post('/cli/connect', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      label?: string
+      binaryPath?: string
+      args?: string[]
+      env?: Record<string, string>
+      cwd?: string
+      timeoutMs?: number
+    }
+    const label = typeof body.label === 'string' ? body.label.trim() : ''
+    const binaryPath = typeof body.binaryPath === 'string' ? body.binaryPath.trim() : ''
+    if (!label) { res.status(400).json({ error: 'Missing label (connector name)' }); return }
+    if (!binaryPath) { res.status(400).json({ error: 'Missing binaryPath' }); return }
+    if (!nodePath.isAbsolute(binaryPath)) { res.status(400).json({ error: 'binaryPath must be absolute' }); return }
+
+    const { isShellBinary, validateCliArgs, validateCliEnv, normalizeCliTimeout, discoverCliServer } = await import('../mcp/cli-transport.js')
+    if (isShellBinary(binaryPath)) {
+      res.status(400).json({ error: 'Shell binaries are not allowed. The CLI connector is for MCP servers.' }); return
+    }
+
+    const args = Array.isArray(body.args) ? body.args.filter((a): a is string => typeof a === 'string') : []
+    const argsError = validateCliArgs(args)
+    if (argsError) { res.status(400).json({ error: argsError }); return }
+    const envError = validateCliEnv(body.env)
+    if (envError) { res.status(400).json({ error: envError }); return }
+    let timeoutMs: number | undefined
+    try { timeoutMs = normalizeCliTimeout(body.timeoutMs) }
+    catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : String(err) }); return }
+    const cwd = typeof body.cwd === 'string' && body.cwd.trim() ? body.cwd.trim() : undefined
+    if (cwd && !nodePath.isAbsolute(cwd)) { res.status(400).json({ error: 'cwd must be absolute' }); return }
+
+    try {
+      const stat = await fs.stat(binaryPath)
+      if (!stat.isFile()) { res.status(400).json({ error: 'binaryPath is not a regular file' }); return }
+      await fs.access(binaryPath, fsConstants.X_OK)
+    } catch {
+      res.status(400).json({ error: 'Binary does not exist or is not executable' }); return
+    }
+    if (cwd) {
+      try {
+        const stat = await fs.stat(cwd)
+        if (!stat.isDirectory()) { res.status(400).json({ error: 'cwd is not a directory' }); return }
+      } catch { res.status(400).json({ error: 'cwd does not exist' }); return }
+    }
+
+    const env = body.env as Record<string, string> | undefined
+    const serverParams = { binaryPath, args: args.length > 0 ? args : undefined, env, cwd, timeoutMs }
+    try {
+      const server = await Promise.race([
+        discoverCliServer(serverParams, label),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('probe-timeout')), 10_000),
+        ),
+      ])
+
+      const credentials: ConnectorCredentials = { type: 'cli', binaryPath, args: args.length > 0 ? args : undefined }
+      const config: Record<string, unknown> = { binaryPath }
+      if (env) config.env = env
+      if (cwd) config.cwd = cwd
+      if (timeoutMs) config.timeoutMs = timeoutMs
+
+      const created = await connectorInstanceStore.createUserInstance({
+        userId,
+        provider: 'cli',
+        label,
+        connected: true,
+        credentials,
+        config,
+      })
+
+      res.json({
+        ok: true,
+        connectorInstanceId: created.id,
+        toolCount: server.tools.length,
+        tools: server.tools.map((t) => ({ name: t.name, description: t.description })),
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg === 'probe-timeout') {
+        res.status(400).json({ error: 'Binary does not speak MCP stdio: connection timed out' }); return
+      }
+      if (msg.includes('CHANNEL_CREDENTIAL_KEY')) {
+        res.status(503).json({ error: 'Connector credential storage is not configured (CHANNEL_CREDENTIAL_KEY)' }); return
+      }
+      res.status(400).json({ error: `Binary does not speak MCP stdio: ${msg.slice(0, 200)}` })
+    }
+  })
+
+  router.get('/cli/:id', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      const instance = await connectorInstanceStore.get(userId, req.params.id)
+      if (!instance || instance.provider !== 'cli') {
+        res.status(404).json({ error: 'CLI connector not found' }); return
+      }
+      const credentials = await connectorInstanceStore.getAuthCredentials(userId, instance.id)
+      if (credentials?.type !== 'cli') {
+        res.status(409).json({ error: 'CLI connector credentials are missing or invalid' }); return
+      }
+      const env = instance.config?.env
+      res.json({
+        connector: {
+          id: instance.id,
+          label: instance.label,
+          binaryPath: credentials.binaryPath,
+          args: credentials.args ?? [],
+          cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : '',
+          timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : 30_000,
+          envKeys: env && typeof env === 'object' && !Array.isArray(env) ? Object.keys(env) : [],
+        },
+      })
+    } catch (err) {
+      console.error('[connectors] CLI config read failed:', err)
+      res.status(500).json({ error: 'Failed to load CLI connector' })
+    }
+  })
+
+  router.patch('/cli/:id', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const instanceId = req.params.id
+    const body = (req.body ?? {}) as {
+      label?: string
+      binaryPath?: string
+      args?: string[]
+      env?: Record<string, string>
+      cwd?: string
+      timeoutMs?: number
+    }
+
+    try {
+      const instances = await connectorInstanceStore.listByUserSystem(userId)
+      const existing = instances.find((i) => i.id === instanceId && i.provider === 'cli')
+      if (!existing) { res.status(404).json({ error: 'CLI connector not found' }); return }
+
+      const { isShellBinary, validateCliArgs, validateCliEnv, normalizeCliTimeout, discoverCliServer } = await import('../mcp/cli-transport.js')
+
+      const storedCredentials = await connectorInstanceStore.getAuthCredentials(userId, instanceId)
+      if (storedCredentials?.type !== 'cli') {
+        res.status(409).json({ error: 'CLI connector credentials are missing or invalid' }); return
+      }
+      let binaryPath = storedCredentials.binaryPath
+      let args = storedCredentials.args ?? []
+      let label = existing.label
+      const config: Record<string, unknown> = { ...existing.config }
+
+      if (typeof body.label === 'string' && body.label.trim()) label = body.label.trim()
+      if (typeof body.binaryPath === 'string' && body.binaryPath.trim()) {
+        binaryPath = body.binaryPath.trim()
+        if (!nodePath.isAbsolute(binaryPath)) { res.status(400).json({ error: 'binaryPath must be absolute' }); return }
+        if (isShellBinary(binaryPath)) { res.status(400).json({ error: 'Shell binaries are not allowed' }); return }
+        try {
+          const stat = await fs.stat(binaryPath)
+          if (!stat.isFile()) { res.status(400).json({ error: 'binaryPath is not a regular file' }); return }
+          await fs.access(binaryPath, fsConstants.X_OK)
+        } catch { res.status(400).json({ error: 'Binary does not exist or is not executable' }); return }
+      }
+      if (Array.isArray(body.args)) {
+        args = body.args.filter((a): a is string => typeof a === 'string')
+        const argsError = validateCliArgs(args)
+        if (argsError) { res.status(400).json({ error: argsError }); return }
+      }
+
+      const envError = validateCliEnv(body.env)
+      if (envError) { res.status(400).json({ error: envError }); return }
+      if (body.env !== undefined) config.env = body.env
+      if (body.cwd !== undefined) {
+        const cwd = typeof body.cwd === 'string' ? body.cwd.trim() : ''
+        if (cwd && !nodePath.isAbsolute(cwd)) { res.status(400).json({ error: 'cwd must be absolute' }); return }
+        if (cwd) {
+          try {
+            const stat = await fs.stat(cwd)
+            if (!stat.isDirectory()) { res.status(400).json({ error: 'cwd is not a directory' }); return }
+          } catch { res.status(400).json({ error: 'cwd does not exist' }); return }
+          config.cwd = cwd
+        } else {
+          delete config.cwd
+        }
+      }
+      if (body.timeoutMs !== undefined) {
+        try { config.timeoutMs = normalizeCliTimeout(body.timeoutMs) }
+        catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : String(err) }); return }
+      }
+
+      config.binaryPath = binaryPath
+      const launchChanged = body.binaryPath !== undefined || body.args !== undefined || body.env !== undefined || body.cwd !== undefined
+      if (launchChanged) {
+        const serverParams = {
+          binaryPath,
+          args: args.length > 0 ? args : undefined,
+          env: config.env as Record<string, string> | undefined,
+          cwd: typeof config.cwd === 'string' ? config.cwd : undefined,
+          timeoutMs: typeof config.timeoutMs === 'number' ? config.timeoutMs : undefined,
+        }
+        await Promise.race([
+          discoverCliServer(serverParams, label),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Binary does not speak MCP stdio: connection timed out')), 10_000),
+          ),
+        ])
+      }
+
+      const credentials: ConnectorCredentials = { type: 'cli', binaryPath, args: args.length > 0 ? args : undefined }
+
+      await connectorInstanceStore.update(userId, instanceId, { label, connected: true, credentials })
+      await connectorInstanceStore.setConfigSystem(instanceId, config)
+
+      res.json({ ok: true, connectorInstanceId: instanceId })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('timed out') || msg.includes('MCP')) {
+        res.status(400).json({ error: msg.slice(0, 200) }); return
+      }
+      console.error('[connectors] cli update failed:', err)
+      res.status(500).json({ error: 'Failed to update CLI connector' })
+    }
+  })
+
   // ── Company mailbox (user-scoped `imap` connector) ─────────────
   //
   // Credential-entry connect with an MX-resolved preset (D1) and a LIVE
@@ -834,6 +1069,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const instances = await connectorInstanceStore.listForUser(userId)
     const byProvider = new Map<string, ConnectorInstance[]>()
     for (const inst of instances) {
+      if (CHANNEL_INFRASTRUCTURE_PROVIDERS.has(inst.provider)) continue
       const list = byProvider.get(inst.provider) ?? []
       list.push(inst)
       byProvider.set(inst.provider, list)
@@ -941,7 +1177,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     if (!UUID_RE.test(workspaceId)) { res.status(400).json({ error: 'Invalid workspace id' }); return }
     try {
       const instances = await connectorInstanceStore.listByWorkspace(userId, workspaceId)
-      const connectors = instances.map((inst) => ({
+      const connectors = instances
+        .filter((inst) => !CHANNEL_INFRASTRUCTURE_PROVIDERS.has(inst.provider))
+        .map((inst) => ({
         connectorInstanceId: inst.id,
         provider: inst.provider,
         label: inst.label,
@@ -949,7 +1187,7 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         healthStatus: inst.healthStatus,
         lastError: inst.lastError,
         lastCheckedAt: inst.lastCheckedAt,
-      }))
+        }))
       res.json({ connectors })
     } catch (err) {
       console.error('[connectors] workspace connector list failed:', err)
@@ -968,6 +1206,45 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
     const provider = req.params.provider
+
+    // CLI catalogs are dynamic and instance-specific. The frontend addresses
+    // them by connector_instance UUID so multiple local MCP servers do not
+    // overwrite one shared `cli` tool catalog.
+    if (UUID_RE.test(provider)) {
+      try {
+        const instance = await connectorInstanceStore.get(userId, provider)
+        if (instance?.provider === 'cli' && instance.connected) {
+          const credentials = await connectorInstanceStore.getAuthCredentials(userId, provider)
+          if (credentials?.type !== 'cli') {
+            res.status(409).json({ error: 'CLI connector credentials are missing or invalid' }); return
+          }
+          const { discoverCliServer } = await import('../mcp/cli-transport.js')
+          const server = await discoverCliServer({
+            binaryPath: credentials.binaryPath,
+            args: credentials.args,
+            env: instance.config?.env as Record<string, string> | undefined,
+            cwd: typeof instance.config?.cwd === 'string' ? instance.config.cwd : undefined,
+            timeoutMs: typeof instance.config?.timeoutMs === 'number' ? instance.config.timeoutMs : undefined,
+          }, instance.label)
+          res.json({
+            serverName: server.name,
+            tools: server.tools.map((t) => {
+              const classification = classifyTool(t.name, t.description)
+              return {
+                name: t.name,
+                description: t.description,
+                classification,
+                policy: defaultPolicy(classification),
+              }
+            }),
+          })
+          return
+        }
+      } catch (err) {
+        console.error('[connectors] CLI tool discovery failed:', err)
+        res.status(500).json({ error: 'Failed to discover CLI tools' }); return
+      }
+    }
 
     // Built-in: static registry catalog.
     const catalog = OFFICIAL_CONNECTOR_TOOLS[provider]
