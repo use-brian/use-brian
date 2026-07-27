@@ -3235,6 +3235,9 @@ function ConnectorsList() {
                     {!imapDetecting && imapPreset?.presetId === "alimail" && (
                       <p className="text-[11px] text-primary">{tc.imap.detectedAlimail}</p>
                     )}
+                    {!imapDetecting && imapPreset?.presetId === "gmail" && (
+                      <p className="text-[11px] text-primary">{tc.imap.detectedGmail}</p>
+                    )}
                     {!imapDetecting && imapResolved && !imapPreset && (
                       <p className="text-[11px] text-muted-foreground">{tc.imap.notDetected}</p>
                     )}
@@ -3255,7 +3258,11 @@ function ConnectorsList() {
                     </button>
                     {imapShowHelp && (
                       <p className="text-[11px] text-muted-foreground">
-                        {imapPreset?.presetId === "alimail" ? tc.imap.passwordHelpAlimail : tc.imap.passwordHelpGeneric}
+                        {imapPreset?.presetId === "alimail"
+                          ? tc.imap.passwordHelpAlimail
+                          : imapPreset?.presetId === "gmail"
+                            ? tc.imap.passwordHelpGmail
+                            : tc.imap.passwordHelpGeneric}
                       </p>
                     )}
                     {!imapShowAdvanced && (

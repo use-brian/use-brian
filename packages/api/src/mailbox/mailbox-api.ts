@@ -222,9 +222,9 @@ export type CreateMailboxApiOptions = {
   sessions?: MailboxSessionCache
   /**
    * APPEND the sent bytes to the IMAP Sent folder after SMTP submission
-   * (default true — most corporate servers do NOT save SMTP submissions, and
-   * default search scope depends on sent copies). Servers that auto-save
-   * would show duplicates; flip per-preset if the empirical check finds one.
+   * (provider-aware default: true for most corporate servers, false for
+   * smtp.gmail.com because Gmail auto-saves submitted mail). Explicit values
+   * override the default for tests and future presets.
    */
   saveSentCopy?: boolean
   /** SMTP submission override (test seam). Defaults to the real transport. */
@@ -233,7 +233,6 @@ export type CreateMailboxApiOptions = {
 
 export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
   const sessions = opts.sessions ?? defaultMailboxSessionCache
-  const saveSentCopy = opts.saveSentCopy ?? true
   const sendComposed = opts.sendComposed ?? sendComposedMessage
 
   return {
@@ -384,6 +383,11 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
       await sendComposed(settings, composed)
 
       // Best-effort Sent copy — the send already egressed; never fail on this.
+      // Gmail auto-saves smtp.gmail.com submissions, so its provider-aware
+      // default skips APPEND and avoids a duplicate in Gmail/Sent.
+      const saveSentCopy =
+        opts.saveSentCopy ??
+        settings.smtpHost.trim().toLowerCase().replace(/\.$/, '') !== 'smtp.gmail.com'
       if (saveSentCopy) {
         try {
           await sessions.withClient(opts.cacheKey, settings, async (client) => {
