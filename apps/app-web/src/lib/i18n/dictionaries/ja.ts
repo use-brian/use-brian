@@ -5653,6 +5653,8 @@ export const ja: Dictionary = {
   },
   recorder: {
     start: "録音",
+    audioOptions: "録音の音声オプション",
+    includeComputerAudio: "コンピューター音声を含める",
     voiceMessage: "ボイスメッセージ",
     meetingRecording: "会議の録音",
     micAndComputerAudio: "マイク + コンピューター音声",

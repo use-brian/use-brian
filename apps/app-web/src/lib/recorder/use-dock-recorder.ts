@@ -75,6 +75,58 @@ function requestPersistentStorage(): void {
   }
 }
 
+export const COMPUTER_AUDIO_PREFERENCE_KEY =
+  "recorder:include-computer-audio";
+
+type RecorderPreferenceStorage = Pick<Storage, "getItem" | "setItem">;
+
+function browserPreferenceStorage(): RecorderPreferenceStorage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Missing/unreadable preferences default ON: the desktop recorder shipped
+ * computer-audio capture before the split-button choice, so an upgrade must
+ * preserve that behavior. Any value except the one canonical OFF marker is
+ * treated as the safe migration default.
+ */
+export function readComputerAudioPreference(
+  storage: RecorderPreferenceStorage | null = browserPreferenceStorage(),
+): boolean {
+  if (!storage) return true;
+  try {
+    return storage.getItem(COMPUTER_AUDIO_PREFERENCE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+/** Best-effort device-local persistence; capture must still work if blocked. */
+export function writeComputerAudioPreference(
+  include: boolean,
+  storage: RecorderPreferenceStorage | null = browserPreferenceStorage(),
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(COMPUTER_AUDIO_PREFERENCE_KEY, include ? "1" : "0");
+  } catch {
+    // Private/locked storage — keep the in-memory choice for this page.
+  }
+}
+
+/** Old shells/browsers can never be promoted by a persisted true value. */
+export function shouldCaptureComputerAudio(
+  desktopCapability: boolean | undefined,
+  includePreference: boolean,
+): boolean {
+  return desktopCapability === true && includePreference;
+}
+
 // ── The pure transition machine ──────────────────────────────────────────
 
 export type RecorderPhase =
@@ -207,6 +259,12 @@ export type DockRecorderApi = {
   pause: () => void;
   resume: () => void;
   level: () => number;
+  /** True only in a hydrated desktop shell that offers loopback capture. */
+  computerAudioAvailable: boolean;
+  /** Device-local source choice used by the next capture. */
+  includeComputerAudio: boolean;
+  /** Changes the next-capture source choice; ignored while recording. */
+  setIncludeComputerAudio: (include: boolean) => void;
   /** Visible trust signal for desktop remote-call capture. */
   includesSystemAudio: () => boolean;
   recovery: SpoolSessionMeta[];
@@ -232,6 +290,13 @@ export function useDockRecorder(opts: {
   const [phase, setPhase] = useState<RecorderPhase>(IDLE);
   const [notice, setNotice] = useState<RecorderNotice | null>(null);
   const [recovery, setRecovery] = useState<SpoolSessionMeta[]>([]);
+  // Start SSR + hydration in the browser-safe shape (no desktop-only
+  // chevron), then resolve the preload capability and device preference
+  // after mount. The ref is the capture-time authority, including for a
+  // ?record=1 auto-start whose effect runs later in this same mount pass.
+  const [computerAudioAvailable, setComputerAudioAvailable] = useState(false);
+  const [includeComputerAudio, setIncludeComputerAudioState] = useState(true);
+  const includeComputerAudioRef = useRef(true);
 
   const phaseRef = useRef<RecorderPhase>(IDLE);
   const engineRef = useRef<RecorderEngine | null>(null);
@@ -248,6 +313,14 @@ export function useDockRecorder(opts: {
   const rollOverRef = useRef(false);
   const spoolRef = useRef<SpoolStore | null>(null);
   const spool = () => (spoolRef.current ??= openRecorderSpool());
+
+  useEffect(() => {
+    const available = desktopBridge()?.systemAudioCapture === true;
+    const include = available ? readComputerAudioPreference() : false;
+    includeComputerAudioRef.current = include;
+    setIncludeComputerAudioState(include);
+    setComputerAudioAvailable(available);
+  }, []);
 
   const applyPhase = (next: RecorderPhase) => {
     phaseRef.current = next;
@@ -346,10 +419,14 @@ export function useDockRecorder(opts: {
           void (async () => {
             try {
               engineRef.current = await createRecorderEngine({
-                // New macOS/Windows shells advertise this capability. Old
-                // shells omit it and preserve the mic-only behavior during
-                // version skew; browsers have no bridge and stay mic-only.
-                includeSystemAudio: desktopBridge()?.systemAudioCapture === true,
+                // New macOS/Windows shells advertise this capability, but
+                // the device-local split-button choice owns whether THIS
+                // capture uses it. OFF bypasses getDisplayMedia completely.
+                // Old shells and browsers stay mic-only during version skew.
+                includeSystemAudio: shouldCaptureComputerAudio(
+                  desktopBridge()?.systemAudioCapture,
+                  includeComputerAudioRef.current,
+                ),
                 // The capture died underneath us (mic unplugged / input
                 // switched / system stream ended / recorder error). Finalize
                 // instead of ticking a zombie clock: a latched meeting stops-
@@ -677,6 +754,16 @@ export function useDockRecorder(opts: {
     [dispatch],
   );
 
+  const setIncludeComputerAudio = useCallback(
+    (include: boolean) => {
+      if (!computerAudioAvailable || phaseRef.current.kind !== "idle") return;
+      includeComputerAudioRef.current = include;
+      setIncludeComputerAudioState(include);
+      writeComputerAudioPreference(include);
+    },
+    [computerAudioAvailable],
+  );
+
   const saveRecovery = useCallback(
     async (sessionId: string) => {
       const meta = recovery.find((s) => s.id === sessionId);
@@ -716,6 +803,9 @@ export function useDockRecorder(opts: {
     pause: useCallback(() => dispatch({ type: "pause" }), [dispatch]),
     resume: useCallback(() => dispatch({ type: "resume" }), [dispatch]),
     level: useCallback(() => engineRef.current?.level() ?? 0, []),
+    computerAudioAvailable,
+    includeComputerAudio,
+    setIncludeComputerAudio,
     includesSystemAudio: useCallback(
       () => engineRef.current?.includesSystemAudio() ?? false,
       [],

@@ -340,6 +340,9 @@
               : "Can't reach your local brain at " +
                 url +
                 ". Use Brian reconnects automatically when it's back.";
+        } else if (reason === "access") {
+          msg =
+            "This self-hosted brain is protected by Cloudflare Access. Connect to approve this desktop app in your browser.";
         } else if (variant === "choose") {
           msg =
             "Connect to a local or self-hosted brain. Use the default address or enter your own, then Connect.";
@@ -371,7 +374,32 @@
         if (res && res.error === "env-override") {
           return "The USEBRIAN_APP_URL dev override is active, so targets are ignored. Unset it and reopen Use Brian to switch.";
         }
+        if (res && res.error === "access-oauth-unavailable") {
+          return "Cloudflare Access is using browser-only login. Enable Managed OAuth and allow 127.0.0.1 loopback clients in this Access application's Advanced settings.";
+        }
+        if (res && res.error === "access-oauth-misconfigured") {
+          return "Cloudflare Managed OAuth is incomplete. Enable dynamic client registration and allow 127.0.0.1 loopback clients in this Access application's Advanced settings.";
+        }
+        if (res && res.error === "access-auth-failed") {
+          return "Cloudflare Access approval didn't complete. Check the browser prompt and try Connect again.";
+        }
+        if (res && res.error === "secure-storage-unavailable") {
+          return "Use Brian couldn't securely store the Cloudflare Access grant in your OS keychain. Unlock the keychain and try again.";
+        }
         return "No brain answered at " + url + ". Is it running?";
+      }
+
+      if (desktop.onAccessAuthState) {
+        desktop.onAccessAuthState(function (state) {
+          var localVisible = el("local").style.display === "block";
+          if (state === "browser") {
+            if (localVisible) setLocalStatus("Approve Cloudflare Access in your browser...");
+            else el("run-local-btn").textContent = "Approve access in your browser...";
+          } else if (state === "approved") {
+            if (localVisible) setLocalStatus("Access approved. Finishing connection...");
+            else el("run-local-btn").textContent = "Access approved. Connecting...";
+          }
+        });
       }
 
       function connectLocal() {
@@ -416,7 +444,7 @@
             btn.textContent = RUN_LOCAL_LABEL;
             cameFromSignin = true;
             configureLocal("setup", (res && res.url) || DEFAULT_LOCAL_URL);
-            if (res && res.error === "env-override") {
+            if (res && res.error && res.error !== "unreachable") {
               setLocalStatus(localFailureMessage(res, ""));
             }
           })
@@ -463,6 +491,7 @@
         configureLocal(
           mode === "local-choose" ? "choose" : "setup",
           qs.get("url") || DEFAULT_LOCAL_URL,
+          qs.get("reason") || "",
         );
       } else {
         show("signin");

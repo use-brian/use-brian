@@ -5863,6 +5863,8 @@ export const en = {
   // record button + live strip + crash-recovery banner on the chat dock.
   recorder: {
     start: "Record",
+    audioOptions: "Recording audio options",
+    includeComputerAudio: "Include computer audio",
     voiceMessage: "Voice message",
     meetingRecording: "Meeting recording",
     micAndComputerAudio: "Mic + computer audio",

@@ -5604,6 +5604,8 @@ export const zh: Dictionary = {
   },
   recorder: {
     start: "录音",
+    audioOptions: "录音音频选项",
+    includeComputerAudio: "包含电脑音频",
     voiceMessage: "语音消息",
     meetingRecording: "会议录音",
     micAndComputerAudio: "麦克风 + 电脑音频",

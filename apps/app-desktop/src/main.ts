@@ -142,6 +142,23 @@ import {
   decryptTokens,
   serializeRendererTokens,
 } from "./desktop-token-store.js";
+import {
+  AccessOAuthError,
+  accessAuthorizationForUrl,
+  accessGrantMatchesApp,
+  buildAccessAuthorizationUrl,
+  buildAccessLoopbackRedirectUri,
+  classifyDesktopConfigAccessResponse,
+  discoverAccessOAuth,
+  exchangeAccessCode,
+  isAccessGrantExpiring,
+  parseAccessGrant,
+  parseAccessLoopbackCallback,
+  refreshAccessGrant,
+  registerAccessClient,
+  serializeAccessGrant,
+  type CloudflareAccessGrant,
+} from "./cloudflare-access-oauth.js";
 
 const { autoUpdater } = electronUpdater;
 
@@ -215,6 +232,10 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/** The edge grant stays main-process-only; the renderer never receives it. */
+let activeAccessGrant: CloudflareAccessGrant | null = null;
+/** Startup discovered that the persisted remote target needs a new Access grant. */
+let accessReauthorizationNeeded = false;
 
 // ── Window ─────────────────────────────────────────────────────
 
@@ -351,7 +372,13 @@ function createWindow(): BrowserWindow {
     })();
   });
 
-  void loadApp(win);
+  if (accessReauthorizationNeeded && cfg.target === "local") {
+    void win.webContents.loadFile(SIGNIN_PAGE, {
+      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
+    });
+  } else {
+    void loadApp(win);
+  }
   win.on("closed", () => {
     mainWindow = null;
     // The capture lives in this window's renderer — with it gone the overlay
@@ -538,16 +565,40 @@ async function probeLocalBrain(apiUrl: string): Promise<boolean> {
  * under a different name was previously unreachable. Never throws — an older
  * self-host 404s here and falls back.
  */
-async function fetchDeclaredApiUrl(appUrl: string): Promise<string | null> {
+type DesktopConfigResult =
+  | { readonly kind: "configured"; readonly apiUrl: string | null }
+  | { readonly kind: "managed-oauth"; readonly resourceMetadataUrl: string }
+  | { readonly kind: "legacy-access" };
+
+async function fetchDeclaredApiUrl(
+  appUrl: string,
+  grant: CloudflareAccessGrant | null = null,
+): Promise<DesktopConfigResult> {
   try {
+    const requestUrl = desktopConfigUrl(appUrl);
+    const authorization = accessAuthorizationForUrl(grant, requestUrl);
     const res = await net.fetch(desktopConfigUrl(appUrl), {
       signal: AbortSignal.timeout(3500),
       cache: "no-store",
+      redirect: "manual",
+      headers: {
+        Accept: "application/json",
+        ...(authorization ? { Authorization: authorization } : {}),
+      },
     });
-    if (!res.ok) return null; // 404 — a self-host predating the endpoint
-    return parseDesktopConfig(await res.json());
+    if (res.ok) return { kind: "configured", apiUrl: parseDesktopConfig(await res.json()) };
+    const access = classifyDesktopConfigAccessResponse({
+      status: res.status,
+      wwwAuthenticate: res.headers.get("www-authenticate"),
+      location: res.headers.get("location"),
+      appUrl,
+    });
+    if (access.kind !== "none") return access;
+    // 404 — a self-host predating the endpoint. Preserve the historical
+    // hostname-derivation fallback for every non-Access response.
+    return { kind: "configured", apiUrl: null };
   } catch {
-    return null;
+    return { kind: "configured", apiUrl: null };
   }
 }
 
@@ -802,6 +853,282 @@ function clearStoredTokens(): void {
     rmSync(tokensFile(), { force: true });
   } catch {
     /* best-effort */
+  }
+}
+
+// ── Cloudflare Access Managed OAuth (remote OSS targets) ──────
+//
+// Access is an edge credential, not a Brian credential. It stays encrypted in
+// the main process and is injected only for the exact app origin. The API
+// origin continues to use its own Brian Authorization bearer.
+
+const ACCESS_GRANT_FILE_NAME = "cloudflare-access.bin";
+const ACCESS_REFRESH_CHECK_INTERVAL_MS = 60 * 1000;
+let accessRefreshInFlight: Promise<CloudflareAccessGrant | null> | null = null;
+let accessRefreshTimer: ReturnType<typeof setInterval> | null = null;
+
+function accessGrantFile(): string {
+  return join(app.getPath("userData"), ACCESS_GRANT_FILE_NAME);
+}
+
+function readStoredAccessGrant(): CloudflareAccessGrant | null {
+  if (!tokenCipher.isAvailable()) return null;
+  try {
+    return parseAccessGrant(tokenCipher.decryptString(readFileSync(accessGrantFile())));
+  } catch {
+    return null;
+  }
+}
+
+/** Persist only through safeStorage; returning false prevents a doomed relaunch. */
+function persistAccessGrant(grant: CloudflareAccessGrant): boolean {
+  const blob = encryptBlob(tokenCipher, serializeAccessGrant(grant));
+  if (!blob) return false;
+  try {
+    writeFileSync(accessGrantFile(), blob);
+    return true;
+  } catch (err) {
+    console.warn("Failed to persist Cloudflare Access grant:", err);
+    return false;
+  }
+}
+
+function clearStoredAccessGrant(): void {
+  activeAccessGrant = null;
+  try {
+    rmSync(accessGrantFile(), { force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Refresh the current grant once. A policy/revocation rejection deletes it;
+ * network/5xx failures keep it so the minute tick can retry.
+ */
+function refreshActiveAccessGrant(force = false): Promise<CloudflareAccessGrant | null> {
+  if (accessRefreshInFlight) return accessRefreshInFlight;
+  const run = (async (): Promise<CloudflareAccessGrant | null> => {
+    const grant = activeAccessGrant;
+    if (!grant) return null;
+    if (!force && !isAccessGrantExpiring(grant, Date.now())) return grant;
+    let refreshed: CloudflareAccessGrant | null;
+    try {
+      refreshed = await refreshAccessGrant(grant, Date.now(), net.fetch);
+    } catch (err) {
+      console.warn("Cloudflare Access refresh failed (will retry):", err);
+      return grant;
+    }
+    if (!refreshed) {
+      clearStoredAccessGrant();
+      accessReauthorizationNeeded = true;
+      return null;
+    }
+    if (!persistAccessGrant(refreshed)) {
+      // Keep the in-memory grant for this process, but do not claim durable
+      // success. The next user-driven connect will surface secure-storage.
+      activeAccessGrant = refreshed;
+      return refreshed;
+    }
+    activeAccessGrant = refreshed;
+    return refreshed;
+  })();
+  accessRefreshInFlight = run;
+  void run.finally(() => {
+    accessRefreshInFlight = null;
+  });
+  return run;
+}
+
+async function usableAccessGrantFor(appUrl: string): Promise<CloudflareAccessGrant | null> {
+  if (!activeAccessGrant) activeAccessGrant = readStoredAccessGrant();
+  if (!activeAccessGrant || !accessGrantMatchesApp(activeAccessGrant, appUrl)) return null;
+  return refreshActiveAccessGrant();
+}
+
+function showAccessApprovalPage(
+  res: import("node:http").ServerResponse,
+  ok: boolean,
+): void {
+  res.writeHead(ok ? 200 : 400, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+  });
+  res.end(`<!doctype html>
+<html><head><meta charset="utf-8"><title>Use Brian</title>
+<style>body{font:16px system-ui;margin:0;display:grid;place-items:center;min-height:100vh;background:#0d1728;color:#edf8ff}main{text-align:center;max-width:28rem;padding:2rem}p{color:#a9b7c9;line-height:1.5}</style>
+</head><body><main><h1>${ok ? "Access approved" : "Access not completed"}</h1>
+<p>${ok ? "Return to Use Brian. You can close this tab." : "Return to Use Brian and try connecting again."}</p>
+</main></body></html>`);
+}
+
+/**
+ * Drive one Cloudflare Managed OAuth authorization. The loopback server is
+ * bound before dynamic registration so its exact ephemeral redirect URI is
+ * what Cloudflare records.
+ */
+function authorizeCloudflareAccess(
+  appUrl: string,
+  resourceMetadataUrl: string,
+  notify: (state: "browser" | "approved") => void,
+): Promise<CloudflareAccessGrant> {
+  const { verifier, challenge } = generatePkcePair();
+  const state = generateStateNonce();
+
+  return new Promise<CloudflareAccessGrant>((resolveGrant, rejectGrant) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let context:
+      | {
+          metadata: Awaited<ReturnType<typeof discoverAccessOAuth>>;
+          client: Awaited<ReturnType<typeof registerAccessClient>>;
+          redirectUri: string;
+        }
+      | null = null;
+
+    const finish = (err: unknown, grant?: CloudflareAccessGrant): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      server.close();
+      if (err) rejectGrant(err);
+      else resolveGrant(grant as CloudflareAccessGrant);
+    };
+
+    const server = createServer((req, res) => {
+      void (async () => {
+        const callback = req.url ? parseAccessLoopbackCallback(req.url, state) : null;
+        if (!callback) {
+          res.writeHead(404, {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          });
+          res.end("Not found");
+          return;
+        }
+        if (!context || callback.kind === "error") {
+          showAccessApprovalPage(res, false);
+          finish(
+            new AccessOAuthError(
+              "token-rejected",
+              callback.kind === "error"
+                ? `Access authorization failed (${callback.error}).`
+                : "Access authorization state was unavailable.",
+            ),
+          );
+          return;
+        }
+        try {
+          const grant = await exchangeAccessCode(
+            {
+              metadata: context.metadata,
+              client: context.client,
+              redirectUri: context.redirectUri,
+              code: callback.code,
+              verifier,
+              nowMs: Date.now(),
+            },
+            net.fetch,
+          );
+          if (!persistAccessGrant(grant)) {
+            throw new AccessOAuthError(
+              "token-failed",
+              "The OS keychain is unavailable, so the Access grant cannot be stored securely.",
+            );
+          }
+          activeAccessGrant = grant;
+          accessReauthorizationNeeded = false;
+          notify("approved");
+          showAccessApprovalPage(res, true);
+          finish(null, grant);
+        } catch (err) {
+          showAccessApprovalPage(res, false);
+          finish(err);
+        }
+      })();
+    });
+
+    server.on("error", (err) => finish(err));
+    timer = setTimeout(
+      () => finish(new AccessOAuthError("token-rejected", "Access authorization timed out.")),
+      LOOPBACK_SERVER_TTL_MS,
+    );
+    server.listen(0, "127.0.0.1", () => {
+      void (async () => {
+        try {
+          const port = (server.address() as AddressInfo).port;
+          const redirectUri = buildAccessLoopbackRedirectUri(port);
+          const metadata = await discoverAccessOAuth(appUrl, resourceMetadataUrl, net.fetch);
+          const client = await registerAccessClient(metadata, redirectUri, net.fetch);
+          context = { metadata, client, redirectUri };
+          notify("browser");
+          await shell.openExternal(
+            buildAccessAuthorizationUrl({ metadata, client, redirectUri, challenge, state }),
+          );
+        } catch (err) {
+          finish(err);
+        }
+      })();
+    });
+  });
+}
+
+/** Install the exact-origin request hook before the first app navigation. */
+function installAccessRequestHook(): void {
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${cfg.appOrigin}/*`] },
+    (details, callback) => {
+      const authorization = accessAuthorizationForUrl(activeAccessGrant, details.url);
+      if (authorization) {
+        for (const name of Object.keys(details.requestHeaders)) {
+          if (name.toLowerCase() === "authorization") delete details.requestHeaders[name];
+        }
+        details.requestHeaders.Authorization = authorization;
+      }
+      callback({ requestHeaders: details.requestHeaders });
+    },
+  );
+}
+
+function showAccessReauthorization(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || cfg.target !== "local") return;
+  const win = mainWindow;
+  void win.webContents
+    .loadFile(SIGNIN_PAGE, {
+      query: { mode: "local-setup", url: cfg.appUrl, reason: "access" },
+    })
+    .then(() => {
+      if (!win.isDestroyed()) focusWindow(win);
+    });
+}
+
+function startAccessGrantKeepalive(): void {
+  if (accessRefreshTimer) return;
+  accessRefreshTimer = setInterval(() => {
+    void (async () => {
+      const before = activeAccessGrant;
+      const after = await refreshActiveAccessGrant();
+      if (before && !after && accessReauthorizationNeeded) showAccessReauthorization();
+    })();
+  }, ACCESS_REFRESH_CHECK_INTERVAL_MS);
+}
+
+/**
+ * Restore/refresh the edge grant before any BrowserWindow request. If a remote
+ * target is protected but the grant is absent/dead, hold on the local setup
+ * landing so Chromium never chases the traditional Access login redirect.
+ */
+async function prepareAccessForStartup(): Promise<void> {
+  activeAccessGrant = readStoredAccessGrant();
+  if (activeAccessGrant && !accessGrantMatchesApp(activeAccessGrant, cfg.appUrl)) {
+    activeAccessGrant = null;
+  }
+  if (activeAccessGrant) await refreshActiveAccessGrant();
+  if (cfg.target !== "local" || new URL(cfg.appUrl).protocol !== "https:") return;
+  const discovery = await fetchDeclaredApiUrl(cfg.appUrl, activeAccessGrant);
+  if (discovery.kind === "managed-oauth" || discovery.kind === "legacy-access") {
+    accessReauthorizationNeeded = true;
   }
 }
 
@@ -1706,8 +2033,12 @@ if (!gotLock) {
   // target and relaunches on the next tick so the landing can paint its
   // "Restarting..." state before the process dies. `use-cloud` switches back,
   // keeping the local address remembered for the return trip.
-  ipcMain.handle("Use Brian:run-local", async (_event, rawUrl: unknown) => {
+  ipcMain.handle("Use Brian:run-local", async (event, rawUrl: unknown) => {
     const input = typeof rawUrl === "string" && rawUrl.trim() ? rawUrl : DEFAULT_LOCAL_APP_URL;
+    const notifyAccess = (state: "checking" | "browser" | "approved"): void => {
+      if (!event.sender.isDestroyed()) event.sender.send("Use Brian:access-auth-state", state);
+    };
+    notifyAccess("checking");
     // The dev env override outranks the persisted record (§2.1 precedence),
     // so a switch would persist but never survive the relaunch — refuse with
     // an explanation instead of silently reopening in the same place.
@@ -1717,7 +2048,45 @@ if (!gotLock) {
     // only reachable via its declaration, since derivation would guess `:4000`.
     const normalized = localTarget(input);
     if (!normalized) return { ok: false, error: "invalid-url", url: input };
-    const declaredApiUrl = await fetchDeclaredApiUrl(normalized.appUrl);
+
+    let grant = await usableAccessGrantFor(normalized.appUrl);
+    let discovery = await fetchDeclaredApiUrl(normalized.appUrl, grant);
+    if (discovery.kind === "legacy-access") {
+      return {
+        ok: false,
+        error: "access-oauth-unavailable",
+        url: normalized.appUrl,
+      };
+    }
+    if (discovery.kind === "managed-oauth") {
+      try {
+        grant = await authorizeCloudflareAccess(
+          normalized.appUrl,
+          discovery.resourceMetadataUrl,
+          notifyAccess,
+        );
+      } catch (err) {
+        console.warn("Cloudflare Access authorization failed:", err);
+        const error =
+          err instanceof AccessOAuthError &&
+          (err.code === "registration-failed" || err.code === "invalid-metadata")
+            ? "access-oauth-misconfigured"
+            : err instanceof AccessOAuthError && err.message.includes("OS keychain")
+              ? "secure-storage-unavailable"
+              : "access-auth-failed";
+        return {
+          ok: false,
+          error,
+          url: normalized.appUrl,
+        };
+      }
+      discovery = await fetchDeclaredApiUrl(normalized.appUrl, grant);
+      if (discovery.kind !== "configured") {
+        return { ok: false, error: "access-auth-failed", url: normalized.appUrl };
+      }
+    }
+
+    const declaredApiUrl = discovery.apiUrl;
     const target = localTarget(normalized.appUrl, declaredApiUrl) ?? normalized;
     if (!(await probeLocalBrain(target.apiUrl))) {
       return { ok: false, error: "unreachable", url: target.appUrl };
@@ -1747,7 +2116,7 @@ if (!gotLock) {
     ipcMain.on("Use Brian:clear-tokens", () => clearStoredTokens());
   }
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // macOS resolves `usebrian://` through the bundle Info.plist (the `protocols:`
     // block in electron-builder.yml). Windows/Linux register the running executable
     // with the OS; an UNPACKAGED Windows dev run must pass execPath + the script
@@ -1760,6 +2129,9 @@ if (!gotLock) {
       app.setAsDefaultProtocolClient(cfg.protocolScheme);
     }
 
+    await prepareAccessForStartup();
+    installAccessRequestHook();
+    startAccessGrantKeepalive();
     startSessionKeepalive();
 
     // Chromium-level media (mic) permission: grant to the app's own origin

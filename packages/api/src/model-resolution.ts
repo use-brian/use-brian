@@ -191,10 +191,10 @@ export function isStandardTier(model: string): boolean {
 export const PRO_TIER_MODELS: ReadonlySet<string> = tierModelIds('pro')
 
 /**
- * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.5,
- * plus the bare `gemini-3.1-pro-preview` legacy row (prior Max default +
- * pre-2026-06-02 research turns billed as Max — historical rows never
- * reprice). Derived from registry rows with `tier: 'max'`.
+ * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.6,
+ * plus the Flash 3.5 and bare `gemini-3.1-pro-preview` legacy rows (prior Max
+ * defaults + pre-2026-06-02 research turns billed as Max — historical rows
+ * never reprice). Derived from registry rows with `tier: 'max'`.
  */
 export const MAX_TIER_MODELS: ReadonlySet<string> = tierModelIds('max')
 

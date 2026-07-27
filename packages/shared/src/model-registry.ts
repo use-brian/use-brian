@@ -184,6 +184,12 @@ const FLASH35_RATES: ModelRates = {
   cacheWritePerMTok: 1.50,
 }
 
+const FLASH36_RATES: ModelRates = {
+  brackets: [{ upToInputTokens: Infinity, inPerMTok: 1.50, outPerMTok: 7.50 }],
+  cacheReadPerMTok: 0.15,
+  cacheWritePerMTok: 1.50,
+}
+
 // Google lists $4/$18 above 200K input for Pro 3.1; the single bracket below
 // deliberately keeps the pre-registry flat pricing so P1 changes no billing
 // math. Bracketed repricing is a deliberate follow-up, not a refactor side
@@ -256,18 +262,18 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     capabilities: { tools: true, vision: true, thinking: true },
   },
   {
-    // Max tier default — Gemini Flash 3.5 (frontier intelligence at Flash speeds).
-    alias: 'gemini-3.5-flash',
-    displayName: 'Gemini 3.5 Flash',
+    // Max tier default — Gemini Flash 3.6 (GA 2026-07-21).
+    alias: 'gemini-3.6-flash',
+    displayName: 'Gemini 3.6 Flash',
     provider: 'gemini',
-    apiModelId: 'gemini-3.5-flash',
+    apiModelId: 'gemini-3.6-flash',
     class: 'max',
     tier: 'max',
     status: 'active',
     chatTierKey: 'max',
     menu: true,
     idAliases: ['max'],
-    rates: FLASH35_RATES,
+    rates: FLASH36_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
     capabilities: { tools: true, vision: true, thinking: true },
@@ -313,6 +319,22 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
   },
 
   // ── Legacy rows (classification/pricing of historical usage only) ──
+  {
+    // Prior Max default (2026-05 through 2026-07-27). Keep its original
+    // $1.50/$9.00 rates and Max classification so historical rows never
+    // reprice when the active default moves to Flash 3.6.
+    alias: 'gemini-3.5-flash',
+    displayName: 'Gemini 3.5 Flash',
+    provider: 'gemini',
+    apiModelId: 'gemini-3.5-flash',
+    class: 'max',
+    tier: 'max',
+    status: 'legacy',
+    rates: FLASH35_RATES,
+    contextWindow: 1_048_576,
+    maxOutput: 65_536,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
   {
     // Prior Max default + pre-2026-06-02 research turns (billed as Max).
     // Stays tier 'max' so historical rows never reprice. `gemini-pro` is a

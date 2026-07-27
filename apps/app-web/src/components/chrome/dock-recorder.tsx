@@ -25,12 +25,14 @@
  * [COMP:app-web/dock-recorder]
  */
 
-import { useEffect, useRef, useState } from "react";
-import { Pause, Play, Square, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { ChevronDown, Pause, Play, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Tooltip } from "@/components/ui/tooltip";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { captureLabelLane, formatElapsed } from "@/lib/recorder/recorder-gesture";
 import type { DockRecorderApi } from "@/lib/recorder/use-dock-recorder";
@@ -79,13 +81,16 @@ export function DockRecorderButton({
   rec,
   disabled,
   className,
+  variant = "default",
 }: {
   rec: DockRecorderApi;
   disabled?: boolean;
   className?: string;
+  variant?: "default" | "floating";
 }) {
   const t = useT().recorder;
   const outsideRef = useRef(false);
+  const computerAudioId = useId();
 
   // While a press-gesture is unresolved, resolve release from ANYWHERE in
   // the document — a finger sliding off the button must still stop.
@@ -102,36 +107,100 @@ export function DockRecorderButton({
   }, [gestureLive, rec]);
 
   if (rec.phase.kind === "latched" || rec.phase.kind === "finishing") return null;
+  const floating = variant === "floating";
+  const canChooseComputerAudio = rec.computerAudioAvailable;
   return (
-    <Tooltip label={t.start}>
-      <button
-        type="button"
-        disabled={disabled}
-        aria-label={t.start}
-        aria-pressed={gestureLive}
-        onPointerDown={(e) => {
-          e.preventDefault();
-          outsideRef.current = false;
-          rec.onPressStart();
-        }}
-        onPointerLeave={() => {
-          outsideRef.current = true;
-        }}
-        onPointerEnter={() => {
-          outsideRef.current = false;
-        }}
-        className={cn(
-          "shrink-0 inline-flex h-9 w-9 items-center justify-center rounded-md",
-          "transition-colors disabled:opacity-50 disabled:pointer-events-none",
-          gestureLive
-            ? "bg-destructive/10 text-destructive animate-pulse"
-            : "text-muted-foreground hover:bg-accent hover:text-destructive",
-          className,
-        )}
-      >
-        <RecordDot className="size-[18px]" />
-      </button>
-    </Tooltip>
+    <div
+      className={cn(
+        "inline-flex shrink-0 items-stretch overflow-hidden",
+        floating
+          ? "h-10 rounded-full border border-border bg-background/90 shadow-lg backdrop-blur"
+          : "h-9 rounded-md",
+        className,
+      )}
+    >
+      <Tooltip label={t.start}>
+        <button
+          type="button"
+          disabled={disabled}
+          aria-label={t.start}
+          aria-pressed={gestureLive}
+          onPointerDown={(e) => {
+            e.preventDefault();
+            outsideRef.current = false;
+            rec.onPressStart();
+          }}
+          onPointerLeave={() => {
+            outsideRef.current = true;
+          }}
+          onPointerEnter={() => {
+            outsideRef.current = false;
+          }}
+          className={cn(
+            "inline-flex h-full items-center justify-center",
+            "transition-colors disabled:pointer-events-none disabled:opacity-50",
+            floating ? "w-10" : "w-9",
+            canChooseComputerAudio
+              ? floating
+                ? "rounded-l-full"
+                : "rounded-l-md"
+              : floating
+                ? "rounded-full"
+                : "rounded-md",
+            gestureLive
+              ? "bg-destructive/10 text-destructive animate-pulse"
+              : floating
+                ? "text-foreground/70 hover:bg-accent hover:text-destructive"
+                : "text-muted-foreground hover:bg-accent hover:text-destructive",
+          )}
+        >
+          <RecordDot className="size-[18px]" />
+        </button>
+      </Tooltip>
+      {canChooseComputerAudio ? (
+        <Popover>
+          <PopoverTrigger
+            render={
+              <button
+                type="button"
+                disabled={disabled || gestureLive}
+                aria-label={t.audioOptions}
+                title={t.audioOptions}
+                className={cn(
+                  "inline-flex h-full w-4 items-center justify-center border-l border-border/70",
+                  "text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                  "disabled:pointer-events-none disabled:opacity-50",
+                  floating ? "rounded-r-full" : "rounded-r-md",
+                )}
+              />
+            }
+          >
+            <ChevronDown className="size-3" aria-hidden />
+          </PopoverTrigger>
+          <PopoverContent
+            side="top"
+            align="end"
+            sideOffset={6}
+            className="w-[240px] p-3"
+          >
+            <div className="flex items-center justify-between gap-4">
+              <label
+                htmlFor={computerAudioId}
+                className="min-w-0 cursor-pointer text-sm text-foreground"
+              >
+                {t.includeComputerAudio}
+              </label>
+              <Switch
+                id={computerAudioId}
+                checked={rec.includeComputerAudio}
+                onCheckedChange={rec.setIncludeComputerAudio}
+                aria-label={t.includeComputerAudio}
+              />
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : null}
+    </div>
   );
 }
 

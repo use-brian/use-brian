@@ -418,19 +418,19 @@ export type CompactionTier = 'standard' | 'pro'
  * budget downgrades), so the threshold matches the window the model will
  * see. Flash-class models (Standard `gemini-3.1-flash-lite` and Pro
  * `gemini-3-flash-preview`) use the standard ceiling; Pro 3.1 (research
- * escalation) and Flash 3.5 (Max default) use the pro ceiling — Flash 3.5
- * is paid at the Max-tier rate and ships with a 1M-token frontier window,
- * so compacting it at the Flash Lite threshold would silently shrink what
- * the user paid 5 credits for.
+ * escalation) and Flash 3.6 (Max default, with Flash 3.5 retained for
+ * historical sessions) use the pro ceiling. Both Max Flash models ship with
+ * a 1M-token frontier window, so compacting them at the Flash Lite threshold
+ * would silently shrink what the user paid 10 credits for.
  *
  * Matches by substring so both the `resolveModel` aliases (`gemini-flash`,
  * `gemini-3.1-flash-lite`, `gemini-pro`) and the real provider IDs
  * (`gemini-3-flash-preview`, `gemini-3.1-flash-lite` / its retired
- * `-preview` SKU, `gemini-3.5-flash`, `gemini-3.1-pro-preview`) classify
- * correctly.
+ * `-preview` SKU, `gemini-3.6-flash`, legacy `gemini-3.5-flash`,
+ * `gemini-3.1-pro-preview`) classify correctly.
  */
 export function modelToCompactionTier(model: string): CompactionTier {
-  if (model.includes('gemini-3.5-flash')) return 'pro'
+  if (model.includes('gemini-3.6-flash') || model.includes('gemini-3.5-flash')) return 'pro'
   if (model.includes('flash')) return 'standard'
   return 'pro'
 }
