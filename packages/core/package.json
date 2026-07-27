@@ -15,6 +15,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@mozilla/readability": "^0.5.0",
+    "@napi-rs/canvas": "^0.1.100",
     "@openai/codex": "0.146.0-alpha.10.1",
     "@use-brian/brian-kb": "workspace:*",
     "@use-brian/shared": "workspace:*",
@@ -26,6 +27,7 @@
     "linkedom": "^0.18.0",
     "mammoth": "^1.12.0",
     "opencc-js": "^1.4.1",
+    "pdfjs-dist": "~5.6.205",
     "pptxgenjs": "^4.0.1",
     "sharp": "^0.34.3",
     "turndown": "^7.2.4",
