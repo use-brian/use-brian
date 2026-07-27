@@ -5,15 +5,6 @@ export const ja: Dictionary = {
     cancel: "キャンセル",
     back: "戻る",
   },
-  login: {
-    title: "Use Brian にサインイン",
-    description:
-      "タスク・CRM・ナレッジ・ワークフローを束ねるあなたのカンパニーブレイン。Use Brian と同じアカウントでサインインしてください。",
-    continueWithGoogle: "Google で続行",
-    devLogin: "ローカル開発用アカウントでサインイン",
-    errorDevLogin:
-      "ローカル開発用サインインに失敗しました。API サーバーは起動していますか？",
-  },
   teams: {
     title: "ワークスペースを選択",
     description:

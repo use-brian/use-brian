@@ -16,16 +16,6 @@ export const en = {
     cancel: "Cancel",
     back: "Back",
   },
-  login: {
-    title: "Sign in to Use Brian",
-    description:
-      "Your company brain for tasks, CRM, knowledge, and workflows. Sign in with the same account you use for Use Brian.",
-    continueWithGoogle: "Continue with Google",
-    // Local-only dev sign-in affordance — compiled out of production
-    // bundles. See src/app/api/auth/dev-login/route.ts.
-    devLogin: "Sign in as local dev",
-    errorDevLogin: "Local dev sign-in failed. Is the API server running?",
-  },
   teams: {
     title: "Pick a workspace",
     description:

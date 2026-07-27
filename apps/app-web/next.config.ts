@@ -23,6 +23,9 @@ const nextConfig: NextConfig = {
     root: workspaceRoot,
   },
   env: {
+    // Public OAuth client metadata used by the connector consent launcher.
+    // Interactive account sign-in no longer lives in app-web, but Google
+    // connector authorization still builds its provider URL in the browser.
     NEXT_PUBLIC_GOOGLE_CLIENT_ID:
       process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID ??
       process.env.GOOGLE_CLIENT_ID ??

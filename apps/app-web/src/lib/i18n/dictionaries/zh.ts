@@ -5,14 +5,6 @@ export const zh: Dictionary = {
     cancel: "取消",
     back: "返回",
   },
-  login: {
-    title: "登入 Use Brian",
-    description:
-      "整合任務、CRM、知識與工作流程的企業大腦，使用您原本登入 Use Brian 的帳號即可進入。",
-    continueWithGoogle: "使用 Google 繼續",
-    devLogin: "以本機開發帳號登入",
-    errorDevLogin: "本機開發登入失敗，API 伺服器是否已啟動？",
-  },
   teams: {
     title: "選擇工作空間",
     description:
