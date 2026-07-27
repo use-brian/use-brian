@@ -1,7 +1,9 @@
 /**
- * Platform guard for `/w/[id]/feed/[platform]/*` — only the feed engine's
- * known platforms (`FEED_PLATFORMS`) are routable; anything else 404s before
- * a page can fetch with a junk platform segment.
+ * Platform guard for `/w/[id]/feed/[platform]/*`.
+ *
+ * Draft-session detail URLs retain the target platform in the path in both
+ * editions. Provider-backed pages sit below the `(hosted)` route group, whose
+ * own layout enforces the edition boundary.
  */
 
 import { notFound } from "next/navigation";

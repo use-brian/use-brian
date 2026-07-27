@@ -14,6 +14,7 @@ import {
   recordedAliasIds,
   providerModelIds,
   menuForClass,
+  MutableProviderAvailability,
   bracketFor,
   effectiveRatePerMTok,
   UNKNOWN_MODEL_RATES,
@@ -83,15 +84,17 @@ describe('[COMP:providers/model-registry] derivations match the pre-registry lit
       // Wave-1 background-lane candidate (plan §5.1): classifies standard
       // like the flash-lite lane it may replace.
       'qwen3.5-flash',
+      'gpt-5.6-luna',
     ].sort())
     expect([...tierModelIds('pro')].sort()).toEqual([
       'pro', 'gemini-flash-3', 'gemini-3-flash-preview', 'gemini-flash',
+      'gpt-5.6-terra',
     ].sort())
     expect([...tierModelIds('max')].sort()).toEqual([
-      'max', 'gemini-3.5-flash', 'gemini-3.1-pro-preview',
+      'max', 'gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gpt-5.6-sol',
     ].sort())
     expect([...tierModelIds('research')].sort()).toEqual([
-      'research', 'gemini-3-pro-research',
+      'research', 'gemini-3-pro-research', 'gpt-5.5', 'gpt-5.2',
     ].sort())
     expect([...tierModelIds('embedding')].sort()).toEqual([
       'gemini-embedding-001', 'text-embedding-004', 'text-embedding-005',
@@ -198,6 +201,13 @@ describe('[COMP:providers/model-registry] provider derivations', () => {
     expect(gemini).not.toContain('gemini-embedding-001')
     expect(gemini).not.toContain('gemini-2.5-flash') // legacy
     expect(providerModelIds('anthropic')).toEqual(['claude-haiku-4-5'])
+    expect(providerModelIds('openai-codex')).toEqual([
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+      'gpt-5.6-sol',
+      'gpt-5.5',
+      'gpt-5.2',
+    ])
   })
 })
 
@@ -227,9 +237,21 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
   })
 
   it('menuForClass lists curated defaults and metered ports, never fallback/background/legacy', () => {
-    expect(menuForClass('standard-pro').map((r) => r.alias)).toEqual(['gemini-3-flash-standard', 'gemini-flash-3'])
-    expect(menuForClass('max').map((r) => r.alias)).toEqual(['gemini-3.5-flash'])
-    expect(menuForClass('research').map((r) => r.alias)).toEqual(['gemini-3-pro-research'])
+    expect(menuForClass('standard-pro').map((r) => r.alias)).toEqual([
+      'gemini-3-flash-standard',
+      'gemini-flash-3',
+      'gpt-5.6-luna',
+      'gpt-5.6-terra',
+    ])
+    expect(menuForClass('max').map((r) => r.alias)).toEqual([
+      'gemini-3.5-flash',
+      'gpt-5.6-sol',
+    ])
+    expect(menuForClass('research').map((r) => r.alias)).toEqual([
+      'gemini-3-pro-research',
+      'gpt-5.5',
+      'gpt-5.2',
+    ])
     expect(menuForClass('metered').map((r) => r.alias).sort()).toEqual(
       ['qwen3.7-plus', 'deepseek-v4-flash', 'qwen3.7-max', 'deepseek-v4-pro'].sort(),
     )
@@ -241,6 +263,30 @@ describe('[COMP:providers/model-registry] wave-1 slate + menus (plan §5.1)', ()
     expect(menuForClass('metered', geminiOnly)).toEqual([])
     expect(menuForClass('standard-pro', geminiOnly).map((r) => r.alias))
       .toEqual(['gemini-3-flash-standard', 'gemini-flash-3'])
+  })
+
+  it('intersects dynamic-provider rows with the live account model catalog', () => {
+    const availability = new MutableProviderAvailability()
+    availability.setStaticProvider('gemini', true)
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol', 'gpt-5.6-terra']))
+
+    expect(menuForClass('standard-pro', availability).map((r) => r.alias)).toEqual([
+      'gemini-3-flash-standard',
+      'gemini-flash-3',
+      'gpt-5.6-terra',
+    ])
+    expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
+      'gemini-3.5-flash',
+      'gpt-5.6-sol',
+    ])
+    expect(menuForClass('research', availability).map((r) => r.alias)).toEqual([
+      'gemini-3-pro-research',
+    ])
+
+    availability.setModelCatalog('openai-codex', null)
+    expect(menuForClass('max', availability).map((r) => r.alias)).toEqual([
+      'gemini-3.5-flash',
+    ])
   })
 })
 

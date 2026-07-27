@@ -15,6 +15,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.98.0",
     "@mozilla/readability": "^0.5.0",
+    "@openai/codex": "0.146.0-alpha.10.1",
     "@use-brian/brian-kb": "workspace:*",
     "@use-brian/shared": "workspace:*",
     "docx": "^9.7.1",

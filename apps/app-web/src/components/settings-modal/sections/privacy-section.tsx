@@ -10,6 +10,17 @@ import { desktopSignOut } from "@/lib/desktop-auth-source";
 import { clearLocalDocCaches } from "@/lib/offline/idb";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { isOssEdition } from "@/lib/edition";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+import {
+  downloadSupportDiagnosticCapsule,
+  getSupportDiagnosticStatus,
+  previewSupportDiagnosticCapsule,
+  startSupportDiagnosticCapture,
+  stopSupportDiagnosticCapture,
+  type SupportDiagnosticPreview,
+  type SupportDiagnosticStatus,
+} from "@/lib/support-diagnostics";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -41,6 +52,8 @@ export function PrivacySection() {
         />
       </div>
 
+      {isOssEdition() && <SupportDiagnosticsCard />}
+
       <div className="border-t border-border pt-6 space-y-5">
         <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">{t.settings.privacy.dataTitle}</h3>
         <DeleteMemoriesRow />
@@ -48,6 +61,246 @@ export function PrivacySection() {
       </div>
     </div>
   );
+}
+
+// ── OSS Support Mode ────────────────────────────────────────
+
+function SupportDiagnosticsCard() {
+  const t = useT().settings.privacy;
+  const { workspaceId, role } = useWorkspaceContext();
+  const [status, setStatus] = useState<SupportDiagnosticStatus | null>(null);
+  const [durationHours, setDurationHours] = useState<1 | 24 | 168>(24);
+  const [includeContent, setIncludeContent] = useState(false);
+  const [preview, setPreview] = useState<SupportDiagnosticPreview | null>(null);
+  const [working, setWorking] = useState<
+    "start" | "stop" | "preview" | "download" | null
+  >(null);
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    if (role === "member") return;
+    void getSupportDiagnosticStatus(workspaceId)
+      .then(setStatus)
+      .catch(() => setError(true));
+  }, [role, workspaceId]);
+
+  if (role === "member") return null;
+
+  async function startCapture() {
+    setWorking("start");
+    setError(false);
+    setPreview(null);
+    try {
+      setStatus(
+        await startSupportDiagnosticCapture({
+          workspaceId,
+          durationHours,
+          includeContent,
+        }),
+      );
+    } catch {
+      setError(true);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function stopCapture() {
+    setWorking("stop");
+    setError(false);
+    try {
+      await stopSupportDiagnosticCapture(workspaceId);
+      setStatus({ active: false, capture: null });
+      setPreview(null);
+    } catch {
+      setError(true);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function loadPreview() {
+    setWorking("preview");
+    setError(false);
+    try {
+      setPreview(await previewSupportDiagnosticCapsule(workspaceId));
+    } catch {
+      setError(true);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function downloadCapsule() {
+    setWorking("download");
+    setError(false);
+    try {
+      await downloadSupportDiagnosticCapsule(workspaceId);
+      setStatus({ active: false, capture: null });
+      setPreview(null);
+    } catch {
+      setError(true);
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  const active = status?.active && status.capture ? status.capture : null;
+
+  return (
+    <div className="border-t border-border pt-6 space-y-4">
+      <div>
+        <h3 className="text-sm font-medium">{t.supportTitle}</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          {t.supportDesc}
+        </p>
+      </div>
+
+      {!active && (
+        <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-4">
+          <label className="block space-y-1.5">
+            <span className="text-xs font-medium">{t.supportDuration}</span>
+            <select
+              value={durationHours}
+              onChange={(event) =>
+                setDurationHours(Number(event.target.value) as 1 | 24 | 168)
+              }
+              className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value={1}>{t.supportDurationOneHour}</option>
+              <option value={24}>{t.supportDurationOneDay}</option>
+              <option value={168}>{t.supportDurationOneWeek}</option>
+            </select>
+          </label>
+
+          <label className="flex items-start gap-3">
+            <input
+              type="checkbox"
+              checked={includeContent}
+              onChange={(event) => setIncludeContent(event.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-border"
+            />
+            <span>
+              <span className="block text-xs font-medium">
+                {t.supportIncludeContent}
+              </span>
+              <span className="mt-0.5 block text-xs leading-relaxed text-muted-foreground">
+                {t.supportIncludeContentDesc}
+              </span>
+            </span>
+          </label>
+
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t.supportLocalOnly}
+          </p>
+          <button
+            type="button"
+            onClick={startCapture}
+            disabled={working !== null}
+            className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+          >
+            {working === "start" ? t.supportStarting : t.supportStart}
+          </button>
+        </div>
+      )}
+
+      {active && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <span className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+                {t.supportActive}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                {format(t.supportActiveUntil, {
+                  time: new Date(active.expiresAt).toLocaleString(),
+                })}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {format(t.supportEvents, { count: active.eventCount })}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={stopCapture}
+              disabled={working !== null}
+              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              {working === "stop" ? t.supportStopping : t.supportStop}
+            </button>
+          </div>
+
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t.supportReproduce}
+          </p>
+
+          {!preview && (
+            <button
+              type="button"
+              onClick={loadPreview}
+              disabled={working !== null}
+              className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+            >
+              {working === "preview" ? t.supportPreparing : t.supportPreview}
+            </button>
+          )}
+
+          {preview && (
+            <div className="rounded-lg border border-border bg-background p-3 space-y-3">
+              <div className="text-xs font-medium">{t.supportPreviewTitle}</div>
+              <ul className="space-y-1">
+                {preview.categories.map((category) => (
+                  <li
+                    key={category.name}
+                    className="flex justify-between gap-4 text-xs text-muted-foreground"
+                  >
+                    <span>{supportCategoryLabel(category.name, t)}</span>
+                    <span>{category.count}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {preview.includeContent
+                  ? t.supportPreviewWithContent
+                  : t.supportPreviewWithoutContent}
+              </p>
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t.supportDownloadDeletes}
+              </p>
+              <button
+                type="button"
+                onClick={downloadCapsule}
+                disabled={working !== null}
+                className="rounded-lg bg-foreground px-3 py-2 text-sm font-medium text-background hover:opacity-90 disabled:opacity-50"
+              >
+                {working === "download"
+                  ? t.supportDownloading
+                  : t.supportDownload}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {error && <p className="text-xs text-destructive">{t.supportError}</p>}
+    </div>
+  );
+}
+
+function supportCategoryLabel(
+  category: string,
+  t: ReturnType<typeof useT>["settings"]["privacy"],
+): string {
+  const labels: Record<string, string> = {
+    captureEvents: t.supportCategoryLogs,
+    analyticsEvents: t.supportCategoryAnalytics,
+    sessionMessages: t.supportCategoryMessages,
+    workflowRuns: t.supportCategoryWorkflows,
+    scheduledJobs: t.supportCategorySchedules,
+    migrations: t.supportCategoryMigrations,
+  };
+  return labels[category] ?? category;
 }
 
 // ── Delete memories ─────────────────────────────────────────

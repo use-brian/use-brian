@@ -23,7 +23,12 @@
  * outage surfaces as an error rather than billing Max revenue for
  * standard-class serving.
  */
-import { registryRow, type ModelRegistryRow } from '@use-brian/shared/model-registry'
+import {
+  isRegistryModelAvailable,
+  registryRow,
+  type ModelRegistryRow,
+  type ProviderAvailability,
+} from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SessionOptions, StreamChunk } from './types.js'
 import { wrapFallback, type FallbackAnalytics } from './wrap-fallback.js'
 
@@ -31,6 +36,14 @@ export type RoutingProviderOptions = {
   /** Forwarded to `wrapFallback` for every routed same-class fallback pair —
    * keeps the `llm_provider_fallback` analytics event emitting. */
   analytics?: FallbackAnalytics
+  /** Live provider/model availability. Plain provider Sets retain static
+   * behavior; the OSS Codex lane adds account-scoped model entitlement. */
+  availability?: ProviderAvailability
+  /** Optional late-bound model resolver. OSS uses this so a provider that
+   * becomes available after OAuth can serve boot-selected background lanes
+   * without restarting the process. Explicit unavailable Codex ids remain
+   * unchanged by `ensureServableModel` and still fail closed. */
+  resolveModel?: (model: string) => string
 }
 
 export function createRoutingProvider(
@@ -47,6 +60,12 @@ export function createRoutingProvider(
       throw new Error(
         `[routing] unknown model id '${model}' — no model-registry row. ` +
         `Add one to packages/shared/src/model-registry.ts (docs/architecture/platform/model-registry.md).`,
+      )
+    }
+    if (!isRegistryModelAvailable(row, options?.availability)) {
+      throw new Error(
+        `[routing] model '${model}' is not available for provider '${row.provider}' ` +
+        `(the account may need to reconnect or choose another model).`,
       )
     }
     const cached = effectiveByAlias.get(row.alias)
@@ -81,7 +100,7 @@ export function createRoutingProvider(
     const fbProvider = providers[fbRow.provider]
     // Fallback provider not configured (no key) → run without fallback.
     // Availability is key presence (L12); the primary keeps serving.
-    if (!fbProvider) return base
+    if (!fbProvider || !isRegistryModelAvailable(fbRow, options?.availability)) return base
     return wrapFallback(base, fbProvider, {
       fallbackModel: row.fallbackAlias,
       ...(options?.analytics ? { analytics: options.analytics } : {}),
@@ -93,11 +112,17 @@ export function createRoutingProvider(
     models: Object.values(providers).flatMap((p) => p.models),
 
     stream(request: ProviderRequest): AsyncIterable<StreamChunk> {
-      return effectiveFor(request.model).stream(request)
+      const model = options?.resolveModel?.(request.model) ?? request.model
+      return effectiveFor(model).stream(
+        model === request.model ? request : { ...request, model },
+      )
     },
 
     createSession(sessionOpts: SessionOptions): ProviderSession {
-      return effectiveFor(sessionOpts.model).createSession(sessionOpts)
+      const model = options?.resolveModel?.(sessionOpts.model) ?? sessionOpts.model
+      return effectiveFor(model).createSession(
+        model === sessionOpts.model ? sessionOpts : { ...sessionOpts, model },
+      )
     },
   }
 }

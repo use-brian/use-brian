@@ -14,9 +14,9 @@
  * Value shape mirrors feed-web's `WorkspaceContextValue` (workspaceId, name,
  * role, canDraft, me, profiles) plus `refresh()` for post-connect reloads.
  * Workspace identity comes from `/api/workspaces/:id`; profiles from the
- * feed SDK. A profiles error (OSS/creds-less backend 404s the whole
- * `/api/distribution` family) degrades to an empty list — the home surface
- * renders its connect-account onboarding state.
+ * feed SDK. OSS returns a successful empty profile list because connections
+ * are hosted-only; unexpected profile failures still degrade to `[]` so the
+ * open planning surface remains usable.
  *
  * [COMP:app-web/feed-profiles-context]
  */
@@ -31,7 +31,11 @@ import {
   type ReactNode,
 } from "react";
 import { authFetch } from "@/lib/auth-fetch";
-import { fetchFeedTeamProfiles, type FeedProfile } from "@/lib/api/feed";
+import {
+  fetchFeedDistributionAssistants,
+  fetchFeedTeamProfiles,
+  type FeedProfile,
+} from "@/lib/api/feed";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -122,26 +126,6 @@ async function loadWorkspace(workspaceId: string): Promise<{
   return { name: team.name, role: team.role, myUserId, canDraft };
 }
 
-async function loadDistributionAssistants(
-  workspaceId: string,
-): Promise<Array<{ id: string; name: string }>> {
-  const res = await authFetch(
-    `${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`,
-  );
-  if (!res.ok) return [];
-  const body = (await res.json().catch(() => ({}))) as {
-    assistants?: Array<{
-      id: string;
-      name: string;
-      kind?: string;
-      appType?: string;
-    }>;
-  };
-  return (body.assistants ?? [])
-    .filter((a) => a.kind === "app" && a.appType === "distribution")
-    .map((a) => ({ id: a.id, name: a.name }));
-}
-
 export function FeedProfilesProvider(props: {
   workspaceId: string;
   children: ReactNode;
@@ -154,12 +138,11 @@ export function FeedProfilesProvider(props: {
   const load = useCallback(async (): Promise<void> => {
     const [team, profiles, assistants] = await Promise.all([
       loadWorkspace(workspaceId),
-      // Profiles failure ≠ surface failure: an OSS/creds-less backend 404s
-      // the whole /api/distribution family — render the zero-profile
-      // onboarding state instead of an error.
+      // Profiles failure ≠ surface failure: connections are optional to
+      // planning, so render the zero-profile onboarding state instead.
       fetchFeedTeamProfiles(workspaceId).catch(() => [] as FeedProfile[]),
       // Same degrade: the Create surfaces just see no brand voice yet.
-      loadDistributionAssistants(workspaceId).catch(
+      fetchFeedDistributionAssistants(workspaceId).catch(
         () => [] as Array<{ id: string; name: string }>,
       ),
     ]);

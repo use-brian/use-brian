@@ -1,4 +1,5 @@
 import { afterEach, describe, it, expect } from 'vitest'
+import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import {
   MODEL_MAP,
   STANDARD_TIER_MODELS,
@@ -289,6 +290,38 @@ describe('[COMP:api/model-resolution] ensureServableModel — default falls to a
 
   it('leaves an already-Qwen pick untouched on a Qwen deploy', () => {
     expect(ensureServableModel('qwen3.7-plus', QWEN)).toBe('qwen3.7-plus')
+  })
+
+  it('maps each Gemini auto tier to the matching live Codex subscription tier', () => {
+    const codex = new MutableProviderAvailability()
+    codex.setModelCatalog(
+      'openai-codex',
+      new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5']),
+    )
+
+    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-5.6-luna')
+    expect(ensureServableModel('gemini-flash-3', codex)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gemini-3.5-flash', codex)).toBe('gpt-5.6-sol')
+    expect(ensureServableModel('gemini-3-pro-research', codex)).toBe('gpt-5.5')
+  })
+
+  it('honors the OSS preferred provider for auto tier rows in a mixed deployment', () => {
+    const mixed = new MutableProviderAvailability()
+    mixed.setStaticProvider('gemini', true)
+    mixed.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra', 'gpt-5.6-sol']))
+    mixed.setPreferredProvider('openai-codex')
+
+    expect(ensureServableModel('gemini-flash-3', mixed)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gemini-3.5-flash', mixed)).toBe('gpt-5.6-sol')
+    // A direct non-default selection remains explicit.
+    expect(ensureServableModel('gpt-5.6-terra', mixed)).toBe('gpt-5.6-terra')
+  })
+
+  it('never substitutes a Codex model absent from the current account catalog', () => {
+    const codex = new MutableProviderAvailability()
+    codex.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra']))
+    expect(ensureServableModel('gemini-3-flash-standard', codex)).toBe('gpt-5.6-terra')
+    expect(ensureServableModel('gpt-5.6-sol', codex)).toBe('gpt-5.6-sol')
   })
 
   // Background lanes (auto-title, topic/research classifiers, session-state

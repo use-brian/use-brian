@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import { modelMenuRoutes, type ModelMenuRouteOptions } from '../model-menu.js'
 
 const getRole = vi.fn()
@@ -68,6 +69,22 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
       .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001').expect(200)
     expect(res.body.classes['metered']).toEqual([])
     expect(res.body.classes['standard-pro'].length).toBeGreaterThan(0)
+  })
+
+  it('shows only the account-scoped Codex catalog intersection', async () => {
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog(
+      'openai-codex',
+      new Set(['gpt-5.6-terra', 'gpt-5.6-sol']),
+    )
+    const res = await request(makeApp({ configuredProviders: availability }))
+      .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001')
+      .expect(200)
+    expect(res.body.classes['standard-pro'].map((m: { alias: string }) => m.alias))
+      .toEqual(['gpt-5.6-terra'])
+    expect(res.body.classes['max'].map((m: { alias: string }) => m.alias))
+      .toEqual(['gpt-5.6-sol'])
+    expect(res.body.classes['research']).toEqual([])
   })
 
   it('hides profiles whose model lost its key, keeps them in the store', async () => {

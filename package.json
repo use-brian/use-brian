@@ -9,6 +9,7 @@
   "scripts": {
     "build": "turbo run build",
     "start": "node scripts/launch.mjs",
+    "support": "node scripts/support.mjs",
     "dev": "node scripts/launch.mjs",
     "dev:watch": "turbo run dev",
     "lint": "turbo run lint",

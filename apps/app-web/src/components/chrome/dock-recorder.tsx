@@ -174,6 +174,11 @@ export function DockRecorderStrip({ rec, className }: { rec: DockRecorderApi; cl
         className={cn("size-2 shrink-0 rounded-full bg-destructive", !paused && !finishing && "animate-pulse")}
       />
       <span className="min-w-0 truncate text-xs text-foreground/80">{label}</span>
+      {rec.includesSystemAudio() ? (
+        <span className="hidden shrink-0 text-[10px] text-muted-foreground sm:inline">
+          {t.micAndComputerAudio}
+        </span>
+      ) : null}
       {!finishing ? (
         <>
           <span className="text-xs font-medium tabular-nums text-foreground">
@@ -251,9 +256,11 @@ export function DockRecorderNotice({ rec, className }: { rec: DockRecorderApi; c
             ? t.pauseStopped
             : rec.notice === "denied"
               ? t.micDenied
-              : rec.notice === "voiceFailed"
-                ? t.voiceFailed
-                : t.captureFailed;
+              : rec.notice === "systemAudioFailed"
+                ? t.systemAudioFailed
+                : rec.notice === "voiceFailed"
+                  ? t.voiceFailed
+                  : t.captureFailed;
   return (
     <div
       role="status"

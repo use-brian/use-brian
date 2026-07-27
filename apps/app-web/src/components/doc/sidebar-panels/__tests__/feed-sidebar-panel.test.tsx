@@ -4,9 +4,8 @@
  * vitest in app-web is node-only — `renderToString` + module mocks
  * (next/navigation, the sidebar-data provider). Effects never run, so the
  * inbox badge (an effect-driven fetch) stays at zero here; what's asserted
- * is the nav structure: Create rows always, one Platforms row per target
- * platform (connected → insights + expanded sub-rows inside its path,
- * unconnected → connection / coming-soon), hrefs built through `feedPath`.
+ * is the edition-aware nav structure: Create rows always; hosted additionally
+ * renders one Platforms row per target platform.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -102,5 +101,24 @@ describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
     expect(html).toContain('href="/w/ws-1/feed/threads/connection"');
     expect(html).toContain(en.feedPage.platformStatusNotConnected);
     expect(html).toContain(en.feedPage.platformStatusComingSoon);
+  });
+
+  it("keeps Create but hides the hosted Platforms group in OSS", () => {
+    const previous = process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
+    try {
+      process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "oss";
+      const html = render([], "/w/ws-1/feed");
+      expect(html).toContain('href="/w/ws-1/feed/drafts"');
+      expect(html).toContain('href="/w/ws-1/feed/inbox"');
+      expect(html).toContain('href="/w/ws-1/feed/ready"');
+      expect(html).not.toContain('href="/w/ws-1/feed/threads/connection"');
+      expect(html).not.toContain(en.feedPage.groups.platforms);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
+      } else {
+        process.env.NEXT_PUBLIC_USEBRIAN_EDITION = previous;
+      }
+    }
   });
 });

@@ -26,6 +26,9 @@ const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
+  // Dock recorder capability. The renderer uses this explicit promise instead
+  // of guessing from a user agent; old shells omit it and remain mic-only.
+  systemAudioCapture: process.platform === "darwin" || process.platform === "win32",
   signIn: () => ipcRenderer.send("Use Brian:sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
   // The offline landing's "Retry" button asks the shell to reload the app now.

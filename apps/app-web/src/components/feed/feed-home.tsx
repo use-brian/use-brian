@@ -52,6 +52,7 @@ import { PlatformIcon } from "@/components/feed/platform-icon";
 import { useConnectAccount } from "@/components/feed/connect-account-dialog";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
+import { isHostedEdition } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -89,6 +90,7 @@ function eventTypeLabel(t: FeedPageDict["home"], eventType: string): string {
 export function FeedHome() {
   const team = useFeedWorkspace();
   const { openConnect, dialog, isAdmin } = useConnectAccount();
+  const canConnect = isAdmin && isHostedEdition();
 
   // `?connected=<platform>` — the OAuth callback landing. Refresh profiles
   // once so the fresh connection shows without a reload, then replace the
@@ -116,9 +118,13 @@ export function FeedHome() {
     <>
       {dialog}
       {team.profiles.length === 0 ? (
-        <EmptyHome onConnect={openConnect} canConnect={isAdmin} />
+        <EmptyHome
+          onConnect={openConnect}
+          canCreateBrand={isAdmin}
+          canConnect={canConnect}
+        />
       ) : (
-        <DashboardHome onConnect={openConnect} canConnect={isAdmin} connected={connected} />
+        <DashboardHome onConnect={openConnect} canConnect={canConnect} connected={connected} />
       )}
     </>
   );
@@ -519,7 +525,15 @@ function timeAgo(t: FeedPageDict["home"], iso: string): string {
  * OAuth. With a brand voice but no connection, point at Drafts (drafting
  * needs no connection); connecting stays available as the secondary path.
  */
-function EmptyHome({ onConnect, canConnect }: { onConnect: () => void; canConnect: boolean }) {
+function EmptyHome({
+  onConnect,
+  canCreateBrand,
+  canConnect,
+}: {
+  onConnect: () => void;
+  canCreateBrand: boolean;
+  canConnect: boolean;
+}) {
   const t = useT().feedPage;
   const team = useFeedWorkspace();
   const [name, setName] = useState("");
@@ -671,7 +685,7 @@ function EmptyHome({ onConnect, canConnect }: { onConnect: () => void; canConnec
             <p className="text-sm text-muted-foreground leading-relaxed">
               {t.home.emptyBody}
             </p>
-            {canConnect ? (
+            {canCreateBrand ? (
               <form
                 className="space-y-3"
                 onSubmit={(e) => {
@@ -697,15 +711,19 @@ function EmptyHome({ onConnect, canConnect }: { onConnect: () => void; canConnec
                 {error ? (
                   <p className="text-sm text-destructive">{error}</p>
                 ) : null}
-                <p className="text-xs text-muted-foreground">{t.home.emptyOrConnect}</p>
-                <button
-                  type="button"
-                  onClick={onConnect}
-                  disabled={busy}
-                  className="inline-flex items-center justify-center rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent disabled:opacity-50 transition-colors"
-                >
-                  {t.home.emptyConnectCta}
-                </button>
+                {canConnect ? (
+                  <>
+                    <p className="text-xs text-muted-foreground">{t.home.emptyOrConnect}</p>
+                    <button
+                      type="button"
+                      onClick={onConnect}
+                      disabled={busy}
+                      className="inline-flex items-center justify-center rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent disabled:opacity-50 transition-colors"
+                    >
+                      {t.home.emptyConnectCta}
+                    </button>
+                  </>
+                ) : null}
               </form>
             ) : (
               <p className="text-sm text-muted-foreground">{t.home.emptyAskAdmin}</p>

@@ -41,7 +41,61 @@ export type ChatTierKey = 'standard' | 'pro' | 'max' | 'research'
 
 /** Provider a row dispatches to. `openai-compat:<label>` names one configured
  * OpenAI-compatible endpoint (e.g. `openai-compat:dashscope-intl`). */
-export type ModelProvider = 'gemini' | 'anthropic' | 'xai' | `openai-compat:${string}`
+export type ModelProvider =
+  | 'gemini'
+  | 'anthropic'
+  | 'openai-codex'
+  | 'xai'
+  | `openai-compat:${string}`
+
+/**
+ * Provider availability with an optional live per-model entitlement gate.
+ *
+ * Plain Sets retain the static-provider behavior. The OSS Codex lane uses
+ * `MutableProviderAvailability`: the provider is configured only while the
+ * isolated ChatGPT account is connected, and `isModelAvailable` intersects
+ * registry rows with the current account-scoped `model/list` catalog.
+ */
+export type ProviderAvailability = ReadonlySet<string> & {
+  isModelAvailable?(provider: string, apiModelId: string): boolean
+  preferredProvider?: string | null
+}
+
+export class MutableProviderAvailability
+  extends Set<string>
+  implements ProviderAvailability
+{
+  readonly #modelCatalogs = new Map<string, ReadonlySet<string>>()
+  preferredProvider: string | null = null
+
+  setPreferredProvider(provider: string | null): void {
+    this.preferredProvider = provider
+  }
+
+  setStaticProvider(provider: string, configured: boolean): void {
+    if (configured) this.add(provider)
+    else {
+      this.delete(provider)
+      this.#modelCatalogs.delete(provider)
+    }
+  }
+
+  setModelCatalog(provider: string, models: ReadonlySet<string> | null): void {
+    if (models === null) {
+      this.delete(provider)
+      this.#modelCatalogs.delete(provider)
+      return
+    }
+    this.add(provider)
+    this.#modelCatalogs.set(provider, new Set(models))
+  }
+
+  isModelAvailable(provider: string, apiModelId: string): boolean {
+    if (!this.has(provider)) return false
+    const catalog = this.#modelCatalogs.get(provider)
+    return catalog ? catalog.has(apiModelId) : true
+  }
+}
 
 /** One input-length pricing bracket. `upToInputTokens: Infinity` = top bracket. */
 export type RateBracket = {
@@ -363,6 +417,86 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 200_000,
     maxOutput: 32_000,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
+
+  // ── ChatGPT subscription via the pinned Codex app-server ─────
+  //
+  // These are reviewed identities from model/list in the pinned runtime.
+  // Live account discovery remains the entitlement authority: a row appears
+  // only when `MutableProviderAvailability` also contains its apiModelId.
+  // Tier is an OSS auto-routing bucket, not a hosted credit classification;
+  // hosted never configures `openai-codex`.
+  {
+    alias: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6 Luna',
+    provider: 'openai-codex',
+    apiModelId: 'gpt-5.6-luna',
+    class: 'standard-pro',
+    tier: 'standard',
+    status: 'active',
+    menu: true,
+    // ChatGPT-plan traffic has no per-token API charge to Brian. OpenAI quota
+    // and reset limits remain the subscription provider's authority.
+    rates: FREE_RATES,
+    contextWindow: 400_000,
+    maxOutput: 32_768,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
+  {
+    alias: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6 Terra',
+    provider: 'openai-codex',
+    apiModelId: 'gpt-5.6-terra',
+    class: 'standard-pro',
+    tier: 'pro',
+    status: 'active',
+    menu: true,
+    rates: FREE_RATES,
+    contextWindow: 400_000,
+    maxOutput: 32_768,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
+  {
+    alias: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6 Sol',
+    provider: 'openai-codex',
+    apiModelId: 'gpt-5.6-sol',
+    class: 'max',
+    tier: 'max',
+    status: 'active',
+    menu: true,
+    rates: FREE_RATES,
+    contextWindow: 400_000,
+    maxOutput: 32_768,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
+  {
+    alias: 'gpt-5.5',
+    displayName: 'GPT-5.5',
+    provider: 'openai-codex',
+    apiModelId: 'gpt-5.5',
+    class: 'research',
+    tier: 'research',
+    status: 'active',
+    menu: true,
+    rates: FREE_RATES,
+    contextWindow: 400_000,
+    maxOutput: 32_768,
+    capabilities: { tools: true, vision: true, thinking: true },
+  },
+  {
+    alias: 'gpt-5.2',
+    displayName: 'GPT-5.2',
+    provider: 'openai-codex',
+    apiModelId: 'gpt-5.2',
+    class: 'research',
+    tier: 'research',
+    status: 'active',
+    menu: true,
+    rates: FREE_RATES,
+    contextWindow: 400_000,
+    maxOutput: 32_768,
     capabilities: { tools: true, vision: true, thinking: true },
   },
 
@@ -794,12 +928,24 @@ export function recordedAliasIds(provider: ModelProvider): ReadonlySet<string> {
  * requires the row's provider key at boot (L12) — callers pass the set of
  * configured provider keys so keyless models are absent, never erroring.
  */
-export function menuForClass(cls: ModelClass, configuredProviders?: ReadonlySet<string>): ModelRegistryRow[] {
+export function isRegistryModelAvailable(
+  row: ModelRegistryRow,
+  configuredProviders?: ProviderAvailability,
+): boolean {
+  if (!configuredProviders) return true
+  if (!configuredProviders.has(row.provider)) return false
+  return configuredProviders.isModelAvailable?.(row.provider, row.apiModelId) ?? true
+}
+
+export function menuForClass(
+  cls: ModelClass,
+  configuredProviders?: ProviderAvailability,
+): ModelRegistryRow[] {
   return MODEL_REGISTRY.filter((row) =>
     row.class === cls &&
     row.status === 'active' &&
     row.menu === true &&
-    (!configuredProviders || configuredProviders.has(row.provider)),
+    isRegistryModelAvailable(row, configuredProviders),
   )
 }
 
@@ -815,11 +961,14 @@ export function menuForClass(cls: ModelClass, configuredProviders?: ReadonlySet<
  * or a Qwen-only deployment falls through to a metered CHAT model and pays
  * chat prices for a 32-token title.
  */
-export function activeForClass(cls: ModelClass, configuredProviders?: ReadonlySet<string>): ModelRegistryRow[] {
+export function activeForClass(
+  cls: ModelClass,
+  configuredProviders?: ProviderAvailability,
+): ModelRegistryRow[] {
   return MODEL_REGISTRY.filter((row) =>
     row.class === cls &&
     row.status === 'active' &&
-    (!configuredProviders || configuredProviders.has(row.provider)),
+    isRegistryModelAvailable(row, configuredProviders),
   )
 }
 

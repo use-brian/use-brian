@@ -37,6 +37,7 @@ import {
   Menu,
   Notification,
   nativeImage,
+  desktopCapturer,
   type Event,
   type MenuItemConstructorOptions,
 } from "electron";
@@ -80,6 +81,10 @@ import {
 } from "./window-policy.js";
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
+import {
+  isTrustedCaptureOrigin,
+  selectPrimaryDisplaySource,
+} from "./system-audio-policy.js";
 import { buildAppMenu } from "./menu.js";
 import {
   buildUninstallScript,
@@ -1768,6 +1773,46 @@ if (!gotLock) {
         return;
       }
       callback(true);
+    });
+
+    // Remote-meeting recording: app-web requests display media only to obtain
+    // the computer's playback stream. getDisplayMedia requires video, so grant
+    // the primary display + audible loopback; the renderer stops the video
+    // track immediately and mixes only mic + playback into MediaRecorder.
+    //
+    // The origin check is the privilege boundary. Bundled file:// is allowed
+    // only when a packaged renderer is actually active; arbitrary web content
+    // can never turn this shell into a whole-computer audio tap.
+    session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+      const trusted = isTrustedCaptureOrigin(
+        request.securityOrigin,
+        cfg.appOrigin,
+        bundledAvailable(),
+      );
+      if (!trusted || !request.audioRequested || !request.videoRequested) {
+        callback({});
+        return;
+      }
+      void desktopCapturer
+        .getSources({
+          types: ["screen"],
+          thumbnailSize: { width: 0, height: 0 },
+          fetchWindowIcons: false,
+        })
+        .then((sources) => {
+          const source = selectPrimaryDisplaySource(
+            sources,
+            screen.getPrimaryDisplay().id,
+          );
+          if (!source) {
+            callback({});
+            return;
+          }
+          // `loopback` leaves local playback audible. `loopbackWithMute`
+          // would make the remote meeting disappear from the user's speakers.
+          callback({ video: source, audio: "loopback" });
+        })
+        .catch(() => callback({}));
     });
 
     // Before the first menu/tray build so their update item reflects the gate.

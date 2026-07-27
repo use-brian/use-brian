@@ -40,6 +40,7 @@ import {
   type CaptureLane,
 } from "./recorder-gesture";
 import { createRecorderEngine, type RecorderEngine } from "./recorder-engine";
+import { SystemAudioCaptureError } from "./audio-mixer";
 import {
   LIVE_SESSION_GRACE_MS,
   assembleSpooledBlob,
@@ -183,6 +184,7 @@ type RecorderNotice =
   | "autoStopped"
   | "pauseStopped"
   | "denied"
+  | "systemAudioFailed"
   | "failed"
   | "voiceFailed";
 
@@ -205,6 +207,8 @@ export type DockRecorderApi = {
   pause: () => void;
   resume: () => void;
   level: () => number;
+  /** Visible trust signal for desktop remote-call capture. */
+  includesSystemAudio: () => boolean;
   recovery: SpoolSessionMeta[];
   saveRecovery: (sessionId: string) => Promise<void>;
   discardRecovery: (sessionId: string) => Promise<void>;
@@ -342,11 +346,15 @@ export function useDockRecorder(opts: {
           void (async () => {
             try {
               engineRef.current = await createRecorderEngine({
+                // New macOS/Windows shells advertise this capability. Old
+                // shells omit it and preserve the mic-only behavior during
+                // version skew; browsers have no bridge and stay mic-only.
+                includeSystemAudio: desktopBridge()?.systemAudioCapture === true,
                 // The capture died underneath us (mic unplugged / input
-                // switched / recorder error). Finalize instead of ticking a
-                // zombie clock: a latched meeting stops-and-forks with
-                // whatever was captured (the confirm dialog surfaces it); an
-                // unresolved press has nothing worth keeping.
+                // switched / system stream ended / recorder error). Finalize
+                // instead of ticking a zombie clock: a latched meeting stops-
+                // and-forks with whatever was captured (the confirm dialog
+                // surfaces it); an unresolved press has nothing worth keeping.
                 onUnexpectedEnd: () => {
                   const kind = phaseRef.current.kind;
                   if (kind === "latched") dispatchRef.current({ type: "stop" });
@@ -359,7 +367,11 @@ export function useDockRecorder(opts: {
               dispatchRef.current({ type: "armed" });
             } catch (err) {
               setNotice(
-                err instanceof DOMException && err.name === "NotAllowedError" ? "denied" : "failed",
+                err instanceof SystemAudioCaptureError
+                  ? "systemAudioFailed"
+                  : err instanceof DOMException && err.name === "NotAllowedError"
+                    ? "denied"
+                    : "failed",
               );
               dispatchRef.current({ type: "arm-failed" });
             }
@@ -704,6 +716,10 @@ export function useDockRecorder(opts: {
     pause: useCallback(() => dispatch({ type: "pause" }), [dispatch]),
     resume: useCallback(() => dispatch({ type: "resume" }), [dispatch]),
     level: useCallback(() => engineRef.current?.level() ?? 0, []),
+    includesSystemAudio: useCallback(
+      () => engineRef.current?.includesSystemAudio() ?? false,
+      [],
+    ),
     recovery,
     saveRecovery,
     discardRecovery,
