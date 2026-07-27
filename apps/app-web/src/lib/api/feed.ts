@@ -1,14 +1,13 @@
 /**
- * SDK for the Feed (distribution) surface — thin typed wrappers around the
- * closed `/api/distribution/*` routes (`packages/api-platform/src/routes/feed*.ts`),
+ * SDK for the Feed surface — thin typed wrappers around the shared
+ * `/api/distribution/*` wire contract (open content planning plus hosted
+ * provider integration),
  * plus the Voice surface's team-memory + tuning-session wrappers over open
  * platform routes (see "Voice (team-scope memories)" below).
  * All calls go through `authFetch` for transparent token refresh.
  *
- * The hosted backend mounts these routes only when distribution platform
- * credentials are configured; an OSS/local backend 404s the whole family.
- * Callers that probe availability (the sidebar's `feedProfiles` signal) treat
- * any error as "feed not available" rather than surfacing it.
+ * OSS returns an empty profile collection and serves planning routes without
+ * platform credentials. Hosted adds connected profile and provider behavior.
  *
  * Wire types are declared locally, mirroring feed-web's context types
  * (`apps/feed-web/src/lib/workspace-context.tsx` pre-port); the server is
@@ -61,9 +60,9 @@ type ProfilesApiResponse = {
 };
 
 /**
- * The workspace's connected feed profiles. Throws on any non-OK response —
- * including the 404 an OSS/creds-less backend returns for the whole
- * `/api/distribution` family — so availability probes catch and degrade.
+ * The workspace's connected feed profiles. OSS returns an empty list because
+ * provider connections are hosted-only. Unexpected non-OK responses throw so
+ * availability probes can catch and degrade.
  */
 export async function fetchFeedTeamProfiles(
   workspaceId: string,
@@ -85,6 +84,29 @@ export async function fetchFeedTeamProfiles(
       iconSeed: p.assistant.iconSeed ?? 0,
     },
   }));
+}
+
+/** Distribution assistants are open planning identities, connected or not. */
+export async function fetchFeedDistributionAssistants(
+  workspaceId: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const res = await authFetch(
+    `${API_URL}/api/assistants?workspaceId=${encodeURIComponent(workspaceId)}`,
+  );
+  if (!res.ok) return [];
+  const body = (await res.json().catch(() => ({}))) as {
+    assistants?: Array<{
+      id: string;
+      name: string;
+      kind?: string;
+      appType?: string;
+    }>;
+  };
+  return (body.assistants ?? [])
+    .filter((assistant) =>
+      assistant.kind === "app" && assistant.appType === "distribution"
+    )
+    .map((assistant) => ({ id: assistant.id, name: assistant.name }));
 }
 
 /**

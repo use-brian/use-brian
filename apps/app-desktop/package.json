@@ -19,12 +19,13 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.39",
-    "electron": "^33.0.0",
+    "electron": "^43.2.0",
     "electron-builder": "^25.0.0",
     "typescript": "^5.7",
     "vitest": "^3"
   },
   "dependencies": {
-    "electron-updater": "^6.8.9"
+    "electron-updater": "^6.8.9",
+    "zod": "^3.24"
   }
 }

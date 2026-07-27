@@ -93,11 +93,18 @@ function msg(uid: number, over: Partial<ImapFetchedMessage['envelope']> = {}, so
   }
 }
 
-function makeApi(client: ImapClientLike, over: { sendComposed?: ReturnType<typeof vi.fn>; saveSentCopy?: boolean } = {}) {
+function makeApi(
+  client: ImapClientLike,
+  over: {
+    sendComposed?: ReturnType<typeof vi.fn>
+    saveSentCopy?: boolean
+    settings?: MailboxAccountSettings
+  } = {},
+) {
   const sessions = createMailboxSessionCache({ createClient: () => client })
   return createMailboxApi({
     cacheKey: 'inst-1',
-    getSettings: async () => SETTINGS,
+    getSettings: async () => over.settings ?? SETTINGS,
     sessions,
     sendComposed: (over.sendComposed ?? vi.fn(async () => {})) as never,
     ...(over.saveSentCopy !== undefined ? { saveSentCopy: over.saveSentCopy } : {}),
@@ -241,6 +248,29 @@ describe('[COMP:api/mailbox-imap-client] sendMessage', () => {
     const result = await api.sendMessage({ to: ['x@y.z'], subject: 's', body: 'b' })
     expect(result.messageId).toBeTruthy()
     expect(sendComposed).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not APPEND a duplicate Sent copy when Gmail already auto-saves SMTP submissions', async () => {
+    const { client, appends } = makeFakeClient(
+      {
+        INBOX: { uids: [], messages: {} },
+        '[Gmail]/Sent Mail': { uids: [], messages: {} },
+      },
+      { specialUseSent: '[Gmail]/Sent Mail' },
+    )
+    const sendComposed = vi.fn(async () => {})
+    const api = makeApi(client, {
+      sendComposed,
+      settings: {
+        ...SETTINGS,
+        email: 'me@gmail.com',
+        imapHost: 'imap.gmail.com',
+        smtpHost: 'SMTP.GMAIL.COM.',
+      },
+    })
+    await api.sendMessage({ to: ['x@y.z'], subject: 's', body: 'b' })
+    expect(sendComposed).toHaveBeenCalledTimes(1)
+    expect(appends).toHaveLength(0)
   })
 
   it('carries cc as a header and cc + bcc into the delivery envelope', async () => {

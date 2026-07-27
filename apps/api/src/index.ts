@@ -23,21 +23,13 @@ import { buildOpenChannelHosts } from '@use-brian/api/channel-hosts.js'
 
 dotenv.config()
 
-// The `gemini` provider can be backed by AI Studio (GEMINI_API_KEY) or Vertex
-// (VERTEX_PROJECT_ID), and a deployment can run Qwen-only via DASHSCOPE_API_KEY.
-// Require at least one usable LLM credential rather than GEMINI_API_KEY
-// specifically — a region where Google blocks the AI Studio developer API
-// (e.g. Hong Kong) has no such key and reaches Gemini via Vertex instead.
+// API-key providers are optional in OSS. With none configured, boot still
+// starts the isolated Codex runtime and the authenticated local Settings route
+// so the owner can choose "Sign in with ChatGPT" without first inventing a
+// placeholder API key.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const VERTEX_PROJECT_ID = process.env.VERTEX_PROJECT_ID
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY
-if (!GEMINI_API_KEY && !VERTEX_PROJECT_ID && !DASHSCOPE_API_KEY) {
-  console.error(
-    '[api-open] No LLM credential set. Provide GEMINI_API_KEY (AI Studio), ' +
-    'VERTEX_PROJECT_ID (Vertex AI), or DASHSCOPE_API_KEY (Qwen), then restart.',
-  )
-  process.exit(1)
-}
 
 // JWT_SECRET is auto-generated + persisted by the launcher; for a bare boot we
 // fall back to a process-local random one (sessions don't survive a restart,
@@ -53,6 +45,9 @@ const env: OpenApiEnv = {
   NODE_ENV: process.env.NODE_ENV || 'development',
   API_URL: process.env.API_URL || 'http://localhost:4000',
   APP_URL: process.env.APP_URL || 'http://localhost:3003',
+  SUPPORT_DIAGNOSTICS_ENABLED: !['false', '0'].includes(
+    (process.env.BRIAN_SUPPORT_DIAGNOSTICS_ENABLED ?? '').trim().toLowerCase(),
+  ),
   PORT: process.env.PORT,
   VOICE_TRANSCRIPTION_ENABLED: process.env.VOICE_TRANSCRIPTION_ENABLED === 'true',
   VOICE_TRANSCRIPTION_MODEL: process.env.VOICE_TRANSCRIPTION_MODEL,

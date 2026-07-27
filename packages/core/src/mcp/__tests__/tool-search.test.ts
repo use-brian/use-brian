@@ -104,6 +104,32 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
     expect(tools[0].description).toContain('Notion')
   })
 
+  it('identifies an indexed workspace KB and discovers its search tool from a KB-named query', async () => {
+    const knowledgeTool = {
+      name: 'searchKnowledge',
+      description: 'Search the workspace knowledge base (KB) by keyword.',
+      inputSchema: {} as never,
+      isReadOnly: true,
+      execute: vi.fn(async () => ({ data: [] })),
+    } as never
+    const index = buildToolIndex([
+      { kind: 'local', serverName: 'knowledge', tools: [knowledgeTool] },
+    ])
+    const [searchTool] = createMcpSearchTools({
+      index,
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1',
+      userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+    })
+
+    expect(searchTool.description).toContain('workspace knowledge base (KB)')
+    expect(searchTool.description).toContain('tool capabilities, not the underlying user data')
+
+    const result = await searchTool.execute({ query: 'cathay-sp kb' }, ctx)
+    expect(String(result.data)).toContain('searchKnowledge')
+  })
+
   // ── Search tests ──────────────────────────────────────────────
 
   it('mcp_search finds DRep tools when searching for "drep"', async () => {

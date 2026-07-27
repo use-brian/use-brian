@@ -6,7 +6,8 @@
       "outputs": ["dist/**", ".next/**"],
       "env": [
         "GOOGLE_CLIENT_ID",
-        "GOOGLE_CLIENT_SECRET",
+        "GOOGLE_API_KEY",
+        "GOOGLE_PROJECT_NUMBER",
         "NODE_ENV",
         "NEXT_PUBLIC_*"
       ]

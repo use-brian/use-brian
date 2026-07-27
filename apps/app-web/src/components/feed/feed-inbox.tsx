@@ -47,7 +47,12 @@ import {
   type FeedActivityEvent,
   type FeedProfile,
 } from "@/lib/api/feed";
-import { feedPath, isFeedPlatform, type FeedPlatform } from "@/lib/feed-nav";
+import {
+  FEED_PLATFORMS,
+  feedPath,
+  isFeedPlatform,
+  type FeedPlatform,
+} from "@/lib/feed-nav";
 import {
   PostDraftPreview,
   QuotedPostPreview,
@@ -105,8 +110,12 @@ export function FeedInbox() {
   }, [team.profiles]);
 
   const assistantIds = useMemo(
-    () => Array.from(new Set(team.profiles.map((p) => p.assistantId))),
-    [team.profiles],
+    () => {
+      const ids = new Set(team.profiles.map((p) => p.assistantId));
+      for (const assistant of team.assistants) ids.add(assistant.id);
+      return Array.from(ids);
+    },
+    [team.profiles, team.assistants],
   );
 
   const [items, setItems] = useState<ApprovalEvent[]>([]);
@@ -219,7 +228,7 @@ export function FeedInbox() {
   // platforms the team doesn't have connected.
   const platformChips = useMemo(() => {
     const list: Array<{ id: FeedPlatform; label: string; count: number }> = [];
-    for (const platform of ["threads", "twitter"] as const) {
+    for (const platform of FEED_PLATFORMS) {
       if (counts[platform] > 0) {
         list.push({
           id: platform,

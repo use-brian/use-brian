@@ -97,6 +97,25 @@ describe("[COMP:app-web/feed-home] FeedHome", () => {
     expect(html).not.toContain(en.feedPage.home.emptyCta);
   });
 
+  it("OSS owner can create a brand voice without seeing OAuth controls", () => {
+    const previous = process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
+    process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "oss";
+    try {
+      const html = render([], "owner");
+      expect(html).toContain(en.feedPage.home.emptyCta);
+      expect(html).not.toContain(
+        `>${en.feedPage.home.emptyConnectCta}</button>`,
+      );
+      expect(html).not.toContain(en.feedPage.home.emptyAskAdmin);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
+      } else {
+        process.env.NEXT_PUBLIC_USEBRIAN_EDITION = previous;
+      }
+    }
+  });
+
   it("with profiles: renders the dashboard with feedPath-built quick links", () => {
     const html = render([profile("threads", "acme")], "owner");
     expect(html).toContain("Acme Team");

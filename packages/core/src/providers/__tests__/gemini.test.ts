@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { normalizeGeminiContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingEnvelopeLeak, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
+import { normalizeGeminiContents, normalizeGeminiRequestContents, resolveGeminiThinkingLevel, resolveStopReason, stripLeadingEnvelopeLeak, stripLeadingRoleToken, stripNonInputParts } from '../gemini.js'
 
 type GeminiContent = Parameters<typeof normalizeGeminiContents>[0][number]
 
@@ -215,6 +215,17 @@ describe('[COMP:providers/gemini-input-parts] stripNonInputParts', () => {
     ]
     expect(stripNonInputParts(clean)).toEqual(clean)
   })
+
+  it('trims trailing model-prefill turns for Gemini 3.6+ only', () => {
+    const history = [userText('translate this'), modelText('Translation:')]
+    expect(normalizeGeminiRequestContents(history, 'gemini-3.6-flash')).toEqual([
+      userText('translate this'),
+    ])
+    expect(normalizeGeminiRequestContents(history, 'gemini-4.0-flash')).toEqual([
+      userText('translate this'),
+    ])
+    expect(normalizeGeminiRequestContents(history, 'gemini-3.5-flash')).toEqual(history)
+  })
 })
 
 describe('[COMP:providers/gemini-role-leak] stripLeadingRoleToken', () => {
@@ -402,6 +413,33 @@ describe('[COMP:providers/gemini-json-mode] responseFormat json → responseMime
     const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
     expect(body.generationConfig?.responseMimeType).toBe('application/json')
     expect(body.generationConfig?.responseSchema).toEqual(schema)
+  })
+
+  it('omits deprecated sampling parameters for Gemini 3.6 while preserving older-model behavior', async () => {
+    fetchMock.mockResolvedValueOnce(sseOk()).mockResolvedValueOnce(sseOk())
+    const { createGeminiProvider } = await import('../gemini.js')
+
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-3.6-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'chat' }],
+        temperature: 0.7,
+      }),
+    )
+    await drain(
+      createGeminiProvider('test-key').stream({
+        model: 'gemini-3.5-flash',
+        systemPrompt: 'sys',
+        messages: [{ role: 'user', content: 'chat' }],
+        temperature: 0.7,
+      }),
+    )
+
+    const latest = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    const legacy = JSON.parse((fetchMock.mock.calls[1][1] as RequestInit).body as string)
+    expect(latest.generationConfig?.temperature).toBeUndefined()
+    expect(legacy.generationConfig?.temperature).toBe(0.7)
   })
 
   it('retries WITHOUT the schema when Gemini rejects it, rather than failing the call', async () => {

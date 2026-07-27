@@ -17,8 +17,27 @@ describe('[COMP:api/mailbox-connect-routes] MX preset resolution', () => {
     expect(presetForMxHost('mx1.qiye.aliyun.com')?.presetId).toBe('alimail')
     expect(presetForMxHost('MX2.QIYE.ALIYUN.COM.')?.presetId).toBe('alimail')
     expect(presetForMxHost('mx3.mxhichina.com')?.presetId).toBe('alimail')
-    expect(presetForMxHost('aspmx.l.google.com')).toBeNull()
     expect(presetForMxHost('evil-qiye.aliyun.com.attacker.io')).toBeNull()
+  })
+
+  it('maps Gmail and Google Workspace MX families to the reviewed Gmail client endpoints', () => {
+    for (const exchange of [
+      'gmail-smtp-in.l.google.com',
+      'alt2.gmail-smtp-in.l.google.com.',
+      'aspmx.l.google.com',
+      'ALT1.ASPMX.L.GOOGLE.COM.',
+    ]) {
+      expect(presetForMxHost(exchange)).toEqual({
+        presetId: 'gmail',
+        label: 'Gmail / Google Workspace',
+        imapHost: 'imap.gmail.com',
+        imapPort: 993,
+        smtpHost: 'smtp.gmail.com',
+        smtpPort: 465,
+      })
+    }
+    expect(presetForMxHost('gmail-smtp-in.l.google.com.attacker.io')).toBeNull()
+    expect(presetForMxHost('aspmx.l.google.com.attacker.io')).toBeNull()
   })
 
   it('resolves via MX lookup, lowest priority first', async () => {
@@ -31,8 +50,25 @@ describe('[COMP:api/mailbox-connect-routes] MX preset resolution', () => {
     expect(preset?.smtpPort).toBe(465)
   })
 
+  it('resolves a Gmail address from its live MX hostname family', async () => {
+    const preset = await resolveMailboxPreset('x@gmail.com', async (domain) => {
+      expect(domain).toBe('gmail.com')
+      return [
+        { exchange: 'alt2.gmail-smtp-in.l.google.com.', priority: 20 },
+        { exchange: 'gmail-smtp-in.l.google.com.', priority: 5 },
+      ]
+    })
+    expect(preset).toMatchObject({
+      presetId: 'gmail',
+      imapHost: 'imap.gmail.com',
+      imapPort: 993,
+      smtpHost: 'smtp.gmail.com',
+      smtpPort: 465,
+    })
+  })
+
   it('returns null for unrecognized MX, unresolvable domains, and bare strings', async () => {
-    expect(await resolveMailboxPreset('x@gmail.com', async () => [{ exchange: 'aspmx.l.google.com', priority: 1 }])).toBeNull()
+    expect(await resolveMailboxPreset('x@unknown.example', async () => [{ exchange: 'mx.unknown.example', priority: 1 }])).toBeNull()
     expect(await resolveMailboxPreset('x@dead.invalid', async () => { throw new Error('ENOTFOUND') })).toBeNull()
     expect(await resolveMailboxPreset('not-an-email', async () => [])).toBeNull()
   })

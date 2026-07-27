@@ -6,6 +6,7 @@ import {
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
 import { parseDesktopConnectorState, buildLoopbackForwardUrl } from "@/lib/connector-oauth-desktop";
+import { isOssEdition } from "@/lib/edition";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ?? "";
@@ -26,13 +27,23 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET ?? "";
  * redirects to the workspace-scoped route. A missing workspace id falls back
  * to `/teams`.
  *
- * INFRA (degraded): requires `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` and a
- * `app.usebrian.ai/...` redirect_uri allowlisted in the Google OAuth client.
- * Doc-web does not set the connector `NEXT_PUBLIC_GOOGLE_CLIENT_ID` env yet,
- * so the connect button can't reach this callback until that lands.
+ * Requires runtime `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` and this
+ * deployment's `/api/auth/callback/google-connector` redirect URI allowlisted
+ * in the Google Web OAuth client. The secret is intentionally absent from
+ * next.config `env`, so Next leaves this server-side process.env read for
+ * runtime instead of replacing it during the build.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
+  // Cloudflare Tunnel terminates the public request and forwards it to
+  // app-web's loopback listener, so an OSS Next.js route sees
+  // `http://localhost:3003` here. Google requires the token exchange to repeat
+  // the exact public redirect_uri used during authorization, and browser
+  // redirects must not leak the loopback address either. Hosted deployments
+  // retain request.url because APP_URL is the marketing origin there.
+  const appOrigin = new URL(
+    isOssEdition() ? process.env.APP_URL ?? request.url : request.url,
+  ).origin;
   const code = url.searchParams.get("code");
   const stateRaw = url.searchParams.get("state") ?? ""; // "gcal[:add]:<workspaceId>:<nonce>"
   const error = url.searchParams.get("error");
@@ -49,7 +60,7 @@ export async function GET(request: Request) {
     if (!forward) {
       // Tampered/invalid loopback — never 302 to a non-loopback host.
       return NextResponse.redirect(
-        new URL(connectorsPath(desktopState.workspaceId, { error: "invalid_state" }), request.url),
+        new URL(connectorsPath(desktopState.workspaceId, { error: "invalid_state" }), appOrigin),
       );
     }
     return NextResponse.redirect(forward);
@@ -59,7 +70,7 @@ export async function GET(request: Request) {
 
   if (error || !code || !connector) {
     return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "consent_denied" }), request.url),
+      new URL(connectorsPath(workspaceId, { error: "consent_denied" }), appOrigin),
     );
   }
 
@@ -71,13 +82,12 @@ export async function GET(request: Request) {
   const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
   if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
     return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "invalid_state" }), request.url),
+      new URL(connectorsPath(workspaceId, { error: "invalid_state" }), appOrigin),
     );
   }
 
   try {
-    const origin = new URL(request.url).origin;
-    const redirectUri = `${origin}/api/auth/callback/google-connector`;
+    const redirectUri = `${appOrigin}/api/auth/callback/google-connector`;
 
     // Exchange code for tokens with Google
     const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
@@ -95,7 +105,7 @@ export async function GET(request: Request) {
     if (!tokenRes.ok) {
       console.error("[google-connector] token exchange failed:", await tokenRes.text());
       return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "token_exchange_failed" }), request.url),
+        new URL(connectorsPath(workspaceId, { error: "token_exchange_failed" }), appOrigin),
       );
     }
 
@@ -107,7 +117,7 @@ export async function GET(request: Request) {
     if (!tokens.refresh_token) {
       console.error("[google-connector] no refresh_token returned");
       return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "no_refresh_token" }), request.url),
+        new URL(connectorsPath(workspaceId, { error: "no_refresh_token" }), appOrigin),
       );
     }
 
@@ -130,7 +140,7 @@ export async function GET(request: Request) {
     // Send refresh token to Express backend to store in the connector row
     const accessToken = cookieStore.get("access_token")?.value;
     if (!accessToken) {
-      return NextResponse.redirect(new URL("/login", request.url));
+      return NextResponse.redirect(new URL("/login", appOrigin));
     }
 
     // `instanceId` (reconnect) re-points an EXISTING instance's credential —
@@ -158,7 +168,7 @@ export async function GET(request: Request) {
     if (!storeRes.ok) {
       console.error("[google-connector] store credentials failed:", await storeRes.text());
       return NextResponse.redirect(
-        new URL(connectorsPath(workspaceId, { error: "store_failed" }), request.url),
+        new URL(connectorsPath(workspaceId, { error: "store_failed" }), appOrigin),
       );
     }
 
@@ -175,13 +185,13 @@ export async function GET(request: Request) {
           connected: connector,
           instance: stored.connectorInstanceId,
         }),
-        request.url,
+        appOrigin,
       ),
     );
   } catch (err) {
     console.error("[google-connector] callback error:", err);
     return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
+      new URL(connectorsPath(workspaceId, { error: "unexpected" }), appOrigin),
     );
   }
 }

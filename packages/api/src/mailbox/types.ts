@@ -20,7 +20,7 @@ export type MailboxAccountSettings = {
 /** A connect-time preset resolved from the address domain's MX records (D1). */
 export type MailboxPreset = {
   /** Stable preset id — drives the per-preset app-password recipe in the UI. */
-  presetId: 'alimail'
+  presetId: 'alimail' | 'gmail'
   label: string
   imapHost: string
   imapPort: number

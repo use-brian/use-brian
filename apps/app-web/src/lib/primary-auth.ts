@@ -80,3 +80,28 @@ export function buildPrimaryAuthUrl(path: string, nextUrl: string): string | nul
   u.searchParams.set("next", nextUrl);
   return u.toString();
 }
+
+/**
+ * Build the one canonical interactive-login URL.
+ *
+ * Sub-app routes use this instead of constructing their own provider entry.
+ * `nextUrl` is already resolved and origin-checked by the caller (or is the
+ * caller's own URL, as in the desktop bridge). The primary login performs its
+ * own return-host allowlist check before honoring it after authentication.
+ *
+ * Pure and parameterized so the hosted, staging, and localhost primary origins
+ * all exercise the exact same query-shaping code.
+ *
+ * [COMP:app-web/login-delegation]
+ */
+export function buildDelegatedLoginUrl(
+  authOrigin: string,
+  nextUrl: string,
+  opts: { addAccount?: boolean; error?: string | null } = {},
+): string {
+  const target = new URL("/login", authOrigin);
+  target.searchParams.set("next", nextUrl);
+  if (opts.addAccount) target.searchParams.set("addAccount", "1");
+  if (opts.error) target.searchParams.set("error", opts.error);
+  return target.toString();
+}

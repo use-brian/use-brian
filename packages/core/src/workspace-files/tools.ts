@@ -353,6 +353,7 @@ export function createFileTools(
     resolveConfirmation: confirm('fileSearch'),
     description:
       'Search workspace files by title / summary / tags / name. Returns a compact projection (id, path, name, title, summary, mime, size_bytes, tags, sensitivity, updated_at). For full content use fileRead. ' +
+      'This searches the workspace file library only; it does not search knowledge base (KB) entries. ' +
       'Optional: `tag` filters to files with that exact tag; `parent_path` scopes to a folder. Default limit 25 (max 100).',
     inputSchema: z.object({
       query: z.string().min(1).max(512).optional().describe('Free-text search across title, summary, tags, and name. Omit to list all files in the (optional) parent_path / tag scope.'),

@@ -395,6 +395,12 @@ describe('[COMP:files/tools] fileAppend', () => {
 })
 
 describe('[COMP:files/tools] fileSearch', () => {
+  it('does not claim to search knowledge-base entries', () => {
+    const { fileSearch } = createFileTools(buildFakeApi())
+    expect(fileSearch.description).toContain('file library only')
+    expect(fileSearch.description).toContain('does not search knowledge base (KB) entries')
+  })
+
   it('matches title / summary / name', async () => {
     const api = buildFakeApi()
     const { fileWrite, fileSearch } = createFileTools(api)

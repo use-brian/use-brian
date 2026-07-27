@@ -69,6 +69,10 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { connectorRemovalConfirmationModel } from "@/lib/connector-removal-confirmation";
+import {
+  isPatConnector,
+  resolveConnectorAddAnotherFlow,
+} from "@/lib/connector-add-another";
 import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
@@ -108,9 +112,6 @@ const OAUTH_SCOPES_WITH_EMAIL: Record<string, string[]> = Object.fromEntries(
     ["https://www.googleapis.com/auth/userinfo.email", ...scopes],
   ]),
 );
-
-/** Connectors that authenticate via a Personal Access Token (not OAuth). */
-const PAT_CONNECTORS = new Set(["github"]);
 
 /**
  * OAuth connectors whose DESKTOP connect is routed through the Electron shell's
@@ -1094,7 +1095,7 @@ function ConnectorsList() {
     setConnecting(rid);
 
     // PAT connectors — show inline token input instead of connecting immediately
-    if (PAT_CONNECTORS.has(id)) {
+    if (isPatConnector(id)) {
       setShowPatInput(rid);
       setConnecting(null);
       return;
@@ -1237,7 +1238,8 @@ function ConnectorsList() {
 
   // Connect ANOTHER account for a provider that already has one.
   async function handleAddAnother(c: Connector) {
-    if (c.id === "cli") {
+    const flow = resolveConnectorAddAnotherFlow(c);
+    if (flow === "cli-form") {
       setShowCliForm(rowId(c));
       setCliLabel("");
       setCliBinaryPath("");
@@ -1247,7 +1249,7 @@ function ConnectorsList() {
       setSelected(rowId(c));
       return;
     }
-    if (PAT_CONNECTORS.has(c.id)) {
+    if (flow === "pat-form") {
       // GitHub PAT → inline label + token form (createNew).
       setAddAnotherFor(c.id);
       setAddLabel("");
@@ -1255,9 +1257,16 @@ function ConnectorsList() {
       setSelected(rowId(c));
       return;
     }
-    if (c.oauthRequired) {
+    if (flow === "imap-form") {
+      // Company Email uses its existing inline credentials form. The connect
+      // route keys on address: a new address adds an instance, while the same
+      // address intentionally reconnects that mailbox.
+      await handleConnect(c, { addAnother: true });
+      return;
+    }
+    if (flow === "oauth") {
       // Notion / Fathom → OAuth with the `:add` intent.
-      handleConnect(c, { addAnother: true });
+      await handleConnect(c, { addAnother: true });
       return;
     }
     // Directory remote MCP → create a fresh instance, then refresh.
@@ -3235,6 +3244,9 @@ function ConnectorsList() {
                     {!imapDetecting && imapPreset?.presetId === "alimail" && (
                       <p className="text-[11px] text-primary">{tc.imap.detectedAlimail}</p>
                     )}
+                    {!imapDetecting && imapPreset?.presetId === "gmail" && (
+                      <p className="text-[11px] text-primary">{tc.imap.detectedGmail}</p>
+                    )}
                     {!imapDetecting && imapResolved && !imapPreset && (
                       <p className="text-[11px] text-muted-foreground">{tc.imap.notDetected}</p>
                     )}
@@ -3255,7 +3267,11 @@ function ConnectorsList() {
                     </button>
                     {imapShowHelp && (
                       <p className="text-[11px] text-muted-foreground">
-                        {imapPreset?.presetId === "alimail" ? tc.imap.passwordHelpAlimail : tc.imap.passwordHelpGeneric}
+                        {imapPreset?.presetId === "alimail"
+                          ? tc.imap.passwordHelpAlimail
+                          : imapPreset?.presetId === "gmail"
+                            ? tc.imap.passwordHelpGmail
+                            : tc.imap.passwordHelpGeneric}
                       </p>
                     )}
                     {!imapShowAdvanced && (

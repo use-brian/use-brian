@@ -64,10 +64,10 @@ describe('[COMP:compaction/full] modelToCompactionTier', () => {
     expect(modelToCompactionTier('gemini-3.1-pro-preview')).toBe('pro')
   })
 
-  it('maps Flash 3.5 (Max-tier default) to pro despite the "flash" substring', () => {
-    // Flash 3.5 is the Max-tier default with a 1M-token frontier window.
-    // Compacting it at the Flash Lite threshold would shrink what the user
-    // paid 5 credits for.
+  it('maps current and legacy Max Flash models to pro despite the "flash" substring', () => {
+    // Flash 3.6 is the Max-tier default; Flash 3.5 can still appear in
+    // historical sessions. Both have a 1M-token frontier window.
+    expect(modelToCompactionTier('gemini-3.6-flash')).toBe('pro')
     expect(modelToCompactionTier('gemini-3.5-flash')).toBe('pro')
   })
 })

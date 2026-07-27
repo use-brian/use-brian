@@ -32,6 +32,11 @@ mac:
     NSMicrophoneUsageDescription: >-
       Use Brian records meetings and voice notes you start, so it can
       transcribe them and file the key facts to your workspace brain.
+    # Electron 39+ uses macOS CoreAudio Tap for desktop playback capture.
+    # Without this key macOS 14.2+ can return a dead audio stream silently.
+    NSAudioCaptureUsageDescription: >-
+      Use Brian records the computer audio in meetings you start, so both
+      sides of the conversation can be transcribed into accurate notes.
   # Notarization is ON. The packaging machine/CI must supply the credentials via
   # environment (electron-builder reads them automatically — never commit them):
   #   CSC_LINK                     base64 (or path) of the Developer ID Application .p12

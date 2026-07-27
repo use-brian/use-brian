@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createRoutingProvider } from '../routing.js'
+import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, StreamChunk } from '../types.js'
 
 function stubProvider(name: string, reply: string): LLMProvider & { seen: ProviderRequest[] } {
@@ -48,8 +49,8 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
   it('routes each model id to its registry row provider', async () => {
     const gemini = stubProvider('gemini', 'from-gemini')
     const routing = createRoutingProvider({ gemini })
-    await text(routing.stream({ model: 'gemini-3.5-flash', systemPrompt: '', messages: [] }))
-    expect(gemini.seen[0]?.model).toBe('gemini-3.5-flash')
+    await text(routing.stream({ model: 'gemini-3.6-flash', systemPrompt: '', messages: [] }))
+    expect(gemini.seen[0]?.model).toBe('gemini-3.6-flash')
   })
 
   it('createSession dispatches on the session model', async () => {
@@ -71,6 +72,53 @@ describe('[COMP:providers/routing-provider] dispatch', () => {
     const routing = createRoutingProvider({ gemini: stubProvider('gemini', '') })
     expect(() => routing.stream({ model: 'claude-haiku-4-5', systemPrompt: '', messages: [] }))
       .toThrow(/provider 'anthropic'.*not configured/)
+  })
+
+  it('gates dynamic-provider dispatch on the live account catalog, including cached rows', async () => {
+    const codex = stubProvider('openai-codex', 'from-codex')
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-sol']))
+    const routing = createRoutingProvider(
+      { 'openai-codex': codex },
+      { availability },
+    )
+
+    await expect(
+      text(routing.stream({ model: 'gpt-5.6-sol', systemPrompt: '', messages: [] })),
+    ).resolves.toBe('from-codex')
+    expect(() =>
+      routing.stream({ model: 'gpt-5.6-terra', systemPrompt: '', messages: [] }),
+    ).toThrow(/not available.*reconnect/)
+
+    availability.setModelCatalog('openai-codex', null)
+    expect(() =>
+      routing.stream({ model: 'gpt-5.6-sol', systemPrompt: '', messages: [] }),
+    ).toThrow(/not available.*reconnect/)
+  })
+
+  it('late-resolves boot-selected lanes after an OAuth provider becomes available', async () => {
+    const codex = stubProvider('openai-codex', 'from-codex')
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog('openai-codex', new Set(['gpt-5.6-terra']))
+    const routing = createRoutingProvider(
+      { 'openai-codex': codex },
+      {
+        availability,
+        resolveModel: (model) =>
+          model === 'gemini-3.1-flash-lite' ? 'gpt-5.6-terra' : model,
+      },
+    )
+
+    await expect(
+      text(
+        routing.stream({
+          model: 'gemini-3.1-flash-lite',
+          systemPrompt: '',
+          messages: [],
+        }),
+      ),
+    ).resolves.toBe('from-codex')
+    expect(codex.seen[0]?.model).toBe('gpt-5.6-terra')
   })
 })
 
@@ -98,7 +146,7 @@ describe('[COMP:providers/routing-provider] same-class fallback (L2)', () => {
     const routing = createRoutingProvider({ gemini: failingProvider('gemini', 503), anthropic })
     // Max class: no fallbackAlias on the registry row — the 503 must surface
     // rather than silently serving a Max-billed turn on a standard-pro model.
-    await expect(text(routing.stream({ model: 'gemini-3.5-flash', systemPrompt: '', messages: [] })))
+    await expect(text(routing.stream({ model: 'gemini-3.6-flash', systemPrompt: '', messages: [] })))
       .rejects.toThrow(/gemini down/)
     expect(anthropic.seen).toHaveLength(0)
   })

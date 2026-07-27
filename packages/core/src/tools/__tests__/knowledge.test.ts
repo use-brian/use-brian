@@ -69,6 +69,11 @@ describe('[COMP:tools/knowledge] createKnowledgeTools', () => {
     ])
   })
 
+  it('labels the search surface as workspace knowledge base / KB', () => {
+    const tools = createKnowledgeTools(mockStore)
+    expect(byName(tools, 'searchKnowledge').description).toContain('workspace knowledge base (KB)')
+  })
+
   describe('searchKnowledge', () => {
     it('calls store.search with AccessContext built from tool context', async () => {
       vi.mocked(mockStore.search).mockResolvedValueOnce([

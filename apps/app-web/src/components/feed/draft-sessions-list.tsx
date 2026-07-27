@@ -32,6 +32,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Trash2 } from "lucide-react";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
+import { isOssEdition } from "@/lib/edition";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { useChoiceDialog } from "@/components/feed/feed-choice-dialog";
 import { useAccountPicker } from "@/components/feed/account-picker-dialog";
@@ -494,7 +495,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
       // ready-to-post queue at approve time — feed-create-split.md D2);
       // replies need the platform API, so the caller surfaces its
       // no-account error.
-      if (intent === "reply") return null;
+      if (intent === "reply" && !isOssEdition()) return null;
       return assistantId ? { assistantId } : null;
     }
     if (accounts.length === 1) return accounts[0];

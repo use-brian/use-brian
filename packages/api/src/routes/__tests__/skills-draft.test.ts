@@ -206,7 +206,7 @@ describe('[COMP:api/skills-route] POST /draft', () => {
     await request(draftApp({ provider: mockProvider(VALID_DRAFT, paid), plan: 'max_5x' }))
       .post('/api/skills/draft')
       .send(turnBody({ model: 'max' }))
-    expect(paid.model).toBe('gemini-3.5-flash')
+    expect(paid.model).toBe('gemini-3.6-flash')
   })
 
   it('blocks the turn when the usage budget is exhausted (429)', async () => {

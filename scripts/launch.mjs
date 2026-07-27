@@ -2,9 +2,11 @@
 /**
  * One-command local boot for Use Brian (oss-local-brain-wedge.md §12.7).
  *
- * `pnpm start` — the whole single-player product on ONE GEMINI_API_KEY:
- *   1. load/prompt GEMINI_API_KEY + generate JWT_SECRET, persisted under
- *      ~/.usebrian/config.json (nothing else is required; a legacy ~/.sidanclaw/ dir is auto-migrated).
+ * `pnpm start` — the whole single-player product with ChatGPT sign-in or a
+ * model API credential:
+ *   1. choose ChatGPT or load/prompt an API-key provider; generate JWT_SECRET,
+ *      persisted under ~/.usebrian/config.json (a legacy ~/.sidanclaw/ dir is
+ *      auto-migrated).
  *   2. build the workspace packages (turbo-cached; the apps run from source via
  *      tsx / next dev).
  *   3. start the embedded PGLite brain server (pg-wire socket on :54329) and wait
@@ -82,7 +84,7 @@ loadDotEnv(join(ROOT, '.env'))
 // developer's local Postgres on the default 5432 (verified failure mode).
 const PORTS = { pglite: 54329, api: 4000, docSync: 8080, appWeb: 3003, discordConnector: 8090, waConnector: 8091 }
 
-// ── config (needs ONE LLM credential — AI Studio, Vertex, or Alicloud) ─────────────
+// ── config (ChatGPT sign-in OR one API credential) ──────────────────
 mkdirSync(CONFIG_DIR, { recursive: true })
 const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'utf8')) : {}
 
@@ -90,24 +92,42 @@ const config = existsSync(CONFIG_FILE) ? JSON.parse(readFileSync(CONFIG_FILE, 'u
 // process.env is spread into the child's `env` below — so a Vertex/Alicloud
 // credential set in .env reaches the api without any extra plumbing here.
 let geminiKey = process.env.GEMINI_API_KEY || config.geminiApiKey
+let preferredProvider =
+  process.env.USEBRIAN_PREFERRED_PROVIDER ||
+  config.preferredProvider
 // Vertex / Alicloud are alternative LLM backends — a deployment in a region
 // where Google blocks AI Studio (e.g. Hong Kong) has no Gemini key and uses
 // one of these instead. Their presence skips the Gemini prompt entirely.
-const hasLlmCredential = Boolean(
+let hasLlmCredential = Boolean(
   geminiKey || process.env.VERTEX_PROJECT_ID || process.env.DASHSCOPE_API_KEY,
 )
 // The single-player owner identity — shown in the app, no login. Local config
 // is the source of truth; prompt once (default the OS username) and persist.
 let ownerName = process.env.USEBRIAN_OWNER_NAME || config.ownerName
-if (!hasLlmCredential || !ownerName) {
+if ((!hasLlmCredential && !preferredProvider) || !ownerName) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
-  if (!hasLlmCredential) {
-    console.log('No LLM credential found. Enter a Gemini (AI Studio) key, or Ctrl-C and set')
-    console.log('VERTEX_PROJECT_ID (Vertex AI) or DASHSCOPE_API_KEY (Alicloud/Qwen) in .env instead.')
-    geminiKey = (await rl.question('GEMINI_API_KEY (https://aistudio.google.com/apikey): ')).trim()
-    if (!geminiKey) {
+  if (!hasLlmCredential && !preferredProvider) {
+    console.log('Choose a model provider:')
+    console.log('  1. Sign in with ChatGPT (no API key)')
+    console.log('  2. Gemini API key')
+    console.log('  Vertex AI and DashScope can still be configured in .env.')
+    const choice = (await rl.question('Provider [1]: ')).trim() || '1'
+    if (choice === '1') {
+      preferredProvider = 'openai-codex'
+    } else if (choice === '2') {
+      geminiKey = (
+        await rl.question('GEMINI_API_KEY (https://aistudio.google.com/apikey): ')
+      ).trim()
+      if (!geminiKey) {
+        rl.close()
+        console.error('A Gemini API key is required for that provider. Exiting.')
+        process.exit(1)
+      }
+      preferredProvider = 'gemini'
+      hasLlmCredential = true
+    } else {
       rl.close()
-      console.error('An LLM credential is required: GEMINI_API_KEY, VERTEX_PROJECT_ID, or DASHSCOPE_API_KEY. Exiting.')
+      console.error('Choose 1 for ChatGPT or 2 for Gemini. Exiting.')
       process.exit(1)
     }
   }
@@ -142,7 +162,7 @@ const waConnectorSecret = process.env.WA_CONNECTOR_SECRET || config.waConnectorS
 const channelCredentialKey = config.channelCredentialKey || randomBytes(32).toString('base64')
 writeFileSync(
   CONFIG_FILE,
-  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
+  JSON.stringify({ ...config, ...(geminiKey ? { geminiApiKey: geminiKey } : {}), ...(preferredProvider ? { preferredProvider } : {}), jwtSecret, docSyncSecret, discordConnectorSecret, waConnectorSecret, channelCredentialKey, ownerName }, null, 2),
 )
 
 // External-store escape hatch: a real Postgres URL skips the embedded brain.
@@ -160,6 +180,7 @@ const env = {
   // one and Gemini may be absent. Only GEMINI_API_KEY is overridden here, to
   // carry the config-persisted / just-prompted value when it isn't in .env.
   GEMINI_API_KEY: geminiKey,
+  USEBRIAN_PREFERRED_PROVIDER: preferredProvider,
   JWT_SECRET: jwtSecret,
   DATABASE_URL: databaseUrl,
   USEBRIAN_SINGLE_PROCESS: '1',
@@ -396,4 +417,7 @@ const entryUrl = `http://localhost:${PORTS.appWeb}/api/auth/local-session`
 const discordStatus = useLocalDiscordConnector ? ` · discord :${PORTS.discordConnector}` : ' · discord external'
 const waStatus = useLocalWaConnector ? ` · whatsapp :${PORTS.waConnector}` : ' · whatsapp external'
 console.log(`\n[launch] Use Brian is up. Opening ${entryUrl}\n  (api :${PORTS.api} · doc-sync :${PORTS.docSync} · app-web :${PORTS.appWeb}${discordStatus}${waStatus})\n  Ctrl-C to stop everything.\n`)
+if (preferredProvider === 'openai-codex') {
+  console.log('[launch] Open Settings → AI providers to complete ChatGPT sign-in.')
+}
 openBrowser(entryUrl)

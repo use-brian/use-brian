@@ -52,7 +52,7 @@ const TURN_CHUNKS = [
     candidates: [{
       content: {
         role: 'model',
-        parts: [{ functionCall: { name: 'patchPage', args: { ops: [] } }, thoughtSignature: 'sig-abc' }],
+        parts: [{ functionCall: { name: 'patchPage', args: { ops: [] }, id: 'fc-provider-1' }, thoughtSignature: 'sig-abc' }],
       },
       finishReason: 'STOP',
     }],
@@ -102,6 +102,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     // Tool call round-trips its thoughtSignature as providerSignature.
     expect(chunks.find((c) => c.type === 'tool_use_end')).toMatchObject({
       type: 'tool_use_end',
+      id: 'fc-provider-1',
       providerSignature: 'sig-abc',
     })
   })
@@ -122,7 +123,7 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     await collect(session.send([{ role: 'user', content: [{ type: 'text', text: 'build a page' }] }]))
     await collect(
       session.send([
-        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'call_1', name: 'patchPage', content: 'ok' }] },
+        { role: 'user', content: [{ type: 'tool_result', toolUseId: 'fc-provider-1', name: 'patchPage', content: 'ok' }] },
       ]),
     )
 
@@ -135,6 +136,13 @@ describe('[COMP:providers/gemini-session-stream] Gemini session streaming', () =
     expect(modelTurn).toBeDefined()
     const fcPart = modelTurn!.parts.find((p) => p.functionCall)
     expect(fcPart?.thoughtSignature).toBe('sig-abc')
+    expect((fcPart?.functionCall as { id?: string } | undefined)?.id).toBe('fc-provider-1')
+
+    const functionResponse = contents
+      .flatMap((c) => c.parts)
+      .find((p) => p.functionResponse)
+      ?.functionResponse as { id?: string; name?: string } | undefined
+    expect(functionResponse).toMatchObject({ id: 'fc-provider-1', name: 'patchPage' })
 
     // Reasoning is never replayed: no thought part survives into history.
     // The turn-1 thought carried NO signature, so a "signature-only stub"

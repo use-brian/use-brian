@@ -115,16 +115,27 @@ export function modelMenuRoutes(opts: ModelMenuRouteOptions): Router {
       opts.meteredProfileStore.list(workspaceId),
       opts.modelDefaultsStore.list(workspaceId),
     ])
-    // Profiles over models whose key is gone are hidden with their models
-    // (L12) — kept in the DB so a re-keyed deployment restores them. A
-    // default pointing at a hidden profile hides with it (same rule).
+    // Profiles and curated pins over models whose key is gone are hidden with
+    // their models (L12) — kept in the DB so a re-keyed deployment restores
+    // them. A legacy curated pin (for example Flash 3.5 after the 3.6
+    // cutover) is likewise hidden, making selection fall through to the
+    // registry class default without destructive data migration.
     const available = new Set(classes['metered']!.map((m) => m.alias))
     const visibleProfiles = profiles.filter((p) => available.has(p.modelAlias))
     const visibleProfileIds = new Set(visibleProfiles.map((p) => p.id))
+    const availableCurated = new Set(
+      Object.entries(classes)
+        .filter(([cls]) => cls !== 'metered')
+        .flatMap(([, models]) => models.map((m) => m.alias)),
+    )
     res.json({
       classes,
       profiles: visibleProfiles,
-      defaults: defaults.filter((d) => d.meteredProfileId === null || visibleProfileIds.has(d.meteredProfileId)),
+      defaults: defaults.filter((d) =>
+        d.meteredProfileId !== null
+          ? visibleProfileIds.has(d.meteredProfileId)
+          : d.modelAlias !== null && availableCurated.has(d.modelAlias),
+      ),
       meteredBillingAvailable: Boolean(opts.estimateMeteredTurn),
     })
   })
