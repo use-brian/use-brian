@@ -14,10 +14,10 @@ export type ConnectorAddAnotherFlow =
   | "oauth"
   | "directory";
 
-const PAT_CONNECTOR_IDS = new Set(["github"]);
+const PAT_CONNECTORS = new Set(["github"]);
 
 export function isPatConnector(id: string): boolean {
-  return PAT_CONNECTOR_IDS.has(id);
+  return PAT_CONNECTORS.has(id);
 }
 
 export function resolveConnectorAddAnotherFlow(connector: {
