@@ -292,6 +292,11 @@ Every string lands in all locale dictionaries in the same commit.
 
 - `401` or `reauthenticationRequired` marks the provider unavailable and
   surfaces **Reconnect ChatGPT**. No fallback reads from `~/.codex`.
+- A temporarily unavailable local runtime must not dead-end the settings card.
+  The unavailable state keeps Connect, device-code, and Refresh actions
+  visible because each control request retries the managed runtime. This lets
+  an already-open settings modal recover after a host policy or process repair
+  without relying on a full page reload.
 - Rate-limit errors include provider reset metadata when available and never
   claim Brian credits were exhausted.
 - Analytics records provider/model, latency, terminal status, and token counts.

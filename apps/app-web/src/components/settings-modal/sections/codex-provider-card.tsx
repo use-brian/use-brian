@@ -144,8 +144,21 @@ export function CodexProviderCard() {
       {loading ? (
         <div className="text-sm text-muted-foreground">{t.loading}</div>
       ) : status?.runtimeAvailable === false ? (
-        <div className="rounded-lg bg-muted/30 px-3 py-2 text-[13px] text-muted-foreground">
-          {t.runtimeUnavailable}
+        <div className="space-y-3">
+          <div className="rounded-lg bg-muted/30 px-3 py-2 text-[13px] text-muted-foreground">
+            {t.runtimeUnavailable}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => void connectBrowser()} disabled={busy}>
+              {busy ? t.connecting : t.connect}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void connectDevice()} disabled={busy}>
+              {t.deviceCode}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void refresh()} disabled={busy}>
+              {t.refresh}
+            </Button>
+          </div>
         </div>
       ) : (
         <>
