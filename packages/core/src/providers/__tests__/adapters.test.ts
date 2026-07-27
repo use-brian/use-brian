@@ -158,6 +158,89 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(res.usage).toEqual({ inputTokens: 30, outputTokens: 12 })
   })
 
+  it('renders PDF pages for Qwen-VL and appends page-numbered visual content', async () => {
+    const content = 'BT /F1 24 Tf 72 700 Td (Quarterly report) Tj ET'
+    const body =
+      `1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n` +
+      `2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n` +
+      `3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>\nendobj\n` +
+      `4 0 obj\n<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n` +
+      `5 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n`
+    const pdf = Buffer.from(`%PDF-1.4\n${body}trailer\n<</Root 1 0 R/Size 6>>\n%%EOF`, 'latin1')
+    const chatBodies: Array<Record<string, any>> = []
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/files')) {
+        return new Response(JSON.stringify({ id: 'file-visual' }), { status: 200 })
+      }
+      const chatBody = JSON.parse(init!.body as string)
+      chatBodies.push(chatBody)
+      if (chatBody.model === DASHSCOPE_LONG_MODEL) {
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: '# Quarterly report' } }],
+          usage: { prompt_tokens: 30, completion_tokens: 12 },
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'A bar chart compares quarterly revenue.' } }],
+        usage: { prompt_tokens: 20, completion_tokens: 8 },
+      }), { status: 200 })
+    })
+
+    const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
+    const res = await runMediaUnderstanding(backend, req({
+      buffer: pdf, mime: 'application/pdf', modality: 'document', fetchFn,
+    }) as never)
+
+    expect(chatBodies).toHaveLength(2)
+    const visionBody = chatBodies.find((body) => body.model === DASHSCOPE_VISION_MODEL)!
+    expect(visionBody.messages[0].content[0].text).toMatch(/visual information/i)
+    expect(visionBody.messages[0].content[1].image_url.url).toMatch(/^data:image\/jpeg;base64,/)
+    expect(res.text).toContain('# Quarterly report')
+    expect(res.text).toContain('## Visual content')
+    expect(res.text).toContain('### Page 1')
+    expect(res.text).toContain('A bar chart compares quarterly revenue.')
+    expect(res.model).toBe(`${DASHSCOPE_LONG_MODEL}+${DASHSCOPE_VISION_MODEL}`)
+    expect(res.usage).toEqual({ inputTokens: 50, outputTokens: 20 })
+    expect(res.usageByModel).toEqual([
+      { model: DASHSCOPE_LONG_MODEL, usage: { inputTokens: 30, outputTokens: 12 } },
+      { model: DASHSCOPE_VISION_MODEL, usage: { inputTokens: 20, outputTokens: 8 } },
+    ])
+  })
+
+  it('keeps Qwen-VL visual extraction when qwen-long is unavailable', async () => {
+    const content = 'BT /F1 24 Tf 72 700 Td (Scanned report) Tj ET'
+    const body =
+      `1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n` +
+      `2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n` +
+      `3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>\nendobj\n` +
+      `4 0 obj\n<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n` +
+      `5 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n`
+    const pdf = Buffer.from(`%PDF-1.4\n${body}trailer\n<</Root 1 0 R/Size 6>>\n%%EOF`, 'latin1')
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      if (String(url).endsWith('/files')) {
+        return new Response(JSON.stringify({ id: 'file-no-long' }), { status: 200 })
+      }
+      const chatBody = JSON.parse(init!.body as string)
+      if (chatBody.model === DASHSCOPE_LONG_MODEL) {
+        return new Response('model not found', { status: 404 })
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'A signed approval stamp appears at the bottom.' } }],
+        usage: { prompt_tokens: 25, completion_tokens: 7 },
+      }), { status: 200 })
+    })
+
+    const res = await runMediaUnderstanding(
+      { kind: 'dashscope', apiKey: 'k', baseUrl: 'https://ds.test/v1' },
+      req({ buffer: pdf, mime: 'application/pdf', modality: 'document', fetchFn }) as never,
+    )
+
+    expect(res.model).toBe(DASHSCOPE_VISION_MODEL)
+    expect(res.text).toContain('### Page 1')
+    expect(res.text).toContain('A signed approval stamp appears at the bottom.')
+    expect(res.usage).toEqual({ inputTokens: 25, outputTokens: 7 })
+  })
+
   it('uses the longModel override for the qwen-long file-extract call', async () => {
     // A deployment whose Model Studio catalog lacks the default `qwen-long`
     // sets DASHSCOPE_LONG_MODEL; without honouring it the call 400s with

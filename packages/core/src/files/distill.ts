@@ -5,8 +5,8 @@
  * Runs on whichever adapter is configured, via the shared `media/backend.ts`
  * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex, or
  * Qwen-VL (`image_url`) / `qwen-long` (file-upload) over DashScope. PDFs ride
- * Gemini's native inlineData reader or DashScope's `qwen-long` upload flow;
- * images use Qwen-VL inline on either adapter.
+ * Gemini's native inlineData reader or DashScope's `qwen-long` upload flow plus
+ * page-rendered Qwen-VL visual analysis; images use Qwen-VL inline.
  *
  * PDFs additionally have a local text-layer fallback (`extractPdfText`, via
  * unpdf): when the configured adapter cannot distill the document — e.g. a
@@ -51,6 +51,7 @@ export type DistillResult = {
   text: string
   usage: TokenUsage | null
   model: string
+  usageByModel?: Array<{ model: string; usage: TokenUsage }>
 }
 
 const DEFAULT_MODEL = 'gemini-2.5-flash'
