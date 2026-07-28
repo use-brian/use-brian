@@ -18,6 +18,7 @@
  */
 
 import { getAccessToken } from "@/lib/auth-fetch";
+import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -65,17 +66,14 @@ export function openFeedStream(opts: {
       base,
     );
     if (lastEventId) url.searchParams.set("lastEventId", lastEventId);
-    // EventSource can't set headers — pass the access_token as a query
-    // param. The SSE route accepts both Bearer and `?access_token=`. Auth
-    // rides the URL token, NOT cookies, so this MUST NOT set
-    // `withCredentials: true`: a credentialed cross-origin EventSource needs
-    // the server to answer `Access-Control-Allow-Credentials: true` (the API
-    // does not), and without it the browser rejects every connection before
-    // `open` and retries forever — a reconnect storm that silently kills the
-    // stream. See workspace-events.ts for the same fix + rationale.
+    // Brian auth rides the URL token. A local Electron target additionally
+    // includes credentials so a separately hosted API receives its deployment-
+    // gateway cookie; the API permits credentials only for allowlisted origins.
     const token = getAccessToken();
     if (token) url.searchParams.set("access_token", token);
-    source = new EventSource(url.toString());
+    source = new EventSource(url.toString(), {
+      withCredentials: usesGatewayCredentials(),
+    });
 
     source.addEventListener("feed-event", (ev) => {
       try {

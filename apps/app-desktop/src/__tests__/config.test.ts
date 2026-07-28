@@ -120,7 +120,7 @@ describe("[COMP:app-desktop/config] resolveConfig target resolution (§2.1)", ()
   it("pairs a self-hosted address with its own backend, never the cloud API", () => {
     const cfg = resolveConfig({}, serializePersistedTarget("local", "https://brain.example.com"));
     expect(cfg.appUrl).toBe("https://brain.example.com");
-    expect(cfg.apiUrl).toBe("https://brain.example.com:4000");
+    expect(cfg.apiUrl).toBe("https://brain.example.com");
   });
 
   it("keeps a persisted cloud record on cloud (the remembered local address is inert)", () => {

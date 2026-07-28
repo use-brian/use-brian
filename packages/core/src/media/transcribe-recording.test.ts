@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   parseTranscriptLines,
   mergeUtterances,
@@ -230,6 +230,72 @@ describe('[COMP:media/transcribe-recording] transcribeRecording', () => {
     ])
     // final endMs clamped to the known duration
     expect(res.utterances[res.utterances.length - 1].endMs).toBe(120_000)
+  })
+
+  it('uses an injected Vertex transport and external file URI, then cleans up', async () => {
+    const cleanup = vi.fn(async () => {})
+    const uploadAudio = vi.fn(async () => ({
+      fileUri: 'gs://files-bucket/recording-transcription/audio-1',
+      cleanup,
+    }))
+    const headers = vi.fn(async () => ({
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer vertex-token',
+    }))
+    const requests: Array<{ url: string; init?: RequestInit }> = []
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      requests.push({ url: String(url), init })
+      const sse = `data: ${JSON.stringify({
+        candidates: [{ content: { parts: [{ text: '[0:01:58] Speaker 1: Finished.' }] }, finishReason: 'STOP' }],
+      })}\n\n`
+      return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    }) as unknown as typeof fetch
+
+    const res = await transcribeRecording({
+      transport: {
+        kind: 'vertex',
+        endpoint: (model, method) => `https://vertex.example/${model}:${method}?alt=sse`,
+        headers,
+      },
+      uploadAudio,
+      buffer: Buffer.from('vertex-audio'),
+      mime: 'audio/aac',
+      durationMs: 120_000,
+      fetchFn,
+    })
+
+    expect(res.truncated).toBe(false)
+    expect(uploadAudio).toHaveBeenCalledWith(expect.objectContaining({ mime: 'audio/aac' }))
+    expect(requests[0].url).toBe('https://vertex.example/gemini-2.5-flash:streamGenerateContent?alt=sse')
+    expect(requests[0].init?.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer vertex-token' }))
+    const body = JSON.parse(String(requests[0].init?.body)) as {
+      contents: Array<{ parts: Array<{ file_data?: { file_uri: string } }> }>
+    }
+    expect(body.contents[0].parts[1].file_data?.file_uri).toBe(
+      'gs://files-bucket/recording-transcription/audio-1',
+    )
+    expect(headers).toHaveBeenCalledOnce()
+    expect(cleanup).toHaveBeenCalledOnce()
+  })
+
+  it('cleans up an externally uploaded file when Vertex generation fails', async () => {
+    const cleanup = vi.fn(async () => {})
+    const fetchFn = vi.fn(async () => new Response('denied', { status: 403 })) as unknown as typeof fetch
+
+    await expect(transcribeRecording({
+      transport: {
+        kind: 'vertex',
+        endpoint: () => 'https://vertex.example/generate',
+        headers: async () => ({ Authorization: 'Bearer token' }),
+      },
+      uploadAudio: async () => ({ fileUri: 'gs://files-bucket/temp', cleanup }),
+      buffer: Buffer.from('vertex-audio'),
+      mime: 'audio/aac',
+      durationMs: 120_000,
+      fetchFn,
+    })).rejects.toThrow('HTTP 403')
+
+    expect(cleanup).toHaveBeenCalledOnce()
   })
 
   it('flags truncated when continuation makes no progress before the audio end', async () => {

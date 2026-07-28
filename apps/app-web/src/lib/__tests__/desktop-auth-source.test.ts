@@ -12,6 +12,7 @@ import {
   desktopAuthSource,
   desktopSignOut,
   classifyRefreshStatus,
+  usesGatewayCredentials,
 } from "../desktop-auth-source";
 
 const realFetch = globalThis.fetch;
@@ -39,6 +40,16 @@ describe("[COMP:app-web/desktop-auth-source] isDesktopAuth", () => {
   it("is true only when the token bridge (getAccessToken) is present", () => {
     setBridge({ signIn: () => {}, getAccessToken: () => "tok" });
     expect(isDesktopAuth()).toBe(true);
+  });
+});
+
+describe("[COMP:app-web/desktop-auth-source] usesGatewayCredentials", () => {
+  it("is enabled only by the local-target bridge marker", () => {
+    expect(usesGatewayCredentials()).toBe(false);
+    setBridge({ signIn: () => {}, gatewayCredentials: false });
+    expect(usesGatewayCredentials()).toBe(false);
+    setBridge({ signIn: () => {}, gatewayCredentials: true });
+    expect(usesGatewayCredentials()).toBe(true);
   });
 });
 

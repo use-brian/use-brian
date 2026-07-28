@@ -19,6 +19,7 @@ import { ossSignedOutRedirect } from "@/lib/oss-entry";
 import {
   isDesktopAuth,
   desktopAuthSource,
+  usesGatewayCredentials,
   classifyRefreshStatus,
   type RefreshOutcome,
 } from "@/lib/desktop-auth-source";
@@ -274,13 +275,14 @@ export async function authFetch(
     }
   }
   const headers = withAuthHeader(init.headers, token);
-  let response = await fetch(url, { ...init, headers });
+  const credentials = usesGatewayCredentials() ? "include" : init.credentials;
+  let response = await fetch(url, { ...init, headers, credentials });
   if (response.status !== 401) return response;
 
   const outcome = await tryRefreshToken();
   if (outcome.kind === "ok") {
     const retryHeaders = withAuthHeader(init.headers, outcome.token);
-    response = await fetch(url, { ...init, headers: retryHeaders });
+    response = await fetch(url, { ...init, headers: retryHeaders, credentials });
     return response;
   }
   // transient → keep the session and return the 401 we already have (no logout);

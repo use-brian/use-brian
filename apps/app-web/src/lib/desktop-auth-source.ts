@@ -38,6 +38,8 @@ interface DesktopBridge {
    */
   systemAudioCapture?: boolean;
   signIn: () => void;
+  /** Local-target marker: include deployment-gateway cookies on API REST/SSE. */
+  gatewayCredentials?: boolean;
   /**
    * Ask the shell to clear its own session (cookies in the thin shell, the
    * safeStorage token in bundled mode) and reload to the sign-in landing.
@@ -121,6 +123,11 @@ declare global {
 export function desktopBridge(): DesktopBridge | undefined {
   if (typeof window === "undefined") return undefined;
   return window.usebrianDesktop ?? window.sidanclawDesktop;
+}
+
+/** True only in the thin shell while it fronts a local/self-hosted target. */
+export function usesGatewayCredentials(): boolean {
+  return desktopBridge()?.gatewayCredentials === true;
 }
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";

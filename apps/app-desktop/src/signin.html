@@ -337,6 +337,10 @@
               ? "Your local brain at " +
                 url +
                 " is reachable but didn't accept the session. Make sure it runs the open-source edition in local mode."
+              : reason === "gateway-auth"
+                ? "Authentication for " +
+                  url +
+                  " was cancelled or did not complete. Retry when you're ready to sign in through its access gateway."
               : "Can't reach your local brain at " +
                 url +
                 ". Use Brian reconnects automatically when it's back.";
@@ -373,6 +377,9 @@
         }
         if (res && res.error === "env-override") {
           return "The USEBRIAN_APP_URL dev override is active, so targets are ignored. Unset it and reopen Use Brian to switch.";
+        }
+        if (res && res.error === "gateway-auth") {
+          return "Authentication was cancelled or did not complete. Connect again to sign in through the server's access gateway.";
         }
         if (res && res.error === "access-oauth-unavailable") {
           return "Cloudflare Access is using browser-only login. Enable Managed OAuth and allow 127.0.0.1 loopback clients in this Access application's Advanced settings.";

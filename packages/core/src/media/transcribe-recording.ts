@@ -1,12 +1,12 @@
 /**
- * Long-recording transcription via the Gemini File API (recording-to-brain
- * Phase 2). Replaces the inline-base64 / 30s / 2048-token path in
+ * Long-recording transcription via Gemini (recording-to-brain Phase 2).
+ * Replaces the inline-base64 / 30s / 2048-token path in
  * `transcribe.ts` for files too long to single-shot.
  *
- * Why the File API: a 1h45m recording is ~50-150 MB and ~200k audio tokens —
- * past the ~20 MB inline-request limit. The File API (resumable upload on the
- * same `generativelanguage.googleapis.com` host, same `x-goog-api-key`) takes
- * multi-hour audio and returns a `file_uri` referenced from `generateContent`.
+ * Why a file URI: a 1h45m recording is ~50-150 MB and ~200k audio tokens — past
+ * the ~20 MB inline-request limit. AI Studio uses its resumable Files API;
+ * Vertex receives an injected GCS uploader because it accepts `gs://` URIs but
+ * has no equivalent Files API.
  *
  * Why a continuation loop: even with `maxOutputTokens` raised, a full verbatim
  * transcript of a long call can exceed one response. While the audio remains
@@ -59,12 +59,13 @@
  * Pure helpers (`parseTranscriptLines`, `mergeUtterances`,
  * `stripDegenerateTail`, `stripDegenerateUtterances`) carry the parsing /
  * seam-dedup / loop-detection logic and unit-test without a network. The
- * network calls take an injectable `fetchFn`.
+ * network calls take an injectable `fetchFn`; external storage is injected too.
  *
  * Spec: docs/architecture/media/transcription.md §Architecture(b).
  */
 
 import type { TokenUsage } from '../providers/types.js'
+import { aiStudioTransport, type GoogleTransport } from '../providers/google-transport.js'
 
 const FILES_BASE = 'https://generativelanguage.googleapis.com'
 const DEFAULT_MODEL = 'gemini-2.5-flash'
@@ -355,7 +356,12 @@ async function fetchWithTransientRetry(
 }
 
 export type TranscribeRecordingOptions = {
-  apiKey: string
+  /** AI Studio key. Omitted when `transport` + `uploadAudio` target Vertex. */
+  apiKey?: string
+  /** Model endpoint/auth transport. Defaults to AI Studio with `apiKey`. */
+  transport?: GoogleTransport
+  /** External file upload seam used by Vertex, whose Gemini API has no Files API. */
+  uploadAudio?: TranscriptionAudioUploader
   /** Raw audio bytes. */
   buffer: Buffer
   mime: string
@@ -377,6 +383,45 @@ export type TranscribeRecordingOptions = {
     degenerate: boolean
     coveredMs: number
   }) => void
+}
+
+export type TranscriptionAudioUploader = (file: {
+  buffer: Buffer
+  mime: string
+  displayName: string
+}) => Promise<{
+  fileUri: string
+  /** Best-effort cleanup for temporary external objects. */
+  cleanup?: () => Promise<void>
+}>
+
+async function withUploadedAudio<T>(
+  opts: TranscribeRecordingOptions,
+  file: { buffer: Buffer; mime: string; displayName: string },
+  use: (fileUri: string) => Promise<T>,
+): Promise<T> {
+  const uploaded = opts.uploadAudio
+    ? await opts.uploadAudio(file)
+    : await uploadAudioToGeminiFiles({
+        apiKey: opts.apiKey ?? '',
+        buffer: file.buffer,
+        mime: file.mime,
+        displayName: file.displayName,
+        fetchFn: opts.fetchFn,
+        ...(opts.retryBackoffMs != null ? { retryBackoffMs: opts.retryBackoffMs } : {}),
+      })
+  try {
+    return await use(uploaded.fileUri)
+  } finally {
+    try {
+      if ('cleanup' in uploaded) await uploaded.cleanup?.()
+    } catch (err) {
+      console.warn(
+        '[transcribe-recording] temporary audio cleanup failed:',
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
 }
 
 /**
@@ -459,6 +504,7 @@ async function generateWindow(
   const fetchFn = opts.fetchFn ?? fetch
   const model = opts.model ?? DEFAULT_MODEL
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const transport = opts.transport ?? aiStudioTransport(opts.apiKey)
 
   let prompt =
     continueFromMs === null
@@ -499,10 +545,10 @@ async function generateWindow(
   try {
     const res = await fetchWithTransientRetry(
       fetchFn,
-      `${FILES_BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      transport.endpoint(model, 'streamGenerateContent', { alt: 'sse' }),
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
+        headers: await transport.headers(),
         body: JSON.stringify(body),
         signal: controller.signal,
       },
@@ -575,7 +621,7 @@ function formatTimestamp(ms: number): string {
 }
 
 /**
- * Transcribe a long recording end-to-end: upload to the File API, then run the
+ * Transcribe a long recording end-to-end: upload through the active adapter, then run the
  * bounded continuation loop, stitching windows until `STOP`, the window cap, or
  * coverage is reached. The caller records each `usages[]` entry via
  * `usageStore.recordUsage` (COGS) and checks `truncated` before billing.
@@ -583,14 +629,17 @@ function formatTimestamp(ms: number): string {
 export async function transcribeRecording(
   opts: TranscribeRecordingOptions,
 ): Promise<RecordingTranscriptionResult> {
-  const { fileUri } = await uploadAudioToGeminiFiles({
-    apiKey: opts.apiKey,
-    buffer: opts.buffer,
-    mime: opts.mime,
-    displayName: opts.displayName,
-    fetchFn: opts.fetchFn,
-  })
+  return withUploadedAudio(
+    opts,
+    { buffer: opts.buffer, mime: opts.mime, displayName: opts.displayName ?? 'recording' },
+    (fileUri) => transcribeUploadedRecording(opts, fileUri),
+  )
+}
 
+async function transcribeUploadedRecording(
+  opts: TranscribeRecordingOptions,
+  fileUri: string,
+): Promise<RecordingTranscriptionResult> {
   let utterances: TranscribedUtterance[] = []
   const usages: Array<{ usage: TokenUsage | null; model: string }> = []
   const model = opts.model ?? DEFAULT_MODEL
@@ -765,6 +814,7 @@ async function generateChunkWindow(
   const fetchFn = opts.fetchFn ?? fetch
   const model = opts.model ?? DEFAULT_MODEL
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const transport = opts.transport ?? aiStudioTransport(opts.apiKey)
 
   const prompt = range
     ? `${CHUNK_TRANSCRIBE_PROMPT}\n\nTranscribe ONLY the audio between ${formatChunkTimestamp(range.fromMs)} and ${formatChunkTimestamp(range.toMs)} of this segment. Output nothing for any other part. Keep timestamps relative to the START of the segment, as always.`
@@ -801,10 +851,10 @@ async function generateChunkWindow(
   try {
     const res = await fetchWithTransientRetry(
       fetchFn,
-      `${FILES_BASE}/v1beta/models/${model}:streamGenerateContent?alt=sse`,
+      transport.endpoint(model, 'streamGenerateContent', { alt: 'sse' }),
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': opts.apiKey },
+        headers: await transport.headers(),
         body: JSON.stringify(body),
         signal: controller.signal,
       },
@@ -863,15 +913,27 @@ async function transcribeOneChunk(
    *  format-ignoring fallback). Hole detection must not scan inside it. */
   opaqueRange?: { fromMs: number; toMs: number }
 }> {
-  const { fileUri } = await uploadAudioToGeminiFiles({
-    apiKey: opts.apiKey,
-    buffer: chunk.buffer,
-    mime: chunk.mime,
-    displayName: `${opts.displayName ?? 'recording'}-chunk-${index}`,
-    fetchFn: opts.fetchFn,
-    ...(opts.retryBackoffMs != null ? { retryBackoffMs: opts.retryBackoffMs } : {}),
-  })
+  return withUploadedAudio(
+    opts,
+    {
+      buffer: chunk.buffer,
+      mime: chunk.mime,
+      displayName: `${opts.displayName ?? 'recording'}-chunk-${index}`,
+    },
+    (fileUri) => transcribeUploadedChunk(opts, chunk, fileUri),
+  )
+}
 
+async function transcribeUploadedChunk(
+  opts: TranscribeRecordingOptions,
+  chunk: RecordingAudioChunk,
+  fileUri: string,
+): Promise<{
+  utterances: TranscribedUtterance[]
+  usages: Array<TokenUsage | null>
+  covered: boolean
+  opaqueRange?: { fromMs: number; toMs: number }
+}> {
   // Work in CHUNK-RELATIVE ms; offset to absolute once, at the end.
   let rel: TranscribedUtterance[] = []
   const usages: Array<TokenUsage | null> = []

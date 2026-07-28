@@ -62,7 +62,9 @@ prefer a container. Self-host overrides live in [`.env.example`](./.env.example)
 Binary data can stay local too: set `LOCAL_FILES_DIR` to a durable directory and
 workspace files, recordings, avatars, and channel media use it. Browser uploads,
 public media, and audio/video seeking use short-lived signed API URLs, so GCS is
-optional.
+optional. The exception is Vertex AI long-recording transcription: because
+Vertex has no Files API, set `GCS_FILES_BUCKET` so temporary audio can be passed
+to the model by `gs://` URI and deleted after the request.
 
 DashScope long-recording transcription fetches input by URL. To keep persistent
 storage local, expose only the signed transfer endpoint through a public HTTPS

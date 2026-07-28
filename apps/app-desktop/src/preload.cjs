@@ -26,6 +26,10 @@ const bridge = {
   // The host OS, so app-web can gate macOS-only chrome (e.g. the traffic-light
   // inset in `.is-canvas-desktop`) without shipping a new desktop build.
   platform: process.platform,
+  // Local/self-hosted targets may put their browser-facing API on a separate
+  // gateway-protected origin. The renderer uses this non-secret marker to opt
+  // REST/SSE into Chromium credentials so that origin's gateway cookie is sent.
+  gatewayCredentials: process.argv.includes("--usebrian-local-target"),
   // Dock recorder capability. The renderer uses this explicit promise instead
   // of guessing from a user agent; old shells omit it and remain mic-only.
   systemAudioCapture: process.platform === "darwin" || process.platform === "win32",

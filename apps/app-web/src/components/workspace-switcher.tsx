@@ -339,12 +339,12 @@ export function WorkspaceSwitcher() {
         ref={triggerRef}
         aria-label={format(t.switcherAriaLabel, { name: ctx.name })}
         className={cn(
-          "inline-flex items-center gap-1.5 rounded-md",
+          "inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md",
           "px-1.5 py-1 text-sm hover:bg-muted transition-colors",
         )}
       >
         <TeamAvatar id={ctx.workspaceId} name={ctx.name} size="xs" />
-        <span className="font-semibold text-[13px] truncate max-w-[140px]">
+        <span className="min-w-0 max-w-[140px] truncate text-[13px] font-semibold">
           {ctx.name}
         </span>
         <svg
