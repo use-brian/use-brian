@@ -1,7 +1,7 @@
 /** Firefox My Browser background page: relay + consent + desktop companion. */
 import { RelayClient } from './relay-client.js'
 import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
-import { eligibilityOf } from './tab-eligibility.js'
+import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
 import { credentialsForConfigure, type PairRequest } from './pairing.js'
 import { FirefoxNativeClient, FirefoxNativeError } from './firefox-native-client.js'
 
@@ -20,7 +20,7 @@ function hostOf(url: string): string {
 }
 
 async function promptForConsent(): Promise<ConsentOutcome> {
-  const [activeTab] = await ext.tabs.query({ active: true, lastFocusedWindow: true })
+  const activeTab = await activeTabForConsent((options) => ext.windows.getLastFocused(options))
   const eligibility = eligibilityOf(activeTab?.url)
   if (!eligibility.eligible) return { allowed: false, reason: eligibility.reason }
   if (activeTab?.id == null) return { allowed: false, reason: 'no_active_tab' }
