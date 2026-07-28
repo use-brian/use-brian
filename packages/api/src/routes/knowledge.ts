@@ -29,6 +29,8 @@ import type { AccessContext, Sensitivity } from '@use-brian/core'
 import { splitFrontmatterBlock, resolveRepoFilePath } from '../knowledge/repo-files.js'
 import { promises as fs } from 'node:fs'
 import * as nodePath from 'node:path'
+import { execFile } from 'node:child_process'
+import type { KnowledgeRepoWriter } from '@use-brian/core'
 
 // Re-exported for existing consumers/tests; the implementations moved to
 // `../knowledge/repo-files.ts` so the assistant repo writer shares them.
@@ -101,6 +103,21 @@ type KnowledgeRouteOptions = {
   syncCredentials?: { getPat(workspaceId: string, connectorInstanceId: string | null): Promise<string> }
   /** Test seam for the proposal flow's GitHub calls. Defaults to the real client. */
   githubOps?: KnowledgeGithubOps
+  /** Shared source writer used for direct local reader edits. */
+  knowledgeRepoWriter?: KnowledgeRepoWriter
+  /** Test seam for the loopback-only local folder action. */
+  openLocalPath?: (path: string) => Promise<void>
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
+}
+
+function openPathWithSystem(path: string): Promise<void> {
+  const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open'
+  return new Promise((resolve, reject) => {
+    execFile(command, [path], (error) => error ? reject(error) : resolve())
+  })
 }
 
 /**
@@ -1048,6 +1065,8 @@ export function workspaceKnowledgeRoutes({
   triggerSync,
   syncCredentials,
   githubOps = DEFAULT_GITHUB_OPS,
+  knowledgeRepoWriter,
+  openLocalPath = openPathWithSystem,
 }: KnowledgeRouteOptions): Router {
   const router = Router({ mergeParams: true })
 
@@ -1154,8 +1173,11 @@ export function workspaceKnowledgeRoutes({
         }
         res.json({
           mode: target.failure === 'manual_entry' ? 'manual' : target.failure === 'local_source' ? 'local' : 'github',
+          canEdit: target.failure === 'local_source' && !!knowledgeRepoWriter,
           canPropose: false,
-          reason: target.failure === 'manual_entry' || target.failure === 'local_source' ? null : target.failure,
+          reason: target.failure === 'local_source' && !knowledgeRepoWriter
+            ? 'not_configured'
+            : target.failure === 'manual_entry' || target.failure === 'local_source' ? null : target.failure,
           repo: null,
           branch: null,
           repoUrl: null,
@@ -1170,7 +1192,7 @@ export function workspaceKnowledgeRoutes({
       } catch (err) {
         console.error('[knowledge:workspace] permission probe failed:', err)
         res.json({
-          mode: 'github', canPropose: false, reason: 'no_credentials',
+          mode: 'github', canEdit: false, canPropose: false, reason: 'no_credentials',
           repo: target.source.repo, branch: target.source.branch,
           repoUrl: `https://github.com/${target.source.repo}`,
         })
@@ -1179,6 +1201,7 @@ export function workspaceKnowledgeRoutes({
 
       res.json({
         mode: 'github',
+        canEdit: push,
         canPropose: push,
         reason: push ? null : 'no_write_access',
         repo: target.source.repo,
@@ -1188,6 +1211,59 @@ export function workspaceKnowledgeRoutes({
     } catch (err) {
       console.error('[knowledge:workspace] edit-capability failed:', err)
       res.status(500).json({ error: 'Failed to check edit capability' })
+    }
+  })
+
+  // ── PATCH /entries/:id — direct local-source body update ──
+  router.patch('/entries/:id', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    const content = (req.body as { content?: unknown }).content
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      res.status(400).json({ error: 'content (non-empty string) is required' })
+      return
+    }
+    if (content.length > 200_000) {
+      res.status(400).json({ error: 'content is too large' })
+      return
+    }
+    if (!knowledgeRepoWriter) {
+      res.status(503).json({ error: 'Local knowledge editing is not configured on this server.' })
+      return
+    }
+    try {
+      const entry = await knowledgeStore.getById(memberCtx(auth), (req.params as { id: string }).id)
+      if (!entry || entry.workspaceId !== auth.workspaceId) {
+        res.status(404).json({ error: 'Entry not found' })
+        return
+      }
+      if (!entry.sourceId) {
+        res.status(400).json({ error: 'This entry is not backed by a local source.' })
+        return
+      }
+      const source = await knowledgeStore.getSource(entry.sourceId)
+      if (!source || source.workspaceId !== auth.workspaceId || source.sourceType !== 'local') {
+        res.status(400).json({ error: 'This endpoint only edits local knowledge sources.' })
+        return
+      }
+      const result = await knowledgeRepoWriter.commitEntryUpdate({
+        workspaceId: auth.workspaceId,
+        entry: { id: entry.id, path: entry.path, content: entry.content, sourceId: entry.sourceId },
+        newBody: content,
+        changeSummary: `update ${entry.path} from knowledge reader`,
+        requestedBy: { userId: auth.userId },
+      })
+      if (!result.ok) {
+        const status = result.reason === 'stale_entry' || result.reason === 'file_missing' || result.reason === 'source_missing'
+          ? 409
+          : result.reason === 'not_writable' ? 403 : 500
+        res.status(status).json({ error: result.message, reason: result.reason })
+        return
+      }
+      res.json({ ok: true, mode: 'local', entryId: result.entryId, path: result.path })
+    } catch (err) {
+      console.error('[knowledge:workspace] local entry update failed:', err)
+      res.status(500).json({ error: 'Failed to update the local knowledge entry.' })
     }
   })
 
@@ -1307,6 +1383,34 @@ export function workspaceKnowledgeRoutes({
     } catch (err) {
       console.error('[knowledge:workspace] list sources failed:', err)
       res.status(500).json({ error: 'Failed to list sources' })
+    }
+  })
+
+  router.post('/sources/:id/open', async (req, res) => {
+    const auth = await verifyWorkspaceMember(req as any, res)
+    if (!auth) return
+    if (!allowLocalSources || !isLoopbackAddress(req.socket.remoteAddress)) {
+      res.status(403).json({ error: 'Local folders can only be opened from the localhost deployment.' })
+      return
+    }
+    const source = await knowledgeStore.getSource((req.params as { id: string }).id)
+    if (!source || source.workspaceId !== auth.workspaceId || source.sourceType !== 'local') {
+      res.status(404).json({ error: 'Local source not found' })
+      return
+    }
+    try {
+      const base = await fs.realpath(source.repo)
+      const root = await fs.realpath(nodePath.resolve(base, source.rootPath || '.'))
+      const relative = nodePath.relative(base, root)
+      if (relative === '..' || relative.startsWith(`..${nodePath.sep}`) || nodePath.isAbsolute(relative)) {
+        res.status(400).json({ error: 'Local source root escapes its configured directory.' })
+        return
+      }
+      await openLocalPath(root)
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('[knowledge:workspace] open local source failed:', err)
+      res.status(500).json({ error: 'Failed to open the local knowledge directory.' })
     }
   })
 

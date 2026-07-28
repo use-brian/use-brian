@@ -768,12 +768,22 @@ describe('[COMP:brain/knowledge-detail-http] GET /api/brain/knowledge/:id', () =
       content: '# Identity healing\n\nLong-form body…',
       tags: ['identity', 'merge'],
       sensitivity: 'confidential',
+      metadata: { url: 'notes-app://open/note-1' },
       sourceId: 's-1',
       sourceSha: 'abc123',
       createdAt: new Date('2026-05-01T00:00:00Z'),
       updatedAt: new Date('2026-05-20T00:00:00Z'),
     }
     const knowledge = makeKnowledgeStore([], entry)
+    knowledge.getSource.mockResolvedValue({
+      id: 's-1',
+      workspaceId: 'ws-1',
+      sourceType: 'local',
+      repo: '/srv/knowledge',
+      branch: 'local',
+      rootPath: '',
+      lastSyncedAt: new Date('2026-05-19T00:00:00Z'),
+    })
     const res = await request(
       makeApp(makeEntityStore(null), makeRetrievalStore(), undefined, knowledge),
     )
@@ -787,8 +797,17 @@ describe('[COMP:brain/knowledge-detail-http] GET /api/brain/knowledge/:id', () =
       content: '# Identity healing\n\nLong-form body…',
       tags: ['identity', 'merge'],
       sensitivity: 'confidential',
+      navigationUrl: 'notes-app://open/note-1',
+      source: {
+        id: 's-1',
+        sourceType: 'local',
+        repo: '/srv/knowledge',
+        branch: 'local',
+        rootPath: '',
+      },
     })
     expect(knowledge.getById).toHaveBeenCalledTimes(1)
+    expect(knowledge.getSource).toHaveBeenCalledWith('s-1')
   })
 
   it('404s when the entry belongs to a different workspace', async () => {

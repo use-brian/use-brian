@@ -33,12 +33,37 @@ import type {
   SearchResultRow,
   Sensitivity,
 } from '@use-brian/core'
+
 import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { listCompanies, listContacts, listDeals } from '../db/crm.js'
 import { listTasks as listWorkspaceTasks } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
+
+const BLOCKED_KNOWLEDGE_URL_PROTOCOLS = new Set([
+  'about:', 'blob:', 'chrome:', 'chrome-extension:', 'data:', 'devtools:',
+  'file:', 'javascript:', 'vbscript:',
+])
+
+function knowledgeNavigationUrl(metadata: unknown): string | null {
+  const value = metadata && typeof metadata === 'object'
+    ? (metadata as Record<string, unknown>).url
+    : null
+  if (typeof value !== 'string' || value.length > 2048) return null
+  try {
+    const url = new URL(value)
+    if (
+      !/^[a-z][a-z0-9+.-]*:$/.test(url.protocol)
+      || BLOCKED_KNOWLEDGE_URL_PROTOCOLS.has(url.protocol)
+      || url.username
+      || url.password
+    ) return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}
 
 /** Format a pg-parsed DATE (local-midnight Date) back to its YYYY-MM-DD. */
 function formatDateOnly(d: Date): string {
@@ -1246,12 +1271,14 @@ export function brainRoutes(deps: {
         sensitivity: entry.sensitivity,
         sourceId: entry.sourceId,
         sourceSha: entry.sourceSha,
+        navigationUrl: knowledgeNavigationUrl(entry.metadata),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
         related: related.map((r) => ({ id: r.id, title: r.title, path: r.path })),
         source: source && source.workspaceId === ctx.workspaceId
           ? {
               id: source.id,
+              sourceType: source.sourceType,
               repo: source.repo,
               branch: source.branch,
               rootPath: source.rootPath,

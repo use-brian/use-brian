@@ -16,6 +16,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createTestApp } from './helpers.js'
 
 vi.mock('../../db/client.js', () => ({
@@ -51,6 +54,11 @@ const githubOps = {
 }
 
 const syncCredentials = { getPat: vi.fn() }
+const knowledgeRepoWriter = {
+  commitEntryUpdate: vi.fn(),
+  commitEntryCreate: vi.fn(),
+}
+const openLocalPath = vi.fn()
 
 const ENTRY = {
   id: 'e-1',
@@ -79,6 +87,9 @@ function app(userId?: string) {
       knowledgeStore: knowledgeStore as never,
       syncCredentials,
       githubOps: githubOps as never,
+      knowledgeRepoWriter: knowledgeRepoWriter as never,
+      allowLocalSources: true,
+      openLocalPath,
     }),
     userId ? { userId } : undefined,
   )
@@ -116,6 +127,15 @@ beforeEach(() => {
   githubOps.createBranchRef.mockResolvedValue(undefined)
   githubOps.createOrUpdateFile.mockResolvedValue({})
   githubOps.createPullRequest.mockResolvedValue({ number: 7, html_url: 'https://github.com/acme/kb/pull/7' })
+  knowledgeRepoWriter.commitEntryUpdate.mockResolvedValue({
+    ok: true,
+    entryId: 'e-1',
+    path: 'products/vault',
+    sourceType: 'local',
+    commitSha: null,
+    commitUrl: null,
+  })
+  openLocalPath.mockResolvedValue(undefined)
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
@@ -160,6 +180,29 @@ describe('[COMP:api/knowledge-proposals] GET /entries/:id/edit-capability', () =
     expect(res.body).toMatchObject({ mode: 'manual', canPropose: false, reason: null })
   })
 
+  it('reports local mode without resolving credentials or calling GitHub', async () => {
+    knowledgeStore.getSource.mockResolvedValue({
+      ...SOURCE,
+      sourceType: 'local',
+      repo: '/srv/knowledge',
+      branch: 'local',
+      connectorInstanceId: null,
+    })
+    const res = await request(app('u-1')).get('/api/workspaces/ws-1/knowledge/entries/e-1/edit-capability')
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({
+      mode: 'local',
+      canEdit: true,
+      canPropose: false,
+      reason: null,
+      repo: null,
+      branch: null,
+      repoUrl: null,
+    })
+    expect(syncCredentials.getPat).not.toHaveBeenCalled()
+    expect(githubOps.getRepoPermissions).not.toHaveBeenCalled()
+  })
+
   it('reports no_credentials when the PAT cannot resolve', async () => {
     syncCredentials.getPat.mockRejectedValue(new Error('no creds'))
     const res = await request(app('u-1')).get('/api/workspaces/ws-1/knowledge/entries/e-1/edit-capability')
@@ -172,6 +215,78 @@ describe('[COMP:api/knowledge-proposals] GET /entries/:id/edit-capability', () =
     const res = await request(app('u-1')).get('/api/workspaces/ws-1/knowledge/entries/e-1/edit-capability')
     expect(res.status).toBe(200)
     expect(res.body).toMatchObject({ mode: 'github', canPropose: false, reason: 'source_missing' })
+  })
+})
+
+describe('[COMP:api/knowledge-proposals] PATCH /entries/:id local edit', () => {
+  it('updates through the local writer without calling GitHub', async () => {
+    knowledgeStore.getSource.mockResolvedValue({
+      ...SOURCE,
+      sourceType: 'local',
+      repo: '/srv/knowledge',
+      branch: 'local',
+      connectorInstanceId: null,
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1/knowledge/entries/e-1')
+      .send({ content: 'new local body' })
+    expect(res.status).toBe(200)
+    expect(res.body).toMatchObject({ ok: true, mode: 'local', entryId: 'e-1' })
+    expect(knowledgeRepoWriter.commitEntryUpdate).toHaveBeenCalledWith({
+      workspaceId: 'ws-1',
+      entry: {
+        id: 'e-1', path: 'products/vault', content: 'old body', sourceId: 'src-1',
+      },
+      newBody: 'new local body',
+      changeSummary: 'update products/vault from knowledge reader',
+      requestedBy: { userId: 'u-1' },
+    })
+    expect(syncCredentials.getPat).not.toHaveBeenCalled()
+    expect(githubOps.getRepoPermissions).not.toHaveBeenCalled()
+    expect(githubOps.createOrUpdateFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects GitHub entries before invoking the local writer', async () => {
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1/knowledge/entries/e-1')
+      .send({ content: 'new body' })
+    expect(res.status).toBe(400)
+    expect(knowledgeRepoWriter.commitEntryUpdate).not.toHaveBeenCalled()
+  })
+
+  it('maps a stale local file to 409', async () => {
+    knowledgeStore.getSource.mockResolvedValue({ ...SOURCE, sourceType: 'local' })
+    knowledgeRepoWriter.commitEntryUpdate.mockResolvedValue({
+      ok: false,
+      reason: 'stale_entry',
+      message: 'The local file moved ahead.',
+    })
+    const res = await request(app('u-1'))
+      .patch('/api/workspaces/ws-1/knowledge/entries/e-1')
+      .send({ content: 'new body' })
+    expect(res.status).toBe(409)
+    expect(res.body).toMatchObject({ reason: 'stale_entry' })
+  })
+})
+
+describe('[COMP:api/knowledge-proposals] local source navigation', () => {
+  it('opens the configured local root without accepting a client path', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'brian-kb-open-'))
+    try {
+      knowledgeStore.getSource.mockResolvedValue({
+        ...SOURCE,
+        sourceType: 'local',
+        repo: dir,
+        rootPath: '',
+      })
+      const res = await request(app('u-1'))
+        .post('/api/workspaces/ws-1/knowledge/sources/src-1/open')
+        .send({ path: '/etc' })
+      expect(res.status).toBe(200)
+      expect(openLocalPath).toHaveBeenCalledWith(dir)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

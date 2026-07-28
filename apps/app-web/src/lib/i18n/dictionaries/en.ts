@@ -3753,6 +3753,11 @@ export const en = {
       readOnlyBadge: "Read-only",
       actionsHeading: "Actions",
       suggestEdit: "Suggest an edit",
+      editEntry: "Edit entry",
+      saveChanges: "Save changes",
+      saving: "Saving…",
+      localEditingHint: "Changes are saved directly to the local knowledge file.",
+      localReadOnlyHint: "Local knowledge editing is not configured on this server.",
       capabilityLoading: "Checking edit access…",
       readOnlyHint:
         "The connected GitHub credential is read-only, so this knowledge base can't be edited from here.",
@@ -3771,6 +3776,8 @@ export const en = {
       kindMemory: "Memory",
       sourceHeading: "Source",
       sourceRepoLabel: "Repository",
+      sourceDirectoryLabel: "Directory",
+      sourceUrlLabel: "URL",
       sourceBranchLabel: "Branch",
       sourceSyncedLabel: "Last synced",
       sourceNever: "Not yet",
@@ -3788,6 +3795,7 @@ export const en = {
         "Your suggested edit is now a pull request. This entry updates after it's merged and synced.",
       viewPr: "View pull request",
       proposalFailed: "Couldn't create the pull request. {message}",
+      localSaveFailed: "Couldn't save the local knowledge file. {message}",
       noContent: "No content to show.",
     },
     // (The former `chatPanel` block is retired: the non-doc surface dock now

@@ -37,9 +37,14 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { getActiveAssistantId } from "@/lib/sidebar-cache";
 import {
   getBrainGraph,
+  canOpenLocalKnowledgeSource,
   getKnowledgeEditCapability,
   getKnowledgeEntry,
+  getKnowledgeEntryNavigationUrl,
+  getKnowledgeSourceUrl,
+  openLocalKnowledgeSource,
   proposeKnowledgeEdit,
+  updateLocalKnowledgeEntry,
   type BrainGraph,
   type BrainGraphNode,
   type KnowledgeEditCapability,
@@ -48,6 +53,7 @@ import {
 import { fetchBrainRow, type BrainInboxRowDetail } from "@/lib/api/brain-inbox";
 import {
   KB_WIKILINK_SCHEME,
+  knowledgeEntryHref,
   resolveWikilinkTarget,
   rewriteWikilinks,
 } from "@/lib/kb-wikilinks";
@@ -231,9 +237,13 @@ function KnowledgeReader({
   }
   const stale = view.forId !== entryId;
 
-  const isGithubSynced = entry.sourceId !== null;
-  const canPropose = capability?.canPropose === true;
-  const readOnly = isGithubSynced && capability !== null && !canPropose;
+  const isGithubSynced = entry.source?.sourceType === "github";
+  const isLocalSynced = entry.source?.sourceType === "local";
+  const canEdit = capability?.canEdit === true;
+  const readOnly = !!entry.source && capability !== null && !canEdit;
+  const sourceUrl = entry.source ? getKnowledgeSourceUrl(entry.source) : null;
+  const entryNavigationUrl = getKnowledgeEntryNavigationUrl(entry.navigationUrl);
+  const canOpenLocalSource = isLocalSynced && !sourceUrl && canOpenLocalKnowledgeSource();
 
   const startEditing = () => {
     setDraft(entry.content);
@@ -250,16 +260,26 @@ function KnowledgeReader({
     }
     setSubmitting(true);
     setSubmitError(null);
-    const result = await proposeKnowledgeEdit(activeId, entry.id, {
-      content: draft,
-      comment: comment.trim().length > 0 ? comment.trim() : undefined,
-    });
+    const result = isLocalSynced
+      ? await updateLocalKnowledgeEntry(activeId, entry.id, draft)
+      : await proposeKnowledgeEdit(activeId, entry.id, {
+          content: draft,
+          comment: comment.trim().length > 0 ? comment.trim() : undefined,
+        });
     setSubmitting(false);
     if (!result.ok) {
-      setSubmitError(format(copy.proposalFailed, { message: result.error }));
+      setSubmitError(format(
+        isLocalSynced ? copy.localSaveFailed : copy.proposalFailed,
+        { message: result.error },
+      ));
       return;
     }
-    setPrUrl(result.prUrl);
+    if (isLocalSynced) {
+      const refreshed = await getKnowledgeEntry(entry.id, activeId, getActiveAssistantId());
+      setView({ forId: entryId, entry: refreshed ?? { ...entry, content: draft } });
+    } else if ("prUrl" in result) {
+      setPrUrl(result.prUrl);
+    }
     setEditing(false);
   };
 
@@ -300,17 +320,17 @@ function KnowledgeReader({
             </section>
           )}
 
-          {isGithubSynced && !editing && (
+          {(isGithubSynced || isLocalSynced) && !editing && (
             <ReaderRailCard title={copy.actionsHeading}>
               <Button
                 className="w-full"
                 variant="outline"
-                disabled={!canPropose}
+                disabled={!canEdit}
                 onClick={startEditing}
                 title={readOnly ? copy.readOnlyHint : undefined}
               >
                 <Pencil className="mr-1.5 size-3.5" aria-hidden />
-                {copy.suggestEdit}
+                {isLocalSynced ? copy.editEntry : copy.suggestEdit}
               </Button>
               {capability === null ? (
                 <p className="pt-1.5 text-[11px] text-muted-foreground">
@@ -318,7 +338,7 @@ function KnowledgeReader({
                 </p>
               ) : readOnly ? (
                 <p className="pt-1.5 text-[11px] text-muted-foreground">
-                  {copy.readOnlyHint}
+                  {isLocalSynced ? copy.localReadOnlyHint : copy.readOnlyHint}
                 </p>
               ) : null}
             </ReaderRailCard>
@@ -359,22 +379,55 @@ function KnowledgeReader({
           {entry.source && (
             <ReaderRailCard title={copy.sourceHeading}>
               <dl className="divide-y divide-border/60">
-                <ReaderPropRow label={copy.sourceRepoLabel}>
-                  <a
-                    href={`https://github.com/${entry.source.repo}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
-                  >
+                <ReaderPropRow
+                  label={isLocalSynced ? copy.sourceDirectoryLabel : copy.sourceRepoLabel}
+                >
+                  {sourceUrl ? (
+                    <a
+                      href={sourceUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
+                    >
+                      <span className="break-all font-mono text-[11px]">
+                        {entry.source.repo}
+                      </span>
+                      <ExternalLink className="size-3 shrink-0" aria-hidden />
+                    </a>
+                  ) : canOpenLocalSource ? (
+                    <button
+                      type="button"
+                      onClick={() => void openLocalKnowledgeSource(activeId, entry.source!.id)}
+                      className="break-all text-right font-mono text-[11px] underline-offset-4 hover:underline"
+                    >
+                      {entry.source.repo}
+                    </button>
+                  ) : (
                     <span className="break-all font-mono text-[11px]">
                       {entry.source.repo}
                     </span>
-                    <ExternalLink className="size-3 shrink-0" aria-hidden />
-                  </a>
+                  )}
                 </ReaderPropRow>
-                <ReaderPropRow label={copy.sourceBranchLabel}>
-                  <span className="font-mono text-[11px]">{entry.source.branch}</span>
-                </ReaderPropRow>
+                {entryNavigationUrl && (
+                  <ReaderPropRow label={copy.sourceUrlLabel}>
+                    <a
+                      href={entryNavigationUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
+                    >
+                      <span className="break-all font-mono text-[11px]">
+                        {entryNavigationUrl}
+                      </span>
+                      <ExternalLink className="size-3 shrink-0" aria-hidden />
+                    </a>
+                  </ReaderPropRow>
+                )}
+                {isGithubSynced && (
+                  <ReaderPropRow label={copy.sourceBranchLabel}>
+                    <span className="font-mono text-[11px]">{entry.source.branch}</span>
+                  </ReaderPropRow>
+                )}
                 <ReaderPropRow label={copy.sourceSyncedLabel}>
                   {entry.source.lastSyncedAt
                     ? new Date(entry.source.lastSyncedAt).toLocaleString()
@@ -420,7 +473,9 @@ function KnowledgeReader({
         {editing ? (
           <div className="mt-2 flex flex-col gap-3 animate-in fade-in-0 duration-200">
             <div className="rounded-lg bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
-              {format(copy.editingHint, { repo: capability?.repo ?? "" })}
+              {isLocalSynced
+                ? copy.localEditingHint
+                : format(copy.editingHint, { repo: capability?.repo ?? "" })}
             </div>
             <textarea
               value={draft}
@@ -428,7 +483,7 @@ function KnowledgeReader({
               spellCheck={false}
               className="min-h-[50vh] w-full resize-y rounded-md border border-border bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground focus:outline-none focus-visible:border-ring"
             />
-            <label className="flex flex-col gap-1">
+            {!isLocalSynced && <label className="flex flex-col gap-1">
               <span className="text-xs font-medium text-muted-foreground">
                 {copy.commentLabel}
               </span>
@@ -439,14 +494,20 @@ function KnowledgeReader({
                 rows={3}
                 className="w-full resize-y rounded-md border border-border bg-background p-2.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus-visible:border-ring"
               />
-            </label>
+            </label>}
             {submitError && (
               <p className="text-xs text-destructive">{submitError}</p>
             )}
             <div className="flex items-center gap-2">
               <Button onClick={submit} disabled={submitting}>
-                <GitPullRequestArrow className="mr-1.5 size-3.5" aria-hidden />
-                {submitting ? copy.submitting : copy.submitProposal}
+                {isLocalSynced ? (
+                  <Pencil className="mr-1.5 size-3.5" aria-hidden />
+                ) : (
+                  <GitPullRequestArrow className="mr-1.5 size-3.5" aria-hidden />
+                )}
+                {submitting
+                  ? isLocalSynced ? copy.saving : copy.submitting
+                  : isLocalSynced ? copy.saveChanges : copy.submitProposal}
               </Button>
               <Button
                 variant="ghost"
@@ -469,7 +530,10 @@ function KnowledgeReader({
                     currentPath={entry.path}
                     related={related}
                     onNavigate={(refId) =>
-                      router.push(`/w/${activeId}/brain/entry/knowledge/${refId}`)
+                      router.push(knowledgeEntryHref(activeId, refId))
+                    }
+                    hrefForTarget={(refId) =>
+                      knowledgeEntryHref(activeId, refId)
                     }
                   />
                 ),
@@ -498,20 +562,24 @@ function KbLink({
   currentPath,
   related,
   onNavigate,
+  hrefForTarget,
 }: React.AnchorHTMLAttributes<HTMLAnchorElement> & {
   currentPath: string;
   related: { id: string; title: string; path: string }[];
   onNavigate: (refId: string) => void;
+  hrefForTarget: (refId: string) => string;
 }) {
   const target = href ? resolveWikilinkTarget(href, currentPath, related) : null;
   if (target) {
     return (
       <a
-        href={`#${target.path}`}
+        href={hrefForTarget(target.id)}
         className="text-primary underline-offset-4 hover:underline"
         onClick={(e) => {
-          e.preventDefault();
-          onNavigate(target.id);
+          if (e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+            e.preventDefault();
+            onNavigate(target.id);
+          }
         }}
       >
         {children}

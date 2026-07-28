@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import {
   KB_WIKILINK_SCHEME,
+  knowledgeEntryHref,
   resolveWikilinkTarget,
   rewriteWikilinks,
 } from "../kb-wikilinks";
@@ -62,5 +63,13 @@ describe("[COMP:app-web/kb-wikilinks] resolveWikilinkTarget", () => {
   it("ignores external and unresolvable targets", () => {
     expect(resolveWikilinkTarget("https://example.com/doc.md", "x", RELATED)).toBeNull();
     expect(resolveWikilinkTarget(`${KB_WIKILINK_SCHEME}ghost`, "x", RELATED)).toBeNull();
+  });
+});
+
+describe("[COMP:app-web/kb-wikilinks] knowledgeEntryHref", () => {
+  it("points resolved links at the canonical entry route, not a hash fragment", () => {
+    expect(knowledgeEntryHref("workspace-1", "entry-2")).toBe(
+      "/w/workspace-1/brain/entry/knowledge/entry-2",
+    );
   });
 });

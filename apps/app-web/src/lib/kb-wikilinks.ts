@@ -28,6 +28,10 @@ import type { KnowledgeRelatedRef } from "@/lib/api/brain";
 
 export const KB_WIKILINK_SCHEME = "kbwiki:";
 
+export function knowledgeEntryHref(workspaceId: string, entryId: string): string {
+  return `/w/${encodeURIComponent(workspaceId)}/brain/entry/knowledge/${encodeURIComponent(entryId)}`;
+}
+
 const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 const FENCE_RE = /^(```|~~~)/;
 
