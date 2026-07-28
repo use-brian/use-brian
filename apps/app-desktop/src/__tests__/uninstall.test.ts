@@ -21,6 +21,9 @@ describe("[COMP:app-desktop/uninstall] uninstall planning", () => {
     expect(paths).toContain(
       "/Users/alice/Library/Saved Application State/ai.sidan.desktop.savedState",
     );
+    expect(paths).toContain(
+      "/Users/alice/Library/Application Support/Mozilla/NativeMessagingHosts/ai.usebrian.browser.json",
+    );
     for (const p of paths) expect(p.startsWith(`${HOME}/Library/`)).toBe(true);
   });
 

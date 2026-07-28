@@ -167,6 +167,14 @@ import {
   serializeAccessGrant,
   type CloudflareAccessGrant,
 } from "./cloudflare-access-oauth.js";
+import { registerFirefoxNativeHost } from "./firefox-native-registration.js";
+import {
+  findFirefoxExecutable,
+  firefoxExecutableCandidates,
+  firefoxProfilesRoot,
+  launchFirefoxForControl,
+  waitForFirefoxRemoteEndpoint,
+} from "./firefox-launcher.js";
 
 const { autoUpdater } = electronUpdater;
 
@@ -2189,6 +2197,10 @@ function startAutoUpdate(): void {
 // ── Deep links + auth callback ─────────────────────────────────
 
 function handleIncomingUrl(rawUrl: string): void {
+  if (rawUrl === `${cfg.protocolScheme}://firefox-control`) {
+    void startFirefoxForControl();
+    return;
+  }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
   if (auth) {
     if (auth.kind === "code") void completeSignIn(auth.code);
@@ -2252,6 +2264,43 @@ async function confirmAndUninstall(): Promise<void> {
   app.quit();
 }
 
+async function startFirefoxForControl(): Promise<void> {
+  const candidates = firefoxExecutableCandidates(process.platform, process.env, homedir());
+  const executable = await findFirefoxExecutable(candidates);
+  const profilesRoot = firefoxProfilesRoot(process.platform, process.env, homedir());
+  if (!executable || !profilesRoot) {
+    await dialog.showMessageBox({
+      type: "error",
+      message: "Firefox was not found",
+      detail: "Install Firefox in its standard location, then try again.",
+      buttons: ["OK"],
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: "Start Firefox for My Browser?",
+    detail:
+      "Quit Firefox completely before continuing. Use Brian will reopen your normal Firefox profile with a loopback-only browser-control endpoint for this launch.",
+    buttons: ["Start Firefox", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return;
+  const startedAt = Date.now() - 1_000;
+  launchFirefoxForControl(executable);
+  const endpoint = await waitForFirefoxRemoteEndpoint(profilesRoot, { afterMs: startedAt });
+  if (!endpoint) {
+    await dialog.showMessageBox({
+      type: "warning",
+      message: "Firefox browser control did not start",
+      detail:
+        "Firefox may still have been running. Quit every Firefox window, wait a moment, then choose Start Firefox for My Browser again.",
+      buttons: ["OK"],
+    });
+  }
+}
+
 /**
  * (Re)build + install the application menu. Called at startup and again on
  * every update-state change, so the update item's label tracks the state
@@ -2267,6 +2316,7 @@ function refreshAppMenu(): void {
       onUpdate: handleUpdateMenuClick,
       onSwitchTarget: () => void switchTargetFromMenu(),
       onUninstall: () => void confirmAndUninstall(),
+      onStartFirefoxControl: () => void startFirefoxForControl(),
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
@@ -2288,6 +2338,7 @@ function buildTrayMenu(): Menu {
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
+    { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
   if (cfg.target !== "local") {
@@ -2351,6 +2402,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  pendingUrl = appUrlFromArgv(process.argv);
   app.on("second-instance", (_event, argv) => {
     focusWindow(ensureWindow());
     const url = appUrlFromArgv(argv);
@@ -2503,6 +2555,17 @@ if (!gotLock) {
   }
 
   app.whenReady().then(async () => {
+    if (app.isPackaged) {
+      void registerFirefoxNativeHost({
+        platform: process.platform,
+        home: homedir(),
+        userData: app.getPath("userData"),
+        executablePath:
+          process.platform === "linux" && process.env.APPIMAGE
+            ? process.env.APPIMAGE
+            : app.getPath("exe"),
+      }).catch((error) => console.warn("Failed to register Firefox native host", error));
+    }
     // macOS resolves `usebrian://` through the bundle Info.plist (the `protocols:`
     // block in electron-builder.yml). Windows/Linux register the running executable
     // with the OS; an UNPACKAGED Windows dev run must pass execPath + the script

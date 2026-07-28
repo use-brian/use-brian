@@ -14,6 +14,7 @@ const handlers: MenuTemplateHandlers = {
   onUpdate: () => {},
   onSwitchTarget: () => {},
   onUninstall: () => {},
+  onStartFirefoxControl: () => {},
 };
 
 /** Default options; spread + override per test. */
@@ -72,6 +73,19 @@ describe("[COMP:app-desktop/menu-template] buildMenuTemplate", () => {
       const record = allItems(t).find((i) => i.label === "Start Recording");
       expect(record?.accelerator).toBe("CommandOrControl+Shift+R");
     }
+  });
+
+  it("starts Firefox browser control from both platform menus", () => {
+    const onStartFirefoxControl = vi.fn();
+    for (const isMac of [true, false]) {
+      const items = allItems(
+        buildMenuTemplate(opts({ isMac }), { ...handlers, onStartFirefoxControl }),
+      );
+      const item = items.find((candidate) => candidate.label === "Start Firefox for My Browser…");
+      expect(item).toBeDefined();
+      (item?.click as () => void)();
+    }
+    expect(onStartFirefoxControl).toHaveBeenCalledTimes(2);
   });
 
   it("offers View-menu zoom on both platforms, with a hidden Cmd/Ctrl+= zoom-in alias", () => {

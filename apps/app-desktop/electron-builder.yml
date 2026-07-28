@@ -97,6 +97,15 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  include: build/installer.nsh
+# ── Linux ───────────────────────────────────────────────────────────────────
+# AppImage is the portable upstream artifact. Distribution-native packages may
+# instead build the same app from source and run it with their Electron runtime.
+linux:
+  target:
+    - AppImage
+  category: Office
+  executableName: use-brian
 # Where `electron-builder --publish always` uploads artifacts. The marketing CTA
 # links the "latest" GitHub Release asset, which must be public-readable for an
 # unauthenticated download. The desktop source is open (this app lives in the
