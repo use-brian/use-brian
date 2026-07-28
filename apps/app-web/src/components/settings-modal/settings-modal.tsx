@@ -101,8 +101,9 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
   // Metered model profiles (model-registry.md L15). Hosted-only: the lane
   // bills credits; the OSS list below omits it.
   "ws-models",
-  // Computer-use Profile-Management (hosted-only: profiles + the vault are
-  // closed platform halves, so the OSS list below omits it).
+  // Computer-use Profile-Management. OSS keeps this navigation entry for the
+  // open My Browser pairing panel; without the optional closed profile/vault
+  // ports, the remaining profile controls report unconfigured.
   "ws-browser-profiles",
   // ws-usage is absent on purpose: the Usage block renders inside ws-plan
   // ("Plan & usage") — the alias case below still routes old deep links.
@@ -111,18 +112,24 @@ const WORKSPACE_SECTIONS: SettingsSection[] = [
 ];
 // The OSS single-player edition has no billing: drop the Plan + Usage sections
 // entirely. Members stays (relabeled "Teammates"), routed to the hosted-upgrade
-// pitch instead of the live members manager. Hosted keeps the full list above.
+// pitch instead of the live members manager. Browser profiles stays so OSS can
+// pair its self-hosted My Browser relay. Hosted keeps the full list above.
 const OSS_WORKSPACE_SECTIONS: SettingsSection[] = [
   "ws-general",
   "ws-members",
   "ws-llm-key",
   "ws-domains",
+  "ws-browser-profiles",
 ];
+
+export function workspaceSettingsSections(oss: boolean): SettingsSection[] {
+  return oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
+}
 
 export function SettingsModal({ open, initialSection = "profile", onClose }: Props) {
   const t = useT();
   const oss = isOssEdition();
-  const workspaceSections = oss ? OSS_WORKSPACE_SECTIONS : WORKSPACE_SECTIONS;
+  const workspaceSections = workspaceSettingsSections(oss);
   const [section, setSection] = useState<SettingsSection>(initialSection);
   // Which pane shows below the `sm` breakpoint (no effect from `sm:` up,
   // where both panes render side by side): the modal opens on the section
