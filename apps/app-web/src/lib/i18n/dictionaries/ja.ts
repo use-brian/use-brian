@@ -3554,6 +3554,11 @@ export const ja: Dictionary = {
       readOnlyBadge: "読み取り専用",
       actionsHeading: "アクション",
       suggestEdit: "編集を提案",
+      editEntry: "エントリを編集",
+      saveChanges: "変更を保存",
+      saving: "保存中…",
+      localEditingHint: "変更はローカルのナレッジファイルに直接保存されます。",
+      localReadOnlyHint: "このサーバーではローカルナレッジの編集が設定されていません。",
       capabilityLoading: "編集権限を確認しています…",
       readOnlyHint:
         "接続中の GitHub 認証情報は読み取り専用のため、ここからナレッジベースを編集できません。",
@@ -3572,6 +3577,8 @@ export const ja: Dictionary = {
       kindMemory: "メモリー",
       sourceHeading: "ソース",
       sourceRepoLabel: "リポジトリ",
+      sourceDirectoryLabel: "ディレクトリ",
+      sourceUrlLabel: "URL",
       sourceBranchLabel: "ブランチ",
       sourceSyncedLabel: "最終同期",
       sourceNever: "未同期",
@@ -3589,6 +3596,7 @@ export const ja: Dictionary = {
         "提案した編集はプルリクエストになりました。マージと同期が完了するとこのエントリに反映されます。",
       viewPr: "プルリクエストを見る",
       proposalFailed: "プルリクエストを作成できませんでした。{message}",
+      localSaveFailed: "ローカルナレッジファイルを保存できませんでした。{message}",
       noContent: "表示する内容がありません。",
     },
     // （旧 chatPanel ブロックは廃止：非ドックサーフェスも doc の FloatingChat を

@@ -326,9 +326,10 @@ export type KnowledgeRelatedRef = {
   path: string;
 };
 
-/** Provenance of a GitHub-synced entry (null for manual entries). */
-type KnowledgeEntrySource = {
+/** Provenance of a synced entry (null for manual entries). */
+export type KnowledgeEntrySource = {
   id: string;
+  sourceType: "github" | "local";
   repo: string;
   branch: string;
   rootPath: string;
@@ -345,6 +346,8 @@ export type KnowledgeEntryDetail = {
   sensitivity: Sensitivity;
   sourceId: string | null;
   sourceSha: string | null;
+  /** Validated from the Markdown entry's optional `url` frontmatter field. */
+  navigationUrl: string | null;
   createdAt: string;
   updatedAt: string;
   /** Resolved `related_ids` (clearance-scoped). Absent on older servers. */
@@ -352,6 +355,41 @@ export type KnowledgeEntryDetail = {
   /** Owning sync source, null for manual entries. Absent on older servers. */
   source?: KnowledgeEntrySource | null;
 };
+
+/** Only GitHub source identifiers are valid browser destinations. */
+export function getKnowledgeSourceUrl(
+  source: KnowledgeEntrySource,
+): string | null {
+  return source.sourceType === "github"
+    ? `https://github.com/${source.repo}`
+    : null;
+}
+
+const BLOCKED_KNOWLEDGE_URL_PROTOCOLS = new Set([
+  "about:", "blob:", "chrome:", "chrome-extension:", "data:", "devtools:",
+  "file:", "javascript:", "vbscript:",
+]);
+
+export function getKnowledgeEntryNavigationUrl(
+  navigationUrl?: string | null,
+): string | null {
+  if (navigationUrl) {
+    try {
+      const url = new URL(navigationUrl);
+      if (
+        /^[a-z][a-z0-9+.-]*:$/.test(url.protocol)
+        && !BLOCKED_KNOWLEDGE_URL_PROTOCOLS.has(url.protocol)
+        && !url.username
+        && !url.password
+      ) {
+        return url.toString();
+      }
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
 
 /**
  * Single knowledge-entry read for the brain detail drawer. Backed by
@@ -379,9 +417,10 @@ export async function getKnowledgeEntry(
 // the DB row updates via the normal sync after merge.
 
 export type KnowledgeEditCapability = {
-  mode: "github" | "manual";
+  mode: "github" | "local" | "manual";
+  canEdit: boolean;
   canPropose: boolean;
-  reason: "no_write_access" | "no_credentials" | "source_missing" | null;
+  reason: "no_write_access" | "no_credentials" | "source_missing" | "not_configured" | null;
   repo: string | null;
   branch: string | null;
   repoUrl: string | null;
@@ -402,6 +441,55 @@ export async function getKnowledgeEditCapability(
   );
   if (!res.ok) return null;
   return (await res.json()) as KnowledgeEditCapability;
+}
+
+export type KnowledgeDirectUpdateResult =
+  | { ok: true; entryId: string; path: string }
+  | { ok: false; error: string };
+
+export async function updateLocalKnowledgeEntry(
+  workspaceId: string,
+  entryId: string,
+  content: string,
+): Promise<KnowledgeDirectUpdateResult> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/knowledge/entries/${encodeURIComponent(entryId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    entryId?: string;
+    path?: string;
+    error?: string;
+  };
+  if (!res.ok || !data.entryId) {
+    return { ok: false, error: data.error ?? `Request failed (${res.status})` };
+  }
+  return { ok: true, entryId: data.entryId, path: data.path ?? "" };
+}
+
+export async function openLocalKnowledgeSource(
+  workspaceId: string,
+  sourceId: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/workspaces/${encodeURIComponent(workspaceId)}/knowledge/sources/${encodeURIComponent(sourceId)}/open`,
+    { method: "POST" },
+  );
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return res.ok ? { ok: true } : { ok: false, error: data.error ?? `Request failed (${res.status})` };
+}
+
+export function canOpenLocalKnowledgeSource(apiUrl = API_URL): boolean {
+  try {
+    const hostname = new URL(apiUrl).hostname;
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
 }
 
 export type KnowledgeProposalResult =

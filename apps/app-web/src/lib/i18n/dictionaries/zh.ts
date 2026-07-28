@@ -3517,6 +3517,11 @@ export const zh: Dictionary = {
       readOnlyBadge: "唯讀",
       actionsHeading: "操作",
       suggestEdit: "建議編輯",
+      editEntry: "編輯項目",
+      saveChanges: "儲存變更",
+      saving: "儲存中…",
+      localEditingHint: "變更會直接儲存到本機知識檔案。",
+      localReadOnlyHint: "此伺服器尚未設定本機知識編輯。",
       capabilityLoading: "正在確認編輯權限…",
       readOnlyHint:
         "連接的 GitHub 憑證僅有讀取權限，因此無法在這裡編輯知識庫。",
@@ -3534,6 +3539,8 @@ export const zh: Dictionary = {
       kindMemory: "記憶",
       sourceHeading: "來源",
       sourceRepoLabel: "儲存庫",
+      sourceDirectoryLabel: "目錄",
+      sourceUrlLabel: "URL",
       sourceBranchLabel: "分支",
       sourceSyncedLabel: "上次同步",
       sourceNever: "尚未同步",
@@ -3551,6 +3558,7 @@ export const zh: Dictionary = {
         "你建議的修改已成為 Pull Request。合併並同步後，這則項目就會更新。",
       viewPr: "查看 Pull Request",
       proposalFailed: "無法建立 Pull Request。{message}",
+      localSaveFailed: "無法儲存本機知識檔案。{message}",
       noContent: "沒有可顯示的內容。",
     },
     // （舊 chatPanel 區塊已淘汰：非文件介面同樣掛載 doc 的 FloatingChat，
