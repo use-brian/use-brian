@@ -323,7 +323,7 @@ function SectionGroup({
   );
 }
 
-function SectionBody({
+export function SectionBody({
   section,
   onClose,
 }: {
@@ -367,10 +367,9 @@ function SectionBody({
       // hosted billing construct; OSS nav hides the section, this is defensive.
       return isOssEdition() ? <HostedUpgradeSection /> : <ModelsSection />;
     case "ws-browser-profiles":
-      // Computer-use Profile-Management (computer-use.md §7, R2-4). Profiles
-      // + the vault are closed platform halves; OSS nav hides the section,
-      // this is defensive.
-      return isOssEdition() ? <HostedUpgradeSection /> : <BrowserProfilesSection />;
+      // My Browser pairing is open and available in OSS. Optional persistent
+      // profile/vault ports report unconfigured inside the section when absent.
+      return <BrowserProfilesSection />;
   }
 }
 
