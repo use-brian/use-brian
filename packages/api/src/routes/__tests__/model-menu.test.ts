@@ -6,6 +6,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { MutableProviderAvailability } from '@use-brian/shared/model-registry'
 import { modelMenuRoutes, type ModelMenuRouteOptions } from '../model-menu.js'
 
 const getRole = vi.fn()
@@ -70,6 +71,22 @@ describe('[COMP:api/model-menu] GET /models/menu', () => {
     expect(res.body.classes['standard-pro'].length).toBeGreaterThan(0)
   })
 
+  it('shows only the account-scoped Codex catalog intersection', async () => {
+    const availability = new MutableProviderAvailability()
+    availability.setModelCatalog(
+      'openai-codex',
+      new Set(['gpt-5.6-terra', 'gpt-5.6-sol']),
+    )
+    const res = await request(makeApp({ configuredProviders: availability }))
+      .get('/api/models/menu?workspaceId=00000000-0000-0000-0000-000000000001')
+      .expect(200)
+    expect(res.body.classes['standard-pro'].map((m: { alias: string }) => m.alias))
+      .toEqual(['gpt-5.6-terra'])
+    expect(res.body.classes['max'].map((m: { alias: string }) => m.alias))
+      .toEqual(['gpt-5.6-sol'])
+    expect(res.body.classes['research']).toEqual([])
+  })
+
   it('hides profiles whose model lost its key, keeps them in the store', async () => {
     profiles.list.mockResolvedValue([
       { id: 'p1', workspaceId: 'w', name: 'deep', modelAlias: 'deepseek-v4-pro', toolRounds: 100, thinking: null },
@@ -104,10 +121,10 @@ describe('[COMP:api/model-menu] metered estimate + profiles CRUD', () => {
   })
 
   it('maps a non-metered model to a 400', async () => {
-    profiles.create.mockRejectedValue(new Error("metered-profile: 'gemini-3.5-flash' is not an active metered registry model"))
+    profiles.create.mockRejectedValue(new Error("metered-profile: 'gemini-3.6-flash' is not an active metered registry model"))
     const res = await request(makeApp())
       .post('/api/workspaces/00000000-0000-0000-0000-000000000001/metered-profiles')
-      .send({ name: 'x', modelAlias: 'gemini-3.5-flash', toolRounds: 10 })
+      .send({ name: 'x', modelAlias: 'gemini-3.6-flash', toolRounds: 10 })
       .expect(400)
     expect(res.body.error).toBe('Not a metered model')
   })
@@ -116,10 +133,11 @@ describe('[COMP:api/model-menu] metered estimate + profiles CRUD', () => {
 describe('[COMP:api/model-menu] workspace model defaults', () => {
   const WID = '00000000-0000-0000-0000-000000000001'
 
-  it('returns defaults in the menu, hiding one whose profile lost its key', async () => {
+  it('returns defaults in the menu, hiding keyless-profile and legacy curated pins', async () => {
     // 'not-a-model' stands in for an alias whose provider key is gone: it is
     // absent from the metered menu, so its profile — and any default pointing
-    // at that profile — hides with it (L12).
+    // at that profile — hides with it (L12). Flash 3.5 is a legacy Max row
+    // after the 3.6 cutover and must also fall through to the registry default.
     profiles.list.mockResolvedValue([
       { id: 'p-visible', workspaceId: WID, name: 'deep', modelAlias: 'deepseek-v4-pro', toolRounds: 100, thinking: null },
       { id: 'p-hidden', workspaceId: WID, name: 'gone', modelAlias: 'not-a-model', toolRounds: 50, thinking: null },
@@ -127,6 +145,7 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
     modelDefaults.list.mockResolvedValue([
       { workspaceId: WID, modelClass: 'max', modelAlias: null, meteredProfileId: 'p-visible', updatedAt: 'now' },
       { workspaceId: WID, modelClass: 'research', modelAlias: null, meteredProfileId: 'p-hidden', updatedAt: 'now' },
+      { workspaceId: WID, modelClass: 'max', modelAlias: 'gemini-3.5-flash', meteredProfileId: null, updatedAt: 'now' },
     ])
     const res = await request(makeApp()).get(`/api/models/menu?workspaceId=${WID}`).expect(200)
     expect(res.body.defaults).toEqual([
@@ -138,7 +157,7 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
     getRole.mockResolvedValue('member')
     await request(makeApp())
       .put(`/api/workspaces/${WID}/model-defaults/max`)
-      .send({ modelAlias: 'gemini-3.5-flash' })
+      .send({ modelAlias: 'gemini-3.6-flash' })
       .expect(403)
     await request(makeApp()).delete(`/api/workspaces/${WID}/model-defaults/max`).expect(403)
     expect(modelDefaults.setCurated).not.toHaveBeenCalled()
@@ -146,12 +165,12 @@ describe('[COMP:api/model-menu] workspace model defaults', () => {
 
   it('sets a curated pin for an admin and maps cross-class rejection to 400', async () => {
     getRole.mockResolvedValue('admin')
-    modelDefaults.setCurated.mockResolvedValue({ workspaceId: WID, modelClass: 'max', modelAlias: 'gemini-3.5-flash', meteredProfileId: null, updatedAt: 'now' })
+    modelDefaults.setCurated.mockResolvedValue({ workspaceId: WID, modelClass: 'max', modelAlias: 'gemini-3.6-flash', meteredProfileId: null, updatedAt: 'now' })
     const ok = await request(makeApp())
       .put(`/api/workspaces/${WID}/model-defaults/max`)
-      .send({ modelAlias: 'gemini-3.5-flash' })
+      .send({ modelAlias: 'gemini-3.6-flash' })
       .expect(200)
-    expect(ok.body.default.modelAlias).toBe('gemini-3.5-flash')
+    expect(ok.body.default.modelAlias).toBe('gemini-3.6-flash')
 
     modelDefaults.setCurated.mockRejectedValue(new Error("model-default: 'qwen3.7-max' is not an active curated menu model of class 'max'"))
     const bad = await request(makeApp())

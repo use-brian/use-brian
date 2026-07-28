@@ -43,7 +43,7 @@ function recordedModelId(requestModel: string, apiModelId: string): string {
 type GeminiPart = {
   text?: string
   functionCall?: { name: string; args?: Record<string, unknown>; id?: string }
-  functionResponse?: { name: string; response: Record<string, unknown> }
+  functionResponse?: { name: string; id?: string; response: Record<string, unknown> }
   inlineData?: { mimeType: string; data: string }
   thoughtSignature?: string
   thought?: boolean
@@ -140,7 +140,9 @@ function messagesToGeminiParts(messages: Message[]): GeminiPart[] {
           // persisted signature — without this the API rejects the request
           // with "Function call is missing a thought_signature in
           // functionCall parts".
-          const part: GeminiPart = { functionCall: { name: block.name, args: block.input } }
+          const part: GeminiPart = {
+            functionCall: { name: block.name, args: block.input, id: block.id },
+          }
           if (block.providerSignature) part.thoughtSignature = block.providerSignature
           parts.push(part)
           break
@@ -149,6 +151,7 @@ function messagesToGeminiParts(messages: Message[]): GeminiPart[] {
           parts.push({
             functionResponse: {
               name: block.name,
+              id: block.toolUseId,
               response: { result: block.content },
             },
           })
@@ -277,6 +280,38 @@ export function stripNonInputParts(contents: GeminiContent[]): GeminiContent[] {
     )
   }
   return cleaned
+}
+
+/**
+ * Gemini 3.6+ rejects a request whose last non-empty content has role
+ * `model`. The query loop normally appends a user/function-response turn
+ * before every generation; this is the provider-boundary safety net for a
+ * malformed persisted/stateless transcript.
+ */
+export function normalizeGeminiRequestContents(
+  contents: GeminiContent[],
+  modelId: string,
+): GeminiContent[] {
+  const cleaned = stripNonInputParts(contents)
+  if (!usesGemini36RequestContract(modelId)) return cleaned
+
+  let end = cleaned.length
+  while (end > 0 && cleaned[end - 1]?.role === 'model') end--
+  if (end === cleaned.length) return cleaned
+
+  console.warn(
+    `[gemini] stripped ${cleaned.length - end} trailing model-prefill turn(s) for ${modelId}. ` +
+    `Gemini 3.6+ requires the final non-empty request turn to be user/function-response.`,
+  )
+  return cleaned.slice(0, end)
+}
+
+function usesGemini36RequestContract(modelId: string): boolean {
+  const match = modelId.toLowerCase().match(/(?:^|\/)gemini-(\d+)(?:\.(\d+))?-/)
+  if (!match) return false
+  const major = Number(match[1])
+  const minor = Number(match[2] ?? 0)
+  return major > 3 || (major === 3 && minor >= 6)
 }
 
 function toToolDeclarations(tools: ToolDefinition[]): GeminiFunctionDeclaration[] {
@@ -546,7 +581,8 @@ function buildRequest(
   // Universal choke point: every request (stateless stream() AND stateful
   // session path) is assembled here, so enforce the input-part contract once,
   // for all of them. Drops reasoning / content-less parts that would 400.
-  const safeContents = stripNonInputParts(contents)
+  const usesLatestContract = usesGemini36RequestContract(modelId)
+  const safeContents = normalizeGeminiRequestContents(contents, modelId)
 
   const toolEntries: GeminiToolEntry[] = []
   if (options.tools?.length) {
@@ -572,7 +608,12 @@ function buildRequest(
     } : {}),
     generationConfig: {
       maxOutputTokens: options.maxTokens,
-      temperature: options.temperature,
+      // Gemini 3.6+ deprecates and ignores sampling parameters; future
+      // generations reject them. Preserve the existing override only for
+      // older models whose decoding contract still supports it.
+      ...(!usesLatestContract && options.temperature !== undefined
+        ? { temperature: options.temperature }
+        : {}),
       // JSON output. Only when the caller asked for it AND no tools are
       // declared — Gemini rejects responseMimeType together with function
       // declarations.
@@ -674,7 +715,8 @@ async function* convertStreamChunks(
       }
       if (part.functionCall) {
         hasToolCalls = true
-        const id = `call_${++toolCallCounter.value}`
+        const fallbackId = `call_${++toolCallCounter.value}`
+        const id = part.functionCall.id ?? fallbackId
         yield { chunk: { type: 'tool_use_start', id, name: part.functionCall.name } }
         yield { chunk: { type: 'tool_use_delta', id, input: JSON.stringify(part.functionCall.args ?? {}) } }
         yield {
@@ -872,7 +914,8 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
               }
               if (part.functionCall) {
                 hasToolCalls = true
-                const id = `call_${++toolCallCounter.value}`
+                const fallbackId = `call_${++toolCallCounter.value}`
+                const id = part.functionCall.id ?? fallbackId
                 yield { type: 'tool_use_start', id, name: part.functionCall.name }
                 yield { type: 'tool_use_delta', id, input: JSON.stringify(part.functionCall.args ?? {}) }
                 // Carry thoughtSignature through to the accumulator → tool_use
@@ -884,7 +927,9 @@ export function createGeminiProvider(keyOrTransport: string | GoogleTransport | 
                   id,
                   ...(part.thoughtSignature ? { providerSignature: part.thoughtSignature } : {}),
                 }
-                const fcPart: GeminiPart = { functionCall: part.functionCall }
+                const fcPart: GeminiPart = {
+                  functionCall: { ...part.functionCall, id },
+                }
                 if (part.thoughtSignature) fcPart.thoughtSignature = part.thoughtSignature
                 accumulatedParts.push(fcPart)
               }

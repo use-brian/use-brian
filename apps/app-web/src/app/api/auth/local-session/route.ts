@@ -36,6 +36,7 @@ import {
 import { primaryAuthUrl } from "@/lib/primary-auth";
 import { isOssEdition } from "@/lib/edition";
 import { sanitizeNext } from "@/lib/oss-entry";
+import { authorizeCloudflareOwner } from "@/lib/cloudflare-access";
 
 // Same resolution as the app-web OAuth callback + refresh bridges:
 // server-side `API_URL`, defaulting to the local dev API.
@@ -53,6 +54,19 @@ export async function GET(request: Request) {
   }
 
   try {
+    const ownerAuthorization = await authorizeCloudflareOwner(request);
+    if (!ownerAuthorization.ok) {
+      if (ownerAuthorization.status === 503) {
+        console.error(
+          "[/api/auth/local-session] Cloudflare Access owner configuration is invalid",
+        );
+      }
+      return NextResponse.json(
+        { error: ownerAuthorization.error },
+        { status: ownerAuthorization.status },
+      );
+    }
+
     const backendRes = await fetch(new URL(`${API_URL}/auth/local-session`), {
       method: "POST",
     });

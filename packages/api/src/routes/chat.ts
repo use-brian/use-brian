@@ -3573,10 +3573,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       // That's the "5 free researches give a real taste of the deep mode"
       // wedge — once exhausted the user upgrades to keep using it.
       //
-      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.5):
+      // Why Pro 3.1 specifically (vs the default Max model, Flash 3.6):
       // Research is reasoning-bound — multi-hop synthesis across web sources
       // is where Pro 3.1 keeps its 3–8 pp lead on GPQA / ARC-AGI-2 / MMLU-Pro.
-      // The default Max model (Flash 3.5) wins on agentic / coding / tool-use
+      // The default Max model (Flash 3.6) wins on agentic / coding / tool-use
       // but underperforms on this specific axis. The `research` alias forces
       // the resolver to Pro 3.1 regardless of the session's requested tier.
       //

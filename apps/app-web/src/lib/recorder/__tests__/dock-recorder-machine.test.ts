@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  COMPUTER_AUDIO_PREFERENCE_KEY,
+  readComputerAudioPreference,
   recorderTransition,
+  shouldCaptureComputerAudio,
+  writeComputerAudioPreference,
   type RecorderEvent,
   type RecorderPhase,
 } from "../use-dock-recorder";
@@ -105,5 +109,55 @@ describe("[COMP:app-web/dock-recorder] Recorder transition machine", () => {
     expect(recorderTransition(IDLE, { type: "release", heldMs: 100 }).effect).toBeNull();
     expect(recorderTransition({ kind: "finishing" }, { type: "press" }).effect).toBeNull();
     expect(recorderTransition({ kind: "finishing" }, { type: "finished" }).phase.kind).toBe("idle");
+  });
+});
+
+describe("[COMP:app-web/dock-recorder] Computer-audio preference", () => {
+  it("defaults on, preserves an explicit off, and treats malformed values as the upgrade default", () => {
+    const getItem = vi.fn<(key: string) => string | null>()
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce("0")
+      .mockReturnValueOnce("unexpected");
+    const storage = { getItem, setItem: vi.fn() };
+
+    expect(readComputerAudioPreference(storage)).toBe(true);
+    expect(readComputerAudioPreference(storage)).toBe(false);
+    expect(readComputerAudioPreference(storage)).toBe(true);
+    expect(getItem).toHaveBeenCalledWith(COMPUTER_AUDIO_PREFERENCE_KEY);
+  });
+
+  it("writes one canonical marker and tolerates blocked device storage", () => {
+    const setItem = vi.fn();
+    const storage = { getItem: vi.fn(), setItem };
+    writeComputerAudioPreference(false, storage);
+    writeComputerAudioPreference(true, storage);
+    expect(setItem.mock.calls).toEqual([
+      [COMPUTER_AUDIO_PREFERENCE_KEY, "0"],
+      [COMPUTER_AUDIO_PREFERENCE_KEY, "1"],
+    ]);
+
+    expect(() =>
+      readComputerAudioPreference({
+        getItem: () => {
+          throw new Error("blocked");
+        },
+        setItem: vi.fn(),
+      }),
+    ).not.toThrow();
+    expect(() =>
+      writeComputerAudioPreference(false, {
+        getItem: vi.fn(),
+        setItem: () => {
+          throw new Error("blocked");
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  it("requires both desktop capability and the user's remembered choice", () => {
+    expect(shouldCaptureComputerAudio(true, true)).toBe(true);
+    expect(shouldCaptureComputerAudio(true, false)).toBe(false);
+    expect(shouldCaptureComputerAudio(false, true)).toBe(false);
+    expect(shouldCaptureComputerAudio(undefined, true)).toBe(false);
   });
 });

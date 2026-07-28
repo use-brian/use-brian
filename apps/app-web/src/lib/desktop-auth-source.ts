@@ -31,6 +31,12 @@ interface DesktopTokens {
  * by the bundled app.
  */
 interface DesktopBridge {
+  /**
+   * The shell can provide a whole-computer playback stream for the dock
+   * recorder. New macOS/Windows shells expose true; old shells and browsers
+   * omit it, preserving microphone-only capture during version skew.
+   */
+  systemAudioCapture?: boolean;
   signIn: () => void;
   /** Local-target marker: include deployment-gateway cookies on API REST/SSE. */
   gatewayCredentials?: boolean;

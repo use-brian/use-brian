@@ -332,12 +332,19 @@ export function createMcpSearchTools(params: {
     .join('; ')
 
   const totalTools = index.entries.length
+  const hasKnowledgeSource = index.serverSummaries.has('knowledge')
+  const searchScope = hasKnowledgeSource
+    ? 'connected services and the workspace knowledge base (KB)'
+    : 'connected services'
+  const queryGuidance = hasKnowledgeSource
+    ? 'Search for the capability you need, not the underlying entry name (e.g. "search knowledge base", "browse knowledge base", "search proposals").'
+    : 'Search for the capability you need, not the underlying data (e.g. "get DRep voting history", "search proposals").'
 
   const searchTool = buildTool({
     name: 'mcp_search',
-    description: `Search across ${totalTools} tools from connected services. Returns matching tools with descriptions and parameter schemas. Connected: ${connectorList}.`,
+    description: `Search across ${totalTools} tools from ${searchScope}. This searches available tool capabilities, not the underlying user data. Returns matching tools with descriptions and parameter schemas. Available sources: ${connectorList}.`,
     inputSchema: z.object({
-      query: z.string().describe('Search query — describe what you want to do (e.g. "get DRep voting history", "search proposals")'),
+      query: z.string().describe(queryGuidance),
     }),
     isConcurrencySafe: true,
     isReadOnly: true,

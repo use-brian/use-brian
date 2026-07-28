@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { parseLastCookie } from "@/lib/auth-cookies";
 import { loopbackRedirectBase } from "@/lib/desktop-loopback";
+import {
+  buildDelegatedLoginUrl,
+  primaryAuthUrl,
+} from "@/lib/primary-auth";
 
 /**
  * Desktop (Electron) sign-in bridge — the browser side of the RFC 8252 + PKCE
@@ -54,6 +58,33 @@ function redirectToApp(
   });
 }
 
+/**
+ * Delegate interactive sign-in to the canonical auth primary in hosted
+ * environments. The absolute return URL is the app-origin bridge itself, so
+ * both Google and email magic-link sign-in resume the same PKCE handoff.
+ *
+ * Dev/OSS have no primary: keep their local `/login` compatibility entry,
+ * which now server-redirects to localhost auth or the local-owner session and
+ * never renders the retired Google-only page.
+ */
+function redirectToLogin(
+  requestUrl: URL,
+  returnUrl: URL,
+  opts: { addAccount?: boolean } = {},
+): NextResponse {
+  const primary = primaryAuthUrl();
+  if (primary) {
+    return NextResponse.redirect(
+      buildDelegatedLoginUrl(primary, returnUrl.toString(), opts),
+    );
+  }
+
+  const loginUrl = new URL("/login", requestUrl);
+  loginUrl.searchParams.set("next", `${returnUrl.pathname}${returnUrl.search}`);
+  if (opts.addAccount) loginUrl.searchParams.set("addAccount", "1");
+  return NextResponse.redirect(loginUrl);
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const challenge = url.searchParams.get("challenge") ?? "";
@@ -73,10 +104,7 @@ export async function GET(request: Request) {
   if (url.searchParams.get("addAccount") === "1") {
     const ret = new URL(url);
     ret.searchParams.delete("addAccount");
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("addAccount", "1");
-    loginUrl.searchParams.set("next", `/desktop/auth${ret.search}`);
-    return NextResponse.redirect(loginUrl);
+    return redirectToLogin(url, ret, { addAccount: true });
   }
 
   const accessToken = parseLastCookie(request.headers.get("cookie") ?? "", "access_token");
@@ -84,9 +112,7 @@ export async function GET(request: Request) {
   // No browser session: send the user through normal login, returning here. The
   // full query (challenge + redirect + state) rides in `next` so it survives.
   if (!accessToken) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("next", `/desktop/auth${url.search}`);
-    return NextResponse.redirect(loginUrl);
+    return redirectToLogin(url, url);
   }
 
   try {
@@ -102,9 +128,7 @@ export async function GET(request: Request) {
 
     if (res.status === 401) {
       // Access token expired between page loads — re-auth, then return here.
-      const loginUrl = new URL("/login", request.url);
-      loginUrl.searchParams.set("next", `/desktop/auth${url.search}`);
-      return NextResponse.redirect(loginUrl);
+      return redirectToLogin(url, url);
     }
     if (!res.ok) {
       return redirectToApp({ error: "mint_failed" }, loopbackBase, state);

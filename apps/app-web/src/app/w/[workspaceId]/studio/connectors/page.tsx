@@ -69,6 +69,10 @@ import { useWorkspaces } from "@/contexts/workspace-context";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { groupConnectors } from "@/lib/connector-groups";
 import { connectorRemovalConfirmationModel } from "@/lib/connector-removal-confirmation";
+import {
+  isPatConnector,
+  resolveConnectorAddAnotherFlow,
+} from "@/lib/connector-add-another";
 import { cn } from "@/lib/utils";
 import { OFFICIAL_OAUTH_SCOPES, OFFICIAL_CONNECTOR_TOOLS, type ConnectorAuthType } from "@use-brian/shared/builtin-connectors";
 import { BUILTIN_PRIMITIVE_CONNECTOR_IDS, OFFICIAL_CONNECTORS } from "@use-brian/shared/connector-registry";
@@ -108,9 +112,6 @@ const OAUTH_SCOPES_WITH_EMAIL: Record<string, string[]> = Object.fromEntries(
     ["https://www.googleapis.com/auth/userinfo.email", ...scopes],
   ]),
 );
-
-/** Connectors that authenticate via a Personal Access Token (not OAuth). */
-const PAT_CONNECTORS = new Set(["github"]);
 
 /**
  * OAuth connectors whose DESKTOP connect is routed through the Electron shell's
@@ -699,6 +700,11 @@ function ConnectorsList() {
   const [localDirError, setLocalDirError] = useState<string | null>(null);
 
   const [showCliForm, setShowCliForm] = useState<string | null>(null);
+  const [newCliLabel, setNewCliLabel] = useState("");
+  const [newCliBinaryPath, setNewCliBinaryPath] = useState("");
+  const [newCliArgs, setNewCliArgs] = useState("");
+  const [newCliCwd, setNewCliCwd] = useState("");
+  const [newCliError, setNewCliError] = useState<string | null>(null);
   const [cliLabel, setCliLabel] = useState("");
   const [cliBinaryPath, setCliBinaryPath] = useState("");
   const [cliArgs, setCliArgs] = useState("");
@@ -1094,7 +1100,7 @@ function ConnectorsList() {
     setConnecting(rid);
 
     // PAT connectors — show inline token input instead of connecting immediately
-    if (PAT_CONNECTORS.has(id)) {
+    if (isPatConnector(id)) {
       setShowPatInput(rid);
       setConnecting(null);
       return;
@@ -1127,8 +1133,11 @@ function ConnectorsList() {
 
     if (id === "cli") {
       setShowCliForm(rid);
-      setCliLabel(c.label ?? "");
-      setCliError(null);
+      setNewCliLabel(c.label ?? "");
+      setNewCliBinaryPath("");
+      setNewCliArgs("");
+      setNewCliCwd("");
+      setNewCliError(null);
       setConnecting(null);
       return;
     }
@@ -1237,17 +1246,18 @@ function ConnectorsList() {
 
   // Connect ANOTHER account for a provider that already has one.
   async function handleAddAnother(c: Connector) {
-    if (c.id === "cli") {
+    const flow = resolveConnectorAddAnotherFlow(c);
+    if (flow === "cli-form") {
       setShowCliForm(rowId(c));
-      setCliLabel("");
-      setCliBinaryPath("");
-      setCliArgs("");
-      setCliCwd("");
-      setCliError(null);
+      setNewCliLabel("");
+      setNewCliBinaryPath("");
+      setNewCliArgs("");
+      setNewCliCwd("");
+      setNewCliError(null);
       setSelected(rowId(c));
       return;
     }
-    if (PAT_CONNECTORS.has(c.id)) {
+    if (flow === "pat-form") {
       // GitHub PAT → inline label + token form (createNew).
       setAddAnotherFor(c.id);
       setAddLabel("");
@@ -1255,9 +1265,16 @@ function ConnectorsList() {
       setSelected(rowId(c));
       return;
     }
-    if (c.oauthRequired) {
+    if (flow === "imap-form") {
+      // Company Email uses its existing inline credentials form. The connect
+      // route keys on address: a new address adds an instance, while the same
+      // address intentionally reconnects that mailbox.
+      await handleConnect(c, { addAnother: true });
+      return;
+    }
+    if (flow === "oauth") {
       // Notion / Fathom → OAuth with the `:add` intent.
-      handleConnect(c, { addAnother: true });
+      await handleConnect(c, { addAnother: true });
       return;
     }
     // Directory remote MCP → create a fresh instance, then refresh.
@@ -1676,25 +1693,25 @@ function ConnectorsList() {
   }
 
   async function handleSaveCli(c: Connector) {
-    if (!cliLabel.trim() || !cliBinaryPath.trim()) return;
+    if (!newCliLabel.trim() || !newCliBinaryPath.trim()) return;
     const rid = rowId(c);
     setConnecting(rid);
-    setCliError(null);
+    setNewCliError(null);
     try {
       const res = await authFetch(`${API_URL}/api/connectors/cli/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          label: cliLabel.trim(),
-          binaryPath: cliBinaryPath.trim(),
-          args: cliArgs.trim() ? cliArgs.trim().split(/\s+/) : undefined,
-          cwd: cliCwd.trim() || undefined,
+          label: newCliLabel.trim(),
+          binaryPath: newCliBinaryPath.trim(),
+          args: newCliArgs.trim() ? newCliArgs.trim().split(/\s+/) : undefined,
+          cwd: newCliCwd.trim() || undefined,
         }),
       });
       if (res.ok) {
         const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
         setShowCliForm(null);
-        setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd("");
+        setNewCliLabel(""); setNewCliBinaryPath(""); setNewCliArgs(""); setNewCliCwd("");
         fetchConnectors();
         if (data.connectorInstanceId) {
           setSelected(data.connectorInstanceId);
@@ -1702,10 +1719,10 @@ function ConnectorsList() {
         }
       } else {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setCliError(data.error ?? tc.cli.errGeneric);
+        setNewCliError(data.error ?? tc.cli.errGeneric);
       }
     } catch {
-      setCliError(tc.cli.errGeneric);
+      setNewCliError(tc.cli.errGeneric);
     }
     setConnecting(null);
   }
@@ -3161,44 +3178,44 @@ function ConnectorsList() {
                     <input
                       type="text"
                       placeholder={tc.cli.labelPlaceholder}
-                      value={cliLabel}
-                      onChange={(e) => setCliLabel(e.target.value)}
+                      value={newCliLabel}
+                      onChange={(e) => setNewCliLabel(e.target.value)}
                       className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                       autoFocus
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.pathPlaceholder}
-                      value={cliBinaryPath}
-                      onChange={(e) => setCliBinaryPath(e.target.value)}
+                      value={newCliBinaryPath}
+                      onChange={(e) => setNewCliBinaryPath(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.argsPlaceholder}
-                      value={cliArgs}
-                      onChange={(e) => setCliArgs(e.target.value)}
+                      value={newCliArgs}
+                      onChange={(e) => setNewCliArgs(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.cwdPlaceholder}
-                      value={cliCwd}
-                      onChange={(e) => setCliCwd(e.target.value)}
+                      value={newCliCwd}
+                      onChange={(e) => setNewCliCwd(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <p className="text-[11px] text-muted-foreground">{tc.cli.pathNote}</p>
-                    {cliError && <p className="text-xs text-destructive">{cliError}</p>}
+                    {newCliError && <p className="text-xs text-destructive">{newCliError}</p>}
                     <div className="flex gap-2">
                       <button
-                        onClick={() => { setShowCliForm(null); setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd(""); setCliError(null); }}
+                        onClick={() => { setShowCliForm(null); setNewCliLabel(""); setNewCliBinaryPath(""); setNewCliArgs(""); setNewCliCwd(""); setNewCliError(null); }}
                         className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
                       >
                         {tc.cancel}
                       </button>
                       <button
                         onClick={() => handleSaveCli(sel)}
-                        disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid}
+                        disabled={!newCliLabel.trim() || !newCliBinaryPath.trim() || connecting === rid}
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.cli.connectingBtn : tc.cli.connectBtn}
@@ -3235,6 +3252,9 @@ function ConnectorsList() {
                     {!imapDetecting && imapPreset?.presetId === "alimail" && (
                       <p className="text-[11px] text-primary">{tc.imap.detectedAlimail}</p>
                     )}
+                    {!imapDetecting && imapPreset?.presetId === "gmail" && (
+                      <p className="text-[11px] text-primary">{tc.imap.detectedGmail}</p>
+                    )}
                     {!imapDetecting && imapResolved && !imapPreset && (
                       <p className="text-[11px] text-muted-foreground">{tc.imap.notDetected}</p>
                     )}
@@ -3255,7 +3275,11 @@ function ConnectorsList() {
                     </button>
                     {imapShowHelp && (
                       <p className="text-[11px] text-muted-foreground">
-                        {imapPreset?.presetId === "alimail" ? tc.imap.passwordHelpAlimail : tc.imap.passwordHelpGeneric}
+                        {imapPreset?.presetId === "alimail"
+                          ? tc.imap.passwordHelpAlimail
+                          : imapPreset?.presetId === "gmail"
+                            ? tc.imap.passwordHelpGmail
+                            : tc.imap.passwordHelpGeneric}
                       </p>
                     )}
                     {!imapShowAdvanced && (

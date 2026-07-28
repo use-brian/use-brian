@@ -3074,9 +3074,8 @@ export function FloatingChat({
       </button>
       <DockRecorderButton
         rec={recorder}
+        variant="floating"
         className={cn(
-          "h-10 w-10 rounded-full border border-border bg-background/90 shadow-lg backdrop-blur",
-          "text-foreground/70 hover:bg-accent",
           "transition-[opacity,transform] duration-200 ease-out",
           expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
         )}

@@ -20,8 +20,10 @@ import {
   registryRow,
   menuForClass,
   activeForClass,
+  isRegistryModelAvailable,
   type ModelClass,
   type ModelTier,
+  type ProviderAvailability,
 } from '@use-brian/shared/model-registry'
 import { isOssEdition } from './edition.js'
 
@@ -59,12 +61,46 @@ export const BACKGROUND_MODEL = 'gemini-3.1-flash-lite'
  */
 export function ensureServableModel(
   model: string,
-  configuredProviders: ReadonlySet<string>,
+  configuredProviders: ProviderAvailability,
 ): string {
   const row = registryRow(model)
-  if (!row || configuredProviders.has(row.provider)) return model
+  if (!row) return model
+  const rowAvailable = isRegistryModelAvailable(row, configuredProviders)
+  const preferredProvider = normalizePreferredProvider(configuredProviders.preferredProvider)
+  if (
+    rowAvailable &&
+    (
+      !row.chatTierKey ||
+      !preferredProvider ||
+      preferredProvider === row.provider ||
+      !configuredProviders.has(preferredProvider)
+    )
+  ) {
+    return model
+  }
+  // A connected Codex provider with a missing model means an entitlement was
+  // removed from the live account catalog. Preserve the explicit id so the
+  // router returns the reconnect/reselect error; never silently downgrade a
+  // subscription model after the user selected it.
+  if (row.provider === 'openai-codex' && configuredProviders.has(row.provider)) {
+    return model
+  }
 
   const sameClass = menuForClass(row.class, configuredProviders)
+  if (preferredProvider) {
+    const preferredTier = sameClass.find(
+      (candidate) =>
+        candidate.provider === preferredProvider &&
+        candidate.tier === row.tier,
+    )
+    if (preferredTier) return preferredTier.alias
+    const preferredClass = sameClass.find(
+      (candidate) => candidate.provider === preferredProvider,
+    )
+    if (preferredClass) return preferredClass.alias
+  }
+  const sameTier = sameClass.find((candidate) => candidate.tier === row.tier)
+  if (sameTier) return sameTier.alias
   if (sameClass.length > 0) return sameClass[0].alias
 
   // Background lanes (auto-title, topic/research classifiers, session-state
@@ -88,12 +124,18 @@ export function ensureServableModel(
   return model
 }
 
+function normalizePreferredProvider(provider: string | null | undefined): string | null {
+  if (!provider || provider === 'auto') return null
+  if (provider === 'dashscope-intl') return 'openai-compat:dashscope-intl'
+  return provider
+}
+
 /**
  * The servable background-lane id for a request, given boot's configured
  * providers. `undefined` providers (a caller with no boot context) keeps the
  * literal, which is what the pre-substitution code did.
  */
-export function backgroundModelFor(configuredProviders?: ReadonlySet<string>): string {
+export function backgroundModelFor(configuredProviders?: ProviderAvailability): string {
   return configuredProviders ? ensureServableModel(BACKGROUND_MODEL, configuredProviders) : BACKGROUND_MODEL
 }
 
@@ -149,10 +191,10 @@ export function isStandardTier(model: string): boolean {
 export const PRO_TIER_MODELS: ReadonlySet<string> = tierModelIds('pro')
 
 /**
- * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.5,
- * plus the bare `gemini-3.1-pro-preview` legacy row (prior Max default +
- * pre-2026-06-02 research turns billed as Max — historical rows never
- * reprice). Derived from registry rows with `tier: 'max'`.
+ * Aliases (and resolved provider ids) for the Max tier — Gemini Flash 3.6,
+ * plus the Flash 3.5 and bare `gemini-3.1-pro-preview` legacy rows (prior Max
+ * defaults + pre-2026-06-02 research turns billed as Max — historical rows
+ * never reprice). Derived from registry rows with `tier: 'max'`.
  */
 export const MAX_TIER_MODELS: ReadonlySet<string> = tierModelIds('max')
 

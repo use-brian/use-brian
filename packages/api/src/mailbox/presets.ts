@@ -1,7 +1,8 @@
 /**
  * MX-record preset resolution for the mailbox connector (D1: generic `imap`
- * provider; AliMail is a preset detected from the address domain's MX at
- * connect time — never a branded connector).
+ * provider; reviewed client presets are detected from the address domain's MX
+ * at connect time — never branded connectors and never the inbound exchange
+ * copied blindly into an IMAP/SMTP field).
  *
  * [COMP:api/mailbox-imap-client]
  */
@@ -18,15 +19,33 @@ const ALIMAIL_PRESET: MailboxPreset = {
   smtpPort: 465,
 }
 
+const GMAIL_PRESET: MailboxPreset = {
+  presetId: 'gmail',
+  label: 'Gmail / Google Workspace',
+  imapHost: 'imap.gmail.com',
+  imapPort: 993,
+  smtpHost: 'smtp.gmail.com',
+  smtpPort: 465,
+}
+
 /**
  * Match an MX exchange hostname to a preset. `qiye.aliyun.com` is the current
  * Alibaba enterprise-mail MX; `mxhichina.com` is its long-lived legacy alias
- * (same endpoints). Exported for tests.
+ * (same endpoints). Gmail's own domain currently uses
+ * `[altN.]gmail-smtp-in.l.google.com`, while Google Workspace domains use
+ * `[altN.]aspmx.l.google.com`; both share the documented Gmail client
+ * endpoints. Exported for tests.
  */
 export function presetForMxHost(exchange: string): MailboxPreset | null {
   const host = exchange.trim().toLowerCase().replace(/\.$/, '')
   if (/(^|\.)qiye\.aliyun\.com$/.test(host) || /(^|\.)mxhichina\.com$/.test(host)) {
     return ALIMAIL_PRESET
+  }
+  if (
+    /(^|\.)gmail-smtp-in\.l\.google\.com$/.test(host) ||
+    /(^|\.)aspmx\.l\.google\.com$/.test(host)
+  ) {
+    return GMAIL_PRESET
   }
   return null
 }

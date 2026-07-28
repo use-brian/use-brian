@@ -41,17 +41,19 @@ record. You stay on the decisions. It handles the rest.
 
 ## Quick start
 
-**Prerequisites:** Node 22+, pnpm 10+, and a free Gemini API key
-([get one here](https://aistudio.google.com/apikey)).
+**Prerequisites:** Node 22+, pnpm 10+, and either an eligible ChatGPT
+subscription or one supported model credential. The launcher offers ChatGPT
+sign-in first; a free Gemini API key
+([get one here](https://aistudio.google.com/apikey)), Vertex AI, and DashScope
+are also supported.
 Recording and video ingestion also requires `ffmpeg` and `ffprobe` on `PATH`
 (`brew install ffmpeg`, `apt install ffmpeg`, or the equivalent for your OS).
 
 ```bash
 git clone https://github.com/use-brian/use-brian.git
 cd use-brian
-export GEMINI_API_KEY=...   # or let the launcher prompt you; persisted under ~/.usebrian/
 pnpm install
-pnpm dev                    # api + canvas + web + Discord/WhatsApp bridges; opens your browser
+pnpm dev                    # choose ChatGPT or an API-key backend; opens your browser
 ```
 
 That is it. There is no step three. The store defaults to an embedded PGLite
@@ -108,9 +110,28 @@ routes, so a cap in the low gigabytes is already generous.
 
 ### Your data stays yours
 
-**0** external services. **1** model key. The brain, the store, and the canvas
-all stay local; the only outbound call Use Brian makes is to the Gemini API with
-your own key. Nothing else about your work leaves your machine.
+The brain, the store, and the canvas stay local. Model requests go only to the
+backend you configure; connectors and upgraded search providers make outbound
+calls only when you opt into them. Your local database and files are not moved
+to a Brian-hosted service.
+
+### Model backends
+
+| Backend | Status | Authentication |
+|---|---|---|
+| Gemini via Google AI Studio | Supported | `GEMINI_API_KEY` |
+| Gemini via Vertex AI | Supported | GCP workload or service-account credentials |
+| Qwen / DeepSeek via DashScope | Supported | `DASHSCOPE_API_KEY` |
+| Claude Haiku outage fallback | Supported as an optional fallback | `ANTHROPIC_API_KEY` |
+| ChatGPT / Codex subscription | **Beta (OSS)** | Sign in with ChatGPT; no API key |
+
+The OSS design for ChatGPT-plan access is public in
+[`docs/plans/chatgpt-codex-oauth.md`](./docs/plans/chatgpt-codex-oauth.md).
+It uses Codex-managed OAuth and live model discovery rather than treating a
+ChatGPT token as an OpenAI API key. The implementation includes the governed
+tool bridge, account-scoped routing, recovery controls, and localized Settings
+surface. It remains Beta until clean-machine browser/device login and live
+quota/revocation release validation passes on the supported OS matrix.
 
 ## How you use it
 

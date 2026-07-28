@@ -139,10 +139,24 @@ import { createDbConnectorActionStore } from './db/connector-actions-store.js'
 import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
+import { contentPlanningRoutes } from './routes/content-planning.js'
+import {
+  injectContentPlanningTools,
+  resolveContentPlanningPrompt,
+  resolveContentPlanningSoul,
+} from './content-planning/host-hooks.js'
+import {
+  getContentDraftTitlePrefix,
+  isDefaultContentDraftTitle,
+} from './db/content-planning-store.js'
 import { createDbMagicLinkStore } from './db/magic-link-store.js'
 import { createSmtpClient, createWorkspaceSmtpTransport } from './email/smtp-client.js'
 import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './routes/chat.js'
-import { menuForClass, registryRow } from '@use-brian/shared/model-registry'
+import {
+  menuForClass,
+  MutableProviderAvailability,
+  registryRow,
+} from '@use-brian/shared/model-registry'
 import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
 import { EXTRACTION_MODEL } from './build-episode-ingestors.js'
 import { createMailboxSyncWorker } from './mailbox/sync-worker.js'
@@ -152,6 +166,12 @@ import { resolveIngestPlaceholders } from './ingest/placeholder-resolver.js'
 import { createMeteredProfileStore } from './db/metered-profile-store.js'
 import { createWorkspaceModelDefaultsStore } from './db/workspace-model-defaults-store.js'
 import { createSessionResumeReplay } from './routes/session-resume-replay.js'
+import {
+  startCodexProviderManager,
+  type CodexProviderManager,
+} from './codex-provider-manager.js'
+import { codexProviderRoutes } from './routes/codex-provider.js'
+import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
 import { homeRoutes } from './routes/home.js'
@@ -436,6 +456,12 @@ import { createCleanupWorker } from './scheduling/cleanup-worker.js'
 import { createCalleeExecutor } from './inter-assistant/executor.js'
 import { deliverToChannel } from './inter-assistant/deliver.js'
 import { query, queryWithRLS, getPool } from './db/client.js'
+import {
+  createSupportDiagnosticsStore,
+  SupportCapsuleBuilder,
+  SupportDiagnosticsCaptureManager,
+  supportDiagnosticRoutes,
+} from './support-diagnostics/index.js'
 
 import type { ChatEpisodeIngestor, BrainEpisodeIngestor } from './ingest-port.js'
 import type { BuildConnectorActionAudit } from './connector-action-port.js'
@@ -472,6 +498,8 @@ export interface OpenApiEnv {
   APP_URL: string
   AUTHED_APP_URL?: string
   FEED_URL?: string
+  /** OSS-only, local support-capsule capture. Hosted compositions leave unset. */
+  SUPPORT_DIAGNOSTICS_ENABLED?: boolean
   /** Optional Cloud Run injected port; falls back to API_URL port / 4000. */
   PORT?: string
   // Voice transcription reuses GEMINI_API_KEY; these toggle/model it.
@@ -968,6 +996,28 @@ export interface BootResult {
 export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult> {
   const env = opts.env
   const ports = opts.ports ?? {}
+  // Content planning is open-core. Hosted hooks layer provider tools and
+  // delivery behavior on top; they never replace the draft cardboard tool.
+  const injectExtraTools: InjectExtraTools = async (ctx) => {
+    await injectContentPlanningTools(ctx)
+    await ports.injectExtraTools?.(ctx)
+  }
+  const resolveExtraSystemPrompt = (session: {
+    mode: string | null
+    channelType: string
+  }): string | null => {
+    const open = resolveContentPlanningPrompt(session)
+    const hosted = ports.resolveExtraSystemPrompt?.(session) ?? null
+    if (!open) return hosted
+    if (!hosted || hosted === open) return open
+    return `${open}\n\n${hosted}`
+  }
+  const resolveAppSoul: ResolveAppSoul = (params) =>
+    ports.resolveAppSoul?.(params) ?? resolveContentPlanningSoul(params)
+  const isPlaceholderTitle =
+    ports.isPlaceholderTitle ?? isDefaultContentDraftTitle
+  const getTitleChannelPrefix =
+    ports.getTitleChannelPrefix ?? getContentDraftTitlePrefix
   const runWorkers = opts.runWorkers ?? true
 
   if (!env.JWT_SECRET) {
@@ -1242,26 +1292,48 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // in menus and be picked as the tier default, then 401 at call time. A
   // pure-Qwen deployment leaves it out entirely.
   const providerInstances: Record<string, LLMProvider> = {}
+  const configuredProviders = new MutableProviderAvailability()
+  configuredProviders.setPreferredProvider(
+    normalizeOssPreferredProvider(process.env.USEBRIAN_PREFERRED_PROVIDER),
+  )
+  let codexProviderManager: CodexProviderManager | undefined
   if (env.GEMINI_API_KEY || env.VERTEX_PROJECT_ID) {
     providerInstances['gemini'] = wrapProvider(createGeminiProvider(geminiTransport))
+    configuredProviders.setStaticProvider('gemini', true)
   }
   if (env.FALLBACK_PROVIDER_ENABLED) {
     if (env.ANTHROPIC_API_KEY) {
       providerInstances['anthropic'] = wrapProvider(createAnthropicProvider({ apiKey: env.ANTHROPIC_API_KEY }))
+      configuredProviders.setStaticProvider('anthropic', true)
     } else {
       console.warn('[provider] FALLBACK_PROVIDER_ENABLED=true but ANTHROPIC_API_KEY is empty — running without the Claude fallback.')
     }
   }
   if (env.DASHSCOPE_API_KEY) {
-    providerInstances[`openai-compat:${DASHSCOPE_INTL_LABEL}`] = wrapProvider(
+    const dashscopeProviderId = `openai-compat:${DASHSCOPE_INTL_LABEL}`
+    providerInstances[dashscopeProviderId] = wrapProvider(
       createOpenAICompatProvider({ apiKey: env.DASHSCOPE_API_KEY, baseURL: dashscopeBaseUrl, label: DASHSCOPE_INTL_LABEL }),
     )
+    configuredProviders.setStaticProvider(dashscopeProviderId, true)
+  }
+  if (isSelfHostedOssEnv()) {
+    try {
+      codexProviderManager = await startCodexProviderManager({
+        availability: configuredProviders,
+        savePreferredProvider: saveLocalProviderPreference,
+      })
+      providerInstances['openai-codex'] = wrapProvider(codexProviderManager.provider)
+    } catch {
+      // Codex is optional: a package/platform/runtime failure disables only
+      // the subscription lane and leaves every API-key provider usable.
+      console.warn('[provider] ChatGPT subscription runtime unavailable — continuing without it.')
+      configuredProviders.setModelCatalog('openai-codex', null)
+    }
   }
   // Selection-surface derivations (model-registry.md L10/L12): which
   // provider keys exist decides which models exist — menus and the chat
   // route's metered gate both consume these, so a keyless model is absent
   // everywhere at once.
-  const configuredProviders: ReadonlySet<string> = new Set(Object.keys(providerInstances))
   const meteredModelsAvailable: ReadonlySet<string> = new Set(
     menuForClass('metered', configuredProviders).map((r) => r.alias),
   )
@@ -1287,6 +1359,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     console.log(`[provider] extraction: ${extractionModel} (${EXTRACTION_MODEL} not servable)`)
   }
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
+    availability: configuredProviders,
+    // Re-evaluate at request time as well as boot. The ChatGPT catalog is
+    // empty until OAuth completes, so boot-selected background/extraction
+    // model ids must be able to move onto the newly available provider
+    // without requiring a Brian restart.
+    resolveModel: (model) => ensureServableModel(model, configuredProviders),
     analytics: {
       onFallback({ primaryModel, fallbackModel, errorKind, errorStatus }) {
         analytics.logEvent({
@@ -1830,8 +1908,8 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     defaultTelegramBotToken: env.TELEGRAM_BOT_TOKEN,
     waConnectorUrl: env.WA_CONNECTOR_URL,
     waConnectorSecret: env.WA_CONNECTOR_SECRET,
-    injectExtraTools: ports.injectExtraTools,
-    resolveAppSoul: ports.resolveAppSoul,
+    injectExtraTools,
+    resolveAppSoul,
     engineHooks: ports.engineHooks,
     savedViewStore,
     // Enables real parallel research-worker fan-out (with worker_runs rows) on
@@ -3317,11 +3395,11 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     checkMeteredSpendCap: ports.meteredBilling?.checkMeteredSpendCap,
     chargeMeteredSurcharge: ports.meteredBilling?.chargeMeteredSurcharge,
     publishSessionEvent,
-    isPlaceholderTitle: ports.isPlaceholderTitle,
-    getTitleChannelPrefix: ports.getTitleChannelPrefix,
-    injectExtraTools: ports.injectExtraTools,
-    resolveExtraSystemPrompt: ports.resolveExtraSystemPrompt,
-    resolveAppSoul: ports.resolveAppSoul,
+    isPlaceholderTitle,
+    getTitleChannelPrefix,
+    injectExtraTools,
+    resolveExtraSystemPrompt,
+    resolveAppSoul,
     engineHooks: ports.engineHooks,
     llmProviderSettingsStore: llmProviderSettingsStore ?? undefined,
     buildWorkspaceProvider: llmProviderSettingsStore
@@ -3456,6 +3534,33 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
     workerRunsStore,
   }))
+
+  let supportDiagnosticsManager: SupportDiagnosticsCaptureManager | undefined
+  if (env.SUPPORT_DIAGNOSTICS_ENABLED) {
+    const supportDiagnosticsStore = createSupportDiagnosticsStore()
+    supportDiagnosticsManager = new SupportDiagnosticsCaptureManager(supportDiagnosticsStore)
+    await supportDiagnosticsManager.start()
+    app.use(
+      '/api/support-diagnostics',
+      requireAuth(env.JWT_SECRET),
+      supportDiagnosticRoutes({
+        store: supportDiagnosticsStore,
+        captureManager: supportDiagnosticsManager,
+        capsuleBuilder: new SupportCapsuleBuilder(supportDiagnosticsStore),
+      }),
+    )
+  }
+
+  // OSS content planning reuses the app-web `/api/distribution/*` wire
+  // contract but contains no provider integration. Hosted mounts its
+  // provider-backed distribution routers later through mountExtraRoutes.
+  if (isOssEdition()) {
+    app.use(
+      '/api/distribution',
+      requireAuth(env.JWT_SECRET),
+      contentPlanningRoutes(),
+    )
+  }
 
   app.use('/api/analytics', optionalAuth(env.JWT_SECRET), analyticsRoutes(analyticsStore))
 
@@ -3910,6 +4015,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     configuredProviders,
     estimateMeteredTurn: ports.meteredBilling?.estimateMeteredTurn,
   }))
+  if (codexProviderManager) {
+    app.use(
+      '/api/local/codex',
+      requireAuth(env.JWT_SECRET),
+      codexProviderRoutes(codexProviderManager),
+    )
+  }
 
   const workflowsRouteOptions: Parameters<typeof workflowsRoutes>[0] = {
     workflowStore,
@@ -5318,7 +5430,9 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     stuckSessionSweeper.stop()
     fileIngestWorker?.stop()
     recordingProcessWorker?.stop()
+    await codexProviderManager?.close()
     if (fileCacheReaper) stopJitteredInterval(fileCacheReaper)
+    await supportDiagnosticsManager?.stop()
     await analytics.shutdown()
     if (server) await new Promise<void>((res) => server!.close(() => res()))
   }
@@ -5329,3 +5443,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 // Re-export getPool so the platform can reuse the same pool accessor for its
 // diagnostic endpoints without re-importing the open db/client.
 export { getPool }
+
+function normalizeOssPreferredProvider(value: string | undefined): string | null {
+  return value === 'gemini' ||
+    value === 'openai-codex' ||
+    value === 'dashscope-intl' ||
+    value === 'auto'
+    ? value
+    : null
+}

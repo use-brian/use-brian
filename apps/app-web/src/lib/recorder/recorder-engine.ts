@@ -1,20 +1,21 @@
 /**
- * Live-capture engine — the thin DOM wrapper over `getUserMedia` +
+ * Live-capture engine — the thin DOM wrapper over capture-source acquisition +
  * `MediaRecorder` (docs/architecture/media/live-capture.md). Everything
  * decision-shaped lives in `recorder-gesture.ts` / `recorder-spool.ts`
  * (pure, node-tested); this file owns the browser objects and stays thin,
  * the same split the feed's `VoiceRecorder` and `recordings-board` use.
  *
- * Lifecycle: `createRecorderEngine()` acquires the mic and starts recording
- * immediately (capture-on-pointer-down — the caller has already decided to
- * record). `latch(spool, meta)` upgrades the capture to crash-durable:
+ * Lifecycle: `createRecorderEngine()` acquires the available audio sources
+ * (mic in browsers; mixed mic + playback in the desktop shell) and starts
+ * recording immediately (capture-on-pointer-down — the caller has already
+ * decided to record). `latch(spool, meta)` upgrades the capture to crash-durable:
  * chunks buffered so far and every chunk after are appended to the spool,
  * best-effort (a spool failure never breaks the in-memory capture).
  * `stop()` yields the assembled blob + the engine-measured duration
  * (wall clock minus paused time — the number the webm patch and the stop
- * fork run on). `cancel()` discards everything and releases the mic.
+ * fork run on). `cancel()` discards everything and releases every input.
  *
- * The level tap (AnalyserNode RMS) is the "is it hearing the room" trust
+ * The level tap (AnalyserNode RMS) is the "is it hearing the call" trust
  * signal the pill meter polls; it is best-effort too (an AudioContext
  * failure degrades to a meter stuck at 0, not a broken capture).
  *
@@ -22,6 +23,7 @@
  */
 
 import { pickRecorderMime } from "./recorder-gesture";
+import { acquireCaptureAudio } from "./audio-mixer";
 import type { SpoolSessionMeta, SpoolStore } from "./recorder-spool";
 
 /** MediaRecorder timeslice — one chunk (and one spool write) per interval. */
@@ -41,8 +43,10 @@ type CaptureResult = { blob: Blob; mime: string; durationMs: number };
 export interface RecorderEngine {
   /** Recorder clock: wall time since start, minus paused time. */
   elapsedMs(): number;
-  /** 0..1 RMS mic level for the live meter; 0 when the tap is unavailable. */
+  /** 0..1 RMS capture-bus level for the live meter; 0 when unavailable. */
   level(): number;
+  /** True when the recorded track contains both mic and computer playback. */
+  includesSystemAudio(): boolean;
   paused(): boolean;
   pause(): void;
   resume(): void;
@@ -58,25 +62,32 @@ export interface RecorderEngine {
   spoolSessionId(): string | null;
   /** Stop and assemble. Resolves once the final chunk has flushed. */
   stop(): Promise<CaptureResult>;
-  /** Discard the capture and release the mic. Safe to call in any state. */
+  /** Discard the capture and release every input. Safe in any state. */
   cancel(): void;
 }
 
 /**
- * Acquire the mic and start capturing. Rejects with the `getUserMedia`
- * error (`NotAllowedError` = denied/dismissed) — the hook maps that to the
- * permission hint. `isSupported` is injectable for the mime ladder.
+ * Acquire the configured sources and start capturing. A mic permission error
+ * remains the `getUserMedia` DOMException; desktop playback failures are
+ * wrapped by `audio-mixer.ts` so the hook can show the correct permission
+ * guidance. `isSupported` is injectable for the mime ladder.
  *
- * `onUnexpectedEnd` fires when the capture dies underneath us — the mic
- * track ends (device unplugged / input switched) or MediaRecorder errors.
+ * `onUnexpectedEnd` fires when the capture dies underneath us — an input
+ * track ends (device unplugged / input switched / loopback lost) or
+ * MediaRecorder errors.
  * Without it a long meeting can turn into a ZOMBIE: the clock keeps
  * ticking while nothing records. It never fires for our own stop/cancel.
  */
 export async function createRecorderEngine(opts?: {
   isSupported?: (mime: string) => boolean;
   onUnexpectedEnd?: () => void;
+  /** Advertised only by new macOS/Windows desktop shells. */
+  includeSystemAudio?: boolean;
 }): Promise<RecorderEngine> {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const captureAudio = await acquireCaptureAudio({
+    includeSystemAudio: opts?.includeSystemAudio === true,
+  });
+  const stream = captureAudio.recordingStream;
   const isSupported =
     opts?.isSupported ??
     ((m: string) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m));
@@ -88,7 +99,9 @@ export async function createRecorderEngine(opts?: {
       audioBitsPerSecond: AUDIO_BITS_PER_SECOND,
     });
   } catch (err) {
-    stream.getTracks().forEach((t) => t.stop());
+    captureAudio.inputStreams.forEach((input) => input.getTracks().forEach((track) => track.stop()));
+    stream.getTracks().forEach((track) => track.stop());
+    void captureAudio.audioContext?.close().catch(() => {});
     throw err;
   }
 
@@ -100,20 +113,26 @@ export async function createRecorderEngine(opts?: {
   const notifyUnexpectedEnd = () => {
     if (!closed) opts?.onUnexpectedEnd?.();
   };
-  stream.getTracks().forEach((t) => t.addEventListener("ended", notifyUnexpectedEnd));
+  captureAudio.inputStreams.forEach((input) => {
+    input.getAudioTracks().forEach((track) => track.addEventListener("ended", notifyUnexpectedEnd));
+  });
   recorder.onerror = notifyUnexpectedEnd;
 
   // ── level tap (best-effort) ──────────────────────────────────────────
-  let analyser: AnalyserNode | null = null;
-  let audioCtx: AudioContext | null = null;
-  try {
-    audioCtx = new AudioContext();
-    const src = audioCtx.createMediaStreamSource(stream);
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 512;
-    src.connect(analyser);
-  } catch {
-    analyser = null;
+  // Desktop mixing already owns an analyser on the final bus. Mic-only keeps
+  // the previous best-effort tap, isolated from the recording stream itself.
+  let analyser: AnalyserNode | null = captureAudio.analyser;
+  let audioCtx: AudioContext | null = captureAudio.audioContext;
+  if (!analyser) {
+    try {
+      audioCtx = new AudioContext();
+      const src = audioCtx.createMediaStreamSource(stream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      src.connect(analyser);
+    } catch {
+      analyser = null;
+    }
   }
   const levelBuf = analyser ? new Uint8Array(analyser.fftSize) : null;
 
@@ -153,7 +172,10 @@ export async function createRecorderEngine(opts?: {
   };
 
   const release = () => {
-    stream.getTracks().forEach((t) => t.stop());
+    captureAudio.inputStreams.forEach((input) =>
+      input.getTracks().forEach((track) => track.stop()),
+    );
+    stream.getTracks().forEach((track) => track.stop());
     void audioCtx?.close().catch(() => {});
   };
 
@@ -171,6 +193,7 @@ export async function createRecorderEngine(opts?: {
       }
       return Math.min(1, Math.sqrt(sum / levelBuf.length) * 3);
     },
+    includesSystemAudio: () => captureAudio.includesSystemAudio,
     paused: () => pausedSince !== null,
     pause() {
       if (recorder.state === "recording") {

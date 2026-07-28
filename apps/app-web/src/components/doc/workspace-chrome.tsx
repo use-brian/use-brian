@@ -38,7 +38,6 @@ import {
   surfaceFromPathname,
 } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
-import { isHostedEdition } from "@/lib/edition";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
@@ -282,11 +281,9 @@ export function WorkspaceChrome({
   }, [workspaceId]);
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
 
-  // Feed availability — every hosted workspace gets the Feed entry in the
-  // operator app-bar (zero-profile visits land on the feed home's
-  // connect-account onboarding state). Only the OSS edition hides it, where
-  // `feed/layout.tsx` 404s the whole subtree.
-  const feedEnabled = isHostedEdition();
+  // Content planning is an operator app in both editions. Hosted-only
+  // platform integration is gated inside the Feed subtree.
+  const feedEnabled = true;
 
   // ── Operator app-bar + sticky Home resolution (operator-apps.ts) ───────
   // The active surface's operator app (Page / Tasks / Feed), or null on

@@ -7,6 +7,7 @@ import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
 import { PlanGate } from "@/components/chrome/plan-gate";
 import { ComputerLivePill } from "@/components/chrome/computer-live-pill";
+import { SupportDiagnosticsIndicator } from "@/components/chrome/support-diagnostics-indicator";
 
 type TeamApiResponse = {
   id: string;
@@ -77,6 +78,9 @@ export default async function WorkspaceLayout(props: {
               floats whenever one of the user's browser tasks is live, from
               any surface under the workspace. */}
           <ComputerLivePill workspaceId={workspaceId} />
+          {/* OSS Support Mode remains visible across every workspace surface
+              while its time-limited local capture is active. */}
+          <SupportDiagnosticsIndicator workspaceId={workspaceId} />
         </div>
       </CustomThemesProvider>
     </WorkspaceContextProvider>

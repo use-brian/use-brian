@@ -30,6 +30,9 @@ const bridge = {
   // gateway-protected origin. The renderer uses this non-secret marker to opt
   // REST/SSE into Chromium credentials so that origin's gateway cookie is sent.
   gatewayCredentials: process.argv.includes("--usebrian-local-target"),
+  // Dock recorder capability. The renderer uses this explicit promise instead
+  // of guessing from a user agent; old shells omit it and remain mic-only.
+  systemAudioCapture: process.platform === "darwin" || process.platform === "win32",
   signIn: () => ipcRenderer.send("Use Brian:sign-in"),
   signOut: () => ipcRenderer.send("Use Brian:sign-out"),
   // The offline landing's "Retry" button asks the shell to reload the app now.
@@ -50,6 +53,20 @@ const bridge = {
   // calls them is shell-owned.
   runLocal: (url) =>
     ipcRenderer.invoke("Use Brian:run-local", typeof url === "string" ? url : null),
+  // Cloudflare Access Managed OAuth progress for the shell-owned local-target
+  // landing. The callback receives status strings only; credentials and
+  // endpoint metadata never cross into the renderer. Return an unsubscribe
+  // function so a future SPA landing can clean up just as safely.
+  onAccessAuthState: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, state) => {
+      if (state === "checking" || state === "browser" || state === "approved") {
+        callback(state);
+      }
+    };
+    ipcRenderer.on("Use Brian:access-auth-state", listener);
+    return () => ipcRenderer.removeListener("Use Brian:access-auth-state", listener);
+  },
   useCloud: () => ipcRenderer.send("Use Brian:use-cloud"),
   // Dock live recording (docs/architecture/media/live-capture.md): app-web
   // signals a latched capture starting/ending so the shell can show/close the

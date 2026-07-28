@@ -26,6 +26,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { WorkspaceLlmKeyBlock } from "./sections/llm-key-block";
+import { CodexProviderCard } from "./sections/codex-provider-card";
 import {
   setWorkspaceDefaultBlueprint,
   setWorkspaceTranscriptionScript,
@@ -1287,6 +1288,7 @@ export function WorkspaceLlmKeySection() {
   return (
     <div className="space-y-6">
       <h2 className="text-lg font-semibold">{t.chrome.settingsModal.workspace.llmKey}</h2>
+      <CodexProviderCard />
       <WorkspaceLlmKeyBlock />
     </div>
   );

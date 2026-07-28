@@ -1,10 +1,22 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   corsAllowsBrowserUpload,
   corsFixHint,
   verifyBucketCorsAtBoot,
   type GcsCorsRule,
 } from '../gcs-cors-check.js'
+
+vi.mock('@google-cloud/storage', () => ({
+  Storage: class {
+    bucket() {
+      return {
+        getMetadata: async () => {
+          throw new Error('storage.buckets.get denied')
+        },
+      }
+    }
+  },
+}))
 
 const ORIGIN = 'https://app.usebrian.ai'
 

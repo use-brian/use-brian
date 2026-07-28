@@ -25,7 +25,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, Kanban, Rows3 } from "lucide-react";
+import { ChevronRight, Kanban, ListChecks, Rows3 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -94,8 +94,11 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 /** Above this many selected rows the surface uses the server bulk endpoint
- *  (one round-trip) instead of the per-row client loop. */
+ *  instead of the per-row client loop. */
 const SERVER_BULK_THRESHOLD = 50;
+/** The server route accepts 1-200 ids per request. The operator list can
+ *  contain 500 rows, so a filter-scoped selection may need three batches. */
+const SERVER_BULK_BATCH_SIZE = 200;
 
 const NONE = "__none__";
 
@@ -169,6 +172,13 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
     () => [...selected].filter((id) => visibleIds.has(id)),
     [selected, visibleIds],
   );
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set([...prev].filter((id) => visibleIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [visibleIds]);
   const toggle = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -179,9 +189,13 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   }, []);
   const allSelected =
     filtered.length > 0 && selectedVisible.length === filtered.length;
+  const selectAllFiltered = useCallback(() => {
+    setSelected(new Set(filtered.map((row) => row.id)));
+  }, [filtered]);
   const toggleAll = useCallback(() => {
-    setSelected(allSelected ? new Set() : new Set(filtered.map((r) => r.id)));
-  }, [allSelected, filtered]);
+    if (allSelected) setSelected(new Set());
+    else selectAllFiltered();
+  }, [allSelected, selectAllFiltered]);
 
   // ── Group collapse ────────────────────────────────────────────────────
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -273,19 +287,39 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         const serverEligible =
           apply.kind === "delete" || apply.serverSet !== null;
         if (ids.length > SERVER_BULK_THRESHOLD && serverEligible) {
-          // Server lane — one round trip, then refetch (supersession ids).
-          const body =
-            apply.kind === "delete"
-              ? ({ action: "delete", ids } as const)
-              : ({ action: "update", ids, set: apply.serverSet! } as const);
-          const result = await bulkTasks(workspaceId, body);
-          if (!("results" in result)) {
-            setBulkError(result.error);
-            return;
+          // Server lane — ≤200 ids per request, then refetch (supersession
+          // ids). A transport failure keeps that batch + every unattempted
+          // id selected while preserving successes from earlier batches.
+          const failed: string[] = [];
+          let requestError: string | null = null;
+          for (
+            let offset = 0;
+            offset < ids.length;
+            offset += SERVER_BULK_BATCH_SIZE
+          ) {
+            const batchIds = ids.slice(offset, offset + SERVER_BULK_BATCH_SIZE);
+            const body =
+              apply.kind === "delete"
+                ? ({ action: "delete", ids: batchIds } as const)
+                : ({
+                    action: "update",
+                    ids: batchIds,
+                    set: apply.serverSet!,
+                  } as const);
+            const result = await bulkTasks(workspaceId, body);
+            if (!("results" in result)) {
+              failed.push(...ids.slice(offset));
+              requestError = result.error;
+              break;
+            }
+            failed.push(
+              ...result.results.filter((row) => !row.ok).map((row) => row.id),
+            );
           }
-          const failed = result.results.filter((r) => !r.ok).map((r) => r.id);
           setSelected(new Set(failed));
-          if (failed.length > 0) {
+          if (requestError) {
+            setBulkError(requestError);
+          } else if (failed.length > 0) {
             setBulkError(
               format(t.bulkPartialFail, {
                 failed: String(failed.length),
@@ -518,6 +552,18 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           <span className="text-[12.5px] font-medium">
             {format(t.selectedCount, { count: String(selectedVisible.length) })}
           </span>
+          {!allSelected && (
+            <button
+              type="button"
+              disabled={bulkBusy}
+              onClick={selectAllFiltered}
+              className="inline-flex h-7 items-center rounded-md px-2 text-[12.5px] font-medium text-primary hover:bg-primary/10 disabled:opacity-50"
+            >
+              {format(t.selectAllFiltered, {
+                count: String(filtered.length),
+              })}
+            </button>
+          )}
           <BulkMenu
             label={t.bulkStatus}
             items={Object.fromEntries(
@@ -672,6 +718,18 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             );
           })}
           <span className="mx-1 hidden h-4 w-px bg-border sm:block" aria-hidden />
+          {filtered.length > 0 && (
+            <button
+              type="button"
+              onClick={selectAllFiltered}
+              className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <ListChecks className="size-3.5" aria-hidden />
+              {format(t.selectAllFiltered, {
+                count: String(filtered.length),
+              })}
+            </button>
+          )}
           <FilterBar
             defs={filterDefs}
             active={{

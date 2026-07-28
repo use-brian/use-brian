@@ -30,7 +30,7 @@ describe("[COMP:app-web/oss-entry] sanitizeNext", () => {
   });
 });
 
-describe("[COMP:app-web/oss-entry] ossSignedOutRedirect", () => {
+describe("[COMP:app-web/local-session-route] ossSignedOutRedirect", () => {
   /**
    * The reported bug: a self-hosted (oss) visitor with no cookie was sent to
    * /login, which in this edition is a Google button with no client ID behind

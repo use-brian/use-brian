@@ -27,6 +27,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n/client";
+import { isHostedEdition } from "@/lib/edition";
 import { cn } from "@/lib/utils";
 import {
   FEED_GROUPS,
@@ -36,7 +37,10 @@ import {
   isConnectableFeedPlatform,
   type FeedPlatform,
 } from "@/lib/feed-nav";
-import { fetchFeedApprovalsCount } from "@/lib/api/feed";
+import {
+  fetchFeedApprovalsCount,
+  fetchFeedDistributionAssistants,
+} from "@/lib/api/feed";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { useSidebarData } from "@/components/doc/doc-sidebar-data";
 
@@ -46,12 +50,24 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
   const { feedProfiles } = useSidebarData();
   const profiles = useMemo(() => feedProfiles ?? [], [feedProfiles]);
   const activePlatform = feedPlatformFromPathname(pathname);
+  const platformIntegrationsEnabled = isHostedEdition();
 
   // ── Inbox badge (cross-platform pending approvals) ──────────────────────
-  const assistantIds = useMemo(
-    () => Array.from(new Set(profiles.map((p) => p.assistantId))),
-    [profiles],
-  );
+  const [planningAssistantIds, setPlanningAssistantIds] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void fetchFeedDistributionAssistants(workspaceId).then((assistants) => {
+      if (!cancelled) setPlanningAssistantIds(assistants.map((a) => a.id));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId]);
+  const assistantIds = useMemo(() => {
+    const ids = new Set(planningAssistantIds);
+    for (const profile of profiles) ids.add(profile.assistantId);
+    return Array.from(ids);
+  }, [planningAssistantIds, profiles]);
   const [inboxCount, setInboxCount] = useState(0);
   useEffect(() => {
     let cancelled = false;
@@ -121,7 +137,8 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
         </ul>
       </div>
 
-      {/* ── Platforms ───────────────────────────────────────────────────── */}
+      {/* ── Platforms (hosted integration layer) ────────────────────────── */}
+      {platformIntegrationsEnabled ? (
       <div className="flex flex-col gap-0.5">
         <div className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/45">
           {t.feedPage.groups.platforms}
@@ -199,6 +216,7 @@ export function FeedSidebarPanel({ workspaceId }: { workspaceId: string }) {
           })}
         </ul>
       </div>
+      ) : null}
     </nav>
   );
 }

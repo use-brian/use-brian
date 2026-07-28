@@ -10,8 +10,8 @@
  * the caller via `onPicked`; the caller is responsible for POSTing them to
  * `/api/connectors/gdrive/authorized-files`.
  *
- * INFRA NOTE (degraded): the Picker needs `NEXT_PUBLIC_GOOGLE_API_KEY` and
- * `NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER` — env vars app-web does not set yet.
+ * INFRA NOTE: the Picker needs `NEXT_PUBLIC_GOOGLE_API_KEY` and
+ * `NEXT_PUBLIC_GOOGLE_PROJECT_NUMBER`, supplied as public build metadata.
  * When unset, `open()` surfaces an actionable "not configured" message rather
  * than failing silently, so the UI degrades gracefully until the deployment
  * supplies them.
