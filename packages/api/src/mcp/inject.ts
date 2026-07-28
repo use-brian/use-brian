@@ -18,7 +18,7 @@
  * See docs/architecture/integrations/mcp.md → "Runtime".
  */
 
-import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
+import { wrapMcpTools, buildToolIndex, createMcpSearchTools, createGoogleCalendarTools, createGmailTools, createGoogleTasksTools, createGoogleDriveTools, createGoogleDocsTools, createGoogleSheetsTools, createGoogleSlidesTools, createGDriveFilesTools, createGitHubTools, createNotionTools, createFathomTools, createShopifyTools, createMsGraphTools, createKnowledgeTools, createAgentmailTools, createMailboxTools } from '@use-brian/core'
 import type { Tool, McpSettingsStore, McpServerConfig, KnowledgeStoreInterface, KnowledgeRepoWriter, AuthorizedFile, GDriveFilesStore, GDriveFileKind, LocalSource, RemoteSource, EngineHooks, FilesApi, AgentmailToolApi, MailboxApi, MailboxAccountRouter } from '@use-brian/core'
 import { getGlobalEmailInboxProvider, type EmailInboxProvider } from '../agentmail/provider.js'
 import { renderEmailBody } from '@use-brian/channels'
@@ -101,6 +101,12 @@ import {
   refundOrder as refundShopifyOrder,
   completeDraftOrder as completeShopifyDraftOrder,
 } from '../shopify/client.js'
+import { createMsGraphClient } from '../msgraph/client.js'
+import {
+  createMsGraphTokenManager,
+  packMsGraphTokens, unpackMsGraphTokens,
+  type MsGraphTokens,
+} from '../msgraph/token.js'
 import { APP_LEVEL_ASSISTANT_ID, OFFICIAL_CONNECTORS } from '@use-brian/shared'
 // Built-in connector OAuth app creds come through getConnectorConfig (OPEN, file
 // or env), NOT getEnv (closed env schema) — so this open injector imports no
@@ -276,6 +282,17 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'shopifyCancelOrder',
     'shopifyRefundOrder',
     'shopifyCompleteDraftOrder',
+  ],
+  msgraph: [
+    'msTeamsListTeams',
+    'msTeamsListChannels',
+    'msTeamsReadChannelMessages',
+    'msTeamsReadThreadReplies',
+    'msTeamsListChats',
+    'msTeamsReadChatMessages',
+    'msTeamsSearchMessages',
+    'msTeamsListMembers',
+    'msTeamsFindPerson',
   ],
   agentmail: [
     'agentmailSendMessage',
@@ -852,6 +869,10 @@ export async function injectMcpTools(params: {
   await injectNotionTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, extrasByProvider.get('notion'), resolveInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
   await injectFathomTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('fathom'), resolveInstanceCreds, persistInstanceCreds)
   await injectShopifyTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, undefined, undefined, extrasByProvider.get('shopify'), resolveInstanceCreds, persistInstanceCreds, { report: reportHealth }, assistantConnectorGrantsStore)
+  // No extras argument: `msgraph` is `single_instance` in OFFICIAL_CONNECTORS
+  // (one Microsoft identity per user), so it is never in
+  // MULTI_INSTANCE_RUNTIME_PROVIDERS and `extrasByProvider` never holds it.
+  await injectMsGraphTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable, { report: reportHealth })
   await injectMailboxTools({
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
@@ -2915,6 +2936,95 @@ async function injectShopifyTools(
     console.debug(`[mcp-inject] Shopify: injected tools${extraInstances?.length ? ` (+${extraInstances.length} extra store(s))` : ''}`)
   } catch (err) {
     console.error('[mcp-inject] Shopify injection failed:', err)
+  }
+}
+
+// ── Built-in Microsoft Graph (Teams) connector ─────────────
+//
+// READ-ONLY Teams access (docs/architecture/integrations/msgraph.md). Two
+// things differ from the injectors above:
+//
+//   - Like Fathom, the credential is an OAuth tuple whose refresh token
+//     ROTATES on every use, so the token manager persists the new tuple back
+//     into the credentials envelope before returning. See msgraph/token.ts.
+//   - Unlike GitHub/Notion/Fathom/Shopify there is no extras path: `msgraph`
+//     is `single_instance` in OFFICIAL_CONNECTORS (one Microsoft identity per
+//     user), which keeps it out of MULTI_INSTANCE_RUNTIME_PROVIDERS entirely.
+//     Dropping that flag means wiring `extrasByProvider.get('msgraph')`
+//     through here in the same change, or a second account is silently dead.
+
+async function injectMsGraphTools(
+  connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
+  connectorStore: ConnectorStore,
+  settingsStore: McpSettingsStore,
+  userId: string,
+  assistantId: string,
+  assistantConnectorStore: AssistantConnectorStore | undefined,
+  tools: Map<string, Tool>,
+  unavailable?: string[],
+  /** Call-time liveness probe (migration 294). See `injectGitHubTools`. */
+  healthProbe?: { report: HealthReporter; instanceId?: string | null },
+): Promise<void> {
+  const msgraphCfg = getConnectorConfig('msgraph')
+  if (!msgraphCfg) return
+  // Captured as primitives so the nested closures keep the narrowing (TS
+  // widens the captured object back to possibly-undefined) — same reason as
+  // the Fathom injector above.
+  const clientId = msgraphCfg.clientId
+  const clientSecret = msgraphCfg.clientSecret
+
+  const msgraph = connectors.find((c) => c.connectorId === 'msgraph' && c.connected)
+  const msgraphEnabled = msgraph && (!assistantConnectorStore || await assistantConnectorStore.isEnabled(assistantId, 'msgraph'))
+
+  if (!msgraph || !msgraphEnabled) {
+    unavailable?.push(notConnectedNotice('Microsoft Teams', 'reading and searching Teams channels, chats, and members'))
+    return
+  }
+
+  const tokenManager = createMsGraphTokenManager({
+    clientId,
+    clientSecret,
+    store: {
+      async getTokens(): Promise<MsGraphTokens | null> {
+        const creds = await connectorStore.getCredentials(userId, 'msgraph')
+        return creds?.client_secret ? unpackMsGraphTokens(creds.client_secret) : null
+      },
+      async persistTokens(next) {
+        await connectorStore.upsert(userId, {
+          connectorId: 'msgraph',
+          name: 'Microsoft Teams',
+          connected: true,
+          credentials: { client_id: 'msgraph_oauth', client_secret: packMsGraphTokens(next) },
+        })
+      },
+    },
+  })
+
+  const primaryInstanceId = healthProbe?.instanceId ?? (msgraph as { id?: string }).id ?? null
+  try {
+    // `retry` is left at its default so the client uses the real
+    // `fetchWithRetry` — Graph enforces ~1 rps per channel and this is the
+    // only connector in the repo that honours `Retry-After`.
+    const built = createMsGraphTools(
+      createMsGraphClient({ getAccessToken: () => tokenManager.getAccessToken() }),
+    )
+    // A dead refresh token surfaces as a thrown MsGraphTokenError whose
+    // message carries `invalid_grant`, which `classifyConnectorAuthError`
+    // reads — so the probe flips this instance to `auth_failed` on first use,
+    // the same signal the Google extras path relies on.
+    const msgraphTools = healthProbe && primaryInstanceId
+      ? wrapToolsWithHealthProbe(built, primaryInstanceId, healthProbe.report)
+      : built
+
+    for (const tool of msgraphTools) {
+      if (await applyPolicyOrSkip(tool, 'msgraph', settingsStore, assistantId, userId, unavailable) === 'include') {
+        tools.set(tool.name, tool)
+      }
+    }
+
+    console.debug('[mcp-inject] Microsoft Teams: injected tools')
+  } catch (err) {
+    console.error('[mcp-inject] Microsoft Teams injection failed:', err)
   }
 }
 

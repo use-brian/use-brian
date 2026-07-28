@@ -616,7 +616,7 @@ describe('[COMP:api/mcp-inject] INJECTED_BUILTIN_TOOLS_BY_CONNECTOR', () => {
   it('maps each built-in connector to a non-empty, duplicate-free tool list', () => {
     const connectors = Object.keys(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)
     expect(connectors).toEqual(
-      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom']),
+      expect.arrayContaining(['gcal', 'gmail', 'gdrive', 'github', 'notion', 'fathom', 'msgraph']),
     )
     for (const [connector, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
       expect(toolNames.length, connector).toBeGreaterThan(0)
@@ -1087,6 +1087,144 @@ describe('[COMP:api/workspace-tool-policy-store] team-owned connector shared pol
     // The workspace store was consulted, and its `block` excluded the tool.
     expect(workspaceToolPolicyStore.getPolicy).toHaveBeenCalledWith('ws-1', 'github', 'githubSearchRepositories')
     expect([...tools.keys()]).not.toContain('githubSearchRepositories')
+  })
+})
+
+describe('[COMP:api/mcp-inject] Microsoft Graph (msgraph) built-in', () => {
+  // Read-only Teams tools over a rotating-refresh-token credential. Unlike
+  // github/notion/fathom there is no extras path: `msgraph` is
+  // `single_instance` in OFFICIAL_CONNECTORS, so a second account can never
+  // reach the injector. See docs/architecture/integrations/msgraph.md.
+  const MSGRAPH_TOOLS = [
+    'msTeamsListTeams',
+    'msTeamsListChannels',
+    'msTeamsReadChannelMessages',
+    'msTeamsReadThreadReplies',
+    'msTeamsListChats',
+    'msTeamsReadChatMessages',
+    'msTeamsSearchMessages',
+    'msTeamsListMembers',
+    'msTeamsFindPerson',
+  ]
+
+  function msgraphStore(connected: boolean) {
+    return {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-ms', connectorId: 'msgraph', name: 'Microsoft Teams', connected, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({
+        client_id: 'msgraph_oauth',
+        client_secret: JSON.stringify({
+          accessToken: 'access-1',
+          refreshToken: 'refresh-1',
+          expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+        }),
+      }),
+      upsert: vi.fn(),
+    }
+  }
+
+  async function inject(opts: {
+    connected?: boolean
+    settingsStore?: unknown
+  } = {}): Promise<{ tools: Map<string, unknown>; unavailable: string[] }> {
+    const tools = new Map()
+    const result = await injectMcpTools({
+      userId: 'u-1',
+      assistantId: 'a-1',
+      tools,
+      connectorStore: msgraphStore(opts.connected ?? true) as never,
+      settingsStore: (opts.settingsStore ?? settingsStoreStub()) as never,
+      keepBuiltinsDirect: true,
+    })
+    return { tools, unavailable: result.unavailable }
+  }
+
+  beforeEach(() => {
+    getConnectorConfig.mockImplementation((provider: string) =>
+      provider === 'msgraph' ? { clientId: 'entra-app', clientSecret: 'entra-secret' } : undefined,
+    )
+  })
+  afterEach(() => {
+    getConnectorConfig.mockReset()
+    getConnectorConfig.mockReturnValue(undefined)
+  })
+
+  it('injects all nine read-only Teams tools when connected and enabled', async () => {
+    const { tools } = await inject()
+    for (const name of MSGRAPH_TOOLS) expect([...tools.keys()], name).toContain(name)
+  })
+
+  it('injects nothing and announces the gap when the connector is disconnected', async () => {
+    const { tools, unavailable } = await inject({ connected: false })
+    for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
+    expect(unavailable.join('\n')).toMatch(/Microsoft Teams: not connected/)
+  })
+
+  it('no-ops entirely when no Entra app credentials are configured', async () => {
+    // Connector-less boot (open single-player): no MSGRAPH_CLIENT_ID/SECRET.
+    // Silent — not even a not-connected notice, since nothing could connect.
+    getConnectorConfig.mockReturnValue(undefined)
+    const { tools, unavailable } = await inject()
+    for (const name of MSGRAPH_TOOLS) expect(tools.has(name)).toBe(false)
+    expect(unavailable.join('\n')).not.toMatch(/Microsoft Teams/)
+  })
+
+  it('lands blocked tools in unavailable[] instead of the tool map', async () => {
+    const blockAll = {
+      getPolicy: vi.fn(async ({ toolName }: { toolName: string }) =>
+        toolName.startsWith('msTeams') ? { policy: 'block' } : undefined,
+      ),
+    }
+    const { tools, unavailable } = await inject({ settingsStore: blockAll })
+    for (const name of MSGRAPH_TOOLS) {
+      expect(tools.has(name), name).toBe(false)
+      expect(unavailable).toContain(`${name} (blocked by policy)`)
+    }
+  })
+
+  it('is single_instance, so a second connected instance produces no variant tools', async () => {
+    const tools = new Map()
+    const connectorStore = {
+      list: vi.fn().mockResolvedValue([
+        { id: 'ci-ms1', connectorId: 'msgraph', name: 'Microsoft Teams', connected: true, url: null, custom: false, createdAt: new Date('2026-01-01T00:00:00Z') },
+        { id: 'ci-ms2', connectorId: 'msgraph', name: 'Second', connected: true, url: null, custom: false, createdAt: new Date('2026-02-01T00:00:00Z') },
+      ]),
+      getCredentials: vi.fn().mockResolvedValue({ client_id: 'msgraph_oauth', client_secret: '{}' }),
+      upsert: vi.fn(),
+    }
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: connectorStore as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: {
+        getCredentialsSystem: vi.fn(), updateCredentialsSystem: vi.fn(), markHealth: vi.fn(),
+      } as never,
+      keepBuiltinsDirect: true,
+    })
+    expect([...tools.keys()]).toContain('msTeamsListTeams')
+    expect([...tools.keys()].some((n) => n.startsWith('msTeamsListTeams__'))).toBe(false)
+  })
+
+  it('registers its tools in the drift-sweep table so local tool search can see them', async () => {
+    // The INJECTED_BUILTIN_TOOLS_BY_CONNECTOR entry is what turns injected
+    // tools into an mcp_search local source — omitting it injects tools the
+    // model can never find. Assert the fold, not just the constant.
+    expect(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR.msgraph).toEqual(MSGRAPH_TOOLS)
+
+    const tools = new Map()
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      connectorStore: msgraphStore(true) as never,
+      settingsStore: settingsStoreStub() as never,
+      keepBuiltinsDirect: false,
+    })
+    // Folded out of the direct map, reachable through mcp_search.
+    expect(tools.has('msTeamsListTeams')).toBe(false)
+    expect(tools.has('mcp_search')).toBe(true)
+    const searchTool = tools.get('mcp_search') as { execute: (i: unknown, c: unknown) => Promise<{ data: unknown }> }
+    const hit = await searchTool.execute({ query: 'teams channel messages' }, {} as never)
+    expect(JSON.stringify(hit.data)).toContain('msTeamsReadChannelMessages')
   })
 })
 
