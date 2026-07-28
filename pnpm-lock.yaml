@@ -57,6 +57,9 @@ importers:
       electron-updater:
         specifier: ^6.8.9
         version: 6.8.9
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
       zod:
         specifier: ^3.24
         version: 3.25.76
@@ -64,6 +67,9 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
       electron:
         specifier: ^43.2.0
         version: 43.2.0
@@ -263,6 +269,40 @@ importers:
       '@types/node':
         specifier: ^20.19.39
         version: 20.19.43
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
+  apps/browser-relay:
+    dependencies:
+      '@use-brian/api':
+        specifier: workspace:*
+        version: link:../../packages/api
+      express:
+        specifier: ^5
+        version: 5.2.1
+      ws:
+        specifier: ^8.18.0
+        version: 8.21.0
+      zod:
+        specifier: ^3.24
+        version: 3.25.76
+    devDependencies:
+      '@types/express':
+        specifier: ^5
+        version: 5.0.6
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
+      '@types/ws':
+        specifier: ^8.5.13
+        version: 8.18.1
+      tsx:
+        specifier: ^4
+        version: 4.22.4
       typescript:
         specifier: ^5.7
         version: 5.9.3
@@ -5145,10 +5185,6 @@ packages:
 
   iconv-lite@0.6.3:
     resolution: {integrity: sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==}
-    engines: {node: '>=0.10.0'}
-
-  iconv-lite@0.7.2:
-    resolution: {integrity: sha512-im9DjEDQ55s9fL4EYzOAv0yMqmMBSZp6G0VvFyTMPKWxiSBHUj9NW/qqLmXUwXrrM7AvqSlTCfvqRb0cM8yYqw==}
     engines: {node: '>=0.10.0'}
 
   iconv-lite@0.7.3:
@@ -10833,7 +10869,7 @@ snapshots:
       content-type: 2.0.0
       debug: 4.4.3
       http-errors: 2.0.1
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
       on-finished: 2.4.1
       qs: 6.15.2
       raw-body: 3.0.2
@@ -12878,10 +12914,6 @@ snapshots:
     dependencies:
       safer-buffer: 2.1.2
 
-  iconv-lite@0.7.2:
-    dependencies:
-      safer-buffer: 2.1.2
-
   iconv-lite@0.7.3:
     dependencies:
       safer-buffer: 2.1.2
@@ -14771,7 +14803,7 @@ snapshots:
     dependencies:
       bytes: 3.1.2
       http-errors: 2.0.1
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
       unpipe: 1.0.0
 
   react-dom@19.2.4(react@19.2.4):

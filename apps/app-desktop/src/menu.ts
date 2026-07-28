@@ -30,6 +30,8 @@ export interface MenuHandlers {
   onSwitchTarget: () => void;
   /** Confirm, tear down local traces, trash the bundle, quit (uninstall.ts). */
   onUninstall: () => void;
+  /** Start Firefox with its loopback Remote Agent enabled for My Browser. */
+  onStartFirefoxControl: () => void;
   /** Whether DevTools / reload affordances should be shown (dev only). */
   isDev: boolean;
   /** Show "Uninstall …" in the macOS app menu (packaged macOS builds only). */

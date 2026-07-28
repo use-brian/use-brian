@@ -137,6 +137,19 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     }
   })
 
+  it('preserves Firefox setup failures so the user gets the right remedy', async () => {
+    for (const code of [
+      'firefox_companion_missing',
+      'firefox_restart_required',
+      'unsupported_browser',
+    ] as const) {
+      const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
+      const provider = createLocalBrowserProvider({ transport })
+      const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+      expect((err as BrowserBackendError).code).toBe(code)
+    }
+  })
+
   it('rejects a malformed snapshot payload at the zod boundary', async () => {
     const { transport } = transportRecording(() => ({ ok: true, data: { nodes: 'nope' } }))
     const provider = createLocalBrowserProvider({ transport })

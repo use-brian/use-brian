@@ -20,6 +20,18 @@ type TabIneligibility = 'restricted_url' | 'no_active_tab'
 export type TabEligibility = { eligible: true } | { eligible: false; reason: TabIneligibility }
 
 /**
+ * Resolve consent against a normal browser window, never an extension popup.
+ * Firefox can keep an allow/browser-action popup as `lastFocusedWindow` after
+ * the user returns to a website, which made an eligible page look restricted.
+ */
+export async function activeTabForConsent<T extends { active?: boolean }>(
+  getLastFocused: (options: { populate: true; windowTypes: ['normal'] }) => Promise<{ tabs?: T[] }>,
+): Promise<T | undefined> {
+  const window = await getLastFocused({ populate: true, windowTypes: ['normal'] })
+  return window.tabs?.find((tab) => tab.active === true)
+}
+
+/**
  * Schemes the debugger cannot attach to. `chrome-extension:` covers our own
  * popup and allow window: prod logged 10x "Cannot access a chrome-extension://
  * URL" AFTER consent, because those passed the old `chrome://`-only check and

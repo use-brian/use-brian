@@ -29,6 +29,9 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'detached',
   'consent_denied',
   'no_eligible_tab',
+  'firefox_companion_missing',
+  'firefox_restart_required',
+  'unsupported_browser',
   'stale_ref',
   'backend_error',
 ])

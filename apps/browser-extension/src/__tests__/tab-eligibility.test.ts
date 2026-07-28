@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { eligibilityOf } from '../tab-eligibility.js'
+import { activeTabForConsent, eligibilityOf } from '../tab-eligibility.js'
 
 /**
  * Which tabs the extension can actually drive.
@@ -14,6 +14,22 @@ import { eligibilityOf } from '../tab-eligibility.js'
  * borrow its error code.
  */
 describe('[COMP:ext/agent] Controllable-tab eligibility', () => {
+  it('selects the active tab from a normal window instead of an extension popup', async () => {
+    const getLastFocused = async (options: { populate: true; windowTypes: ['normal'] }) => {
+      expect(options).toEqual({ populate: true, windowTypes: ['normal'] })
+      return {
+        tabs: [
+          { id: 1, active: false, url: 'https://example.com/' },
+          { id: 2, active: true, url: 'https://google.com/' },
+        ],
+      }
+    }
+    await expect(activeTabForConsent(getLastFocused)).resolves.toMatchObject({
+      id: 2,
+      url: 'https://google.com/',
+    })
+  })
+
   it('accepts ordinary web pages', () => {
     expect(eligibilityOf('https://example.com/dashboard')).toEqual({ eligible: true })
     expect(eligibilityOf('http://localhost:3003/w/abc')).toEqual({ eligible: true })
