@@ -700,6 +700,11 @@ function ConnectorsList() {
   const [localDirError, setLocalDirError] = useState<string | null>(null);
 
   const [showCliForm, setShowCliForm] = useState<string | null>(null);
+  const [newCliLabel, setNewCliLabel] = useState("");
+  const [newCliBinaryPath, setNewCliBinaryPath] = useState("");
+  const [newCliArgs, setNewCliArgs] = useState("");
+  const [newCliCwd, setNewCliCwd] = useState("");
+  const [newCliError, setNewCliError] = useState<string | null>(null);
   const [cliLabel, setCliLabel] = useState("");
   const [cliBinaryPath, setCliBinaryPath] = useState("");
   const [cliArgs, setCliArgs] = useState("");
@@ -1128,8 +1133,11 @@ function ConnectorsList() {
 
     if (id === "cli") {
       setShowCliForm(rid);
-      setCliLabel(c.label ?? "");
-      setCliError(null);
+      setNewCliLabel(c.label ?? "");
+      setNewCliBinaryPath("");
+      setNewCliArgs("");
+      setNewCliCwd("");
+      setNewCliError(null);
       setConnecting(null);
       return;
     }
@@ -1241,11 +1249,11 @@ function ConnectorsList() {
     const flow = resolveConnectorAddAnotherFlow(c);
     if (flow === "cli-form") {
       setShowCliForm(rowId(c));
-      setCliLabel("");
-      setCliBinaryPath("");
-      setCliArgs("");
-      setCliCwd("");
-      setCliError(null);
+      setNewCliLabel("");
+      setNewCliBinaryPath("");
+      setNewCliArgs("");
+      setNewCliCwd("");
+      setNewCliError(null);
       setSelected(rowId(c));
       return;
     }
@@ -1685,25 +1693,25 @@ function ConnectorsList() {
   }
 
   async function handleSaveCli(c: Connector) {
-    if (!cliLabel.trim() || !cliBinaryPath.trim()) return;
+    if (!newCliLabel.trim() || !newCliBinaryPath.trim()) return;
     const rid = rowId(c);
     setConnecting(rid);
-    setCliError(null);
+    setNewCliError(null);
     try {
       const res = await authFetch(`${API_URL}/api/connectors/cli/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          label: cliLabel.trim(),
-          binaryPath: cliBinaryPath.trim(),
-          args: cliArgs.trim() ? cliArgs.trim().split(/\s+/) : undefined,
-          cwd: cliCwd.trim() || undefined,
+          label: newCliLabel.trim(),
+          binaryPath: newCliBinaryPath.trim(),
+          args: newCliArgs.trim() ? newCliArgs.trim().split(/\s+/) : undefined,
+          cwd: newCliCwd.trim() || undefined,
         }),
       });
       if (res.ok) {
         const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
         setShowCliForm(null);
-        setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd("");
+        setNewCliLabel(""); setNewCliBinaryPath(""); setNewCliArgs(""); setNewCliCwd("");
         fetchConnectors();
         if (data.connectorInstanceId) {
           setSelected(data.connectorInstanceId);
@@ -1711,10 +1719,10 @@ function ConnectorsList() {
         }
       } else {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        setCliError(data.error ?? tc.cli.errGeneric);
+        setNewCliError(data.error ?? tc.cli.errGeneric);
       }
     } catch {
-      setCliError(tc.cli.errGeneric);
+      setNewCliError(tc.cli.errGeneric);
     }
     setConnecting(null);
   }
@@ -3170,44 +3178,44 @@ function ConnectorsList() {
                     <input
                       type="text"
                       placeholder={tc.cli.labelPlaceholder}
-                      value={cliLabel}
-                      onChange={(e) => setCliLabel(e.target.value)}
+                      value={newCliLabel}
+                      onChange={(e) => setNewCliLabel(e.target.value)}
                       className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                       autoFocus
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.pathPlaceholder}
-                      value={cliBinaryPath}
-                      onChange={(e) => setCliBinaryPath(e.target.value)}
+                      value={newCliBinaryPath}
+                      onChange={(e) => setNewCliBinaryPath(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.argsPlaceholder}
-                      value={cliArgs}
-                      onChange={(e) => setCliArgs(e.target.value)}
+                      value={newCliArgs}
+                      onChange={(e) => setNewCliArgs(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <input
                       type="text"
                       placeholder={tc.cli.cwdPlaceholder}
-                      value={cliCwd}
-                      onChange={(e) => setCliCwd(e.target.value)}
+                      value={newCliCwd}
+                      onChange={(e) => setNewCliCwd(e.target.value)}
                       className="w-full text-sm font-mono bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                     <p className="text-[11px] text-muted-foreground">{tc.cli.pathNote}</p>
-                    {cliError && <p className="text-xs text-destructive">{cliError}</p>}
+                    {newCliError && <p className="text-xs text-destructive">{newCliError}</p>}
                     <div className="flex gap-2">
                       <button
-                        onClick={() => { setShowCliForm(null); setCliLabel(""); setCliBinaryPath(""); setCliArgs(""); setCliCwd(""); setCliError(null); }}
+                        onClick={() => { setShowCliForm(null); setNewCliLabel(""); setNewCliBinaryPath(""); setNewCliArgs(""); setNewCliCwd(""); setNewCliError(null); }}
                         className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
                       >
                         {tc.cancel}
                       </button>
                       <button
                         onClick={() => handleSaveCli(sel)}
-                        disabled={!cliLabel.trim() || !cliBinaryPath.trim() || connecting === rid}
+                        disabled={!newCliLabel.trim() || !newCliBinaryPath.trim() || connecting === rid}
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
                         {connecting === rid ? tc.cli.connectingBtn : tc.cli.connectBtn}
