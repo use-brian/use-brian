@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc && node scripts/assemble.mjs",
+    "build:firefox": "tsc && node scripts/assemble-firefox.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

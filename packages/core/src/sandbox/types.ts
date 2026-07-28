@@ -71,6 +71,9 @@ export type BrowserBackendErrorCode =
   | 'detached'       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
   | 'consent_denied' // the user declined the extension's per-tab Allow prompt
   | 'no_eligible_tab' // the active tab is one Chrome will not attach the debugger to
+  | 'firefox_companion_missing' // Firefox extension cannot reach the installed desktop host
+  | 'firefox_restart_required' // Firefox was not started with its loopback Remote Agent
+  | 'unsupported_browser' // local browser control is unavailable on this platform
   | 'stale_ref'      // ref is not from the latest snapshot
   | 'backend_error'  // anything else the backend reported
 
@@ -91,7 +94,7 @@ export class BrowserBackendError extends Error {
  * never a hang, and that does not require discarding the reason.
  */
 export const NO_EXTENSION_REMEDY =
-  'Ask the user to open Chrome with the Use Brian extension installed and enabled (and signed in), then retry.'
+  'Ask the user to open a supported browser with the Use Brian extension installed and enabled, then retry.'
 
 /** The P1.4 contract: a missing extension is a clear instruction, never a hang. */
 export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected. ${NO_EXTENSION_REMEDY}`
