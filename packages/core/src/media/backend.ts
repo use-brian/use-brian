@@ -25,13 +25,16 @@
  * file-upload flow instead: the buffer is uploaded via the OpenAI-compatible
  * Files API (`POST /files`, `purpose: "file-extract"`), and the returned
  * `file-id` is referenced as `fileid://<id>` in the system message of a
- * `qwen-long` chat completion. Images still distill via Qwen-VL inline.
+ * `qwen-long` chat completion. For PDFs, each page is additionally rendered
+ * to a bounded JPEG and sent to Qwen-VL; page-numbered visual descriptions are
+ * appended to the text extraction. Images still distill via Qwen-VL inline.
  *
  * See docs/architecture/engine/provider-abstraction.md → "Adapters".
  */
 
 import type { TokenUsage } from '../providers/types.js'
 import type { GoogleTransport } from '../providers/google-transport.js'
+import { renderPdfPages } from '../files/pdf-pages.js'
 import sharp from 'sharp'
 
 export type MediaBackend =
@@ -74,6 +77,8 @@ export type MediaResult = {
   text: string
   usage: TokenUsage | null
   model: string
+  /** Per-model usage when one logical operation needs multiple models. */
+  usageByModel?: Array<{ model: string; usage: TokenUsage }>
 }
 
 /** DashScope substitutes these — a Gemini model id is meaningless there. */
@@ -85,6 +90,14 @@ export const DASHSCOPE_LONG_MODEL = 'qwen-long'
 // Leave room for base64 expansion and JSON/prompt overhead rather than relying
 // on the provider's edge to reject an otherwise valid camera image.
 const DASHSCOPE_MAX_INLINE_IMAGE_BYTES = 6 * 1024 * 1024
+const DASHSCOPE_MAX_PDF_VISUAL_PAGES = 10
+const DASHSCOPE_PDF_PAGE_OUTPUT_TOKENS = 1024
+
+const PDF_PAGE_VISUAL_PROMPT =
+  'Analyze this rendered PDF page for visual information that plain text extraction can miss: ' +
+  'photographs, charts, diagrams, signatures, stamps, handwriting, and layout-dependent relationships. ' +
+  'Transcribe text that is part of those visuals. Return concise, faithful Markdown only. ' +
+  'Do not repeat ordinary body text. If there is no meaningful visual information, return an empty string.'
 
 async function prepareDashScopeImage(buffer: Buffer, mime: string): Promise<{ buffer: Buffer; mime: string }> {
   if (buffer.length <= DASHSCOPE_MAX_INLINE_IMAGE_BYTES) return { buffer, mime }
@@ -205,6 +218,19 @@ const SUPPORTED_IMAGE = /^image\//
 
 type DashScopeFileUploadResponse = { id?: string }
 
+function addUsage(left: TokenUsage | null, right: TokenUsage | null): TokenUsage | null {
+  if (!left) return right
+  if (!right) return left
+  const cacheReadTokens = (left.cacheReadTokens ?? 0) + (right.cacheReadTokens ?? 0)
+  const cacheWriteTokens = (left.cacheWriteTokens ?? 0) + (right.cacheWriteTokens ?? 0)
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    ...(cacheReadTokens > 0 ? { cacheReadTokens } : {}),
+    ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+  }
+}
+
 async function uploadDashScopeFile(
   backend: Extract<MediaBackend, { kind: 'dashscope' }>,
   buffer: Buffer,
@@ -233,6 +259,113 @@ async function uploadDashScopeFile(
   return payload.id
 }
 
+async function runDashScopePdfVisuals(
+  fetchFn: typeof fetch,
+  backend: Extract<MediaBackend, { kind: 'dashscope' }>,
+  req: MediaRequest,
+  signal: AbortSignal,
+): Promise<MediaResult> {
+  const rendered = await renderPdfPages(req.buffer, { maxPages: DASHSCOPE_MAX_PDF_VISUAL_PAGES })
+  const visionModel = backend.visionModel ?? DASHSCOPE_VISION_MODEL
+  const visualSections: string[] = []
+  const failedPages: number[] = []
+  let visualUsage: TokenUsage | null = null
+  let successfulPages = 0
+  let firstFailure: unknown
+
+  for (const page of rendered.pages) {
+    try {
+      const image = await prepareDashScopeImage(page.buffer, page.mime)
+      const content = [
+        { type: 'text', text: `${PDF_PAGE_VISUAL_PROMPT}\n\nPage ${page.pageNumber} of ${rendered.totalPages}.` },
+        { type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.buffer.toString('base64')}` } },
+      ]
+      const pageResult = await dashScopeChat(
+        fetchFn,
+        backend,
+        visionModel,
+        [{ role: 'user', content }],
+        { ...req, maxOutputTokens: Math.min(req.maxOutputTokens, DASHSCOPE_PDF_PAGE_OUTPUT_TOKENS) },
+        signal,
+      )
+      successfulPages++
+      if (pageResult.text) visualSections.push(`### Page ${page.pageNumber}\n\n${pageResult.text}`)
+      visualUsage = addUsage(visualUsage, pageResult.usage)
+    } catch (err) {
+      firstFailure ??= err
+      failedPages.push(page.pageNumber)
+      if (signal.aborted) break
+    }
+  }
+
+  if (successfulPages === 0 && firstFailure) throw firstFailure
+  if (failedPages.length > 0) {
+    visualSections.push(`> Visual analysis could not process page${failedPages.length === 1 ? '' : 's'} ${failedPages.join(', ')}.`)
+  }
+  if (rendered.truncated && visualSections.length > 0) {
+    visualSections.push(
+      `> Visual analysis was limited to the first ${DASHSCOPE_MAX_PDF_VISUAL_PAGES} of ${rendered.totalPages} pages.`,
+    )
+  }
+
+  return {
+    text: visualSections.length > 0 ? `## Visual content\n\n${visualSections.join('\n\n')}` : '',
+    usage: visualUsage,
+    model: visionModel,
+  }
+}
+
+async function runDashScopePdf(
+  fetchFn: typeof fetch,
+  backend: Extract<MediaBackend, { kind: 'dashscope' }>,
+  req: MediaRequest,
+  signal: AbortSignal,
+): Promise<MediaResult> {
+  const textPromise = (async () => {
+    const fileId = await uploadDashScopeFile(backend, req.buffer, req.mime, fetchFn, signal)
+    return dashScopeChat(
+      fetchFn,
+      backend,
+      backend.longModel ?? DASHSCOPE_LONG_MODEL,
+      [
+        { role: 'system', content: `fileid://${fileId}` },
+        { role: 'user', content: req.prompt },
+      ],
+      req,
+      signal,
+    )
+  })()
+  const [textOutcome, visualOutcome] = await Promise.allSettled([
+    textPromise,
+    runDashScopePdfVisuals(fetchFn, backend, req, signal),
+  ])
+
+  if (textOutcome.status === 'rejected' && visualOutcome.status === 'rejected') {
+    throw textOutcome.reason
+  }
+  const textResult = textOutcome.status === 'fulfilled' ? textOutcome.value : undefined
+  const visualResult = visualOutcome.status === 'fulfilled' ? visualOutcome.value : undefined
+  if (!textResult) {
+    console.warn(`[media/backend] DashScope PDF text extraction skipped: ${String(textOutcome.status === 'rejected' ? textOutcome.reason : 'no result')}`)
+    return visualResult!
+  }
+  if (!visualResult) {
+    console.warn(`[media/backend] DashScope PDF visual analysis skipped: ${String(visualOutcome.status === 'rejected' ? visualOutcome.reason : 'no result')}`)
+    return textResult
+  }
+
+  const usageByModel = [
+    ...(textResult.usage ? [{ model: textResult.model, usage: textResult.usage }] : []),
+    ...(visualResult.usage ? [{ model: visualResult.model, usage: visualResult.usage }] : []),
+  ]
+  return {
+    text: [textResult.text, visualResult.text].filter(Boolean).join('\n\n'),
+    usage: addUsage(textResult.usage, visualResult.usage),
+    model: `${textResult.model}+${visualResult.model}`,
+    ...(usageByModel.length > 0 ? { usageByModel } : {}),
+  }
+}
+
 async function runDashScope(
   backend: Extract<MediaBackend, { kind: 'dashscope' }>,
   req: MediaRequest,
@@ -253,7 +386,7 @@ async function runDashScope(
           input_audio: { data: `data:${req.mime};base64,${base64}`, format: req.mime.split('/')[1] ?? 'wav' },
         },
       ]
-      return await dashScopeChat(fetchFn, backend, backend.asrModel ?? DASHSCOPE_ASR_MODEL, [{ role: 'user', content }], req)
+      return await dashScopeChat(fetchFn, backend, backend.asrModel ?? DASHSCOPE_ASR_MODEL, [{ role: 'user', content }], req, controller.signal)
     }
 
     if (SUPPORTED_IMAGE.test(req.mime)) {
@@ -263,17 +396,24 @@ async function runDashScope(
         { type: 'text', text: req.prompt },
         { type: 'image_url', image_url: { url: `data:${image.mime};base64,${base64}` } },
       ]
-      return await dashScopeChat(fetchFn, backend, backend.visionModel ?? DASHSCOPE_VISION_MODEL, [{ role: 'user', content }], req)
+      return await dashScopeChat(fetchFn, backend, backend.visionModel ?? DASHSCOPE_VISION_MODEL, [{ role: 'user', content }], req, controller.signal)
+    }
+
+    if (req.mime === 'application/pdf') {
+      return await runDashScopePdf(fetchFn, backend, req, controller.signal)
     }
 
     const fileId = await uploadDashScopeFile(backend, req.buffer, req.mime, fetchFn, controller.signal)
     return await dashScopeChat(
-      fetchFn, backend, backend.longModel ?? DASHSCOPE_LONG_MODEL,
+      fetchFn,
+      backend,
+      backend.longModel ?? DASHSCOPE_LONG_MODEL,
       [
         { role: 'system', content: `fileid://${fileId}` },
         { role: 'user', content: req.prompt },
       ],
       req,
+      controller.signal,
     )
   } finally {
     clearTimeout(timer)
@@ -288,6 +428,7 @@ async function dashScopeChat(
   model: string,
   messages: DashScopeMessage[],
   req: MediaRequest,
+  signal?: AbortSignal,
 ): Promise<MediaResult> {
   const response = await fetchFn(`${backend.baseUrl}/chat/completions`, {
     method: 'POST',
@@ -301,6 +442,7 @@ async function dashScopeChat(
       max_tokens: req.maxOutputTokens,
       temperature: 0,
     }),
+    ...(signal ? { signal } : {}),
   })
 
   if (!response.ok) {

@@ -43,9 +43,13 @@ describe('[COMP:files/distill] PDF local-text fallback', () => {
   })
 
   it('keeps the native distillation when the adapter succeeds (no fallback)', async () => {
-    const fetchFn = vi.fn(async (url: string | URL | Request) => {
+    const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url)
       if (u.endsWith('/files')) return new Response(JSON.stringify({ id: 'file-1' }), { status: 200 })
+      const body = JSON.parse(init!.body as string)
+      if (body.model === 'qwen-vl-max') {
+        return new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), { status: 200 })
+      }
       return new Response(JSON.stringify({ choices: [{ message: { content: '# Native extract' } }] }), { status: 200 })
     })
 
