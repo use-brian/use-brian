@@ -4241,6 +4241,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     connectorInstanceStore,
     connectorGrantStore,
     syncCredentials,
+    knowledgeRepoWriter,
     triggerSync: async () => { if (syncWorkerRef) await syncWorkerRef.tick() },
   }))
 
