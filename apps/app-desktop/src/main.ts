@@ -171,7 +171,7 @@ import { registerFirefoxNativeHost } from "./firefox-native-registration.js";
 import {
   findFirefoxExecutable,
   firefoxExecutableCandidates,
-  firefoxProfilesRoot,
+  firefoxProfilesRoots,
   launchFirefoxForControl,
   waitForFirefoxRemoteEndpoint,
 } from "./firefox-launcher.js";
@@ -2267,8 +2267,8 @@ async function confirmAndUninstall(): Promise<void> {
 async function startFirefoxForControl(): Promise<void> {
   const candidates = firefoxExecutableCandidates(process.platform, process.env, homedir());
   const executable = await findFirefoxExecutable(candidates);
-  const profilesRoot = firefoxProfilesRoot(process.platform, process.env, homedir());
-  if (!executable || !profilesRoot) {
+  const profilesRoots = firefoxProfilesRoots(process.platform, process.env, homedir());
+  if (!executable || profilesRoots.length === 0) {
     await dialog.showMessageBox({
       type: "error",
       message: "Firefox was not found",
@@ -2289,7 +2289,7 @@ async function startFirefoxForControl(): Promise<void> {
   if (response !== 0) return;
   const startedAt = Date.now() - 1_000;
   launchFirefoxForControl(executable);
-  const endpoint = await waitForFirefoxRemoteEndpoint(profilesRoot, { afterMs: startedAt });
+  const endpoint = await waitForFirefoxRemoteEndpoint(profilesRoots, { afterMs: startedAt });
   if (!endpoint) {
     await dialog.showMessageBox({
       type: "warning",

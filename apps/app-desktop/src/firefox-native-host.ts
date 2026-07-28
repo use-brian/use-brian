@@ -2,7 +2,7 @@
 import type { Readable, Writable } from "node:stream";
 import { spawn } from "node:child_process";
 import { FirefoxBidiExecutor, FirefoxBidiError } from "./firefox-bidi.js";
-import { discoverFirefoxRemoteEndpoint, firefoxProfilesRoot } from "./firefox-launcher.js";
+import { discoverFirefoxRemoteEndpoint, firefoxProfilesRoots } from "./firefox-launcher.js";
 
 // Firefox caps native-host -> extension frames at 1 MiB. Leave framing headroom.
 export const MAX_NATIVE_MESSAGE_BYTES = 900 * 1024;
@@ -69,12 +69,14 @@ export type FirefoxNativeHostDeps = {
 export async function runFirefoxNativeHost(deps: FirefoxNativeHostDeps): Promise<void> {
   const decoder = new NativeMessageDecoder();
   let executor: FirefoxBidiExecutor | null = null;
-  const profilesRoot = firefoxProfilesRoot(deps.platform, deps.env, deps.home);
+  const profilesRoots = firefoxProfilesRoots(deps.platform, deps.env, deps.home);
 
   const ensureExecutor = async (): Promise<FirefoxBidiExecutor> => {
     if (executor) return executor;
-    if (!profilesRoot) throw new FirefoxBidiError("Firefox is not supported on this platform.", "unsupported_browser");
-    const endpoint = await discoverFirefoxRemoteEndpoint(profilesRoot);
+    if (profilesRoots.length === 0) {
+      throw new FirefoxBidiError("Firefox is not supported on this platform.", "unsupported_browser");
+    }
+    const endpoint = await discoverFirefoxRemoteEndpoint(profilesRoots);
     if (!endpoint) {
       throw new FirefoxBidiError(
         "Firefox was not started for My Browser. Quit Firefox, then choose Start Firefox for My Browser in the Use Brian desktop app.",
