@@ -383,10 +383,11 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
   })
 
   describe('safety fuse (P1.8)', () => {
-    it('caps per-session browser calls', async () => {
+    it('caps per-session cloud browser calls', async () => {
       const tools = createComputerTools({
         local: fakeProvider('local'),
         cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
         fuse: { maxCallsPerSession: 2 },
       })
       const ctx = toolContext()
@@ -397,11 +398,12 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       expect(String(res.data)).toContain('safety cap')
     })
 
-    it('caps per-session wall clock', async () => {
+    it('caps per-session cloud wall clock', async () => {
       let t = 1_000_000
       const tools = createComputerTools({
         local: fakeProvider('local'),
         cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
         fuse: { maxWallMsPerSession: 60_000 },
         now: () => t,
       })
@@ -418,6 +420,7 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       const tools = createComputerTools({
         local: fakeProvider('local'),
         cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
         fuse: { maxCallsPerSession: 2, maxWallMsPerSession: 60_000, idleResetMs: 120_000 },
         now: () => t,
       })
@@ -435,6 +438,27 @@ describe('[COMP:sandbox/browser-tools] Computer tool surface', () => {
       t += 59_000
       const withinWall = await run(tools.browserCurrentUrl, {}, ctx)
       expect(withinWall.isError ?? false).toBe(false)
+    })
+
+    it('does not cap the watched local browser even when cloud is available', async () => {
+      let t = 1_000_000
+      const local = fakeProvider('local')
+      const tools = createComputerTools({
+        local,
+        cloud: fakeProvider('cloud'),
+        cloudAvailable: () => true,
+        fuse: { maxCallsPerSession: 1, maxWallMsPerSession: 1 },
+        now: () => t,
+      })
+      const ctx = toolContext()
+      tools.setSessionBackendOverride(ctx.sessionId, 'local')
+      await run(tools.browserSnapshot, {}, ctx)
+      t += 60_000
+      const second = await run(tools.browserCurrentUrl, {}, ctx)
+      const third = await run(tools.browserSnapshot, {}, ctx)
+      expect(second.isError ?? false).toBe(false)
+      expect(third.isError ?? false).toBe(false)
+      expect(local.calls).toEqual(['snapshot', 'currentUrl', 'snapshot'])
     })
   })
 

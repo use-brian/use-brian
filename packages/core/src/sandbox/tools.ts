@@ -397,7 +397,7 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     }
   }
 
-  /** Shared pre-execution gates. Returns an error result or the live state. */
+  /** Shared policy gates. Backend-specific resource fusing runs after routing. */
   async function gates(
     toolName: string,
     context: ToolContext,
@@ -406,12 +406,17 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
     if (autonomous) return { error: autonomous }
     const blocked = await policyBlockGate(toolName, context)
     if (blocked) return { error: blocked }
-    const state = sessionState(context)
+    return { state: sessionState(context) }
+  }
+
+  /** The action/wall-clock fuse protects cloud work; watched local browsing is exempt. */
+  function backendFuseGate(state: SessionBrowseState, backend: BrowserBackendKind): ToolResult | null {
+    if (backend === 'local') return null
     const fused = fuseGate(state)
-    if (fused) return { error: fused }
+    if (fused) return fused
     state.calls += 1
     state.lastCallAt = now()
-    return { state }
+    return null
   }
 
   function backendErrorResult(err: unknown, backend?: BrowserBackendKind): ToolResult {
@@ -615,6 +620,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       gate.state.profileName = profile?.name ?? null
       const backend = resolveBackend(gate.state, profile)
       gate.state.backend = backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       gate.state.refLabels.clear()
       try {
         const res = await providerFor(backend).navigate(callCtx(context, gate.state), input.url)
@@ -709,6 +716,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const gate = await gates('browserSnapshot', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       try {
         const snapshot = await providerFor(backend).snapshot(callCtx(context, gate.state))
         gate.state.refLabels = new Map(snapshot.nodes.map((n) => [n.ref, n.name]))
@@ -788,6 +797,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const gate = await gates('browserClick', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       try {
         await providerFor(backend).click(callCtx(context, gate.state), input.ref)
         emit({ type: 'browser_action', op: 'click', backend, host: null, ok: true }, context)
@@ -838,6 +849,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const gate = await gates('browserType', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       try {
         await providerFor(backend).type(callCtx(context, gate.state), input.ref, input.text)
         gate.state.lastTyped = input.text
@@ -879,6 +892,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       const gate = await gates('browserCurrentUrl', context)
       if ('error' in gate) return gate.error
       const backend = gate.state.backend
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       try {
         const res = await providerFor(backend).currentUrl(callCtx(context, gate.state))
         const data = `URL: ${res.url}\nTitle: ${res.title || '(untitled)'}`
@@ -992,6 +1007,8 @@ export function createComputerTools(opts: CreateComputerToolsOptions): ComputerT
       // lets backendErrorResult apply the same connection-block posture (§5) a
       // hard edge reject gets on the interactive tools.
       const backend: BrowserBackendKind = 'cloud'
+      const fused = backendFuseGate(gate.state, backend)
+      if (fused) return fused
       // Identity-less on purpose: no profile resolution, no profileId in the
       // call context — a worker read never initiates a vault injection.
       const ctx: BrowserCallContext = {
