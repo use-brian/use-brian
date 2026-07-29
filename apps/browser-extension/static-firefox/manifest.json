@@ -1,0 +1,24 @@
+{
+  "manifest_version": 2,
+  "name": "Use Brian Browser Agent",
+  "version": "0.1.0",
+  "description": "Lets your Use Brian assistant act in your own browser: consent-gated, approval-gated sends, always stoppable.",
+  "permissions": ["tabs", "storage", "nativeMessaging"],
+  "background": {
+    "page": "background.html",
+    "persistent": true
+  },
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_title": "Use Brian"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "browser@usebrian.ai",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": ["authenticationInfo", "browsingActivity", "websiteContent"]
+      }
+    }
+  }
+}

@@ -28,6 +28,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Kanban, Rows3 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
+import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -107,20 +109,28 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const searchParams = useSearchParams();
 
   // ── Data ──────────────────────────────────────────────────────────────
-  const [data, setData] = useState<CrmData | null>(null);
-  const [loadError, setLoadError] = useState(false);
+  // Cache-backed, same as Tasks: a revisit paints the last known deals /
+  // contacts / companies immediately and revalidates behind them. See
+  // `lib/surface-cache.ts`.
+  const crmKey = surfaceDataKey("crm", workspaceId);
+  const crm = useCachedResource(crmKey, () => fetchWorkspaceCrm(workspaceId));
+  const data = crm.data ?? null;
+  // Only a failure with nothing on screen is a load error.
+  const loadError = data === null && crm.error !== undefined;
 
+  // Stable callback, not the resource object — see the note in tasks-surface.
+  const refreshCrm = crm.refresh;
   const reload = useCallback(() => {
-    setLoadError(false);
-    fetchWorkspaceCrm(workspaceId)
-      .then(setData)
-      .catch(() => setLoadError(true));
-  }, [workspaceId]);
+    void refreshCrm();
+  }, [refreshCrm]);
 
-  useEffect(() => {
-    setData(null);
-    reload();
-  }, [workspaceId, reload]);
+  /** Optimistic patch against the cached value (survives leaving the surface). */
+  const setData = useCallback(
+    (updater: (previous: CrmData) => CrmData) => {
+      mutateSurfaceCache<CrmData>(crmKey, updater);
+    },
+    [crmKey],
+  );
 
   // ── View state (URL is the source of truth) ───────────────────────────
   const view = useMemo(() => crmViewFromSearch(searchParams), [searchParams]);
@@ -241,42 +251,28 @@ export function CrmSurface({ workspaceId }: { workspaceId: string }) {
   const [bulkError, setBulkError] = useState<string | null>(null);
 
   const patchDeal = useCallback((id: string, patch: Partial<CrmDealRow>) => {
-    setData((prev) =>
-      prev
-        ? {
-            ...prev,
-            deals: prev.deals.map((d) => (d.id === id ? { ...d, ...patch } : d)),
-          }
-        : prev,
-    );
+    setData((prev) => ({
+      ...prev,
+      deals: prev.deals.map((d) => (d.id === id ? { ...d, ...patch } : d)),
+    }));
   }, []);
   const patchContact = useCallback(
     (id: string, patch: Partial<CrmContactRow>) => {
-      setData((prev) =>
-        prev
-          ? {
-              ...prev,
-              contacts: prev.contacts.map((c) =>
-                c.id === id ? { ...c, ...patch } : c,
-              ),
-            }
-          : prev,
-      );
+      setData((prev) => ({
+        ...prev,
+        contacts: prev.contacts.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+      }));
     },
     [],
   );
   const patchCompany = useCallback(
     (id: string, patch: Partial<CrmCompanyRow>) => {
-      setData((prev) =>
-        prev
-          ? {
-              ...prev,
-              companies: prev.companies.map((c) =>
-                c.id === id ? { ...c, ...patch } : c,
-              ),
-            }
-          : prev,
-      );
+      setData((prev) => ({
+        ...prev,
+        companies: prev.companies.map((c) =>
+          c.id === id ? { ...c, ...patch } : c,
+        ),
+      }));
     },
     [],
   );

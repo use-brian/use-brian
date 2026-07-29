@@ -71,6 +71,9 @@ export type BrowserBackendErrorCode =
   | 'detached'       // Chrome ended the CDP session (banner cancelled, DevTools, crash)
   | 'consent_denied' // the user declined the extension's per-tab Allow prompt
   | 'no_eligible_tab' // the active tab is one Chrome will not attach the debugger to
+  | 'firefox_companion_missing' // Firefox extension cannot reach the installed desktop host
+  | 'firefox_restart_required' // Firefox was not started with its loopback Remote Agent
+  | 'unsupported_browser' // local browser control is unavailable on this platform
   | 'stale_ref'      // ref is not from the latest snapshot
   | 'backend_error'  // anything else the backend reported
 
@@ -91,7 +94,7 @@ export class BrowserBackendError extends Error {
  * never a hang, and that does not require discarding the reason.
  */
 export const NO_EXTENSION_REMEDY =
-  'Ask the user to open Chrome with the Use Brian extension installed and enabled (and signed in), then retry.'
+  'Ask the user to open a supported browser with the Use Brian extension installed and enabled, then retry.'
 
 /** The P1.4 contract: a missing extension is a clear instruction, never a hang. */
 export const NO_EXTENSION_MESSAGE = `No Use Brian browser extension is connected. ${NO_EXTENSION_REMEDY}`
@@ -110,6 +113,9 @@ export interface BrowserProvider {
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
+  /** Optional watched Take-Over surface. Local uses relay polling; cloud uses SandboxProvider below. */
+  nextTakeoverFrame?(ctx: BrowserCallContext): Promise<TakeoverFrame | null>
+  sendTakeoverInput?(ctx: BrowserCallContext, event: TakeoverInputEvent): Promise<void>
   /** Best-effort release of the task's browsing binding (close-to-stop is user-side). */
   stop(ctx: BrowserCallContext): Promise<void>
 }
@@ -187,7 +193,8 @@ export interface SessionVault {
 // ── Take-Over surface (§4.8) ───────────────────────────────────
 
 export type TakeoverInputEvent =
-  | { kind: 'click'; x: number; y: number }
+  | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'pointer'; action: 'down' | 'move' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
   /**
@@ -198,6 +205,11 @@ export type TakeoverInputEvent =
   | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
 
 export type TakeoverFrame = { data: string; mimeType: string }
+
+export const TakeoverFrameSchema = z.object({
+  data: z.string(),
+  mimeType: z.string(),
+})
 
 export type SandboxTakeover = {
   /** Next screencast frame (base64 image), or null once the stream closes. */

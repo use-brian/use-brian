@@ -123,6 +123,7 @@ const pipelineCalls: Array<{
   channelId: string
   userId: string
   isGroupChat: boolean
+  messageText?: string
   userContentBlocks?: Array<{ type: string; mimeType?: string }>
 }> = []
 vi.mock('../channel-pipeline.js', () => ({
@@ -130,6 +131,7 @@ vi.mock('../channel-pipeline.js', () => ({
     channelId: string
     userId: string
     isGroupChat: boolean
+    messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
     hooks: {
       sendResponse: (text: string) => Promise<void>
@@ -140,6 +142,7 @@ vi.mock('../channel-pipeline.js', () => ({
       channelId: params.channelId,
       userId: params.userId,
       isGroupChat: params.isGroupChat,
+      messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
     await params.hooks.sendResponse('ok')
@@ -392,6 +395,84 @@ describe('[COMP:api/telegram-byo-route] OSS audio intake fallback', () => {
     expect(shouldUseUniversalTelegramIntake('audio', false)).toBe(true)
     expect(shouldUseUniversalTelegramIntake('audio', true)).toBe(false)
     expect(shouldUseUniversalTelegramIntake('document', true)).toBe(true)
+  })
+
+  // `voice` is the gap this describe's sibling above does not cover: it is
+  // excluded from universal intake AND from the non-voice content-block
+  // branch, so the voice-transcription preflight is its ONLY path. On OSS,
+  // where the kill switch defaulted off until 2026-07-29, that path was shut
+  // and the turn reached the model with nothing in it — so it answered "I
+  // don't see a recording attachment" and asked for a re-upload that failed
+  // the same way (2026-07-28, live Telegram bot).
+  it('never routes a voice note to universal intake', () => {
+    expect(shouldUseUniversalTelegramIntake('voice', false)).toBe(false)
+    expect(shouldUseUniversalTelegramIntake('voice', true)).toBe(false)
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] voice note without a transcript', () => {
+  function buildVoiceUpdate(caption?: string): Record<string, unknown> {
+    return {
+      update_id: 900,
+      message: {
+        message_id: 900,
+        from: { id: 42, first_name: 'Hinson', username: 'hinson' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        voice: { file_id: 'voice_file_1', duration: 5, file_size: 4096 },
+        ...(caption ? { caption } : {}),
+      },
+    }
+  }
+
+  function appWith(voiceTranscription?: { enabled: boolean; apiKey: string; model?: string }) {
+    return createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+        ...(voiceTranscription ? { voiceTranscription } : {}),
+      }),
+    )
+  }
+
+  it('tells the model the voice note arrived when the kill switch is off', async () => {
+    await postUpdate(appWith({ enabled: false, apiKey: 'k' }), buildVoiceUpdate())
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    // The turn must not be empty — an empty turn is what the model reads as
+    // "the user sent nothing".
+    expect(pipelineCalls[0].messageText).toMatch(/voice note received/i)
+    expect(pipelineCalls[0].messageText).toContain('VOICE_TRANSCRIPTION_ENABLED')
+    expect(pipelineCalls[0].messageText).toMatch(/no attachment/i)
+  })
+
+  it('preserves the caption alongside the unavailable note', async () => {
+    await postUpdate(appWith({ enabled: false, apiKey: 'k' }), buildVoiceUpdate('listen to this'))
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].messageText).toMatch(/voice note received/i)
+    expect(pipelineCalls[0].messageText).toContain('listen to this')
+  })
+
+  it('reports the same way when transcription is wired but unavailable at boot', async () => {
+    // No voiceTranscription option at all — the shape an incompletely wired
+    // deployment produces. Still a voice note, still must be named.
+    await postUpdate(appWith(undefined), buildVoiceUpdate())
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    expect(pipelineCalls[0].messageText).toMatch(/voice note received/i)
   })
 })
 

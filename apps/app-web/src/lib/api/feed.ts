@@ -18,8 +18,29 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import type { FeedPlatform } from "@/lib/feed-nav";
+import type { PlanBrief, PlanSlot, PlanSlotMark } from "@/lib/feed-plan";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+
+/**
+ * Build an `/api/...` URL with query params.
+ *
+ * `new URL()` cannot be used here: in development `next.config.ts` sets
+ * `NEXT_PUBLIC_API_URL` to `""` on purpose so the browser goes through the
+ * `/api` rewrite, and `new URL("/api/…")` throws `Invalid URL` without a base.
+ * That threw inside the SDK before any fetch fired, so callers saw a bare
+ * "failed to load" with NO request in the network tab - which is exactly how
+ * the Voice surface broke in local dev. Template strings + URLSearchParams
+ * work for both a relative and an absolute `API_URL`.
+ */
+function apiUrl(path: string, params?: Record<string, string | undefined>): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value !== undefined) query.set(key, value);
+  }
+  const qs = query.toString();
+  return `${API_URL}${path}${qs ? `?${qs}` : ""}`;
+}
 
 /** One connected platform account (a `distribution_profiles` row + assistant). */
 export type FeedProfile = {
@@ -146,14 +167,15 @@ export async function fetchFeedAssistantEvents(
   assistantId: string,
   opts: { limit?: number; eventTypes?: readonly string[] } = {},
 ): Promise<FeedActivityEvent[]> {
-  const url = new URL(`${API_URL}/api/distribution/${assistantId}/events`);
-  if (opts.limit !== undefined) {
-    url.searchParams.set("limit", String(opts.limit));
-  }
-  if (opts.eventTypes && opts.eventTypes.length > 0) {
-    url.searchParams.set("eventTypes", opts.eventTypes.join(","));
-  }
-  const res = await authFetch(url.toString());
+  const res = await authFetch(
+    apiUrl(`/api/distribution/${assistantId}/events`, {
+      limit: opts.limit !== undefined ? String(opts.limit) : undefined,
+      eventTypes:
+        opts.eventTypes && opts.eventTypes.length > 0
+          ? opts.eventTypes.join(",")
+          : undefined,
+    }),
+  );
   if (!res.ok) return [];
   const body = (await res.json()) as { events?: FeedActivityEvent[] };
   return body.events ?? [];
@@ -167,11 +189,11 @@ export async function fetchFeedAssistantApprovals(
   assistantId: string,
   opts: { limit?: number } = {},
 ): Promise<FeedActivityEvent[]> {
-  const url = new URL(`${API_URL}/api/distribution/${assistantId}/approvals`);
-  if (opts.limit !== undefined) {
-    url.searchParams.set("limit", String(opts.limit));
-  }
-  const res = await authFetch(url.toString());
+  const res = await authFetch(
+    apiUrl(`/api/distribution/${assistantId}/approvals`, {
+      limit: opts.limit !== undefined ? String(opts.limit) : undefined,
+    }),
+  );
   if (!res.ok) return [];
   const body = (await res.json()) as { approvals?: FeedActivityEvent[] };
   return body.approvals ?? [];
@@ -273,12 +295,12 @@ export async function fetchFeedExternalPost(
   assistantId: string,
   opts: { permalink: string; platform: FeedPlatform },
 ): Promise<FeedExternalPost> {
-  const url = new URL(
-    `${API_URL}/api/distribution/${assistantId}/external-post`,
+  const res = await authFetch(
+    apiUrl(`/api/distribution/${assistantId}/external-post`, {
+      permalink: opts.permalink,
+      platform: opts.platform,
+    }),
   );
-  url.searchParams.set("permalink", opts.permalink);
-  url.searchParams.set("platform", opts.platform);
-  const res = await authFetch(url.toString());
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -359,11 +381,11 @@ export async function fetchFeedVoiceMemories(
   assistantId: string,
   opts: { limit?: number } = {},
 ): Promise<{ memories: FeedVoiceMemory[]; total: number }> {
-  const url = new URL(`${API_URL}/api/assistants/${assistantId}/memories/team`);
-  if (opts.limit !== undefined) {
-    url.searchParams.set("limit", String(opts.limit));
-  }
-  const res = await authFetch(url.toString());
+  const res = await authFetch(
+    apiUrl(`/api/assistants/${assistantId}/memories/team`, {
+      limit: opts.limit !== undefined ? String(opts.limit) : undefined,
+    }),
+  );
   if (!res.ok) throw new Error(`memories API ${res.status}`);
   const body = (await res.json()) as {
     memories?: FeedVoiceMemory[];
@@ -463,7 +485,7 @@ export async function fetchFeedSessionIdByChannel(
 // `draft-session-detail.tsx` — streams don't belong in the RPC SDK.
 
 /** Mirrors `ReplyTarget` in `packages/api/src/db/draft-session-store.ts`. */
-type FeedReplyTargetSummary = {
+export type FeedReplyTargetSummary = {
   authorHandle: string;
   text: string;
   permalink: string | null;
@@ -596,10 +618,14 @@ export type FeedDraftMutationResult =
  */
 export async function fetchFeedDraftSessions(
   assistantId: string,
-  platform: FeedPlatform,
+  /** Omit for every platform — the merged Posts queue reads the whole rail
+   *  in one call. Both editions treat the query param as optional. */
+  platform?: FeedPlatform,
 ): Promise<FeedDraftSessionSummary[]> {
   const res = await authFetch(
-    `${API_URL}/api/distribution/${assistantId}/draft-sessions?platform=${platform}`,
+    `${API_URL}/api/distribution/${assistantId}/draft-sessions${
+      platform ? `?platform=${platform}` : ""
+    }`,
   );
   if (!res.ok) throw new Error(`draft sessions API ${res.status}`);
   const body = (await res.json()) as { sessions?: FeedDraftSessionSummary[] };
@@ -613,7 +639,12 @@ export async function fetchFeedDraftSessions(
  */
 export async function createFeedDraftSession(
   assistantId: string,
-  body: { platform: FeedPlatform; seed?: FeedDraftSessionSeed },
+  body: {
+    platform: FeedPlatform;
+    seed?: FeedDraftSessionSeed;
+    /** Names the post up front; the server falls back to a default title. */
+    title?: string;
+  },
 ): Promise<
   | { ok: true; session: FeedDraftSessionSummary }
   | { ok: false; error: string | null }
@@ -1182,57 +1213,6 @@ export async function updateFeedMemberDraftPermission(
  * the written visual brief for image-first platforms, when the draft
  * carried one.
  */
-export type FeedReadyPost = {
-  id: string;
-  platform: FeedPlatform;
-  finalText: string;
-  imageBrief: string | null;
-  approvedBy: string | null;
-  sessionId: string | null;
-  createdAt: string;
-};
-
-type ReadyEventRow = {
-  id: string;
-  platform: string;
-  metadata?: {
-    finalText?: unknown;
-    imageBrief?: unknown;
-    approvedBy?: unknown;
-    sessionId?: unknown;
-  } | null;
-  createdAt: string;
-};
-
-/**
- * The assistant's ready-to-post queue
- * (`GET /:assistantId/ready-posts`). Returns `[]` on any non-OK response —
- * the page treats a failed load as an inline error via a separate probe.
- */
-export async function fetchFeedReadyPosts(
-  assistantId: string,
-): Promise<FeedReadyPost[] | null> {
-  const res = await authFetch(
-    `${API_URL}/api/distribution/${assistantId}/ready-posts`,
-  );
-  if (!res.ok) return null;
-  const body = (await res.json().catch(() => ({}))) as {
-    ready?: ReadyEventRow[];
-  };
-  return (body.ready ?? []).map((e) => {
-    const meta = e.metadata ?? {};
-    return {
-      id: e.id,
-      platform: e.platform as FeedPlatform,
-      finalText: typeof meta.finalText === "string" ? meta.finalText : "",
-      imageBrief: typeof meta.imageBrief === "string" ? meta.imageBrief : null,
-      approvedBy: typeof meta.approvedBy === "string" ? meta.approvedBy : null,
-      sessionId: typeof meta.sessionId === "string" ? meta.sessionId : null,
-      createdAt: e.createdAt,
-    };
-  });
-}
-
 /**
  * Mark a ready post as posted by hand
  * (`POST /:assistantId/ready-posts/:eventId/mark-posted`). The optional
@@ -1268,4 +1248,172 @@ export async function discardFeedReadyPost(
   if (res.ok) return { ok: true };
   const data = (await res.json().catch(() => ({}))) as { error?: string };
   return { ok: false, error: data.error ?? null };
+}
+
+// ── Marketing plan (docs/plans/feed-revamp.md §6) ────────────────────────
+//
+// Served by the open `contentPlanRoutes()` router, which both editions mount
+// unconditionally — so unlike the rest of this file, these calls behave
+// identically in OSS and hosted and never degrade to an empty collection.
+
+/** The month's slots (`GET /:assistantId/plan-slots?month=YYYY-MM`). */
+export async function fetchPlanSlots(
+  assistantId: string,
+  month: string,
+): Promise<PlanSlot[] | null> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-slots?month=${encodeURIComponent(month)}`,
+  );
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => ({}))) as { slots?: PlanSlot[] };
+  return body.slots ?? [];
+}
+
+export async function createPlanSlot(
+  assistantId: string,
+  input: {
+    platform: FeedPlatform;
+    scheduledFor: string;
+    title: string;
+    brief?: string;
+  },
+): Promise<{ ok: true; slot: PlanSlot } | { ok: false; error: string | null }> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-slots`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    slot?: PlanSlot;
+    error?: string;
+  };
+  if (res.ok && data.slot) return { ok: true, slot: data.slot };
+  return { ok: false, error: data.error ?? null };
+}
+
+/**
+ * Edit a slot. `status` accepts only the operator's own marks — the server
+ * rejects a derived status by design (feed-revamp.md D7).
+ */
+export async function updatePlanSlot(
+  assistantId: string,
+  slotId: string,
+  patch: {
+    scheduledFor?: string;
+    title?: string;
+    brief?: string | null;
+    status?: PlanSlotMark;
+  },
+): Promise<{ ok: true; slot: PlanSlot } | { ok: false; error: string | null }> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-slots/${slotId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    slot?: PlanSlot;
+    error?: string;
+  };
+  if (res.ok && data.slot) return { ok: true, slot: data.slot };
+  return { ok: false, error: data.error ?? null };
+}
+
+export async function deletePlanSlot(
+  assistantId: string,
+  slotId: string,
+): Promise<FeedDraftMutationResult> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-slots/${slotId}`,
+    { method: "DELETE" },
+  );
+  if (res.ok) return { ok: true };
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  return { ok: false, error: data.error ?? null };
+}
+
+/**
+ * Start drafting a slot: opens a draft session seeded from the slot's brief
+ * and binds it. Idempotent — a slot already drafting returns its session.
+ */
+export async function draftFromPlanSlot(
+  assistantId: string,
+  slotId: string,
+): Promise<
+  | { ok: true; slot: PlanSlot; sessionId: string }
+  | { ok: false; error: string | null }
+> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-slots/${slotId}/draft`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    slot?: PlanSlot;
+    sessionId?: string;
+    error?: string;
+  };
+  if (res.ok && data.slot && data.sessionId) {
+    return { ok: true, slot: data.slot, sessionId: data.sessionId };
+  }
+  return { ok: false, error: data.error ?? null };
+}
+
+/** The month brief. An unwritten month returns an empty brief, not a 404. */
+export async function fetchPlanBrief(
+  assistantId: string,
+  month: string,
+): Promise<PlanBrief | null> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-brief?month=${encodeURIComponent(month)}`,
+  );
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => ({}))) as { brief?: PlanBrief };
+  return body.brief ?? null;
+}
+
+export async function savePlanBrief(
+  assistantId: string,
+  input: { month: string; brief: string; themes: string[] },
+): Promise<{ ok: true; brief: PlanBrief } | { ok: false; error: string | null }> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-brief`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    brief?: PlanBrief;
+    error?: string;
+  };
+  if (res.ok && data.brief) return { ok: true, brief: data.brief };
+  return { ok: false, error: data.error ?? null };
+}
+
+/**
+ * Open (or resume) the operator's plan conversation, returning the sticky
+ * channel the dock should mount. Idempotent — safe to call on every Plan
+ * mount. The session carries `mode='plan'`, which is what gives the assistant
+ * the `proposePlan` cardboard tool (feed-revamp.md D9).
+ */
+export async function ensurePlanSession(
+  assistantId: string,
+): Promise<{ sessionId: string; channelId: string } | null> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/plan-session`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+  );
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => ({}))) as {
+    sessionId?: string;
+    channelId?: string;
+  };
+  if (!body.sessionId || !body.channelId) return null;
+  return { sessionId: body.sessionId, channelId: body.channelId };
 }

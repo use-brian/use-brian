@@ -516,7 +516,7 @@ function InspirationConfigForm({
             {saving ? td.saving : td.save}
           </button>
           {savedAt ? (
-            <span className="text-xs text-emerald-400">{td.saved}</span>
+            <span className="text-xs text-emerald-700 dark:text-emerald-400">{td.saved}</span>
           ) : null}
         </div>
       ) : null}

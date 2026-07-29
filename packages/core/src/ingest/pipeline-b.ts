@@ -57,6 +57,11 @@ import {
 import { resolveEntity } from '../entities/resolver.js'
 import type { MemoryRecord, MemoryStore } from '../memory/types.js'
 import type { TaskStore } from '../tasks/types.js'
+import {
+  admitTask,
+  buildTaskPolicyPromptBlock,
+  type TaskAdmissionPort,
+} from '../tasks/admission.js'
 import { collectStream } from '../providers/accumulator.js'
 import type { LLMProvider, Message, TokenUsage } from '../providers/types.js'
 import { RANK, type Sensitivity } from '../security/sensitivity.js'
@@ -159,6 +164,18 @@ export type PipelineBDeps = {
    * should always wire it.
    */
   tasks?: TaskStore
+  /**
+   * Task admission gate (`docs/architecture/features/task-guardrails.md`).
+   * When wired, every extracted task runs through `admitTask` on the
+   * `extracted` lane: previously rejected titles and deny-rule matches are
+   * dropped, near-duplicates are held in the suggestions tray, and the
+   * workspace's stated policy is injected into the extraction prompt so the
+   * model stops proposing that class in the first place.
+   *
+   * Optional — absent means "no policy stated" and every existing caller keeps
+   * today's behavior byte-for-byte.
+   */
+  taskAdmission?: TaskAdmissionPort
   episodes: EpisodeUpdaterPort
   /** Optional Flash-class classifier model. Defaults to `deps.model` when
    *  omitted; pass `null` to disable the classifier step. */
@@ -631,6 +648,14 @@ function truncate(s: string, n: number): string {
 function buildExtractionPrompt(
   episode: PipelineBEpisode,
   content: string,
+  /**
+   * Workspace task policy, pre-rendered by `buildTaskPolicyPromptBlock`.
+   * Empty string for every workspace that has stated none, which keeps the
+   * prompt byte-identical to before for them. Suppressing here is strictly
+   * cheaper than suppressing at the admission gate — no row written, no
+   * candidate to review — so this is the primary defense.
+   */
+  taskPolicy = '',
 ): string {
   const allowedEdges = EDGE_TYPES.join(' | ')
   const allowedEphemeralReasons = EPHEMERAL_REASONS.join(' | ')
@@ -696,7 +721,7 @@ Negative examples — DO NOT emit these as memories:
   - "Got it, thanks!" → ephemeral (ack-or-confirmation). No content.
   - "Alice is the CEO of Hinson HQ" → entities (Alice, Hinson HQ) + edge (works_at). Memory's why_not_entity test fails — this IS an entity attribute.
   - "Follow up with Bob next week" → tasks (text="Follow up with Bob", due_iso=<next week>). Memory's why_not_task test fails — this IS a TODO.
-
+${taskPolicy}
 Rules:
 - Persons: prefer email as canonical_id; else null.
 - Companies: prefer registrable domain as canonical_id; else null.
@@ -1084,11 +1109,28 @@ export async function processEpisode(
   // result is the final attempt's usage (per-attempt metering is
   // authoritative for billing).
   let extractionUsage: TokenUsage | null = null
+  // Workspace task policy — the user's stated rules plus their recent
+  // rejections, shown to the extractor as negative guidance. Best-effort: a
+  // policy lookup that fails must not fail the extraction, so it degrades to
+  // the unmodified prompt and the admission gate catches what gets through.
+  let taskPolicyBlock = ''
+  if (deps.taskAdmission?.loadPolicyForPrompt) {
+    try {
+      const policy = await deps.taskAdmission.loadPolicyForPrompt(episode.workspaceId)
+      taskPolicyBlock = buildTaskPolicyPromptBlock(policy.rules, policy.tombstones)
+    } catch (err) {
+      console.warn(
+        `[pipeline-b] task policy load failed for episode ${episode.id}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      )
+    }
+  }
   const windows = splitContentByTokenLimit(extractableContent, EXTRACTION_TOKEN_LIMIT)
   const windowPayloads: ExtractionOutput[] = []
   for (let wi = 0; wi < windows.length; wi++) {
     const extractionMessages: Message[] = [
-      { role: 'user', content: buildExtractionPrompt(episode, windows[wi]) },
+      { role: 'user', content: buildExtractionPrompt(episode, windows[wi], taskPolicyBlock) },
     ]
     let windowPayload: ExtractionOutput | null = null
     for (let attempt = 1; attempt <= 2 && !windowPayload; attempt++) {
@@ -1288,6 +1330,10 @@ export async function processEpisode(
   // tasks — see RETROSPECTIVE_SOURCE_KINDS. This is the enforcement point
   // graded by `invariants/no-task-extraction-from-code-history`.
   const createsTasks = sourceKindCreatesTasks(episode.sourceKind)
+  // Per-item admission outcomes, folded into the log line below so a workspace
+  // can see the guardrail working without opening the candidates table.
+  let tasksHeld = 0
+  let tasksBlocked = 0
   if (deps.tasks && createsTasks) {
     for (const ex of payload.tasks) {
       try {
@@ -1296,6 +1342,28 @@ export async function processEpisode(
           const parsed = new Date(ex.due_iso)
           due = Number.isNaN(parsed.getTime()) ? null : parsed
         }
+
+        // Admission gate — the extracted lane. Unlike the assistant lane, a
+        // `hold` here is exactly right: nobody asked for this task, so an
+        // ambiguous near-duplicate waits in the suggestions tray instead of
+        // landing in the list. `admitTask` writes the tray/audit row itself.
+        if (deps.taskAdmission) {
+          const verdict = await admitTask(deps.taskAdmission, {
+            workspaceId: episode.workspaceId,
+            title: ex.text,
+            due,
+            lane: 'extracted',
+            sourceKind: episode.sourceKind,
+            sourceEpisodeId: episode.id,
+            createdByAssistantId: episode.createdByAssistantId,
+          })
+          if (!verdict.admitted) {
+            if (verdict.outcome === 'hold') tasksHeld++
+            else tasksBlocked++
+            continue
+          }
+        }
+
         const task = await deps.tasks.create({
           userId: episode.createdByUserId,
           workspaceId: episode.workspaceId,
@@ -1324,6 +1392,11 @@ export async function processEpisode(
           ? `source_kind '${episode.sourceKind}' is retrospective (no task creation)`
           : 'deps.tasks not wired'
       }`,
+    )
+  }
+  if (tasksHeld > 0 || tasksBlocked > 0) {
+    console.log(
+      `[pipeline-b] episode ${episode.id} — task guardrails: ${tasksWritten.length} created, ${tasksHeld} held for review, ${tasksBlocked} blocked`,
     )
   }
 

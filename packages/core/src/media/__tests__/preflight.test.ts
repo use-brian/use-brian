@@ -6,7 +6,13 @@ vi.mock('../transcribe.js', () => ({
 }))
 
 // Import after the mock so the preflight binds to the mocked export.
-const { transcribeFirstAudio, describeTranscriptionFailure } = await import('../preflight.js')
+const {
+  transcribeFirstAudio,
+  describeTranscriptionFailure,
+  voiceUnavailableNote,
+  composeVoiceTurnText,
+  TRANSCRIPTION_DISABLED_REASON,
+} = await import('../preflight.js')
 const { transcribeAudio } = await import('../transcribe.js')
 const mockedTranscribe = vi.mocked(transcribeAudio)
 
@@ -149,6 +155,80 @@ describe('[COMP:media/preflight] transcription failure reporting', () => {
       { enabled: true, apiKey: 'k', onFailure: (r) => seen.push(r) },
     )
     expect(seen).toEqual([])
+  })
+
+  // The kill switch used to return before the caller could learn anything, so
+  // an OSS deployment booted with it off dropped voice notes into an empty turn
+  // and the model answered "I don't see a recording attachment" (2026-07-28).
+  it('reports the kill switch through onFailure, naming the env var', async () => {
+    const seen: string[] = []
+    // This describe shares one mock across its tests, so compare the delta.
+    const callsBefore = mockedTranscribe.mock.calls.length
+    const out = await transcribeFirstAudio(
+      [{ buffer: Buffer.from('a'), mime: 'audio/ogg', index: 0 } as MediaAttachment],
+      { enabled: false, apiKey: 'k', onFailure: (r) => seen.push(r) },
+    )
+    expect(out).toBeUndefined()
+    expect(mockedTranscribe.mock.calls.length).toBe(callsBefore)
+    expect(seen).toEqual([TRANSCRIPTION_DISABLED_REASON])
+    expect(seen[0]).toContain('VOICE_TRANSCRIPTION_ENABLED')
+  })
+
+  // Ordering matters: the switch is checked AFTER the audio lookup, so a turn
+  // that carried no audio at all never emits a spurious notice.
+  it('stays silent when disabled and there was no audio to drop', async () => {
+    const seen: string[] = []
+    await transcribeFirstAudio(
+      [{ buffer: Buffer.from('a'), mime: 'image/png', index: 0 } as MediaAttachment],
+      { enabled: false, apiKey: 'k', onFailure: (r) => seen.push(r) },
+    )
+    await transcribeFirstAudio([], { enabled: false, apiKey: 'k', onFailure: (r) => seen.push(r) })
+    expect(seen).toEqual([])
+  })
+})
+
+describe('[COMP:media/preflight] voiceUnavailableNote', () => {
+  it('names the reason and forbids the three confabulations seen in production', () => {
+    const note = voiceUnavailableNote('transcription timed out')
+    expect(note).toContain('transcription timed out')
+    // "still processing" / "I'll retry" / "you sent no attachment" are the
+    // three things the model invented when handed a bare unavailable marker.
+    expect(note).toMatch(/still processing/i)
+    expect(note).toMatch(/retry/i)
+    expect(note).toMatch(/no attachment/i)
+  })
+
+  it('still identifies the turn as a voice note when the reason is unknown', () => {
+    const note = voiceUnavailableNote(undefined)
+    expect(note).toMatch(/voice note received/i)
+    expect(note).not.toContain('undefined')
+  })
+})
+
+describe('[COMP:media/preflight] composeVoiceTurnText', () => {
+  it('prefixes a transcript and keeps the caption after it', () => {
+    expect(composeVoiceTurnText('hello there', undefined, 'see attached')).toBe(
+      '[voice] hello there\n\nsee attached',
+    )
+    expect(composeVoiceTurnText('hello there', undefined)).toBe('[voice] hello there')
+  })
+
+  // The regression: with no transcript the turn used to be left EMPTY, which
+  // reads to the model as "the user sent nothing" — so it denied receiving an
+  // attachment instead of reporting a transcription failure.
+  it('never yields an empty turn when the transcript is missing', () => {
+    for (const transcript of [undefined, '', '   ']) {
+      const out = composeVoiceTurnText(transcript, 'transcription timed out')
+      expect(out).not.toBe('')
+      expect(out).toMatch(/voice note received/i)
+      expect(out).toContain('transcription timed out')
+    }
+  })
+
+  it('keeps the caption when the transcript is missing', () => {
+    const out = composeVoiceTurnText(undefined, undefined, 'what do you think?')
+    expect(out).toMatch(/voice note received/i)
+    expect(out.endsWith('what do you think?')).toBe(true)
   })
 })
 

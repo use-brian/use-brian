@@ -64,6 +64,8 @@ export interface MenuTemplateHandlers {
   onSwitchTarget: () => void;
   /** Confirm, tear down local traces, trash the bundle, quit (uninstall.ts). */
   onUninstall: () => void;
+  /** Start Firefox with its loopback Remote Agent enabled for My Browser. */
+  onStartFirefoxControl: () => void;
 }
 
 /** Build the platform-appropriate menu template (pure). */
@@ -106,6 +108,10 @@ export function buildMenuTemplate(
       label: "Start Recording",
       accelerator: "CommandOrControl+Shift+R",
       click: () => handlers.onRecord(),
+    },
+    {
+      label: "Start Firefox for My Browser…",
+      click: () => handlers.onStartFirefoxControl(),
     },
   ];
   // A local target has no login (the shell mints the local-owner session), so

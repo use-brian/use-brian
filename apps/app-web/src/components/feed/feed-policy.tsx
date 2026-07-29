@@ -184,7 +184,7 @@ export function FeedPolicy() {
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
           {t.policy.modeHeading}
         </h2>
-        <div className="space-y-2 animate-stagger">
+        <div className="space-y-2">
           {MODE_VALUES.map((value) => (
             <label
               key={value}
@@ -255,7 +255,7 @@ export function FeedPolicy() {
             {saving ? t.policy.saving : t.policy.saveCta}
           </button>
           {savedAt ? (
-            <span className="text-xs text-emerald-400 inline-flex items-center gap-1 animate-fade-in">
+            <span className="text-xs text-emerald-700 dark:text-emerald-400 inline-flex items-center gap-1 animate-fade-in">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
               {t.policy.saved}
             </span>

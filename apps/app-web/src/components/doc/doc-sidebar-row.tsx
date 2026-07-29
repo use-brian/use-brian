@@ -22,6 +22,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { warmDocPage } from "@/lib/surface-prefetch";
 import {
   daysUntilPrune,
   derivePageIcon,
@@ -108,7 +109,12 @@ export function DocSidebarRow({
 
   return (
     <div
-      onMouseEnter={() => setHovered(true)}
+      onMouseEnter={() => {
+        setHovered(true);
+        // Warm this page's metadata so opening it paints instantly
+        // (lib/surface-prefetch.ts).
+        warmDocPage(row.id);
+      }}
       onMouseLeave={() => setHovered(false)}
       className={
         active

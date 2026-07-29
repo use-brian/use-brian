@@ -41,6 +41,7 @@ import {
   type BrainInboxPrimitive,
 } from '../db/brain-inbox-store.js'
 import { createInspectionSession } from '../db/sessions.js'
+import { rejectTask as rejectTaskWithReason } from '../db/task-admission-store.js'
 import {
   updateMemory,
   getMemoryByIdSystem,
@@ -2106,6 +2107,43 @@ export function brainInboxRoutes({
       }
       if (ownership.rows[0].workspace_id !== workspaceId) {
         res.status(403).json({ error: 'Row belongs to a different workspace' })
+        return
+      }
+
+      // Delete-with-reason (tasks only) — the reason is what upgrades a delete
+      // into a lesson: it writes a tombstone that stops near-identical tasks
+      // from being re-created, and may propose a standing rule. A DELETE with
+      // no reason falls through to the plain soft delete below, so existing
+      // callers are unaffected.
+      // Spec: docs/architecture/features/task-guardrails.md
+      const rejectReason =
+        primitiveParam === 'task' && typeof (req.body as any)?.reason === 'string'
+          ? ((req.body as any).reason as string).trim()
+          : ''
+      if (rejectReason.length >= 3) {
+        const rejected = await rejectTaskWithReason({
+          workspaceId,
+          userId,
+          taskId: rowId,
+          reason: rejectReason,
+        })
+        if (!rejected) {
+          res.status(404).json({ error: 'Row not found' })
+          return
+        }
+        await appendBrainVerification({
+          targetKind: auditKind(primitiveParam),
+          targetId: rowId,
+          workspaceId,
+          verifiedByUserId: userId,
+          action: 'delete',
+        })
+        void notifyBrainInboxChange(workspaceId, primitiveParam, rowId, 'delete')
+        res.json({
+          ok: true,
+          tombstoned: true,
+          proposedRuleId: rejected.proposedRuleId,
+        })
         return
       }
 

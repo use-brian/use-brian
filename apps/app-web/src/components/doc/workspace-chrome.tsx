@@ -38,6 +38,8 @@ import {
   surfaceFromPathname,
 } from "@/lib/doc-page-url";
 import { useT } from "@/lib/i18n/client";
+import { SurfaceTransition } from "@/components/chrome/surface-transition";
+import { usePrimaryAssistant } from "@/contexts/primary-assistant";
 import { routeProgress } from "@/lib/route-progress";
 import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
@@ -53,13 +55,7 @@ import {
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
 import { useWorkspaceEvents } from "@/lib/workspace-events";
-import {
-  ASSISTANT_REFRESH_EVENT,
-  type AssistantRefreshDetail,
-} from "@/lib/assistant-events";
 import { cn } from "@/lib/utils";
-import { listWorkspaceAssistants } from "@/lib/api/views";
-import { pickPrimaryAssistant } from "@/lib/primary-assistant";
 import { CHAT_SEED_EVENT, type ChatSeed } from "@/lib/chat-seed";
 import { DocSidebar } from "./doc-sidebar";
 import { InboxPanel } from "./inbox-panel";
@@ -180,42 +176,11 @@ export function WorkspaceChrome({
   // from the path inside `FloatingChat`); elsewhere the path has no page so the
   // next message mints a new page. See docs/architecture/features/doc.md →
   // "One dock, every surface".
-  const [chatAssistantId, setChatAssistantId] = useState<string | null>(null);
-  const resolveChatAssistant = useCallback(() => {
-    if (!workspaceId) return;
-    listWorkspaceAssistants(workspaceId)
-      .then((list) => {
-        // Repair-only: seed when we have no interlocutor yet, or when the one
-        // we picked has left the workspace. Re-picking unconditionally would
-        // yank a live conversation to a different assistant whenever the
-        // roster reorders.
-        setChatAssistantId((current) =>
-          current && list.some((a) => a.id === current)
-            ? current
-            : (pickPrimaryAssistant(list)?.id ?? null),
-        );
-      })
-      .catch(() => {
-        /* no list → no dock this load; a later workspace change retries */
-      });
-  }, [workspaceId]);
-
-  useEffect(() => {
-    resolveChatAssistant();
-  }, [resolveChatAssistant]);
-
-  // Live refresh. This chrome never unmounts inside a workspace, so a
-  // first-ever assistant created after load would otherwise leave
-  // `chatAssistantId` null (no dock at all) until an app restart.
-  useEffect(() => {
-    const onRefresh = (event: Event) => {
-      const detail = (event as CustomEvent<AssistantRefreshDetail>).detail;
-      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
-      resolveChatAssistant();
-    };
-    window.addEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
-    return () => window.removeEventListener(ASSISTANT_REFRESH_EVENT, onRefresh);
-  }, [workspaceId, resolveChatAssistant]);
+  // Resolution + the live-refresh listener moved UP to
+  // `PrimaryAssistantProvider` (mounted in the workspace layout) so the doc
+  // surface can read the same value instead of blocking on a second identical
+  // fetch of its own. Behaviour here is unchanged: no dock until it lands.
+  const { assistantId: chatAssistantId } = usePrimaryAssistant();
 
   // Chat-seed routing — the default-viewer landing's chatter / inline AI box
   // hand the user into the dock with a pre-written prompt via the
@@ -490,10 +455,15 @@ export function WorkspaceChrome({
       {/* The surface — the doc page shell on `/p`, or a folded-in surface
           (Brain / Studio / Workflow / …) on its own route. Each owns its inner
           chrome; the sidebar (which hosts the Home operator app-bar) is
-          shared here. */}
-      <div className="relative flex h-full min-w-0 flex-1 flex-col">
+          shared here.
+
+          `SurfaceTransition` is a plain wrapper that plays the on-brand enter
+          animation when the SURFACE changes (not on `/p/<pageId>` swaps, which
+          the shell handles in place). It never keys/remounts `children`, so the
+          doc shell and its Yjs socket survive every switch. */}
+      <SurfaceTransition className="relative flex h-full min-w-0 flex-1 flex-col">
         {children}
-      </div>
+      </SurfaceTransition>
 
       {/* The ONE assistant chat dock — mounted once for EVERY surface so a
           turn keeps streaming across tab switches and the conversation is

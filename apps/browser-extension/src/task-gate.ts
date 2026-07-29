@@ -46,8 +46,10 @@ const DENIAL_ERRORS: Record<ConsentDenialReason, { code: string; message: string
 export class TaskGate {
   private allowedTabId: number | null = null
   private stopped = false
+  private stopGeneration = 0
   private lastCommandAt = 0
   private promptInFlight: Promise<ConsentOutcome> | null = null
+  private promptStopGeneration = 0
   private readonly prompt: ConsentPrompter
   private readonly now: () => number
 
@@ -80,9 +82,13 @@ export class TaskGate {
       return this.allowedTabId
     }
     this.allowedTabId = null
-    this.promptInFlight ??= this.prompt().finally(() => {
-      this.promptInFlight = null
-    })
+    if (!this.promptInFlight) {
+      this.promptStopGeneration = this.stopGeneration
+      this.promptInFlight = this.prompt().finally(() => {
+        this.promptInFlight = null
+      })
+    }
+    const stopGeneration = this.promptStopGeneration
     const outcome = await this.promptInFlight
     if (!outcome.allowed) {
       // Only a human Allow clears `stopped`. A structural failure leaves the
@@ -90,6 +96,11 @@ export class TaskGate {
       // landing on the wrong kind of page.
       const { code, message } = DENIAL_ERRORS[outcome.reason]
       throw Object.assign(new Error(message), { code })
+    }
+    if (this.stopGeneration !== stopGeneration) {
+      throw Object.assign(new Error('The task stopped while browser permission was pending.'), {
+        code: 'stopped',
+      })
     }
     this.stopped = false
     this.allowedTabId = outcome.tabId
@@ -112,6 +123,7 @@ export class TaskGate {
 
   /** The persistent Stop: latches until the user allows a new task. */
   stop(): void {
+    this.stopGeneration += 1
     this.stopped = true
     this.allowedTabId = null
   }

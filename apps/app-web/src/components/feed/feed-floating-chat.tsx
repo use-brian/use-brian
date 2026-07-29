@@ -25,7 +25,9 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname } from "next/navigation";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
+import { feedSectionFromPathname } from "@/lib/feed-nav";
 import { cn } from "@/lib/utils";
 import {
   TuningChatPanel,
@@ -66,6 +68,14 @@ export function FeedFloatingChat() {
     }
     return [...seen.values()];
   }, [profiles, brandAssistants]);
+
+  // The Plan surface talks on its own sticky channel. That session carries
+  // `mode='plan'`, which is what injects the `proposePlan` cardboard tool
+  // (feed-revamp.md D9) — and it keeps a month of scheduling context out of
+  // the voice-tuning thread the operator uses everywhere else.
+  const pathname = usePathname() ?? "";
+  const channelId =
+    feedSectionFromPathname(pathname) === "plan" ? "plan" : "tuning";
 
   const [expanded, setExpanded] = useState(false);
   const [activeAssistantId, setActiveAssistantId] = useState<string | null>(null);
@@ -185,13 +195,15 @@ export function FeedFloatingChat() {
         ) : null}
 
         <div className="min-h-0 flex-1">
-          {/* Keyed by assistant so switching resumes that assistant's session. */}
+          {/* Keyed by assistant AND channel so switching either resumes the
+              right conversation instead of grafting messages onto the last. */}
           <TuningChatPanel
-            key={activeAssistant.id}
+            key={`${activeAssistant.id}:${channelId}`}
             ref={chatRef}
             assistantId={activeAssistant.id}
             assistantName={activeAssistant.name}
             workspaceId={workspaceId}
+            channelId={channelId}
             onClose={() => setExpanded(false)}
           />
         </div>

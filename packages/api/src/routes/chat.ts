@@ -4,7 +4,7 @@ import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, distillFileToText, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, distillFileToText, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -16,7 +16,7 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
-import { buildSplitSystemPrompt, resolveLayer1Prompt, maybeAppendFollowupChips } from './_prompt-builder.js'
+import { buildSplitSystemPrompt, attachTurnContext, resolveLayer1Prompt, maybeAppendFollowupChips } from './_prompt-builder.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
@@ -851,32 +851,11 @@ export function buildViewingDeckBlock(deck: {
  * implicit prompt cache covers both. An empty `turnContext` returns the
  * input unchanged.
  */
-export function attachTurnContext(
-  messages: Message[],
-  turnContext: string,
-): Message[] | null {
-  if (!turnContext || turnContext.trim().length === 0) return messages
-  if (messages.length === 0) return null
-  const last = messages[messages.length - 1]
-  if (last.role !== 'user') return null
-  // A tool_result-bearing user message is a pairing carrier — don't graft
-  // prose onto it; fall back to in-prompt placement instead.
-  if (
-    typeof last.content !== 'string' &&
-    last.content.some((b) => b.type === 'tool_result')
-  ) {
-    return null
-  }
-  const envelope = `<turn_context>\n${turnContext.trim()}\n</turn_context>`
-  const content =
-    typeof last.content === 'string'
-      ? [
-          { type: 'text' as const, text: last.content },
-          { type: 'text' as const, text: envelope },
-        ]
-      : [...last.content, { type: 'text' as const, text: envelope }]
-  return [...messages.slice(0, -1), { role: 'user', content }]
-}
+// Moved to `_prompt-builder.ts` so `channel-pipeline.ts` can use it too
+// (chat.ts imports channel-pipeline, so the reverse import would cycle).
+// Re-exported here because callers and tests already import it from this
+// module.
+export { attachTurnContext }
 
 /**
  * Pick the sticky `channel_id` used to resolve (or create) a web session when
@@ -2013,12 +1992,12 @@ export function chatRoutes(options: WebChatOptions): Router {
                 )
                 if (transcription) transcriptions.push(transcription)
               } else {
-                transcribeFailure = 'voice transcription is disabled on this deployment (VOICE_TRANSCRIPTION_ENABLED)'
+                transcribeFailure = TRANSCRIPTION_DISABLED_REASON
               }
               textParts.push(
                 transcription
                   ? `[voice] ${transcription.text}`
-                  : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[voice note — transcription unavailable${transcribeFailure ? `: ${transcribeFailure}` : ''}. Tell the user this plainly; do NOT claim it is still processing or that you will retry.]</attached_file>`,
+                  : `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">${voiceUnavailableNote(transcribeFailure)}</attached_file>`,
               )
               if (!transcription && transcribeFailure) {
                 sendEvent('notice', { kind: 'transcription_unavailable', message: transcribeFailure })
@@ -2174,7 +2153,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       try {
         classification = await classifyTopic({
           provider: options.provider,
-          model: 'gemini-flash',
+          // Background lane — a per-turn classifier is exactly the invisible
+          // work cost-and-pricing.md → "Standard-tier routing" pins to Flash
+          // Lite (its sibling classifiers already do). Had drifted onto the
+          // Flash 3 chat alias at 2x the rate.
+          model: backgroundModelFor(options.configuredProviders),
           recentUserTurns,
           replyToText: replyResolved?.text ?? null,
           currentMessage: userMessageText,

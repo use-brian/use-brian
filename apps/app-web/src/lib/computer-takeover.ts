@@ -15,6 +15,11 @@
  * Spec: docs/architecture/engine/computer-use.md §4.8, §5.
  */
 
+/** Local tabs have no public stream capability; they start and stay on API polling. */
+export function takeoverStartsPolled(backend: "local" | "cloud"): boolean {
+  return backend === "local";
+}
+
 /**
  * Map a client-space click to frame coordinates through the `object-contain`
  * fit. Returns null for clicks in the letterbox bars (nothing under them).

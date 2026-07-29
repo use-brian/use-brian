@@ -69,7 +69,7 @@ function render(value: FeedWorkspaceValue): string {
   workspaceRef.current = value;
   return renderToString(
     <I18nProvider locale="en" dict={dict}>
-      <FeedVoice />
+      <FeedVoice scope="threads" />
     </I18nProvider>,
   );
 }
@@ -77,8 +77,12 @@ function render(value: FeedWorkspaceValue): string {
 describe("[COMP:app-web/feed-voice] FeedVoice", () => {
   it("renders the header and the loading skeletons (effects never run under SSR)", () => {
     const html = render(workspace([profile("acme")]));
-    expect(html).toContain(en.feedPage.sections.voice);
-    expect(html).toContain(en.feedPage.voice.subtitle);
+    // The rail opens on a platform, and the heading names that scope rather
+    // than the surface (feed-revamp.md D3).
+    expect(html).toContain("Threads voice");
+    // The scope rail is retired: the sidebar owns scope now (D13), so the
+    // pane states its scope in the subtitle instead.
+    expect(html).toContain("on top of the baseline");
     // Admin sees the Inject rule button even while loading. (Anchor on the
     // closing tag — the subtitle prose also contains "Inject rule".)
     expect(html).toContain(`${en.feedPage.voice.injectRule}</button>`);
@@ -89,7 +93,7 @@ describe("[COMP:app-web/feed-voice] FeedVoice", () => {
 
   it("hides the Inject rule button from non-admin members", () => {
     const html = render(workspace([profile("acme")], "member"));
-    expect(html).toContain(en.feedPage.sections.voice);
+    expect(html).toContain("Threads voice");
     expect(html).not.toContain(`${en.feedPage.voice.injectRule}</button>`);
   });
 

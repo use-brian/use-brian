@@ -8,6 +8,9 @@
  *   - sets `resolveConfirmation` on `ask` / `allow` tools so the executor
  *     can fail-fast on `ask` (Phase A) or pause for approval (Phase C).
  *
+ * Built-in tools that declare `requiresConfirmation` (the KB write pair) ride
+ * the same pause — see the `allowKnowledgeWrites` note below.
+ *
  * Run once per workflow-run start; the resulting map is held immutable for
  * that run's duration. Adding/removing connectors mid-run does not affect
  * an in-flight run (good for predictability).
@@ -15,7 +18,7 @@
  * [COMP:workflow/mcp-bridge]
  */
 
-import type { Tool, KnowledgeStoreInterface, GDriveFilesStore, McpSettingsStore, FilesApi } from '@use-brian/core'
+import type { Tool, KnowledgeStoreInterface, KnowledgeRepoWriter, GDriveFilesStore, McpSettingsStore, FilesApi } from '@use-brian/core'
 import { injectMcpTools } from '../mcp/inject.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -32,6 +35,14 @@ export type WorkflowToolRegistryDeps = {
   connectorInstanceStore?: ConnectorInstanceStore
   workspaceToolPolicyStore?: import('../db/workspace-tool-policy-store.js').WorkspaceToolPolicyStore
   knowledgeStore?: KnowledgeStoreInterface
+  /**
+   * KB source write-back port. Present ⇒ a `tool_call` step may write the
+   * knowledge base, gated by the executor's approval pause (see the
+   * `allowKnowledgeWrites` note at the injection call). Absent ⇒ only
+   * manual-KB updates are reachable, and repo-backed writes are not exposed
+   * at all (`injectMcpTools` requires the port to emit them).
+   */
+  knowledgeRepoWriter?: KnowledgeRepoWriter
   gdriveFilesStore?: GDriveFilesStore
   /** Workspace-files byte layer — `gmailSendMessage` attachments on workflow
    *  `tool_call` steps (`docs/architecture/integrations/gmail.md`). */
@@ -98,9 +109,26 @@ export async function buildWorkflowToolRegistry(
     workspaceToolPolicyStore: deps.workspaceToolPolicyStore,
     assistantTeamId: scope.workspaceId,
     keepBuiltinsDirect: true,
-    // KB write tools are chat-only (D2): workflow runs have no live
-    // Approve/Deny loop, so this surface never exposes them.
-    allowKnowledgeWrites: false,
+    // KB writes ARE exposed here, and are governed by the executor's own
+    // approval pause rather than a chat Approve/Deny card. Both write tools
+    // carry `requiresConfirmation: true`, and `keepBuiltinsDirect` (above) is
+    // what keeps that flag visible to the executor: `dispatchToolCall` reads
+    // it, routes to `askPolicyOutcome`, and — with `deps.requestApproval`
+    // wired — pauses the run on a `kind='workflow_step'` approval carrying
+    // frozen arguments. So a workflow never writes the KB unattended; it
+    // parks in the Approvals inbox exactly like an ask-policy MCP tool.
+    //
+    // This is what makes the `knowledge` event source a closed loop: an entry
+    // changes → a workflow wakes → it drafts an edit → a human approves it.
+    // Without the write half the loop can only ever notify.
+    //
+    // Deliberately NOT extended to `assistant_call` steps: the callee executor
+    // strips confirmation UX (`inter-assistant/executor.ts` keeps
+    // `allowKnowledgeWrites: false`), so a KB write there would have no gate.
+    // Author the decision as an `assistant_call` and the write as a
+    // `tool_call`.
+    allowKnowledgeWrites: true,
+    knowledgeRepoWriter: deps.knowledgeRepoWriter,
     filesApi: deps.filesApi,
   })
 

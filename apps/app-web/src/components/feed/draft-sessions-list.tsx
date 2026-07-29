@@ -165,10 +165,10 @@ export function deriveStatus(
 
 const STATUS_BADGE_CLASS: Record<SessionStatus, string> = {
   ready: "bg-primary/15 text-primary ring-1 ring-primary/30",
-  "ready-to-post": "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30",
-  drafting: "bg-amber-500/15 text-amber-400 ring-1 ring-amber-500/30",
+  "ready-to-post": "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30",
+  drafting: "bg-amber-500/15 text-amber-700 dark:text-amber-400 ring-1 ring-amber-500/30",
   "in-progress": "bg-muted text-muted-foreground ring-1 ring-border",
-  posted: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30",
+  posted: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30",
   deleted: "bg-destructive/15 text-destructive ring-1 ring-destructive/30",
   resolved: "bg-muted text-muted-foreground ring-1 ring-border",
 };
@@ -811,7 +811,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
       ) : (
         <div
           // `key={filter}` re-mounts the list when the filter changes so
-          // `.animate-stagger` re-fires the per-card rise-in. Without
+          // `.` re-fires the per-card rise-in. Without
           // this, refiltering snaps the cards into their new positions.
           key={filter}
           // Row-major masonry: items are round-robin distributed into
@@ -820,7 +820,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
           // Each column is a plain flex stack so cards sit flush —
           // removing the empty-row gutters the prior CSS Grid produced
           // when card heights varied (parent-post embeds run 200–800px).
-          className="flex gap-3 items-start animate-stagger"
+          className="flex gap-3 items-start"
         >
           {columns.map((col, ci) => (
             <ul key={ci} className="flex-1 min-w-0 flex flex-col gap-3">
@@ -842,7 +842,7 @@ export function DraftSessionsList(props: { platform?: FeedPlatform } = {}) {
                 <Link
                   href={`${feedPath(params.workspaceId, { platform, segment: "draft-sessions" })}/${s.id}`}
                   className={
-                    "block h-full rounded-xl border p-3 space-y-2.5 shadow-sm hover:shadow-md transition-colors " +
+                    "block h-full rounded-xl border p-3 space-y-2.5 shadow-xs transition-colors " +
                     STATUS_CARD_CHROME[status]
                   }
                 >
@@ -1330,7 +1330,7 @@ function SessionPreviewTile({
  */
 const KIND_BADGE_CLASS: Record<Exclude<CardKind, "pending">, string> = {
   reply: "bg-primary/10 text-primary ring-1 ring-primary/25",
-  original: "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/30",
+  original: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30",
 };
 
 function KindBadge({ kind }: { kind: CardKind }) {

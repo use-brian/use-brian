@@ -192,14 +192,14 @@ export function FeedConnection() {
             className={
               "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 ring-inset " +
               (profile.enabled
-                ? "bg-emerald-500/15 text-emerald-300 ring-emerald-400/25"
-                : "bg-amber-500/15 text-amber-300 ring-amber-400/25")
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-emerald-400/25"
+                : "bg-amber-500/15 text-amber-700 dark:text-amber-300 ring-amber-400/25")
             }
           >
             <span
               className={
                 "h-1.5 w-1.5 rounded-full " +
-                (profile.enabled ? "bg-emerald-400 animate-pulse-soft" : "bg-amber-400")
+                (profile.enabled ? "bg-emerald-600/80 dark:bg-emerald-400/80" : "bg-amber-500/80 dark:bg-amber-400/80")
               }
             />
             {profile.enabled ? t.connection.statusEnabled : t.connection.statusDisabled}

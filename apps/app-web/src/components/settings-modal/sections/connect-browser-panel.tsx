@@ -4,10 +4,10 @@
  * "My Browser" connect surface (my-browser.md P1): pair the user's own Chrome
  * (via the browser extension + relay) so the assistant can browse as them, with
  * their logins and home network, for hardened/authenticated sites the cloud
- * browser cannot reach. Paid-gated on the hosted edition (D3); OSS never gates
- * (and never shows this section). Renders at the top of the Browser profiles
- * section - setting a profile's backend to "My Browser" routes browsing to the
- * paired Chrome.
+ * browser cannot reach. Paid-gated on the hosted edition (D3); OSS exposes the
+ * same section without a plan gate for a configured self-hosted relay. Renders
+ * at the top of the Browser profiles section - setting a profile's backend to
+ * "My Browser" routes browsing to the paired Chrome.
  *
  * [COMP:app-web/connect-browser]
  */

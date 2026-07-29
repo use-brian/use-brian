@@ -3,7 +3,7 @@
 /**
  * Persistent live-browser affordance for the chat composer.
  *
- * When the chat session has an active cloud computer task, a pulsing chip
+ * When the chat session has an active cloud or local computer task, a pulsing chip
  * renders above the composer linking into the Take-Over live view
  * (`/w/[workspaceId]/computer/[sessionId]`) so the user can watch the
  * assistant browse or take over (e.g. to sign in) at any moment - the
