@@ -96,6 +96,17 @@ export type ComputerTaskSummary = {
   lastActivityAt: number;
 };
 
+/** Task the Browsers index should open when no session was selected explicitly. */
+export function mostRecentComputerTask(
+  tasks: ComputerTaskSummary[],
+): ComputerTaskSummary | null {
+  return tasks.reduce<ComputerTaskSummary | null>(
+    (latest, task) =>
+      !latest || task.lastActivityAt > latest.lastActivityAt ? task : latest,
+    null,
+  );
+}
+
 /**
  * The caller's live browser tasks in a workspace — the discovery surface the
  * shell pill polls. Empty array on any failure: discovery chrome must never
