@@ -296,6 +296,43 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
     expect(input.customerSelection).toEqual({ all: true })
   })
 
+  it('createDiscountCode passes through the validity window and defaults startsAt to now', async () => {
+    // The "promo code that runs for three days" path. Nothing covered this
+    // before, despite endsAt being the whole point of a time-boxed code.
+    const { createDiscountCode } = await import('../client.js')
+    const ok = () => jsonResponse({
+      data: { discountCodeBasicCreate: { codeDiscountNode: { id: 'gid://shopify/DiscountCodeNode/1' }, userErrors: [] } },
+    })
+    const input = () => JSON.parse((mockFetch.mock.calls.at(-1)![1] as { body: string }).body).variables.basicCodeDiscount
+
+    mockFetch.mockResolvedValue(ok())
+    const startsAt = '2026-07-28T00:00:00.000Z'
+    const endsAt = '2026-07-31T00:00:00.000Z'
+    await createDiscountCode(AUTH, { code: 'THREEDAY', percentage: 10, startsAt, endsAt })
+    expect(input().startsAt).toBe(startsAt)
+    expect(input().endsAt).toBe(endsAt)
+
+    // No startsAt → defaults to now; no endsAt → key omitted entirely, since
+    // Shopify reads an absent endsAt as "no end" and null as invalid.
+    mockFetch.mockResolvedValue(ok())
+    const before = Date.now()
+    await createDiscountCode(AUTH, { code: 'FOREVER', percentage: 10 })
+    const defaulted = input()
+    expect(Date.parse(defaulted.startsAt)).toBeGreaterThanOrEqual(before)
+    expect(defaulted).not.toHaveProperty('endsAt')
+  })
+
+  it('createDiscountCode keeps an explicit usageLimit of 0 instead of dropping it', async () => {
+    // Truthiness check would turn "redeemable zero times" into unlimited.
+    const { createDiscountCode } = await import('../client.js')
+    mockFetch.mockResolvedValue(jsonResponse({
+      data: { discountCodeBasicCreate: { codeDiscountNode: { id: 'gid://shopify/DiscountCodeNode/1' }, userErrors: [] } },
+    }))
+    await createDiscountCode(AUTH, { code: 'ZERO', percentage: 10, usageLimit: 0 })
+    const input = JSON.parse((mockFetch.mock.calls.at(-1)![1] as { body: string }).body).variables.basicCodeDiscount
+    expect(input.usageLimit).toBe(0)
+  })
+
   it('setInventoryQuantity resolves the location and demands one when ambiguous', async () => {
     const { setInventoryQuantity } = await import('../client.js')
     const twoLocations = {
@@ -363,6 +400,29 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       data: { orderCancel: { job: null, orderCancelUserErrors: [{ field: null, message: 'Order is already cancelled' }], userErrors: [] } },
     }))
     await expect(cancelOrder(AUTH, { orderId: '1' })).rejects.toThrow(/already cancelled/)
+  })
+
+  it('cancelOrder translates the refund boolean into refundMethod and drops the deprecated userErrors selection', async () => {
+    // `refund: Boolean` was deprecated in 2025-07; originalPaymentMethods is
+    // its documented replacement. Selecting the deprecated `userErrors` on
+    // this payload would hard-fail the query once Shopify removes it.
+    const { cancelOrder } = await import('../client.js')
+    const ok = () => jsonResponse({ data: { orderCancel: { job: { id: 'gid://shopify/Job/1' }, orderCancelUserErrors: [] } } })
+    const sentBody = () => JSON.parse((mockFetch.mock.calls.at(-1)![1] as { body: string }).body)
+
+    mockFetch.mockResolvedValue(ok())
+    await cancelOrder(AUTH, { orderId: '1' })
+    let body = sentBody()
+    expect(body.variables.refundMethod).toEqual({ originalPaymentMethods: {} })
+    expect(body.variables).not.toHaveProperty('refund')
+    expect(body.query).toContain('$refundMethod: OrderCancelRefundMethodInput')
+    expect(body.query).not.toMatch(/\brefund:\s*\$refund\b/)
+    expect(body.query).not.toMatch(/^\s*userErrors\s*\{/m)
+
+    mockFetch.mockResolvedValue(ok())
+    await cancelOrder(AUTH, { orderId: '1', refund: false })
+    body = sentBody()
+    expect(body.variables.refundMethod).toBeNull()
   })
 
   it('fetchOrdersRange paginates with the cursor and reports truncation', async () => {
