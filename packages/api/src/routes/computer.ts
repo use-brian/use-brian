@@ -4,11 +4,13 @@ import { z } from 'zod'
 import { createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
   BrowserProfileStore,
+  BrowserProvider,
   BrowserSkillGrantStore,
   BrowserSkillStore,
   SandboxOrchestrator,
   SandboxProvider,
   SessionVault,
+  SandboxTaskRecord,
 } from '@use-brian/core'
 
 /**
@@ -27,7 +29,13 @@ import type {
  */
 
 const InputEventSchema = z.union([
-  z.object({ kind: z.literal('click'), x: z.number(), y: z.number() }),
+  z.object({
+    kind: z.literal('click'),
+    x: z.number(),
+    y: z.number(),
+    frameW: z.number().positive().optional(),
+    frameH: z.number().positive().optional(),
+  }),
   z.object({ kind: z.literal('key'), text: z.string().min(1).max(64) }),
   z.object({ kind: z.literal('scroll'), deltaY: z.number() }),
   // Take-over toolbar navigation (§5): goto must carry an http(s) url — the
@@ -45,6 +53,69 @@ const InputEventSchema = z.union([
 
 const ClearanceSchema = z.enum(['public', 'internal', 'confidential'])
 const BackendSchema = z.enum(['local', 'cloud'])
+
+export type LocalComputerTaskRecord = {
+  taskId: string
+  userId: string
+  workspaceId: string
+  sessionId: string
+  status: 'running'
+  profileId: string | null
+  injectedSite: string | null
+  createdAt: number
+  lastActivityAt: number
+}
+
+export type LocalComputerTaskStore = {
+  touch(context: { userId: string; workspaceId?: string | null; sessionId: string }, site?: string | null): void
+  getActiveBySession(sessionId: string): LocalComputerTaskRecord | null
+  listActiveByWorkspace(workspaceId: string): LocalComputerTaskRecord[]
+  complete(sessionId: string): void
+}
+
+const LOCAL_TASK_TTL_MS = 20 * 60 * 1000
+
+/** Process-local by design: the extension/tab binding is itself ephemeral. */
+export function createInMemoryLocalComputerTaskStore(now: () => number = Date.now): LocalComputerTaskStore {
+  const tasks = new Map<string, LocalComputerTaskRecord>()
+  const active = (task: LocalComputerTaskRecord) => now() - task.lastActivityAt < LOCAL_TASK_TTL_MS
+  const prune = () => {
+    for (const [sessionId, task] of tasks) if (!active(task)) tasks.delete(sessionId)
+  }
+  return {
+    touch(context, site) {
+      if (!context.workspaceId) return
+      prune()
+      // The relay controls one consented tab per user. A newer chat adopts it.
+      for (const [sessionId, task] of tasks) {
+        if (task.userId === context.userId && sessionId !== context.sessionId) tasks.delete(sessionId)
+      }
+      const existing = tasks.get(context.sessionId)
+      tasks.set(context.sessionId, {
+        taskId: existing?.taskId ?? `local-${context.sessionId}`,
+        userId: context.userId,
+        workspaceId: context.workspaceId,
+        sessionId: context.sessionId,
+        status: 'running',
+        profileId: null,
+        injectedSite: site ?? existing?.injectedSite ?? null,
+        createdAt: existing?.createdAt ?? now(),
+        lastActivityAt: now(),
+      })
+    },
+    getActiveBySession(sessionId) {
+      prune()
+      return tasks.get(sessionId) ?? null
+    },
+    listActiveByWorkspace(workspaceId) {
+      prune()
+      return [...tasks.values()].filter((task) => task.workspaceId === workspaceId)
+    },
+    complete(sessionId) {
+      tasks.delete(sessionId)
+    },
+  }
+}
 
 const CreateProfileSchema = z.object({
   workspaceId: z.string().min(1).max(64),
@@ -65,6 +136,8 @@ const UpdateProfileSchema = z.object({
 export function computerRoutes(deps: {
   orchestrator: SandboxOrchestrator | null
   provider: SandboxProvider | null
+  localProvider?: BrowserProvider | null
+  localTasks?: LocalComputerTaskStore | null
   vault: SessionVault | null
   /** Closed store; null → the Profile-Management surface reports unconfigured. */
   profileStore: BrowserProfileStore | null
@@ -79,11 +152,16 @@ export function computerRoutes(deps: {
 }): Router {
   const router = Router()
 
-  async function ownedTask(sessionId: string, userId: string) {
+  async function ownedTask(
+    sessionId: string,
+    userId: string,
+  ): Promise<{ backend: 'local'; task: LocalComputerTaskRecord } | { backend: 'cloud'; task: SandboxTaskRecord } | null> {
+    const local = deps.localTasks?.getActiveBySession(sessionId)
+    if (local?.userId === userId) return { backend: 'local', task: local }
     if (!deps.orchestrator) return null
-    const task = await deps.orchestrator.getActiveTask(sessionId)
-    if (!task || task.userId !== userId) return null
-    return task
+    const cloud = await deps.orchestrator.getActiveTask(sessionId)
+    if (!cloud || cloud.userId !== userId) return null
+    return { backend: 'cloud', task: cloud }
   }
 
   // Workspace-wide discovery (§5): the caller's live tasks, so the app shell
@@ -98,7 +176,7 @@ export function computerRoutes(deps: {
       res.status(400).json({ error: 'workspaceId is required' })
       return
     }
-    if (!deps.orchestrator) {
+    if (!deps.orchestrator && !deps.localTasks) {
       res.json({ tasks: [] })
       return
     }
@@ -107,9 +185,16 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'Workspace not found' })
       return
     }
-    const tasks = await deps.orchestrator.listActiveTasks(workspaceId)
+    const cloudTasks = deps.orchestrator ? await deps.orchestrator.listActiveTasks(workspaceId) : []
+    const localTasks = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
+    const localSessions = new Set(localTasks.map((task) => task.sessionId))
     res.json({
-      tasks: tasks
+      tasks: [
+        ...localTasks.map((task) => ({ ...task, backend: 'local' as const })),
+        ...cloudTasks
+          .filter((task) => !localSessions.has(task.sessionId))
+          .map((task) => ({ ...task, backend: 'cloud' as const })),
+      ]
         .filter((task) => task.userId === (req.userId as string))
         .map((task) => ({
           taskId: task.taskId,
@@ -119,6 +204,7 @@ export function computerRoutes(deps: {
           injectedSite: task.injectedSite,
           createdAt: task.createdAt,
           lastActivityAt: task.lastActivityAt,
+          backend: task.backend,
         })),
     })
   })
@@ -130,12 +216,13 @@ export function computerRoutes(deps: {
       return
     }
     res.json({
-      taskId: task.taskId,
-      status: task.status,
-      profileId: task.profileId,
-      injectedSite: task.injectedSite,
-      workspaceId: task.workspaceId,
-      createdAt: task.createdAt,
+      taskId: task.task.taskId,
+      status: task.task.status,
+      profileId: task.task.profileId,
+      injectedSite: task.task.injectedSite,
+      workspaceId: task.task.workspaceId,
+      createdAt: task.task.createdAt,
+      backend: task.backend,
     })
   })
 
@@ -143,26 +230,48 @@ export function computerRoutes(deps: {
   // paused sandbox (§4.8: pause covers the WAIT, not the takeover itself).
   router.post('/tasks/:sessionId/resume', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.orchestrator) {
+    if (!task) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
-    await deps.orchestrator.resumeAfterTakeover(req.params.sessionId)
+    if (task.backend === 'cloud') await deps.orchestrator?.resumeAfterTakeover(req.params.sessionId)
     res.json({ ok: true })
   })
 
-  // Screencast frame poll (~1 fps from the client). Polling over SSE keeps
-  // Cloud Run connection lifetimes trivial at the takeover's low frame rate.
+  // Frame poll (~1 fps from the client): cloud fallback or the local relay's
+  // bounded screenshot path. Every request remains ownership-gated here.
   router.get('/tasks/:sessionId/frame', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.provider) {
+    if (!task) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
     try {
-      const takeover = deps.provider.browser(task.sandboxId).takeover()
-      const frame = await takeover.nextFrame()
-      await takeover.close()
+      let frame
+      if (task.backend === 'local') {
+        if (!deps.localProvider?.nextTakeoverFrame) {
+          res.status(501).json({ error: 'Local browser live view is not supported by this deployment' })
+          return
+        }
+        frame = await deps.localProvider.nextTakeoverFrame({
+          userId: task.task.userId,
+          workspaceId: task.task.workspaceId,
+          sessionId: task.task.sessionId,
+          taskId: task.task.taskId,
+        })
+        deps.localTasks?.touch(task.task, task.task.injectedSite)
+      } else {
+        if (!deps.provider) {
+          res.status(404).json({ error: 'No active computer task for this session' })
+          return
+        }
+        const takeover = deps.provider.browser(task.task.sandboxId).takeover()
+        try {
+          frame = await takeover.nextFrame()
+        } finally {
+          await takeover.close()
+        }
+      }
       if (!frame) {
         res.status(204).end()
         return
@@ -179,11 +288,19 @@ export function computerRoutes(deps: {
   // gate, not the data path. 501 → the page stays on the polled fallback.
   router.post('/tasks/:sessionId/stream-session', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.provider) {
+    if (!task) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
-    const browser = deps.provider.browser(task.sandboxId)
+    if (task.backend === 'local') {
+      res.status(501).json({ error: 'Direct live streaming is not available for local browser tasks' })
+      return
+    }
+    if (!deps.provider) {
+      res.status(404).json({ error: 'No active computer task for this session' })
+      return
+    }
+    const browser = deps.provider.browser(task.task.sandboxId)
     if (!browser.openTakeoverStream) {
       res.status(501).json({ error: 'Live streaming is not supported by this sandbox backend' })
       return
@@ -202,7 +319,7 @@ export function computerRoutes(deps: {
 
   router.post('/tasks/:sessionId/input', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.provider) {
+    if (!task) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
@@ -212,9 +329,33 @@ export function computerRoutes(deps: {
       return
     }
     try {
-      const takeover = deps.provider.browser(task.sandboxId).takeover()
-      await takeover.input(parsed.data)
-      await takeover.close()
+      if (task.backend === 'local') {
+        if (!deps.localProvider?.sendTakeoverInput) {
+          res.status(501).json({ error: 'Local browser Take-Over input is not supported by this deployment' })
+          return
+        }
+        await deps.localProvider.sendTakeoverInput(
+          {
+            userId: task.task.userId,
+            workspaceId: task.task.workspaceId,
+            sessionId: task.task.sessionId,
+            taskId: task.task.taskId,
+          },
+          parsed.data,
+        )
+        deps.localTasks?.touch(task.task, task.task.injectedSite)
+      } else {
+        if (!deps.provider) {
+          res.status(404).json({ error: 'No active computer task for this session' })
+          return
+        }
+        const takeover = deps.provider.browser(task.task.sandboxId).takeover()
+        try {
+          await takeover.input(parsed.data)
+        } finally {
+          await takeover.close()
+        }
+      }
       res.json({ ok: true })
     } catch (err) {
       res.status(502).json({ error: err instanceof Error ? err.message : 'input relay failed' })
@@ -226,7 +367,18 @@ export function computerRoutes(deps: {
   // A task that started identity-less must name the profile to bind.
   router.post('/tasks/:sessionId/captured', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.orchestrator) {
+    if (!task) {
+      res.status(404).json({ error: 'No active computer task for this session' })
+      return
+    }
+    if (task.backend === 'local') {
+      res.status(409).json({
+        error: 'Local browser sessions stay in the user browser and are not captured to the cloud vault.',
+        code: 'local_session',
+      })
+      return
+    }
+    if (!deps.orchestrator) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
@@ -237,7 +389,7 @@ export function computerRoutes(deps: {
       res.status(400).json({ error: 'site is required' })
       return
     }
-    if (!task.profileId && !body.data.profileId) {
+    if (!task.task.profileId && !body.data.profileId) {
       res.status(409).json({
         error: 'This task has no browser profile — pick or create one to save the session into.',
         code: 'profile_required',
@@ -255,12 +407,32 @@ export function computerRoutes(deps: {
   // Close-to-stop (§4.15/§4.8): ends the task now — capture + pull + kill.
   router.post('/tasks/:sessionId/complete', async (req, res) => {
     const task = await ownedTask(req.params.sessionId, req.userId as string)
-    if (!task || !deps.orchestrator) {
+    if (!task) {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
     const outcome = req.body?.outcome === 'failed' ? 'failed' : 'completed'
-    const done = await deps.orchestrator.completeTask(req.params.sessionId, outcome)
+    if (task.backend === 'local') {
+      if (!deps.localProvider) {
+        res.status(501).json({ error: 'Local browser control is not supported by this deployment' })
+        return
+      }
+      try {
+        await deps.localProvider.stop({
+          userId: task.task.userId,
+          workspaceId: task.task.workspaceId,
+          sessionId: task.task.sessionId,
+          taskId: task.task.taskId,
+        })
+      } catch (err) {
+        res.status(502).json({ error: err instanceof Error ? err.message : 'local browser stop failed' })
+        return
+      }
+      deps.localTasks?.complete(req.params.sessionId)
+      res.json({ ok: true, status: outcome })
+      return
+    }
+    const done = await deps.orchestrator?.completeTask(req.params.sessionId, outcome)
     res.json({ ok: true, status: done?.status ?? outcome })
   })
 
@@ -276,6 +448,30 @@ export function computerRoutes(deps: {
     if (!body.success) {
       res.status(400).json({ error: 'backend must be "local", "cloud", or null' })
       return
+    }
+    const task = await ownedTask(req.params.sessionId, req.userId as string)
+    if (!task) {
+      res.status(404).json({ error: 'No active computer task for this session' })
+      return
+    }
+    const local = task.backend === 'local' ? task.task : null
+    if (local && body.data.backend !== 'local') {
+      if (!deps.localProvider) {
+        res.status(501).json({ error: 'Local browser control is not supported by this deployment' })
+        return
+      }
+      try {
+        await deps.localProvider.stop({
+          userId: local.userId,
+          workspaceId: local.workspaceId,
+          sessionId: local.sessionId,
+          taskId: local.taskId,
+        })
+      } catch (err) {
+        res.status(502).json({ error: err instanceof Error ? err.message : 'local browser stop failed' })
+        return
+      }
+      deps.localTasks?.complete(local.sessionId)
     }
     deps.setSessionBackend(req.params.sessionId, body.data.backend)
     res.json({ ok: true, backend: body.data.backend })

@@ -186,7 +186,7 @@ import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
 import { browserExtensionRoutes } from './routes/browser-extension.js'
-import { computerRoutes } from './routes/computer.js'
+import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import { createRelayCommandTransport, relayExtensionConnected } from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
@@ -3080,8 +3080,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       return 'public'
     }
   }
+  const localComputerTasks = createInMemoryLocalComputerTaskStore()
+  const localBrowserProvider = createLocalBrowserProvider({ transport: browserRelayTransport })
   const computerTools = createComputerTools({
-    local: createLocalBrowserProvider({ transport: browserRelayTransport }),
+    local: localBrowserProvider,
     cloud: createCloudBrowserProvider({
       provider: sandboxProvider,
       binding: sandboxOrchestrator?.binding ?? null,
@@ -3134,6 +3136,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     // R2-8: unattended is paid-gated on top of Barrier 2.
     getWorkspacePlan,
     onEvent: (evt, ctx) => {
+      if (evt.backend === 'local' && evt.ok) {
+        localComputerTasks.touch(ctx, evt.host)
+        void sandboxOrchestrator?.completeTask(ctx.sessionId).catch(() => {})
+      } else if (evt.backend === 'cloud' && evt.ok) {
+        localComputerTasks.complete(ctx.sessionId)
+      }
       analytics.logEvent({
         userId: ctx.userId,
         assistantId: ctx.assistantId,
@@ -3844,12 +3852,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   app.use('/api/computer', requireAuth(env.JWT_SECRET), computerRoutes({
     orchestrator: sandboxOrchestrator,
     provider: sandboxProvider,
+    localProvider: localBrowserProvider,
+    localTasks: localComputerTasks,
     vault: ports.browserSessionVault ?? null,
     profileStore: ports.browserProfileStore ?? null,
     grants: ports.browserSkillGrantStore ?? null,
     skills: browserSkillsStore,
     getWorkspaceRole: (userId, workspaceId) => workspaceStore.getRole(userId, workspaceId),
-    setSessionBackend: computerTools.setSessionBackendOverride,
+    setSessionBackend: (sessionId, backend) => {
+      if (backend !== 'local') localComputerTasks.complete(sessionId)
+      computerTools.setSessionBackendOverride(sessionId, backend)
+    },
   }))
 
   app.use('/api/browser-extension', requireAuth(env.JWT_SECRET), browserExtensionRoutes({
