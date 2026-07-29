@@ -2122,6 +2122,11 @@ export const ja: Dictionary = {
     dropToAttach: "ファイルをドロップして添付",
     tooLarge: "このファイルは大きすぎて添付できません（最大 20 MB）。",
     videoUnsupported: "動画を使うには、スタジオで録画としてアップロードして文字起こししてください。",
+    readPdfTitle: "この PDF を読み込みますか？",
+    readPdfBody:
+      "{fileName} は {pages} ページあります。読み込みにはクレジットを使用し、1〜2 分かかることがあります。結果は保存されるため、同じファイルについて再度質問する場合は無料です。",
+    readPdfConfirm: "読み込む",
+    readPdfCancel: "添付しない",
   },
   approvalsPage: {
     title: "承認",

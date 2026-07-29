@@ -159,6 +159,7 @@ import { chatRoutes, runSessionResume, tryResolveLiveToolApproval } from './rout
 import {
   menuForClass,
   MutableProviderAvailability,
+  modelRates,
   registryRow,
 } from '@use-brian/shared/model-registry'
 import { BACKGROUND_MODEL, ensureServableModel } from './model-resolution.js'
@@ -1402,6 +1403,17 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   const distillateCache: DistillateCachePort = {
     get: (contentHash, configKey) => getPdfDistillate(contentHash, configKey),
     set: (row) => savePdfDistillate(row),
+  }
+  /**
+   * Does distillation cost anything per token on this deployment? A ChatGPT
+   * subscription is `FREE_RATES` in the registry, so there is nothing to
+   * confirm and the >30-page warning is noise. Read lazily: the
+   * provider-backed rung is resolved after this point.
+   */
+  const mediaBackendIsFreeRated = (): boolean => {
+    if (mediaBackend.kind !== 'provider') return false
+    const rates = modelRates(mediaBackend.model)
+    return !!rates && rates.brackets.every((b) => b.inPerMTok === 0 && b.outPerMTok === 0)
   }
 
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
@@ -3548,6 +3560,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     planStore,
     jobStore,
     voiceTranscription,
+    pdfPreflight: { distill: documentDistill, cache: distillateCache, freeRated: mediaBackendIsFreeRated() },
     connectorActionStore,
     episodesStore,
     buildConnectorActionAudit: ports.buildConnectorActionAudit,

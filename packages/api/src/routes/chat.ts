@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, updateUserLastSeenTz } from '../db/users.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
 import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
-import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
+import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
 import { insertClaimProvenance, getClaimsForLatestAssistantMessage } from '../db/claim-provenance-store.js'
 import type { ToolResultMeta, SessionStateStore, SessionStateRecord, PlanStore, AmbientSurface } from '@use-brian/core'
 import { runProactiveCompaction } from './proactive-compaction.js'
@@ -355,6 +356,21 @@ type WebChatOptions = {
     apiKey: string
     backend?: MediaBackend
     model?: string
+  }
+  /**
+   * PDF pre-flight + COGS attribution (pdf-universal-read §6). The provider
+   * boundary is what guarantees a PDF becomes readable text; this seam exists
+   * for the two things the boundary structurally cannot do — probe the page
+   * count BEFORE the turn so the user gets a "reading N pages" notice and a
+   * cost warning on a big document, and attribute the distill's tokens to the
+   * user who attached it. It pre-warms the same cache the wrapper reads, so a
+   * pre-warmed turn distills once, not twice.
+   */
+  pdfPreflight?: {
+    distill: import('@use-brian/core').DocumentDistillPort
+    cache?: import('@use-brian/core').DistillateCachePort
+    /** Backend bills nothing per token (a ChatGPT subscription) — no confirm. */
+    freeRated?: boolean
   }
   capabilityStore: CapabilityStore
   /** Workspace files store (Q3 §10). When set + the assistant has the `files`
@@ -1860,6 +1876,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // `overhead:transcription` — collect results here and record once we
       // have the stored user_message_id below.
       const transcriptions: TranscribeResult[] = []
+      // Distills pre-warmed this turn — attributed as `overhead:pdf-distill`
+      // once the user message id exists, exactly like transcriptions.
+      const pdfDistills: Array<{ model: string; usage: TokenUsage; pages: number | null }> = []
       if (hasFiles && options.fileStore) {
         // Gate each client-supplied fileId by the turn's identity so a file
         // from another workspace/user is filtered out (audit #3). The read
@@ -1879,6 +1898,71 @@ export function chatRoutes(options: WebChatOptions): Router {
         const validFiles = fetched.filter((f): f is NonNullable<typeof f> => f !== null)
 
         if (validFiles.length > 0) {
+          // Only the PRE-FLIGHT needs this: whether the served model reads
+          // PDFs natively decides if there is anything to warn about or
+          // pre-warm. Correctness does not depend on it — the provider
+          // boundary swaps a PDF for text regardless of what happens here.
+          const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
+          const servedModel = options.configuredProviders
+            ? ensureServableModel(resolvedTierModel, options.configuredProviders)
+            : resolvedTierModel
+          const providerReadsPdfInline = registryRow(servedModel)?.capabilities.nativePdf ?? false
+
+          /**
+           * Probe, warn, distill, cache — before the turn runs.
+           *
+           * The probe is deliberately the CHEAP one (`probePdfPageCount`
+           * parses structure; it does not render or call a model), because a
+           * preflight that costs as much as the operation is not a preflight.
+           * Above the page threshold on a paid backend the user is told the
+           * page count and the estimated spend; the notice is emitted before
+           * the work starts so a long document does not read as a hang.
+           */
+          const prewarmPdf = async (bytes: Buffer, fileName: string): Promise<void> => {
+            const preflight = options.pdfPreflight!
+            const pages = await probePdfPageCount(bytes)
+            if (pages !== null && pages > PDF_CONFIRM_PAGE_THRESHOLD && !preflight.freeRated) {
+              const est = estimateDistillTokens(pages, DASHSCOPE_RENDER_WIDTH)
+              sendEvent('notice', {
+                kind: 'pdf_large_document',
+                fileName,
+                pages,
+                estimatedTokens: est.inputTokens + est.outputTokens,
+              })
+            }
+            sendEvent('notice', { kind: 'pdf_reading', fileName, ...(pages !== null ? { pages } : {}) })
+
+            const contentHash = createHash('sha256').update(bytes).digest('hex')
+            const configKey = preflight.distill.configKey
+            const hit = await preflight.cache?.get(contentHash, configKey).catch(() => null)
+            if (hit?.text) return
+            try {
+              const result = await preflight.distill.distill({ buffer: bytes, mime: 'application/pdf' })
+              if (!result.text.trim()) return
+              if (result.usage) {
+                pdfDistills.push({ model: result.model, usage: result.usage, pages })
+              }
+              await preflight.cache?.set({
+                contentHash,
+                configKey,
+                text: result.text,
+                model: result.model,
+                usage: result.usage ?? null,
+                pageCount: pages,
+                truncated: result.truncated ?? false,
+              }).catch(() => {})
+            } catch (err) {
+              // Not fatal: the provider boundary re-attempts and, failing that,
+              // hands the model an honest "could not be read" note. The user
+              // hears about it either way, so a pre-warm failure is only ever a
+              // lost optimisation.
+              sendEvent('notice', {
+                kind: 'distillation_unavailable',
+                message: err instanceof Error ? err.message : String(err),
+              })
+            }
+          }
+
           const textParts: string[] = []
           for (const file of validFiles) {
             const isImage = file.mimeType.startsWith('image/')
@@ -1922,6 +2006,9 @@ export function chatRoutes(options: WebChatOptions): Router {
                 textParts.push(
                   `<attached_file id="${file.id}" name="${file.fileName}" type="${file.mimeType}">[${isPdf ? 'pdf' : 'image'}]</attached_file>`,
                 )
+                if (isPdf && !providerReadsPdfInline && options.pdfPreflight) {
+                  await prewarmPdf(Buffer.from(match[1], 'base64'), file.fileName)
+                }
               }
             } else if (isAudio) {
               // Voice preflight — transcribe just-in-time via Gemini. Transcript
@@ -2244,6 +2331,25 @@ export function chatRoutes(options: WebChatOptions): Router {
           // so the two can be priced and migrated independently.
           triggerKey: 'voice_message_transcription',
           ...(t.audioSeconds !== undefined ? { audioSeconds: t.audioSeconds } : {}),
+        })
+      }
+
+      // Attribute PDF distillation as overhead. One row per document actually
+      // distilled — a cache hit records nothing, which is the whole point of
+      // the cache and what makes the COGS number meaningful.
+      for (const d of pdfDistills) {
+        await recordOverheadUsage({
+          usageStore: options.usageStore,
+          userId: user.id,
+          assistantId: assistant.id,
+          sessionId: session.id,
+          userMessageId: storedUserMsg.id,
+          model: d.model,
+          usage: d.usage,
+          source: 'overhead:pdf-distill',
+          triggerKey: d.pages !== null && d.pages > PDF_CONFIRM_PAGE_THRESHOLD
+            ? 'pdf_distill_large'
+            : 'pdf_distill',
         })
       }
 

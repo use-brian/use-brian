@@ -74,6 +74,10 @@ export const OVERHEAD_SOURCES = [
   // sweep worker; migration 375 removed its valid_source reservation.)
   // Migration 348 (2026-07-22): the task-autopilot v2 triage judge.
   'overhead:goal-triage',
+  // Migration 382 (2026-07-30): full-page PDF distillation. Metered first so
+  // pricing can be decided from measured COGS rather than guessed (same
+  // sequencing as RECORDING_SURCHARGE_X) — see cost-and-pricing.md.
+  'overhead:pdf-distill',
 ] as const
 
 export type OverheadSource = typeof OVERHEAD_SOURCES[number]

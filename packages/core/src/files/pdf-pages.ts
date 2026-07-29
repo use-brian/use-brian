@@ -34,6 +34,31 @@ function ensureRenderPdfJs(): Promise<void> {
   return pdfJsReady
 }
 
+/**
+ * Page count only — the CHEAP pre-flight probe.
+ *
+ * Parses the document structure and nothing else: no render, no canvas, no
+ * model call. That is the whole point (see
+ * `docs/architecture/engine/preflight-confirmation.md`): the probe that
+ * decides whether to ask the user about an expensive operation must never
+ * BE the expensive operation.
+ *
+ * Returns null when the bytes are not a readable PDF — the caller decides
+ * whether that is a failure or simply "no estimate available".
+ */
+export async function probePdfPageCount(buffer: Buffer): Promise<number | null> {
+  try {
+    const pdf = await getDocumentProxy(new Uint8Array(buffer))
+    try {
+      return pdf.numPages
+    } finally {
+      await pdf.destroy()
+    }
+  } catch {
+    return null
+  }
+}
+
 /** Render the first bounded set of PDF pages as compressed JPEG images. */
 export async function renderPdfPages(
   buffer: Buffer,

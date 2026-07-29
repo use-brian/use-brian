@@ -186,6 +186,14 @@ export type ChannelDocumentIngestResult =
   | { status: 'storage_quota' }
   | { status: 'skipped_no_assistant' }
   | { status: 'empty' }
+  /**
+   * Inline media (PDF / image) on a deployment with no `filesApi`, hence no
+   * file-ingest worker and no distill port. `parseFileContent` returns BASE64
+   * for these, which is meant for an `image` ContentBlock and is meaningless
+   * to Pipeline B — the old path fed it straight into decomposition and the
+   * brain silently ingested garbage. Reported instead of guessed.
+   */
+  | { status: 'store_only_needs_distill' }
 
 export type ChannelMediaIntakeResult =
   | { status: 'queued'; kind: 'audio_video'; recordingId: string; jobId: string | null }
@@ -215,7 +223,7 @@ export type ChannelMediaIntakeResult =
       // quiet without lying about an ingest that never happened.
       status: 'skipped'
       kind: 'document'
-      reason: 'no_assistant' | 'empty'
+      reason: 'no_assistant' | 'empty' | 'needs_distill'
     }
   | {
       status: 'rejected'
@@ -402,6 +410,8 @@ export async function ingestChannelMedia(
       return { status: 'skipped', kind: 'document', reason: 'no_assistant' }
     case 'empty':
       return { status: 'skipped', kind: 'document', reason: 'empty' }
+    case 'store_only_needs_distill':
+      return { status: 'skipped', kind: 'document', reason: 'needs_distill' }
   }
 }
 

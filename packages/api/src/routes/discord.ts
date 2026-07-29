@@ -606,13 +606,16 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             actions,
           })
         },
-        async sendResponse(text) {
+        async sendResponse(text, documents) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-          const reply = finalText || "I couldn't generate a reply — please rephrase or try again."
+          const hasDocuments = !!documents?.length
+          const reply = finalText || (hasDocuments ? '' : "I couldn't generate a reply — please rephrase or try again.")
           let channelMessageId: string | undefined
           // Edit-in-place: morph the status message into the response when it
           // fits one Discord message; otherwise drop the status and send fresh.
-          if (statusMessageId && reply.length <= 2000) {
+          // A reply carrying documents always sends fresh — an edit cannot
+          // attach uploads, so the edit path would silently drop them.
+          if (statusMessageId && !hasDocuments && reply.length <= 2000) {
             await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown' })
             channelMessageId = statusMessageId
             statusMessageId = undefined
@@ -623,7 +626,7 @@ export function discordRoutes(options: DiscordRouteOptions): Router {
             }
             channelMessageId = await adapter.sendMessage(
               channelId,
-              { text: reply, format: 'markdown' },
+              { text: reply, format: 'markdown', documents },
               incoming.messageId ? { threadTs: incoming.messageId } : undefined,
             )
           }

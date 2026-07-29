@@ -2308,6 +2308,11 @@ export const en = {
     dropToAttach: "Drop files to attach",
     tooLarge: "That file is too large to attach (max 20 MB).",
     videoUnsupported: "To use a video, upload it as a recording in Studio to transcribe it.",
+    readPdfTitle: "Read this PDF?",
+    readPdfBody:
+      "{fileName} has {pages} pages. Reading it uses credits and can take a minute or two. The result is saved, so asking again about the same file is free.",
+    readPdfConfirm: "Read it",
+    readPdfCancel: "Don't attach",
   },
   approvalsPage: {
     title: "Approvals",

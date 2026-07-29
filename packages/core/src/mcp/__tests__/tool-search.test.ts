@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { z } from 'zod'
 import { buildToolIndex, createMcpSearchTools } from '../tool-search.js'
 import type { McpSettingsStore, McpServerConfig, McpToolSetting } from '../types.js'
 
@@ -229,6 +230,83 @@ describe('[COMP:mcp/tool-search] createMcpSearchTools', () => {
       tool: 'create_page',
       args: 'not valid json',
     })).toThrow(/Expected object, received string/)
+  })
+
+  it('mcp_call validates local-tool args against the tool schema and names the bad parameter', async () => {
+    // The 2026-07-30 boarding-pass failure: the model called imapGetMessage
+    // via mcp_call with `id` instead of `messageId`. mcp_call's provider-facing
+    // schema only constrains `args` to "object", so the misnamed key reached
+    // execute() as undefined and died deep in the seam ("Cannot read
+    // properties of undefined (reading 'lastIndexOf')") — an error the model
+    // cannot act on. Local dispatch must zod-validate so the result names the
+    // right parameter and the model self-corrects.
+    const execute = vi.fn(async () => ({ data: 'full message' }))
+    const getMessage = {
+      name: 'imapGetMessage',
+      description: 'Read a full email by id.',
+      inputSchema: z.object({ messageId: z.string() }),
+      isConcurrencySafe: true,
+      isReadOnly: true,
+      requiresConfirmation: false,
+      execute,
+    } as never
+    const index = buildToolIndex([
+      { kind: 'local', serverName: 'imap', tools: [getMessage] },
+    ])
+    const [, callTool] = createMcpSearchTools({
+      index,
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1',
+      userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+    })
+
+    const bad = await callTool.execute(
+      { server: 'imap', tool: 'imapGetMessage', args: { id: 'INBOX:72548' } },
+      ctx,
+    )
+    expect(bad.isError).toBe(true)
+    expect(String(bad.data)).toContain('messageId')
+    expect(execute).not.toHaveBeenCalled()
+
+    const good = await callTool.execute(
+      { server: 'imap', tool: 'imapGetMessage', args: { messageId: 'INBOX:72548' } },
+      ctx,
+    )
+    expect(good.isError).toBeFalsy()
+    expect(execute).toHaveBeenCalledWith({ messageId: 'INBOX:72548' }, ctx)
+  })
+
+  it('mcp_call applies local-tool schema defaults on dispatch', async () => {
+    // Parsed output replaces raw args so `.default()` fields behave the same
+    // as on the direct-injection path (the provider fills defaults there).
+    const execute = vi.fn(async () => ({ data: [] }))
+    const searchTool = {
+      name: 'imapSearchMessages',
+      description: 'Search the mailbox.',
+      inputSchema: z.object({ query: z.string(), limit: z.number().default(20) }),
+      isConcurrencySafe: true,
+      isReadOnly: true,
+      requiresConfirmation: false,
+      execute,
+    } as never
+    const index = buildToolIndex([
+      { kind: 'local', serverName: 'imap', tools: [searchTool] },
+    ])
+    const [, callTool] = createMcpSearchTools({
+      index,
+      settingsStore: makeFakeSettingsStore(),
+      assistantId: 'a1',
+      userId: 'u1',
+      callMcpTool: vi.fn(async () => ({})),
+    })
+
+    const result = await callTool.execute(
+      { server: 'imap', tool: 'imapSearchMessages', args: { query: 'boarding pass' } },
+      ctx,
+    )
+    expect(result.isError).toBeFalsy()
+    expect(execute).toHaveBeenCalledWith({ query: 'boarding pass', limit: 20 }, ctx)
   })
 
   it('mcp_call returns error for unknown server', async () => {

@@ -5,7 +5,7 @@ import { getDefaultAssistant, findAssistantById, getWorkspacePrimaryAssistant } 
 import { getWorkspaceFileById } from '../db/workspace-files.js'
 import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import { findOrCreateSession, findSessionById } from '../db/sessions.js'
-import { parseFileContent, shouldInline, type FileStore } from '@use-brian/core'
+import { parseFileContent, shouldInline, probePdfPageCount, PDF_CONFIRM_PAGE_THRESHOLD, type FileStore } from '@use-brian/core'
 import { FileIngestError } from '../files/ingest-error.js'
 import type { FileIngestor } from '../files/ingest-port.js'
 import type { ArtifactPromoter } from '../files/artifact-promote.js'
@@ -226,6 +226,12 @@ export function fileRoutes(
             }
           }
 
+          // Cheap pre-flight probe (parses structure; no render, no model
+          // call) so the client can confirm before a big document is read.
+          // See docs/architecture/engine/preflight-confirmation.md — the
+          // probe must never be the expensive work it gates.
+          const pdfPageCount = isPdf ? await probePdfPageCount(file.buffer) : null
+
           results.push({
             id: cached.id,
             fileName: cached.fileName,
@@ -234,6 +240,10 @@ export function fileRoutes(
             summary,
             inline: shouldInline(text),
             artifact,
+            ...(pdfPageCount !== null ? { pdfPageCount } : {}),
+            ...(pdfPageCount !== null && pdfPageCount > PDF_CONFIRM_PAGE_THRESHOLD
+              ? { needsReadConfirm: true }
+              : {}),
             // Send back the parsed text preview so the chat endpoint can inline it
             // without re-fetching (saves a round-trip)
             preview: text.slice(0, 200),

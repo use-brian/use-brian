@@ -2108,6 +2108,11 @@ export const zh: Dictionary = {
     dropToAttach: "拖放檔案以附加",
     tooLarge: "此檔案太大，無法附加（上限 20 MB）。",
     videoUnsupported: "若要使用影片，請在工作室中以錄音方式上傳以進行轉錄。",
+    readPdfTitle: "要讀取這份 PDF 嗎？",
+    readPdfBody:
+      "{fileName} 共 {pages} 頁。讀取會使用點數，可能需要一兩分鐘。結果會保存下來，之後再詢問同一份檔案不另計費。",
+    readPdfConfirm: "讀取",
+    readPdfCancel: "不要附加",
   },
   approvalsPage: {
     title: "核准",
