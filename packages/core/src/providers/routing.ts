@@ -31,6 +31,11 @@ import {
 } from '@use-brian/shared/model-registry'
 import type { LLMProvider, ProviderRequest, ProviderSession, SessionOptions, StreamChunk } from './types.js'
 import { wrapFallback, type FallbackAnalytics } from './wrap-fallback.js'
+import {
+  wrapDocumentAdaptation,
+  type DistillateCachePort,
+  type DocumentDistillPort,
+} from './document-adaptation.js'
 
 export type RoutingProviderOptions = {
   /** Forwarded to `wrapFallback` for every routed same-class fallback pair —
@@ -44,6 +49,17 @@ export type RoutingProviderOptions = {
    * without restarting the process. Explicit unavailable Codex ids remain
    * unchanged by `ensureServableModel` and still fail closed. */
   resolveModel?: (model: string) => string
+  /**
+   * Ports for `wrapDocumentAdaptation`. Wired here rather than at each call
+   * site because this is the only place that knows the CONCRETE model — and
+   * therefore its `capabilities.nativePdf` — for both the primary and its
+   * fallback. Omitted ⇒ non-native providers receive an honest "no
+   * distillation backend" note instead of a malformed PDF part.
+   */
+  documentAdaptation?: {
+    distill?: DocumentDistillPort
+    cache?: DistillateCachePort
+  }
 }
 
 export function createRoutingProvider(
@@ -79,9 +95,25 @@ export function createRoutingProvider(
       )
     }
 
-    const effective = withFallback(row, base)
+    const effective = withFallback(row, withDocumentAdaptation(row, base))
     effectiveByAlias.set(row.alias, effective)
     return effective
+  }
+
+  /**
+   * Applied per CONCRETE row, not per provider key: `nativePdf` is a model
+   * capability, and the primary and its fallback can differ. Wrapping inside
+   * `withFallback` (rather than around it) is what makes an Anthropic
+   * fallback firing mid-PDF-turn receive the distillate instead of dropping
+   * the block — wrapping outside would consult the PRIMARY's capability and
+   * hand the fallback a PDF it cannot read.
+   */
+  function withDocumentAdaptation(row: ModelRegistryRow, base: LLMProvider): LLMProvider {
+    return wrapDocumentAdaptation(base, {
+      nativePdf: row.capabilities.nativePdf,
+      ...(options?.documentAdaptation?.distill ? { distill: options.documentAdaptation.distill } : {}),
+      ...(options?.documentAdaptation?.cache ? { cache: options.documentAdaptation.cache } : {}),
+    })
   }
 
   function withFallback(row: ModelRegistryRow, base: LLMProvider): LLMProvider {
@@ -101,7 +133,7 @@ export function createRoutingProvider(
     // Fallback provider not configured (no key) → run without fallback.
     // Availability is key presence (L12); the primary keeps serving.
     if (!fbProvider || !isRegistryModelAvailable(fbRow, options?.availability)) return base
-    return wrapFallback(base, fbProvider, {
+    return wrapFallback(base, withDocumentAdaptation(fbRow, fbProvider), {
       fallbackModel: row.fallbackAlias,
       ...(options?.analytics ? { analytics: options.analytics } : {}),
     })

@@ -55,7 +55,15 @@ export type TokenUsage = {
 
 export type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'image'; mimeType: string; data: string } // base64-encoded inline media (image/* or application/pdf) — mapped to Gemini `inlineData` parts
+  /**
+   * Base64-encoded inline media (image/* or application/pdf) — mapped to
+   * Gemini `inlineData` parts. `name` is the original filename when the
+   * producer knows it: `wrapDocumentAdaptation` carries it onto the
+   * `<attached_file name="…">` tag it swaps a PDF for, so the model can refer
+   * to the document the way the user does. Optional and additive — every
+   * pre-existing producer omits it.
+   */
+  | { type: 'image'; mimeType: string; data: string; name?: string }
   /**
    * `providerSignature` is opaque provenance the provider needs to re-send
    * when this tool_use reappears in conversation history on a later HTTP

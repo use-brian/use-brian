@@ -886,12 +886,17 @@ export async function buildFileContentBlocks(
     const isPdf = file.mimeType === 'application/pdf'
 
     if (isImage || isPdf) {
-      // Images + PDFs share the `inlineData` path — Gemini reads both natively.
+      // Images + PDFs share the canonical inline-media block. A PDF headed for
+      // a model without `capabilities.nativePdf` is swapped for its distillate
+      // at the PROVIDER BOUNDARY (`wrapDocumentAdaptation`), so no channel
+      // needs its own gate here — that is the whole point of putting the rule
+      // at dispatch. `name` rides along so the swapped tag can carry it.
       const base64Data = file.buffer.toString('base64')
       contentBlocks.push({
         type: 'image',
         mimeType: file.mimeType,
         data: base64Data,
+        name: file.fileName,
       })
       if (file.id) {
         textParts.push(

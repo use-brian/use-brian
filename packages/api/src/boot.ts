@@ -32,6 +32,8 @@ import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport,
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
   createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
+  distillConfigKey, DASHSCOPE_RENDER_WIDTH, DASHSCOPE_CHUNK_PAGES, PROVIDER_RENDER_WIDTH, PROVIDER_CHUNK_PAGES,
+  type DocumentDistillPort, type DistillateCachePort,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
@@ -436,6 +438,7 @@ import { createDbCacheStore } from './db/cache-store.js'
 import { createDbFileStore } from './db/file-store.js'
 import { createDbAnalyticsStore } from './db/analytics-store.js'
 import { createDbJobStore } from './db/job-store.js'
+import { getPdfDistillate, savePdfDistillate } from './db/pdf-distillate-store.js'
 import { createDbSessionResumeStore } from './db/session-resume-store.js'
 import { createDbWorkerRunsStore } from './db/worker-runs-store.js'
 import { sweepStaleWorkerRuns } from './workers/worker-runs-cleanup.js'
@@ -1376,8 +1379,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (extractionModel !== EXTRACTION_MODEL) {
     console.log(`[provider] extraction: ${extractionModel} (${EXTRACTION_MODEL} not servable)`)
   }
+  // A PDF bound for a model whose registry row says `nativePdf: false` is
+  // swapped for its distillate HERE, at the provider boundary — so web chat,
+  // every channel adapter, the outage fallback firing mid-turn, and replayed
+  // history all inherit it with no per-route wiring. Ports keep core DB-free.
+  //
+  // `mediaBackend` is read lazily inside `distill` because the provider-backed
+  // rung is resolved AFTER this provider exists (it needs `provider` itself).
+  const documentDistill: DocumentDistillPort = {
+    get configKey() {
+      return distillConfigKey({
+        renderWidth: mediaBackend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
+        chunkPages: mediaBackend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
+        model: mediaBackend.kind === 'provider' ? mediaBackend.model : mediaBackend.kind,
+      })
+    },
+    distill: async ({ buffer, mime }) => {
+      const result = await distillFileToText({ buffer, mime }, { backend: mediaBackend })
+      return { text: result.text, model: result.model, usage: result.usage }
+    },
+  }
+  const distillateCache: DistillateCachePort = {
+    get: (contentHash, configKey) => getPdfDistillate(contentHash, configKey),
+    set: (row) => savePdfDistillate(row),
+  }
+
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
     availability: configuredProviders,
+    documentAdaptation: { distill: documentDistill, cache: distillateCache },
     // Re-evaluate at request time as well as boot. The ChatGPT catalog is
     // empty until OAuth completes, so boot-selected background/extraction
     // model ids must be able to move onto the newly available provider
@@ -1427,12 +1456,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     backend: mediaBackend,
     model: env.VOICE_TRANSCRIPTION_MODEL,
   }
-  // Only models whose registry row declares `capabilities.nativePdf` ingest
-  // `application/pdf` inline. The media backend is always available for
-  // distillation; chat.ts decides per-turn whether the served model needs it
-  // (routing is per-model, so this can't be gated on the deployment).
-  const inlineDocumentDistill = { backend: mediaBackend }
-
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
   const workerRunsStore = createDbWorkerRunsStore()
@@ -3525,7 +3548,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     planStore,
     jobStore,
     voiceTranscription,
-    inlineDocumentDistill,
     connectorActionStore,
     episodesStore,
     buildConnectorActionAudit: ports.buildConnectorActionAudit,
