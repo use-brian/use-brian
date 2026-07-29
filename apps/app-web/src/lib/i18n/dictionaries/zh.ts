@@ -5663,6 +5663,9 @@ export const zh: Dictionary = {
     liveViewTitle: "即時瀏覽器",
     liveViewSubtitle:
       "這是助理在此任務使用的雲端瀏覽器。點進頁面即可登入或接手操作；你輸入的內容只會送到該頁面，不會送到我們這裡。",
+    localViewSubtitle:
+      "這是你為此任務授權的瀏覽器分頁。你也可以直接操作實際分頁；此處的輸入只會轉送到該分頁。",
+    localViewBadge: "我的瀏覽器",
     connecting: "正在連線瀏覽器...",
     noTask: "此對話沒有進行中的瀏覽器任務。可能已完成或逾時，請再請助理試一次。",
     frameStalled: "即時畫面暫停了。瀏覽器回應後會自動恢復。",
@@ -5685,6 +5688,7 @@ export const zh: Dictionary = {
     stopTask: "停止此任務",
     stopConfirmTitle: "要停止這個瀏覽器任務嗎？",
     stopConfirmBody: "雲端瀏覽器將立即關閉。已下載的檔案都已存入你的工作空間檔案。",
+    localStopConfirmBody: "Use Brian 將釋放已授權的瀏覽器分頁並停止控制。",
     stopConfirmAction: "停止任務",
     loginDoneCta: "完成: 關閉這個瀏覽器",
     liveChip: {

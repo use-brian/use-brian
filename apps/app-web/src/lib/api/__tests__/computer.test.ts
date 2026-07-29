@@ -47,6 +47,7 @@ describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => 
       profileId: null,
       injectedSite: null,
       createdAt: 1,
+      backend: 'cloud' as const,
     }
     expect(
       mostRecentComputerTask([
@@ -61,11 +62,12 @@ describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => 
 describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
   it('resolves the active task and maps 404 to null (the "no task" empty state)', async () => {
     mockFetch.mockResolvedValueOnce(
-      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1 }),
+      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1, backend: 'local' }),
     )
     const task = await getComputerTask('sess-1')
     expect(task?.status).toBe('running')
     expect(task?.profileId).toBe('p1')
+    expect(task?.backend).toBe('local')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/api/computer/tasks/sess-1')
 
     mockFetch.mockResolvedValueOnce(respond(404))
@@ -109,7 +111,7 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
       profileRequired: true,
     })
 
-    await completeComputerTask('sess-1', 'failed')
+    expect(await completeComputerTask('sess-1', 'failed')).toBe(true)
     const complete = mockFetch.mock.calls.at(-1)!
     expect(String(complete[0])).toContain('/tasks/sess-1/complete')
     expect(JSON.parse(complete[1]!.body as string)).toEqual({ outcome: 'failed' })
