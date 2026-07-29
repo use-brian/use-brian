@@ -294,11 +294,15 @@ async function dispatchInput(event, retried) {
     // width applies (their frame IS the latest frame, minus a tiny race).
     const fw = Number(event.frameW) || (latest ? latest.frameW : 0)
     const scale = fw > 0 && latest && latest.deviceW > 0 ? latest.deviceW / fw : 1
-    if (event.kind === 'click') {
+    if (event.kind === 'click' || event.kind === 'pointer') {
       const base = { x: Math.round(event.x * scale), y: Math.round(event.y * scale), button: 'left', clickCount: 1, pointerType: 'mouse' }
       await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' }, sid)
-      await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sid)
-      await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sid)
+      if (event.kind === 'click' || event.action === 'down') {
+        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sid)
+      }
+      if (event.kind === 'click' || event.action === 'up') {
+        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sid)
+      }
     } else if (event.kind === 'move') {
       await cdpSend(conn, 'Input.dispatchMouseEvent', {
         type: 'mouseMoved',

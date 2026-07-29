@@ -194,6 +194,17 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       op: 'takeoverInput',
       args: { event: { kind: 'click', x: 100, y: 50, frameW: 200, frameH: 100 } },
     })
+    const pointerDown = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 })
+    const pointerUp = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'up', x: 100, y: 50, frameW: 200, frameH: 100 })
+    expect([pointerDown.status, pointerUp.status]).toEqual([200, 200])
+    expect(localOps.slice(-2).map((entry) => entry.args)).toEqual([
+      { event: { kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 } },
+      { event: { kind: 'pointer', action: 'up', x: 100, y: 50, frameW: 200, frameH: 100 } },
+    ])
     expect((await request(app).post('/api/computer/tasks/sess-local/stream-session')).status).toBe(501)
     expect((await request(app).post('/api/computer/tasks/sess-local/captured').send({ site: 'skyscanner.com' })).body.code)
       .toBe('local_session')

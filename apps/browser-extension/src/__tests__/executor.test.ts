@@ -156,4 +156,29 @@ describe('[COMP:ext/agent] Local Take-Over', () => {
       executor.takeoverInput({ kind: 'navigate', action: 'goto', url: 'file:///etc/passwd' }),
     ).rejects.toMatchObject({ code: 'backend_error' })
   })
+
+  it('keeps the trusted mouse button down until a separate pointer-up event', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method === 'Page.getLayoutMetrics') {
+        return { cssVisualViewport: { clientWidth: 1000, clientHeight: 500 } }
+      }
+      return {}
+    })
+
+    await executor.takeoverInput({
+      kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100,
+    })
+    let mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse.map((call) => call[2]?.type)).toEqual(['mouseMoved', 'mousePressed'])
+
+    await executor.takeoverInput({
+      kind: 'pointer', action: 'up', x: 100, y: 50, frameW: 200, frameH: 100,
+    })
+    mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse.map((call) => call[2]?.type)).toEqual([
+      'mouseMoved', 'mousePressed', 'mouseMoved', 'mouseReleased',
+    ])
+  })
 })

@@ -36,6 +36,14 @@ const InputEventSchema = z.union([
     frameW: z.number().positive().optional(),
     frameH: z.number().positive().optional(),
   }),
+  z.object({
+    kind: z.literal('pointer'),
+    action: z.enum(['down', 'up']),
+    x: z.number(),
+    y: z.number(),
+    frameW: z.number().positive().optional(),
+    frameH: z.number().positive().optional(),
+  }),
   z.object({ kind: z.literal('key'), text: z.string().min(1).max(64) }),
   z.object({ kind: z.literal('scroll'), deltaY: z.number() }),
   // Take-over toolbar navigation (§5): goto must carry an http(s) url — the

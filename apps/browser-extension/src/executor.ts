@@ -49,6 +49,7 @@ export function retryableAfterReattach(op: string): boolean {
 
 type TakeoverInput =
   | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
   | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
@@ -247,7 +248,7 @@ export class TabExecutor {
 
   async takeoverInput(event: TakeoverInput): Promise<void> {
     const tabId = this.mustTab()
-    if (event.kind === 'click') {
+    if (event.kind === 'click' || event.kind === 'pointer') {
       if (![event.x, event.y].every(Number.isFinite)) {
         throw new ExecutorError('Invalid Take-Over click coordinates.', 'backend_error')
       }
@@ -262,8 +263,12 @@ export class TabExecutor {
       const y = event.frameH && event.frameH > 0 ? (event.y * height) / event.frameH : event.y
       const base = { x, y, button: 'left', clickCount: 1, pointerType: 'mouse' } as const
       await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' })
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' })
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' })
+      if (event.kind === 'click' || event.action === 'down') {
+        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' })
+      }
+      if (event.kind === 'click' || event.action === 'up') {
+        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' })
+      }
       return
     }
     if (event.kind === 'key') {

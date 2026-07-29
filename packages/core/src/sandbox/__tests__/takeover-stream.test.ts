@@ -115,9 +115,10 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     }
   })
 
-  it('bridge input vocabulary stays in lockstep with takeover-input.ts (click/key/scroll), plus socket-only move and the frame→viewport rescale', () => {
+  it('bridge input vocabulary stays in lockstep with takeover-input.ts (click/pointer/key/scroll), plus socket-only move and the frame→viewport rescale', () => {
     for (const marker of [
       `event.kind === 'click'`,
+      `event.kind === 'pointer'`,
       `event.kind === 'move'`,
       `event.kind === 'key'`,
       `event.kind === 'scroll'`,

@@ -136,7 +136,15 @@ export default function ComputerTakeoverPage(props: {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const frameBoxRef = useRef<HTMLDivElement | null>(null);
   const naturalSize = useRef<{ w: number; h: number } | null>(null);
+  const pressedPointer = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    frameW: number;
+    frameH: number;
+  } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const streamRef = useRef<TakeoverStreamSession | null>(null);
   streamRef.current = stream;
 
@@ -337,32 +345,44 @@ export default function ComputerTakeoverPage(props: {
         return;
       }
       if (event.kind === "move") return;
-      const apiEvent = event;
-      const live = streamRef.current;
-      if (live) {
-        void sendStreamInput(live.inputUrl, event).then((ok) => {
-          if (!ok) void sendComputerInput(sessionId, apiEvent);
+      // HTTP requests have no ordering guarantee. Serialize them so a quick
+      // pointer-up can never overtake pointer-down and leave the remote mouse stuck.
+      inputQueueRef.current = inputQueueRef.current
+        .catch(() => {})
+        .then(async () => {
+          const live = streamRef.current;
+          if (live && (await sendStreamInput(live.inputUrl, event))) return;
+          await sendComputerInput(sessionId, event);
         });
-      } else {
-        void sendComputerInput(sessionId, apiEvent);
-      }
     },
     [sessionId],
   );
 
-  const forwardClick = useCallback(
-    (e: React.MouseEvent<HTMLImageElement>) => {
+  const forwardPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      if (!e.isPrimary || e.button !== 0 || pressedPointer.current) return;
       const img = imgRef.current;
       const natural = naturalSize.current;
       if (!img || !natural) return;
       const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
       if (!point) return; // letterbox bar — nothing under it in the frame
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      frameBoxRef.current?.focus();
+      pressedPointer.current = {
+        pointerId: e.pointerId,
+        x: point.x,
+        y: point.y,
+        frameW: natural.w,
+        frameH: natural.h,
+      };
       const box = frameBoxRef.current?.getBoundingClientRect();
       if (box) {
         setRipple({ x: e.clientX - box.left, y: e.clientY - box.top, id: Date.now() });
       }
       forwardInput({
-        kind: "click",
+        kind: "pointer",
+        action: "down",
         x: point.x,
         y: point.y,
         frameW: natural.w,
@@ -371,6 +391,50 @@ export default function ComputerTakeoverPage(props: {
     },
     [forwardInput],
   );
+  const forwardPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const pressed = pressedPointer.current;
+      if (!pressed || pressed.pointerId !== e.pointerId) return;
+      e.preventDefault();
+      const natural = naturalSize.current;
+      const point = natural
+        ? mapClickToFrame(e.currentTarget.getBoundingClientRect(), natural, e.clientX, e.clientY)
+        : null;
+      pressedPointer.current = null;
+      forwardInput({
+        kind: "pointer",
+        action: "up",
+        x: point?.x ?? pressed.x,
+        y: point?.y ?? pressed.y,
+        frameW: pressed.frameW,
+        frameH: pressed.frameH,
+      });
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    },
+    [forwardInput],
+  );
+  useEffect(() => {
+    const releaseOnBlur = () => {
+      const pressed = pressedPointer.current;
+      if (!pressed) return;
+      pressedPointer.current = null;
+      forwardInput({
+        kind: "pointer",
+        action: "up",
+        x: pressed.x,
+        y: pressed.y,
+        frameW: pressed.frameW,
+        frameH: pressed.frameH,
+      });
+    };
+    window.addEventListener("blur", releaseOnBlur);
+    return () => {
+      releaseOnBlur();
+      window.removeEventListener("blur", releaseOnBlur);
+    };
+  }, [forwardInput]);
   useEffect(() => {
     if (!ripple) return;
     const timer = setTimeout(() => setRipple(null), 450);
@@ -681,7 +745,10 @@ export default function ComputerTakeoverPage(props: {
                 h: e.currentTarget.naturalHeight,
               };
             }}
-            onClick={forwardClick}
+            onPointerDown={forwardPointerDown}
+            onPointerUp={forwardPointerUp}
+            onPointerCancel={forwardPointerUp}
+            onContextMenu={(e) => e.preventDefault()}
             onMouseMove={forwardMove}
             className="h-full w-full cursor-pointer select-none object-contain"
           />

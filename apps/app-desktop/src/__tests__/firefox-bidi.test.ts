@@ -110,6 +110,25 @@ describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
     });
   });
 
+  it("keeps the BiDi pointer pressed until a separate pointer-up event", async () => {
+    const socket = new FakeSocket();
+    const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);
+    await executor.connect();
+    await executor.bindFocusedContext();
+    await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "down", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+    await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "up", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+
+    const events = socket.sent.filter((message) => message.method === "input.performActions").slice(-2);
+    const down = ((events[0]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    const up = ((events[1]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    expect(down.map((action) => action.type)).toEqual(["pointerMove", "pointerDown"]);
+    expect(up.map((action) => action.type)).toEqual(["pointerMove", "pointerUp"]);
+  });
+
   it("decodes BiDi remote values without eval", () => {
     expect(
       firefoxBidiInternals.decodeRemoteValue(

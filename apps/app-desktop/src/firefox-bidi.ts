@@ -433,7 +433,7 @@ export class FirefoxBidiExecutor {
 
   private async takeoverInput(event: Record<string, unknown>): Promise<void> {
     const context = this.mustContext();
-    if (event.kind === "click") {
+    if (event.kind === "click" || event.kind === "pointer") {
       const x = Number(event.x);
       const y = Number(event.y);
       if (!Number.isFinite(x) || !Number.isFinite(y)) {
@@ -445,17 +445,18 @@ export class FirefoxBidiExecutor {
       const frameH = Number(event.frameH);
       const px = frameW > 0 && typeof viewport.width === "number" ? (x * viewport.width) / frameW : x;
       const py = frameH > 0 && typeof viewport.height === "number" ? (y * viewport.height) / frameH : y;
+      const actions: Array<Record<string, unknown>> = [
+        { type: "pointerMove", x: Math.round(px), y: Math.round(py), duration: 0, origin: "viewport" },
+      ];
+      if (event.kind === "click" || event.action === "down") actions.push({ type: "pointerDown", button: 0 });
+      if (event.kind === "click" || event.action === "up") actions.push({ type: "pointerUp", button: 0 });
       await this.command("input.performActions", {
         context,
         actions: [{
           type: "pointer",
           id: "use-brian-takeover-mouse",
           parameters: { pointerType: "mouse" },
-          actions: [
-            { type: "pointerMove", x: Math.round(px), y: Math.round(py), duration: 0, origin: "viewport" },
-            { type: "pointerDown", button: 0 },
-            { type: "pointerUp", button: 0 },
-          ],
+          actions,
         }],
       });
       return;

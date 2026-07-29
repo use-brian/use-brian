@@ -90,6 +90,12 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
     const inputCall = mockFetch.mock.calls.at(-1)!
     expect(String(inputCall[0])).toContain('/tasks/sess-1/input')
     expect(JSON.parse(inputCall[1]!.body as string)).toEqual({ kind: 'click', x: 10, y: 20 })
+
+    mockFetch.mockResolvedValueOnce(respond(200, { ok: true }))
+    await sendComputerInput('sess-1', { kind: 'pointer', action: 'down', x: 10, y: 20 })
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)?.[1]?.body as string)).toEqual({
+      kind: 'pointer', action: 'down', x: 10, y: 20,
+    })
   })
 
   it('captures into the task profile, maps 409 to profileRequired, and completes with the chosen outcome', async () => {

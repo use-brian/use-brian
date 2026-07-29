@@ -47,6 +47,7 @@ export type TakeoverFrame = { data: string; mimeType: string };
  */
 export type TakeoverInput =
   | { kind: "click"; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: "pointer"; action: "down" | "up"; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: "move"; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: "key"; text: string }
   | { kind: "scroll"; deltaY: number }
