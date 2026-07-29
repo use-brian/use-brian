@@ -1180,7 +1180,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     })
     fullSystemPrompt += skillResult.promptFragment
   }
-  fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+  fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
   fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
 
   // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──

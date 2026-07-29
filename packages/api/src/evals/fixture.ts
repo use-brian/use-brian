@@ -226,7 +226,7 @@ export function buildFixtureWorkspace(): FixtureWorkspace {
     LAYER_1_SYSTEM_PROMPT +
     '\n\n' +
     FIXTURE_USER_CONTEXT +
-    buildUnavailableCapabilitiesPrompt(unavailable)
+    buildUnavailableCapabilitiesPrompt(unavailable, tools)
 
   // Frozen-state capability grants: 'tasks' (§3 explicit) + 'crm' (probe
   // expectations require saveContact/listDeals callable). The other declared

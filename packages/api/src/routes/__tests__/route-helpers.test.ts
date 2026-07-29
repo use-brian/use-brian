@@ -76,25 +76,68 @@ describe('[COMP:api/route-helpers] Route helpers', () => {
   })
 
   describe('buildUnavailableCapabilitiesPrompt', () => {
+    // No search surface: `injectMcpTools` skips the mcp_search pair when no
+    // source exists, and these three pin the original strict behaviour.
+    const noSearch = new Map()
+
     it('returns empty string for empty array', () => {
-      expect(buildUnavailableCapabilitiesPrompt([])).toBe('')
+      expect(buildUnavailableCapabilitiesPrompt([], noSearch)).toBe('')
     })
 
     it('includes capability names and NOT available text', () => {
-      const result = buildUnavailableCapabilitiesPrompt(['Gmail', 'Google Calendar'])
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail', 'Google Calendar'], noSearch)
       expect(result).toContain('Gmail')
       expect(result).toContain('Google Calendar')
       expect(result).toContain('NOT available')
     })
 
     it('scopes the Settings suggestion to the listed services (closed world)', () => {
-      const result = buildUnavailableCapabilitiesPrompt(['Gmail'])
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail'], noSearch)
       // The template must be scoped to the list, not a general habit the
       // model extends to arbitrary services (the invented-Jira-connector
       // class caught by the WS2 probe battery).
       expect(result).toContain('listed above')
       expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
       expect(result).not.toContain('an unavailable service')
+    })
+
+    // ── Deferred-surface carve-out (prod incident 2026-07-23) ──────
+    // `injectMcpTools` DELETES every built-in connector tool from the map and
+    // folds it behind `mcp_search`. A granted+connected connector is therefore
+    // in NEITHER `capabilities` (it is connected) NOR the tool map (plucked),
+    // so the bare closed-world sentence told the model to deny it. TaskMaster
+    // refused a GitHub write it held a live grant for, then found 8 GitHub
+    // tools the moment it was pushed into running `mcp_search`.
+    const withSearch = new Map([['mcp_search', {}], ['mcp_call', {}]])
+
+    it('does NOT claim the visible tools are the whole surface when mcp_search is present', () => {
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail'], withSearch)
+      expect(result).not.toContain('This list plus your tools is the complete integration surface')
+    })
+
+    it('orders a search before any denial when mcp_search is present', () => {
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail'], withSearch)
+      expect(result).toContain('mcp_search')
+      expect(result).toMatch(/before .{0,60}unavailable/i)
+      // The listed services stay closed-world — searching for them is still banned.
+      expect(result).toContain('Never point the user to a Settings toggle or connector for a service that is not listed here')
+    })
+
+    it('emits the search guidance even when nothing is unavailable', () => {
+      // The old builder returned '' at length 0, so an assistant with every
+      // connector healthy got NO guidance at all and still denied from absence.
+      const result = buildUnavailableCapabilitiesPrompt([], withSearch)
+      expect(result).toContain('mcp_search')
+      expect(result).not.toContain('# Unavailable capabilities')
+    })
+
+    it('keeps the strict closed world when there is no search surface', () => {
+      // Tool-awareness rule: never name mcp_search when it is not in the map.
+      // `injectMcpTools` skips the search pair entirely when no source exists.
+      expect(buildUnavailableCapabilitiesPrompt([], new Map())).toBe('')
+      const result = buildUnavailableCapabilitiesPrompt(['Gmail'], new Map())
+      expect(result).not.toContain('mcp_search')
+      expect(result).toContain('This list plus your tools is the complete integration surface')
     })
   })
 

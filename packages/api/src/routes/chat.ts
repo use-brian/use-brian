@@ -3458,7 +3458,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Inject unavailable capabilities so the model doesn't waste turns
       // searching for tools that don't exist.
-      fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+      fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
 
       // Browser-escalation guidance — dynamic injection gated on the acting
       // browser tools being in the map (tool-awareness carve-out): search
