@@ -11,6 +11,7 @@ import {
   BrowserBackendError,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
+  TakeoverFrameSchema,
   BrowserUrlResultSchema,
   NO_EXTENSION_MESSAGE,
   NO_EXTENSION_REMEDY,
@@ -18,6 +19,7 @@ import {
   type BrowserCallContext,
   type BrowserProvider,
   type RelayCommandTransport,
+  type TakeoverInputEvent,
 } from './types.js'
 
 const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -86,6 +88,12 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async nextTakeoverFrame(ctx) {
+      return TakeoverFrameSchema.parse(await send(ctx, 'captureFrame'))
+    },
+    async sendTakeoverInput(ctx, event: TakeoverInputEvent) {
+      await send(ctx, 'takeoverInput', { event })
     },
     async stop(ctx) {
       await send(ctx, 'stop')
