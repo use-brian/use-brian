@@ -963,6 +963,24 @@ export async function injectMcpTools(params: {
             { report: reportHealth, instanceId: g.instance.id },
             assistantConnectorGrantsStore,
           )
+        } else if (p === 'msgraph') {
+          // Read-only Teams over a rotating refresh token. The synthetic
+          // one-provider list mirrors the Google branch: the exposed instance
+          // is the authority on connectedness, so injection never depends on
+          // the grantor's `mcp_connectors` dual-write also being present.
+          // Rotation persists back into the EXPOSED row via the system writer
+          // (the Shopify pattern) — writing it to the grantor's user-scoped
+          // envelope would brick the next call.
+          await injectMsGraphTools(
+            [{ connectorId: 'msgraph', connected: true }],
+            connectorStore, settingsStore, g.grantedByUserId, assistantId, assistantConnectorStore, tools, undefined,
+            { report: reportHealth, instanceId: g.instance.id },
+            boundGrantCreds,
+            async (encoded) => {
+              if (!connectorInstanceStore) throw new Error('Microsoft Graph token rotation needs the instance store')
+              await connectorInstanceStore.updateCredentialsSystem(g.instance.id, { client_id: 'msgraph_oauth', client_secret: encoded })
+            },
+          )
         } else if (p === 'imap') {
           // The user's corporate mailbox exposed to the workspace. Bind to
           // the EXACT exposed instance (the typed 'imap' credentials blob) —
@@ -1110,6 +1128,44 @@ export async function injectMcpTools(params: {
             { report: reportHealth, instanceId: inst.id },
             assistantConnectorGrantsStore,
           )
+        } else if (p === 'imap') {
+          // A workspace-owned mailbox. `transferToWorkspace` DELETES the
+          // instance's grants (a team-scoped row is visible by scope and needs
+          // none), so this branch is the transferred mailbox's ONLY route to a
+          // workspace assistant — without it, transferring makes the mailbox
+          // vanish from the assistant while Studio still shows it connected.
+          // The synthetic row carries `id`, which `injectMailboxTools` matches
+          // against `instanceIdOverride` to bind credentials to this exact row.
+          await injectMailboxTools({
+            connectors: [{ connectorId: 'imap', connected: true, id: inst.id, name: inst.label, createdAt: inst.createdAt }],
+            settingsStore: teamPolicyStore,   // team-owned: policy from workspace_tool_policy
+            userId, assistantId, assistantConnectorStore, tools,
+            connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
+            instanceIdOverride: inst.id,
+            healthProbe: { report: reportHealth },
+          })
+        } else if (p === 'msgraph') {
+          // A workspace-owned Microsoft identity. Reads and the rotated tuple
+          // both bind to this team-scoped row; the shared workspace policy
+          // governs its tools, like every other team-native connector.
+          await injectMsGraphTools(
+            syntheticConnectors,
+            connectorStore,
+            teamPolicyStore,     // team-owned: policy from workspace_tool_policy
+            userId,
+            assistantId,
+            assistantConnectorStore,
+            tools,
+            undefined,
+            { report: reportHealth, instanceId: inst.id },
+            async () => {
+              const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
+              return creds?.client_secret ?? null
+            },
+            async (encoded) => {
+              await connectorInstanceStore.updateCredentialsSystem(inst.id, { client_id: 'msgraph_oauth', client_secret: encoded })
+            },
+          )
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
           googleOverrides[p] = async () => {
             const creds = await connectorInstanceStore.getCredentialsSystem(inst.id)
@@ -1186,6 +1242,36 @@ export async function injectMcpTools(params: {
       }
     } catch (err) {
       console.error('[mcp-inject] team-native overlay failed:', err)
+    }
+  }
+
+  // ── Reconcile the not-connected advert with what actually injected ──
+  //
+  // The base built-in pass runs BEFORE both overlays, and for a workspace
+  // assistant the connector-scoping gate hands it an EMPTY connector list — so
+  // it adverts every built-in as "not connected". When an overlay then injects
+  // that provider, the advert becomes an active lie in Layer-1 context: the
+  // model holds the tools and is simultaneously told the connector is
+  // unavailable this turn, so it answers out of the advert instead of calling
+  // the tool ("the connector has no interactive tools I can call"). Injected
+  // tools are the ground truth; drop the stale line.
+  {
+    const staleNotices: string[] = []
+    for (const [provider, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
+      const display = NOT_CONNECTED_DISPLAY_NAME[provider]
+      if (!display) continue
+      const canonical = new Set(toolNames)
+      for (const name of tools.keys()) {
+        if (canonical.has(baseToolName(name))) {
+          staleNotices.push(`${display}: not connected`)
+          break
+        }
+      }
+    }
+    if (staleNotices.length > 0) {
+      for (let i = unavailable.length - 1; i >= 0; i--) {
+        if (staleNotices.some((prefix) => unavailable[i]!.startsWith(prefix))) unavailable.splice(i, 1)
+      }
     }
   }
 
@@ -1514,6 +1600,27 @@ function notConnectedNotice(displayName: string, capabilities: string): string {
     'If the user asks for one, say so plainly in your own words and point them to Studio then Connectors to connect it. ' +
     'Do not quote this notice back to them, and do not claim a tool call failed.'
   )
+}
+
+/**
+ * The exact `displayName` each built-in injector passes to
+ * {@link notConnectedNotice}, keyed by provider. Read by the reconcile step in
+ * `injectMcpTools` to retract a not-connected advert the workspace overlays
+ * have since falsified. Keep an entry in lockstep with its `notConnectedNotice`
+ * call — a drifted string silently stops retracting (the advert survives and
+ * contradicts the injected tools), which is why the reconcile test asserts on
+ * a real injection rather than on this table.
+ */
+const NOT_CONNECTED_DISPLAY_NAME: Record<string, string> = {
+  gcal: 'Google Calendar and Google Tasks',
+  gmail: 'Gmail',
+  gdrive: 'Google Drive, Docs, Sheets and Slides',
+  github: 'GitHub',
+  notion: 'Notion',
+  fathom: 'Fathom',
+  shopify: 'Shopify',
+  msgraph: 'Microsoft Teams',
+  imap: 'Company email (IMAP)',
 }
 
 /**
@@ -2952,6 +3059,13 @@ async function injectShopifyTools(
 //     user), which keeps it out of MULTI_INSTANCE_RUNTIME_PROVIDERS entirely.
 //     Dropping that flag means wiring `extrasByProvider.get('msgraph')`
 //     through here in the same change, or a second account is silently dead.
+//
+// Called from THREE places, and all three must stay wired: the base built-in
+// pass (personal, workspace-less assistants), the member-exposure grant
+// overlay, and the team-native overlay. A workspace assistant NEVER reaches
+// the base pass — the connector-scoping gate suppresses it — so an injector
+// that only the base pass calls is dead for every assistant a user actually
+// chats with, while Studio still lists its tools as connected and governable.
 
 async function injectMsGraphTools(
   connectors: Array<{ connectorId: string; connected: boolean; url?: string | null }>,
@@ -2964,6 +3078,22 @@ async function injectMsGraphTools(
   unavailable?: string[],
   /** Call-time liveness probe (migration 294). See `injectGitHubTools`. */
   healthProbe?: { report: HealthReporter; instanceId?: string | null },
+  /**
+   * Workspace-overlay credential binding. Reads the packed tuple off the EXACT
+   * exposed / team-owned `connector_instance` row instead of the provider-wide
+   * `getCredentials(userId, 'msgraph')` lookup (which is
+   * `ORDER BY created_at ASC LIMIT 1` — the grantor's oldest account, possibly
+   * one that was never exposed to this workspace; incident 2026-07-08).
+   */
+  credsOverride?: () => Promise<string | null>,
+  /**
+   * Where the ROTATED tuple lands. Graph invalidates the refresh token on every
+   * use, so an overlay that reads from the instance row but writes back to the
+   * user-scoped envelope bricks the connector on the second call — the hazard
+   * that deferred team-native Fathom. Always pass this alongside
+   * `credsOverride`.
+   */
+  persistOverride?: (encoded: string) => Promise<void>,
 ): Promise<void> {
   const msgraphCfg = getConnectorConfig('msgraph')
   if (!msgraphCfg) return
@@ -2986,15 +3116,22 @@ async function injectMsGraphTools(
     clientSecret,
     store: {
       async getTokens(): Promise<MsGraphTokens | null> {
-        const creds = await connectorStore.getCredentials(userId, 'msgraph')
-        return creds?.client_secret ? unpackMsGraphTokens(creds.client_secret) : null
+        const blob = credsOverride
+          ? await credsOverride()
+          : (await connectorStore.getCredentials(userId, 'msgraph'))?.client_secret ?? null
+        return blob ? unpackMsGraphTokens(blob) : null
       },
       async persistTokens(next) {
+        const encoded = packMsGraphTokens(next)
+        if (persistOverride) {
+          await persistOverride(encoded)
+          return
+        }
         await connectorStore.upsert(userId, {
           connectorId: 'msgraph',
           name: 'Microsoft Teams',
           connected: true,
-          credentials: { client_id: 'msgraph_oauth', client_secret: packMsGraphTokens(next) },
+          credentials: { client_id: 'msgraph_oauth', client_secret: encoded },
         })
       },
     },
