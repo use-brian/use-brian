@@ -71,6 +71,7 @@ import {
   type WorkflowEventDispatcher,
   createRunQueueWorker,
   createTaskTools,
+  createTaskGuardrailTools,
   createGoalTools,
   buildOneStepReminderWorkflow,
   type GoalRecord,
@@ -140,6 +141,7 @@ import { authRoutes } from './routes/auth.js'
 import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
 import { contentPlanningRoutes } from './routes/content-planning.js'
+import { contentPlanRoutes } from './routes/content-plan.js'
 import {
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
@@ -174,6 +176,7 @@ import { codexProviderRoutes } from './routes/codex-provider.js'
 import { saveLocalProviderPreference } from './local-provider-preference.js'
 import { brainRoutes } from './routes/brain.js'
 import { brainInboxRoutes } from './routes/brain-inbox.js'
+import { taskGuardrailRoutes } from './routes/task-guardrails.js'
 import { homeRoutes } from './routes/home.js'
 import { homeDockRoutes } from './routes/home-dock.js'
 import { createDbHomeDockStore } from './db/home-dock-store.js'
@@ -281,6 +284,10 @@ import { createDbMemoryStore } from './db/memory-store.js'
 import { createMemoryToEntityPromotionStore } from './db/memory-to-entity-promotion-store.js'
 import { createMemoryRecallEventsStore } from './db/memory-recall-events-store.js'
 import { createDbTaskStore } from './db/tasks-store.js'
+import {
+  createTaskAdmissionPort,
+  createTaskGuardrailStore,
+} from './db/task-admission-store.js'
 import { createDbGoalStore } from './db/goals-store.js'
 import { createGoalRollupRunner } from './goals/rollup-runner.js'
 import { createGoalDriver, parseGoalTick, GOAL_TICK_KIND, INITIAL_GOAL_LOOP_STATE, type GoalLoopState } from './goals/driver.js'
@@ -370,6 +377,7 @@ import { createDbSavedViewStore } from './db/saved-views-store.js'
 import { publishPageLifecycle, setPageEventDispatcher } from './page-event-fanout.js'
 import { setMediaTokenSecret } from './media-token.js'
 import { setTaskEventDispatcher } from './task-event-fanout.js'
+import { setKnowledgeEventDispatcher } from './knowledge-event-fanout.js'
 import { createRecordingSynthesizer, type RecordingSynthesizeFn } from './synthesis/recording-synthesizer.js'
 import { processOpenRecording } from './recordings/process-recording.js'
 import { createOpenRecordingProcessWorker } from './recordings/recording-process-worker.js'
@@ -2043,6 +2051,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
         connectorInstanceStore,
         workspaceToolPolicyStore,
         knowledgeStore,
+        // Lets a `tool_call` step write the KB — gated by the executor's
+        // `workflow_step` approval pause, never unattended. See the
+        // `allowKnowledgeWrites` note in mcp-bridge.ts.
+        knowledgeRepoWriter,
         gdriveFilesStore,
         // Evaluated per-run (this closure fires post-boot), so the late
         // `filesApi` initialization below is already done.
@@ -2511,7 +2523,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   allTools.set('saveView', saveView)
 
   // ── Primitive tools (Tasks + CRM) ──
+  // The admission gate runs on the `assistant` lane here: a workspace deny
+  // rule or a previously rejected title refuses the create with an explanation
+  // the model relays; a near-duplicate creates it with a warning appended.
+  // Spec: docs/architecture/features/task-guardrails.md
   const taskTools = createTaskTools(taskStore, {
+    admission: createTaskAdmissionPort(),
     entityLinks: entityLinksStore,
     onEvent: (evt, ctx) => {
       const base = { userId: ctx.userId, assistantId: ctx.assistantId, sessionId: ctx.sessionId, channelType: ctx.channelType }
@@ -2534,6 +2551,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // one instruction; tasks.md → "Bulk tools").
   allTools.set('bulkUpdateTasks', taskTools.bulkUpdateTasks)
   allTools.set('archiveTasks', taskTools.archiveTasks)
+
+  // Guardrail tools — rejecting a task WITH a reason is what teaches the
+  // workspace; archiveTasks above is routine cleanup and deliberately teaches
+  // nothing. Same `tasks` capability, so a workspace that has tasks has these.
+  const guardrailTools = createTaskGuardrailTools(createTaskGuardrailStore())
+  allTools.set('rejectTask', guardrailTools.rejectTask)
+  allTools.set('saveTaskRule', guardrailTools.saveTaskRule)
+  allTools.set('listTaskRules', guardrailTools.listTaskRules)
+  allTools.set('deleteTaskRule', guardrailTools.deleteTaskRule)
 
   // ── Goal-seeker kickoff tools (default-on 'goals' capability) ──
   const goalTools = createGoalTools(goalStore, {
@@ -3559,6 +3585,13 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     )
   }
 
+  // Marketing plan (slots + month brief) is open in BOTH editions: it needs
+  // no credential and no distribution profile, so it must not join the
+  // `/api/distribution` fork that already 404s edition-specific routes.
+  // Mounted first; unmatched paths fall through to whichever planning router
+  // the edition mounts below. Spec: docs/plans/feed-revamp.md §6.
+  app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentPlanRoutes())
+
   // OSS content planning reuses the app-web `/api/distribution/*` wire
   // contract but contains no provider integration. Hosted mounts its
   // provider-backed distribution routers later through mountExtraRoutes.
@@ -4219,6 +4252,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     entityLinks: entityLinksStore,
     workspaceSkillStore,
   }))
+  // Task guardrails — rules, the suggestions tray, and the rejection log.
+  // Authenticated, so it mounts here without tripping the public-route
+  // ordering trap. Spec: docs/architecture/features/task-guardrails.md
+  app.use('/api/task-guardrails', requireAuth(env.JWT_SECRET), taskGuardrailRoutes({
+    workspaceStore,
+  }))
   app.use('/api/home', requireAuth(env.JWT_SECRET), homeRoutes())
   app.use('/api/home-dock', requireAuth(env.JWT_SECRET), homeDockRoutes({
     homeDockStore,
@@ -4373,6 +4412,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // Task lifecycle events ride the same dispatcher — the late-bound seam
   // `db/tasks.ts` publishes into (no-op until this bind). Both editions.
   setTaskEventDispatcher(workflowEventDispatcher)
+  // Knowledge lifecycle events likewise — the seam `db/knowledge-store.ts`
+  // publishes into on every entry create / update / delete, covering the sync
+  // worker, the assistant repo-writer's write-through, and manual edits.
+  setKnowledgeEventDispatcher(workflowEventDispatcher)
 
   // ════════════════════════════════════════════════════════════════
   // Open background workers
@@ -4508,7 +4551,12 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   )
 
   // ── Consolidation worker (dreaming) ──
-  const CONSOLIDATION_MODEL = 'gemini-flash'
+  // Background lane, not chat lane. cost-and-pricing.md → "Standard-tier
+  // routing" names consolidation as Flash-Lite work; it had drifted onto the
+  // Flash 3 chat alias, which is 2x the input rate and 2x the output rate for
+  // invisible background summarization. `backgroundModel` is the boot-resolved
+  // id (falls back when Flash Lite isn't servable for the configured provider).
+  const CONSOLIDATION_MODEL = backgroundModel
   const consolidationCallModel = async (
     prompt: string,
     ctx: { assistantId: string; userId: string | null; workspaceId: string | null; phase: string },

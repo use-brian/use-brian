@@ -24,7 +24,14 @@ export {
   type FieldCitation,
 } from '@use-brian/shared'
 export { transcribeAudio, type TranscribeOptions, type TranscribeResult } from './transcribe.js'
-export { transcribeFirstAudio, describeTranscriptionFailure, type PreflightOptions } from './preflight.js'
+export {
+  transcribeFirstAudio,
+  describeTranscriptionFailure,
+  voiceUnavailableNote,
+  composeVoiceTurnText,
+  TRANSCRIPTION_DISABLED_REASON,
+  type PreflightOptions,
+} from './preflight.js'
 export {
   transcribeRecording,
   transcribeRecordingChunks,

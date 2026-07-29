@@ -35,7 +35,16 @@ type ExtractedFact = {
  */
 export const COMPACT_THRESHOLDS = {
   standard: 42_000,
-  pro: 187_000,
+  // Lowered 187k → 60k (2026-07-29). 187k let a session accumulate ~187k
+  // tokens of history before compacting, and EVERY message sent below that
+  // ceiling re-pays for the whole accumulation — measured Pro messages
+  // carried 216k input tokens to produce ~1.4k of output. Compaction costs
+  // ~$0.012 a firing and saves ~$0.016 on each subsequent message in the
+  // session, so compacting sooner pays for itself roughly 7:1. 60k keeps
+  // this 1.4x the standard tier so the pro lane still carries materially
+  // more history. See docs/architecture/platform/cost-and-pricing.md →
+  // "Context size is the cost driver".
+  pro: 60_000,
 } as const
 
 const SUMMARY_MAX_TOKENS = 4_000

@@ -119,6 +119,15 @@ export {
 } from './task-event-trigger.js'
 
 export {
+  KNOWLEDGE_LIFECYCLE_ACTIONS,
+  knowledgeLifecycleToDispatchEvent,
+  createKnowledgeLifecycleTrigger,
+  type KnowledgeLifecycleAction,
+  type KnowledgeLifecycleEvent,
+  type KnowledgeWriteActor,
+} from './knowledge-event-trigger.js'
+
+export {
   createRunQueueWorker,
   type RunQueueWorker,
   type RunQueueWorkerDeps,

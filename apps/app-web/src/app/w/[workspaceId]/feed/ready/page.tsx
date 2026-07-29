@@ -1,14 +1,12 @@
 "use client";
 
 /**
- * Feed ready-to-post route — approved drafts awaiting manual posting
- * (docs/plans/feed-create-split.md D2). Thin wrapper: the meat lives in
- * `@/components/feed/feed-ready` (`[COMP:app-web/feed-ready]`) so the
- * desktop SPA can import the client component directly.
+ * Legacy `/feed/ready` route — merged into `/feed/posts` by the revamp and
+ * kept as a redirect so existing deep links do not 404 (feed-revamp.md D6).
  */
 
-import { FeedReady } from "@/components/feed/feed-ready";
+import { FeedLegacyRedirect } from "@/components/feed/feed-legacy-redirect";
 
-export default function FeedReadyPage() {
-  return <FeedReady />;
+export default function FeedLegacyReadyPage() {
+  return <FeedLegacyRedirect status="ready" />;
 }

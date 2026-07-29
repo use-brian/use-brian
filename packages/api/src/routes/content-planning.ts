@@ -515,7 +515,12 @@ export function contentPlanningRoutes(
   return router
 }
 
-async function resolvePlanningAccess(
+/**
+ * Membership + draft-permission context for a distribution assistant.
+ * Exported so the plan router (`content-plan.ts`) reuses this exact gate
+ * rather than reimplementing it (docs/plans/feed-revamp.md §6).
+ */
+export async function resolvePlanningAccess(
   userId: string,
   assistantId: string,
 ): Promise<PlanningAccessContext | null> {

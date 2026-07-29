@@ -14,13 +14,20 @@ import { createHash } from 'node:crypto'
 
 const queries: { text: string; values?: unknown[] }[] = []
 
+/** Rows served to the priority half of the claim (`created_at > cutoff`). */
 let claimRows: { id: string; embed_text: string | null }[] = []
+/** Rows served to the backlog half (`created_at <= cutoff`), when it runs. */
+let olderRows: { id: string; embed_text: string | null }[] = []
 
 const fakeClient = {
   query: vi.fn(async (text: string, values?: unknown[]) => {
     queries.push({ text, values })
     if (text.includes('FOR UPDATE SKIP LOCKED')) {
-      return { rows: claimRows, rowCount: claimRows.length }
+      // The claim is split across two bounded range scans (see
+      // embedding-store.ts); serve each half its own fixture so a test can
+      // tell them apart.
+      const rows = text.includes('created_at <= now()') ? olderRows : claimRows
+      return { rows, rowCount: rows.length }
     }
     return { rows: [], rowCount: 0 }
   }),
@@ -43,9 +50,14 @@ function sql(): string {
 beforeEach(() => {
   queries.length = 0
   claimRows = []
+  olderRows = []
   fakeClient.query.mockClear()
   fakeClient.release.mockClear()
 })
+
+function claims(): { text: string; values?: unknown[] }[] {
+  return queries.filter((q) => q.text.includes('FOR UPDATE SKIP LOCKED'))
+}
 
 describe('[COMP:brain/embedding-store] withClaimedRows', () => {
   it('throws for a primitive without a vector column (episodes)', async () => {
@@ -59,13 +71,66 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     await store.withClaimedRows('memories', 50, async (rows) => {
       expect(rows).toEqual([])
     })
-    const claim = queries.find((q) => q.text.includes('FOR UPDATE SKIP LOCKED'))
-    expect(claim).toBeDefined()
-    expect(claim!.text).toContain('FROM memories')
-    expect(claim!.text).toContain('embedding IS NULL')
-    expect(claim!.text).toContain('embedding_failed_at IS NULL')
-    expect(claim!.text).toContain("INTERVAL '24 hours'")
-    expect(claim!.values).toEqual([50])
+    // Priority class first (new writes < 24h), then the backlog — both against
+    // the same predicate, oldest-first, under a skip-locked lease.
+    const [priority, backlog] = claims()
+    expect(priority).toBeDefined()
+    expect(backlog).toBeDefined()
+    for (const claim of [priority, backlog]) {
+      expect(claim.text).toContain('FROM memories')
+      expect(claim.text).toContain('embedding IS NULL')
+      expect(claim.text).toContain('embedding_failed_at IS NULL')
+      expect(claim.text).toContain("INTERVAL '24 hours'")
+      expect(claim.text).toContain('ORDER BY created_at ASC')
+    }
+    expect(priority.text).toContain('created_at > now()')
+    expect(backlog.text).toContain('created_at <= now()')
+    expect(priority.values).toEqual([50])
+  })
+
+  it('claims via indexable range scans — never a CASE-expression sort', async () => {
+    // Regression guard for the 2026-07-28 connection-exhaustion outage
+    // (embeddings.md §"Worker priority queue"). A `CASE WHEN created_at >
+    // now() ...` in ORDER BY cannot be indexed (now() is not IMMUTABLE), so it
+    // forces a full scan + sort of every unembedded row on each tick; at 415k
+    // rows that ran 5-20 min per claim, and because the claim holds its
+    // transaction's connection the whole time, claims stacked until all 25
+    // Cloud SQL slots were gone. The bound must stay in WHERE, not ORDER BY.
+    await store.withClaimedRows('email_segment', 100, async () => undefined)
+    expect(claims()).not.toHaveLength(0)
+    for (const claim of claims()) {
+      // Assert on the ORDER BY tail specifically: a textExpr may legitimately
+      // contain a CASE (file_segment's heading breadcrumb does), so a blanket
+      // "no CASE anywhere" check would be primitive-dependent and misleading.
+      const orderBy = claim.text.slice(claim.text.indexOf('ORDER BY'))
+      expect(orderBy).not.toContain('CASE')
+      expect(orderBy).toMatch(/^ORDER BY created_at ASC/)
+      expect(claim.text).toContain('AND created_at')
+    }
+  })
+
+  it('skips the backlog scan when the priority class fills the batch', async () => {
+    claimRows = [
+      { id: 'm-1', embed_text: 'one' },
+      { id: 'm-2', embed_text: 'two' },
+    ]
+    await store.withClaimedRows('memories', 2, async (rows) => {
+      expect(rows.map((r) => r.id)).toEqual(['m-1', 'm-2'])
+    })
+    expect(claims()).toHaveLength(1)
+  })
+
+  it('tops the batch up from the backlog, requesting only the remainder', async () => {
+    claimRows = [{ id: 'm-1', embed_text: 'recent' }]
+    olderRows = [{ id: 'm-9', embed_text: 'old' }]
+    await store.withClaimedRows('memories', 3, async (rows) => {
+      // Priority rows lead, backlog rows follow — the ordering the single
+      // CASE-sorted query used to produce.
+      expect(rows.map((r) => r.id)).toEqual(['m-1', 'm-9'])
+    })
+    const [priority, backlog] = claims()
+    expect(priority.values).toEqual([3])
+    expect(backlog.values).toEqual([2])
   })
 
   it('routes each primitive to its own table', async () => {

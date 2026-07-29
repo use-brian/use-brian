@@ -28,6 +28,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { cn } from "@/lib/utils";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import {
   createFeedVoiceMemory,
@@ -60,6 +61,12 @@ type FeedPageDict = ReturnType<typeof useT>["feedPage"];
 type VoiceDict = FeedPageDict["voice"];
 
 type Sensitivity = "public" | "internal" | "confidential";
+
+/**
+ * What the rail can select: one platform, or the baseline every platform
+ * inherits. Not a union with "all" - see the state comment in `FeedVoice`.
+ */
+type VoiceScope = FeedPlatform | "company";
 
 const MEMORY_TYPES = ["voice", "identity", "policy", "style", "example"] as const;
 const SENSITIVITIES: Sensitivity[] = ["public", "internal", "confidential"];
@@ -114,7 +121,7 @@ function sensitivityLabel(t: VoiceDict, sensitivity: string): string {
   return (t.sensitivities as Record<string, string>)[sensitivity] ?? sensitivity;
 }
 
-export function FeedVoice() {
+export function FeedVoice({ scope }: { scope: VoiceScope }) {
   const team = useFeedWorkspace();
   const feedT = useT().feedPage;
 
@@ -128,10 +135,10 @@ export function FeedVoice() {
    */
   async function importFromSamples() {
     let samples = "";
-    // Platform-first (feed-create-split.md D12): the import scope defaults
-    // to the page's selected platform; "All platforms" stays one click away.
+    // The import inherits the rail's scope: training X voice from X posts is
+    // the whole point, and a baseline import stays one click away.
     let platform: FeedPlatform | null =
-      voicePlatform === "all" ? null : voicePlatform;
+      voicePlatform === "company" ? null : voicePlatform;
     const ok = await confirmDialog({
       title: t.importSamplesTitle,
       description: t.importSamplesBody,
@@ -175,24 +182,11 @@ export function FeedVoice() {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
 
-  // Platform-first entry (feed-create-split.md D12): the page opens on one
-  // platform's view (baseline + that platform's rules — exactly what draft
-  // sessions inject) with "All" one chip away. The stored pick applies in an
-  // effect, not the initializer, so SSR/client first paints stay identical.
-  const [voicePlatform, setVoicePlatform] = useState<FeedPlatform | "all">(
-    FEED_PLATFORMS[0],
-  );
-  const pickAppliedRef = useRef(false);
-  useEffect(() => {
-    if (pickAppliedRef.current) return;
-    pickAppliedRef.current = true;
-    setVoicePlatform(
-      defaultFeedPlatform(
-        team.workspaceId,
-        team.profiles.map((p) => p.platform),
-      ),
-    );
-  }, [team.workspaceId, team.profiles]);
+  // Scope comes from the ROUTE now (feed-revamp.md D13): `/feed/voice` is
+  // company-wide, `/feed/<platform>/voice` is that platform. The sidebar
+  // owns the switcher, so an in-page scope rail would be a second picker
+  // for the same thing.
+  const voicePlatform = scope;
 
   // Add form
   const [showAdd, setShowAdd] = useState(false);
@@ -348,27 +342,27 @@ export function FeedVoice() {
     [items, filter],
   );
 
-  // Platform view (D12): show the baseline (no platform tag) + the selected
-  // platform's scoped rules — the exact set a draft session for that
-  // platform injects. Rules scoped only to other platforms live in their
-  // own platform's view.
+  // The exact set a draft session for this scope injects: the platform's own
+  // rules, plus the baseline every platform inherits. Rules scoped only to
+  // other platforms live in their own rail entry.
   const platformTagsOf = (m: FeedVoiceMemory) =>
     (m.tags ?? []).filter(isFeedPlatform);
-  const visible = useMemo(() => {
-    if (voicePlatform === "all") return filtered;
-    return filtered.filter((m) => {
-      const scoped = platformTagsOf(m);
-      return scoped.length === 0 || scoped.includes(voicePlatform);
-    });
-  }, [filtered, voicePlatform]);
   const baselineRules = useMemo(
-    () => visible.filter((m) => platformTagsOf(m).length === 0),
-    [visible],
+    () => filtered.filter((m) => platformTagsOf(m).length === 0),
+    [filtered],
   );
   const scopedRules = useMemo(
-    () => visible.filter((m) => platformTagsOf(m).length > 0),
-    [visible],
+    () =>
+      voicePlatform === "company"
+        ? []
+        : filtered.filter((m) => platformTagsOf(m).includes(voicePlatform)),
+    [filtered, voicePlatform],
   );
+  const visible = useMemo(
+    () => (voicePlatform === "company" ? baselineRules : [...scopedRules, ...baselineRules]),
+    [voicePlatform, baselineRules, scopedRules],
+  );
+
 
   // One rule row — shared by the flat "All" grid and the platform view's
   // two sections; the in-place edit card swaps in for the row being edited.
@@ -426,23 +420,29 @@ export function FeedVoice() {
     );
   }
 
+  const scopeLabel =
+    voicePlatform === "company"
+      ? t.baselineLabel
+      : feedT.platformLabels[voicePlatform];
+
   return (
-    <div className="relative h-screen overflow-hidden">
-      <div className="h-full overflow-y-auto">
-        {/* Memories — full width; the tuning chat lives in the floating dock. */}
-        <div className="px-4 md:px-6 py-5 max-w-4xl mx-auto space-y-5">
+    <div className="flex h-full min-h-0">
+      <div className="min-w-0 flex-1 overflow-y-auto">
+        <div className="max-w-4xl space-y-5 px-4 py-5 md:px-6">
           <header className="flex items-start justify-between gap-4">
             <div className="space-y-1.5">
               <div className="flex items-center gap-2">
                 <h1 className="text-[15px] font-semibold">
-                  {feedT.sections.voice}
+                  {format(t.scopeHeading, { scope: scopeLabel })}
                 </h1>
                 <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                   {total === 1 ? t.ruleCountOne : format(t.ruleCount, { count: total })}
                 </span>
               </div>
-              <p className="text-sm text-muted-foreground leading-relaxed max-w-xl">
-                {t.subtitle}
+              <p className="max-w-xl text-sm leading-relaxed text-muted-foreground">
+                {voicePlatform === "company"
+                  ? t.baselineScopeSubtitle
+                  : format(t.platformScopeSubtitle, { platform: scopeLabel })}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -450,7 +450,7 @@ export function FeedVoice() {
                 <button
                   type="button"
                   onClick={() => void importFromSamples()}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-border px-4 h-9 text-sm font-medium hover:bg-accent transition-colors"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
                 >
                   {t.importSamples}
                 </button>
@@ -459,15 +459,15 @@ export function FeedVoice() {
                 <button
                   type="button"
                   onClick={() => {
-                    // New rules default their scope to the page's selected
-                    // platform (D12); the form's chips can widen/clear it.
+                    // A new rule inherits the rail's scope; the form's chips
+                    // can widen or clear it.
                     setAddForm({
                       ...DEFAULT_FORM,
-                      tags: voicePlatform === "all" ? "" : voicePlatform,
+                      tags: voicePlatform === "company" ? "" : voicePlatform,
                     });
                     setShowAdd(true);
                   }}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 h-8 text-[12.5px] font-medium text-primary-foreground hover:bg-primary/90 active:bg-primary/85 transition-colors press"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90"
                 >
                   <PlusIcon />
                   {t.injectRule}
@@ -475,46 +475,6 @@ export function FeedVoice() {
               ) : null}
             </div>
           </header>
-
-          {/* Platform switcher (D12) — the page is entered with a platform
-              selected; "All" shows every rule with its platform badges. */}
-          <nav
-            aria-label={t.platformSwitcherAria}
-            className="flex flex-wrap items-center gap-1.5"
-          >
-            {FEED_PLATFORMS.map((p) => {
-              const active = voicePlatform === p;
-              return (
-                <button
-                  key={p}
-                  type="button"
-                  onClick={() => setVoicePlatform(p)}
-                  aria-pressed={active}
-                  className={
-                    "press h-8 rounded-full border px-3.5 text-[13px] font-medium transition-colors " +
-                    (active
-                      ? "border-transparent bg-foreground text-background"
-                      : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
-                  }
-                >
-                  {feedT.platformLabels[p]}
-                </button>
-              );
-            })}
-            <button
-              type="button"
-              onClick={() => setVoicePlatform("all")}
-              aria-pressed={voicePlatform === "all"}
-              className={
-                "press h-8 rounded-full border px-3.5 text-[13px] font-medium transition-colors " +
-                (voicePlatform === "all"
-                  ? "border-transparent bg-foreground text-background"
-                  : "border-border bg-background/60 text-muted-foreground hover:bg-accent")
-              }
-            >
-              {t.filterAllPlatforms}
-            </button>
-          </nav>
 
           {types.length > 2 ? (
             <div className="flex items-center gap-1 overflow-x-auto -mx-1 px-1 pb-1">
@@ -540,13 +500,16 @@ export function FeedVoice() {
           ) : null}
 
           {error ? (
-            <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive animate-pop-in">
+            <div
+              role="alert"
+              className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive"
+            >
               {error}
             </div>
           ) : null}
 
           {showAdd ? (
-            <div className="rounded-xl border border-border bg-card p-4 space-y-4 animate-pop-in shadow-xs">
+            <div className="space-y-4 rounded-xl border border-border/60 bg-card p-4 shadow-xs">
               <div className="flex items-center justify-between">
                 <span className="text-sm font-medium">{t.addTitle}</span>
                 <button
@@ -573,35 +536,31 @@ export function FeedVoice() {
           {loading ? (
             <CardSkeletonList count={4} lines={2} />
           ) : items.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border bg-card/40 p-8 text-center space-y-2 animate-pop-in">
+            <div className="space-y-2 rounded-xl border border-dashed border-border bg-card/40 p-8 text-center">
               <p className="text-sm font-medium">{t.emptyTitle}</p>
-              <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+              <p className="mx-auto max-w-sm text-xs text-muted-foreground">
                 {t.emptyBodyBefore} <strong>{t.injectRule}</strong> {t.emptyBodyAfter}
               </p>
             </div>
-          ) : visible.length === 0 ? (
+          ) : visible.length === 0 && filter !== "all" ? (
             <div className="rounded-xl border border-dashed border-border bg-card/40 p-8 text-center text-xs text-muted-foreground">
               {t.typeEmptyBefore} <strong>{typeLabel(t, filter)}</strong> {t.typeEmptyAfter}
             </div>
-          ) : voicePlatform === "all" ? (
-            <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger pb-4">
-              {visible.map(renderRule)}
-            </ul>
+          ) : voicePlatform === "company" ? (
+            baselineRules.length > 0 ? (
+              <ul className="grid grid-cols-1 gap-3 pb-4 xl:grid-cols-2">
+                {baselineRules.map(renderRule)}
+              </ul>
+            ) : (
+              <p className="rounded-xl border border-dashed border-border bg-card/40 p-5 text-center text-xs text-muted-foreground">
+                {t.baselineSectionEmpty}
+              </p>
+            )
           ) : (
-            // Platform view (D12): baseline first (applies everywhere), then
-            // the selected platform's scoped rules — mirroring the injection
-            // order draft sessions use.
+            // This platform's own rules first, then the baseline it inherits.
+            // Own-before-inherited is the point of the surface: it answers
+            // "what makes this platform sound different" at a glance.
             <div className="space-y-5 pb-4">
-              {baselineRules.length > 0 ? (
-                <section className="space-y-2">
-                  <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    {t.baselineSection}
-                  </h2>
-                  <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger">
-                    {baselineRules.map(renderRule)}
-                  </ul>
-                </section>
-              ) : null}
               <section className="space-y-2">
                 <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                   {format(t.platformSection, {
@@ -609,7 +568,7 @@ export function FeedVoice() {
                   })}
                 </h2>
                 {scopedRules.length > 0 ? (
-                  <ul className="grid grid-cols-1 xl:grid-cols-2 gap-3 animate-stagger">
+                  <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
                     {scopedRules.map(renderRule)}
                   </ul>
                 ) : (
@@ -620,6 +579,16 @@ export function FeedVoice() {
                   </p>
                 )}
               </section>
+              {baselineRules.length > 0 ? (
+                <section className="space-y-2">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {t.inheritedSection}
+                  </h2>
+                  <ul className="grid grid-cols-1 gap-3 xl:grid-cols-2">
+                    {baselineRules.map(renderRule)}
+                  </ul>
+                </section>
+              ) : null}
             </div>
           )}
         </div>
@@ -815,7 +784,7 @@ function MemoryCard({
   const t = feedT.voice;
   const platformLabels = feedT.platformLabels;
   return (
-    <li className="group relative flex h-full flex-col rounded-xl border border-border/60 bg-card p-4 space-y-2 shadow-xs transition-all hover:shadow-md">
+    <li className="group relative flex h-full flex-col rounded-xl border border-border/60 bg-card p-4 space-y-2 shadow-xs transition-colors">
 
       <div className="relative flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">

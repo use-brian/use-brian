@@ -7,6 +7,14 @@ vi.mock('../client.js', () => ({
   getPool: vi.fn(),
 }))
 
+// Capture the `knowledge` workflow-event-source emissions the store publishes.
+const { published } = vi.hoisted(() => ({ published: [] as Array<Record<string, unknown>> }))
+vi.mock('../../knowledge-event-fanout.js', () => ({
+  publishKnowledgeLifecycle: (event: Record<string, unknown>) => {
+    published.push(event)
+  },
+}))
+
 import { createDbKnowledgeStore } from '../knowledge-store.js'
 import { query } from '../client.js'
 
@@ -25,6 +33,7 @@ const ctxFor = (workspaceId: string, clearance?: 'public' | 'internal' | 'confid
 
 beforeEach(() => {
   vi.clearAllMocks()
+  published.length = 0
 })
 
 describe('[COMP:api/knowledge-store] entries', () => {
@@ -160,9 +169,29 @@ describe('[COMP:api/knowledge-store] entries', () => {
       expect(rows).toHaveLength(2)
       const sql = mockQuery.mock.calls[0][0] as string
       expect(sql).toContain('workspace_id = $1')
-      expect(sql).toContain('ORDER BY updated_at DESC')
+      // `, id` is a PAGINATION tiebreaker, not decoration: this is the
+      // knowledge arm of the Brain list's composite cursor, and rows tied on
+      // `updated_at` (a bulk KB import writes many at once) would otherwise
+      // reshuffle between pages, showing duplicates and skipping others.
+      expect(sql).toContain('ORDER BY updated_at DESC, id')
       expect(sql).not.toContain('plainto_tsquery')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50])
+      // Offset defaults to 0 when the caller does not page.
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 0])
+    })
+
+    it('offsets by the caller\'s cursor position', async () => {
+      mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      await store.listForBrain(ctxFor('t1'), '', 50, 120)
+      expect(mockQuery.mock.calls[0][0] as string).toContain('OFFSET')
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 120])
+    })
+
+    it('floors a negative or fractional offset to zero-or-whole rows', async () => {
+      mockQuery.mockResolvedValue({ rows: [], rowCount: 0 } as never)
+      await store.listForBrain(ctxFor('t1'), '', 50, -5)
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'confidential', 50, 0])
+      await store.listForBrain(ctxFor('t1'), '', 50, 10.7)
+      expect(mockQuery.mock.calls[1][1]).toEqual(['t1', 'confidential', 50, 10])
     })
 
     it('runs FTS ranked by ts_rank_cd when query is non-empty', async () => {
@@ -175,7 +204,10 @@ describe('[COMP:api/knowledge-store] entries', () => {
       const sql = mockQuery.mock.calls[0][0] as string
       expect(sql).toContain('plainto_tsquery')
       expect(sql).toContain('ts_rank_cd')
-      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'pricing model', 'confidential', 20])
+      // Same tiebreaker reasoning as the empty-query branch — `ts_rank_cd`
+      // ties are common, so paging without it would repeat and skip rows.
+      expect(sql).toContain('DESC, id')
+      expect(mockQuery.mock.calls[0][1]).toEqual(['t1', 'pricing model', 'confidential', 20, 0])
     })
   })
 
@@ -420,5 +452,112 @@ describe('[COMP:api/kb-write-capability] source write-access cache', () => {
     mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     const updated = await store.updateManualEntryContent('t1', 'repo-entry', 'x')
     expect(updated).toBeNull()
+  })
+})
+
+// ── Knowledge lifecycle events (the `knowledge` workflow event source) ──
+//
+// The store is the KB's write chokepoint — the sync worker, the assistant
+// repo-writer's write-through, and manual writes all land here — so this is
+// where lifecycle events are published. Spec:
+// docs/architecture/features/workflow.md → "Knowledge event source".
+describe('[COMP:api/knowledge-event-fanout] lifecycle emission', () => {
+  const entryRow = {
+    id: 'e1',
+    workspaceId: 't1',
+    path: 'products/vault',
+    title: 'Vault',
+    tags: ['pricing'],
+    sensitivity: 'internal',
+    sourceId: 'src1',
+  }
+
+  it('upsertByPath discriminates create from update with xmax and emits the matching action', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: true }], rowCount: 1 } as never)
+    await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'body', sensitivity: 'internal', sourceId: 'src1',
+    })
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('(xmax = 0) AS "__inserted"')
+    expect(published).toHaveLength(1)
+    expect(published[0]).toMatchObject({ entryId: 'e1', action: 'created', workspaceId: 't1' })
+
+    published.length = 0
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: false }], rowCount: 1 } as never)
+    await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'body2', sensitivity: 'internal', sourceId: 'src1',
+    })
+    expect(published[0]).toMatchObject({ action: 'updated' })
+  })
+
+  it('strips the xmax discriminator from the returned entry', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: true }], rowCount: 1 } as never)
+    const row = await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'body', sensitivity: 'internal',
+    })
+    expect(row).not.toHaveProperty('__inserted')
+  })
+
+  it('defaults to a user write, and relays writtenBy: system from the repo writer', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: false }], rowCount: 1 } as never)
+    await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'b', sensitivity: 'internal',
+    })
+    // The sync worker mirroring a human push must NOT look bot-authored.
+    expect(published[0].writtenBy).toBeUndefined()
+
+    published.length = 0
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: false }], rowCount: 1 } as never)
+    await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'b', sensitivity: 'internal', writtenBy: 'system', actorId: 'u9',
+    })
+    expect(published[0]).toMatchObject({ writtenBy: 'system', actorId: 'u9' })
+  })
+
+  it('updateManualEntryContent emits an assistant-authored update', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [{ id: 'm1', path: 'notes/x', title: 'X', tags: [], sensitivity: 'internal', sourceId: null }],
+      rowCount: 1,
+    } as never)
+    await store.updateManualEntryContent('t1', 'm1', 'New body')
+    expect(published[0]).toMatchObject({
+      entryId: 'm1', action: 'updated', writtenBy: 'system', sourceId: null,
+    })
+  })
+
+  it('deleteByTeamAndPath emits a delete carrying the removed row', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [entryRow], rowCount: 1 } as never)
+    await store.deleteByTeamAndPath('t1', 'products/vault')
+    const sql = mockQuery.mock.calls[0][0] as string
+    expect(sql).toContain('RETURNING')
+    expect(published[0]).toMatchObject({ entryId: 'e1', action: 'deleted', writtenBy: 'user' })
+  })
+
+  it('emits nothing when the delete matched no row', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await store.deleteByTeamAndPath('t1', 'missing')
+    expect(published).toHaveLength(0)
+  })
+
+  it('bulk teardown paths stay silent — a source disconnect is not N entry events', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 12 } as never)
+    await store.deleteBySource('src1')
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 5 } as never)
+    await store.deleteByTeamAndPathPrefix('t1', 'products/')
+    expect(published).toHaveLength(0)
+  })
+
+  it('never puts the entry body on the event', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...entryRow, __inserted: true }], rowCount: 1 } as never)
+    await store.upsertByPath({
+      workspaceId: 't1', path: 'products/vault', title: 'Vault',
+      content: 'SECRET BODY', sensitivity: 'confidential',
+    })
+    expect(JSON.stringify(published[0])).not.toContain('SECRET BODY')
   })
 })

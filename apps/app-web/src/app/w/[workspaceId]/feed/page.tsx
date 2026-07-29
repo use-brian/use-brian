@@ -1,20 +1,24 @@
 "use client";
 
 /**
- * Feed surface index — the team home dashboard. Thin wrapper: the meat lives
- * in `@/components/feed/feed-home` (`[COMP:app-web/feed-home]`) so the
- * desktop SPA can import the client component directly
- * (docs/plans/feed-web-consolidation.md §6, §10). The Suspense boundary
- * covers `useSearchParams` (the `?connected=` OAuth landing).
+ * Feed surface index — the marketing Plan (calendar + month brief), or the
+ * guided first run when the workspace has no brand voice yet. Plan owns the
+ * bare `/feed` index rather than a `/feed/plan` segment (feed-revamp.md D5).
+ *
+ * Thin wrapper: the meat lives in `@/components/feed/feed-plan`
+ * (`[COMP:app-web/feed-plan-surface]`) so the desktop SPA can import the
+ * client component directly (docs/plans/feed-web-consolidation.md §6, §10).
+ * The Suspense boundary covers `useSearchParams` (the `?connected=` OAuth
+ * landing and the `?month=` deep link).
  */
 
 import { Suspense } from "react";
-import { FeedHome } from "@/components/feed/feed-home";
+import { FeedPlan } from "@/components/feed/feed-plan";
 
-export default function FeedHomePage() {
+export default function FeedPlanPage() {
   return (
-    <Suspense fallback={<div className="text-sm text-muted-foreground">…</div>}>
-      <FeedHome />
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">…</div>}>
+      <FeedPlan />
     </Suspense>
   );
 }

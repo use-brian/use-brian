@@ -1,0 +1,203 @@
+/**
+ * Task guardrails SDK — the suggestions tray, workspace rules, and the
+ * rejection log behind `/api/task-guardrails`.
+ *
+ * Spec: docs/architecture/features/task-guardrails.md
+ * [COMP:app-web/task-suggestions]
+ */
+
+import { authFetch } from "@/lib/auth-fetch";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+
+type TaskLane = "extracted" | "assistant";
+
+type TaskRuleEffect = "deny" | "require";
+export type TaskRuleStatus = "active" | "proposed" | "disabled";
+
+export type TaskRulePredicate = {
+  source_kinds?: string[];
+  lanes?: TaskLane[];
+  title_matches?: string[];
+  channel_refs?: string[];
+  require?: ("assignee" | "due")[];
+};
+
+export type TaskRule = {
+  id: string;
+  workspaceId: string;
+  status: TaskRuleStatus;
+  effect: TaskRuleEffect;
+  predicate: TaskRulePredicate;
+  nlClause: string | null;
+  reason: string | null;
+  origin: "user" | "proposed";
+  createdAt: string;
+};
+
+/** Why a candidate did not become a task. */
+type TaskCandidateReason =
+  | "tombstoned"
+  | "rule"
+  | "rule_requires"
+  | "duplicate"
+  | "near_duplicate";
+
+export type TaskCandidate = {
+  id: string;
+  title: string;
+  due: string | null;
+  sourceKind: string | null;
+  lane: TaskLane;
+  sourceEpisodeId: string | null;
+  status: string;
+  reasonCode: TaskCandidateReason;
+  matchedTaskId: string | null;
+  matchedTaskTitle: string | null;
+  similarity: number | null;
+  createdAt: string;
+  expiresAt: string;
+};
+
+export type TaskTombstone = {
+  id: string;
+  title: string;
+  reason: string;
+  sourceKind: string | null;
+  lane: TaskLane | null;
+  createdAt: string;
+};
+
+async function json<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Failed to ${what}`);
+  }
+  return (await res.json()) as T;
+}
+
+// ── Suggestions tray ────────────────────────────────────────────────
+
+export async function loadTaskCandidates(
+  workspaceId: string,
+): Promise<TaskCandidate[]> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/candidates`,
+  );
+  const body = await json<{ candidates: TaskCandidate[] }>(
+    res,
+    "load task suggestions",
+  );
+  return body.candidates;
+}
+
+export async function acceptTaskCandidate(
+  workspaceId: string,
+  candidateId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/candidates/${candidateId}/accept`,
+    { method: "POST" },
+  );
+  await json(res, "accept suggestion");
+}
+
+/**
+ * Dismiss a suggestion. Passing a `reason` also writes a tombstone, so the
+ * same "no, and here's why" that teaches the workspace when deleting a task
+ * works from the tray - without the task ever having existed.
+ */
+export async function dismissTaskCandidate(
+  workspaceId: string,
+  candidateId: string,
+  reason?: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/candidates/${candidateId}/dismiss`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(reason ? { reason } : {}),
+    },
+  );
+  await json(res, "dismiss suggestion");
+}
+
+// ── Rules ───────────────────────────────────────────────────────────
+
+export async function loadTaskRules(workspaceId: string): Promise<TaskRule[]> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/rules`,
+  );
+  const body = await json<{ rules: TaskRule[] }>(res, "load task rules");
+  return body.rules;
+}
+
+export async function setTaskRuleStatus(
+  workspaceId: string,
+  ruleId: string,
+  status: TaskRuleStatus,
+): Promise<TaskRule> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/rules/${ruleId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status }),
+    },
+  );
+  const body = await json<{ rule: TaskRule }>(res, "update task rule");
+  return body.rule;
+}
+
+export async function deleteTaskRule(
+  workspaceId: string,
+  ruleId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/rules/${ruleId}`,
+    { method: "DELETE" },
+  );
+  await json(res, "delete task rule");
+}
+
+// ── Rejection log ───────────────────────────────────────────────────
+
+export async function loadTaskTombstones(
+  workspaceId: string,
+): Promise<TaskTombstone[]> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/tombstones`,
+  );
+  const body = await json<{ tombstones: TaskTombstone[] }>(
+    res,
+    "load rejections",
+  );
+  return body.tombstones;
+}
+
+export async function deleteTaskTombstone(
+  workspaceId: string,
+  tombstoneId: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/task-guardrails/${workspaceId}/tombstones/${tombstoneId}`,
+    { method: "DELETE" },
+  );
+  await json(res, "delete rejection");
+}
+
+/**
+ * Render a predicate as a short human phrase for a rule the user never put
+ * into words (a proposed rule, or one authored through the API).
+ */
+export function describeTaskRulePredicate(p: TaskRulePredicate): string {
+  const parts: string[] = [];
+  if (p.source_kinds?.length) parts.push(`from ${p.source_kinds.join(", ")}`);
+  if (p.lanes?.length) parts.push(`lane ${p.lanes.join(", ")}`);
+  if (p.title_matches?.length)
+    parts.push(`mentioning ${p.title_matches.join(", ")}`);
+  if (p.channel_refs?.length) parts.push(`in ${p.channel_refs.join(", ")}`);
+  if (p.require?.length) parts.push(`must have ${p.require.join(" + ")}`);
+  return parts.join(" ");
+}

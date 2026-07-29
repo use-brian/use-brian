@@ -152,20 +152,44 @@ export function createDbEmbeddingStore(): EmbeddingStore {
         // (`overhead:embedding` — embeddings.md §"Cost model"). Every
         // embedded table carries both columns; user_id is NULL on
         // workspace-shared rows.
-        const claimed = await client.query<ClaimedRow>(
+        //
+        // Run as TWO bounded range scans rather than one CASE-ordered query.
+        // The priority CASE contains now(), which is not IMMUTABLE and so
+        // cannot be indexed — a single `ORDER BY CASE(...), created_at` can
+        // therefore only ever plan as a full scan plus a sort of every
+        // unembedded row, carrying the embed text, to take LIMIT rows off the
+        // top. That planned fine at small table sizes and took down the API on
+        // 2026-07-28: at 415k unembedded email_archive_segments rows (5.6 GB)
+        // each claim ran 5-20 min, and because the claim holds this open
+        // transaction's connection for its whole duration, claims outlived the
+        // 30s tick, stacked, and exhausted all 25 Cloud SQL slots. Splitting on
+        // the 24h boundary is exactly equivalent — bucket 1 is `created_at >
+        // cutoff` ordered created_at ASC, bucket 3 is the rest in the same
+        // order — and both halves ride idx_<table>_embed_queue (migration 378)
+        // as index scans bounded by LIMIT. Keep them separate statements:
+        // UNION ALL is not allowed with FOR UPDATE.
+        const claimSql = (bound: '>' | '<=') =>
           `SELECT id, (${textExpr}) AS embed_text, workspace_id, user_id
              FROM ${table}
             WHERE embedding IS NULL
               AND embedding_failed_at IS NULL
-            ORDER BY
-              CASE WHEN created_at > now() - INTERVAL '24 hours' THEN 1 ELSE 3 END,
-              created_at ASC
+              AND created_at ${bound} now() - INTERVAL '24 hours'
+            ORDER BY created_at ASC
             LIMIT $1
-            FOR UPDATE SKIP LOCKED`,
-          [limit],
-        )
+            FOR UPDATE SKIP LOCKED`
 
-        const rows: EmbeddingCandidate[] = claimed.rows.map((r) => {
+        const recent = await client.query<ClaimedRow>(claimSql('>'), [limit])
+        const claimedRows = [...recent.rows]
+        // Only reach for the backlog when the priority class did not fill the
+        // batch, so a busy write stream never pays for the second scan.
+        if (claimedRows.length < limit) {
+          const older = await client.query<ClaimedRow>(claimSql('<='), [
+            limit - claimedRows.length,
+          ])
+          claimedRows.push(...older.rows)
+        }
+
+        const rows: EmbeddingCandidate[] = claimedRows.map((r) => {
           const text = (r.embed_text ?? '').trim()
           return {
             id: r.id,

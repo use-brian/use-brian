@@ -354,6 +354,31 @@ export type EventSourceRef =
        */
       type: 'task'
     }
+  | {
+      /**
+       * The workspace's knowledge base — an *internal*, **id-less** source,
+       * for the same reason the task source is: a workspace's KB is one
+       * corpus, and a multi-repo workspace still wants "the KB changed", so
+       * `match` does all the selection. Lifecycle actions (`created` |
+       * `updated` | `deleted`) ride the `inChannels` axis; the entry's
+       * frontmatter tags ride `match.tags`; `match.keywords` matches the
+       * entry TITLE. Events reach the dispatcher from the KB store's write
+       * chokepoints (`knowledge-event-fanout.ts` →
+       * `knowledgeLifecycleToDispatchEvent`), which every writer funnels
+       * through — the github/local sync worker, the assistant repo-writer's
+       * write-through, and manual entry writes.
+       *
+       * `isBot` is true for an assistant-authored write, so a KB-maintenance
+       * workflow that itself writes the KB does not re-trigger itself unless
+       * its subscription sets `fromBots: true`.
+       *
+       * Path-prefix selectivity is deliberately NOT a `match` field: the
+       * payload carries `path`, so a `branch` step (or the step prompt) does
+       * it. See docs/architecture/features/workflow.md → "Knowledge event
+       * source".
+       */
+      type: 'knowledge'
+    }
 
 /**
  * Declarative selectivity on one event subscription. Every present field is
@@ -381,9 +406,11 @@ export type EventMatch = {
   /** Any entity the event mentions ∈ list. */
   mentions?: string[]
   /**
-   * Event tags ∩ list ≠ ∅. Only `task` events carry tags (full set on
-   * `created`, ADDED set on updates — appearance semantics); a `tags` filter
-   * on a connector / channel / page subscription never matches.
+   * Event tags ∩ list ≠ ∅. Only `task` and `knowledge` events carry tags —
+   * for tasks the full set on `created` and the ADDED set on updates
+   * (appearance semantics), for knowledge the entry's current frontmatter
+   * tags. A `tags` filter on a connector / channel / page subscription never
+   * matches.
    */
   tags?: string[]
   /** Allow bot-authored events to fire this subscription. Default false. */

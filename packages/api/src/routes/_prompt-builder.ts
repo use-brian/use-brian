@@ -44,7 +44,7 @@
  * when a user's custom instructions are vague or conflicting.
  */
 
-import type { TopicClassification } from '@use-brian/core'
+import type { Message, TopicClassification } from '@use-brian/core'
 import { FOLLOW_UP_QUESTIONS_ADDENDUM } from '@use-brian/core'
 import type { ResolveAppSoul } from '../tool-injection-port.js'
 
@@ -410,8 +410,8 @@ export type SplitSystemPrompt = {
   stablePrompt: string
   /**
    * The volatile per-turn sections joined — attach to the newest user
-   * message as a `<turn_context>` block (see `attachTurnContext` in
-   * `chat.ts`). Empty string when no volatile section rendered.
+   * message as a `<turn_context>` block via `attachTurnContext` below.
+   * Empty string when no volatile section rendered.
    */
   turnContext: string
 }
@@ -429,6 +429,52 @@ export function buildSplitSystemPrompt(p: BuildPromptParams): SplitSystemPrompt 
     stablePrompt: stable.join('\n\n'),
     turnContext: volatile.join('\n\n'),
   }
+}
+
+/**
+ * Attach the per-turn `<turn_context>` envelope to the newest user message.
+ *
+ * Returns the new messages array, or `null` when no plain trailing user
+ * message can carry it (empty history, assistant-final resume shapes, or a
+ * tool_result-bearing user message) — the caller then falls back to in-prompt
+ * placement for that turn.
+ *
+ * Ephemeral by design: operates on the in-memory copy passed to the query
+ * loop; the persisted session row never carries the envelope. That is the
+ * cache-prefix invariant this exists for — history bytes stay identical
+ * across turns, the system prompt stays byte-stable, and the provider's
+ * implicit prompt cache covers both. An empty `turnContext` returns the
+ * input unchanged.
+ *
+ * Lives here rather than in `chat.ts` so every route can pair it with
+ * `buildSplitSystemPrompt` without importing a sibling route (`chat.ts`
+ * imports `channel-pipeline.ts`, so the reverse edge would be a cycle).
+ */
+export function attachTurnContext(
+  messages: Message[],
+  turnContext: string,
+): Message[] | null {
+  if (!turnContext || turnContext.trim().length === 0) return messages
+  if (messages.length === 0) return null
+  const last = messages[messages.length - 1]
+  if (last.role !== 'user') return null
+  // A tool_result-bearing user message is a pairing carrier — don't graft
+  // prose onto it; fall back to in-prompt placement instead.
+  if (
+    typeof last.content !== 'string' &&
+    last.content.some((b) => b.type === 'tool_result')
+  ) {
+    return null
+  }
+  const envelope = `<turn_context>\n${turnContext.trim()}\n</turn_context>`
+  const content =
+    typeof last.content === 'string'
+      ? [
+          { type: 'text' as const, text: last.content },
+          { type: 'text' as const, text: envelope },
+        ]
+      : [...last.content, { type: 'text' as const, text: envelope }]
+  return [...messages.slice(0, -1), { role: 'user', content }]
 }
 
 function renderTopicHint(hint: TopicClassification | null | undefined): string | null {

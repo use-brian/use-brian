@@ -41,6 +41,9 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
       { key: "connectors", segment: "connectors" },
       { key: "ingestRules", segment: "ingest-rules" },
       { key: "knowledge", segment: "knowledge" },
+      // What the brain may turn into a task, and what it has been told not to.
+      // docs/architecture/features/task-guardrails.md
+      { key: "taskRules", segment: "task-rules" },
     ],
   },
   {

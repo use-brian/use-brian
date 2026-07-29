@@ -78,10 +78,13 @@ import {
   primitivesToGraphKinds,
   projectInboxRowToBrainRow,
   type BrainFacets,
-  type BrainGraph,
   type BrainRow,
 } from "@/lib/api/brain";
 import { fetchBrainRow } from "@/lib/api/brain-inbox";
+import { useBrainEntries } from "@/lib/use-brain-entries";
+import { ChunkSentinel } from "@/components/chrome/chunk-sentinel";
+import { useCachedResource } from "@/lib/surface-cache";
+import { brainGraphCacheKey } from "@/lib/surface-prefetch";
 import { parseBrainDeepLink } from "@/lib/brain-deep-link";
 import {
   listWorkspaceSkills,
@@ -187,7 +190,6 @@ function BrainPageInner() {
     }
   }, [search, primitives, pendingOnly]);
 
-  const [rows, setRows] = useState<BrainRow[] | null>(null);
   const [selected, setSelected] = useState<BrainRow | null>(null);
 
   // Row deep link — `?row=<id>[&kind=<primitive>]` opens that row's drawer
@@ -262,7 +264,6 @@ function BrainPageInner() {
 
   const [refreshTick, setRefreshTick] = useState(0);
 
-  const [graph, setGraph] = useState<BrainGraph | null>(null);
   const [facets, setFacets] = useState<BrainFacets | null>(null);
 
   // The graph never refetches on a filter-chip toggle — the selection
@@ -296,45 +297,44 @@ function BrainPageInner() {
   // workspace stream — the chrome mounts `useWorkspaceEvents`, so this page
   // only listens (handler above).
 
+  // Reviews — the master-detail pool, scoped by the Reviews filter selection
+  // (search needle-filters client-side below, so a keystroke never refetches).
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId || section !== "reviews") return;
     let cancelled = false;
-
-    // Reviews — the master-detail pool, scoped by the Reviews filter
-    // selection (search needle-filters client-side below, so a keystroke
-    // never refetches).
-    if (section === "reviews") {
-      fetchReviewItems(activeId, reviewFilters).then((items) => {
-        if (cancelled) return;
-        setReviewItems(items);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    listBrain({
-      workspaceId: activeId,
-      primitives: primitives.length ? primitives : undefined,
-      search: search || undefined,
-      viewpointAssistantId,
-      limit: 100,
-    }).then((result) => {
+    fetchReviewItems(activeId, reviewFilters).then((items) => {
       if (cancelled) return;
-      setRows(result.rows);
+      setReviewItems(items);
     });
     return () => {
       cancelled = true;
     };
-  }, [
-    activeId,
-    section,
+  }, [activeId, section, reviewFilters, refreshTick]);
+
+  // Entries — CHUNKED. The list accumulates page by page and asks for the next
+  // chunk as the user scrolls toward the end, instead of the old single
+  // `limit: 100` shot that capped the surface at 100 rows with no way to reach
+  // the rest ([COMP:app-web/brain-entries]).
+  const entries = useBrainEntries({
+    workspaceId: activeId ?? null,
     primitives,
-    reviewFilters,
     search,
     viewpointAssistantId,
     refreshTick,
-  ]);
+    enabled: section === "entries",
+  });
+  const rows = entries.rows;
+  // Row keys from the most recent chunk — only these animate in. Recomputed
+  // per chunk, so rows already on screen stay put while the new ones arrive.
+  const freshRowKeys = useMemo(
+    () =>
+      new Set(
+        (entries.rows ?? [])
+          .slice(entries.chunkStart)
+          .map((row) => `${row.kind}:${row.id}`),
+      ),
+    [entries.rows, entries.chunkStart],
+  );
 
   // Completed tasks for the grouped view's "Show completed" disclosure. Only
   // fetched when the Entries section has tasks in scope (All, or the Tasks
@@ -366,24 +366,40 @@ function BrainPageInner() {
 
   // Workspace graph snapshot — needed by BOTH browse modes: the grouped default
   // decorates its entity rows with degree + neighbour-kind dots, and the graph
-  // mode renders the force-directed doc. Fetched whenever the workspace /
-  // viewpoint changes (not gated on viewMode). `showMemory` is always on —
-  // memory is a first-class node kind (connected-only keeps the set bounded).
-  useEffect(() => {
-    if (!activeId) return;
-    let cancelled = false;
+  // mode renders the force-directed doc. Keyed on workspace / viewpoint only
+  // (not gated on viewMode). `showMemory` is always on — memory is a
+  // first-class node kind (connected-only keeps the set bounded).
+  //
+  // Read through the surface cache ([COMP:app-web/surface-cache]): the graph is
+  // the DEFAULT Brain view and its slowest fetch, and its key is identical on
+  // every visit, so re-entering Brain paints the last graph immediately and
+  // revalidates behind it rather than staring at a skeleton again. It is the
+  // one Brain fetch cached this way — the entries list is driven by filter +
+  // search state and is not a single stable key.
+  const graphKey = activeId
+    ? brainGraphCacheKey(activeId, viewpointAssistantId)
+    : null;
+  const graphResource = useCachedResource(graphKey, () =>
     getBrainGraph({
-      workspaceId: activeId,
+      workspaceId: activeId!,
       viewpointAssistantId,
       showMemory: true,
-    }).then((result) => {
-      if (cancelled) return;
-      setGraph(result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId, viewpointAssistantId, refreshTick]);
+    }),
+  );
+  const graph = graphResource.data ?? null;
+
+  // `refreshTick` (the BRAIN_REFRESH_EVENT bus) must force a revalidation. Skip
+  // the first run: the hook already loads on mount, and forcing one here would
+  // defeat the cache on every revisit.
+  const refreshGraph = graphResource.refresh;
+  const graphTickSeen = useRef(false);
+  useEffect(() => {
+    if (!graphTickSeen.current) {
+      graphTickSeen.current = true;
+      return;
+    }
+    void refreshGraph();
+  }, [refreshTick, refreshGraph]);
 
   // Facets (which primitive types have ≥1 row) back the mobile FilterStrip's
   // chip presence; the sidebar panel fetches its own copy for the desktop strip.
@@ -622,9 +638,15 @@ function BrainPageInner() {
              breadcrumb + view toggle + count without the toggle painting
              over this span. */
           <span className="text-xs tabular-nums text-muted-foreground max-sm:hidden">
-            {rows.length === 1
-              ? topbarCopy.entryCountOne
-              : format(topbarCopy.entryCountMany, { count: rows.length })}
+            {/* `N+` while more chunks remain — the list is paged, so `rows.length`
+                is what has ARRIVED, not what exists. Printing it bare was the
+                old bug in miniature: a brain with 4,000 entries reported "100
+                items" and looked complete. */}
+            {entries.hasMore
+              ? format(topbarCopy.entryCountMore, { count: rows.length })
+              : rows.length === 1
+                ? topbarCopy.entryCountOne
+                : format(topbarCopy.entryCountMany, { count: rows.length })}
           </span>
         )}
         {activeFilterCount > 0 && (
@@ -883,6 +905,14 @@ function BrainPageInner() {
             completedTasks={completedTasks}
             showCompletedTasks={showCompletedTasks}
             onToggleCompletedTasks={() => setShowCompletedTasks((v) => !v)}
+            freshKeys={freshRowKeys}
+            footer={
+              <ChunkSentinel
+                hasMore={entries.hasMore}
+                loading={entries.loadingMore}
+                onVisible={entries.loadMore}
+              />
+            }
           />
         )}
       </div>

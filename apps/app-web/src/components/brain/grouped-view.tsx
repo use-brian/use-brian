@@ -64,6 +64,15 @@ type Props = {
   showCompletedTasks?: boolean;
   /** Flip the completed-task disclosure. */
   onToggleCompletedTasks?: () => void;
+  /**
+   * Row keys (`kind:id`) belonging to the MOST RECENT chunk, which animate in.
+   * A set rather than an index range because rows are regrouped by kind for
+   * display, so a fresh row's position in this view has nothing to do with its
+   * arrival order. Omitted ⇒ nothing animates.
+   */
+  freshKeys?: ReadonlySet<string>;
+  /** Rendered after the last group — the chunk sentinel / load-more control. */
+  footer?: React.ReactNode;
 };
 
 /** Chip tint per task status. Live work earns a little colour (in-progress =
@@ -346,6 +355,8 @@ export function BrainGroupedView({
   completedTasks,
   showCompletedTasks = false,
   onToggleCompletedTasks,
+  freshKeys,
+  footer,
 }: Props) {
   const t = useT();
   const legend = t.brainPage.graphView.legend;
@@ -472,6 +483,18 @@ export function BrainGroupedView({
     [groups],
   );
 
+
+  // Entrance animation for the newest chunk only. Fresh rows are scattered
+  // across groups after regrouping, so the stagger is counted here as they are
+  // rendered rather than expressed as an `nth-child` rule. Capped at 8 steps:
+  // past that the last rows of a big chunk would visibly lag behind the scroll.
+  let freshSeen = 0;
+  const chunkAnim = (key: string) => {
+    if (!freshKeys?.has(key)) return undefined;
+    const delay = Math.min(freshSeen++, 8) * 28;
+    return { className: "animate-chunk-in", style: { animationDelay: `${delay}ms` } };
+  };
+
   return (
     // pb-28: clear the fixed chat dock the chrome floats over the surface's
     // bottom-right, so the last entry row isn't trapped behind it.
@@ -515,7 +538,10 @@ export function BrainGroupedView({
                   // search primitive still renders, never a blank row or crash.
                   if (!KNOWN_ROW_KINDS.has(row.kind)) {
                     return (
-                      <li key={`${row.kind}:${row.id}`}>
+                      <li
+                        key={`${row.kind}:${row.id}`}
+                        {...chunkAnim(`${row.kind}:${row.id}`)}
+                      >
                         <BrainFallbackCard row={row} />
                       </li>
                     );
@@ -526,7 +552,10 @@ export function BrainGroupedView({
                     ? Array.from(decoration.neighbourKinds.get(node.id) ?? [])
                     : [];
                   return (
-                    <li key={`${row.kind}:${row.id}`}>
+                    <li
+                      key={`${row.kind}:${row.id}`}
+                      {...chunkAnim(`${row.kind}:${row.id}`)}
+                    >
                       <button
                         type="button"
                         onClick={() => onSelect(row)}
@@ -666,6 +695,9 @@ export function BrainGroupedView({
           );
         })}
 
+        {/* Chunk sentinel / load-more — after the last group, so it marks the
+            true end of the list and the next chunk appends below it. */}
+        {footer}
       </div>
     </div>
   );

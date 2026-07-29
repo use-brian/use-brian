@@ -403,7 +403,7 @@ function ProfileSummary({
               </span>
               {label}
             </div>
-            <div className="text-3xl font-semibold tabular-nums leading-none">
+            <div className="text-2xl font-semibold tabular-nums leading-none">
               {loading ? (
                 <span className="inline-block h-8 w-14 bg-muted rounded animate-pulse" />
               ) : (
@@ -967,7 +967,7 @@ function PostInsightsCard({
           cluster, left-aligned, `12.5px` muted text. Hairline above
           separates it from the body. */}
       {post.error ? (
-        <p className="text-[11px] text-amber-300/80 italic pt-3 border-t border-border/50">
+        <p className="text-[11px] text-amber-700 dark:text-amber-300/80 italic pt-3 border-t border-border/50">
           {td.postInsightsUnavailable}
         </p>
       ) : (

@@ -2,13 +2,17 @@
  * Audio preflight — transcribe the first audio attachment, if any.
  *
  * Semantics:
- *   - `enabled === false` → return undefined (kill switch).
  *   - Empty attachments → undefined.
  *   - Find first `!alreadyTranscribed` with `audio/*` mime. None → undefined.
+ *   - `enabled === false` → report `TRANSCRIPTION_DISABLED_REASON` through
+ *     `onFailure` and return undefined (kill switch). The check runs AFTER the
+ *     audio lookup on purpose: "we had audio and did not transcribe it" is the
+ *     reportable event, while a text-only turn must stay silent.
  *   - Call transcribeAudio; on success flip `alreadyTranscribed` and return.
- *   - On any throw → log and return undefined. Never re-throw.
- *     (The silent-fail behavior is deliberate: a failed transcription should
- *     degrade to empty text, never block the whole message.)
+ *   - On any throw → log, report via `onFailure`, return undefined. Never
+ *     re-throw. (The silent-fail behavior is deliberate: a failed
+ *     transcription should degrade to empty text, never block the whole
+ *     message.)
  */
 import type { MediaBackend } from './backend.js'
 import { transcribeAudio, type TranscribeResult } from './transcribe.js'
@@ -34,6 +38,53 @@ export type PreflightOptions = {
    * lets the turn state what actually happened.
    */
   onFailure?: (reason: string) => void
+}
+
+/**
+ * The reason reported when the ops kill switch is off. One spelling, so the
+ * web chat notice and every channel turn name the same env var.
+ */
+export const TRANSCRIPTION_DISABLED_REASON =
+  'voice transcription is disabled on this deployment (VOICE_TRANSCRIPTION_ENABLED)'
+
+/**
+ * The text a turn carries in place of a transcript that never arrived.
+ *
+ * Every surface that receives audio must emit this when transcription yields
+ * nothing, because the alternative is not "the model says less" — it is the
+ * model confabulating. A turn whose voice note was dropped arrives with empty
+ * text and no attachment, which reads to the model as *the user sent nothing*,
+ * so it answers "I don't see a recording attachment" and asks for a re-upload
+ * that will fail identically (2026-07-28, Telegram, OSS deployment booted with
+ * the kill switch off). Naming the failure is what stops the loop.
+ *
+ * Wrap it as the surface requires (chat nests it in `<attached_file>`; a
+ * channel route assigns it straight to `incoming.text`).
+ */
+export function voiceUnavailableNote(reason?: string): string {
+  return (
+    `[voice note received - transcription unavailable${reason ? `: ${reason}` : ''}. ` +
+    'Tell the user this plainly and ask them to type it or resend. Do NOT claim ' +
+    'the audio is still processing, that you will retry, or that they sent no attachment.]'
+  )
+}
+
+/**
+ * The text a channel turn carries for an inbound voice note: the transcript
+ * when there is one, the unavailable note when there is not, with the caption
+ * (if any) preserved after it.
+ *
+ * Shared so the "no transcript" branch cannot be forgotten at one call site —
+ * forgetting it is the whole bug this exists to prevent, and it is invisible
+ * locally because the route still returns 200 and the model still replies.
+ */
+export function composeVoiceTurnText(
+  transcript: string | undefined,
+  reason: string | undefined,
+  caption?: string,
+): string {
+  const head = transcript?.trim() ? `[voice] ${transcript}` : voiceUnavailableNote(reason)
+  return caption?.trim() ? `${head}\n\n${caption}` : head
 }
 
 /**
@@ -66,13 +117,19 @@ export async function transcribeFirstAudio(
   attachments: MediaAttachment[],
   options: PreflightOptions,
 ): Promise<TranscribeResult | undefined> {
-  if (!options.enabled) return undefined
   if (!attachments.length) return undefined
 
   const firstAudio = attachments.find(
     (att) => att.mime.startsWith('audio/') && !att.alreadyTranscribed,
   )
   if (!firstAudio) return undefined
+
+  // Kill switch. Checked here, below the lookup, so the caller learns that
+  // audio was dropped and why — silence is what makes the model confabulate.
+  if (!options.enabled) {
+    options.onFailure?.(TRANSCRIPTION_DISABLED_REASON)
+    return undefined
+  }
 
   try {
     const result = await transcribeAudio(

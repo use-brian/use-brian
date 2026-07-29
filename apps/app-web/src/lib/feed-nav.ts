@@ -3,12 +3,14 @@
  * grouped sub-menu (`FeedSidebarPanel`) and its route helpers, mirroring
  * `studio-nav.ts` (the root CLAUDE.md "derive, don't duplicate" rule).
  *
- * The Feed surface splits into two groups (docs/plans/feed-create-split.md):
- * **Create** — workspace-level content creation (home / voice / drafts /
- * inbox / ready), which works with ZERO platform connections — and
- * **Platforms** — the integration side, one row per target platform with
- * per-platform sub-rows (insights / inspiration / connection / policy /
- * settings) for connected ones.
+ * The Feed surface is PLATFORM-LED (docs/plans/feed-revamp.md §8a, D13):
+ * **Company** (voice, plan) sits above a platform switcher, and everything
+ * below it — that platform's voice and its post list — inherits the switcher.
+ * A marketing operator works inside one platform at a time, so the platform
+ * selects the context rather than sitting in a filter chip.
+ *
+ * The hosted **Platforms** group (insights / inspiration / connection / policy
+ * / settings for a connected account) is unchanged.
  *
  * The keys index into the i18n `feedPage.sections` / `feedPage.groups`
  * dictionaries; the `segment` is the child route under
@@ -74,24 +76,35 @@ export type FeedGroup = {
 };
 
 /**
- * Grouped by the Create/Platforms split (docs/architecture/feed/operator-app.md):
- *   create    — workspace-level content creation (works with zero
- *               connections): dashboard, voice, drafts, approval inbox,
- *               ready-to-post queue. Drafts hoisted here from the old
- *               per-platform `draft-sessions` row (feed-create-split.md D8).
- *   platforms — the integration side, scoped to one platform account
+ * Grouped per feed-revamp.md §8a (D13):
+ *   company   — platform-agnostic work: the company voice every platform
+ *               inherits, and the Plan calendar (which filters by platform
+ *               INSIDE the surface rather than splitting the nav).
+ *   platform  — scoped by the sidebar's platform switcher: that platform's
+ *               voice. Its post list is rendered by the sidebar panel itself
+ *               (the "Platform drafts" group, D14) rather than being a row.
+ *   platforms — the hosted integration side, scoped to one connected account.
+ *
+ * Plan owns the bare `/feed` index rather than a `/feed/plan` segment
+ * (feed-revamp.md D5): one URL per surface, and the zero-brand-voice
+ * onboarding keeps rendering at the surface index. The retired `drafts`,
+ * `inbox`, `ready`, and `posts` rows survive as redirect routes only (D6/D14)
+ * — they are linked from `distribution_events` deep links, the Approvals
+ * panel, and the Studio gallery, so they must not 404.
  */
 export const FEED_GROUPS: readonly FeedGroup[] = [
   {
-    key: "create",
+    key: "company",
     perPlatform: false,
     sections: [
-      { key: "home", segment: "" },
       { key: "voice", segment: "voice" },
-      { key: "drafts", segment: "drafts" },
-      { key: "inbox", segment: "inbox" },
-      { key: "ready", segment: "ready" },
+      { key: "plan", segment: "" },
     ],
+  },
+  {
+    key: "platform",
+    perPlatform: true,
+    sections: [{ key: "platformVoice", segment: "voice" }],
   },
   {
     key: "platforms",
@@ -209,8 +222,8 @@ export function defaultFeedPlatform(
 }
 
 /**
- * Resolve the active feed section from a pathname. `/feed` → `home`;
- * `/feed/inbox` → `inbox`; `/feed/<platform>/<segment>[/...]` → the matching
+ * Resolve the active feed section from a pathname. `/feed` → `plan`;
+ * `/feed/posts` → `posts`; `/feed/<platform>/<segment>[/...]` → the matching
  * platform section. Null when the path isn't inside the feed surface or the
  * segment is unknown.
  */
@@ -221,7 +234,7 @@ export function feedSectionFromPathname(
   const m = FEED_PATH_RE.exec(pathname);
   if (!m) return null;
   const rest = (m[1] ?? "").split("/").filter(Boolean);
-  if (rest.length === 0) return "home";
+  if (rest.length === 0) return "plan";
   const [first, second] = rest;
   if (isFeedPlatform(first)) {
     if (!second) return null;
@@ -240,4 +253,80 @@ export function feedSectionFromPathname(
     }
   }
   return null;
+}
+
+/** Route to one post's in-place editor (feed-revamp.md D15). */
+export function feedPostPath(
+  workspaceId: string,
+  platform: FeedPlatform,
+  sessionId: string,
+): string {
+  return `${feedPath(workspaceId, { platform, segment: "posts" })}/${sessionId}`;
+}
+
+/** The `sessionId` from `/feed/<platform>/posts/<id>`, else null. */
+export function feedPostIdFromPathname(
+  pathname: string | null | undefined,
+): string | null {
+  if (!pathname) return null;
+  const m = FEED_PATH_RE.exec(pathname);
+  if (!m || !m[1]) return null;
+  const parts = m[1].split("/").filter(Boolean);
+  if (parts.length < 3) return null;
+  const [platform, segment, sessionId] = parts;
+  if (!isFeedPlatform(platform) || segment !== "posts") return null;
+  return sessionId ?? null;
+}
+
+// ── Current platform (the sidebar switcher, feed-revamp.md D13) ───────────
+//
+// The switcher scopes everything below it. On a platform-scoped route the URL
+// is authoritative; this store is what Company routes (`/feed`, `/feed/voice`)
+// fall back to, so returning to Feed resumes the platform the operator was
+// last working in. Per-workspace and per-device, like the platform pick.
+
+const currentPlatformKey = (workspaceId: string) =>
+  `feed:current-platform:${workspaceId}`;
+
+export function getCurrentFeedPlatform(
+  workspaceId: string,
+): FeedPlatform | null {
+  const storage = pickStorage();
+  if (!storage) return null;
+  try {
+    const raw = storage.getItem(currentPlatformKey(workspaceId));
+    return isFeedPlatform(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setCurrentFeedPlatform(
+  workspaceId: string,
+  platform: FeedPlatform,
+): void {
+  const storage = pickStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(currentPlatformKey(workspaceId), platform);
+  } catch {
+    /* private mode / quota — the choice just isn't remembered */
+  }
+}
+
+/**
+ * The platform the sidebar should show as current: the URL when it carries
+ * one (it is authoritative), else the stored choice, else the same fallback
+ * chain `defaultFeedPlatform` uses.
+ */
+export function resolveCurrentFeedPlatform(params: {
+  workspaceId: string;
+  pathname: string | null | undefined;
+  connectedPlatforms: readonly FeedPlatform[];
+}): FeedPlatform {
+  return (
+    feedPlatformFromPathname(params.pathname)
+    ?? getCurrentFeedPlatform(params.workspaceId)
+    ?? defaultFeedPlatform(params.workspaceId, params.connectedPlatforms)
+  );
 }

@@ -1548,6 +1548,37 @@
   .animate-stagger > *:nth-child(8) { animation-delay: 300ms; }
   .animate-stagger > *:nth-child(n+9) { animation-delay: 340ms; }
 
+  /* Chunk enter — rows arriving from a later page of a chunked list
+     (components/chrome/chunk-sentinel.tsx + lib/use-brain-entries.ts). Softer
+     and shorter than `.animate-rise-in`: these land while the user is reading
+     the rows above them, so the motion has to register without pulling the
+     eye down. Applied ONLY to the newest chunk — re-running it across the
+     whole list on every append turns a quiet fill into a flicker. The
+     per-row stagger comes from an inline `animation-delay`, capped by the
+     caller, because the fresh rows are scattered across groups and no
+     `nth-child` rule can find them. */
+  @keyframes fb-chunk-in {
+    from { opacity: 0; transform: translate3d(0, 6px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+  .animate-chunk-in {
+    animation: fb-chunk-in 300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  /* Surface enter — the content pane's transition between top-level surfaces
+     (components/chrome/surface-transition.tsx). Shorter and shallower than
+     `.animate-rise-in`: a whole pane moving reads heavier than a card, so 4px
+     over 260ms lands where 6px over 320ms would feel slow. Driven by a data
+     attribute rather than a class so the toggle that restarts it can't collide
+     with the layout classes on the same element. */
+  @keyframes fb-surface-enter {
+    from { opacity: 0; transform: translate3d(0, 4px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+  }
+  [data-surface-enter="true"] {
+    animation: fb-surface-enter 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
   /* Skeleton — neutral block with a slow shimmer sweep. Pair with a
      concrete width/height. */
   .skeleton {
@@ -1890,6 +1921,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
   .animate-rise-out,
   .animate-pop-in,
   .animate-pulse-soft,
+  .animate-chunk-in,
   .animate-draft-hint,
   .doc-icon-temporary,
   .animate-stagger > *,
@@ -1903,6 +1935,7 @@ html[data-vt-back="true"]::view-transition-new(root) {
   .route-progress__bar,
   .hover-lift,
   .spoiler,
+  [data-surface-enter="true"],
   ::view-transition-old(root),
   ::view-transition-new(root) {
     animation: none !important;

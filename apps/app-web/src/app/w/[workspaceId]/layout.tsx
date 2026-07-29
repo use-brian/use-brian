@@ -3,6 +3,7 @@ import { serverApiFetch } from "@/lib/server-fetch";
 import { WorkspaceContextProvider } from "@/lib/workspace-context";
 import { CustomThemesProvider } from "@/lib/custom-themes";
 import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
+import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
 import { PlanGate } from "@/components/chrome/plan-gate";
@@ -63,13 +64,19 @@ export default async function WorkspaceLayout(props: {
     >
       <CustomThemesProvider workspaceId={workspaceId}>
         <div className="flex h-screen w-full overflow-hidden bg-background">
-          <DocSidebarDataProvider workspaceId={workspaceId}>
-            <BrainSurfaceProvider workspaceId={workspaceId}>
-              <WorkspaceChrome workspaceId={workspaceId}>
-                {props.children}
-              </WorkspaceChrome>
-            </BrainSurfaceProvider>
-          </DocSidebarDataProvider>
+          {/* The workspace primary assistant, resolved once here so BOTH the
+              chrome's chat dock and the doc surface read one fetch. The doc
+              surface used to run its own copy and block its whole shell on it
+              ([COMP:app-web/primary-assistant-context]). */}
+          <PrimaryAssistantProvider workspaceId={workspaceId}>
+            <DocSidebarDataProvider workspaceId={workspaceId}>
+              <BrainSurfaceProvider workspaceId={workspaceId}>
+                <WorkspaceChrome workspaceId={workspaceId}>
+                  {props.children}
+                </WorkspaceChrome>
+              </BrainSurfaceProvider>
+            </DocSidebarDataProvider>
+          </PrimaryAssistantProvider>
           {/* Hosted paid gate — renders only when the workspace has no
               active plan ([COMP:app-web/plan-gate]); the OSS edition never
               shows it. */}

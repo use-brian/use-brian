@@ -28,7 +28,10 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ChevronRight, Kanban, ListChecks, Rows3 } from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
+import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
+import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
+import { TaskSuggestions } from "@/components/tasks/task-suggestions";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -110,24 +113,43 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const searchParams = useSearchParams();
 
   // ── Data ──────────────────────────────────────────────────────────────
-  const [rows, setRows] = useState<TaskRow[] | null>(null);
-  const [loadError, setLoadError] = useState(false);
+  // Read through the surface cache: coming back to Tasks paints the last known
+  // list on the first frame and revalidates behind it, instead of blanking to a
+  // skeleton for a round trip every single visit. Hovering the Tasks icon in
+  // the operator bar has usually already warmed this exact key
+  // (`lib/surface-prefetch.ts`), so even a first visit often lands on data.
+  const tasksKey = surfaceDataKey("tasks", workspaceId);
+  const tasks = useCachedResource(tasksKey, () =>
+    fetchWorkspaceTasks(workspaceId),
+  );
+  const rows = tasks.data ?? null;
+  // Only an error with NOTHING to show is a load failure; a failed revalidation
+  // behind a painted list stays quiet.
+  const loadError = rows === null && tasks.error !== undefined;
   const [roster, setRoster] = useState<AssignableMember[] | null>(null);
 
+  // Depend on the stable `refresh` callback, NOT the resource object — that
+  // object is new every render, so a dep on it re-creates `reload` each time
+  // and churns anything keyed on it.
+  const refreshTasks = tasks.refresh;
   const reload = useCallback(() => {
-    setLoadError(false);
-    fetchWorkspaceTasks(workspaceId)
-      .then(setRows)
-      .catch(() => setLoadError(true));
-  }, [workspaceId]);
+    void refreshTasks();
+  }, [refreshTasks]);
+
+  /** Optimistic row patch - writes to the cache so the edit survives leaving
+   *  the surface, and every mounted reader updates together. */
+  const setRows = useCallback(
+    (updater: (previous: TaskRow[]) => TaskRow[]) => {
+      mutateSurfaceCache<TaskRow[]>(tasksKey, updater);
+    },
+    [tasksKey],
+  );
 
   useEffect(() => {
-    setRows(null);
-    reload();
     loadWorkspaceRoster(workspaceId)
       .then(setRoster)
       .catch(() => setRoster([]));
-  }, [workspaceId, reload]);
+  }, [workspaceId]);
 
   // ── View state (URL is the source of truth) ───────────────────────────
   const view = useMemo(
@@ -224,11 +246,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const patchRow = useCallback(
     (id: string, newId: string | null, patch: Partial<TaskRow>) => {
       setRows((prev) =>
-        prev
-          ? prev.map((r) =>
-              r.id === id ? { ...r, ...patch, id: newId ?? r.id } : r,
-            )
-          : prev,
+        prev.map((r) => (r.id === id ? { ...r, ...patch, id: newId ?? r.id } : r)),
       );
       if (newId) {
         setSelected((prev) => {
@@ -338,7 +356,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           if (apply.kind === "delete") {
             const result = await deleteBrainRow(workspaceId, "task", id);
             if (result.ok) {
-              setRows((prev) => (prev ? prev.filter((r) => r.id !== id) : prev));
+              setRows((prev) => prev.filter((r) => r.id !== id));
               setSelected((prev) => {
                 const next = new Set(prev);
                 next.delete(id);
@@ -538,6 +556,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
           </>
         }
       />
+
+      {/* Suggestions the admission gate held rather than created. Renders
+          nothing at zero, so a healthy workspace never sees the strip
+          ([COMP:app-web/task-suggestions],
+          docs/architecture/features/task-guardrails.md). */}
+      <TaskSuggestions workspaceId={workspaceId} onAccepted={reload} />
 
       {/* `relative`: the task peek panel floats over THIS box — it never
           reflows the table/board underneath, and never covers the bar. */}

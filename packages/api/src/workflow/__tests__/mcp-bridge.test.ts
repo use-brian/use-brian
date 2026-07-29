@@ -72,8 +72,24 @@ describe('[COMP:workflow/mcp-bridge] buildWorkflowToolRegistry', () => {
     expect(arg.assistantTeamId).toBe('ws-1')
   })
 
-  it('never enables KB writes — workflow runs have no Approve/Deny loop (D2 chat-only)', async () => {
+  it('enables KB writes and forwards the repo writer — the executor approval pause is the gate', async () => {
+    // Not a regression of the chat-only D2 decision: the gate moved rather
+    // than disappeared. Both KB write tools declare `requiresConfirmation`,
+    // and `keepBuiltinsDirect` keeps that flag visible to the executor, which
+    // routes it into a `kind='workflow_step'` approval. Without this the
+    // `knowledge` event source could only ever notify, never maintain.
+    const writer = { commitEntryUpdate: vi.fn(), commitEntryCreate: vi.fn() }
+    const deps = { ...makeDeps(new Map<string, Tool>()), knowledgeRepoWriter: writer } as WorkflowToolRegistryDeps
+    await buildWorkflowToolRegistry(deps, scope)
+    expect(mockInject.mock.calls[0][0].allowKnowledgeWrites).toBe(true)
+    expect(mockInject.mock.calls[0][0].knowledgeRepoWriter).toBe(writer)
+    // The executor can only see `requiresConfirmation` on a built-in that was
+    // left directly in the map; routing it behind mcp_call would hide it.
+    expect(mockInject.mock.calls[0][0].keepBuiltinsDirect).toBe(true)
+  })
+
+  it('exposes no repo write path when the writer port is absent (open standalone boot)', async () => {
     await buildWorkflowToolRegistry(makeDeps(new Map<string, Tool>()), scope)
-    expect(mockInject.mock.calls[0][0].allowKnowledgeWrites).toBe(false)
+    expect(mockInject.mock.calls[0][0].knowledgeRepoWriter).toBeUndefined()
   })
 })

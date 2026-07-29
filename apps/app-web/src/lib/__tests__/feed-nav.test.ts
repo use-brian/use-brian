@@ -28,19 +28,19 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
     expect(isConnectableFeedPlatform("xhs")).toBe(false);
   });
 
-  it("keeps Create rows and platform rows in separate groups", () => {
-    const createGroup = FEED_GROUPS.find((g) => !g.perPlatform);
-    const platformGroup = FEED_GROUPS.find((g) => g.perPlatform);
-    expect(createGroup?.key).toBe("create");
-    expect(createGroup?.sections.map((s) => s.key)).toEqual([
-      "home",
-      "voice",
-      "drafts",
-      "inbox",
-      "ready",
+  // Platform-led (feed-revamp.md §8a, D13): Company sits above a platform
+  // switcher, and everything under it inherits that platform.
+  it("orders the groups company -> platform -> hosted platforms", () => {
+    expect(FEED_GROUPS.map((g) => g.key)).toEqual([
+      "company",
+      "platform",
+      "platforms",
     ]);
-    expect(platformGroup?.key).toBe("platforms");
-    expect(platformGroup?.sections.map((s) => s.key)).toEqual([
+    expect(FEED_GROUPS[0].perPlatform).toBe(false);
+    expect(FEED_GROUPS[0].sections.map((s) => s.key)).toEqual(["voice", "plan"]);
+    expect(FEED_GROUPS[1].perPlatform).toBe(true);
+    expect(FEED_GROUPS[1].sections.map((s) => s.key)).toEqual(["platformVoice"]);
+    expect(FEED_GROUPS[2].sections.map((s) => s.key)).toEqual([
       "insights",
       "inspiration",
       "connection",
@@ -51,7 +51,7 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
 
   it("builds feed routes for team and platform scopes", () => {
     expect(feedPath("w1")).toBe("/w/w1/feed");
-    expect(feedPath("w1", { segment: "inbox" })).toBe("/w/w1/feed/inbox");
+    expect(feedPath("w1", { segment: "posts" })).toBe("/w/w1/feed/posts");
     expect(feedPath("w1", { platform: "threads" })).toBe("/w/w1/feed/threads");
     expect(feedPath("w1", { platform: "twitter", segment: "insights" })).toBe(
       "/w/w1/feed/twitter/insights",
@@ -63,19 +63,30 @@ describe("[COMP:app-web/feed-nav] feed navigation config", () => {
       "threads",
     );
     expect(feedPlatformFromPathname("/w/w1/feed/twitter")).toBe("twitter");
-    expect(feedPlatformFromPathname("/w/w1/feed/inbox")).toBeNull();
+    expect(feedPlatformFromPathname("/w/w1/feed/posts")).toBeNull();
     expect(feedPlatformFromPathname("/w/w1/feed")).toBeNull();
     expect(feedPlatformFromPathname("/w/w1/brain")).toBeNull();
     expect(feedPlatformFromPathname(null)).toBeNull();
   });
 
   it("classifies feed sections from pathnames", () => {
-    expect(feedSectionFromPathname("/w/w1/feed")).toBe("home");
-    expect(feedSectionFromPathname("/w/w1/feed/")).toBe("home");
-    expect(feedSectionFromPathname("/w/w1/feed/inbox")).toBe("inbox");
+    // Plan owns the bare index (feed-revamp.md D5).
+    expect(feedSectionFromPathname("/w/w1/feed")).toBe("plan");
+    expect(feedSectionFromPathname("/w/w1/feed/")).toBe("plan");
     expect(feedSectionFromPathname("/w/w1/feed/voice")).toBe("voice");
-    expect(feedSectionFromPathname("/w/w1/feed/drafts")).toBe("drafts");
-    expect(feedSectionFromPathname("/w/w1/feed/ready")).toBe("ready");
+    // A platform's own voice is its own section key, so the sidebar can light
+    // the right row for `/feed/threads/voice` vs company `/feed/voice`.
+    expect(feedSectionFromPathname("/w/w1/feed/threads/voice")).toBe(
+      "platformVoice",
+    );
+    // Posts is a route, not a nav row: the list lives in the sidebar (D14).
+    expect(feedSectionFromPathname("/w/w1/feed/posts")).toBeNull();
+    expect(feedSectionFromPathname("/w/w1/feed/threads/posts")).toBeNull();
+    // The merged routes are redirect-only now, so they classify as unknown
+    // rather than lighting a sidebar row that no longer exists (D6).
+    expect(feedSectionFromPathname("/w/w1/feed/drafts")).toBeNull();
+    expect(feedSectionFromPathname("/w/w1/feed/inbox")).toBeNull();
+    expect(feedSectionFromPathname("/w/w1/feed/ready")).toBeNull();
     expect(feedSectionFromPathname("/w/w1/feed/threads/insights")).toBe(
       "insights",
     );
