@@ -44,7 +44,32 @@ export function isDetachedError(err: unknown): boolean {
  * lands on the same URL) are safe to redo.
  */
 export function retryableAfterReattach(op: string): boolean {
-  return op === 'snapshot' || op === 'currentUrl' || op === 'navigate'
+  return op === 'snapshot' || op === 'currentUrl' || op === 'navigate' || op === 'captureFrame'
+}
+
+type TakeoverInput =
+  | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'key'; text: string }
+  | { kind: 'scroll'; deltaY: number }
+  | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
+
+const TAKEOVER_KEYS: Record<
+  string,
+  { key: string; code: string; windowsVirtualKeyCode: number; text?: string }
+> = {
+  Enter: { key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r' },
+  Tab: { key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 },
+  Backspace: { key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 },
+  Delete: { key: 'Delete', code: 'Delete', windowsVirtualKeyCode: 46 },
+  Escape: { key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', windowsVirtualKeyCode: 37 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', windowsVirtualKeyCode: 38 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', windowsVirtualKeyCode: 39 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', windowsVirtualKeyCode: 40 },
+  Home: { key: 'Home', code: 'Home', windowsVirtualKeyCode: 36 },
+  End: { key: 'End', code: 'End', windowsVirtualKeyCode: 35 },
+  PageUp: { key: 'PageUp', code: 'PageUp', windowsVirtualKeyCode: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', windowsVirtualKeyCode: 34 },
 }
 
 async function sendCdp<T = unknown>(tabId: number, method: string, params?: Record<string, unknown>): Promise<T> {
@@ -190,6 +215,108 @@ export class TabExecutor {
     const tabId = this.mustTab()
     const tab = await chrome.tabs.get(tabId)
     return { url: tab.url ?? '', title: tab.title ?? '' }
+  }
+
+  async captureFrame(): Promise<{ data: string; mimeType: string }> {
+    const tabId = this.mustTab()
+    await this.cdp(tabId, 'Page.enable')
+    const metrics = await this.cdp<{
+      cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number }
+      visualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number }
+    }>(tabId, 'Page.getLayoutMetrics')
+    const viewport = metrics.cssVisualViewport ?? metrics.visualViewport
+    const width = Math.max(1, viewport?.clientWidth ?? 1280)
+    const height = Math.max(1, viewport?.clientHeight ?? 720)
+    const scale = Math.min(1, 1280 / width)
+    const frame = await this.cdp<{ data?: string }>(tabId, 'Page.captureScreenshot', {
+      format: 'jpeg',
+      quality: 55,
+      fromSurface: true,
+      captureBeyondViewport: false,
+      clip: {
+        x: viewport?.pageX ?? 0,
+        y: viewport?.pageY ?? 0,
+        width,
+        height,
+        scale,
+      },
+    })
+    if (!frame.data) throw new ExecutorError('Chrome returned an empty browser frame.', 'backend_error')
+    return { data: frame.data, mimeType: 'image/jpeg' }
+  }
+
+  async takeoverInput(event: TakeoverInput): Promise<void> {
+    const tabId = this.mustTab()
+    if (event.kind === 'click') {
+      if (![event.x, event.y].every(Number.isFinite)) {
+        throw new ExecutorError('Invalid Take-Over click coordinates.', 'backend_error')
+      }
+      const metrics = await this.cdp<{
+        cssVisualViewport?: { clientWidth?: number; clientHeight?: number }
+        visualViewport?: { clientWidth?: number; clientHeight?: number }
+      }>(tabId, 'Page.getLayoutMetrics')
+      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport
+      const width = viewport?.clientWidth ?? event.frameW ?? 1
+      const height = viewport?.clientHeight ?? event.frameH ?? 1
+      const x = event.frameW && event.frameW > 0 ? (event.x * width) / event.frameW : event.x
+      const y = event.frameH && event.frameH > 0 ? (event.y * height) / event.frameH : event.y
+      const base = { x, y, button: 'left', clickCount: 1, pointerType: 'mouse' } as const
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' })
+      return
+    }
+    if (event.kind === 'key') {
+      if (event.text.length === 1) {
+        await this.cdp(tabId, 'Input.insertText', { text: event.text })
+      } else {
+        const key = TAKEOVER_KEYS[event.text]
+        if (!key) return
+        await this.cdp(tabId, 'Input.dispatchKeyEvent', { type: 'keyDown', ...key })
+        await this.cdp(tabId, 'Input.dispatchKeyEvent', {
+          type: 'keyUp',
+          key: key.key,
+          code: key.code,
+          windowsVirtualKeyCode: key.windowsVirtualKeyCode,
+        })
+      }
+      return
+    }
+    if (event.kind === 'scroll') {
+      if (!Number.isFinite(event.deltaY)) {
+        throw new ExecutorError('Invalid Take-Over scroll distance.', 'backend_error')
+      }
+      const metrics = await this.cdp<{
+        cssVisualViewport?: { clientWidth?: number; clientHeight?: number }
+        visualViewport?: { clientWidth?: number; clientHeight?: number }
+      }>(tabId, 'Page.getLayoutMetrics')
+      const viewport = metrics.cssVisualViewport ?? metrics.visualViewport
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        x: Math.round((viewport?.clientWidth ?? 1280) / 2),
+        y: Math.round((viewport?.clientHeight ?? 720) / 2),
+        deltaX: 0,
+        deltaY: event.deltaY,
+        pointerType: 'mouse',
+      })
+      return
+    }
+    if (event.action === 'reload') {
+      await this.cdp(tabId, 'Page.reload')
+    } else if (event.action === 'goto') {
+      if (!event.url || !/^https?:\/\//i.test(event.url)) {
+        throw new ExecutorError('Take-Over navigation accepts only http(s) URLs.', 'backend_error')
+      }
+      this.lastSnapshot = null
+      await this.cdp(tabId, 'Page.navigate', { url: event.url })
+    } else {
+      const history = await this.cdp<{
+        currentIndex: number
+        entries: Array<{ id: number }>
+      }>(tabId, 'Page.getNavigationHistory')
+      const target = history.entries[history.currentIndex + (event.action === 'back' ? -1 : 1)]
+      if (target) await this.cdp(tabId, 'Page.navigateToHistoryEntry', { entryId: target.id })
+    }
   }
 }
 

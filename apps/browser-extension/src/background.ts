@@ -185,6 +185,11 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
       return { typed: true }
     case 'currentUrl':
       return executor.currentUrl()
+    case 'captureFrame':
+      return executor.captureFrame()
+    case 'takeoverInput':
+      await executor.takeoverInput(args.event as Parameters<TabExecutor['takeoverInput']>[0])
+      return { forwarded: true }
     default:
       throw new ExecutorError(`Unknown op ${op}`, 'backend_error')
   }

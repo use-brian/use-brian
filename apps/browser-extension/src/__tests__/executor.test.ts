@@ -120,7 +120,40 @@ describe('[COMP:ext/agent] Detach recovery policy', () => {
     expect(retryableAfterReattach('snapshot')).toBe(true)
     expect(retryableAfterReattach('currentUrl')).toBe(true)
     expect(retryableAfterReattach('navigate')).toBe(true)
+    expect(retryableAfterReattach('captureFrame')).toBe(true)
     expect(retryableAfterReattach('click')).toBe(false)
     expect(retryableAfterReattach('type')).toBe(false)
+  })
+})
+
+describe('[COMP:ext/agent] Local Take-Over', () => {
+  it('captures a bounded frame and rescales trusted clicks to the CSS viewport', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    dbg.sendCommand.mockImplementation(async (_target, method) => {
+      if (method === 'Page.captureScreenshot') return { data: 'jpeg-data' }
+      if (method === 'Page.getLayoutMetrics') {
+        return { cssVisualViewport: { clientWidth: 1000, clientHeight: 500 } }
+      }
+      return {}
+    })
+
+    await expect(executor.captureFrame()).resolves.toEqual({
+      data: 'jpeg-data',
+      mimeType: 'image/jpeg',
+    })
+    await executor.takeoverInput({ kind: 'click', x: 100, y: 50, frameW: 200, frameH: 100 })
+
+    const mouse = dbg.sendCommand.mock.calls.filter((call) => call[1] === 'Input.dispatchMouseEvent')
+    expect(mouse).toHaveLength(3)
+    expect(mouse[1]?.[2]).toMatchObject({ type: 'mousePressed', x: 500, y: 250 })
+  })
+
+  it('rejects non-http Take-Over navigation below the API seam', async () => {
+    const executor = new TabExecutor()
+    await executor.attach(42)
+    await expect(
+      executor.takeoverInput({ kind: 'navigate', action: 'goto', url: 'file:///etc/passwd' }),
+    ).rejects.toMatchObject({ code: 'backend_error' })
   })
 })
