@@ -63,7 +63,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowDownToLine, Plus } from "lucide-react";
+import { ArrowDownToLine, Plus, Sparkles } from "lucide-react";
 import { useWorkspaces } from "@/contexts/workspace-context";
 import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
@@ -126,6 +126,7 @@ import {
   type SkillImportPrefill,
 } from "@/components/brain/skill-creator";
 import { SkillImportDialog } from "@/components/brain/skill-import-dialog";
+import { SkillGroupsDialog } from "@/components/brain/skill-groups-dialog";
 import { BlueprintsLibrary } from "@/components/brain/blueprints-library";
 import { ProvenanceProvider, useProvenanceState } from "@/components/provenance/provenance-context";
 import { ProvenanceSheet } from "@/components/provenance/provenance-sheet";
@@ -238,6 +239,8 @@ function BrainPageInner() {
   // draft is held here and handed to the creator via `initialImport`; the
   // seq keys the creator so a fresh import re-seeds its mount state.
   const [importOpen, setImportOpen] = useState(false);
+  // Bulk group suggestion (skill-system.md → "Suggesting groups").
+  const [groupsOpen, setGroupsOpen] = useState(false);
   const [importPrefill, setImportPrefill] = useState<SkillImportPrefill | null>(null);
   const [importSeq, setImportSeq] = useState(0);
   const [selectedSkill, setSelectedSkill] = useState<WorkspaceSkillSummary | null>(
@@ -689,6 +692,14 @@ function BrainPageInner() {
         )}
         <button
           type="button"
+          onClick={() => setGroupsOpen(true)}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          <Sparkles className="size-3.5" aria-hidden />
+          {t.brainPage.skillGroups.cta}
+        </button>
+        <button
+          type="button"
           onClick={() => setImportOpen(true)}
           className="inline-flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
@@ -735,6 +746,14 @@ function BrainPageInner() {
       />
 
       {activeId && (
+        <>
+        <SkillGroupsDialog
+          workspaceId={activeId}
+          open={groupsOpen}
+          onClose={() => setGroupsOpen(false)}
+          skills={skills ?? []}
+          onApplied={() => requestBrainRefresh(activeId)}
+        />
         <SkillImportDialog
           workspaceId={activeId}
           open={importOpen}
@@ -746,6 +765,7 @@ function BrainPageInner() {
             openSkillCreator();
           }}
         />
+        </>
       )}
 
       {/* Mobile-only inline controls — the section switch + entry filters

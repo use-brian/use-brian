@@ -3424,6 +3424,33 @@ export const en = {
       send: "Send",
       attach: "Attach files",
     },
+    skillGroups: {
+      title: "Suggest groups",
+      cta: "Suggest groups",
+      intentBody:
+        "{count} skills are not in a group yet. Brian can read their names and descriptions and propose one for each.",
+      intentHint:
+        "Nothing is saved until you review the list. Skills you already put in a group are left alone.",
+      nothingToGroup: "Every skill is already in a group.",
+      suggestCta: "Suggest",
+      suggesting: "Reading your skills…",
+      noSuggestions:
+        "Brian read them and left everything where it was. Nothing to change.",
+      reviewBody:
+        "{count} proposed moves. Uncheck anything you disagree with, or pick a different group.",
+      groupLabel: "Group",
+      groupAria: "Group for {name}",
+      includeAria: "Include {name}",
+      selectAll: "Select all",
+      deselectAll: "Clear all",
+      applyCta: "Group {count} skills",
+      applying: "Grouping…",
+      appliedBody: "{count} skills grouped.",
+      appliedFailed: "{count} could not be updated. They were left as they were.",
+      done: "Done",
+      close: "Close",
+      cancel: "Cancel",
+    },
     skillFiles: {
       heading: "Files",
       explainer:

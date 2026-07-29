@@ -3190,6 +3190,32 @@ export const zh: Dictionary = {
       send: "傳送",
       attach: "附加檔案",
     },
+    skillGroups: {
+      title: "建議分組",
+      cta: "建議分組",
+      intentBody:
+        "有 {count} 個技能尚未分組。Brian 可以讀取它們的名稱與說明，為每一個提出建議。",
+      intentHint:
+        "在你檢視清單之前都不會儲存。你已經分好組的技能不會被動到。",
+      nothingToGroup: "所有技能都已分組。",
+      suggestCta: "建議",
+      suggesting: "正在讀取你的技能…",
+      noSuggestions: "Brian 看過了，維持原樣即可，沒有需要變更的項目。",
+      reviewBody:
+        "共 {count} 項建議調整。不同意的可取消勾選，或改選其他分組。",
+      groupLabel: "分組",
+      groupAria: "{name} 的分組",
+      includeAria: "包含 {name}",
+      selectAll: "全選",
+      deselectAll: "全部取消",
+      applyCta: "分組 {count} 個技能",
+      applying: "套用中…",
+      appliedBody: "已將 {count} 個技能分組。",
+      appliedFailed: "有 {count} 項無法更新，維持原狀。",
+      done: "完成",
+      close: "關閉",
+      cancel: "取消",
+    },
     skillFiles: {
       heading: "檔案",
       explainer:
