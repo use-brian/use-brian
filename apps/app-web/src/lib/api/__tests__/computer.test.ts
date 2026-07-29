@@ -17,6 +17,7 @@ import {
   getComputerFrame,
   getComputerTask,
   listBrowserProfiles,
+  mostRecentComputerTask,
   markComputerSessionCaptured,
   resumeComputerTask,
   revokeProfileSession,
@@ -38,6 +39,23 @@ function respond(status: number, body?: unknown) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockFetch.mockResolvedValue(respond(200, {}))
+})
+
+describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => {
+  it('opens the most recently active running or paused task', () => {
+    const base = {
+      profileId: null,
+      injectedSite: null,
+      createdAt: 1,
+    }
+    expect(
+      mostRecentComputerTask([
+        { ...base, taskId: 't1', sessionId: 's1', status: 'running', lastActivityAt: 10 },
+        { ...base, taskId: 't2', sessionId: 's2', status: 'paused', lastActivityAt: 20 },
+      ])?.sessionId,
+    ).toBe('s2')
+    expect(mostRecentComputerTask([])).toBeNull()
+  })
 })
 
 describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {

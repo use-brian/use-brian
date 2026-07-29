@@ -420,7 +420,9 @@ function createWindow(): BrowserWindow {
     // deferred — see docs/architecture/features/app-desktop.md → "Windows (v1 frame)".
     ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     backgroundColor: "#ffffff",
-    show: false,
+    // A remote page can stall before ready-to-show, which otherwise leaves the
+    // tray process alive with no window for the user to recover.
+    show: true,
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
