@@ -308,6 +308,10 @@ describe('[COMP:channels/discord] markdownToDiscord', () => {
 
 type CapturedCall = { url: string; init: RequestInit }
 
+function captureAndCount(captured: CapturedCall[], url: unknown, init: RequestInit | undefined) {
+  captured.push({ url: String(url), init: init ?? {} })
+}
+
 function mockFetch(captured: CapturedCall[], status = 200, json: unknown = { id: 'msg-1', channel_id: 'C1' }) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     captured.push({ url: String(url), init: init ?? {} })
@@ -376,6 +380,95 @@ describe('[COMP:channels/discord] sendMessage confirmation buttons', () => {
     await adapter.editMessage('C1', 'M1', { text: 'Tool action: Allowed', actions: [] })
     const body = JSON.parse(String(calls[0].init.body))
     expect(body.components).toEqual([])
+  })
+})
+
+describe('[COMP:channels/discord] sendMessage outbound documents', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  const doc = { filename: 'boarding-pass.pdf', mime: 'application/pdf', data: new Uint8Array([1, 2, 3]) }
+
+  it('uploads the document as multipart after the text, linking payload_json to files[0]', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+
+    const id = await adapter.sendMessage('C1', { text: 'Here it is.', documents: [doc] })
+
+    expect(calls).toHaveLength(2)
+    // Text first, JSON as before — the document must not disturb it.
+    expect(String(calls[0].init.headers ? (calls[0].init.headers as Record<string, string>)['Content-Type'] : '')).toBe('application/json')
+    expect(JSON.parse(String(calls[0].init.body)).content).toBe('Here it is.')
+
+    // Upload: multipart, so fetch owns the boundary — we must NOT set Content-Type.
+    const upload = calls[1]
+    const headers = (upload.init.headers ?? {}) as Record<string, string>
+    expect(headers['Content-Type']).toBeUndefined()
+    expect(upload.init.body).toBeInstanceOf(FormData)
+    const form = upload.init.body as FormData
+    const payload = JSON.parse(String(form.get('payload_json')))
+    // Discord links the JSON attachment entry to the file part by index.
+    expect(payload.attachments).toEqual([{ id: 0, filename: 'boarding-pass.pdf' }])
+    const file = form.get('files[0]') as File
+    expect(file).toBeInstanceOf(Blob)
+    expect(file.type).toBe('application/pdf')
+    expect(await file.arrayBuffer()).toEqual(new Uint8Array([1, 2, 3]).buffer)
+
+    // The returned id stays the LAST TEXT chunk's — the reaction round-trip anchor.
+    expect(id).toBe('msg-1')
+  })
+
+  it('delivers a documents-only reply (no text) instead of returning early', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+
+    const id = await adapter.sendMessage('C1', { text: '', documents: [doc] })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0].init.body).toBeInstanceOf(FormData)
+    // No text chunk ran, so the anchor falls back to the document's message.
+    expect(id).toBe('msg-1')
+  })
+
+  it('surfaces a notice when an upload fails — never a silent drop', async () => {
+    const calls: CapturedCall[] = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      captureAndCount(calls, url, init)
+      // The multipart upload fails; the plain text sends fine.
+      if (init?.body instanceof FormData) {
+        return new Response(JSON.stringify({ message: 'Request entity too large' }), {
+          status: 413,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ id: 'msg-1', channel_id: 'C1' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    })
+    const adapter = createDiscordAdapter({ token: 't' })
+
+    await adapter.sendMessage('C1', { text: 'Here it is.', documents: [doc] })
+
+    const notice = calls.filter((c) => !(c.init.body instanceof FormData)).map((c) => JSON.parse(String(c.init.body)).content)
+    expect(notice).toContain('Could not attach boarding-pass.pdf.')
+  })
+
+  it('refuses a file over Discord\'s unboosted upload ceiling before touching the API', async () => {
+    const calls: CapturedCall[] = []
+    mockFetch(calls)
+    const adapter = createDiscordAdapter({ token: 't' })
+
+    await adapter.sendMessage('C1', {
+      text: 'Here it is.',
+      documents: [{ ...doc, data: new Uint8Array(10 * 1024 * 1024 + 1) }],
+    })
+
+    // Text + notice only — no multipart request was ever made.
+    expect(calls.some((c) => c.init.body instanceof FormData)).toBe(false)
+    const contents = calls.map((c) => JSON.parse(String(c.init.body)).content)
+    expect(contents).toContain('Could not attach boarding-pass.pdf.')
   })
 })
 

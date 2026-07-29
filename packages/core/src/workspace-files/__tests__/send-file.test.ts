@@ -127,6 +127,47 @@ describe('[COMP:files/send-file] sendFile', () => {
     expect(String(result.data)).toContain('not supported on WhatsApp')
   })
 
+  it('refuses on WeChat, whose adapter ignores documents (silent drop otherwise)', async () => {
+    // The pipeline hands `documents` to every adapter and the incapable ones
+    // drop them. Without this gate sendFile reports success and the model
+    // tells the user a file is attached that never arrives.
+    const tool = createSendFileTool(statOnlyApi(fakeFile()))
+    const result = await tool.execute({ file: '/reports/q1.md' }, makeContext({ channelType: 'wechat' }))
+
+    expect(result.isError).toBe(true)
+    expect(String(result.data)).toContain('wechat')
+    expect(String(result.data)).toContain('web app')
+  })
+
+  it('allows the channels whose adapters really upload documents', async () => {
+    for (const channelType of ['web', 'telegram', 'slack', 'discord', 'email', 'msteams']) {
+      const result = await createSendFileTool(statOnlyApi(fakeFile())).execute(
+        { file: '/reports/q1.md' },
+        makeContext({ channelType }),
+      )
+      expect(result.isError, `${channelType} should deliver documents`).toBeFalsy()
+    }
+  })
+
+  it('applies Discord\'s stricter 10 MiB ceiling, not the generic 45 MB one', async () => {
+    const big = fakeFile({ sizeBytes: 20 * 1024 * 1024 })
+
+    // Fine on Telegram (under 45 MB) …
+    const onTelegram = await createSendFileTool(statOnlyApi(big)).execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'telegram' }),
+    )
+    expect(onTelegram.isError).toBeFalsy()
+
+    // … but refused up front on Discord, where the upload would 413.
+    const onDiscord = await createSendFileTool(statOnlyApi(big)).execute(
+      { file: '/reports/q1.md' },
+      makeContext({ channelType: 'discord' }),
+    )
+    expect(onDiscord.isError).toBe(true)
+    expect(String(onDiscord.data)).toContain('10 MB')
+  })
+
   it('blocks confidential files on external channels but allows them on web', async () => {
     const confidential = fakeFile({ sensitivity: 'confidential' })
 

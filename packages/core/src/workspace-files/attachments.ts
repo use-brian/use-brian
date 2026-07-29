@@ -32,6 +32,44 @@ export const MAX_ATTACHMENTS_PER_TURN = 5
  */
 export const MAX_EXTERNAL_DOCUMENT_BYTES = 45 * 1024 * 1024
 
+/**
+ * Channels whose adapter actually puts a document on the wire.
+ *
+ * This list is the `sendFile` gate's authority, and it exists because the
+ * pipeline hands `documents` to every adapter and **an adapter that cannot
+ * deliver them just ignores the argument** (`channel-pipeline.ts` → "Channels
+ * that can't deliver documents ignore the argument"). Without the gate the
+ * tool reports success, the model tells the user the file is attached, and
+ * nothing arrives — the worst failure shape available, since the user has no
+ * way to tell a lost document from one that was never sent.
+ *
+ * **Adding a channel here is a claim about its adapter, not a preference.**
+ * Only add one once its adapter reads `response.documents` and uploads them.
+ */
+export const DOCUMENT_CAPABLE_CHANNELS: ReadonlySet<string> = new Set([
+  'web',
+  'telegram',
+  'slack',
+  'discord',
+  'email',
+  'msteams',
+])
+
+/**
+ * Per-channel byte ceilings for platforms stricter than
+ * {@link MAX_EXTERNAL_DOCUMENT_BYTES}. Discord's upload limit on an
+ * unboosted server is 10 MiB, so a 20 MB file would 413 at the adapter — the
+ * gate refuses it up front instead, where the model can relay a real reason.
+ */
+const CHANNEL_DOCUMENT_BYTE_CAPS: Readonly<Record<string, number>> = {
+  discord: 10 * 1024 * 1024,
+}
+
+/** The document byte ceiling in force for a channel. Web is uncapped. */
+export function documentByteCapFor(channelType: string): number {
+  return CHANNEL_DOCUMENT_BYTE_CAPS[channelType] ?? MAX_EXTERNAL_DOCUMENT_BYTES
+}
+
 export class AttachmentCollector {
   private items: OutboundAttachment[] = []
 

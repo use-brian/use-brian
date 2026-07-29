@@ -6,6 +6,14 @@ import { markdownToDiscord } from './markdown.js'
 // Discord's content limit is 2000 characters for bot messages (Nitro's 4000 is
 // not available to bots). We chunk at exactly the limit.
 const DISCORD_MAX_MESSAGE_LENGTH = 2000
+/**
+ * Discord's per-attachment upload ceiling on an UNBOOSTED server (10 MiB).
+ * Boosted servers allow more, but the bot cannot know a guild's tier at send
+ * time, so the floor is the safe bound — over it the upload 413s and the user
+ * gets a "could not attach" notice instead of the file. `sendFile` refuses
+ * over-cap files up front (CHANNEL_DOCUMENT_BYTE_CAPS); this is the belt.
+ */
+const DISCORD_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
 // Discord epoch (2015-01-01) — used to recover a millisecond timestamp from a
 // snowflake id when the payload carries no ISO timestamp (interactions).
@@ -322,7 +330,7 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
     },
 
     async sendMessage(channelId: string, response: OutgoingMessage, opts?: { threadTs?: string }): Promise<string> {
-      if (!response.text.trim()) return ''
+      if (!response.text.trim() && !response.documents?.length) return ''
       const text = response.format === 'markdown' ? markdownToDiscord(response.text) : response.text
       const chunks = chunkText(text, DISCORD_MAX_MESSAGE_LENGTH)
       // Buttons attach to the last non-empty chunk so they sit beneath the full
@@ -349,6 +357,44 @@ export function createDiscordAdapter(options: DiscordAdapterOptions): ChannelAda
           ...(components && i === lastNonEmptyIndex ? { components } : {}),
         })
         lastId = result.id
+      }
+
+      // Outbound documents — after the text, so the reply reads top-down
+      // (the Telegram convention). A per-document failure must not fail the
+      // send: the text already landed, so surface a short notice instead of
+      // dropping the file silently. The returned id stays the LAST TEXT
+      // chunk's, which is what the channel-id round-trip anchors to.
+      // See adapter-pattern.md → "Outbound documents".
+      if (response.documents?.length) {
+        for (const doc of response.documents) {
+          try {
+            if (doc.data.byteLength > DISCORD_MAX_ATTACHMENT_BYTES) {
+              throw new Error(
+                `${doc.data.byteLength} bytes exceeds Discord's ${DISCORD_MAX_ATTACHMENT_BYTES}-byte upload limit`,
+              )
+            }
+            const docResult = await api.createMessageWithFile(
+              channelId,
+              {
+                content: doc.caption ?? '',
+                allowed_mentions: allowedMentions,
+              },
+              { filename: doc.filename, mime: doc.mime, data: doc.data },
+            )
+            if (!lastId) lastId = docResult.id
+          } catch (err) {
+            console.warn(
+              `[discord] attachment upload failed for ${doc.filename}:`,
+              err instanceof Error ? err.message : String(err),
+            )
+            await api
+              .createMessage(channelId, {
+                content: `Could not attach ${doc.filename}.`,
+                allowed_mentions: allowedMentions,
+              })
+              .catch(() => {})
+          }
+        }
       }
 
       return lastId
