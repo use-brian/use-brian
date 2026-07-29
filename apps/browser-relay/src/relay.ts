@@ -37,6 +37,7 @@ type Connection = {
   workspaceId: string
   pending: Map<string, Pending>
   lastSeenAt: number
+  terminalEvent: 'stopped' | 'tab_closed' | null
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
@@ -62,6 +63,8 @@ const NO_EXTENSION_RESPONSE: InternalCommandResponse = {
 export class BrowserRelay {
   private readonly byUser = new Map<string, Connection>()
   private readonly bySocket = new Map<RelaySocket, Connection>()
+  private readonly terminalByUser = new Map<string, 'stopped' | 'tab_closed'>()
+  private readonly pendingStops = new Set<string>()
   private readonly verify: PairingVerifier
   private readonly mintSessionToken: SessionTokenMinter | null
   private readonly commandTimeoutMs: number
@@ -84,6 +87,29 @@ export class BrowserRelay {
     }
   }
 
+  /** Keep a disconnected Stop durable until the extension acknowledges it. */
+  private deliverPendingStop(conn: Connection): void {
+    if (!this.pendingStops.has(conn.userId)) return
+    const id = randomUUID()
+    const retry = () => {
+      if (this.byUser.get(conn.userId) === conn && this.pendingStops.has(conn.userId)) {
+        this.deliverPendingStop(conn)
+      }
+    }
+    const timer = setTimeout(() => {
+      conn.pending.delete(id)
+      retry()
+    }, this.commandTimeoutMs)
+    conn.pending.set(id, {
+      timer,
+      resolve: (result) => {
+        if (result.ok) this.pendingStops.delete(conn.userId)
+        else setTimeout(retry, 1_000)
+      },
+    })
+    this.sendTo(conn.socket, { type: 'command', id, op: 'stop', args: {} })
+  }
+
   /** Number of live extension connections (health/status surface). */
   connectionCount(): number {
     return this.byUser.size
@@ -91,6 +117,17 @@ export class BrowserRelay {
 
   isConnected(userId: string): boolean {
     return this.byUser.has(userId)
+  }
+
+  connectionStatus(userId: string): {
+    connected: boolean
+    terminalEvent: 'stopped' | 'tab_closed' | null
+  } {
+    const connection = this.byUser.get(userId)
+    return {
+      connected: !!connection,
+      terminalEvent: connection?.terminalEvent ?? this.terminalByUser.get(userId) ?? null,
+    }
   }
 
   /**
@@ -143,6 +180,7 @@ export class BrowserRelay {
         workspaceId: identity.workspaceId,
         pending: conn?.pending ?? new Map(),
         lastSeenAt: Date.now(),
+        terminalEvent: this.terminalByUser.get(identity.userId) ?? null,
       }
       this.byUser.set(identity.userId, fresh)
       this.bySocket.set(socket, fresh)
@@ -153,6 +191,11 @@ export class BrowserRelay {
           ? this.mintSessionToken({ userId: identity.userId, workspaceId: identity.workspaceId })
           : undefined
       this.sendTo(socket, sessionToken ? { type: 'ready', sessionToken } : { type: 'ready' })
+      if (this.pendingStops.has(identity.userId)) {
+        fresh.terminalEvent = 'stopped'
+        this.terminalByUser.set(identity.userId, 'stopped')
+        this.deliverPendingStop(fresh)
+      }
       return
     }
 
@@ -175,6 +218,8 @@ export class BrowserRelay {
       conn.pending.delete(msg.data.id)
       clearTimeout(pending.timer)
       if (msg.data.ok) {
+        conn.terminalEvent = null
+        this.terminalByUser.delete(conn.userId)
         pending.resolve({ ok: true, data: msg.data.data })
       } else {
         pending.resolve({
@@ -191,6 +236,10 @@ export class BrowserRelay {
       // user (P1.7 close-to-stop; the extension itself refuses follow-up
       // commands). Each carries its own message: they are different situations
       // and a wrong one sends the model chasing the wrong cause.
+      if (msg.data.kind === 'stopped' || msg.data.kind === 'tab_closed') {
+        conn.terminalEvent = msg.data.kind
+        this.terminalByUser.set(conn.userId, msg.data.kind)
+      }
       this.rejectPending(conn, {
         ok: false,
         error: EVENT_MESSAGES[msg.data.kind],
@@ -228,7 +277,14 @@ export class BrowserRelay {
     timeoutMs?: number
   }): Promise<InternalCommandResponse> {
     const conn = this.byUser.get(params.userId)
-    if (!conn) return NO_EXTENSION_RESPONSE
+    if (!conn) {
+      if (params.op === 'stop') {
+        this.pendingStops.add(params.userId)
+        this.terminalByUser.set(params.userId, 'stopped')
+        return { ok: true, data: { stopped: true } }
+      }
+      return NO_EXTENSION_RESPONSE
+    }
 
     const id = randomUUID()
     const timeoutMs = params.timeoutMs ?? this.commandTimeoutMs

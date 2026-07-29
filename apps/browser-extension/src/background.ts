@@ -74,6 +74,7 @@ function hostOf(url: string): string {
 }
 
 const gate = new TaskGate({ prompt: promptForConsent })
+let relayWasReady = false
 
 // ── Relay connection ───────────────────────────────────────────
 
@@ -92,6 +93,15 @@ const client = new RelayClient({
   },
   onCommand: (cmd) => void handleCommand(cmd),
   onStateChange: (state) => {
+    if (state === 'ready') {
+      relayWasReady = true
+    } else if (relayWasReady) {
+      // A lost control plane must revoke browser control even if the relay
+      // process restarts and forgets a queued Stop.
+      relayWasReady = false
+      gate.stop()
+      void executor.detach()
+    }
     void chrome.action.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void chrome.action.setBadgeBackgroundColor({ color: '#16a34a' })
   },

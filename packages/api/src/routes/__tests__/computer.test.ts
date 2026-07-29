@@ -3,6 +3,7 @@ import request from 'supertest'
 import { createTestApp } from './helpers.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from '../computer.js'
 import {
+  BrowserBackendError,
   StubSandboxProvider,
   createCloudBrowserProvider,
   createInMemoryBrowserProfileStore,
@@ -25,6 +26,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   let localProvider: BrowserProvider
   let localTasks: ReturnType<typeof createInMemoryLocalComputerTaskStore>
   let localOps: Array<{ op: string; args?: Record<string, unknown> }>
+  let localStatus: { connected: boolean; terminalEvent: 'stopped' | 'tab_closed' | null } | null
   let app: ReturnType<typeof createTestApp>
 
   function makeApp(userId: string) {
@@ -35,6 +37,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
         provider,
         localProvider,
         localTasks,
+        localStatus: async () => localStatus,
         vault,
         profileStore,
         getWorkspaceRole: MEMBER_ROLE,
@@ -50,6 +53,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     profileStore = createInMemoryBrowserProfileStore()
     backendFlips = []
     localOps = []
+    localStatus = { connected: true, terminalEvent: null }
     localTasks = createInMemoryLocalComputerTaskStore()
     localProvider = createLocalBrowserProvider({
       transport: {
@@ -237,6 +241,98 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
 
     const stopped = await request(app).post('/api/computer/tasks/sess-local/complete')
     expect(stopped.status).toBe(502)
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+  })
+
+  it('retires local tasks from discovery when the extension disconnects', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localStatus = { connected: false, terminalEvent: null }
+
+    const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(list.status).toBe(200)
+    expect(list.body.tasks.some((task: { sessionId: string }) => task.sessionId === 'sess-local')).toBe(false)
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+    const disconnected = await request(app).get('/api/computer/tasks/sess-local')
+    expect(disconnected.body.connectionState).toBe('disconnected')
+    localStatus = { connected: true, terminalEvent: null }
+    const reconnected = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(reconnected.body.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: 'sess-local', backend: 'local' }),
+    ]))
+    expect((await request(app).post('/api/computer/tasks/sess-local/complete')).status).toBe(200)
+    expect(localTasks.getActiveBySession('sess-local')).toBeNull()
+  })
+
+  it('keeps local tasks when relay liveness is temporarily unavailable', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localStatus = null
+
+    const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(list.body.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: 'sess-local', backend: 'local' }),
+    ]))
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+  })
+
+  it('retires local tasks after the relay observes the controlled tab closing', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localStatus = { connected: true, terminalEvent: 'tab_closed' }
+
+    const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(list.body.tasks.some((task: { sessionId: string }) => task.sessionId === 'sess-local')).toBe(false)
+    expect(localTasks.getActiveBySession('sess-local')).toBeNull()
+  })
+
+  it('keeps the task when an old relay cannot durably queue Stop during disconnect', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localProvider = {
+      ...localProvider,
+      stop: async () => { throw new BrowserBackendError('extension disconnected', 'no_extension') },
+    }
+    app = makeApp('user-1')
+
+    const stopped = await request(app).post('/api/computer/tasks/sess-local/complete')
+    expect(stopped.status).toBe(502)
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+  })
+
+  it('retires a local task when frame polling reports that its tab closed', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localProvider = {
+      ...localProvider,
+      nextTakeoverFrame: async () => { throw new BrowserBackendError('tab closed', 'tab_closed') },
+    }
+    app = makeApp('user-1')
+
+    const frame = await request(app).get('/api/computer/tasks/sess-local/frame')
+    expect(frame.status).toBe(502)
+    expect(localTasks.getActiveBySession('sess-local')).toBeNull()
+  })
+
+  it('keeps a local task retryable after a command timeout', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localProvider = {
+      ...localProvider,
+      nextTakeoverFrame: async () => { throw new BrowserBackendError('relay timeout', 'timeout') },
+    }
+    app = makeApp('user-1')
+
+    const frame = await request(app).get('/api/computer/tasks/sess-local/frame')
+    expect(frame.status).toBe(502)
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+  })
+
+  it('keeps a local task retryable while the Firefox companion restarts', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localProvider = {
+      ...localProvider,
+      nextTakeoverFrame: async () => {
+        throw new BrowserBackendError('restart Firefox from the desktop app', 'firefox_restart_required')
+      },
+    }
+    app = makeApp('user-1')
+
+    expect((await request(app).get('/api/computer/tasks/sess-local/frame')).status).toBe(502)
     expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
   })
 

@@ -6126,6 +6126,7 @@ export const en = {
     connecting: "Connecting to the browser...",
     noTask: "No active browser task for this chat. It may have finished or timed out; ask the assistant to try again.",
     frameStalled: "The live view stalled. It resumes as soon as the browser responds.",
+    browserDisconnected: "The local browser disconnected. Reopen it or stop this task.",
     inputSending: "Sending input...",
     inputHolding: "Holding mouse button",
     inputDelivered: "Input delivered",

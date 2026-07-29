@@ -64,6 +64,21 @@ export async function relayExtensionConnected(opts: {
   userId: string
   fetchImpl?: typeof fetch
 }): Promise<boolean> {
+  return (await relayExtensionStatus(opts))?.connected === true
+}
+
+export type RelayExtensionStatus = {
+  connected: boolean
+  terminalEvent: 'stopped' | 'tab_closed' | null
+}
+
+/** Null means the relay status itself was unavailable; never infer disconnect from it. */
+export async function relayExtensionStatus(opts: {
+  relayUrl: string
+  relaySecret: string
+  userId: string
+  fetchImpl?: typeof fetch
+}): Promise<RelayExtensionStatus | null> {
   const fetchImpl = opts.fetchImpl ?? fetch
   try {
     const res = await fetchImpl(
@@ -73,10 +88,15 @@ export async function relayExtensionConnected(opts: {
         signal: AbortSignal.timeout(5_000),
       },
     )
-    if (!res.ok) return false
-    const body = (await res.json()) as { connected?: boolean }
-    return body.connected === true
+    if (!res.ok) return null
+    const body = (await res.json()) as { connected?: unknown; terminalEvent?: unknown }
+    if (typeof body.connected !== 'boolean') return null
+    const terminalEvent = body.terminalEvent
+    return {
+      connected: body.connected,
+      terminalEvent: terminalEvent === 'stopped' || terminalEvent === 'tab_closed' ? terminalEvent : null,
+    }
   } catch {
-    return false
+    return null
   }
 }

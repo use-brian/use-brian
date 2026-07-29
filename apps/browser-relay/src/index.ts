@@ -56,7 +56,7 @@ app.post('/internal/browser/command', async (req, res) => {
 })
 
 app.get('/internal/browser/status/:userId', (req, res) => {
-  res.json({ connected: relay.isConnected(req.params.userId) })
+  res.json(relay.connectionStatus(req.params.userId))
 })
 
 // ── WebSocket endpoint for extensions ─────────────────────────

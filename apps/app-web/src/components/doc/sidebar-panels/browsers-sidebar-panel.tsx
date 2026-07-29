@@ -37,7 +37,9 @@ import {
   type ComputerTaskSummary,
 } from "@/lib/api/computer";
 
-const POLL_MS = 20_000;
+// This panel exists only while the Browsers surface is open. Poll quickly so a
+// crashed local browser disappears within one UI beat rather than 20 seconds.
+const POLL_MS = 2_000;
 
 const COMPUTER_SESSION_RE = /\/computer\/([^/?#]+)/;
 

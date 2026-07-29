@@ -190,7 +190,11 @@ import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
 import { browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
-import { createRelayCommandTransport, relayExtensionConnected } from './sandbox/relay-transport.js'
+import {
+  createRelayCommandTransport,
+  relayExtensionConnected,
+  relayExtensionStatus,
+} from './sandbox/relay-transport.js'
 import { feedbackRoutes } from './routes/feedback.js'
 import { accountRoutes, accountAvatarPublicRoutes } from './routes/account.js'
 import { memoryRoutes } from './routes/memories.js'
@@ -3887,6 +3891,15 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     provider: sandboxProvider,
     localProvider: localBrowserProvider,
     localTasks: localComputerTasks,
+    localStatus:
+      browserRelayUrl && env.BROWSER_RELAY_SECRET
+        ? (userId) =>
+            relayExtensionStatus({
+              relayUrl: browserRelayUrl as string,
+              relaySecret: env.BROWSER_RELAY_SECRET as string,
+              userId,
+            })
+        : null,
     vault: ports.browserSessionVault ?? null,
     profileStore: ports.browserProfileStore ?? null,
     grants: ports.browserSkillGrantStore ?? null,

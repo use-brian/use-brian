@@ -5912,6 +5912,7 @@ export const ja: Dictionary = {
     connecting: "ブラウザに接続しています...",
     noTask: "このチャットに実行中のブラウザタスクはありません。終了したかタイムアウトした可能性があります。アシスタントにもう一度依頼してください。",
     frameStalled: "ライブ表示が一時停止しています。ブラウザが応答すると再開します。",
+    browserDisconnected: "ローカルブラウザが切断されました。再度開くか、このタスクを停止してください。",
     inputSending: "入力を送信しています...",
     inputHolding: "マウスボタンを長押し中",
     inputDelivered: "入力を送信しました",

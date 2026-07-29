@@ -5858,6 +5858,7 @@ export const zh: Dictionary = {
     connecting: "正在連線瀏覽器...",
     noTask: "此對話沒有進行中的瀏覽器任務。可能已完成或逾時，請再請助理試一次。",
     frameStalled: "即時畫面暫停了。瀏覽器回應後會自動恢復。",
+    browserDisconnected: "本機瀏覽器已中斷連線。請重新開啟或停止此任務。",
     inputSending: "正在傳送輸入...",
     inputHolding: "正在按住滑鼠按鈕",
     inputDelivered: "輸入已送達",

@@ -100,6 +100,30 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
     expect(res).toMatchObject({ ok: false, code: 'no_extension' })
   })
 
+  it('queues Stop while disconnected and delivers it on reconnect', async () => {
+    vi.useFakeTimers()
+    const relay = relayWithVerifier()
+    await expect(relay.dispatchCommand({ userId: 'user-1', op: 'stop' })).resolves.toEqual({
+      ok: true,
+      data: { stopped: true },
+    })
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: false, terminalEvent: 'stopped' })
+
+    const first = pair(relay)
+    expect(first.sent).toEqual([
+      { type: 'ready' },
+      expect.objectContaining({ type: 'command', op: 'stop', args: {} }),
+    ])
+    relay.handleDisconnect(first)
+
+    const replacement = pair(relay)
+    const stop = replacement.sent.find((message) => message.type === 'command') as { id: string; op: string }
+    expect(stop.op).toBe('stop')
+    relay.handleMessage(replacement, JSON.stringify({ type: 'result', id: stop.id, ok: true, data: { stopped: true } }))
+    await vi.runAllTimersAsync()
+    expect(replacement.sent.filter((message) => message.type === 'command')).toHaveLength(1)
+  })
+
   it('times out an unanswered command with code timeout', async () => {
     vi.useFakeTimers()
     const relay = relayWithVerifier(1_000)
@@ -115,6 +139,22 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
     const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'type', args: { ref: '@e1', text: 'hi' } })
     relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'stopped' }))
     await expect(resultPromise).resolves.toMatchObject({ ok: false, code: 'stopped' })
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'stopped' })
+  })
+
+  it('remembers tab_closed across reconnect until a successful new command', async () => {
+    const relay = relayWithVerifier()
+    const socket = pair(relay)
+    relay.handleMessage(socket, JSON.stringify({ type: 'event', kind: 'tab_closed' }))
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'tab_closed' })
+
+    const replacement = pair(relay)
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: 'tab_closed' })
+    const resultPromise = relay.dispatchCommand({ userId: 'user-1', op: 'snapshot' })
+    const command = replacement.sent.find((message) => message.type === 'command') as { id: string }
+    relay.handleMessage(replacement, JSON.stringify({ type: 'result', id: command.id, ok: true, data: {} }))
+    await expect(resultPromise).resolves.toMatchObject({ ok: true })
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: null })
   })
 
   it('rejects in-flight commands when the extension emits event{detached}', async () => {
@@ -132,6 +172,7 @@ describe('[COMP:ext/relay] Browser extension relay', () => {
     expect(res.code).toBe('detached')
     expect(res.error).not.toMatch(/closed/i)
     expect(res.error).toMatch(/debugging session/i)
+    expect(relay.connectionStatus('user-1')).toEqual({ connected: true, terminalEvent: null })
   })
 
   it('rejects in-flight commands with no_extension when the socket disconnects', async () => {
