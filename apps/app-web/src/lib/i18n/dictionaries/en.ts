@@ -3174,6 +3174,12 @@ export const en = {
       nameRequired: "Give the skill a name.",
     },
     skillsLibrary: {
+      categories: {
+        productivity: "Productivity",
+        communication: "Communication",
+        research: "Research",
+        custom: "Custom",
+      },
       countOne: "1 skill",
       countMany: "{count} skills",
       searchPlaceholder: "Search skills…",
@@ -3341,6 +3347,7 @@ export const en = {
       saveConfirm: "Save & confirm",
       saveConfirmHint:
         "Saving your edit certifies this skill and sets its confidence to 100%.",
+      categoryLabel: "Category",
       aboutHeading: "About",
       usageLabel: "Usage",
       usageSummary: "{runs} runs · {ok} ok · {corrected} corrected",
@@ -3406,10 +3413,50 @@ export const en = {
       send: "Send",
       attach: "Attach files",
     },
+    skillFiles: {
+      heading: "Files",
+      explainer:
+        "References, templates, and scripts this skill can pull in. Put the file's token in the body and the assistant reads the file when it runs the skill.",
+      add: "Add file",
+      empty: "No files yet. The skill runs on its body alone.",
+      edit: "Edit",
+      close: "Close",
+      delete: "Delete",
+      deleteTitle: "Delete this file?",
+      deleteBody:
+        "{name} will be removed from this skill. Any token pointing at it in the body stops resolving.",
+      copyPointer: "Copy token",
+      notReferenced: "The body does not point at this file yet.",
+      kindLabel: "Kind",
+      kinds: {
+        reference: "Reference",
+        template: "Template",
+        script: "Script",
+      },
+      nameLabel: "File name",
+      descriptionLabel: "What it is (optional)",
+      descriptionPlaceholder: "A one-line note for whoever reads this next.",
+      renameLeftBehind:
+        "Saved, but the old file {name} could not be removed, so both copies exist now. Delete {name} by hand. ({error})",
+      namePlaceholder: "weekly-status.md",
+      contentPlaceholder: "The file contents the assistant will read.",
+      save: "Save file",
+      saving: "Saving…",
+      cancel: "Cancel",
+    },
     skillImport: {
       title: "Import a skill",
+      tabPaste: "Paste",
       tabUrl: "From URL",
       tabGithub: "From GitHub",
+      pasteLabel: "Skill markdown",
+      pasteUpload: "Upload a file",
+      pastePlaceholder:
+        "---\nname: Weekly status\ndescription: How we write the weekly update\n---\n\nCollect the updates, then draft the note.",
+      pasteHint:
+        "Paste an Agent Skills SKILL.md, a Claude Code command, a Cursor rule, or any prompt markdown. Nothing is saved until you review it.",
+      pasteFromFile: "Loaded from {name}. Editing the text clears the file name.",
+      fileReadFailed: "That file could not be read. Try pasting its contents instead.",
       urlLabel: "Public file URL",
       urlPlaceholder: "https://github.com/owner/repo/blob/main/SKILL.md",
       urlHint:

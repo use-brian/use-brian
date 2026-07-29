@@ -27,15 +27,17 @@ import * as React from "react";
 import { Dialog } from "@base-ui/react/dialog";
 import {
   ChevronRight,
+  ClipboardType,
   FileText,
   Folder,
   FolderGit2,
   Link2,
   Loader2,
+  Upload,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-import { useT } from "@/lib/i18n/client";
+import { useT, format } from "@/lib/i18n/client";
 import { Button } from "@/components/ui/button";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
@@ -64,16 +66,28 @@ type Props = {
   onImported: (prefill: SkillImportPrefill) => void;
 };
 
-type Tab = "url" | "github";
+type Tab = "paste" | "url" | "github";
+
+/** Extensions the file picker accepts — the dialects the parser speaks. */
+const PASTE_ACCEPT = ".md,.mdc,.markdown,.txt";
 
 export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Props) {
   const t = useT();
   const copy = t.brainPage.skillImport;
 
-  const [tab, setTab] = React.useState<Tab>("url");
+  // Paste leads: it is the only source that needs no network, no host
+  // allowlist, and no connector — the shortest path from "I have a skill
+  // file" to a draft.
+  const [tab, setTab] = React.useState<Tab>("paste");
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [result, setResult] = React.useState<SkillImportResult | null>(null);
+
+  // Paste tab — `pasteFileName` is set only by the file picker; it feeds
+  // dialect detection (.mdc ⇒ Cursor rule) and the fallback name.
+  const [paste, setPaste] = React.useState("");
+  const [pasteFileName, setPasteFileName] = React.useState<string | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // URL tab.
   const [url, setUrl] = React.useState("");
@@ -116,6 +130,19 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
     onImported(toSkillImportPrefill(result));
     setResult(null);
     onClose();
+  }
+
+  /** Read a picked `.md` into the paste box — the upload half of this tab.
+   *  The file never leaves the browser except as the paste body. */
+  async function readPickedFile(file: File) {
+    setError(null);
+    try {
+      const text = await file.text();
+      setPaste(text);
+      setPasteFileName(file.name);
+    } catch {
+      setError(copy.fileReadFailed);
+    }
   }
 
   // ── GitHub browse data ──────────────────────────────────────
@@ -285,6 +312,7 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
               <div className="mt-4 flex gap-1 rounded-lg bg-muted p-1" role="tablist">
                 {(
                   [
+                    { key: "paste" as Tab, label: copy.tabPaste, icon: ClipboardType },
                     { key: "url" as Tab, label: copy.tabUrl, icon: Link2 },
                     { key: "github" as Tab, label: copy.tabGithub, icon: FolderGit2 },
                   ]
@@ -311,7 +339,56 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
                 ))}
               </div>
 
-              {tab === "url" ? (
+              {tab === "paste" ? (
+                <div className="mt-4">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <label
+                      className="text-xs font-medium text-foreground"
+                      htmlFor="skill-import-paste"
+                    >
+                      {copy.pasteLabel}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                      <Upload className="size-3.5" aria-hidden />
+                      {copy.pasteUpload}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept={PASTE_ACCEPT}
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        // Reset so picking the same file twice re-fires.
+                        e.target.value = "";
+                        if (file) void readPickedFile(file);
+                      }}
+                    />
+                  </div>
+                  <textarea
+                    id="skill-import-paste"
+                    value={paste}
+                    placeholder={copy.pastePlaceholder}
+                    rows={10}
+                    spellCheck={false}
+                    onChange={(e) => {
+                      setPaste(e.target.value);
+                      // Hand-edited text is no longer the picked file.
+                      setPasteFileName(null);
+                    }}
+                    className="mt-1.5 w-full resize-y rounded-md border border-border bg-background px-3 py-2 font-mono text-xs leading-relaxed text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40"
+                  />
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {pasteFileName
+                      ? format(copy.pasteFromFile, { name: pasteFileName })
+                      : copy.pasteHint}
+                  </p>
+                </div>
+              ) : tab === "url" ? (
                 <div className="mt-4">
                   <label className="text-xs font-medium text-foreground" htmlFor="skill-import-url">
                     {copy.urlLabel}
@@ -466,6 +543,22 @@ export function SkillImportDialog({ workspaceId, open, onClose, onImported }: Pr
                 <Button variant="outline" size="sm" onClick={onClose}>
                   {copy.cancel}
                 </Button>
+                {tab === "paste" && (
+                  <Button
+                    variant="default"
+                    size="sm"
+                    disabled={!paste.trim() || busy}
+                    onClick={() =>
+                      void runImport({
+                        kind: "paste",
+                        content: paste,
+                        ...(pasteFileName ? { fileName: pasteFileName } : {}),
+                      })
+                    }
+                  >
+                    {busy ? copy.importing : copy.importCta}
+                  </Button>
+                )}
                 {tab === "url" && (
                   <Button
                     variant="default"

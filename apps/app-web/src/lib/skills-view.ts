@@ -123,6 +123,60 @@ export function partitionSkillsForLanding(
   };
 }
 
+// ── Category grouping ────────────────────────────────────────────
+//
+// `workspace_skills.category` has been in the schema and the skill format
+// since the beginning but nothing ever grouped by it, so the library was one
+// undifferentiated stack. The column is TEXT with no write-side enum check,
+// so anything a legacy or third-party row carries has to normalize onto a
+// bucket the UI has a translated label for.
+
+/** The closed set the skill format documents, in library display order. */
+export const SKILL_CATEGORIES = [
+  "productivity",
+  "communication",
+  "research",
+  "custom",
+] as const;
+
+export type SkillCategory = (typeof SKILL_CATEGORIES)[number];
+
+const KNOWN_CATEGORIES = new Set<string>(SKILL_CATEGORIES);
+
+/** One skill's category, folded onto the known set (`custom` is the sink). */
+export function skillCategoryOf(skill: { category?: string }): SkillCategory {
+  const value = skill.category;
+  return typeof value === "string" && KNOWN_CATEGORIES.has(value)
+    ? (value as SkillCategory)
+    : "custom";
+}
+
+export type SkillCategoryGroup = {
+  category: SkillCategory;
+  skills: WorkspaceSkillSummary[];
+};
+
+/**
+ * Bucket skills by category in the fixed `SKILL_CATEGORIES` order, dropping
+ * empty buckets. Order WITHIN a bucket is the incoming order, so whatever
+ * `filterSkillsForLibrary` sorted by (status, then name) still holds.
+ */
+export function groupSkillsByCategory(
+  skills: WorkspaceSkillSummary[],
+): SkillCategoryGroup[] {
+  const buckets = new Map<SkillCategory, WorkspaceSkillSummary[]>();
+  for (const skill of skills) {
+    const category = skillCategoryOf(skill);
+    const bucket = buckets.get(category);
+    if (bucket) bucket.push(skill);
+    else buckets.set(category, [skill]);
+  }
+  return SKILL_CATEGORIES.flatMap((category) => {
+    const bucket = buckets.get(category);
+    return bucket && bucket.length > 0 ? [{ category, skills: bucket }] : [];
+  });
+}
+
 /** The editor's Instructions drafts — always strings (inputs), trimmed on
  *  diff so whitespace-only edits never count as changes. */
 export type SkillInstructionsDraft = {
@@ -130,6 +184,7 @@ export type SkillInstructionsDraft = {
   description: string;
   whenToUse: string;
   content: string;
+  category: SkillCategory;
 };
 
 /** How many skills are awaiting confirmation — the Brain topbar's amber
@@ -168,7 +223,7 @@ export function skillRowIdFromPathname(
 export function buildSkillPatch(
   skill: Pick<
     WorkspaceSkillSummary,
-    "name" | "description" | "whenToUse" | "content"
+    "name" | "description" | "whenToUse" | "content" | "category"
   >,
   draft: SkillInstructionsDraft,
 ): UpdateSkillInput {
@@ -181,5 +236,8 @@ export function buildSkillPatch(
   if (whenToUse !== (skill.whenToUse ?? "")) patch.whenToUse = whenToUse;
   const content = draft.content.trim();
   if (content && content !== skill.content) patch.content = content;
+  // Compared against the NORMALIZED current value, so a row carrying a legacy
+  // out-of-enum category doesn't read as "already custom" and swallow the fix.
+  if (draft.category !== skillCategoryOf(skill)) patch.category = draft.category;
   return patch;
 }

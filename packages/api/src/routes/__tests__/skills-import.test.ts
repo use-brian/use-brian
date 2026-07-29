@@ -127,6 +127,48 @@ describe('[COMP:api/skill-import] POST /api/skills/import', () => {
     expect(badBody.status).toBe(400)
   })
 
+  it('parses a pasted body with paste provenance and no fetch', async () => {
+    const res = await request(importApp())
+      .post('/api/skills/import')
+      .send({ workspaceId: 'w-1', source: { kind: 'paste', content: SKILL_MD } })
+
+    expect(res.status).toBe(200)
+    expect(res.body.dialect).toBe('agent-skills')
+    expect(res.body.draft.name).toBe('Release Notes')
+    expect(res.body.importSource).toEqual({ kind: 'paste' })
+    expect(res.body.supportFiles).toEqual([])
+    expect(fetchRawImport).not.toHaveBeenCalled()
+    expect(workspaceSkillStore.create).not.toHaveBeenCalled()
+  })
+
+  it('honours an uploaded fileName for dialect detection', async () => {
+    const res = await request(importApp())
+      .post('/api/skills/import')
+      .send({
+        workspaceId: 'w-1',
+        source: {
+          kind: 'paste',
+          fileName: 'rule.mdc',
+          content: ['---', 'description: A rule.', 'globs: "*.ts"', '---', 'Do it.'].join('\n'),
+        },
+      })
+    expect(res.status).toBe(200)
+    expect(res.body.dialect).toBe('cursor-rule')
+  })
+
+  it('400s an empty paste and gates it on workspace membership', async () => {
+    const empty = await request(importApp())
+      .post('/api/skills/import')
+      .send({ workspaceId: 'w-1', source: { kind: 'paste', content: '   ' } })
+    expect(empty.status).toBe(400)
+
+    workspaceStore.getRole.mockResolvedValue(null)
+    const nonMember = await request(importApp())
+      .post('/api/skills/import')
+      .send({ workspaceId: 'w-9', source: { kind: 'paste', content: SKILL_MD } })
+    expect(nonMember.status).toBe(404)
+  })
+
   it('github-source imports answer 503 when connector stores are not wired', async () => {
     const res = await request(importApp())
       .post('/api/skills/import')

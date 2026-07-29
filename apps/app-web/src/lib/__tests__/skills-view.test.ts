@@ -3,8 +3,10 @@ import type { WorkspaceSkillSummary } from "../api/skills";
 import {
   buildSkillPatch,
   filterSkillsForLibrary,
+  groupSkillsByCategory,
   hasLibraryFilter,
   partitionSkillsForLanding,
+  skillCategoryOf,
   skillRowIdFromPathname,
   skillStatus,
   suggestedSkillCount,
@@ -33,6 +35,7 @@ function skill(
     verifiedByUserId: null,
     verifiedAt: null,
     rederivationCount: 0,
+    category: "custom",
     blueprintId: null,
     requiresConnectors: [],
     enabledAssistantIds: [],
@@ -195,6 +198,59 @@ describe("[COMP:app-web/brain-skills-view] filterSkillsForLibrary", () => {
   });
 });
 
+describe("[COMP:app-web/brain-skills-view] groupSkillsByCategory", () => {
+  it("returns the known categories in a fixed order, skipping empty ones", () => {
+    const groups = groupSkillsByCategory([
+      skill({ rowId: "a", name: "Alpha", category: "custom" }),
+      skill({ rowId: "b", name: "Bravo", category: "productivity" }),
+      skill({ rowId: "c", name: "Charlie", category: "research" }),
+    ]);
+    expect(groups.map((g) => g.category)).toEqual([
+      "productivity",
+      "research",
+      "custom",
+    ]);
+    expect(groups.map((g) => g.skills.map((s) => s.rowId))).toEqual([
+      ["b"],
+      ["c"],
+      ["a"],
+    ]);
+  });
+
+  it("preserves the incoming order within a group", () => {
+    const groups = groupSkillsByCategory([
+      skill({ rowId: "z", name: "Zulu", category: "productivity" }),
+      skill({ rowId: "a", name: "Alpha", category: "productivity" }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.skills.map((s) => s.rowId)).toEqual(["z", "a"]);
+  });
+
+  // `workspace_skills.category` is a TEXT column with no write-side enum
+  // check, so a legacy or third-party row can carry anything. It must still
+  // land in a group the UI has a translated label for.
+  it("folds an unknown or missing category into custom", () => {
+    const groups = groupSkillsByCategory([
+      skill({ rowId: "a", category: "sales-enablement" }),
+      skill({ rowId: "b", category: undefined as unknown as string }),
+      skill({ rowId: "c", category: "custom" }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.category).toBe("custom");
+    expect(groups[0]!.skills.map((s) => s.rowId)).toEqual(["a", "b", "c"]);
+  });
+
+  it("returns nothing for an empty list", () => {
+    expect(groupSkillsByCategory([])).toEqual([]);
+  });
+
+  it("normalizes one skill's category on its own", () => {
+    expect(skillCategoryOf({ category: "communication" })).toBe("communication");
+    expect(skillCategoryOf({ category: "nonsense" })).toBe("custom");
+    expect(skillCategoryOf({})).toBe("custom");
+  });
+});
+
 describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
   const base = skill({
     name: "Weekly update",
@@ -210,6 +266,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: "How we write it",
         whenToUse: "On Fridays",
         content: "Step 1.",
+        category: "custom",
       }),
     ).toEqual({});
   });
@@ -221,6 +278,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: "How we write it ",
         whenToUse: " On Fridays",
         content: "Step 1.\n",
+        category: "custom",
       }),
     ).toEqual({});
   });
@@ -232,6 +290,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: "How we write it",
         whenToUse: "On Fridays",
         content: "Step 1. Step 2.",
+        category: "custom",
       }),
     ).toEqual({ content: "Step 1. Step 2." });
   });
@@ -244,6 +303,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: noWhen.description,
         whenToUse: "",
         content: noWhen.content,
+        category: "custom",
       }),
     ).toEqual({});
     expect(
@@ -252,6 +312,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: noWhen.description,
         whenToUse: "When invoicing",
         content: noWhen.content,
+        category: "custom",
       }),
     ).toEqual({ whenToUse: "When invoicing" });
   });
@@ -263,6 +324,7 @@ describe("[COMP:app-web/brain-skill-editor] buildSkillPatch", () => {
         description: base.description,
         whenToUse: "On Fridays",
         content: "  ",
+        category: "custom",
       }),
     ).toEqual({});
   });

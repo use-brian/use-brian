@@ -46,6 +46,7 @@ import {
 } from "@/lib/api/skills";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import {
+  groupSkillsByCategory,
   hasLibraryFilter,
   partitionSkillsForLanding,
   skillStatus,
@@ -89,6 +90,7 @@ export function SkillsLibrary({
   const locale = useLocale();
   const skillsCopy = t.brainPage.skills;
   const copy = t.brainPage.skillsLibrary;
+  const categoryCopy = copy.categories;
 
   // Every filter is shared context — the sidebar popover is the one filter
   // surface; this pane just renders the filtered list.
@@ -193,18 +195,33 @@ export function SkillsLibrary({
                 </ul>
               </section>
             )}
-            <ul className="flex flex-col">
-              {list.map((skill) => (
-                <SkillRow
-                  key={skill.rowId}
-                  skill={skill}
-                  locale={locale}
-                  confirming={confirmingId === skill.rowId}
-                  onOpen={() => onOpenSkill(skill)}
-                  onConfirm={() => void handleConfirm(skill)}
-                />
-              ))}
-            </ul>
+            {/* The main list groups by category — the field has been in the
+                schema and the skill format since the beginning but nothing
+                ever grouped by it, so the pane was one undifferentiated
+                stack. A single group renders its heading too, so the pane
+                never silently changes shape as a workspace grows. */}
+            {groupSkillsByCategory(list).map((group) => (
+              <section key={group.category}>
+                <h2 className="px-4 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  {categoryCopy[group.category]}
+                  <span className="ml-1.5 font-normal tabular-nums opacity-70">
+                    {group.skills.length}
+                  </span>
+                </h2>
+                <ul className="flex flex-col">
+                  {group.skills.map((skill) => (
+                    <SkillRow
+                      key={skill.rowId}
+                      skill={skill}
+                      locale={locale}
+                      confirming={confirmingId === skill.rowId}
+                      onOpen={() => onOpenSkill(skill)}
+                      onConfirm={() => void handleConfirm(skill)}
+                    />
+                  ))}
+                </ul>
+              </section>
+            ))}
           </>
         )}
       </div>

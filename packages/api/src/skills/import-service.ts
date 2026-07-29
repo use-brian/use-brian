@@ -117,6 +117,47 @@ export async function importSkillFromUrl(
   }
 }
 
+// ── Paste import (markdown handed straight to the server) ─────
+
+/** File name assumed for a paste that carries none — only ever used to derive
+ *  a fallback display name, and only when the body has no frontmatter or H1. */
+const PASTED_FILE_NAME = 'pasted-skill.md'
+
+/**
+ * Normalize markdown the user pasted (or uploaded) into a draft.
+ *
+ * Synchronous by construction: unlike the URL and GitHub sources this one
+ * performs NO server-side fetch, which is why it needs no host allowlist —
+ * the bytes arrived in the request. `fileName` is optional and matters only
+ * for dialect detection (`.mdc` ⇒ Cursor rule) and name derivation.
+ */
+export function importSkillFromPaste(content: string, fileName?: string): SkillImportResult {
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new SkillImportError('Paste the skill markdown first.')
+  }
+  const bytes = Buffer.byteLength(content, 'utf8')
+  if (bytes > IMPORT_MAX_FILE_BYTES) {
+    throw new SkillImportError(
+      `That paste is too large to import (${bytes} bytes; limit ${IMPORT_MAX_FILE_BYTES}).`,
+    )
+  }
+
+  const parsed = parseImportedSkill(fileName?.trim() || PASTED_FILE_NAME, content)
+  if (!parsed) {
+    throw new SkillImportError(
+      'That does not look like a skill: it is empty, binary, or has no usable body.',
+    )
+  }
+
+  return {
+    dialect: parsed.dialect,
+    draft: parsed.draft,
+    supportFiles: [],
+    warnings: parsed.warnings,
+    importSource: { kind: 'paste' },
+  }
+}
+
 // ── GitHub import (file or Agent Skills folder) ───────────────
 
 export type GithubImportTarget = {
