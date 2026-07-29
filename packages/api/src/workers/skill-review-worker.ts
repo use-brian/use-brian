@@ -1230,6 +1230,9 @@ function approvalsPort(approvals: PendingApprovalsStore, approverUserId: string)
         slug: string
         name: string
         description: string
+        /** Forwarded verbatim to the store. Optional here only so approvals
+         *  staged before the field existed still typecheck. */
+        whenToUse?: string
         content: string
         supportFiles?: Array<{ kind: SkillFileKind; name: string; content: string; description?: string }>
       }

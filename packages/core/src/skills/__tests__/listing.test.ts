@@ -37,11 +37,36 @@ describe('[COMP:skills/listing] formatSkillListing', () => {
     expect(formatSkillListing([skill({ id: 'a', description: 'Does A.' })])).toBe('- a: Does A.')
   })
 
-  it('joins description and whenToUse with an em-dash', () => {
+  it('leads with whenToUse, then the description', () => {
     const out = formatSkillListing([
       skill({ id: 'a', description: 'Does A.', whenToUse: 'when you need A' }),
     ])
-    expect(out).toBe('- a: Does A. — when you need A')
+    expect(out).toBe('- a: when you need A — Does A.')
+  })
+
+  // The trigger is what the model SELECTS on; the description only
+  // elaborates. Truncation eats the tail, so a description-first join threw
+  // the trigger away exactly when the workspace got big enough to need it:
+  // in prod, an assistant with 41 enabled skills truncated every entry to 60
+  // chars and never once reached the concatenated whenToUse.
+  it('keeps the trigger and sacrifices the description when over budget', () => {
+    const many = Array.from({ length: 40 }, (_, i) =>
+      skill({
+        id: `skill-${String(i).padStart(2, '0')}`,
+        description: 'D'.repeat(300) + 'DESCRIPTION_TAIL',
+        whenToUse: `fires on topic ${i}`,
+      }),
+    )
+    const out = formatSkillListing(many)
+    expect(out.length).toBeLessThanOrEqual(SKILL_LISTING_BUDGET_CHARS)
+    // Truncation definitely engaged.
+    expect(out.split('\n').every((line) => line.endsWith('…'))).toBe(true)
+    // Every row still carries its own trigger, intact.
+    for (let i = 0; i < 40; i++) {
+      expect(out).toContain(`fires on topic ${i}`)
+    }
+    // The description tail is what got cut, not the trigger.
+    expect(out).not.toContain('DESCRIPTION_TAIL')
   })
 
   it('newline-joins multiple skills', () => {
