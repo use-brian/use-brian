@@ -46,6 +46,14 @@ const CHANNEL_IDENTIFIER = /^[a-z_][a-z0-9_]*$/
 
 const handlers = new Map<string, NotifyHandler>()
 
+/**
+ * Channels whose `LISTEN` succeeded on the CURRENT connection. Cleared on every
+ * reconnect, because a new session inherits no subscriptions. Keeping this
+ * separate from `handlers` is what lets a channel registered while `connect()`
+ * is mid-loop be picked up exactly once.
+ */
+const subscribed = new Set<string>()
+
 let client: pg.Client | null = null
 let status: 'idle' | 'connecting' | 'listening' | 'reconnecting' = 'idle'
 let reconnectTimer: NodeJS.Timeout | null = null
@@ -67,11 +75,13 @@ export function registerNotifyChannel(channel: string, handler: NotifyHandler): 
         'LISTEN cannot bind the channel as a parameter, so it must match /^[a-z_][a-z0-9_]*$/',
     )
   }
-  const alreadyRegistered = handlers.has(channel)
   handlers.set(channel, handler)
-  // Only the first registration needs a LISTEN; a replacement handler rides the
-  // subscription that is already open.
-  if (!alreadyRegistered && status === 'listening' && client) {
+  // A replacement handler rides the subscription that is already open; only a
+  // channel this connection has not yet subscribed needs a LISTEN. `subscribed`
+  // (not `handlers`) is the right guard: it is per-connection, so this stays
+  // correct across reconnects and cannot double-issue against `connect()`'s
+  // in-flight loop.
+  if (status === 'listening' && client && !subscribed.has(channel)) {
     void subscribe(client, channel)
   }
 }
@@ -80,6 +90,7 @@ export function registerNotifyChannel(channel: string, handler: NotifyHandler): 
 async function subscribe(target: pg.Client, channel: string): Promise<boolean> {
   try {
     await target.query(`LISTEN ${channel}`)
+    subscribed.add(channel)
     console.log(`[notify-listener] LISTEN ${channel} active`)
     return true
   } catch (err) {
@@ -122,14 +133,27 @@ async function connect(): Promise<void> {
 
   try {
     await next.connect()
-    status = 'listening'
-    backoffMs = 1_000
     for (const channel of handlers.keys()) {
       // Stop at the first failure: `subscribe` has already scheduled the
       // reconnect and ended this client, so the remaining channels would each
       // throw against a dead client and log a duplicate warning. The reconnect
       // re-subscribes all of them.
-      if (!(await subscribe(next, channel))) break
+      if (!(await subscribe(next, channel))) return
+    }
+    // Only now is the connection actually useful, so only now does it count as
+    // a success. Declaring 'listening' (and resetting the backoff) before the
+    // LISTENs land would make a server that ACCEPTS connections but fails
+    // LISTEN retry at a flat 1s forever instead of climbing to the 30s cap —
+    // a tight reconnect loop against a database that is already struggling,
+    // which is the exact condition this module exists to stay clear of.
+    status = 'listening'
+    backoffMs = 1_000
+    // A channel registered while the loop above was in flight saw
+    // `status !== 'listening'` and skipped its immediate LISTEN. The live Map
+    // iteration usually catches it; this sweep covers the case where it was
+    // added behind the cursor.
+    for (const channel of handlers.keys()) {
+      if (!subscribed.has(channel)) void subscribe(next, channel)
     }
   } catch (err) {
     console.warn('[notify-listener] failed to connect:', err)
@@ -146,6 +170,9 @@ function scheduleReconnect(): void {
     client.end().catch(() => {})
     client = null
   }
+  // A new session inherits no subscriptions, so nothing is subscribed until
+  // the next connect re-issues every LISTEN.
+  subscribed.clear()
 
   const delay = backoffMs
   backoffMs = Math.min(backoffMs * 2, 30_000)
@@ -197,4 +224,5 @@ export async function _shutdownNotifyListener(): Promise<void> {
   status = 'idle'
   backoffMs = 1_000
   handlers.clear()
+  subscribed.clear()
 }

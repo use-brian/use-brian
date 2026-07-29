@@ -27,6 +27,8 @@ type FakeClient = {
 const clients: FakeClient[] = []
 /** Make the next `connect()` reject, simulating a refused connection. */
 let failNextConnect = false
+/** Make every `LISTEN` reject while the TCP connect still succeeds. */
+let failListen = false
 
 function buildFakeClient(): FakeClient {
   const handlers = new Map<string, ((...args: unknown[]) => void)[]>()
@@ -40,6 +42,7 @@ function buildFakeClient(): FakeClient {
     }),
     query: vi.fn(async (text: string) => {
       statements.push(text)
+      if (failListen && text.startsWith('LISTEN')) throw new Error('LISTEN refused')
       return { rows: [], rowCount: 0 }
     }),
     end: vi.fn(async () => {}),
@@ -85,6 +88,7 @@ function listens(): string[] {
 beforeEach(() => {
   clients.length = 0
   failNextConnect = false
+  failListen = false
 })
 
 afterEach(async () => {
@@ -233,6 +237,30 @@ describe('[COMP:platform/notify-listener] shared LISTEN connection', () => {
 
     expect(_getNotifyChannels()).toEqual([])
     expect(clients[0]!.end).toHaveBeenCalled()
+  })
+
+  // Regression: `status = 'listening'` and the backoff reset used to happen
+  // BEFORE the LISTEN queries. A server that accepts connections but rejects
+  // LISTEN therefore looked like a success on every attempt, so the backoff
+  // reset to 1s each time and the module retried at a flat 1s forever instead
+  // of climbing to the 30s cap — a tight reconnect loop against a database that
+  // is, by construction, already struggling.
+  it('backs off exponentially when the connection succeeds but LISTEN fails', async () => {
+    vi.useFakeTimers()
+    failListen = true
+    registerNotifyChannel('brain_events', () => {})
+    startNotifyListener()
+    await vi.waitFor(() => expect(clients).toHaveLength(1))
+
+    // 1st retry after 1s.
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.waitFor(() => expect(clients).toHaveLength(2))
+
+    // 2nd retry must wait 2s, not 1s — proof the backoff climbed.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(clients).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.waitFor(() => expect(clients).toHaveLength(3))
   })
 
   it('rejects a channel name that is not a bare identifier', () => {
