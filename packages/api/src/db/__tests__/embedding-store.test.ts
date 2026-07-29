@@ -27,14 +27,29 @@ let olderRows: { id: string; embed_text: string | null }[] = []
 let checkedOut = 0
 let maxCheckedOut = 0
 
+/** What the budget probe reports: approximate rows already embedded. */
+let embeddedCount = 0
+/** Set to true to make the budget probe report an un-analyzed table. */
+let reltuplesUnavailable = false
+
 const fakeClient = {
   query: vi.fn(async (text: string, values?: unknown[]) => {
     queries.push({ text, values })
+    if (text.includes('reltuples')) {
+      return {
+        rows: [
+          reltuplesUnavailable
+            ? { approx_total: null, unembedded: '0' }
+            : { approx_total: String(embeddedCount + 500), unembedded: '500' },
+        ],
+        rowCount: 1,
+      }
+    }
     if (text.includes('FOR UPDATE SKIP LOCKED')) {
       // The claim is split across two bounded range scans (see
       // embedding-store.ts); serve each half its own fixture so a test can
       // tell them apart.
-      const rows = text.includes('created_at <= now()') ? olderRows : claimRows
+      const rows = /\w+ <= now\(\) - INTERVAL '24 hours'/.test(text) ? olderRows : claimRows
       return { rows, rowCount: rows.length }
     }
     return { rows: [], rowCount: 0 }
@@ -54,8 +69,12 @@ vi.mock('../client.js', () => ({
   }),
 }))
 
-import { createDbEmbeddingStore } from '../embedding-store.js'
-import type { EmbeddingResult } from '@use-brian/core'
+import { createDbEmbeddingStore, __resetEmbedBudgetCache } from '../embedding-store.js'
+import {
+  DEFAULT_EMBED_BUDGET_SEGMENTS,
+  DEFAULT_EMBED_RECENCY_WINDOW_MONTHS,
+  type EmbeddingResult,
+} from '@use-brian/core'
 
 const store = createDbEmbeddingStore()
 
@@ -69,6 +88,9 @@ beforeEach(() => {
   olderRows = []
   checkedOut = 0
   maxCheckedOut = 0
+  embeddedCount = 0
+  reltuplesUnavailable = false
+  __resetEmbedBudgetCache()
   fakeClient.query.mockClear()
   fakeClient.release.mockClear()
 })
@@ -127,8 +149,13 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
       // "no CASE anywhere" check would be primitive-dependent and misleading.
       const orderBy = claim.text.slice(claim.text.indexOf('ORDER BY'))
       expect(orderBy).not.toContain('CASE')
-      expect(orderBy).toMatch(/^ORDER BY created_at ASC/)
-      expect(claim.text).toContain('AND created_at')
+      // The sort key is the primitive's recency column (B5), so assert the
+      // shape rather than a specific column: a bare column, never an
+      // expression — anything over now() is not IMMUTABLE and cannot be
+      // indexed.
+      expect(orderBy).toMatch(/^ORDER BY \w+ ASC/)
+      expect(orderBy).not.toContain('now()')
+      expect(claim.text).toMatch(/AND \w+ [<>]=? now\(\)/)
     }
   })
 
@@ -156,6 +183,108 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     expect(backlog.values).toEqual([2])
   })
 
+  // ── B5: recency expression + embed budget ─────────────────────
+  //
+  // corpus-substrate-hardening §5. Two defects, one mechanism: the tier keyed
+  // on the row-insert clock (so a backfill put the whole archive in the
+  // new-writes bucket), and nothing bounded how much index a bulk backfill
+  // could create.
+
+  it('keys the email corpus on its SENT time, not on the sync clock', async () => {
+    // D6. `created_at` on email_archive_segments is when the sync wrote the
+    // row: the IMAP backfill stamped ~528k historical messages with `now()`,
+    // so a created_at tier matched the entire archive as "new writes".
+    await store.withClaimedRows('email_segment', 10, async () => undefined)
+    for (const claim of claims()) {
+      expect(claim.text).toContain('ORDER BY valid_from ASC')
+      expect(claim.text).toContain("valid_from > now() - INTERVAL '12 months'")
+      expect(claim.text).not.toContain('created_at')
+    }
+  })
+
+  it('keys a primitive whose row IS the event on created_at', async () => {
+    await store.withClaimedRows('memories', 10, async () => undefined)
+    for (const claim of claims()) {
+      expect(claim.text).toContain('ORDER BY created_at ASC')
+      expect(claim.text).toContain(
+        `created_at > now() - INTERVAL '${DEFAULT_EMBED_RECENCY_WINDOW_MONTHS} months'`,
+      )
+    }
+  })
+
+  it('stops claiming once the corpus reaches its embed budget', async () => {
+    // D7: full drain is NOT a goal. A fully embedded email corpus is a ~1.7 GB
+    // HNSW index on an instance with 0.6 GB of RAM, so rows past the ceiling
+    // stay queued and retrieval discloses the partial coverage instead.
+    embeddedCount = DEFAULT_EMBED_BUDGET_SEGMENTS
+    claimRows = [{ id: 'm-1', embed_text: 'would have been embedded' }]
+    let handed: unknown[] | undefined
+    await store.withClaimedRows('email_segment', 100, async (rows) => {
+      handed = rows
+    })
+    expect(handed).toEqual([])
+    expect(claims()).toHaveLength(0)
+  })
+
+  it('drains a synthetic backfill only up to the budget, then stops', async () => {
+    // The backfill shape: every claim returns a full batch, forever. Without a
+    // ceiling this never terminates; with one it stops within a batch of it.
+    embeddedCount = DEFAULT_EMBED_BUDGET_SEGMENTS - 250
+    claimRows = Array.from({ length: 100 }, (_, i) => ({
+      id: `e-${i}`,
+      embed_text: `segment ${i}`,
+    }))
+    let batches = 0
+    for (let tick = 0; tick < 20; tick++) {
+      await store.withClaimedRows('email_segment', 100, async (rows, apply) => {
+        if (rows.length === 0) return
+        batches += 1
+        await apply.commit(
+          rows.map((r) => ({
+            id: r.id,
+            embedding: [0.1],
+            embeddingModelId: 'gemini:gemini-embedding-001',
+            contentHash: r.contentHash,
+          })),
+        )
+      })
+    }
+    // 250 rows of headroom at 100/batch — three batches, then the drain stops
+    // even though the queue still has rows and ticks keep firing.
+    expect(batches).toBe(3)
+  })
+
+  it('proceeds unbudgeted when the table has never been analyzed', async () => {
+    // reltuples is -1/NULL until autovacuum ANALYZEs. A ceiling that guessed
+    // would be worse than one that abstains — the recency window still bounds
+    // the work.
+    reltuplesUnavailable = true
+    claimRows = [{ id: 'm-1', embed_text: 'hello' }]
+    let handed: unknown[] | undefined
+    await store.withClaimedRows('email_segment', 10, async (rows) => {
+      handed = rows
+    })
+    expect(handed).toHaveLength(1)
+  })
+
+  it('measures the budget without scanning for embedding IS NOT NULL', async () => {
+    // The direct count has no index to ride and would seq-scan the 5.6 GB
+    // table this budget exists to protect.
+    await store.withClaimedRows('email_segment', 10, async () => undefined)
+    const probe = queries.find((q) => q.text.includes('reltuples'))
+    expect(probe).toBeDefined()
+    expect(probe!.text).not.toContain('embedding IS NOT NULL')
+    expect(probe!.text).toContain('embedding IS NULL AND embedding_failed_at IS NULL')
+  })
+
+  it('does not re-measure the budget on every tick', async () => {
+    claimRows = []
+    await store.withClaimedRows('memories', 10, async () => undefined)
+    await store.withClaimedRows('memories', 10, async () => undefined)
+    await store.withClaimedRows('memories', 10, async () => undefined)
+    expect(queries.filter((q) => q.text.includes('reltuples'))).toHaveLength(1)
+  })
+
   it('routes each primitive to its own table', async () => {
     for (const [primitive, table] of [
       ['entities', 'FROM entities'],
@@ -173,7 +302,7 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
   it('file_segment embed text prefixes the heading breadcrumb when present', async () => {
     queries.length = 0
     await store.withClaimedRows('file_segment', 10, async () => undefined)
-    const claim = queries.find((q) => q.text.includes('FROM file_segments'))
+    const claim = claims().find((q) => q.text.includes('FROM file_segments'))
     expect(claim).toBeDefined()
     // Breadcrumb joined ' > ' + newline, empty when heading_path = '{}'.
     expect(claim!.text).toContain("array_to_string(heading_path, ' > ')")

@@ -104,6 +104,39 @@ describe('[COMP:api/email-archive-store] insertEmailArchiveMessage', () => {
     expect(segInsert!.params?.[5]).toBe('owner-1') // user_id = owner
   })
 
+  it('stamps segment valid_from with the message SENT time, not the sync clock', async () => {
+    // D6 / B5. `created_at` is when the sync wrote the row, so a backfill
+    // stamps a decade of history with `now()`; the embedding drain keys its
+    // priority tier and its 12-month window on `valid_from` for this corpus.
+    const { calls } = makeTxClient('am-1')
+    await insertEmailArchiveMessage(INPUT)
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    expect(segInsert!.sql).toContain('created_by_user_id, valid_from')
+    expect(segInsert!.params?.[8]).toEqual(INPUT.sentAt)
+  })
+
+  it('clamps a future-dated sent time to now — a skewed Date: header cannot hide the row', async () => {
+    const { calls } = makeTxClient('am-1')
+    const before = Date.now()
+    await insertEmailArchiveMessage({
+      ...INPUT,
+      sentAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    const validFrom = segInsert!.params?.[8] as Date
+    expect(validFrom.getTime()).toBeGreaterThanOrEqual(before)
+    expect(validFrom.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('falls back to now when the message carries no sent time', async () => {
+    const { calls } = makeTxClient('am-1')
+    const before = Date.now()
+    await insertEmailArchiveMessage({ ...INPUT, sentAt: null })
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    const validFrom = segInsert!.params?.[8] as Date
+    expect(validFrom.getTime()).toBeGreaterThanOrEqual(before)
+  })
+
   it('is idempotent on (instance_id, provider_message_id) — a re-synced UID writes nothing', async () => {
     const { calls } = makeTxClient(null) // ON CONFLICT DO NOTHING → no RETURNING row
     const result = await insertEmailArchiveMessage(INPUT)

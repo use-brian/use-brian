@@ -1,0 +1,43 @@
+-- 379_email_archive_embed_queue_valid_from.sql  (OPEN tables -> use-brian/packages/api/migrations/)
+--
+-- Drain-queue index keyed on the email corpus's DOMAIN recency
+-- (docs/plans/corpus-substrate-hardening.md §5 / D6, and
+-- docs/architecture/brain/embeddings.md -> "Worker priority queue").
+--
+-- Migration 378 gave every drainable primitive a partial index on
+-- `created_at`, which is the right key wherever the row IS the event. It is
+-- the wrong key for an imported corpus: `email_archive_segments.created_at`
+-- is the SYNC clock, so the IMAP backfill stamped ~528k historical messages
+-- with the current timestamp. The claim's priority tier ("new writes, last
+-- 24h, first") therefore matched the entire archive at once and defeated
+-- itself for exactly the workload it exists for.
+--
+-- The claim now keys `email_segment` on `valid_from`, which
+-- `insertEmailArchiveMessage` stamps with the message's sent time (bi-
+-- temporally: when the fact became true). Both halves of the split claim and
+-- the 12-month embed window read that column, so it needs its own partial
+-- index or the claim falls back to the scan-and-sort plan that caused the
+-- 2026-07-28 outage.
+--
+-- The 378 index on `created_at` is deliberately LEFT IN PLACE: it is tiny
+-- (partial on the unembedded backlog only) and dropping it is a separate
+-- decision from adding this one. Both shrink toward empty as rows embed.
+--
+-- Rows written before the `valid_from` stamping keep their insert-time value
+-- and so still sort as "just arrived". They are NOT backfilled here on
+-- purpose: an UPDATE across 528k rows of a 5.6 GB table rewrites every index
+-- entry for every row (the embedding column is indexed, so the update cannot
+-- be HOT), which is precisely the write amplification this plan is trying to
+-- avoid. The per-corpus embed budget, not the tier, is what bounds those rows.
+--
+-- CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so this
+-- file has no BEGIN/COMMIT wrapper; migrate.ts detects
+-- CONCURRENTLY-without-BEGIN and runs each statement separately.
+--
+-- Latest applied migration is 378 (embedding_drain_queue_indexes). Filenames
+-- are globally unique across BOTH migration dirs (one shared _migrations
+-- table).
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_email_archive_segments_embed_queue_valid_from
+  ON email_archive_segments (valid_from)
+  WHERE embedding IS NULL AND embedding_failed_at IS NULL;

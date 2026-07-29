@@ -118,12 +118,22 @@ export async function insertEmailArchiveMessage(
       await client.query('COMMIT')
       return { inserted: false, messageId: null, segmentCount: 0 }
     }
+    // `valid_from` is the bi-temporal "when this became true", which for a mail
+    // segment is when the message was SENT — not when we synced it. The
+    // embedding drain keys its priority tier and its 12-month embed window on
+    // this column for `email_segment` (D6): `created_at` is the sync clock, so
+    // a backfill would stamp a decade of history with `now()` and drop the
+    // whole archive into the "new writes first" tier at once. Clamped to the
+    // present, because a future-dated `Date:` header (clock skew, or a forged
+    // one) would otherwise hide the row from any as-of read.
+    const validFrom =
+      input.sentAt && input.sentAt.getTime() < Date.now() ? input.sentAt : new Date()
     for (let i = 0; i < segments.length; i++) {
       await client.query(
         `INSERT INTO email_archive_segments (
            workspace_id, message_id, instance_id, segment_index, segment_text,
-           user_id, assistant_id, sensitivity, created_by_user_id
-         ) VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8)
+           user_id, assistant_id, sensitivity, created_by_user_id, valid_from
+         ) VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9)
          ON CONFLICT (message_id, segment_index) DO NOTHING`,
         [
           input.workspaceId,
@@ -134,6 +144,7 @@ export async function insertEmailArchiveMessage(
           input.ownerUserId,
           sensitivity,
           input.ownerUserId,
+          validFrom,
         ],
       )
     }
