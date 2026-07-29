@@ -526,6 +526,26 @@ describe("[COMP:app-web/block-drag-handle] gripVerticalOffset", () => {
     stubRect(p, 100, 30); // <p> flush with the <li> top
     expect(gripVerticalOffset(li)).toBe(3);
   });
+
+  it("anchors a TASK row's grip to the <p> nested under the content div", () => {
+    // Tiptap's TaskItem node view is `<li><label>…checkbox…</label><div><p>…`,
+    // so the `<p>` is NOT a direct child and `:scope > p` misses it — the metric
+    // then falls through to the `<li>` box (pad-top 0 → 12 − 12 = 0px) and the
+    // grip sits ~3px above the checkbox's centre. Reading `:scope > div > p`
+    // gives the same 3px drop as any other list row.
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    const content = document.createElement("div");
+    const p = document.createElement("p");
+    p.style.paddingTop = "3px";
+    p.style.lineHeight = "24px";
+    p.style.fontSize = "16px";
+    content.appendChild(p);
+    li.append(label, content);
+    stubRect(li, 100, 30);
+    stubRect(p, 100, 30); // content column flush with the row top
+    expect(gripVerticalOffset(li)).toBe(3);
+  });
 });
 
 describe("[COMP:app-web/block-drag-handle] hasLayoutBox", () => {
