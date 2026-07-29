@@ -46,6 +46,7 @@ async function promptForConsent(): Promise<ConsentOutcome> {
 }
 
 const gate = new TaskGate({ prompt: promptForConsent })
+let relayWasReady = false
 
 async function getStored<T = string>(key: string): Promise<T | null> {
   const obj = await ext.storage.local.get(key)
@@ -62,6 +63,14 @@ const client = new RelayClient({
   },
   onCommand: (cmd) => void handleCommand(cmd),
   onStateChange: (state) => {
+    if (state === 'ready') {
+      relayWasReady = true
+    } else if (relayWasReady) {
+      relayWasReady = false
+      gate.stop()
+      boundTabId = null
+      void native.request('stop').catch(() => {})
+    }
     void ext.browserAction.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void ext.browserAction.setBadgeBackgroundColor({ color: '#16a34a' })
   },

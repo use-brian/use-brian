@@ -34,6 +34,7 @@ export type ComputerTask = {
   workspaceId: string;
   createdAt: number;
   backend: "local" | "cloud";
+  connectionState?: "connected" | "disconnected" | "unknown";
 };
 
 export type TakeoverFrame = { data: string; mimeType: string };

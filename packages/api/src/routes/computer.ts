@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Router } from 'express'
 import { z } from 'zod'
-import { createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
+import { BrowserBackendError, createCloudBrowserProvider, registrableSiteOf } from '@use-brian/core'
 import type {
   BrowserProfileStore,
   BrowserProvider,
@@ -61,6 +61,22 @@ const InputEventSchema = z.union([
 
 const ClearanceSchema = z.enum(['public', 'internal', 'confidential'])
 const BackendSchema = z.enum(['local', 'cloud'])
+
+const TERMINAL_LOCAL_ERROR_CODES = new Set([
+  'stopped',
+  'tab_closed',
+])
+const ALREADY_STOPPED_LOCAL_ERROR_CODES = new Set([
+  ...TERMINAL_LOCAL_ERROR_CODES,
+])
+
+function isTerminalLocalTaskError(error: unknown): boolean {
+  return error instanceof BrowserBackendError && TERMINAL_LOCAL_ERROR_CODES.has(error.code)
+}
+
+function isAlreadyStoppedLocalTaskError(error: unknown): boolean {
+  return error instanceof BrowserBackendError && ALREADY_STOPPED_LOCAL_ERROR_CODES.has(error.code)
+}
 
 export type LocalComputerTaskRecord = {
   taskId: string
@@ -146,6 +162,11 @@ export function computerRoutes(deps: {
   provider: SandboxProvider | null
   localProvider?: BrowserProvider | null
   localTasks?: LocalComputerTaskStore | null
+  /** Null means relay status was unavailable, never that the extension disconnected. */
+  localStatus?: ((userId: string) => Promise<{
+    connected: boolean
+    terminalEvent: 'stopped' | 'tab_closed' | null
+  } | null>) | null
   vault: SessionVault | null
   /** Closed store; null → the Profile-Management surface reports unconfigured. */
   profileStore: BrowserProfileStore | null
@@ -194,7 +215,19 @@ export function computerRoutes(deps: {
       return
     }
     const cloudTasks = deps.orchestrator ? await deps.orchestrator.listActiveTasks(workspaceId) : []
-    const localTasks = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
+    let localTasks = deps.localTasks?.listActiveByWorkspace(workspaceId) ?? []
+    const callerLocalTasks = localTasks.filter((task) => task.userId === (req.userId as string))
+    if (callerLocalTasks.length > 0 && deps.localStatus) {
+      const status = await deps.localStatus(req.userId as string)
+      if (status?.terminalEvent) {
+        for (const task of callerLocalTasks) deps.localTasks?.complete(task.sessionId)
+        localTasks = localTasks.filter((task) => task.userId !== (req.userId as string))
+      } else if (status && !status.connected) {
+        // Hide during reconnect, but retain the record so Stop can still clear
+        // it and a successful reconnect can restore it without a new task.
+        localTasks = localTasks.filter((task) => task.userId !== (req.userId as string))
+      }
+    }
     const localSessions = new Set(localTasks.map((task) => task.sessionId))
     res.json({
       tasks: [
@@ -223,6 +256,16 @@ export function computerRoutes(deps: {
       res.status(404).json({ error: 'No active computer task for this session' })
       return
     }
+    let connectionState: 'connected' | 'disconnected' | 'unknown' | undefined
+    if (task.backend === 'local' && deps.localStatus) {
+      const status = await deps.localStatus(task.task.userId)
+      if (status?.terminalEvent) {
+        deps.localTasks?.complete(task.task.sessionId)
+        res.status(404).json({ error: 'No active computer task for this session' })
+        return
+      }
+      connectionState = status ? (status.connected ? 'connected' : 'disconnected') : 'unknown'
+    }
     res.json({
       taskId: task.task.taskId,
       status: task.task.status,
@@ -231,6 +274,7 @@ export function computerRoutes(deps: {
       workspaceId: task.task.workspaceId,
       createdAt: task.task.createdAt,
       backend: task.backend,
+      ...(connectionState ? { connectionState } : {}),
     })
   })
 
@@ -286,6 +330,9 @@ export function computerRoutes(deps: {
       }
       res.json(frame)
     } catch (err) {
+      if (task.backend === 'local' && isTerminalLocalTaskError(err)) {
+        deps.localTasks?.complete(task.task.sessionId)
+      }
       res.status(502).json({ error: err instanceof Error ? err.message : 'frame capture failed' })
     }
   })
@@ -366,6 +413,9 @@ export function computerRoutes(deps: {
       }
       res.json({ ok: true })
     } catch (err) {
+      if (task.backend === 'local' && isTerminalLocalTaskError(err)) {
+        deps.localTasks?.complete(task.task.sessionId)
+      }
       res.status(502).json({ error: err instanceof Error ? err.message : 'input relay failed' })
     }
   })
@@ -414,12 +464,14 @@ export function computerRoutes(deps: {
 
   // Close-to-stop (§4.15/§4.8): ends the task now — capture + pull + kill.
   router.post('/tasks/:sessionId/complete', async (req, res) => {
+    const outcome = req.body?.outcome === 'failed' ? 'failed' : 'completed'
     const task = await ownedTask(req.params.sessionId, req.userId as string)
     if (!task) {
-      res.status(404).json({ error: 'No active computer task for this session' })
+      // Idempotent close: a crashed browser may already have been retired by
+      // frame/list liveness cleanup before the user presses Stop.
+      res.json({ ok: true, status: outcome })
       return
     }
-    const outcome = req.body?.outcome === 'failed' ? 'failed' : 'completed'
     if (task.backend === 'local') {
       if (!deps.localProvider) {
         res.status(501).json({ error: 'Local browser control is not supported by this deployment' })
@@ -433,6 +485,11 @@ export function computerRoutes(deps: {
           taskId: task.task.taskId,
         })
       } catch (err) {
+        if (isAlreadyStoppedLocalTaskError(err)) {
+          deps.localTasks?.complete(req.params.sessionId)
+          res.json({ ok: true, status: outcome })
+          return
+        }
         res.status(502).json({ error: err instanceof Error ? err.message : 'local browser stop failed' })
         return
       }
@@ -476,8 +533,10 @@ export function computerRoutes(deps: {
           taskId: local.taskId,
         })
       } catch (err) {
-        res.status(502).json({ error: err instanceof Error ? err.message : 'local browser stop failed' })
-        return
+        if (!isAlreadyStoppedLocalTaskError(err)) {
+          res.status(502).json({ error: err instanceof Error ? err.message : 'local browser stop failed' })
+          return
+        }
       }
       deps.localTasks?.complete(local.sessionId)
     }

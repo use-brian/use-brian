@@ -62,12 +62,13 @@ describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => 
 describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
   it('resolves the active task and maps 404 to null (the "no task" empty state)', async () => {
     mockFetch.mockResolvedValueOnce(
-      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1, backend: 'local' }),
+      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1, backend: 'local', connectionState: 'disconnected' }),
     )
     const task = await getComputerTask('sess-1')
     expect(task?.status).toBe('running')
     expect(task?.profileId).toBe('p1')
     expect(task?.backend).toBe('local')
+    expect(task?.connectionState).toBe('disconnected')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/api/computer/tasks/sess-1')
 
     mockFetch.mockResolvedValueOnce(respond(404))

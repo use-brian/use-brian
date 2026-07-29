@@ -308,6 +308,19 @@ export default function ComputerTakeoverPage(props: {
         gateRef.current?.push(`data:${frame.mimeType};base64,${frame.data}`);
         setStalled(false);
       } else {
+        const active = await getComputerTask(sessionId).catch(() => undefined);
+        if (cancelled) return;
+        if (active === null) {
+          setTask(null);
+          return;
+        }
+        if (active) {
+          setTask((current) =>
+            current && current !== "loading" && current.connectionState === active.connectionState
+              ? current
+              : active,
+          );
+        }
         setStalled(true);
       }
       timer = setTimeout(() => void tick(), FRAME_INTERVAL_MS);
@@ -887,7 +900,9 @@ export default function ComputerTakeoverPage(props: {
         ) : null}
         {stalled ? (
           <div className="absolute inset-x-0 bottom-0 bg-background/80 px-3 py-1.5 text-center text-xs text-muted-foreground">
-            {t.computer.frameStalled}
+            {task.connectionState === "disconnected"
+              ? t.computer.browserDisconnected
+              : t.computer.frameStalled}
           </div>
         ) : null}
       </div>
