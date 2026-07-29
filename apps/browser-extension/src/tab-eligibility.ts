@@ -18,6 +18,9 @@
 type TabIneligibility = 'restricted_url' | 'no_active_tab'
 
 export type TabEligibility = { eligible: true } | { eligible: false; reason: TabIneligibility }
+export type TabEligibilityOptions = { allowFirefoxNewTab?: boolean }
+
+const FIREFOX_NEW_TAB_URLS = new Set(['about:blank', 'about:home', 'about:newtab'])
 
 /**
  * Resolve consent against a normal browser window, never an extension popup.
@@ -54,11 +57,20 @@ const RESTRICTED_SCHEMES = [
 /** Chrome protects the Web Store from extensions, the debugger included. */
 const RESTRICTED_HOSTS = new Set(['chromewebstore.google.com', 'chrome.google.com'])
 
-export function eligibilityOf(url: string | null | undefined): TabEligibility {
+export function eligibilityOf(
+  url: string | null | undefined,
+  options: TabEligibilityOptions = {},
+): TabEligibility {
   const trimmed = (url ?? '').trim()
   if (!trimmed) return { eligible: false, reason: 'no_active_tab' }
 
   const lower = trimmed.toLowerCase()
+  // Firefox's native BiDi companion can navigate an empty/new-tab context to
+  // an ordinary website. Chromium still uses its stricter debugger posture,
+  // and every other privileged Firefox about: page remains blocked.
+  if (options.allowFirefoxNewTab && FIREFOX_NEW_TAB_URLS.has(lower)) {
+    return { eligible: true }
+  }
   // Prefix-match the raw string rather than parsing: a scheme is only blocked
   // when the page IS one, never when a query parameter merely mentions one.
   if (RESTRICTED_SCHEMES.some((scheme) => lower.startsWith(scheme))) {

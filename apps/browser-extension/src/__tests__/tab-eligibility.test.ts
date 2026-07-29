@@ -49,6 +49,17 @@ describe('[COMP:ext/agent] Controllable-tab eligibility', () => {
     }
   })
 
+  it('allows only Firefox empty/new-tab launch pages when explicitly requested', () => {
+    for (const url of ['about:blank', 'about:home', 'about:newtab']) {
+      expect(eligibilityOf(url, { allowFirefoxNewTab: true }), url).toEqual({ eligible: true })
+      expect(eligibilityOf(url), url).toEqual({ eligible: false, reason: 'restricted_url' })
+    }
+    expect(eligibilityOf('about:config', { allowFirefoxNewTab: true })).toEqual({
+      eligible: false,
+      reason: 'restricted_url',
+    })
+  })
+
   it('rejects extension pages, including our own popup and allow window', () => {
     // Prod logged 10x "Cannot access a chrome-extension:// URL" AFTER consent:
     // these passed the old chrome://-only check, then died inside CDP with an

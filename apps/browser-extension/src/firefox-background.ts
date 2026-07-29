@@ -21,7 +21,7 @@ function hostOf(url: string): string {
 
 async function promptForConsent(): Promise<ConsentOutcome> {
   const activeTab = await activeTabForConsent((options) => ext.windows.getLastFocused(options))
-  const eligibility = eligibilityOf(activeTab?.url)
+  const eligibility = eligibilityOf(activeTab?.url, { allowFirefoxNewTab: true })
   if (!eligibility.eligible) return { allowed: false, reason: eligibility.reason }
   if (activeTab?.id == null) return { allowed: false, reason: 'no_active_tab' }
   const targetTabId = activeTab.id
