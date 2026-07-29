@@ -2,10 +2,11 @@
  * [COMP:app-web/sidebar-panel-feed] Feed rail — static render contract.
  *
  * vitest in app-web is node-only — `renderToString` + module mocks
- * (next/navigation, the sidebar-data provider). Effects never run, so the
- * inbox badge (an effect-driven fetch) stays at zero here; what's asserted
- * is the edition-aware nav structure: Create rows always; hosted additionally
- * renders one Platforms row per target platform.
+ * (next/navigation, the sidebar-data provider). Effects never run, so anything
+ * effect-driven (the post list, the resolved current platform, the review
+ * badge) stays at its initial value here; what is asserted is the platform-led
+ * nav STRUCTURE (feed-revamp.md §8a, D13/D14): Company above a platform
+ * switcher, then the platform-drafts group, then the hosted Platforms group.
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -21,6 +22,7 @@ const sidebarDataRef = vi.hoisted(
 vi.mock("next/navigation", () => ({
   usePathname: () => pathnameRef.current,
   useRouter: () => ({ push: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
   useSidebarData: () => sidebarDataRef.current,
@@ -60,57 +62,75 @@ function render(profiles: FeedProfile[] | null, pathname: string): string {
 }
 
 describe("[COMP:app-web/sidebar-panel-feed] FeedSidebarPanel", () => {
-  it("renders the Create rows with feedPath hrefs", () => {
+  it("renders Company above Platform above Platform drafts", () => {
     const html = render([profile("threads", "acme")], "/w/ws-1/feed");
-    expect(html).toContain('href="/w/ws-1/feed"');
-    expect(html).toContain('href="/w/ws-1/feed/voice"');
-    expect(html).toContain('href="/w/ws-1/feed/drafts"');
-    expect(html).toContain('href="/w/ws-1/feed/inbox"');
-    expect(html).toContain('href="/w/ws-1/feed/ready"');
+    const company = html.indexOf(en.feedPage.groups.company);
+    const platform = html.indexOf(en.feedPage.groups.platform);
+    const drafts = html.indexOf(en.feedPage.groups.drafts);
+    expect(company).toBeGreaterThan(-1);
+    // Scope narrows as you descend; the order carries that meaning.
+    expect(platform).toBeGreaterThan(company);
+    expect(drafts).toBeGreaterThan(platform);
   });
 
-  it("renders one row per target platform: connected to insights, unconnected to connection", () => {
+  it("puts company voice and the plan calendar in the Company group", () => {
     const html = render([profile("threads", "acme")], "/w/ws-1/feed");
-    // Connected Threads → insights + handle.
+    expect(html).toContain('href="/w/ws-1/feed/voice"');
+    expect(html).toContain('href="/w/ws-1/feed"');
+  });
+
+  it("scopes the platform voice row to the current platform", () => {
+    // The URL is authoritative when it carries a platform, so the row and the
+    // pane can never disagree.
+    const html = render(
+      [profile("threads", "acme")],
+      "/w/ws-1/feed/twitter/voice",
+    );
+    expect(html).toContain('href="/w/ws-1/feed/twitter/voice"');
+  });
+
+  it("offers a New post entry under the drafts group", () => {
+    const html = render([profile("threads", "acme")], "/w/ws-1/feed");
+    expect(html).toContain(en.feedPage.posts.newPost);
+  });
+
+  // The queue page is retired (D14) — the list is the sidebar.
+  it("no longer links a standalone posts queue", () => {
+    const html = render([profile("threads", "acme")], "/w/ws-1/feed");
+    expect(html).not.toContain('href="/w/ws-1/feed/posts"');
+    expect(html).not.toContain('href="/w/ws-1/feed/drafts"');
+    expect(html).not.toContain('href="/w/ws-1/feed/inbox"');
+  });
+
+  it("renders one hosted row per target platform with its connection state", () => {
+    const html = render([profile("threads", "acme")], "/w/ws-1/feed");
     expect(html).toContain('href="/w/ws-1/feed/threads/insights"');
     expect(html).toContain("acme");
-    // Unconnected connectable (X) → connection page.
     expect(html).toContain('href="/w/ws-1/feed/twitter/connection"');
-    // Create-only targets → connection page (coming-soon stub) + label.
     expect(html).toContain('href="/w/ws-1/feed/instagram/connection"');
-    expect(html).toContain('href="/w/ws-1/feed/xhs/connection"');
     expect(html).toContain(en.feedPage.platformStatusComingSoon);
   });
 
-  it("expands sub-rows only inside a connected platform's path", () => {
-    const home = render([profile("threads", "acme")], "/w/ws-1/feed");
-    expect(home).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
+  it("expands hosted sub-rows only inside a connected platform's path", () => {
+    const outside = render([profile("threads", "acme")], "/w/ws-1/feed");
+    expect(outside).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
     const inside = render(
       [profile("threads", "acme"), profile("twitter", "acmex")],
       "/w/ws-1/feed/twitter/insights",
     );
     expect(inside).toContain('href="/w/ws-1/feed/twitter/inspiration"');
     expect(inside).toContain('href="/w/ws-1/feed/twitter/settings"');
-    // The other platform stays collapsed.
     expect(inside).not.toContain('href="/w/ws-1/feed/threads/inspiration"');
   });
 
-  it("still renders the platform rows with no connected profiles", () => {
-    const html = render([], "/w/ws-1/feed");
-    expect(html).toContain('href="/w/ws-1/feed/drafts"');
-    expect(html).toContain('href="/w/ws-1/feed/threads/connection"');
-    expect(html).toContain(en.feedPage.platformStatusNotConnected);
-    expect(html).toContain(en.feedPage.platformStatusComingSoon);
-  });
-
-  it("keeps Create but hides the hosted Platforms group in OSS", () => {
+  it("keeps Company and Platform but hides the hosted group in OSS", () => {
     const previous = process.env.NEXT_PUBLIC_USEBRIAN_EDITION;
     try {
       process.env.NEXT_PUBLIC_USEBRIAN_EDITION = "oss";
       const html = render([], "/w/ws-1/feed");
-      expect(html).toContain('href="/w/ws-1/feed/drafts"');
-      expect(html).toContain('href="/w/ws-1/feed/inbox"');
-      expect(html).toContain('href="/w/ws-1/feed/ready"');
+      expect(html).toContain(en.feedPage.groups.company);
+      expect(html).toContain(en.feedPage.groups.platform);
+      expect(html).toContain(en.feedPage.groups.drafts);
       expect(html).not.toContain('href="/w/ws-1/feed/threads/connection"');
       expect(html).not.toContain(en.feedPage.groups.platforms);
     } finally {

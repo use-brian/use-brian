@@ -13,10 +13,13 @@
  *   - channels   → the channel webhook (`packages/api/.../routes/slack.ts`).
  *   - pages      → `workflow/page-event-trigger.ts` (the saved-views store
  *     write path — a doc page created / updated / moved under a watched
- *     parent).
+ *     parent);
+ *   - tasks      → `workflow/task-event-trigger.ts` (the task write path);
+ *   - knowledge  → `workflow/knowledge-event-trigger.ts` (the KB store's
+ *     write chokepoints — sync worker, assistant write-through, manual edits).
  * Each producer normalizes its native event into a `DispatchEvent`; the
  * dispatcher never knows whether an event came from a poller, a webhook, or a
- * page write. Connectors, channels, and pages are equal first-class sources.
+ * page write. Every source kind is equally first-class.
  *
  * Design — ports over imports. `packages/core` stays pg-free; the API
  * package fulfils `findEventTriggeredWorkflows` (a workspace-scoped read of
@@ -56,8 +59,8 @@ export type DispatchEvent = {
   actorId: string | null
   /**
    * Sub-channel within the source (Slack channel, GitHub repo) — matched by
-   * `EventMatch.inChannels`. For a `page` / `task` source this carries the
-   * primary lifecycle action (`created` | `updated` | …).
+   * `EventMatch.inChannels`. For a `page` / `task` / `knowledge` source this
+   * carries the primary lifecycle action (`created` | `updated` | …).
    */
   channelId: string | null
   /**
@@ -72,9 +75,10 @@ export type DispatchEvent = {
   /** Entities the event mentions — matched by `EventMatch.mentions`. */
   mentions: string[]
   /**
-   * Event tags — matched by `EventMatch.tags` (overlap). Only `task` events
-   * carry these: the full tag set on `created`, the ADDED set on updates
-   * (appearance semantics — see workflow.md → "Task event source").
+   * Event tags — matched by `EventMatch.tags` (overlap). Only `task` and
+   * `knowledge` events carry these: for tasks the full tag set on `created`
+   * and the ADDED set on updates (appearance semantics — see workflow.md →
+   * "Task event source"); for knowledge the entry's frontmatter tags.
    */
   tags?: string[]
   /** Whether a bot authored the event — gated by `EventMatch.fromBots`. */
@@ -248,6 +252,11 @@ function sourceMatches(event: EventSourceRef, ref: EventSourceRef): boolean {
     // dispatch matches; `match` carries all the selectivity.
     return true
   }
+  if (event.type === 'knowledge' && ref.type === 'knowledge') {
+    // Id-less source, same reasoning as `task`: a workspace's KB is one
+    // corpus even when several sources feed it.
+    return true
+  }
   return false
 }
 
@@ -333,12 +342,22 @@ function buildInput(event: DispatchEvent): WorkflowEventInput {
       channelId: event.channelId,
       actorId: event.actorId,
     }
-  } else {
+  } else if (src.type === 'task') {
     trigger = {
       sourceType: 'task',
       provider: 'task',
       // For a task source `channelId` is the primary lifecycle action; the
       // full action set lives in the payload (`input.event.actions`).
+      channelId: event.channelId,
+      actorId: event.actorId,
+    }
+  } else {
+    trigger = {
+      sourceType: 'knowledge',
+      provider: 'knowledge',
+      // For a knowledge source `channelId` is the lifecycle action; the
+      // entry's id + path live in the payload (`input.event.entryId` /
+      // `input.event.path`).
       channelId: event.channelId,
       actorId: event.actorId,
     }

@@ -237,6 +237,11 @@ export type CreateStagedSkillCreationParams = {
     slug: string
     name: string
     description: string
+    /** The skill's trigger condition. Required by `skill_manage`'s own input
+     *  schema (an assistant may not propose a skill it cannot say when to
+     *  use), optional here so approvals staged before the field existed
+     *  still materialise at approve time. */
+    whenToUse?: string
     content: string
     supportFiles?: Array<{
       kind: 'reference' | 'template' | 'script'

@@ -53,6 +53,7 @@ import { WorkspaceContextProvider, type WorkspaceContextValue } from "@/lib/work
 import { CustomThemesProvider } from "@/lib/custom-themes";
 import { DocSidebarDataProvider } from "@/components/doc/doc-sidebar-data";
 import { BrainSurfaceProvider } from "@/contexts/brain-surface-context";
+import { PrimaryAssistantProvider } from "@/contexts/primary-assistant";
 import { WorkspaceChrome } from "@/components/doc/workspace-chrome";
 
 // Surface layouts + pages — reused verbatim from the Next route tree so the
@@ -407,6 +408,9 @@ function WorkspaceShell() {
     <WorkspaceContextProvider value={ctx.value}>
       <CustomThemesProvider workspaceId={workspaceId}>
         <div className="flex h-screen w-full overflow-hidden bg-background">
+          {/* Mirrors the Next workspace layout: one primary-assistant
+              resolution shared by the chat dock and the doc surface. */}
+          <PrimaryAssistantProvider workspaceId={workspaceId}>
           <DocSidebarDataProvider workspaceId={workspaceId}>
             <BrainSurfaceProvider workspaceId={workspaceId}>
               <WorkspaceChrome workspaceId={workspaceId}>
@@ -426,6 +430,7 @@ function WorkspaceShell() {
               </WorkspaceChrome>
             </BrainSurfaceProvider>
           </DocSidebarDataProvider>
+          </PrimaryAssistantProvider>
         </div>
       </CustomThemesProvider>
     </WorkspaceContextProvider>

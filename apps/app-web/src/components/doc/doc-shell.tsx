@@ -77,6 +77,8 @@ import {
   type ViewMetadata,
 } from "@/lib/api/views";
 import { getUserInfo } from "@/lib/user";
+import { loadSurfaceCache, readSurfaceCache } from "@/lib/surface-cache";
+import { docPageCacheKey } from "@/lib/surface-prefetch";
 import { buildBreadcrumb } from "@/lib/sidebar-tree";
 import { useT, format } from "@/lib/i18n/client";
 import { useWorkspaceContext } from "@/lib/workspace-context";
@@ -645,24 +647,41 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     }
     let cancelled = false;
     setActiveError(null);
-    getView(urlViewId)
-      .then((meta) => {
+
+    // Stale-while-revalidate. A page the user has opened before (or hovered in
+    // the sidebar, which warms the same key) paints its title/icon/chrome on
+    // this frame instead of after a round trip — the header skeleton below only
+    // shows on a genuinely cold page. The revalidation always runs, so a rename
+    // or icon change made elsewhere corrects itself one round trip later.
+    const cacheKey = docPageCacheKey(urlViewId);
+    const adopt = (meta: ViewMetadata) => {
+      setActiveView(meta);
+      // Record the open — covers deep links / direct loads that don't
+      // route through `navigateToView` (saved-only filter happens at
+      // render time).
+      pushRecent(meta.id);
+      if (meta.state === "draft") {
+        recordPrune(meta.id, meta.autoPruneAt);
+      }
+    };
+    const cached = readSurfaceCache<ViewMetadata>(cacheKey).data;
+    if (cached) adopt(cached);
+
+    void loadSurfaceCache<ViewMetadata>(cacheKey, () => getView(urlViewId)).then(
+      (meta) => {
         if (cancelled) return;
-        setActiveView(meta);
-        // Record the open — covers deep links / direct loads that don't
-        // route through `navigateToView` (saved-only filter happens at
-        // render time).
-        pushRecent(meta.id);
-        if (meta.state === "draft") {
-          recordPrune(meta.id, meta.autoPruneAt);
+        if (meta) {
+          adopt(meta);
+          return;
         }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        const message = err instanceof Error ? err.message : String(err);
-        setActiveError(message);
+        // The fetch failed. If a cached copy is already on screen, leave the
+        // user reading it rather than replacing a working page with an error.
+        if (cached) return;
+        const err = readSurfaceCache(cacheKey).error;
+        setActiveError(err instanceof Error ? err.message : String(err));
         setActiveView(null);
-      });
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -748,10 +767,10 @@ export function DocShell({ workspaceId, assistantId }: ShellProps) {
     const desktop = w.usebrianDesktop ?? w.sidanclawDesktop;
     if (!desktop) return;
     document.documentElement.classList.add("is-canvas-desktop");
-    // Windows keeps a standard OS frame (no macOS traffic lights), so zero the
-    // title-bar inset via `is-canvas-desktop-win` — see globals.css.
-    if (desktop.platform === "win32") {
-      document.documentElement.classList.add("is-canvas-desktop-win");
+    // Windows and Linux keep a standard OS frame (no macOS traffic lights), so
+    // zero the title-bar inset — see globals.css.
+    if (desktop.platform && desktop.platform !== "darwin") {
+      document.documentElement.classList.add("is-canvas-desktop-standard-frame");
     }
   }, []);
 

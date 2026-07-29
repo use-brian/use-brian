@@ -56,6 +56,14 @@ import { format } from "@/lib/i18n/format";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
+/**
+ * The default sticky channel: one tuning conversation per (assistant,
+ * operator). The Plan surface overrides it with `"plan"` so the marketing
+ * plan gets its own thread — and, because that session is created with
+ * `mode='plan'`, its own `proposePlan` cardboard tool (feed-revamp.md D9).
+ * Mixing the two in one thread would put a month of scheduling context in
+ * front of every voice question.
+ */
 const TUNING_CHANNEL_ID = "tuning";
 
 /** Persisted across sessions so the operator's model choice sticks. */
@@ -98,15 +106,52 @@ export const TuningChatPanel = forwardRef<
     suggestions?: string[];
     /** When provided, the header renders a collapse button (floating shell). */
     onClose?: () => void;
+    /** Sticky channel to resume. Defaults to the tuning conversation. */
+    channelId?: string;
+    /**
+     * Resume THIS session instead of looking one up by channel. The post
+     * editor hosts a per-post refine chat, which is a session id, not a
+     * sticky channel (feed-revamp.md D15).
+     */
+    sessionId?: string;
+    /** Fired when a turn finishes, so a host can re-read what it produced. */
+    onTurnComplete?: () => void;
+    /** Override the panel's name. The post editor hosts a REFINE chat, not
+     *  the voice-tuning chat, and the header is the only thing that says so. */
+    title?: string;
+    /** Override the composer placeholder for the same reason. */
+    composerPlaceholder?: string;
+    /**
+     * Render the `budget_exhausted` plan gate. It is a billing state, not a
+     * stream crash, so the host owns its presentation (D18); without this the
+     * message falls through to the generic error strip.
+     */
+    renderPlanGate?: (message: string) => React.ReactNode;
   }
 >(function TuningChatPanel(props, ref) {
-  const { assistantId, assistantName, workspaceId, headline, suggestions, onClose } = props;
+  const {
+    assistantId,
+    assistantName,
+    workspaceId,
+    headline,
+    suggestions,
+    onClose,
+    channelId = TUNING_CHANNEL_ID,
+    sessionId: fixedSessionId,
+    onTurnComplete,
+    renderPlanGate,
+    title: titleOverride,
+    composerPlaceholder,
+  } = props;
 
   const t = useT().feedPage.tuningChat;
   const session = useChatSession();
   const stream = useMessageStream();
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The server's machine code for the last error. `budget_exhausted` is a
+  // billing STATE, not a stream crash, so the host renders it (D18).
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<StagedAttachment[]>([]);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   // Model tier. Persisted across sessions; gated by the workspace plan
@@ -203,13 +248,15 @@ export const TuningChatPanel = forwardRef<
     setModel((m) => (m === "standard" ? "pro" : m));
   }, [workspacePlan]);
 
-  // Resume the persisted tuning session for this user+assistant — same
+  // Resume the persisted session for this user+assistant+channel — same
   // semantics as feed-web's standalone /chat page (channel_id='tuning').
   useEffect(() => {
     if (!assistantId) return;
     let cancelled = false;
     (async () => {
-      const sessionId = await fetchFeedSessionIdByChannel(assistantId, TUNING_CHANNEL_ID);
+      const sessionId =
+        fixedSessionId
+        ?? (await fetchFeedSessionIdByChannel(assistantId, channelId));
       if (cancelled || !sessionId) return;
       session.setSession(sessionId);
 
@@ -228,7 +275,7 @@ export const TuningChatPanel = forwardRef<
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assistantId]);
+  }, [assistantId, channelId, fixedSessionId]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -251,6 +298,7 @@ export const TuningChatPanel = forwardRef<
       setInput("");
       setAttachments([]);
       setError(null);
+      setErrorCode(null);
       setStatusMessage(null);
       session.dispatch({ type: "stream/start" });
 
@@ -262,8 +310,10 @@ export const TuningChatPanel = forwardRef<
         body: {
           message: trimmed,
           assistantId,
-          sessionId: sessionIdRef.current ?? undefined,
-          channelId: TUNING_CHANNEL_ID,
+          sessionId: fixedSessionId ?? sessionIdRef.current ?? undefined,
+          // A fixed session is addressed by id; sending a channel too would
+          // ask the resume path to reconcile two different identities.
+          ...(fixedSessionId ? {} : { channelId }),
           model,
           // Forward the research-mode toggle. The server upgrades to the
           // coordinator + max-tier model + higher turn ceiling, gated by
@@ -343,7 +393,15 @@ export const TuningChatPanel = forwardRef<
                 setResearchExhausted(true);
                 setResearchMode(false);
               }
-              setError((data.error as string | undefined) ?? t.streamError);
+              // The server sends `message` on gate errors and `error` on
+              // failures; reading only one swallowed the plan-gate copy into
+              // a generic "stream error".
+              setError(
+                (data as { message?: string }).message
+                ?? (data.error as string | undefined)
+                ?? t.streamError,
+              );
+              setErrorCode((data.code as string | undefined) ?? null);
               setStatusMessage(null);
               session.dispatch({ type: "stream/abort" });
               break;
@@ -364,6 +422,7 @@ export const TuningChatPanel = forwardRef<
           } else {
             session.dispatch({ type: "stream/abort" });
           }
+          onTurnComplete?.();
         },
         onError: (err) => {
           setError(err instanceof Error ? err.message : t.streamFailed);
@@ -404,6 +463,7 @@ export const TuningChatPanel = forwardRef<
       const localId = `voice-${Date.now()}`;
       setAttachments((prev) => [...prev, { localId, fileName: file.name, status: "uploading" }]);
       setError(null);
+      setErrorCode(null);
 
       const formData = new FormData();
       formData.append("files", file);
@@ -485,7 +545,7 @@ export const TuningChatPanel = forwardRef<
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold tracking-tight">
-                {t.title}
+                {titleOverride ?? t.title}
               </span>
               <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-primary">
                 {t.live}
@@ -594,11 +654,13 @@ export const TuningChatPanel = forwardRef<
             </div>
           )}
 
-          {error && (
+          {error && errorCode === "budget_exhausted" && renderPlanGate ? (
+            renderPlanGate(error)
+          ) : error ? (
             <div className="rounded-xl border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">
               {error}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -614,7 +676,7 @@ export const TuningChatPanel = forwardRef<
                     ? "border-destructive/40 text-destructive"
                     : a.status === "uploading"
                       ? "border-border text-muted-foreground"
-                      : "border-emerald-500/40 text-emerald-300")
+                      : "border-emerald-500/40 text-emerald-700 dark:text-emerald-300")
                 }
               >
                 <MicDot status={a.status} />
@@ -636,7 +698,7 @@ export const TuningChatPanel = forwardRef<
               // Typeable while the reply streams — `onSend` no-ops on
               // `stream.inFlight()`, so Enter can't double-send; the message
               // list carries the thinking indicator.
-              placeholder={t.composerPlaceholder}
+              placeholder={composerPlaceholder ?? t.composerPlaceholder}
               rows={1}
               className="w-full bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground/60 resize-none outline-none min-h-[24px] max-h-[140px] py-0.5 leading-relaxed"
               style={{ fieldSizing: "content" } as React.CSSProperties}
@@ -727,7 +789,7 @@ function EmptyState({
     : [t.tuningChat.suggestion1, t.tuningChat.suggestion2, t.tuningChat.suggestion3];
   return (
     <div className="space-y-3 animate-fade-in">
-      <div className="rounded-xl border border-primary/20 bg-gradient-to-br from-primary/[0.07] via-primary/[0.03] to-transparent p-3.5">
+      <div className="rounded-xl border border-border/60 bg-card p-3.5">
         <div className="flex items-start gap-2.5">
           <span className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary">
             <SparkIcon />

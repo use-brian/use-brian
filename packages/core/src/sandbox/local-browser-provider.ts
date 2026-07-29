@@ -11,6 +11,7 @@ import {
   BrowserBackendError,
   BrowserNavigateResultSchema,
   BrowserSnapshotSchema,
+  TakeoverFrameSchema,
   BrowserUrlResultSchema,
   NO_EXTENSION_MESSAGE,
   NO_EXTENSION_REMEDY,
@@ -18,6 +19,7 @@ import {
   type BrowserCallContext,
   type BrowserProvider,
   type RelayCommandTransport,
+  type TakeoverInputEvent,
 } from './types.js'
 
 const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
@@ -29,6 +31,9 @@ const KNOWN_ERROR_CODES: ReadonlySet<string> = new Set([
   'detached',
   'consent_denied',
   'no_eligible_tab',
+  'firefox_companion_missing',
+  'firefox_restart_required',
+  'unsupported_browser',
   'stale_ref',
   'backend_error',
 ])
@@ -83,6 +88,12 @@ export function createLocalBrowserProvider(deps: {
     },
     async currentUrl(ctx) {
       return BrowserUrlResultSchema.parse(await send(ctx, 'currentUrl'))
+    },
+    async nextTakeoverFrame(ctx) {
+      return TakeoverFrameSchema.parse(await send(ctx, 'captureFrame'))
+    },
+    async sendTakeoverInput(ctx, event: TakeoverInputEvent) {
+      await send(ctx, 'takeoverInput', { event })
     },
     async stop(ctx) {
       await send(ctx, 'stop')

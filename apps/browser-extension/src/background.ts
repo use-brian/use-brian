@@ -7,7 +7,7 @@
 import { RelayClient } from './relay-client.js'
 import { TabExecutor, ExecutorError, isDetachedError, retryableAfterReattach } from './executor.js'
 import { TaskGate, CONSENT_PROMPT_TIMEOUT_MS, type ConsentOutcome } from './task-gate.js'
-import { eligibilityOf } from './tab-eligibility.js'
+import { activeTabForConsent, eligibilityOf } from './tab-eligibility.js'
 import { credentialsForConfigure, isTrustedPairingOrigin, type PairRequest } from './pairing.js'
 import { hasBrowserControl } from './browser-control-permission.js'
 
@@ -34,7 +34,7 @@ async function openGrantWindow(): Promise<void> {
 let pendingConsent: ((res: { allowed: boolean }) => void) | null = null
 
 async function promptForConsent(): Promise<ConsentOutcome> {
-  const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
+  const activeTab = await activeTabForConsent((options) => chrome.windows.getLastFocused(options))
   // An unattachable page is NOT a refusal. Reporting it as one told users they
   // had declined a prompt never shown, and sent the assistant chasing a consent
   // problem instead of saying "switch to the page you want me to work on".
@@ -74,6 +74,7 @@ function hostOf(url: string): string {
 }
 
 const gate = new TaskGate({ prompt: promptForConsent })
+let relayWasReady = false
 
 // ── Relay connection ───────────────────────────────────────────
 
@@ -92,6 +93,15 @@ const client = new RelayClient({
   },
   onCommand: (cmd) => void handleCommand(cmd),
   onStateChange: (state) => {
+    if (state === 'ready') {
+      relayWasReady = true
+    } else if (relayWasReady) {
+      // A lost control plane must revoke browser control even if the relay
+      // process restarts and forgets a queued Stop.
+      relayWasReady = false
+      gate.stop()
+      void executor.detach()
+    }
     void chrome.action.setBadgeText({ text: state === 'ready' ? 'ON' : '' })
     void chrome.action.setBadgeBackgroundColor({ color: '#16a34a' })
   },
@@ -185,6 +195,11 @@ async function dispatch(op: string, args: Record<string, unknown>): Promise<unkn
       return { typed: true }
     case 'currentUrl':
       return executor.currentUrl()
+    case 'captureFrame':
+      return executor.captureFrame()
+    case 'takeoverInput':
+      await executor.takeoverInput(args.event as Parameters<TabExecutor['takeoverInput']>[0])
+      return { forwarded: true }
     default:
       throw new ExecutorError(`Unknown op ${op}`, 'backend_error')
   }

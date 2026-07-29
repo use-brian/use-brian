@@ -49,6 +49,7 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
         }
       }
       if (op === 'currentUrl') return { ok: true, data: { url: 'https://example.com/', title: 'Example' } }
+      if (op === 'captureFrame') return { ok: true, data: { data: 'jpeg-data', mimeType: 'image/jpeg' } }
       return { ok: true }
     })
     const provider = createLocalBrowserProvider({ transport })
@@ -58,14 +59,29 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     await provider.click(CTX, '@e1')
     await provider.type(CTX, '@e2', 'hello there')
     await provider.currentUrl(CTX)
+    const frame = await provider.nextTakeoverFrame?.(CTX)
+    await provider.sendTakeoverInput?.(CTX, { kind: 'click', x: 20, y: 10, frameW: 200, frameH: 100 })
     await provider.stop(CTX)
 
-    expect(sent.map((s) => s.op)).toEqual(['navigate', 'snapshot', 'click', 'type', 'currentUrl', 'stop'])
+    expect(sent.map((s) => s.op)).toEqual([
+      'navigate',
+      'snapshot',
+      'click',
+      'type',
+      'currentUrl',
+      'captureFrame',
+      'takeoverInput',
+      'stop',
+    ])
     expect(sent.every((s) => s.userId === 'user-1')).toBe(true)
     expect(sent[0]?.args).toEqual({ url: 'https://example.com/' })
     expect(sent[2]?.args).toEqual({ ref: '@e1' })
     expect(sent[3]?.args).toEqual({ ref: '@e2', text: 'hello there' })
+    expect(sent[6]?.args).toEqual({
+      event: { kind: 'click', x: 20, y: 10, frameW: 200, frameH: 100 },
+    })
     expect(snap.nodes[0]).toMatchObject({ ref: '@e1', role: 'button', name: 'Send' })
+    expect(frame).toEqual({ data: 'jpeg-data', mimeType: 'image/jpeg' })
   })
 
   it('falls back to the full open-Chrome instruction when the relay gives no reason (P1.4)', async () => {
@@ -130,6 +146,19 @@ describe('[COMP:sandbox/local-browser] LocalBrowserProvider', () => {
     // browse read as a site problem: the model told the user Luma was blocking
     // automation when Chrome had simply dropped the debugger.
     for (const code of ['detached', 'consent_denied'] as const) {
+      const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
+      const provider = createLocalBrowserProvider({ transport })
+      const err = await provider.snapshot(CTX).catch((e: unknown) => e)
+      expect((err as BrowserBackendError).code).toBe(code)
+    }
+  })
+
+  it('preserves Firefox setup failures so the user gets the right remedy', async () => {
+    for (const code of [
+      'firefox_companion_missing',
+      'firefox_restart_required',
+      'unsupported_browser',
+    ] as const) {
       const { transport } = transportRecording(() => ({ ok: false, error: `nope: ${code}`, code }))
       const provider = createLocalBrowserProvider({ transport })
       const err = await provider.snapshot(CTX).catch((e: unknown) => e)

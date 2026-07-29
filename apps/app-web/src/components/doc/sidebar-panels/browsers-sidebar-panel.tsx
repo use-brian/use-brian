@@ -8,7 +8,7 @@
  * that rendered its list as an in-content rail; it now lives in the sidebar
  * with the rest, freeing the whole content pane for the Take-Over live view.
  *
- * Renders the caller's live browser sessions (`sandbox_tasks`, running/paused)
+ * Renders the caller's live browser sessions (cloud sandbox + ephemeral local tasks)
  * in the shared sidebar-panel recipe (uppercase block header + count, quiet
  * `.doc-nav-active` nav rows). A row `<Link>`s to `/computer/<sessionId>`, so
  * the Take-Over view fills the content pane and browser back/forward move
@@ -37,7 +37,9 @@ import {
   type ComputerTaskSummary,
 } from "@/lib/api/computer";
 
-const POLL_MS = 20_000;
+// This panel exists only while the Browsers surface is open. Poll quickly so a
+// crashed local browser disappears within one UI beat rather than 20 seconds.
+const POLL_MS = 2_000;
 
 const COMPUTER_SESSION_RE = /\/computer\/([^/?#]+)/;
 

@@ -173,6 +173,47 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     )
   })
 
+  it('injects a workspace-owned mailbox for a workspace assistant (team-native overlay)', async () => {
+    // `POST /api/connector-instances/:id/transfer` moves a personal mailbox to
+    // `scope='workspace'` AND DELETES its grants — a workspace-owned instance is
+    // visible by scope, so it needs none. That leaves the team-native overlay as
+    // the mailbox's only route to a workspace assistant (the base pass is
+    // suppressed by the connector-scoping gate), so a missing branch there means
+    // transferring your mailbox to the workspace makes it vanish from the
+    // assistant while Studio still shows it connected.
+    const tools = new Map<string, Tool>()
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async () => IMAP_CREDS),
+      getCredentialsSystem: vi.fn(async () => null),
+      listByWorkspaceSystem: vi.fn(async () => [
+        {
+          id: 'inst-imap-team', scope: 'workspace', userId: null, workspaceId: 'ws-1',
+          provider: 'imap', label: 'team@harborlane.example', url: null, custom: false,
+          connected: true, healthStatus: 'ok', config: {}, sensitivity: 'internal',
+          createdAt: new Date('2026-07-01T00:00:00Z'),
+          updatedAt: new Date('2026-07-01T00:00:00Z'),
+        },
+      ]),
+    } as unknown as ConnectorInstanceStore
+
+    await injectMcpTools({
+      userId: 'u-1', assistantId: 'a-1', tools,
+      // Empty: a workspace assistant never base-loads the owner's personal set.
+      connectorStore: { list: vi.fn().mockResolvedValue([]) } as never,
+      settingsStore: settingsStoreStub() as never,
+      connectorInstanceStore: instanceStore,
+      connectorGrantStore: { listForTargetSystem: vi.fn().mockResolvedValue([]) } as never,
+      assistantTeamId: 'ws-1',
+      keepBuiltinsDirect: true,
+    })
+
+    expect(tools.has('imapSearchMessages')).toBe(true)
+    expect(tools.has('imapGetMessage')).toBe(true)
+    expect(tools.has('imapSendMessage')).toBe(true)
+    // Bound to the team-owned row, not to whatever the acting user owns.
+    expect(instanceStore.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-imap-team')
+  })
+
   it('classifier preflight deny short-circuits the send BEFORE any network call and audits status=denied', async () => {
     const emit = vi.fn(async () => ({ status: 'denied' as const }))
     const audit = {

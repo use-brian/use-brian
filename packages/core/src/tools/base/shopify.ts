@@ -1001,17 +1001,39 @@ export function createShopifyTools(api: ShopifyApi): Tool[] {
     description:
       'Create a Shopify promo code: percentage off (percentage) or a fixed amount off (amount), storewide, all customers, ' +
       'with optional usage limit and validity window. ' +
+      'A discount value is REQUIRED: pass exactly one of percentage or amount. If the user asked for a promo code ' +
+      'without saying how much off, ask them before calling this. ' +
       'Call this tool directly — the user will see an Approve/Deny prompt.',
-    inputSchema: z.object({
-      code: z.string().describe('The promo code customers type (e.g. "SUMMER20").'),
-      title: z.string().optional().describe('Internal title (defaults to the code).'),
-      percentage: z.number().optional().describe('Percent off, 0-100. Pass exactly one of percentage or amount.'),
-      amount: z.string().optional().describe('Fixed amount off in shop currency, decimal string (e.g. "10.00").'),
-      startsAt: z.string().optional().describe('Start (ISO timestamp, default now).'),
-      endsAt: z.string().optional().describe('End (ISO timestamp, default no end).'),
-      usageLimit: z.number().optional().describe('Total redemption cap.'),
-      appliesOncePerCustomer: z.boolean().optional().describe('One redemption per customer (default false).'),
-    }),
+    inputSchema: z
+      .object({
+        code: z.string().describe('The promo code customers type (e.g. "SUMMER20").'),
+        title: z.string().optional().describe('Internal title (defaults to the code).'),
+        percentage: z.number().optional().describe('Percent off, 0-100. Pass exactly one of percentage or amount.'),
+        amount: z.string().optional().describe('Fixed amount off in shop currency, decimal string (e.g. "10.00").'),
+        startsAt: z
+          .string()
+          .optional()
+          .describe(
+            'When the code STARTS working (ISO timestamp, default now). "starting in three days" sets this; ' +
+            'a code that merely RUNS FOR three days leaves this at now.',
+          ),
+        endsAt: z
+          .string()
+          .optional()
+          .describe(
+            'When the code STOPS working (ISO timestamp, default no end). A code that runs "for three days" ' +
+            'sets this to three days from the start.',
+          ),
+        usageLimit: z.number().optional().describe('Total redemption cap.'),
+        appliesOncePerCustomer: z.boolean().optional().describe('One redemption per customer (default false).'),
+      })
+      // Shopify requires a value and rejects both-at-once. Enforcing it here
+      // turns a wasted round trip (the client throws, the model retries) into
+      // a schema rejection the model can correct before any call goes out.
+      .refine(
+        (v) => (typeof v.percentage === 'number') !== (typeof v.amount === 'string' && v.amount.length > 0),
+        { message: 'Pass exactly one of percentage or amount.' },
+      ),
     isConcurrencySafe: false,
     isReadOnly: false,
     requiresConfirmation: true,

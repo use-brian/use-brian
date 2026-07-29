@@ -173,6 +173,26 @@ export const OFFICIAL_CONNECTOR_TOOLS: Record<string, BuiltinConnectorTool[]> = 
     { name: 'shopifyRefundOrder', description: 'Refund an order in full or by line item', classification: 'destructive', defaultPolicy: 'ask' },
     { name: 'shopifyCompleteDraftOrder', description: 'Convert a draft order into a real order', classification: 'destructive', defaultPolicy: 'ask' },
   ],
+  // Microsoft Teams (Graph) — READ-ONLY, permanently (decision D1). Graph
+  // publishes no application permission for sending, so every Graph write is
+  // attributed to a human rather than to the assistant; sending stays on the
+  // Teams bot. No write tool may be added here or to the factory in
+  // packages/core/src/tools/base/msgraph.ts. Classification is the mechanical
+  // half of that rule: a write misclassified as `read` ships past
+  // gateToolsOnActionGrants ungated. Descriptions are condensed from the
+  // authoritative `buildTool({ description })` text on each tool — keep the
+  // two consistent. See docs/architecture/integrations/msgraph.md §1, §7.
+  msgraph: [
+    { name: 'msTeamsListTeams', description: 'List the teams in the tenant, including ones the assistant was never added to', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsListChannels', description: 'List the channels in a team, each marked standard, private, or shared', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsReadChannelMessages', description: 'Read recent root messages in a channel, including history from before the assistant joined', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsReadThreadReplies', description: 'Read the replies in one channel thread', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsListChats', description: "List the direct messages and group chats the connected user is in", classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsReadChatMessages', description: 'Read recent messages in one chat (a direct message or group chat)', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsSearchMessages', description: 'Search across the Teams channels and chats the connected user can see', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsListMembers', description: 'List the members of a team, or of one channel in it', classification: 'read', defaultPolicy: 'allow' },
+    { name: 'msTeamsFindPerson', description: "Find a person by name, email, or directory id in the organization directory or one team's roster", classification: 'read', defaultPolicy: 'allow' },
+  ],
   // Assistant Email (AgentMail) — the assistant's OWN mailbox. Sends go out
   // from the assistant's address, never the user's (that is Gmail); see
   // docs/architecture/integrations/agentmail.md → "Connector tools".
@@ -288,6 +308,28 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     // gdrive precedent) so existing users see a "reconnect" banner.
     'public_api',
   ],
+  // Microsoft Graph, delegated (D3 — search is delegated-only, so an app-only
+  // grant could enumerate but never find). Every scope here is a line the
+  // tenant admin reads on the consent screen, so the set is the minimum the
+  // nine read tools need and nothing more: no `People.Read` (managed-policy
+  // exclusion, relevance ranking is a nice-to-have), no `Presence.Read.All`,
+  // no `Files.Read.All` / `Sites.Read.All`, nothing meeting-related. There is
+  // no Send / ReadWrite / Migrate scope and there never will be — D1.
+  // `ChannelMessage.Read.All` forces admin consent unconditionally, which is
+  // free under BYO (D2): the consenting admin IS the person who registered
+  // the Entra app for the Azure Bot.
+  // See docs/architecture/integrations/msgraph.md §6 and research §5.1.
+  msgraph: [
+    'offline_access',
+    'User.Read',
+    'User.ReadBasic.All',
+    'Team.ReadBasic.All',
+    'Channel.ReadBasic.All',
+    'ChannelMessage.Read.All',
+    'Chat.Read',
+    'TeamMember.Read.All',
+    'ChannelMember.Read.All',
+  ],
   shopify: [
     // Full catalog scope set (docs/plans/shopify-connector.md §6 + D13: the
     // app registered with zero installs, so the two-wave split collapsed and
@@ -295,21 +337,60 @@ export const OFFICIAL_OAUTH_SCOPES: Record<string, string[]> = {
     // approval-gated by Shopify; add it here only AFTER the approval lands
     // (requesting it unapproved breaks the consent screen), and if real
     // installs exist by then, bump scopeVersion (D12) for the reconnect banner.
+    //
+    // This list is DERIVED from the operations in packages/api/src/shopify/
+    // client.ts, not hand-guessed: `scripts/validate-shopify-graphql.mjs`
+    // reports the scopes each operation requires. Re-run it after adding or
+    // editing any operation. A scope error is invisible to every test we have
+    // (they mock fetch, so nothing ever checks a grant) and only surfaces as
+    // an access-denied against a real install.
     'read_products',
-    'read_orders',
-    'read_customers',
-    'read_inventory',
-    'read_fulfillments',
     'write_products',
-    'write_draft_orders',
+    'read_orders',
     'write_orders',
+    'read_customers',
     'write_customers',
-    'write_inventory',
-    'write_fulfillments',
+    'read_draft_orders',
+    'write_draft_orders',
     'read_discounts',
     'write_discounts',
+    'read_inventory',
+    'write_inventory',
+    // Location fields other than `id` have required read_locations since API
+    // 2024-07. Both inventory operations select `location { name }`, so
+    // without this shopifyGetInventoryLevels and shopifySetInventory (which
+    // resolves its location through the same query) fail access-denied.
+    'read_locations',
+    // Two DISTINCT families, both needed. read/write_fulfillments cover the
+    // Fulfillment resource itself (GetOrder selects `fulfillments`,
+    // fulfillmentCreate returns one); the *_fulfillment_orders scopes cover
+    // FulfillmentOrder, which is what shopifyCreateFulfillment resolves and
+    // passes as `lineItemsByFulfillmentOrder`. Granting only the first family
+    // leaves that tool broken end to end.
+    'read_fulfillments',
+    'write_fulfillments',
+    // The merchant_managed + third_party pair is the documented posture for an
+    // order-management app. The *_assigned_fulfillment_orders scopes are for
+    // apps that ARE a fulfillment service registering their own locations,
+    // which we are not, so they stay out (App Store rule 3.2: request only
+    // what the app needs).
+    'read_merchant_managed_fulfillment_orders',
+    'write_merchant_managed_fulfillment_orders',
+    'read_third_party_fulfillment_orders',
+    'write_third_party_fulfillment_orders',
+    // Pages/articles/blogs need the granular online-store-pages pair in
+    // addition to the broader content pair.
     'read_content',
     'write_content',
+    'read_online_store_pages',
+    'write_online_store_pages',
+    // Payouts and disputes both resolve through shopifyPaymentsAccount, which
+    // requires read_shopify_payments OR read_shopify_payments_accounts - an
+    // either/or, not both. Only the granular one is offered in the Dev
+    // Dashboard, so that is the one we request; do NOT re-add
+    // `read_shopify_payments` from validator output (it reports alternatives
+    // alongside requirements, and the app config rejects the broad name).
+    'read_shopify_payments_accounts',
     'read_shopify_payments_payouts',
     'read_shopify_payments_disputes',
   ],

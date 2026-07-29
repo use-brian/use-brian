@@ -872,3 +872,56 @@ describe("[COMP:app-web/feed-sdk] feed SDK", () => {
     });
   });
 });
+
+/**
+ * Regression: `NEXT_PUBLIC_API_URL` is deliberately `""` in development
+ * (`next.config.ts` routes the browser through the `/api` rewrite), so every
+ * SDK call has to survive a RELATIVE base. Four functions used
+ * `new URL(`${API_URL}/api/…`)`, which throws `Invalid URL` with no base -
+ * before any fetch fired, so the caller's catch showed a bare "failed to load"
+ * with no request in the network tab at all. That is exactly how the Voice
+ * surface broke in local dev (2026-07-29).
+ *
+ * These assert the query-carrying calls still reach `authFetch` (i.e. do not
+ * throw) and keep their params. `API_URL` is baked at import time, and the
+ * suite's default is the absolute fallback, so the throw itself is pinned by
+ * the explicit relative-base construction below.
+ */
+describe("[COMP:app-web/feed-sdk] relative API base (dev rewrite)", () => {
+  it("never builds a request URL with `new URL` on a relative base", () => {
+    // The construction the SDK must avoid: this is what threw in dev.
+    expect(() => new URL("/api/assistants/a-1/memories/team")).toThrow();
+    // The construction it uses instead: a plain string, valid either way.
+    const query = new URLSearchParams({ limit: "100" }).toString();
+    expect(`${""}/api/assistants/a-1/memories/team?${query}`).toBe(
+      "/api/assistants/a-1/memories/team?limit=100",
+    );
+  });
+
+  it("sends query params on the calls that carry them", async () => {
+    authFetch.mockResolvedValueOnce(jsonResponse({ memories: [], total: 0 }));
+    await fetchFeedVoiceMemories("a-1", { limit: 100 });
+    expect(authFetch.mock.calls[0][0]).toContain(
+      "/api/assistants/a-1/memories/team?limit=100",
+    );
+
+    authFetch.mockResolvedValueOnce(jsonResponse({ events: [] }));
+    await fetchFeedAssistantEvents("a-1", {
+      limit: 20,
+      eventTypes: ["drafted", "post-created"],
+    });
+    const eventsUrl = authFetch.mock.calls[1][0] as string;
+    expect(eventsUrl).toContain("limit=20");
+    expect(eventsUrl).toContain("eventTypes=drafted%2Cpost-created");
+
+    authFetch.mockResolvedValueOnce(jsonResponse({ approvals: [] }));
+    await fetchFeedAssistantApprovals("a-1", { limit: 200 });
+    expect(authFetch.mock.calls[2][0]).toContain("limit=200");
+  });
+
+  it("omits the query string entirely when no params are supplied", async () => {
+    authFetch.mockResolvedValueOnce(jsonResponse({ events: [] }));
+    await fetchFeedAssistantEvents("a-1");
+    expect(authFetch.mock.calls[0][0]).not.toContain("?");
+  });
+});

@@ -124,6 +124,10 @@ export type SkillManageApprovalsStore = {
       slug: string
       name: string
       description: string
+      /** Optional on the PORT, required on the tool's own input schema:
+       *  approvals staged before the field existed carry no trigger, and
+       *  approve-time must still be able to materialise them. */
+      whenToUse?: string
       content: string
       supportFiles?: Array<{ kind: SkillFilePointerKind; name: string; content: string; description?: string }>
     }
@@ -221,6 +225,19 @@ const FILE_SCHEMA = z.object({
 const UMBRELLA_SCHEMA = z.object({
   name: z.string().min(1).max(100),
   description: z.string().min(1).max(500),
+  // REQUIRED on this path, deliberately. `when_to_use` is the only field the
+  // skill listing gives the model to select on, and a skill without one is
+  // effectively unreachable: in prod, 67 of 72 workspace skills had no
+  // trigger and 2 had ever been invoked. Every one of those was born here,
+  // through a schema that had no field for it. A human authoring a skill in
+  // the UI may still omit it (`CreateSkillInput.whenToUse` stays optional) —
+  // they can see and fix their own library. An assistant proposing one
+  // cannot, so it must say when the skill fires before it may create it.
+  whenToUse: z
+    .string()
+    .min(1)
+    .max(300)
+    .describe('The trigger condition: what the user says or does that should make this skill fire.'),
   content: z.string().min(1).max(50_000),
   supportFiles: z.array(FILE_SCHEMA).max(20).optional(),
 })
@@ -285,6 +302,8 @@ Choose the action in this order — try each one and only fall through when it d
 3. add_support_file — Add a reference, template, or script under an existing skill. Use when the lesson is concrete enough to be a standalone artefact (a template the user reused, a transcript worth quoting, a checklist the user followed). Body pointers use {{reference:name}} / {{template:name}} / {{script:name}}.
 
 4. create_umbrella — Create a new class-level umbrella. ONLY when nothing above fits. The name must describe a class of task — not a session-specific bug, error, date, or PR number. Names like "fix-...", "debug-...", "audit-...", "today-...", "2026-...", "pr-...", or anything containing a literal error message will be rejected.
+
+whenToUse is required on create and is the single most important field you write. It is the only part of the skill anyone sees when deciding whether to open it, so state the TRIGGER, not the topic: what the user says or does that should make this skill fire. Write "when the user asks to log a diary entry, add a task, or sync the vault", not "diary and task management". A skill whose whenToUse merely restates its name will never be selected.
 
 Routing is automatic — you do not need to consider it. Auto-generated skills are patched directly; user-authored and community skills are queued for the workspace owner's approval; new umbrella creations are always queued. If an equivalent proposal is already waiting for the owner's decision, the tool skips staging a duplicate and reports skipped_pending_approval. The tool result tells you which path was taken.`
 
@@ -536,6 +555,7 @@ async function runCreateUmbrella(
   umbrella: {
     name: string
     description: string
+    whenToUse: string
     content: string
     supportFiles?: Array<{ kind: SkillFilePointerKind; name: string; content: string; description?: string }>
   },
@@ -592,6 +612,7 @@ async function runCreateUmbrella(
       slug,
       name: umbrella.name,
       description: umbrella.description,
+      whenToUse: umbrella.whenToUse,
       content: umbrella.content,
       supportFiles: umbrella.supportFiles,
     },

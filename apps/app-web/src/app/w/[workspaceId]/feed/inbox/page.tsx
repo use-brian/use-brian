@@ -1,15 +1,13 @@
 "use client";
 
 /**
- * Feed inbox route — the cross-platform approval inbox. Thin wrapper: the
- * meat lives in `@/components/feed/feed-inbox` (`[COMP:app-web/feed-inbox]`)
- * so the desktop SPA can import the client component directly
- * (docs/plans/feed-web-consolidation.md §6, §10). No `useSearchParams`, so
- * no Suspense boundary is needed.
+ * Legacy `/feed/inbox` route — merged into `/feed/posts` by the revamp and
+ * kept as a redirect so existing deep links do not 404 (feed-revamp.md D6).
+ * The Approvals panel deep-links `distribution_draft` rows here.
  */
 
-import { FeedInbox } from "@/components/feed/feed-inbox";
+import { FeedLegacyRedirect } from "@/components/feed/feed-legacy-redirect";
 
-export default function FeedInboxPage() {
-  return <FeedInbox />;
+export default function FeedLegacyInboxPage() {
+  return <FeedLegacyRedirect status="review" />;
 }

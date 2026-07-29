@@ -7,7 +7,13 @@
  * "googleCalendarCreateEvent".
  */
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
+/**
+ * Exported so the coverage rule can be asserted in a unit test rather than
+ * only by the file-grepping `pnpm check` invariant
+ * (`invariants/connector-registry` → no-display-name). Read it, never mutate
+ * it; `getToolDisplayName` is the accessor.
+ */
+export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   // Google Calendar
   googleCalendarListEvents: 'List calendar events',
   googleCalendarGetEvent: 'View calendar event',
@@ -128,6 +134,17 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   agentmailSendMessage: 'Send email as the assistant',
   agentmailSearchThreads: 'Search the assistant\'s mailbox',
   agentmailCreateDraft: 'Draft email as the assistant',
+
+  // Microsoft Teams (Graph) — read-only
+  msTeamsListTeams: 'List Teams teams',
+  msTeamsListChannels: 'List Teams channels',
+  msTeamsReadChannelMessages: 'Read Teams channel messages',
+  msTeamsReadThreadReplies: 'Read Teams thread replies',
+  msTeamsListChats: 'List Teams chats',
+  msTeamsReadChatMessages: 'Read Teams chat messages',
+  msTeamsSearchMessages: 'Search Teams messages',
+  msTeamsListMembers: 'List Teams members',
+  msTeamsFindPerson: 'Find a person in Teams',
 
   // Company mailbox (IMAP/SMTP) — the user's own corporate mailbox
   imapSearchMessages: 'Search company mailbox',

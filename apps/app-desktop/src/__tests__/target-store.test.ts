@@ -64,11 +64,11 @@ describe("[COMP:app-desktop/target-store] deriveLocalApiUrl", () => {
     );
   });
 
-  it("NEVER falls back to the cloud API: an arbitrary self-hosted origin pairs same-host :4000", () => {
+  it("pairs HTTP self-hosts with :4000 and HTTPS reverse proxies with their origin", () => {
     expect(deriveLocalApiUrl("http://myserver.tail1234.ts.net:3003")).toBe(
       "http://myserver.tail1234.ts.net:4000",
     );
-    expect(deriveLocalApiUrl("https://brain.example.com")).toBe("https://brain.example.com:4000");
+    expect(deriveLocalApiUrl("https://brain.example.com")).toBe("https://brain.example.com");
     expect(deriveLocalApiUrl("garbage")).toBe("http://localhost:4000");
   });
 });
@@ -100,7 +100,7 @@ describe("[COMP:app-desktop/target-store] targets", () => {
   it("localTarget normalizes a custom URL and refuses an invalid one", () => {
     const t = localTarget("https://brain.example.com:8443/");
     expect(t?.appUrl).toBe("https://brain.example.com:8443");
-    expect(t?.apiUrl).toBe("https://brain.example.com:4000");
+    expect(t?.apiUrl).toBe("https://brain.example.com:8443");
     expect(t?.label).toBe("Local Brain (brain.example.com:8443)");
     expect(localTarget("not a url")).toBeNull();
     expect(localTarget("ftp://x")).toBeNull();
@@ -171,8 +171,8 @@ describe("[COMP:app-desktop/target-store] indicator + URL helpers", () => {
 
 describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)", () => {
   // A reverse-proxied self-host is the case hostname derivation cannot serve:
-  // its API is on 443 under a name that is neither an `api.` sibling nor the
-  // same host on :4000, so without a declaration the shell probes a dead port.
+  // its API is on 443 under a separate name, so a declaration still overrides
+  // the safe same-origin HTTPS fallback.
   const PROXIED_APP = "https://brain.example.com";
   const PROXIED_API = "https://backend.example.com";
 
@@ -182,8 +182,8 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
     );
   });
 
-  it("derivation alone strands a reverse-proxied self-host on an unreachable :4000", () => {
-    expect(deriveLocalApiUrl(PROXIED_APP)).toBe(`${PROXIED_APP}:4000`);
+  it("derivation safely falls back to the HTTPS reverse-proxy origin", () => {
+    expect(deriveLocalApiUrl(PROXIED_APP)).toBe(PROXIED_APP);
   });
 
   it("a declared API outranks the hostname guess", () => {
@@ -191,9 +191,9 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
   });
 
   it("falls back to derivation with no declaration, or a rejected one", () => {
-    expect(localTarget(PROXIED_APP)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
-    expect(localTarget(PROXIED_APP, null)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
-    expect(localTarget(PROXIED_APP, "not a url")?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+    expect(localTarget(PROXIED_APP)?.apiUrl).toBe(PROXIED_APP);
+    expect(localTarget(PROXIED_APP, null)?.apiUrl).toBe(PROXIED_APP);
+    expect(localTarget(PROXIED_APP, "not a url")?.apiUrl).toBe(PROXIED_APP);
   });
 
   it("accepts a normalized http(s) declaration and strips trailing slashes", () => {
@@ -206,7 +206,7 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
     // and refresh traffic at the origin where a real cloud session lives.
     expect(acceptDeclaredApiUrl(CLOUD_API_URL)).toBeNull();
     expect(acceptDeclaredApiUrl(`${CLOUD_API_URL}/v1`)).toBeNull();
-    expect(localTarget(PROXIED_APP, CLOUD_API_URL)?.apiUrl).toBe(`${PROXIED_APP}:4000`);
+    expect(localTarget(PROXIED_APP, CLOUD_API_URL)?.apiUrl).toBe(PROXIED_APP);
   });
 
   it("rejects a non-http(s) declaration", () => {
@@ -261,6 +261,6 @@ describe("[COMP:app-desktop/target-store] declared API (GET /api/desktop-config)
     const handEdited = JSON.stringify({ v: 1, kind: "local", appUrl: PROXIED_APP, apiUrl: CLOUD_API_URL });
     expect(parsePersistedTarget(handEdited)?.apiUrl).toBeUndefined();
     // ...and the resolved target derives instead of reaching the cloud API.
-    expect(resolveTargetFromPersisted(handEdited).apiUrl).toBe(`${PROXIED_APP}:4000`);
+    expect(resolveTargetFromPersisted(handEdited).apiUrl).toBe(PROXIED_APP);
   });
 });

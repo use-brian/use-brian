@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { normalizeImportUrl } from '../import-source.js'
 import {
   importSkillFromGithub,
+  importSkillFromPaste,
   importSkillFromUrl,
   SkillImportError,
+  IMPORT_MAX_FILE_BYTES,
   IMPORT_MAX_SUPPORT_FILE_BYTES,
   type GithubContentEntry,
   type GithubContentsReader,
@@ -119,6 +121,75 @@ function readerOf(map: Record<string, GithubContentEntry | GithubContentEntry[]>
     },
   }
 }
+
+describe('[COMP:api/skill-import] importSkillFromPaste', () => {
+  it('parses pasted markdown into a draft with paste provenance', () => {
+    const result = importSkillFromPaste(SKILL_MD)
+    expect(result.dialect).toBe('agent-skills')
+    expect(result.draft.name).toBe('Release Notes')
+    expect(result.supportFiles).toEqual([])
+    expect(result.importSource).toEqual({ kind: 'paste' })
+  })
+
+  // The file name only ever informs dialect detection + name derivation, so a
+  // paste with no name still has to land on a usable draft.
+  it('derives the name from an H1 when there is no frontmatter or file name', () => {
+    const result = importSkillFromPaste('# Weekly Status\n\nCollect the updates.')
+    expect(result.dialect).toBe('generic-markdown')
+    expect(result.draft.name).toBe('Weekly Status')
+    expect(result.warnings.map((w) => w.code)).toContain('no_frontmatter')
+  })
+
+  it('uses an uploaded file name for the name and the dialect', () => {
+    const fromName = importSkillFromPaste('Collect the updates.', 'weekly-status.md')
+    expect(fromName.draft.name).toBe('Weekly Status')
+
+    // `.mdc` is the Cursor-rule signal — it must survive an upload.
+    const cursor = importSkillFromPaste(
+      ['---', 'description: A rule.', 'globs: "*.ts"', '---', 'Do the thing.'].join('\n'),
+      'rule.mdc',
+    )
+    expect(cursor.dialect).toBe('cursor-rule')
+  })
+
+  it('carries the dialect lints through unchanged', () => {
+    const result = importSkillFromPaste(
+      ['---', 'description: A command.', 'argument-hint: <pr>', '---', 'Review `Bash` on $ARGUMENTS.'].join('\n'),
+      'review.md',
+    )
+    expect(result.dialect).toBe('slash-command')
+    const codes = result.warnings.map((w) => w.code)
+    expect(codes).toContain('foreign_tools')
+    expect(codes).toContain('arguments_placeholder')
+    expect(codes).toContain('ignored_metadata')
+  })
+
+  it('rejects empty, blank, and unparseable pastes', () => {
+    expect(() => importSkillFromPaste('')).toThrow(SkillImportError)
+    expect(() => importSkillFromPaste('   \n  ')).toThrow(SkillImportError)
+    expect(() => importSkillFromPaste('binary\u0000content')).toThrow(SkillImportError)
+  })
+
+  it('rejects a paste over the file byte cap', () => {
+    expect(() => importSkillFromPaste('x'.repeat(IMPORT_MAX_FILE_BYTES + 1))).toThrow(
+      /too large/i,
+    )
+  })
+
+  // Paste does no server-side fetch at all, so it needs no host allowlist —
+  // the property that makes it strictly safer than the URL source.
+  it('never performs a network fetch', () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (() => {
+      throw new Error('paste import must not fetch')
+    }) as typeof fetch
+    try {
+      expect(importSkillFromPaste(SKILL_MD).draft.name).toBe('Release Notes')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
 
 describe('[COMP:api/skill-import] importSkillFromGithub', () => {
   it('imports a single file with sha provenance', async () => {

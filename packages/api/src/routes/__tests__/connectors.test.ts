@@ -304,6 +304,45 @@ describe('[COMP:api/connectors-route] /api/connectors', () => {
     expect(update).toHaveBeenCalledWith('u1', IID, { connected: true })
   })
 
+  it('store-credentials marks shopify provenance from tuple SHAPE, not the shpat_ prefix', async () => {
+    // Shopify's EXPIRING offline tokens are `shpat_`-prefixed too, so a prefix
+    // test labelled every real OAuth install `shopify_token`. Verified against
+    // a live install on 2026-07-29: the stored marker said `shopify_token`
+    // while the tuple carried a `shprt_` refresh token.
+    const oauth = makeApp('u1')
+    await request(oauth.app).post('/api/connectors/shopify/store-credentials').send({
+      shopifyTokens: {
+        accessToken: 'shpat_expiring_oauth_token',
+        refreshToken: 'shprt_rotating',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        shopDomain: 'teststore.myshopify.com',
+      },
+    })
+    expect(oauth.createUserInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'u1',
+        provider: 'shopify',
+        credentials: expect.objectContaining({ client_id: 'shopify_oauth' }),
+      }),
+    )
+
+    // A pasted static token carries neither field -> genuine `shopify_token`.
+    const pasted = makeApp('u1')
+    await request(pasted.app).post('/api/connectors/shopify/store-credentials').send({
+      shopifyTokens: {
+        accessToken: 'shpat_static_pasted_token',
+        shopDomain: 'teststore.myshopify.com',
+      },
+    })
+    expect(pasted.createUserInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'u1',
+        provider: 'shopify',
+        credentials: expect.objectContaining({ client_id: 'shopify_token' }),
+      }),
+    )
+  })
+
   it('store-credentials rejects an unsupported provider', async () => {
     const { app, createUserInstance } = makeApp('u1')
     const res = await request(app).post('/api/connectors/bogus/store-credentials').send({ pat: 'x' })

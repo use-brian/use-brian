@@ -99,6 +99,22 @@ export function isContentPlanningPlatform(
     && (CONTENT_PLANNING_PLATFORMS as readonly string[]).includes(value)
 }
 
+/**
+ * A session title guaranteed to carry its platform prefix. An untitled
+ * session falls back to the platform default; a titled one is prefixed unless
+ * it already carries a known prefix (so re-titling stays idempotent).
+ */
+export function withPlatformTitlePrefix(
+  platform: ContentPlanningPlatform,
+  title: string | null | undefined,
+  seed?: ContentDraftSeed,
+): string {
+  const trimmed = title?.trim()
+  if (!trimmed) return defaultContentDraftTitle(platform, seed)
+  if (getContentDraftTitlePrefix(trimmed)) return trimmed
+  return `${TITLE_PREFIX[platform]} ${trimmed}`
+}
+
 export function defaultContentDraftTitle(
   platform: ContentPlanningPlatform,
   seed?: ContentDraftSeed,
@@ -272,8 +288,17 @@ export function createContentPlanningStore(): ContentPlanningStore {
   return {
     async createSession(params) {
       const channelId = `draft:${randomUUID()}`
-      const title = params.title?.trim()
-        || defaultContentDraftTitle(params.platform, params.seed)
+      // The platform lives in the TITLE PREFIX (`platformFromContentDraftTitle`
+      // is how `listSessions` filters), so a caller-supplied title must carry
+      // one or the session becomes invisible to every platform-scoped query.
+      // Enforced here, at the one chokepoint, rather than trusting each
+      // caller to remember: a plan slot's "Launch recap" silently vanished
+      // from the Threads list exactly this way.
+      const title = withPlatformTitlePrefix(
+        params.platform,
+        params.title,
+        params.seed,
+      )
       const seedKind = params.seed?.kind ?? 'freeform'
       const result = await query<{
         id: string

@@ -55,6 +55,7 @@ import {
 } from "react";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { promptDialog } from "@/components/ui/prompt-dialog";
+import { invalidateDocPage } from "@/lib/surface-prefetch";
 import { useT, format } from "@/lib/i18n/client";
 import {
   createDraft,
@@ -314,6 +315,11 @@ export function DocSidebarDataProvider({
       id: string,
       updater: (v: ViewMetadata) => ViewMetadata,
     ) => {
+      // Any in-place metadata edit (rename, save/unsave, clearance, icon)
+      // invalidates the page's cached copy. The doc shell paints that copy
+      // synchronously on open, so leaving it behind would flash the pre-edit
+      // title for one round trip on the next visit.
+      invalidateDocPage(id);
       const b = bridgeRef.current;
       if (!b) return;
       b.setActiveView((v) => (v && v.id === id ? updater(v) : v));
@@ -571,6 +577,9 @@ export function DocSidebarDataProvider({
           onResult: (updated) => patchActiveView(id, () => updated),
           optimistic: () => patchActiveView(id, (v) => ({ ...v, name: next })),
         });
+        // The doc shell paints cached page metadata on open, so a renamed page
+        // must drop its entry or a revisit flashes the old title.
+        invalidateDocPage(id);
         reloadSidebar();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -592,6 +601,7 @@ export function DocSidebarDataProvider({
           onResult: (updated) => patchActiveView(id, () => updated),
           optimistic: () => patchActiveView(id, (v) => ({ ...v, name })),
         });
+        invalidateDocPage(id);
         reloadSidebar();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -653,6 +663,7 @@ export function DocSidebarDataProvider({
         // on re-entry. Redundant but harmless while mounted: the shell writes
         // its own (already scrubbed) state back on the next commit.
         dropPageFromDocTabsSession(workspaceId, id);
+        invalidateDocPage(id);
         reloadSidebar();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

@@ -21,6 +21,7 @@ import {
   type TaskRecordStatus,
   type TaskStore,
 } from './types.js'
+import { admitTask, type TaskAdmissionPort } from './admission.js'
 
 /**
  * Tools that let the primary assistant manage workspace-scoped tasks via
@@ -96,6 +97,19 @@ export type TaskToolOptions = {
    * a real moment.
    */
   citeSourceMoment?: { index: CitationIndex }
+  /**
+   * Task admission gate (`docs/architecture/features/task-guardrails.md`).
+   * When wired, every `saveTask` call runs through `admitTask` on the
+   * `assistant` lane before the write: a workspace deny-rule or a previously
+   * rejected title refuses the create, a near-duplicate creates it anyway with
+   * a warning the model relays.
+   *
+   * Optional so OSS deployments, tests, and any surface without a guardrail
+   * store behave exactly as before — an absent port is "no policy stated",
+   * which is not the same as "policy says allow", but is indistinguishable at
+   * this layer and is the safe default.
+   */
+  admission?: TaskAdmissionPort
 }
 
 const STATUS_VALUES = [...TASK_STATUSES] as [TaskRecordStatus, ...TaskRecordStatus[]]
@@ -224,6 +238,11 @@ export function createTaskTools(
       attributes: z.record(z.unknown()).optional().describe('Free-form JSONB for user-defined per-task keys — typically sprint estimation / ordering / velocity (e.g. `estimate_days`, `estimate_points`, `order`). Schema is unvalidated; whatever keys the workspace converges on. Whole object overwrites on `updateTask` — read with `getTask` first if you only want to change one key.'),
       depends_on: z.array(idShape).max(50).optional().describe('Task ids this task depends on. Each becomes a task→task `depends_on` graph edge — the daily turn topologically reasons over the dependency graph (A depends_on B means "do B before A"). Same-workspace ids only. v1 limitation: append-only — emits new edges but does not remove existing ones. To restructure a dependency graph, soft-delete (`status: archived`) and re-create.'),
       links: explicitLinksField,
+      override_guardrail: tolerantBoolean()
+        .optional()
+        .describe(
+          'Bypass this workspace\'s task guardrails (duplicate suppression, deny rules, previously rejected titles). Only set this after a create was refused, you told the user why, and they said to create it anyway. Never set it pre-emptively.',
+        ),
       // Present ONLY on a recording fill's tool map — see `citeSourceMoment`.
       // Spread so every other surface's schema is untouched, not merely
       // "optional there": a field the model cannot use should not be a field
@@ -252,6 +271,31 @@ export function createTaskTools(
         opts?.citeSourceMoment && typeof input.source_moment === 'string'
           ? (extractCitations(input.source_moment, opts.citeSourceMoment.index)[0] ?? null)
           : null
+
+      // Admission gate — the assistant lane. A `hold` never reaches here: for a
+      // task the user asked for directly, a review tray is a non-answer, so
+      // `admitTask` collapses it to an allow carrying a warning we append to the
+      // result. A `drop` refuses, but returns a plain (non-error) result whose
+      // text is written to be read aloud — the model is expected to tell the
+      // user which rule or existing task blocked it, not to retry silently.
+      let admissionWarning: string | null = null
+      if (opts?.admission && input.override_guardrail !== true) {
+        const verdict = await admitTask(opts.admission, {
+          workspaceId: context.workspaceId!,
+          title: input.title,
+          due: input.due ? new Date(input.due) : null,
+          assigneeId: input.assignee_id ?? null,
+          lane: 'assistant',
+          sourceEpisodeId: opts.writeSourceEpisodeId ?? null,
+          createdByAssistantId: context.assistantId,
+        })
+        if (!verdict.admitted && verdict.outcome !== 'allow') {
+          return { data: verdict.explanation }
+        }
+        if (verdict.outcome === 'allow' && verdict.warning) {
+          admissionWarning = ` (${verdict.warning.explanation})`
+        }
+      }
 
       try {
         const task = await store.create({
@@ -300,7 +344,9 @@ export function createTaskTools(
         // Echo the moment back when one was kept, so a model that cited a
         // moment the transcript does not contain sees it was dropped.
         const momentNote = moment ? ` @ ${formatStamp(moment.startMs)}` : ''
-        return { data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}` }
+        return {
+          data: `Created task [${task.id}]: ${task.title}${momentNote}${formatLinksSummary(linksSummary)}${admissionWarning ?? ''}`,
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         if (msg.includes('parent_id must reference a task in the same workspace')) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { selectFreshestAccessToken, getValidAccessToken } from "@/lib/auth-fetch";
+import { authFetch, selectFreshestAccessToken, getValidAccessToken } from "@/lib/auth-fetch";
 
 // Force the production refresh path (a primary auth origin is configured), so
 // the offline guard below is the only thing standing between a stale token and
@@ -102,5 +102,27 @@ describe("[COMP:app-web/auth-fetch] offline refresh guard", () => {
     await getValidAccessToken();
 
     expect(location.href).toContain("/api/auth/refresh-and-return");
+  });
+});
+
+describe("[COMP:app-web/auth-fetch] deployment-gateway credentials", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("includes cookies on API requests from a local-target Electron shell", async () => {
+    const token = tokenWithExp(Math.floor(Date.now() / 1000) + 3600);
+    vi.stubGlobal("window", {
+      location: { href: "https://brain.example/w/1", origin: "https://brain.example" },
+      sidanclawDesktop: { signIn: () => {}, gatewayCredentials: true },
+    });
+    vi.stubGlobal("document", { cookie: `access_token=${token}` });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await authFetch("https://api.brain.example/api/workspaces");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ credentials: "include" });
   });
 });

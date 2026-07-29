@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/lib/i18n/client";
 import { en } from "@/lib/i18n/dictionaries/en";
 import type { TaskRow } from "@/lib/api/tasks";
+import { resetSurfaceCache } from "@/lib/surface-cache";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -46,6 +47,16 @@ vi.mock("@/lib/api/tasks", async (importOriginal) => {
 
 vi.mock("@/lib/api/workspace-roster", () => ({
   loadWorkspaceRoster: vi.fn().mockResolvedValue([]),
+}));
+
+// The suggestions tray ([COMP:app-web/task-suggestions]) mounts alongside the
+// table and fetches its own candidates. Stub it empty — this file is about
+// filter-scoped selection, and an unstubbed tray would put a real network call
+// inside `act`.
+vi.mock("@/lib/api/task-guardrails", () => ({
+  loadTaskCandidates: vi.fn().mockResolvedValue([]),
+  acceptTaskCandidate: vi.fn(),
+  dismissTaskCandidate: vi.fn(),
 }));
 
 vi.mock("@/components/operator/operator-topbar", () => ({
@@ -137,6 +148,12 @@ beforeEach(() => {
   taskApi.fetchWorkspaceTasks.mockReset();
   taskApi.fetchWorkspaceTasks.mockResolvedValue(rows);
   taskApi.bulkTasks.mockReset();
+  // The surface reads its list through the module-level surface cache
+  // ([COMP:app-web/surface-cache]), which deliberately OUTLIVES a mount so a
+  // revisit paints instantly. That means one case's rows would still be cached
+  // and fresh when the next mounts, and its `mockResolvedValue` would never be
+  // consulted. Clear it between cases.
+  resetSurfaceCache();
 });
 
 afterEach(() => {

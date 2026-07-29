@@ -217,8 +217,10 @@ function MsTeamsIcon() {
   // the official set: the deep-purple app tile with the white T, the large
   // teammate silhouette behind it and the smaller one to the right — the
   // official logo's colors (#4B53BC tile, #7B83EB / #5059C9 people),
-  // simplified for 18px rendering. Reached by both the msteams connector
-  // instance rows (provider `msteams`) and the Events rail.
+  // simplified for 18px rendering. Reached by the msteams connector instance
+  // rows (provider `msteams`), the Events rail, and the `msgraph` Graph
+  // connector - same product and same brand mark, so it is deliberately one
+  // component rather than two byte-identical SVGs.
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
       <circle cx="19.6" cy="7.6" r="2.2" fill="#5059C9" />
@@ -321,6 +323,9 @@ export function ConnectorIcon({
     case "gcs": return <GcsIcon />;
     case "s3": return <S3Icon />;
     case "msteams": return <MsTeamsIcon />;
+    // The Graph connector (read + search) and the Teams channel are the same
+    // product to a user, so they share the brand mark.
+    case "msgraph": return <MsTeamsIcon />;
     case "agentmail": return <AgentmailIcon />;
     case "imap": return <ImapMailboxIcon />;
     case "cli": return <CliIcon />;

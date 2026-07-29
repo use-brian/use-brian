@@ -34,7 +34,7 @@ import { notifyBrainWriteIfMatch } from '../brain-stream/notify.js'
 import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { resolveReplyText } from './_reply-context.js'
-import { buildFullSystemPrompt } from './_prompt-builder.js'
+import { buildSplitSystemPrompt, attachTurnContext } from './_prompt-builder.js'
 import { getEvolution as getWorkspaceMemoryEvolution } from '../db/workspace-memory-evolution-store.js'
 import { getBrainEvolution } from '../db/workspace-brain-evolution-store.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
@@ -737,7 +737,10 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   try {
     classification = await classifyTopic({
       provider,
-      model: 'gemini-flash',
+      // Background lane (see the chat.ts counterpart) — Flash Lite per
+      // cost-and-pricing.md → "Standard-tier routing", not the Flash 3
+      // chat alias this had drifted onto.
+      model: laneModel,
       recentUserTurns,
       replyToText: replyResolved?.text ?? null,
       currentMessage: messageText,
@@ -1004,7 +1007,18 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     }
   }
 
-  let fullSystemPrompt = buildFullSystemPrompt({
+  // Cache-split assembly (same sections, same order, same bytes as the
+  // joined form). The volatile per-turn half rides the newest user message
+  // as a `<turn_context>` envelope instead of the system prompt, so the
+  // system prompt AND the injected tool schemas behind it stay byte-stable
+  // across turns and land in the provider's implicit prompt cache. Gemini
+  // serializes `systemInstruction` before `tools`, so a per-turn datetime
+  // in the system prompt invalidates every tool schema after it — that was
+  // measured at ~40k fresh input tokens per message on the channel routes.
+  // See docs/architecture/platform/cost-and-pricing.md → "Prompt cache
+  // alignment". `chat.ts` has used this split since the builder was added;
+  // the channel routes were the remaining joined-form caller.
+  const splitPrompt = buildSplitSystemPrompt({
     basePrompt: systemPrompt,
     assistantInstructions: assistant.systemPrompt,
     workspaceEvolutionSnippet,
@@ -1021,6 +1035,11 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
       : null,
     groupChatContext,
   })
+  // Everything appended below is stable-per-session (channel formatting,
+  // skills fragment, unavailable capabilities, browser escalation), so it
+  // belongs in the cached prefix alongside `stablePrompt`.
+  let fullSystemPrompt = splitPrompt.stablePrompt
+  const turnContext = splitPrompt.turnContext
 
   // ── Channel formatting hints ──
   if (channelType === 'whatsapp') {
@@ -1161,7 +1180,7 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
     })
     fullSystemPrompt += skillResult.promptFragment
   }
-  fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+  fullSystemPrompt += buildUnavailableCapabilitiesPrompt(unavailableCapabilities, allTools)
   fullSystemPrompt += buildBrowserEscalationPrompt(allTools)
 
   // ── Pre-flight-confirm reply correlation (channel-recording-preflight-confirm §6) ──
@@ -1344,7 +1363,23 @@ export async function processChannelMessage(params: ChannelPipelineParams): Prom
   // workflow-lane behavior.
   const replyEvidence = new EvidenceAccumulator()
   replyEvidence.note(systemPromptWithPreflight)
+  // The volatile half now rides the user message rather than the system
+  // prompt, so seed it explicitly — otherwise figures that used to reach
+  // the gate via the system prompt (open commitments, episodic history)
+  // would silently stop counting as evidence.
+  replyEvidence.note(turnContext)
   replyEvidence.note(messageText)
+
+  // Attach the per-turn envelope to the newest user message. When the
+  // trailing message can't carry it (tool_result carrier, assistant-final
+  // resume shape), fall back to in-prompt placement for this turn only —
+  // same contract as `chat.ts`.
+  const envelopedMessages = attachTurnContext(messages, turnContext)
+  if (envelopedMessages) {
+    messages = envelopedMessages
+  } else if (turnContext) {
+    systemPromptWithPreflight = `${systemPromptWithPreflight}\n\n${turnContext}`
+  }
 
   // Claim ledger stash — persisted after flushBufferedTurns (which creates
   // the assistant message row) and BEFORE sendResponse, so the linkage

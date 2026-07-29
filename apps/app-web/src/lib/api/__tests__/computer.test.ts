@@ -17,6 +17,7 @@ import {
   getComputerFrame,
   getComputerTask,
   listBrowserProfiles,
+  mostRecentComputerTask,
   markComputerSessionCaptured,
   resumeComputerTask,
   revokeProfileSession,
@@ -40,14 +41,34 @@ beforeEach(() => {
   mockFetch.mockResolvedValue(respond(200, {}))
 })
 
+describe('[COMP:app-web/browsers-surface] Browsers index task selection', () => {
+  it('opens the most recently active running or paused task', () => {
+    const base = {
+      profileId: null,
+      injectedSite: null,
+      createdAt: 1,
+      backend: 'cloud' as const,
+    }
+    expect(
+      mostRecentComputerTask([
+        { ...base, taskId: 't1', sessionId: 's1', status: 'running', lastActivityAt: 10 },
+        { ...base, taskId: 't2', sessionId: 's2', status: 'paused', lastActivityAt: 20 },
+      ])?.sessionId,
+    ).toBe('s2')
+    expect(mostRecentComputerTask([])).toBeNull()
+  })
+})
+
 describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
   it('resolves the active task and maps 404 to null (the "no task" empty state)', async () => {
     mockFetch.mockResolvedValueOnce(
-      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1 }),
+      respond(200, { taskId: 't1', status: 'running', profileId: 'p1', injectedSite: null, workspaceId: 'w1', createdAt: 1, backend: 'local', connectionState: 'disconnected' }),
     )
     const task = await getComputerTask('sess-1')
     expect(task?.status).toBe('running')
     expect(task?.profileId).toBe('p1')
+    expect(task?.backend).toBe('local')
+    expect(task?.connectionState).toBe('disconnected')
     expect(String(mockFetch.mock.calls[0][0])).toContain('/api/computer/tasks/sess-1')
 
     mockFetch.mockResolvedValueOnce(respond(404))
@@ -70,6 +91,17 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
     const inputCall = mockFetch.mock.calls.at(-1)!
     expect(String(inputCall[0])).toContain('/tasks/sess-1/input')
     expect(JSON.parse(inputCall[1]!.body as string)).toEqual({ kind: 'click', x: 10, y: 20 })
+
+    mockFetch.mockResolvedValueOnce(respond(200, { ok: true }))
+    await sendComputerInput('sess-1', { kind: 'pointer', action: 'down', x: 10, y: 20 })
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)?.[1]?.body as string)).toEqual({
+      kind: 'pointer', action: 'down', x: 10, y: 20,
+    })
+    mockFetch.mockResolvedValueOnce(respond(200, { ok: true }))
+    await sendComputerInput('sess-1', { kind: 'pointer', action: 'move', x: 15, y: 25 })
+    expect(JSON.parse(mockFetch.mock.calls.at(-1)?.[1]?.body as string)).toEqual({
+      kind: 'pointer', action: 'move', x: 15, y: 25,
+    })
   })
 
   it('captures into the task profile, maps 409 to profileRequired, and completes with the chosen outcome', async () => {
@@ -91,7 +123,7 @@ describe('[COMP:app-web/sandbox-takeover] Take-Over live view SDK', () => {
       profileRequired: true,
     })
 
-    await completeComputerTask('sess-1', 'failed')
+    expect(await completeComputerTask('sess-1', 'failed')).toBe(true)
     const complete = mockFetch.mock.calls.at(-1)!
     expect(String(complete[0])).toContain('/tasks/sess-1/complete')
     expect(JSON.parse(complete[1]!.body as string)).toEqual({ outcome: 'failed' })

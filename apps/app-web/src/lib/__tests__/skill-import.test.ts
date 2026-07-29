@@ -33,11 +33,13 @@ describe("[COMP:app-web/brain-skill-import] skill-import helpers", () => {
       description: "Drafts release notes from merged PRs.",
       whenToUse: "Use when the user asks for release notes.",
       content: RESULT.draft.content,
+      category: RESULT.draft.category,
     });
     expect(prefill.supportFiles).toEqual(RESULT.supportFiles);
     expect(prefill.importSource).toEqual(RESULT.importSource);
-    // The prefill deliberately carries no slug/category/warnings: the create
-    // route re-derives the slug from the (possibly edited) name.
+    // The prefill carries `category` (it decides the library group the saved
+    // skill lands in) but deliberately no slug/warnings: the create route
+    // re-derives the slug from the (possibly edited) name.
     expect("slug" in prefill.draft).toBe(false);
   });
 

@@ -2442,3 +2442,199 @@ describe('[COMP:brain/pipeline-b] windowed extraction', () => {
     warn.mockRestore()
   })
 })
+
+/**
+ * Task admission gate on the extraction lane.
+ *
+ * Spec: docs/architecture/features/task-guardrails.md
+ *
+ * The 2026-07-27 slop in workspace 3ccdb5fe came through this loop: 20 tasks
+ * in five minutes, including three near-copies of the same standup request.
+ * These tests pin that a wired gate refuses, that an unwired one changes
+ * nothing, and that the workspace policy reaches the prompt.
+ */
+describe('[COMP:tasks/admission] Pipeline B — extraction lane gate', () => {
+  function taskCollector() {
+    const rows: Array<{ title: string }> = []
+    const tasks = {
+      create: async (params: { title: string }) => {
+        rows.push({ title: params.title })
+        return { id: `task-${rows.length}`, title: params.title }
+      },
+    } as unknown as PipelineBDeps['tasks']
+    return { rows, tasks }
+  }
+
+  function extractionWith(titles: string[]): string {
+    return JSON.stringify({
+      summary: 'Standup chatter.',
+      entities: [],
+      edges: [],
+      tasks: titles.map((text) => ({ text, due_iso: null, assignee_ref: null })),
+      memories: [],
+      ephemeral: [],
+      tags: [],
+    })
+  }
+
+  function admissionPort(over: Partial<PipelineBDeps['taskAdmission']> = {}) {
+    return {
+      listActiveRules: async () => [],
+      findSimilarTombstones: async () => [],
+      findSimilarTasks: async () => [],
+      recordCandidate: async () => {},
+      ...over,
+    } as PipelineBDeps['taskAdmission']
+  }
+
+  function baseDepsFor(provider: LLMProvider, tasks: PipelineBDeps['tasks']) {
+    return {
+      provider,
+      crm: spyCrm(makeWorld()).store,
+      entities: spyEntities(makeWorld()).store,
+      entityLinks: spyLinks().store,
+      memories: spyMemories().store,
+      episodes: spyEpisodes().port,
+      tasks,
+    }
+  }
+
+  const classification = JSON.stringify({
+    inferred_sensitivity: 'internal',
+    brief_reason: 'routine',
+  })
+
+  it('writes every extracted task when no gate is wired (unchanged behavior)', async () => {
+    const { rows, tasks } = taskCollector()
+    const provider = sequencedProvider([
+      extractionWith(['Revise daily standup workflow']),
+      classification,
+    ])
+    await processEpisode(baseEpisode(), 'chatter', makeDeps(baseDepsFor(provider, tasks)))
+    expect(rows.map((r) => r.title)).toEqual(['Revise daily standup workflow'])
+  })
+
+  it('drops a task the workspace already rejected, and records the audit row', async () => {
+    const { rows, tasks } = taskCollector()
+    const recorded: any[] = []
+    const provider = sequencedProvider([extractionWith(['List tasks']), classification])
+    await processEpisode(
+      baseEpisode(),
+      'chatter',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          findSimilarTombstones: async () => [
+            {
+              tombstone: {
+                id: 'tomb-1',
+                workspaceId: 'ws-1',
+                title: 'List tasks',
+                titleNorm: 'list tasks',
+                reason: 'this was an instruction to you, not a work item',
+                sourceKind: 'slack_thread',
+                lane: 'extracted',
+                createdAt: new Date(),
+              },
+              similarity: 1,
+            },
+          ],
+          recordCandidate: async (input) => {
+            recorded.push(input)
+          },
+        }),
+      }),
+    )
+
+    expect(rows).toHaveLength(0)
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0].status).toBe('dropped')
+    expect(recorded[0].reasonCode).toBe('tombstoned')
+  })
+
+  it('holds a near-duplicate in the tray while letting the rest of the batch through', async () => {
+    const { rows, tasks } = taskCollector()
+    const recorded: any[] = []
+    const provider = sequencedProvider([
+      extractionWith(['Fix the GitHub 401 error', 'Book the venue']),
+      classification,
+    ])
+    await processEpisode(
+      baseEpisode(),
+      'chatter',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          findSimilarTasks: async (_ws: string, titleNorm: string) =>
+            titleNorm.includes('github')
+              ? [{ id: 'task-existing', title: 'Resolve GitHub 401', similarity: 0.7 }]
+              : [],
+          recordCandidate: async (input) => {
+            recorded.push(input)
+          },
+        }),
+      }),
+    )
+
+    expect(rows.map((r) => r.title)).toEqual(['Book the venue'])
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0].status).toBe('pending')
+    expect(recorded[0].reasonCode).toBe('near_duplicate')
+  })
+
+  it('injects the workspace policy into the extraction prompt', async () => {
+    const { tasks } = taskCollector()
+    const { provider, requests } = capturingProvider([extractionWith([]), classification])
+    await processEpisode(
+      baseEpisode(),
+      'chatter',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          loadPolicyForPrompt: async () => ({
+            rules: [
+              {
+                id: 'r1',
+                workspaceId: 'ws-1',
+                status: 'active' as const,
+                effect: 'deny' as const,
+                predicate: {},
+                nlClause: "Don't create tasks from standup acknowledgements",
+                reason: null,
+                origin: 'user' as const,
+                createdAt: new Date(),
+              },
+            ],
+            tombstones: [],
+          }),
+        }),
+      }),
+    )
+
+    const prompt = String(requests[0]?.messages?.[0]?.content ?? '')
+    expect(prompt).toContain('Workspace task policy')
+    expect(prompt).toContain("Don't create tasks from standup acknowledgements")
+  })
+
+  it('extracts normally when the policy lookup fails', async () => {
+    // A policy read that throws must not fail the extraction — the gate is
+    // still there as the backstop.
+    const { rows, tasks } = taskCollector()
+    const provider = sequencedProvider([extractionWith(['Book the venue']), classification])
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await processEpisode(
+      baseEpisode(),
+      'chatter',
+      makeDeps({
+        ...baseDepsFor(provider, tasks),
+        taskAdmission: admissionPort({
+          loadPolicyForPrompt: async () => {
+            throw new Error('db down')
+          },
+        }),
+      }),
+    )
+    expect(rows.map((r) => r.title)).toEqual(['Book the venue'])
+    warn.mockRestore()
+  })
+})

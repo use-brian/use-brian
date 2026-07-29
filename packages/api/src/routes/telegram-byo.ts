@@ -40,7 +40,7 @@ import { withChatLock } from '../db/chat-lock.js'
 import { buildDocumentFiledReply, buildOversizeDocReply, classifyMedia } from '../ingest/channel-media-intake.js'
 import type { ConfirmationDecision, ConfirmationResolver, ContentBlock } from '@use-brian/core'
 import type { LLMProvider, Tool, MemoryStore, UsageStore, AnalyticsLogger, McpSettingsStore, KnowledgeStoreInterface, GDriveFilesStore, TokenUsage } from '@use-brian/core'
-import { transcribeFirstAudio, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
+import { transcribeFirstAudio, describeTranscriptionFailure, composeVoiceTurnText, TRANSCRIPTION_DISABLED_REASON, sanitize as sanitizeAnalytics, type MediaBackend } from '@use-brian/core'
 import type { ChannelIntegrationStore, ChannelIntegrationConfig, TelegramCredentials, SeenChat } from '../db/channel-integrations.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
@@ -1201,49 +1201,74 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
   let voiceTranscriptionUsage:
     | { usage: TokenUsage | null; model: string; audioSeconds?: number }
     | null = null
+  // Why the transcript is missing, when we know. A voice note that produces
+  // nothing must still reach the model AS a voice note: this route attaches no
+  // audio content block for `voice` (the transcript is authoritative) and
+  // `shouldUseUniversalTelegramIntake` never routes it to brain ingest, so a
+  // silent failure hands the model an empty turn and it answers "I don't see a
+  // recording attachment". See docs/architecture/media/transcription.md.
+  let transcribeFailure: string | undefined
+  let transcript: string | undefined
   if (
     incoming.mediaType === 'voice' &&
-    incoming.mediaUrl &&
-    params.voiceTranscription?.enabled
+    incoming.mediaUrl
   ) {
-    try {
-      const { buffer, mime } = await adapter.downloadVoice(incoming.mediaUrl)
-      const result = await transcribeFirstAudio(
-        [
+    // Kill switch short-circuits the download — pulling bytes we will throw
+    // away is the one thing the rollback is meant to stop. The turn still says
+    // what happened.
+    if (!params.voiceTranscription?.enabled) {
+      transcribeFailure = TRANSCRIPTION_DISABLED_REASON
+    } else {
+      try {
+        const { buffer, mime } = await adapter.downloadVoice(incoming.mediaUrl)
+        const result = await transcribeFirstAudio(
+          [
+            {
+              buffer,
+              mime,
+              index: 0,
+              // Telegram puts `voice.duration` on the webhook payload, so this
+              // is the one transcription path that can price itself per audio
+              // hour. Absent (older payloads) stays absent, not 0.
+              ...(incoming.mediaDurationSec !== undefined
+                ? { durationSeconds: incoming.mediaDurationSec }
+                : {}),
+            },
+          ],
           {
-            buffer,
-            mime,
-            index: 0,
-            // Telegram puts `voice.duration` on the webhook payload, so this
-            // is the one transcription path that can price itself per audio
-            // hour. Absent (older payloads) stays absent, not 0.
-            ...(incoming.mediaDurationSec !== undefined
-              ? { durationSeconds: incoming.mediaDurationSec }
+            enabled: true,
+            apiKey: params.voiceTranscription.apiKey,
+            ...(params.voiceTranscription.backend
+              ? { backend: params.voiceTranscription.backend }
               : {}),
+            model: params.voiceTranscription.model,
+            onFailure: (reason) => { transcribeFailure = reason },
           },
-        ],
-        {
-          enabled: true,
-          apiKey: params.voiceTranscription.apiKey,
-          ...(params.voiceTranscription.backend
-            ? { backend: params.voiceTranscription.backend }
-            : {}),
-          model: params.voiceTranscription.model,
-        },
-      )
-      if (result) {
-        voiceTranscriptionUsage = {
-          usage: result.usage,
-          model: result.model,
-          ...(result.audioSeconds !== undefined ? { audioSeconds: result.audioSeconds } : {}),
+        )
+        if (result) {
+          // The call happened, so attribute its usage even when the transcript
+          // came back empty.
+          voiceTranscriptionUsage = {
+            usage: result.usage,
+            model: result.model,
+            ...(result.audioSeconds !== undefined ? { audioSeconds: result.audioSeconds } : {}),
+          }
         }
-        incoming.text = incoming.text
-          ? `[voice] ${result.text}\n\n${incoming.text}`
-          : `[voice] ${result.text}`
+        if (result?.text.trim()) {
+          transcript = result.text
+        } else if (result) {
+          // The transcriber is instructed to emit an empty string for silent or
+          // unintelligible audio, so this is an answer, not an error.
+          transcribeFailure = 'the audio was silent or unintelligible'
+        }
+      } catch (err) {
+        // The download leg (getFile + fetch) throws here; transcription failures
+        // arrive via onFailure. Either way the turn must say so.
+        console.error('[telegram-byo] voice download/transcribe failed:', err)
+        transcribeFailure = describeTranscriptionFailure(err)
       }
-    } catch (err) {
-      console.error('[telegram-byo] voice download/transcribe failed:', err)
     }
+    incoming.text = composeVoiceTurnText(transcript, transcribeFailure, incoming.text)
   }
 
   // Non-voice media preflight. Two shapes supported:

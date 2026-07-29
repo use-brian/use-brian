@@ -27,7 +27,12 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import nodePath from 'node:path'
 import { parseMarkdownFile } from '@use-brian/core'
-import type { KnowledgeRepoWriter, KnowledgeRepoWriteResult, Sensitivity } from '@use-brian/core'
+import type {
+  KnowledgeRepoWriter,
+  KnowledgeRepoWriteResult,
+  KnowledgeWriteActor,
+  Sensitivity,
+} from '@use-brian/core'
 import * as github from '../github/client.js'
 import { splitFrontmatterBlock, resolveRepoFilePath, validateKnowledgeEntryPath } from './repo-files.js'
 
@@ -68,6 +73,14 @@ export type RepoWriterStore = {
     summary?: string | null; content: string; tags?: string[]
     sensitivity: Sensitivity
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
+    /**
+     * Lifecycle-event provenance for the `knowledge` workflow event source.
+     * The writer always passes `'system'` — its write-through IS the
+     * assistant's own write, and marking it bot-authored is the self-loop
+     * guard for a KB-maintenance workflow.
+     */
+    writtenBy?: KnowledgeWriteActor
+    actorId?: string | null
   }): Promise<{ id: string; path: string }>
   updateSourceWriteAccess(id: string, writeAccess: boolean): Promise<void>
 }
@@ -265,6 +278,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
     relativePath: string,
     fileContent: string,
     commitSha: string | null,
+    requestedBy: { userId: string } | null | undefined,
   ): Promise<{ id: string; path: string }> {
     const parsed = parseMarkdownFile(relativePath, fileContent)
     return await deps.store.upsertByPath({
@@ -278,6 +292,13 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
       metadata: { ...parsed.metadata, _rawRelated: parsed.related },
       sourceId: source.id,
       sourceSha: commitSha,
+      // Assistant-authored: becomes `DispatchEvent.isBot` on the `knowledge`
+      // workflow event source, so a KB-maintenance workflow watching this
+      // source does not re-trigger on the write it just caused. A workflow
+      // that genuinely wants to see assistant edits opts in with
+      // `match.fromBots: true`.
+      writtenBy: 'system',
+      actorId: requestedBy?.userId ?? null,
     })
   }
 
@@ -360,7 +381,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, relativePath, newFile, commitSha)
+        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy)
       } catch (err) {
         return mirrorFailure(source.sourceType, commitSha, err)
       }
@@ -430,7 +451,7 @@ export function createKnowledgeRepoWriter(deps: KnowledgeRepoWriterDeps): Knowle
 
       let row: { id: string; path: string }
       try {
-        row = await writeThrough(source, relativePath, newFile, commitSha)
+        row = await writeThrough(source, relativePath, newFile, commitSha, requestedBy)
       } catch (err) {
         return mirrorFailure(source.sourceType, commitSha, err)
       }

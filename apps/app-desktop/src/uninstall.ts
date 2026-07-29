@@ -46,6 +46,9 @@ export function collectUninstallPaths(home: string): string[] {
       `${home}/Library/Saved Application State/${appId}.savedState`,
     );
   }
+  paths.push(
+    `${home}/Library/Application Support/Mozilla/NativeMessagingHosts/ai.usebrian.browser.json`,
+  );
   return paths;
 }
 

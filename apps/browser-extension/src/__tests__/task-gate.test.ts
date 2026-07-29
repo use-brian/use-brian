@@ -90,6 +90,24 @@ describe('[COMP:ext/agent] Per-task consent gate (P1.7)', () => {
     expect(prompts).toBe(1)
   })
 
+  it('does not let a pre-disconnect Allow release a newer Stop', async () => {
+    let allow: (() => void) | null = null
+    const gate = new TaskGate({
+      prompt: () => new Promise((resolve) => {
+        allow = () => resolve({ allowed: true, tabId: 3 })
+      }),
+    })
+    const beforeDisconnect = gate.requireTab()
+    gate.stop()
+    const afterDisconnect = gate.requireTab()
+    allow?.()
+
+    await expect(beforeDisconnect).rejects.toMatchObject({ code: 'stopped' })
+    await expect(afterDisconnect).rejects.toMatchObject({ code: 'stopped' })
+    expect(gate.isStopped()).toBe(true)
+    expect(gate.currentTab()).toBeNull()
+  })
+
   it('Stop drops live consent, so the next command cannot ride the idle window', async () => {
     // Previously this asserted `code === 'stopped'` with an ALLOWING prompter
     // — i.e. it asserted that granting consent does NOT release Stop, which

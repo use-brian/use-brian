@@ -75,10 +75,18 @@ import {
 import {
   classifyNavigation,
   decideLoginAction,
+  decideRedirectAction,
   parseRefreshBounce,
   decideLoadFailureAction,
   shouldAttemptLocalMint,
 } from "./window-policy.js";
+import {
+  isAllowedGatewayNavigation,
+  hasReturnedToProtectedOrigin,
+  isHealthyDocument,
+  probeExpectedJson,
+  type GatewayProbeFetch,
+} from "./gateway-auth.js";
 import { resolveDeepLink } from "./deep-link.js";
 import { quickCaptureUrl, recordTargetUrl } from "./quick-capture.js";
 import {
@@ -159,6 +167,14 @@ import {
   serializeAccessGrant,
   type CloudflareAccessGrant,
 } from "./cloudflare-access-oauth.js";
+import { registerFirefoxNativeHost } from "./firefox-native-registration.js";
+import {
+  findFirefoxExecutable,
+  firefoxExecutableCandidates,
+  firefoxProfilesRoots,
+  launchFirefoxForControl,
+  waitForFirefoxRemoteEndpoint,
+} from "./firefox-launcher.js";
 
 const { autoUpdater } = electronUpdater;
 
@@ -232,10 +248,139 @@ let connectorServer: Server | null = null;
 let connectorServerTimer: ReturnType<typeof setTimeout> | null = null;
 /** A deep link / auth callback delivered before the window exists (macOS cold-start). */
 let pendingUrl: string | null = null;
+/** The isolated, shared-session browser used for an interactive deployment gateway. */
+let gatewayWindow: BrowserWindow | null = null;
+/** One gateway login at a time; concurrent challenged requests wait for this result. */
+let gatewayAuthInFlight: Promise<boolean> | null = null;
+/** Origin currently being authenticated; another origin queues behind it. */
+let gatewayAuthOrigin: string | null = null;
+/** Protected target currently being validated from the local-target chooser. */
+let pendingLocalGatewayUrl: string | null = null;
 /** The edge grant stays main-process-only; the renderer never receives it. */
 let activeAccessGrant: CloudflareAccessGrant | null = null;
 /** Startup discovered that the persisted remote target needs a new Access grant. */
 let accessReauthorizationNeeded = false;
+
+const GATEWAY_RECHECK_INTERVAL_MS = 1000;
+
+/** Electron-session transport: HttpOnly deployment-gateway cookies stay on-device. */
+const gatewayProbeFetch: GatewayProbeFetch = (input, init) => {
+  const authorization = accessAuthorizationForUrl(activeAccessGrant, input);
+  if (!authorization) return session.defaultSession.fetch(input, init);
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", authorization);
+  return session.defaultSession.fetch(input, { ...init, headers });
+};
+
+/**
+ * Authenticate an arbitrary HTTP gateway without knowing its provider, domains,
+ * or cookie names. Success means the caller's original endpoint contract passes.
+ */
+function authenticateGateway(
+  protectedUrl: string,
+  validate: () => Promise<boolean>,
+): Promise<boolean> {
+  const protectedOrigin = new URL(protectedUrl).origin;
+  console.log(`[gateway-auth] opening authentication for ${protectedOrigin}`);
+  if (gatewayAuthInFlight) {
+    if (gatewayAuthOrigin === protectedOrigin) return gatewayAuthInFlight;
+    const pending = gatewayAuthInFlight;
+    return pending.then(() => authenticateGateway(protectedUrl, validate));
+  }
+  gatewayAuthOrigin = protectedOrigin;
+
+  const run = new Promise<boolean>((resolveAuth) => {
+    const win = new BrowserWindow({
+      width: 560,
+      height: 760,
+      title: "Authenticate to Local Brain",
+      show: false,
+      autoHideMenuBar: true,
+      webPreferences: {
+        session: session.defaultSession,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        devTools: false,
+        spellcheck: false,
+      },
+    });
+    gatewayWindow = win;
+
+    let settled = false;
+    let checking = false;
+    const timer = setInterval(() => void checkAccess(), GATEWAY_RECHECK_INTERVAL_MS);
+
+    const finish = (authenticated: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      if (gatewayWindow === win) gatewayWindow = null;
+      resolveAuth(authenticated);
+      if (!win.isDestroyed()) win.destroy();
+    };
+
+    const checkAccess = async (): Promise<void> => {
+      if (settled || checking) return;
+      checking = true;
+      try {
+        if (await validate()) {
+          console.log(`[gateway-auth] authenticated ${protectedOrigin}`);
+          finish(true);
+        }
+      } catch {
+        // The gateway or IdP is still navigating/offline; the next check retries.
+      } finally {
+        checking = false;
+      }
+    };
+
+    const enforceNavigation = (event: Event, url: string): void => {
+      if (!isAllowedGatewayNavigation(url, protectedUrl)) event.preventDefault();
+    };
+
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    win.webContents.on("will-navigate", enforceNavigation);
+    win.webContents.on("will-redirect", enforceNavigation);
+    win.webContents.on("did-finish-load", () => void checkAccess());
+    win.webContents.on("did-navigate", (_event, url, statusCode) => {
+      console.log(`[gateway-auth] navigated ${statusCode} ${url}`);
+      // Returning from an IdP to the protected origin proves the outer
+      // gateway session was established. Close this browser immediately;
+      // the caller still re-probes desktop-config and /health before it can
+      // persist or load the target, so a same-origin 404 is never accepted
+      // as a healthy Brian deployment.
+      if (hasReturnedToProtectedOrigin(url, protectedUrl)) {
+        console.log(`[gateway-auth] returned to protected origin ${protectedOrigin}`);
+        finish(true);
+        return;
+      }
+      void checkAccess();
+    });
+    win.once("ready-to-show", () => focusWindow(win));
+    win.on("closed", () => finish(false));
+
+    void win.webContents.loadURL(protectedUrl).catch((err) => {
+      if (!settled) console.warn("Gateway authentication page failed to load:", err);
+    });
+  });
+
+  gatewayAuthInFlight = run;
+  void run.finally(() => {
+    if (gatewayAuthInFlight === run) {
+      gatewayAuthInFlight = null;
+      gatewayAuthOrigin = null;
+    }
+  });
+  return run;
+}
+
+function ignoreAbortedLoad(label: string, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("ERR_ABORTED") || (err as { code?: number })?.code === -3) return;
+  console.warn(`${label} failed to load:`, err);
+}
 
 // ── Window ─────────────────────────────────────────────────────
 
@@ -251,7 +396,8 @@ let accessReauthorizationNeeded = false;
  * stays draggable. Mirrors app-web's own `[data-doc-chrome] :is(button, a, …)`
  * rule, generalized so the shell never depends on the page tagging perfectly.
  */
-const INTERACTIVE_NO_DRAG_CSS = `
+const DESKTOP_CHROME_SAFETY_CSS = `
+  ${process.platform === "darwin" ? "" : ":root { --doc-titlebar-lights: 0rem !important; }"}
   a, button, input, textarea, select, label, summary,
   [role="button"], [role="link"], [role="menuitem"], [role="tab"],
   [role="option"], [contenteditable], [data-no-drag] {
@@ -274,7 +420,9 @@ function createWindow(): BrowserWindow {
     // deferred — see docs/architecture/features/app-desktop.md → "Windows (v1 frame)".
     ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     backgroundColor: "#ffffff",
-    show: false,
+    // A remote page can stall before ready-to-show, which otherwise leaves the
+    // tray process alive with no window for the user to recover.
+    show: true,
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
@@ -283,7 +431,10 @@ function createWindow(): BrowserWindow {
       webSecurity: true,
       // Bundled mode only: tell the preload to expose the Bearer token bridge.
       // Absent in the thin shell, so its `isDesktopAuth()` stays false (cookies).
-      additionalArguments: cfg.bundled ? ["--usebrian-bundled"] : [],
+      additionalArguments: [
+        ...(cfg.bundled ? ["--usebrian-bundled"] : []),
+        ...(cfg.target === "local" ? ["--usebrian-local-target"] : []),
+      ],
     },
   });
 
@@ -302,12 +453,13 @@ function createWindow(): BrowserWindow {
     if (!win.webContents.isDestroyed()) win.webContents.focus();
   });
 
-  // Re-apply the drag-region safety net (see INTERACTIVE_NO_DRAG_CSS) on every
+  // Re-apply the chrome safety net (see DESKTOP_CHROME_SAFETY_CSS) on every
   // full load, so controls on the loaded page can never be silently turned into
   // window-drag handles that eat clicks. insertCSS persists across the page's
   // own SPA navigations, so re-applying per full load is enough.
   win.webContents.on("did-finish-load", () => {
-    if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(INTERACTIVE_NO_DRAG_CSS);
+    if (!win.webContents.isDestroyed()) void win.webContents.insertCSS(DESKTOP_CHROME_SAFETY_CSS);
+    if (cfg.target === "local") void detectLoadedGatewayChallenge(win);
   });
 
   // §2.3 visible target indicator: a local target suffixes every page title so
@@ -340,7 +492,7 @@ function createWindow(): BrowserWindow {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", handleNavigation);
-  win.webContents.on("will-redirect", handleNavigation);
+  win.webContents.on("will-redirect", handleRedirect);
 
   // Never leave a blank window on a main-frame load failure. A SIGNED-IN user
   // (a refresh token in the jar) whose load fails for lack of network gets the
@@ -478,11 +630,122 @@ function handleNavigation(event: Event, url: string): void {
   }
 }
 
+/**
+ * An off-origin server redirect from a local app may be its deployment gateway.
+ * Keep ordinary navigations on the existing policy, but verify a redirect via
+ * the protected discovery endpoint before resuming the app in Electron's jar.
+ */
+function handleRedirect(event: Event, url: string): void {
+  // During Cloud -> Local validation cfg still describes the CURRENT cloud
+  // target; the prospective local target is not persisted until validation
+  // succeeds. Route its server redirects as gateway auth explicitly rather
+  // than consulting cfg.target and accidentally starting cloud PKCE.
+  if (pendingLocalGatewayUrl && isAllowedGatewayNavigation(url, pendingLocalGatewayUrl)) {
+    event.preventDefault();
+    void recoverPendingLocalGatewayRedirect(pendingLocalGatewayUrl);
+    return;
+  }
+  const action = decideRedirectAction(url, {
+    target: cfg.target,
+    auth: cfg.targetAuth,
+    appOrigin: cfg.appOrigin,
+    appUrl: cfg.appUrl,
+  });
+  if (action === "gateway") {
+    event.preventDefault();
+    void recoverAppGatewayRedirect(url);
+    return;
+  }
+  if (action !== "none" && action !== "navigation") {
+    handleNavigation(event, url);
+    return;
+  }
+  handleNavigation(event, url);
+}
+
+async function recoverPendingLocalGatewayRedirect(protectedUrl: string): Promise<void> {
+  const result = await probeWithGatewayAuthentication(
+    desktopConfigUrl(protectedUrl),
+    () => probeDesktopConfig(protectedUrl),
+  );
+  if (result.kind !== "ready") return;
+}
+
+async function recoverAppGatewayRedirect(redirectUrl: string): Promise<void> {
+  const first = await probeDesktopConfig(cfg.appUrl);
+  if (first.kind === "ready") {
+    if (classifyNavigation(redirectUrl, cfg.appOrigin) === "internal") {
+      await ensureWindow().webContents.loadURL(redirectUrl);
+    } else {
+      await shell.openExternal(redirectUrl);
+    }
+    return;
+  }
+  if (first.kind !== "authentication-required") {
+    showLocalDown(ensureWindow());
+    return;
+  }
+  const result = await probeWithGatewayAuthentication(
+    desktopConfigUrl(cfg.appUrl),
+    () => probeDesktopConfig(cfg.appUrl),
+  );
+  if (result.kind === "ready") await loadApp(ensureWindow());
+  else showLocalDown(ensureWindow(), result.kind === "cancelled" ? "gateway-auth" : "unreachable");
+}
+
+/** Catch a gateway that replaces the app document with a 200/401/403 login page. */
+async function detectLoadedGatewayChallenge(win: BrowserWindow): Promise<void> {
+  if (win.isDestroyed()) return;
+  try {
+    if (new URL(win.webContents.getURL()).origin !== cfg.appOrigin) return;
+  } catch {
+    return;
+  }
+  const first = await probeDesktopConfig(cfg.appUrl);
+  if (first.kind !== "authentication-required") return;
+  const result = await probeWithGatewayAuthentication(
+    desktopConfigUrl(cfg.appUrl),
+    () => probeDesktopConfig(cfg.appUrl),
+  );
+  if (result.kind === "ready") await loadApp(win);
+  else showLocalDown(win, result.kind === "cancelled" ? "gateway-auth" : "unreachable");
+}
+
+/** Re-authenticate after an API/SSE request is redirected when a gateway cookie expires. */
+async function recoverBackgroundGatewayRequest(requestUrl: string): Promise<void> {
+  let requestOrigin: string;
+  try {
+    requestOrigin = new URL(requestUrl).origin;
+  } catch {
+    return;
+  }
+
+  if (requestOrigin === cfg.appOrigin) {
+    await probeWithGatewayAuthentication(
+      desktopConfigUrl(cfg.appUrl),
+      () => probeDesktopConfig(cfg.appUrl),
+    );
+    return;
+  }
+
+  if (requestOrigin === new URL(cfg.apiUrl).origin) {
+    await probeWithGatewayAuthentication(healthUrl(cfg.apiUrl), () => probeLocalBrain(cfg.apiUrl));
+  }
+}
+
 /** Show the built-in sign-in landing (never a blank window). */
 function promptSignIn(): void {
   stopRetryWatchers(); // leaving the offline/brain-down state for a real sign-out
-  const win = ensureWindow();
-  void win.webContents.loadFile(SIGNIN_PAGE).then(() => focusWindow(win));
+  // A redirect handler can call this while Chromium is still cancelling the
+  // intercepted navigation. Replacing it synchronously races that cancellation
+  // and aborts this file load too, so start the landing on the next turn.
+  setImmediate(() => {
+    const win = ensureWindow();
+    void win.webContents.loadFile(SIGNIN_PAGE).then(
+      () => focusWindow(win),
+      (err) => ignoreAbortedLoad("Sign-in landing", err),
+    );
+  });
 }
 
 // ── Offline landing + auto-retry ───────────────────────────────
@@ -542,17 +805,20 @@ function showOffline(win: BrowserWindow): void {
 // target switch. Every decision is pure (target-store.ts / window-policy.ts);
 // only the IO lives here.
 
-/** Probe the paired API's `/health` — cheap, short-timeout, never throws (§2.2). */
-async function probeLocalBrain(apiUrl: string): Promise<boolean> {
-  try {
-    const res = await net.fetch(healthUrl(apiUrl), {
-      signal: AbortSignal.timeout(3500),
-      cache: "no-store",
-    });
-    return res.ok;
-  } catch {
-    return false;
+type LocalProbeResult<T> =
+  | { kind: "ready"; value: T }
+  | { kind: "authentication-required" }
+  | { kind: "unreachable" }
+  | { kind: "cancelled" };
+
+/** Probe `/health`, requiring the API's JSON contract rather than any HTTP 2xx. */
+async function probeLocalBrain(apiUrl: string): Promise<LocalProbeResult<undefined>> {
+  const result = await probeExpectedJson(healthUrl(apiUrl), { fetchImpl: gatewayProbeFetch });
+  if (result.kind === "authentication-required") return result;
+  if (result.kind === "ok" && isHealthyDocument(result.body)) {
+    return { kind: "ready", value: undefined };
   }
+  return { kind: "unreachable" };
 }
 
 /**
@@ -565,6 +831,19 @@ async function probeLocalBrain(apiUrl: string): Promise<boolean> {
  * under a different name was previously unreachable. Never throws — an older
  * self-host 404s here and falls back.
  */
+async function probeDesktopConfig(appUrl: string): Promise<LocalProbeResult<string | null>> {
+  const result = await probeExpectedJson(desktopConfigUrl(appUrl), {
+    allowNotFound: true,
+    fetchImpl: gatewayProbeFetch,
+  });
+  if (result.kind === "authentication-required") return result;
+  if (result.kind === "missing") return { kind: "ready", value: null };
+  if (result.kind === "ok") {
+    return { kind: "ready", value: parseDesktopConfig(result.body) };
+  }
+  return { kind: "unreachable" };
+}
+
 type DesktopConfigResult =
   | { readonly kind: "configured"; readonly apiUrl: string | null }
   | { readonly kind: "managed-oauth"; readonly resourceMetadataUrl: string }
@@ -600,6 +879,76 @@ async function fetchDeclaredApiUrl(
   } catch {
     return { kind: "configured", apiUrl: null };
   }
+}
+
+/** Authenticate once when a probe reports a gateway challenge, then re-probe. */
+async function probeWithGatewayAuthentication<T>(
+  protectedUrl: string,
+  probe: () => Promise<LocalProbeResult<T>>,
+): Promise<LocalProbeResult<T>> {
+  const first = await probe();
+  if (first.kind !== "authentication-required") return first;
+
+  const authenticated = await authenticateGateway(protectedUrl, async () => {
+    const result = await probe();
+    return result.kind === "ready";
+  });
+  if (!authenticated) return { kind: "cancelled" };
+  return probe();
+}
+
+/**
+ * Electron's session.fetch may follow a Cloudflare Access redirect despite a
+ * manual redirect request, yielding an opaque failed probe instead of the 302.
+ * For an explicitly chosen HTTPS self-host, fall back to opening the protected
+ * endpoint itself: Chromium follows the Access chain visibly, while the same
+ * JSON probe remains the only completion signal.
+ */
+async function probeWithVisibleGatewayFallback<T>(
+  protectedUrl: string,
+  probe: () => Promise<LocalProbeResult<T>>,
+  interactiveUrl = protectedUrl,
+): Promise<LocalProbeResult<T>> {
+  const first = await probe();
+  if (first.kind === "ready") return first;
+  if (first.kind !== "authentication-required" && new URL(protectedUrl).protocol !== "https:") {
+    return first;
+  }
+  const authenticated = await authenticateGateway(interactiveUrl, async () => {
+    const result = await probe();
+    return result.kind === "ready";
+  });
+  if (!authenticated) return { kind: "cancelled" };
+  return probe();
+}
+
+/** Validate both protected origins before loading or adopting a local target. */
+async function validateLocalTarget(
+  appUrl: string,
+  fallbackApiUrl: string,
+): Promise<LocalProbeResult<{ apiUrl: string; declaredApiUrl: string | null }>> {
+  console.log(`[gateway-auth] validating app ${appUrl}`);
+  const config = await probeWithVisibleGatewayFallback(
+    desktopConfigUrl(appUrl),
+    () => probeDesktopConfig(appUrl),
+  );
+  if (config.kind !== "ready") {
+    console.warn(`[gateway-auth] app validation ended: ${config.kind}`);
+    return config;
+  }
+
+  const target = localTarget(appUrl, config.value) ?? localTarget(appUrl);
+  const apiUrl = target?.apiUrl ?? fallbackApiUrl;
+  const health = await probeWithVisibleGatewayFallback(
+    healthUrl(apiUrl),
+    () => probeLocalBrain(apiUrl),
+  );
+  if (health.kind !== "ready") {
+    console.warn(`[gateway-auth] API validation ended: ${health.kind} (${apiUrl})`);
+    return health;
+  }
+  console.log(`[gateway-auth] target ready: app=${appUrl} api=${apiUrl}`);
+  return { kind: "ready", value: { apiUrl, declaredApiUrl: config.value } };
 }
 
 /**
@@ -663,14 +1012,18 @@ async function mintLocalSession(): Promise<void> {
  * about a localhost brain — so this one re-probes the paired API and reloads
  * the app the moment `/health` answers.
  */
-function showLocalDown(win: BrowserWindow, reason: "unreachable" | "auth" = "unreachable"): void {
+function showLocalDown(
+  win: BrowserWindow,
+  reason: "unreachable" | "auth" | "gateway-auth" = "unreachable",
+): void {
   void win.webContents
     .loadFile(SIGNIN_PAGE, { query: { mode: "local-down", target: cfg.appUrl, reason } })
     .then(() => focusWindow(win));
   stopRetryWatchers();
+  if (reason === "gateway-auth") return;
   localRetryTimer = setInterval(() => {
     void (async () => {
-      if (await probeLocalBrain(cfg.apiUrl)) await retryLoad(win);
+      if ((await probeLocalBrain(cfg.apiUrl)).kind === "ready") await retryLoad(win);
     })();
   }, OFFLINE_RETRY_INTERVAL_MS);
 }
@@ -733,7 +1086,10 @@ function bundledAvailable(): boolean {
  * the quick-capture surface. Until a bundle is packaged, `bundledAvailable()`
  * is false and this is byte-for-byte the prior `loadURL` behavior.
  */
-function loadApp(win: BrowserWindow, opts: { capture?: boolean; record?: boolean } = {}): Promise<void> {
+async function loadApp(
+  win: BrowserWindow,
+  opts: { capture?: boolean; record?: boolean } = {},
+): Promise<void> {
   if (bundledAvailable()) {
     // The bundled renderer loads from file://, so it has no env: hand it the API
     // base (and the capture/record intent) via the query string. The client reads
@@ -741,9 +1097,17 @@ function loadApp(win: BrowserWindow, opts: { capture?: boolean; record?: boolean
     const query: Record<string, string> = { api: cfg.apiUrl };
     if (opts.capture) query.capture = "1";
     if (opts.record) query.record = "1";
-    return win.webContents.loadFile(BUNDLE_INDEX, { query });
+    await win.webContents.loadFile(BUNDLE_INDEX, { query });
+    return;
   }
-  return win.webContents.loadURL(
+  if (cfg.target === "local") {
+    const target = await validateLocalTarget(cfg.appUrl, cfg.apiUrl);
+    if (target.kind !== "ready") {
+      showLocalDown(win, target.kind === "cancelled" ? "gateway-auth" : "unreachable");
+      return;
+    }
+  }
+  await win.webContents.loadURL(
     opts.capture ? quickCaptureUrl(cfg.appUrl) : opts.record ? recordTargetUrl(cfg.appUrl) : cfg.appUrl,
   );
 }
@@ -1591,7 +1955,27 @@ function refreshSessionInPlace(): Promise<RefreshOutcome> {
     if (!refreshToken) return "signed-out";
     let result: DesktopSession | null;
     try {
-      result = await refreshSession(cfg.apiUrl, refreshToken);
+      if (cfg.target === "local") {
+        let health = await probeLocalBrain(cfg.apiUrl);
+        if (
+          health.kind === "authentication-required" &&
+          mainWindow &&
+          !mainWindow.isDestroyed() &&
+          mainWindow.isVisible()
+        ) {
+          health = await probeWithGatewayAuthentication(
+            healthUrl(cfg.apiUrl),
+            () => probeLocalBrain(cfg.apiUrl),
+          );
+        }
+        if (health.kind !== "ready") return "failed";
+      }
+      result =
+        cfg.target === "local"
+          ? await refreshSession(cfg.apiUrl, refreshToken, (input, init) =>
+              session.defaultSession.fetch(input, { ...init, credentials: "include" }),
+            )
+          : await refreshSession(cfg.apiUrl, refreshToken);
     } catch (err) {
       console.warn("Session refresh failed (will retry):", err);
       return "failed";
@@ -1815,6 +2199,10 @@ function startAutoUpdate(): void {
 // ── Deep links + auth callback ─────────────────────────────────
 
 function handleIncomingUrl(rawUrl: string): void {
+  if (rawUrl === `${cfg.protocolScheme}://firefox-control`) {
+    void startFirefoxForControl();
+    return;
+  }
   const auth = parseAuthCallback(rawUrl, cfg.protocolScheme);
   if (auth) {
     if (auth.kind === "code") void completeSignIn(auth.code);
@@ -1878,6 +2266,43 @@ async function confirmAndUninstall(): Promise<void> {
   app.quit();
 }
 
+async function startFirefoxForControl(): Promise<void> {
+  const candidates = firefoxExecutableCandidates(process.platform, process.env, homedir());
+  const executable = await findFirefoxExecutable(candidates);
+  const profilesRoots = firefoxProfilesRoots(process.platform, process.env, homedir());
+  if (!executable || profilesRoots.length === 0) {
+    await dialog.showMessageBox({
+      type: "error",
+      message: "Firefox was not found",
+      detail: "Install Firefox in its standard location, then try again.",
+      buttons: ["OK"],
+    });
+    return;
+  }
+  const { response } = await dialog.showMessageBox({
+    type: "info",
+    message: "Start Firefox for My Browser?",
+    detail:
+      "Quit Firefox completely before continuing. Use Brian will reopen your normal Firefox profile with a loopback-only browser-control endpoint for this launch.",
+    buttons: ["Start Firefox", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return;
+  const startedAt = Date.now() - 1_000;
+  launchFirefoxForControl(executable);
+  const endpoint = await waitForFirefoxRemoteEndpoint(profilesRoots, { afterMs: startedAt });
+  if (!endpoint) {
+    await dialog.showMessageBox({
+      type: "warning",
+      message: "Firefox browser control did not start",
+      detail:
+        "Firefox may still have been running. Quit every Firefox window, wait a moment, then choose Start Firefox for My Browser again.",
+      buttons: ["OK"],
+    });
+  }
+}
+
 /**
  * (Re)build + install the application menu. Called at startup and again on
  * every update-state change, so the update item's label tracks the state
@@ -1893,6 +2318,7 @@ function refreshAppMenu(): void {
       onUpdate: handleUpdateMenuClick,
       onSwitchTarget: () => void switchTargetFromMenu(),
       onUninstall: () => void confirmAndUninstall(),
+      onStartFirefoxControl: () => void startFirefoxForControl(),
       isDev,
       update: updateMenuItem(),
       target: { kind: cfg.target, label: cfg.targetLabel },
@@ -1914,6 +2340,7 @@ function buildTrayMenu(): Menu {
     { label: "Open Use Brian", click: () => focusWindow(ensureWindow()) },
     { label: "Quick Capture", click: () => summonAndCapture() },
     { label: "Start Recording", click: () => summonAndRecord() },
+    { label: "Start Firefox for My Browser…", click: () => void startFirefoxForControl() },
   ];
   // A local target has no login — the tray mirrors the app menu (§2.3).
   if (cfg.target !== "local") {
@@ -1977,8 +2404,9 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
+  pendingUrl = appUrlFromArgv(process.argv);
   app.on("second-instance", (_event, argv) => {
-    if (mainWindow) focusWindow(mainWindow);
+    focusWindow(ensureWindow());
     const url = appUrlFromArgv(argv);
     if (url) handleIncomingUrl(url);
   });
@@ -2048,7 +2476,6 @@ if (!gotLock) {
     // only reachable via its declaration, since derivation would guess `:4000`.
     const normalized = localTarget(input);
     if (!normalized) return { ok: false, error: "invalid-url", url: input };
-
     let grant = await usableAccessGrantFor(normalized.appUrl);
     let discovery = await fetchDeclaredApiUrl(normalized.appUrl, grant);
     if (discovery.kind === "legacy-access") {
@@ -2088,14 +2515,27 @@ if (!gotLock) {
 
     const declaredApiUrl = discovery.apiUrl;
     const target = localTarget(normalized.appUrl, declaredApiUrl) ?? normalized;
-    if (!(await probeLocalBrain(target.apiUrl))) {
-      return { ok: false, error: "unreachable", url: target.appUrl };
+    pendingLocalGatewayUrl = target.appUrl;
+    const validation = await validateLocalTarget(target.appUrl, target.apiUrl).finally(() => {
+      pendingLocalGatewayUrl = null;
+    });
+    if (validation.kind !== "ready") {
+      return {
+        ok: false,
+        error: validation.kind === "cancelled" ? "gateway-auth" : "unreachable",
+        url: target.appUrl,
+      };
     }
+    const resolvedDeclaredApiUrl = validation.value.declaredApiUrl ?? declaredApiUrl;
+    const resolvedTarget = localTarget(target.appUrl, resolvedDeclaredApiUrl) ?? target;
     // A short delay (not setImmediate) so the ok-reply actually flushes to the
     // renderer and the landing paints "Restarting..." before the process dies.
     // The declaration rides along into the record so startup stays sync.
-    setTimeout(() => persistTargetAndRelaunch("local", target.appUrl, declaredApiUrl), 150);
-    return { ok: true, url: target.appUrl };
+    setTimeout(
+      () => persistTargetAndRelaunch("local", resolvedTarget.appUrl, resolvedDeclaredApiUrl),
+      150,
+    );
+    return { ok: true, url: resolvedTarget.appUrl };
   });
   ipcMain.on("Use Brian:use-cloud", () =>
     persistTargetAndRelaunch("cloud", rememberedLocalAppUrl(), rememberedLocalApiUrl()),
@@ -2117,6 +2557,17 @@ if (!gotLock) {
   }
 
   app.whenReady().then(async () => {
+    if (app.isPackaged) {
+      void registerFirefoxNativeHost({
+        platform: process.platform,
+        home: homedir(),
+        userData: app.getPath("userData"),
+        executablePath:
+          process.platform === "linux" && process.env.APPIMAGE
+            ? process.env.APPIMAGE
+            : app.getPath("exe"),
+      }).catch((error) => console.warn("Failed to register Firefox native host", error));
+    }
     // macOS resolves `usebrian://` through the bundle Info.plist (the `protocols:`
     // block in electron-builder.yml). Windows/Linux register the running executable
     // with the OS; an UNPACKAGED Windows dev run must pass execPath + the script
@@ -2140,11 +2591,83 @@ if (!gotLock) {
     // — `askForMediaAccess` in `summonAndRecord`). Everything else keeps
     // Electron's default-allow, unchanged from the no-handler behavior.
     session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+      if (gatewayWindow && !gatewayWindow.isDestroyed() && _wc.id === gatewayWindow.webContents.id) {
+        callback(false);
+        return;
+      }
       if (permission === "media") {
         callback(details.requestingUrl?.startsWith(cfg.appOrigin) ?? false);
         return;
       }
       callback(true);
+    });
+
+    // The gateway window is an authentication surface, never a download or app
+    // surface. Session-level hooks can identify its WebContents without granting
+    // remote identity pages any native bridge.
+    session.defaultSession.on("will-download", (event, _item, webContents) => {
+      if (gatewayWindow && !gatewayWindow.isDestroyed() && webContents?.id === gatewayWindow.webContents.id) {
+        event.preventDefault();
+      }
+    });
+
+    // Catch expiry on renderer REST/SSE requests as well as main-frame redirects.
+    // The failed request may retry according to its own policy; this restores the
+    // shared gateway session without reloading potentially unsaved app state.
+    session.defaultSession.webRequest.onBeforeRedirect((details) => {
+      if (cfg.target !== "local") return;
+      // session.fetch probes have no WebContents and must never trigger their
+      // own recovery hook; only renderer/main-window traffic belongs here.
+      if (details.webContentsId === undefined) return;
+      if (
+        gatewayWindow &&
+        !gatewayWindow.isDestroyed() &&
+        details.webContentsId === gatewayWindow.webContents.id
+      ) {
+        return;
+      }
+      try {
+        const sourceOrigin = new URL(details.url).origin;
+        const destinationOrigin = new URL(details.redirectURL).origin;
+        const apiOrigin = new URL(cfg.apiUrl).origin;
+        if (
+          (sourceOrigin === cfg.appOrigin || sourceOrigin === apiOrigin) &&
+          isAllowedGatewayNavigation(details.redirectURL, details.url)
+        ) {
+          void recoverBackgroundGatewayRequest(details.url);
+        }
+      } catch {
+        // Ignore malformed redirect metadata; Chromium will fail it normally.
+      }
+    });
+
+    session.defaultSession.webRequest.onCompleted((details) => {
+      if (cfg.target !== "local" || details.webContentsId === undefined) return;
+      if (
+        gatewayWindow &&
+        !gatewayWindow.isDestroyed() &&
+        details.webContentsId === gatewayWindow.webContents.id
+      ) {
+        return;
+      }
+      try {
+        const sourceOrigin = new URL(details.url).origin;
+        const apiOrigin = new URL(cfg.apiUrl).origin;
+        const contentType = Object.entries(details.responseHeaders ?? {}).find(
+          ([name]) => name.toLowerCase() === "content-type",
+        )?.[1];
+        const isHtmlChallenge =
+          details.resourceType !== "mainFrame" &&
+          contentType?.some((value) => value.toLowerCase().includes("text/html")) === true;
+        if (
+          (sourceOrigin === cfg.appOrigin || sourceOrigin === apiOrigin) &&
+          ([401, 403, 407].includes(details.statusCode) || isHtmlChallenge)
+        ) {
+          void recoverBackgroundGatewayRequest(details.url);
+        }
+      } catch {
+        // Ignore malformed completion metadata.
+      }
     });
 
     // Remote-meeting recording: app-web requests display media only to obtain

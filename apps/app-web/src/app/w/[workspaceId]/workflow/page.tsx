@@ -42,11 +42,24 @@ import {
 } from "@/lib/workflow-events";
 import { CreateWorkflowModal } from "@/components/workflow/create-workflow-modal";
 import { cn } from "@/lib/utils";
+import { useCachedResource } from "@/lib/surface-cache";
+import { surfaceDataKey } from "@/lib/surface-prefetch";
 
 export default function WorkflowPage() {
   const t = useT();
   const { activeId } = useWorkspaces();
-  const [workflows, setWorkflows] = useState<WorkflowSummary[] | null>(null);
+  // Cache-backed (`lib/surface-cache.ts`): returning to Workflow paints the
+  // last known grid immediately and revalidates behind it, and hovering the
+  // Workflow icon in the sidebar has usually already warmed this key.
+  // `includeArchived` so the collapsed Archived section can render; the grid
+  // itself only shows live (active + stale) workflows.
+  const workflowsKey = surfaceDataKey("workflow", activeId);
+  const workflowList = useCachedResource(workflowsKey, () =>
+    activeId
+      ? listWorkflows(activeId, { includeArchived: true })
+      : Promise.resolve([] as WorkflowSummary[]),
+  );
+  const workflows = workflowList.data ?? null;
   const [createOpen, setCreateOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -55,26 +68,13 @@ export default function WorkflowPage() {
   >(null);
   const [bulkWorking, setBulkWorking] = useState(false);
 
+  // Stable callback, not the resource object: the refresh-event effect below
+  // depends on `reload`, and a dep on the (freshly-allocated) resource would
+  // tear down and re-add that window listener on every render.
+  const refreshWorkflows = workflowList.refresh;
   const reload = useCallback(async () => {
-    if (!activeId) return;
-    // `includeArchived` so the collapsed Archived section can render;
-    // the grid itself only shows live (active + stale) workflows.
-    const list = await listWorkflows(activeId, { includeArchived: true });
-    setWorkflows(list);
-  }, [activeId]);
-
-  useEffect(() => {
-    if (!activeId) return;
-    let cancelled = false;
-    setWorkflows(null);
-    void (async () => {
-      const list = await listWorkflows(activeId, { includeArchived: true });
-      if (!cancelled) setWorkflows(list);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeId]);
+    await refreshWorkflows();
+  }, [refreshWorkflows]);
 
   // Silent re-fetch on the workflow event bus — same-tab mutations AND the
   // shell's server leg (assistant chat, workers, another tab). No "…"

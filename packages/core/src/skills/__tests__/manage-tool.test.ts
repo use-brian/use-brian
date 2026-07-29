@@ -495,6 +495,7 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
         umbrella: {
           name: 'fix-stripe-webhook',
           description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
           content: 'body',
         },
       } as never,
@@ -514,6 +515,7 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
         umbrella: {
           name: 'customer-onboarding',
           description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
           content: 'See {{reference:nope}}.',
           // No supportFiles provided.
         },
@@ -522,6 +524,56 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
     )
     expect(out.isError).toBe(true)
     expect((out.data as { error: string }).error).toMatch(/not in the proposal/i)
+  })
+
+  // An assistant may not propose a skill it cannot say when to use. The
+  // trigger is the only field the skill listing offers the model to select
+  // on, and `create_umbrella` had no field for it at all — which is how 67
+  // of 72 prod skills ended up triggerless and 2 of 72 ever ran. A human
+  // authoring in the UI may still omit it; they can see their own library.
+  it('REQUIRES whenToUse on the input schema', () => {
+    const tool = createSkillManageTool(makeDeps())
+    const missing = tool.inputSchema.safeParse({
+      action: 'create_umbrella',
+      umbrella: { name: 'customer-onboarding', description: 'desc', content: 'body' },
+    })
+    expect(missing.success).toBe(false)
+    expect(JSON.stringify(missing.error)).toMatch(/whenToUse/)
+
+    const present = tool.inputSchema.safeParse({
+      action: 'create_umbrella',
+      umbrella: {
+        name: 'customer-onboarding',
+        description: 'desc',
+        whenToUse: 'when the user starts onboarding a new customer',
+        content: 'body',
+      },
+    })
+    expect(present.success).toBe(true)
+  })
+
+  it('carries whenToUse into the staged proposal', async () => {
+    const deps = makeDeps()
+    const tool = createSkillManageTool(deps)
+    await tool.execute(
+      {
+        action: 'create_umbrella',
+        umbrella: {
+          name: 'customer-onboarding',
+          description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
+          content: 'body',
+        },
+      } as never,
+      CTX_STUB,
+    )
+    expect(deps.createStagedSkillCreation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposedUmbrella: expect.objectContaining({
+          whenToUse: 'when the user starts onboarding a new customer',
+        }),
+      }),
+    )
   })
 
   it('accepts a body whose pointers all resolve to proposed support files', async () => {
@@ -533,6 +585,7 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
         umbrella: {
           name: 'customer-onboarding',
           description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
           content: 'See {{reference:flow}}.',
           supportFiles: [{ kind: 'reference', name: 'flow', content: 'FLOW' }],
         },
@@ -553,6 +606,7 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
         umbrella: {
           name: 'customer-onboarding',
           description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
           content: 'plain body',
         },
       } as never,
@@ -598,6 +652,7 @@ describe('[COMP:skills/manage-tool] create_umbrella routing', () => {
         umbrella: {
           name: 'Customer Onboarding',
           description: 'desc',
+          whenToUse: 'when the user starts onboarding a new customer',
           content: 'plain body',
         },
       } as never,

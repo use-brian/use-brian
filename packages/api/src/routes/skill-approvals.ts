@@ -406,6 +406,9 @@ type StagedCreationArgs = {
     slug: string
     name: string
     description: string
+    /** Optional: approvals staged before `skill_manage` required a trigger
+     *  carry none. Newly proposed umbrellas always have one. */
+    whenToUse?: string
     content: string
     supportFiles?: Array<{
       kind: 'reference' | 'template' | 'script'
@@ -575,6 +578,11 @@ async function applyStagedSkillCreation(
       slug: parsed.umbrella.slug,
       name: parsed.umbrella.name,
       description: parsed.umbrella.description,
+      // Carries the proposal's trigger onto the live row. Without this the
+      // field is dropped at approve time and the skill lands in the listing
+      // with nothing to select on — the shape that left 67 of 72 prod skills
+      // triggerless. `undefined` only for approvals staged before the field.
+      whenToUse: parsed.umbrella.whenToUse,
       content: parsed.umbrella.content,
       category: 'custom',
       source: 'user',

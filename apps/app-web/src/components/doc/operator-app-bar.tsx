@@ -36,6 +36,7 @@
  */
 
 import Link from "next/link";
+import { useIntentPrefetch } from "@/lib/surface-prefetch";
 import {
   CheckSquare,
   FileText,
@@ -82,6 +83,7 @@ export function OperatorAppBar({
   feedEnabled: boolean;
 }) {
   const t = useT().operatorBar;
+  const intentPrefetch = useIntentPrefetch();
   const labels: Record<OperatorAppKey, string> = {
     page: t.page,
     tasks: t.tasks,
@@ -108,10 +110,14 @@ export function OperatorAppBar({
       {apps.map((key) => {
         const Icon = APP_ICON[key];
         const isActive = key === active;
+        const href = operatorAppPath(workspaceId, key);
         return (
           <Tooltip key={key} label={labels[key]}>
             <Link
-              href={operatorAppPath(workspaceId, key)}
+              href={href}
+              // Hover/focus warms the route AND the app's landing list, so the
+              // Tasks / CRM tables are usually already in cache on click.
+              {...intentPrefetch(href)}
               aria-label={labels[key]}
               aria-current={isActive ? "page" : undefined}
               onClick={() => writeOperatorApp(workspaceId, key)}

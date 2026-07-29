@@ -551,6 +551,14 @@ const eventSourceRefSchema = z.discriminatedUnion('type', [
     // matched via `inChannels`; task tags via the task-only `tags` filter.
     type: z.literal('task'),
   }),
+  z.object({
+    // Id-less: the workspace's knowledge base (every source + manual
+    // entries). Lifecycle actions (created / updated / deleted) are matched
+    // via `inChannels`; the entry's frontmatter tags via `tags`; its title
+    // via `keywords`. Path-prefix scoping rides a `branch` step off
+    // `{{input.event.path}}`, not `match`.
+    type: z.literal('knowledge'),
+  }),
 ])
 
 const eventMatchSchema = z.object({
@@ -706,6 +714,7 @@ export const WORKFLOW_EVENT_SOURCE_TYPES = [
   'channel',
   'page',
   'task',
+  'knowledge',
 ] as const satisfies readonly z.infer<typeof EventSubscriptionSchema>['source']['type'][]
 
 // Compile-time exhaustiveness: `satisfies` (above) rejects a wrong/extra

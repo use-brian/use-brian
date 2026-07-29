@@ -103,6 +103,46 @@ describe('[COMP:tools/shopify] Shopify tools', () => {
     }
   })
 
+  it('shopifyCreateDiscountCode rejects a missing or doubled discount value at the schema', async () => {
+    // A value-less "create a promo code XYZ" used to reach the client and come
+    // back as an error tool-result, costing a round trip. The refine turns it
+    // into a schema rejection the model can fix before any call goes out.
+    const tool = createShopifyTools(mockApi()).find((t) => t.name === 'shopifyCreateDiscountCode')!
+    expect(() => tool.inputSchema.parse({ code: 'XYZ' })).toThrow(/exactly one/i)
+    expect(() => tool.inputSchema.parse({ code: 'XYZ', percentage: 10, amount: '5.00' })).toThrow(/exactly one/i)
+    expect(() => tool.inputSchema.parse({ code: 'XYZ', percentage: 10 })).not.toThrow()
+    expect(() => tool.inputSchema.parse({ code: 'XYZ', amount: '5.00' })).not.toThrow()
+  })
+
+  it('shopifyCreateDiscountCode forwards the validity window and projects it back', async () => {
+    const createDiscountCode = vi.fn().mockResolvedValue({
+      codeDiscountNode: {
+        id: 'gid://shopify/DiscountCodeNode/1',
+        codeDiscount: {
+          title: 'XYZ', status: 'ACTIVE',
+          startsAt: '2026-07-28T00:00:00Z', endsAt: '2026-07-31T00:00:00Z',
+          usageLimit: null,
+          codes: { edges: [{ node: { code: 'XYZ' } }] },
+        },
+      },
+    })
+    const tool = createShopifyTools(mockApi({ createDiscountCode })).find(
+      (t) => t.name === 'shopifyCreateDiscountCode',
+    )!
+    const result = await tool.execute(
+      { code: 'XYZ', percentage: 10, startsAt: '2026-07-28T00:00:00Z', endsAt: '2026-07-31T00:00:00Z' },
+      {} as never,
+    )
+    expect(createDiscountCode).toHaveBeenCalledWith(
+      expect.objectContaining({ startsAt: '2026-07-28T00:00:00Z', endsAt: '2026-07-31T00:00:00Z' }),
+    )
+    // The model needs the window back to ground "valid until ..." in its reply.
+    expect(result.data).toMatchObject({
+      code: 'XYZ', status: 'ACTIVE',
+      starts_at: '2026-07-28T00:00:00Z', ends_at: '2026-07-31T00:00:00Z',
+    })
+  })
+
   it('shopifyListDiscounts projects code + automatic discount union members', async () => {
     const api = mockApi({
       listDiscounts: vi.fn().mockResolvedValue({

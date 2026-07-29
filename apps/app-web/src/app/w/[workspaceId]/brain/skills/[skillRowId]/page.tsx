@@ -56,10 +56,18 @@ import {
   type SkillSensitivity,
   type WorkspaceSkillSummary,
 } from "@/lib/api/skills";
-import { buildSkillPatch, skillStatus } from "@/lib/skills-view";
+import {
+  buildSkillPatch,
+  skillCategoryOf,
+  skillStatus,
+  SKILL_CATEGORIES,
+  type SkillCategory,
+} from "@/lib/skills-view";
 import { SKILL_BODY_MAX_CHARS } from "@/lib/skill-markdown";
 import { requestBrainRefresh } from "@/lib/brain-events";
 import { SkillDocument } from "@/components/brain/skill-document";
+import { SkillFilesSection } from "@/components/brain/skill-files-section";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Button } from "@/components/ui/button";
 import { BackButton } from "@/components/ui/back-button";
 import { BrainTopbar } from "@/components/brain/brain-topbar";
@@ -172,6 +180,9 @@ function SkillEditor({
   const [description, setDescription] = useState(skill.description);
   const [whenToUse, setWhenToUse] = useState(skill.whenToUse ?? "");
   const [content, setContent] = useState(skill.content);
+  // Library grouping bucket. Saved by the SAME Save button as the body — a
+  // separate apply-on-change control would give the page two save models.
+  const [category, setCategory] = useState<SkillCategory>(skillCategoryOf(skill));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -184,7 +195,7 @@ function SkillEditor({
     setError(null);
   }, [skill]);
 
-  const patch = buildSkillPatch(skill, { name, description, whenToUse, content });
+  const patch = buildSkillPatch(skill, { name, description, whenToUse, content, category });
   const dirty = Object.keys(patch).length > 0;
 
   async function save() {
@@ -281,6 +292,12 @@ function SkillEditor({
             content={content}
             onContentChange={setContent}
           />
+
+          {/* The skill's bundle — reference / template / script files the
+              body reaches through {{kind:name}} pointers. Reads `content`
+              (the live draft) so a pointer the user just typed counts as
+              referenced without a save first. */}
+          <SkillFilesSection skillRowId={skill.rowId} content={content} />
         </div>
 
         {/* ── Right rail — the properties: Suggested decision first, then
@@ -297,7 +314,12 @@ function SkillEditor({
               onConfirmed={onSaved}
             />
           )}
-          <AboutGroup skill={skill} status={status} />
+          <AboutGroup
+            skill={skill}
+            status={status}
+            category={category}
+            onCategoryChange={setCategory}
+          />
           <AccessGroup
             workspaceId={workspaceId}
             skill={skill}
@@ -385,9 +407,13 @@ function PropRow({
 function AboutGroup({
   skill,
   status,
+  category,
+  onCategoryChange,
 }: {
   skill: WorkspaceSkillSummary;
   status: ReturnType<typeof skillStatus>;
+  category: SkillCategory;
+  onCategoryChange: (next: SkillCategory) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -411,6 +437,26 @@ function AboutGroup({
           {skillsCopy.inductionSource[skill.inductionSource]}
         </span>
       </div>
+
+      {/* Category — the library's grouping bucket, and the ONE editable row
+          in this otherwise read-only card. It saves with the main Save
+          button (it rides `buildSkillPatch`), not on change. */}
+      <PropRow label={copy.categoryLabel}>
+        <div className="w-40">
+          <SearchableSelect
+            value={category}
+            onValueChange={(next) =>
+              onCategoryChange((next || "custom") as SkillCategory)
+            }
+            items={SKILL_CATEGORIES.map((value) => ({
+              value,
+              label: t.brainPage.skillsLibrary.categories[value],
+            }))}
+            placeholder={copy.categoryLabel}
+            aria-label={copy.categoryLabel}
+          />
+        </div>
+      </PropRow>
       <dl className="divide-y divide-border/40">
         {/* Structural-synthesis Phase 2: the v2 blueprint this skill fills (if
             the draft carried a structured output shape). Links to the library. */}

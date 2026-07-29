@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const getAccessToken = vi.hoisted(() => vi.fn());
+const usesGatewayCredentials = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/auth-fetch", () => ({ getAccessToken }));
+vi.mock("@/lib/desktop-auth-source", () => ({ usesGatewayCredentials }));
 
 import { openFeedStream, type FeedEventRow } from "@/lib/feed-sse";
 
@@ -33,11 +35,13 @@ beforeEach(() => {
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource);
   getAccessToken.mockReturnValue("tok-1");
+  usesGatewayCredentials.mockReturnValue(false);
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   getAccessToken.mockReset();
+  usesGatewayCredentials.mockReset();
 });
 
 function row(id: string): string {
@@ -54,10 +58,15 @@ describe("[COMP:app-web/feed-sse] openFeedStream", () => {
     expect(url.pathname).toBe("/api/distribution/t/ws-1/events");
     expect(url.searchParams.get("access_token")).toBe("tok-1");
     expect(url.searchParams.has("lastEventId")).toBe(false);
-    // Auth rides the URL token, not cookies — a credentialed cross-origin
-    // EventSource would demand `Access-Control-Allow-Credentials: true` (the
-    // API doesn't send it) and reconnect-storm. Must stay uncredentialed.
+    // Ordinary web/cloud traffic stays uncredentialed.
     expect(source.withCredentials).toBe(false);
+    handle.close();
+  });
+
+  it("includes deployment-gateway cookies for a local Electron target", () => {
+    usesGatewayCredentials.mockReturnValue(true);
+    const handle = openFeedStream({ workspaceId: "ws-1", onEvent: () => {} });
+    expect(FakeEventSource.instances[0].withCredentials).toBe(true);
     handle.close();
   });
 

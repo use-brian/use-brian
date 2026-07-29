@@ -15,12 +15,25 @@
  * dimension). So this store composes its own narrower predicate
  * (workspace_id + sensitivity) inline rather than calling the helper.
  *
+ * Workflow event source — this store is the KB's write chokepoint (the
+ * github/local sync worker, the assistant repo-writer's write-through, and
+ * manual entry writes all funnel through `create` / `upsertByPath` /
+ * `updateManualEntryContent` / `deleteByTeamAndPath`), so it is where
+ * knowledge lifecycle events are published for the `knowledge` workflow event
+ * source. Best-effort and fire-and-forget — see knowledge-event-fanout.ts.
+ * Bulk teardown paths (`deleteBySource`, `deleteByTeamAndPathPrefix`) and the
+ * id-only `delete` deliberately do NOT emit: source disconnection would fire
+ * one event per entry for a change the user made at the source level, not the
+ * entry level.
+ *
  * See docs/architecture/features/knowledge-base.md and
  * docs/architecture/platform/sensitivity.md.
  */
 
 import type { AccessContext, Sensitivity } from '@use-brian/core'
+import type { KnowledgeLifecycleAction, KnowledgeWriteActor } from '@use-brian/core'
 import { query } from './client.js'
+import { publishKnowledgeLifecycle } from '../knowledge-event-fanout.js'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -70,6 +83,33 @@ export type KnowledgeSource = {
 
 // Unaliased — used by writes (INSERT ... RETURNING) and system callers
 // that don't need a clearance-scoped related_ids filter.
+/**
+ * Publish one entry-shaped lifecycle event to the `knowledge` workflow event
+ * source. Fire-and-forget; the fanout swallows its own errors.
+ */
+function emitLifecycle(
+  row: Pick<
+    KnowledgeEntry,
+    'id' | 'workspaceId' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'
+  >,
+  action: KnowledgeLifecycleAction,
+  writtenBy: KnowledgeWriteActor | undefined,
+  actorId: string | null,
+): void {
+  publishKnowledgeLifecycle({
+    workspaceId: row.workspaceId,
+    entryId: row.id,
+    action,
+    path: row.path,
+    title: row.title,
+    tags: row.tags ?? [],
+    sensitivity: row.sensitivity,
+    sourceId: row.sourceId ?? null,
+    actorId,
+    writtenBy,
+  })
+}
+
 const ENTRY_COLUMNS = `
   id, workspace_id AS "workspaceId",
   path, title, summary, content, tags, related_ids AS "relatedIds",
@@ -164,6 +204,14 @@ export type KnowledgeStore = {
     ctx: AccessContext,
     queryStr: string,
     limit: number,
+    /**
+     * Rows to skip — the knowledge arm of the Brain list's composite cursor
+     * (`/api/brain/list`). Both orderings below carry an `id` tiebreaker so a
+     * given offset lands on the same row every time; without it, rows tied on
+     * `updated_at` (a bulk KB import) or on `ts_rank_cd` could reshuffle
+     * between pages and the user would see duplicates and holes.
+     */
+    offset?: number,
   ): Promise<Array<{ id: string; title: string; path: string; sensitivity: Sensitivity }>>
   /**
    * Graph-view projection: every visible knowledge entry plus its
@@ -202,6 +250,14 @@ export type KnowledgeStore = {
     compartments?: string[]
     metadata?: Record<string, unknown>
     sourceId?: string | null; sourceSha?: string | null; createdBy?: string | null
+    /**
+     * Lifecycle-event provenance (the `knowledge` workflow event source).
+     * `writtenBy: 'system'` marks an assistant-authored write, which becomes
+     * `DispatchEvent.isBot` — the self-loop guard. Defaults to `user`.
+     */
+    writtenBy?: KnowledgeWriteActor
+    /** Acting user id for the lifecycle event; falls back to `createdBy`. */
+    actorId?: string | null
   }): Promise<KnowledgeEntry>
   upsertByPath(params: {
     workspaceId: string; path: string; title: string
@@ -210,6 +266,15 @@ export type KnowledgeStore = {
     /** Compartment set (MLS category axis) to stamp on the row. Default '{}'. */
     compartments?: string[]
     metadata?: Record<string, unknown>; sourceId?: string | null; sourceSha?: string | null
+    /**
+     * Lifecycle-event provenance. The sync worker omits it (a mirrored human
+     * commit is a `user` write); the assistant repo-writer's write-through
+     * passes `'system'` so a KB-maintenance workflow watching this source does
+     * not re-trigger on the assistant's own commit.
+     */
+    writtenBy?: KnowledgeWriteActor
+    /** Acting user id for the lifecycle event. */
+    actorId?: string | null
   }): Promise<KnowledgeEntry>
   /**
    * Body-only update of a MANUAL entry (`source_id IS NULL` enforced in the
@@ -394,11 +459,17 @@ export function createDbKnowledgeStore(): KnowledgeStore {
           params.compartments ?? [],
         ],
       )
-      return result.rows[0]
+      const row = result.rows[0]
+      emitLifecycle(row, 'created', params.writtenBy, params.actorId ?? params.createdBy ?? null)
+      return row
     },
 
     async upsertByPath(params) {
-      const result = await query<KnowledgeEntry>(
+      // `xmax = 0` is the standard upsert discriminator: a row inserted by
+      // THIS statement has no updating transaction stamped on it, so the
+      // predicate separates a create from an update without a second read.
+      // Needed for the lifecycle action — the sync worker calls this for both.
+      const result = await query<KnowledgeEntry & { __inserted: boolean }>(
         `INSERT INTO knowledge_entries
            (workspace_id, path, title, summary, content, tags, related_ids, sensitivity, metadata, source_id, source_sha, compartments)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -413,7 +484,7 @@ export function createDbKnowledgeStore(): KnowledgeStore {
            source_id = EXCLUDED.source_id,
            source_sha = EXCLUDED.source_sha,
            compartments = EXCLUDED.compartments
-         RETURNING ${ENTRY_COLUMNS}`,
+         RETURNING ${ENTRY_COLUMNS}, (xmax = 0) AS "__inserted"`,
         [
           params.workspaceId, params.path, params.title,
           params.summary ?? null, params.content, params.tags ?? [],
@@ -422,18 +493,44 @@ export function createDbKnowledgeStore(): KnowledgeStore {
           params.compartments ?? [],
         ],
       )
-      return result.rows[0]
+      const { __inserted, ...row } = result.rows[0]
+      emitLifecycle(
+        row,
+        __inserted ? 'created' : 'updated',
+        params.writtenBy,
+        params.actorId ?? null,
+      )
+      return row
     },
 
     async updateManualEntryContent(workspaceId, id, content) {
-      const result = await query<{ id: string; path: string }>(
+      const result = await query<
+        Pick<KnowledgeEntry, 'id' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'>
+      >(
         `UPDATE knowledge_entries
          SET content = $1, updated_at = now()
          WHERE id = $2 AND workspace_id = $3 AND source_id IS NULL
-         RETURNING id, path`,
+         RETURNING id, path, title, tags, sensitivity, source_id AS "sourceId"`,
         [content, id, workspaceId],
       )
-      return result.rows[0] ?? null
+      const row = result.rows[0]
+      if (!row) return null
+      publishKnowledgeLifecycle({
+        workspaceId,
+        entryId: row.id,
+        action: 'updated',
+        path: row.path,
+        title: row.title,
+        tags: row.tags ?? [],
+        sensitivity: row.sensitivity,
+        sourceId: row.sourceId ?? null,
+        actorId: null,
+        // Sole caller is the assistant's `updateKnowledgeEntry` tool (manual
+        // mode) — `system` by construction, so a KB-maintenance workflow does
+        // not re-trigger on its own manual-entry edits.
+        writtenBy: 'system',
+      })
+      return { id: row.id, path: row.path }
     },
 
     async delete(id) {
@@ -453,10 +550,21 @@ export function createDbKnowledgeStore(): KnowledgeStore {
     },
 
     async deleteByTeamAndPath(workspaceId, path) {
-      const result = await query(
-        `DELETE FROM knowledge_entries WHERE workspace_id = $1 AND path = $2`,
+      const result = await query<
+        Pick<
+          KnowledgeEntry,
+          'id' | 'workspaceId' | 'path' | 'title' | 'tags' | 'sensitivity' | 'sourceId'
+        >
+      >(
+        `DELETE FROM knowledge_entries WHERE workspace_id = $1 AND path = $2
+         RETURNING id, workspace_id AS "workspaceId", path, title, tags, sensitivity,
+                   source_id AS "sourceId"`,
         [workspaceId, path],
       )
+      const row = result.rows[0]
+      // Sole callers are the sync worker's removed-file paths, i.e. a human
+      // deleted the markdown at the source — a `user` write, not a bot one.
+      if (row) emitLifecycle(row, 'deleted', 'user', null)
       return (result.rowCount ?? 0) > 0
     },
 
@@ -488,17 +596,18 @@ export function createDbKnowledgeStore(): KnowledgeStore {
       return result.rows
     },
 
-    async listForBrain(ctx, queryStr, limit) {
+    async listForBrain(ctx, queryStr, limit, offset = 0) {
       const clearance = ctx.clearance ?? DEFAULT_CLEARANCE
       const trimmed = queryStr.trim()
+      const skip = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
       if (trimmed.length === 0) {
         const result = await query<{ id: string; title: string; path: string; sensitivity: Sensitivity }>(
           `SELECT id, title, path, sensitivity FROM knowledge_entries
            WHERE workspace_id = $1
              AND sensitivity_rank(sensitivity) <= sensitivity_rank($2)
-           ORDER BY updated_at DESC
-           LIMIT $3`,
-          [ctx.workspaceId, clearance, limit],
+           ORDER BY updated_at DESC, id
+           LIMIT $3 OFFSET $4`,
+          [ctx.workspaceId, clearance, limit, skip],
         )
         return result.rows
       }
@@ -507,9 +616,9 @@ export function createDbKnowledgeStore(): KnowledgeStore {
          WHERE workspace_id = $1
            AND search_vector @@ plainto_tsquery('english', $2)
            AND sensitivity_rank(sensitivity) <= sensitivity_rank($3)
-         ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english', $2)) DESC
-         LIMIT $4`,
-        [ctx.workspaceId, trimmed, clearance, limit],
+         ORDER BY ts_rank_cd(search_vector, plainto_tsquery('english', $2)) DESC, id
+         LIMIT $4 OFFSET $5`,
+        [ctx.workspaceId, trimmed, clearance, limit, skip],
       )
       return result.rows
     },

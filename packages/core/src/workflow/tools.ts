@@ -33,6 +33,7 @@ import {
   WORKFLOW_EVENT_SOURCE_TYPES,
 } from './schemas.js'
 import { TASK_LIFECYCLE_ACTIONS } from './task-event-trigger.js'
+import { KNOWLEDGE_LIFECYCLE_ACTIONS } from './knowledge-event-trigger.js'
 import { stepAdvisories } from './advisories.js'
 import { RESERVED_OUTCOME_VAR_NAMES } from './types.js'
 import type {
@@ -254,9 +255,9 @@ export const TRIGGER_INPUT_DESCRIPTION =
   `\n- \`{ kind: "schedule", schedule: {type: "daily"|"weekly"|"monthly"|"once"|"cron", ...}, timezone?, mode?, delivery?: { channel: "telegram"|"slack"|"whatsapp" }, policy?: { silentUntilFire?, nagIntervalMins?, nagUntilKeyword? } }\` ` +
   `fires on a cadence in ONE call — scheduling is a workflow trigger, so no separate scheduling step or tool is needed. \`delivery.channel\` pushes the result to the user (for a recurring reminder the exact chat + Telegram topic are captured automatically from this session); \`policy\` covers "remind every N min until <keyword>" and silent-until-fire. ` +
   `\n- \`{ kind: "event", event: { sources: [{ source, match? }, ...] } }\` fires from a workspace signal and IS fully authorable here. The ONLY source types: ${WORKFLOW_EVENT_SOURCE_TYPES.join(' | ')}. ` +
-  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less). ` +
-  `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
-  `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
+  `Shapes: \`{ type: "connector", connectorInstanceId, provider }\` (a CONNECTED connector instance), \`{ type: "channel", channelIntegrationId, channel }\` (a connected chat integration), \`{ type: "page", pageId }\` (a doc page + its direct children), \`{ type: "task" }\` (the workspace's tasks — id-less), \`{ type: "knowledge" }\` (the workspace's knowledge base — id-less). ` +
+  `\`match\` narrows firing: keywords / fromActors / inChannels / mentions / tags (task and knowledge events only) / fromBots (default false — bot- or assistant-authored events only fire with \`fromBots: true\`). ` +
+  `Task lifecycle actions are matched via \`match.inChannels\`: ${TASK_LIFECYCLE_ACTIONS.join(' / ')}. Knowledge lifecycle actions, same axis: ${KNOWLEDGE_LIFECYCLE_ACTIONS.join(' / ')} — for knowledge, \`keywords\` matches the entry TITLE and \`tags\` its frontmatter tags; there is no path filter, so scope by path with a \`branch\` step on \`{{input.event.path}}\`. A connector/channel source id that does not reference a live connected source never fires — verify it is connected first. ` +
   `Each entry nests the source under a \`source\` key — e.g. a task tagged 'triage' is \`{ source: { type: "task" }, match: { inChannels: ["tagged"], tags: ["triage"] } }\` (do NOT flatten \`type\` to the entry top level). ` +
   `\n- \`{ kind: "webhook", match?: { condition } }\` fires from an external signed POST. The kind can be set here, but the webhook URL slug + signing secret are provisioned in the web builder — tell the user the workflow cannot receive deliveries until they complete that step there.`
 

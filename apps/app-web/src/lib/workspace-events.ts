@@ -47,6 +47,7 @@
 import { useEffect } from "react";
 
 import { getAccessToken } from "@/lib/auth-fetch";
+import { usesGatewayCredentials } from "@/lib/desktop-auth-source";
 import {
   BRAIN_REFRESH_EVENT,
   type BrainRefreshDetail,
@@ -276,19 +277,14 @@ function openWorkspaceStream(opts: {
     // (prod, desktop bundle) ignores it, so file:// can't leak in.
     const url = new URL(`${API_URL}/api/brain/stream`, window.location.origin);
     url.searchParams.set("workspaceId", opts.workspaceId);
-    // EventSource cannot set custom headers — the SSE route accepts both
-    // `Authorization: Bearer` and `?access_token=`. Auth rides the URL token,
-    // NOT cookies (the route never reads them), so this MUST NOT set
-    // `withCredentials: true`: a credentialed cross-origin EventSource
-    // (:3003 → :4000, or app.usebrian.ai → api.usebrian.ai) requires the
-    // server to answer `Access-Control-Allow-Credentials: true`, which the
-    // API does not send. Without it the browser rejects every connection
-    // before `open`, and EventSource retries forever — a reconnect storm that
-    // silently kills ALL realtime (the roster switcher, brain, approvals, …),
-    // forcing a full page reload to see any change.
+    // Brian auth rides the URL token. A local Electron target additionally
+    // includes credentials so a separately hosted API receives its deployment-
+    // gateway cookie; the API permits credentials only for allowlisted origins.
     const token = getAccessToken();
     if (token) url.searchParams.set("access_token", token);
-    source = new EventSource(url.toString());
+    source = new EventSource(url.toString(), {
+      withCredentials: usesGatewayCredentials(),
+    });
 
     source.addEventListener("open", () => {
       // First connect AND every auto-reconnect: refetch what we missed.

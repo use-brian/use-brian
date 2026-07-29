@@ -61,12 +61,24 @@ import {
 } from '../skills/draft-generator.js'
 import {
   importSkillFromGithub,
+  importSkillFromPaste,
   importSkillFromUrl,
   SkillImportError,
-  IMPORT_MAX_SUPPORT_FILES,
-  IMPORT_MAX_SUPPORT_FILE_BYTES,
+  IMPORT_MAX_FILE_BYTES,
   type GithubContentsReader,
 } from '../skills/import-service.js'
+import {
+  selectCategorizableSkills,
+  suggestSkillCategories,
+  SKILL_CATEGORIES,
+} from '../skills/categorize.js'
+import {
+  validateSupportFile,
+  validateSupportFileSet,
+  SUPPORT_FILE_KINDS,
+  SUPPORT_FILE_NAME_MAX,
+  type SupportFile,
+} from '../skills/support-files.js'
 import type { RawImportFetcher } from '../skills/import-source.js'
 import {
   listWorkspaceGithubInstances,
@@ -239,6 +251,8 @@ export function skillRoutes({
       description: s.description,
       whenToUse: s.whenToUse ?? null,
       content: s.content,
+      // The library groups on this; without it every skill reads as "custom".
+      category: s.category,
       state: s.state,
       confidence: s.confidence,
       activatedAt: s.activatedAt ? s.activatedAt.toISOString() : null,
@@ -504,27 +518,13 @@ export function skillRoutes({
 
     // Skill-import extension: validate support files up front so a bad batch
     // never leaves a half-written skill (`workspace_skill_files` rows are
-    // written after the insert; the caps mirror the import service's).
-    const SUPPORT_KINDS = new Set(['reference', 'template', 'script'])
-    let validSupportFiles: Array<{ kind: 'reference' | 'template' | 'script'; name: string; content: string; description?: string }> = []
+    // written after the insert). One validator backs this and the editor's
+    // PUT /:id/files, so the two paths cannot drift.
+    let validSupportFiles: SupportFile[] = []
     if (supportFiles !== undefined) {
-      if (!Array.isArray(supportFiles) || supportFiles.length > IMPORT_MAX_SUPPORT_FILES) {
-        res.status(400).json({ error: `supportFiles must be an array of at most ${IMPORT_MAX_SUPPORT_FILES}` }); return
-      }
-      const seen = new Set<string>()
-      for (const f of supportFiles) {
-        if (!f || typeof f.kind !== 'string' || !SUPPORT_KINDS.has(f.kind)
-          || typeof f.name !== 'string' || !f.name.trim() || f.name.length > 200
-          || typeof f.content !== 'string' || f.content.length > IMPORT_MAX_SUPPORT_FILE_BYTES) {
-          res.status(400).json({ error: 'Invalid support file' }); return
-        }
-        const key = `${f.kind}:${f.name}`
-        if (seen.has(key)) {
-          res.status(400).json({ error: `Duplicate support file: ${key}` }); return
-        }
-        seen.add(key)
-      }
-      validSupportFiles = supportFiles as typeof validSupportFiles
+      const checked = validateSupportFileSet(supportFiles)
+      if (!checked.ok) { res.status(400).json({ error: checked.error }); return }
+      validSupportFiles = checked.value
     }
     if (importSource !== undefined
       && (typeof importSource !== 'object' || importSource === null || Array.isArray(importSource))) {
@@ -642,6 +642,14 @@ export function skillRoutes({
     workspaceId: z.string().trim().min(1),
     source: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('url'), url: z.string().trim().min(1).max(2000) }),
+      // Paste / .md upload — the bytes ride in the request, so unlike `url`
+      // there is no server-side fetch and therefore no host allowlist to
+      // enforce. `fileName` only informs dialect detection + name derivation.
+      z.object({
+        kind: z.literal('paste'),
+        content: z.string().min(1).max(IMPORT_MAX_FILE_BYTES),
+        fileName: z.string().trim().max(200).optional(),
+      }),
       z.object({
         kind: z.literal('github'),
         connectorInstanceId: z.string().trim().min(1),
@@ -692,6 +700,10 @@ export function skillRoutes({
       if (source.kind === 'url') {
         const result = await importSkillFromUrl(source.url, fetchRawImport)
         res.json(result)
+        return
+      }
+      if (source.kind === 'paste') {
+        res.json(importSkillFromPaste(source.content, source.fileName))
         return
       }
       const resolved = await resolveWorkspaceGithubPat(
@@ -1204,6 +1216,262 @@ export function skillRoutes({
     } catch (err) {
       console.error('[skills] access update failed:', err)
       res.status(500).json({ error: 'Failed to update skill access' })
+    }
+  })
+
+  // ── /categorize — suggest a library group for the unsorted skills ──
+  //
+  // A workspace that has been running a while accumulates dozens of skills —
+  // its own plus everything the background curator induced — and every one of
+  // them lands in the `custom` sink, because nothing set `category` until the
+  // editor picker existed. Re-filing them one editor visit at a time is the
+  // friction this removes.
+  //
+  // Two routes, deliberately split: `/categorize` PROPOSES and writes nothing,
+  // `/categorize/apply` takes the explicit per-skill assignments the user
+  // reviewed. The model is guessing a bucket from a name and a description, so
+  // a bulk write nobody looked at is the failure mode to design out.
+  //
+  // Spec: docs/architecture/engine/skill-system.md → "Suggesting groups".
+
+  const categorizeBodySchema = z.object({ workspaceId: z.string().trim().min(1) })
+
+  const categorizeApplySchema = z.object({
+    workspaceId: z.string().trim().min(1),
+    assignments: z
+      .array(
+        z.object({
+          skillRowId: z.string().trim().min(1),
+          category: z.enum(SKILL_CATEGORIES),
+        }),
+      )
+      .min(1)
+      .max(500),
+  })
+
+  router.post('/categorize', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!workspaceSkillStore || !workspaceStore) {
+      res.status(501).json({ error: 'Skill grouping is not available' }); return
+    }
+    if (!draftProvider) {
+      res.status(503).json({ error: 'Skill grouping is not available' }); return
+    }
+
+    const parsed = categorizeBodySchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'workspaceId is required' }); return }
+    const { workspaceId } = parsed.data
+
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(404).json({ error: 'Not found' }); return }
+
+    // Shares the draft limiter: both are user-triggered model calls from the
+    // same surface, and one budget is easier to reason about than two.
+    if (!draftLimiter.check(`u:${userId}`)) {
+      res.status(429).json({ error: 'Too many requests — try again later' }); return
+    }
+
+    const plan = await getWorkspacePlan(workspaceId)
+    const budget = await checkUsageBudget(workspaceId, plan)
+    if (budget.status === 'blocked') {
+      res.status(429).json({ error: 'This workspace has no active plan. Pick a plan to keep going, or self-host the open-source version.' }); return
+    }
+
+    try {
+      const all = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
+      const candidates = selectCategorizableSkills(
+        all.filter((s) => s.state !== 'archived'),
+      ).map((s) => ({
+        rowId: s.rowId,
+        name: s.name,
+        description: s.description,
+        whenToUse: s.whenToUse ?? null,
+        category: s.category,
+      }))
+
+      if (candidates.length === 0) {
+        res.json({ suggestions: [], considered: 0 })
+        return
+      }
+
+      const suggestions = await suggestSkillCategories({
+        provider: draftProvider,
+        // Bucketing a name + description is the cheapest kind of judgement;
+        // it never needs more than the plan's floor tier.
+        model: resolveModel('standard', plan, budget.status),
+        skills: candidates,
+      })
+      res.json({ suggestions, considered: candidates.length })
+    } catch (err) {
+      console.error('[skills] categorize failed:', err)
+      res.status(500).json({ error: 'Failed to suggest groups' })
+    }
+  })
+
+  router.post('/categorize/apply', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!workspaceSkillStore || !workspaceStore) {
+      res.status(501).json({ error: 'Skill grouping is not available' }); return
+    }
+
+    const parsed = categorizeApplySchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Invalid assignments' }); return }
+    const { workspaceId, assignments } = parsed.data
+
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(404).json({ error: 'Not found' }); return }
+
+    // `update` scopes by (id, workspace_id), so a row from another workspace
+    // simply matches nothing — it is counted as skipped, never applied.
+    // Category is metadata, so this does NOT carry the D2 trust stamp: a bulk
+    // re-file must not silently verify and activate every Suggested skill it
+    // touches (`skill-store.ts` → "Metadata-only edits ... don't qualify").
+    let updated = 0
+    const failed: string[] = []
+    for (const { skillRowId, category } of assignments) {
+      try {
+        const row = await workspaceSkillStore.update(userId, workspaceId, skillRowId, { category })
+        if (row) updated += 1
+        else failed.push(skillRowId)
+      } catch (err) {
+        console.error('[skills] categorize apply failed for', skillRowId, err)
+        failed.push(skillRowId)
+      }
+    }
+    res.json({ updated, failed })
+  })
+
+  // ── /:id/files — the skill's support-file bundle ────────────
+  //
+  // A skill is a bundle, not a lone body: `workspace_skill_files` holds its
+  // reference / template / script files and `useSkill` expands their
+  // `{{kind:name}}` pointers at load time. These three routes are the human
+  // half of that surface — before them the rows were write-once at import and
+  // the background curator's `add_support_file` could attach a file the
+  // owning user could never see, edit, or remove.
+  //
+  // Spec: docs/architecture/engine/skill-system.md → "Support files".
+
+  /** Membership + store gate shared by the three file routes. Answers on
+   *  `res` and returns false when the caller must not proceed. */
+  async function passesSkillFilesGate(
+    userId: string,
+    skillRowId: string,
+    res: import('express').Response,
+  ): Promise<boolean> {
+    if (!workspaceSkillFilesStore) {
+      res.status(501).json({ error: 'Support files are not available on this deployment.' })
+      return false
+    }
+    const scope = await resolveSkillMutationScope(userId, skillRowId)
+    if (scope.kind !== 'workspace') {
+      // `legacy` means the workspace stores aren't injected — the same
+      // not-configured answer as a missing files store.
+      if (scope.kind === 'legacy') {
+        res.status(501).json({ error: 'Support files are not available on this deployment.' })
+      } else {
+        res.status(404).json({ error: 'Skill not found' })
+      }
+      return false
+    }
+    return true
+  }
+
+  /** Wire shape of one support-file row. */
+  function toSupportFileJson(row: {
+    kind: string
+    name: string
+    content: string
+    description: string | null
+    updatedAt: Date | string
+  }) {
+    return {
+      kind: row.kind,
+      name: row.name,
+      content: row.content,
+      description: row.description,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+    }
+  }
+
+  const supportFileSelectorSchema = z.object({
+    kind: z.enum(SUPPORT_FILE_KINDS),
+    name: z.string().trim().min(1).max(SUPPORT_FILE_NAME_MAX),
+  })
+
+  router.get('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+      const rows = await workspaceSkillFilesStore!.list(req.params.id, { actingUserId: userId })
+      res.json({ files: rows.map(toSupportFileJson) })
+    } catch (err) {
+      console.error('[skills] list support files failed:', err)
+      res.status(500).json({ error: 'Failed to list support files' })
+    }
+  })
+
+  router.put('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const checked = validateSupportFile(req.body)
+    if (!checked.ok) { res.status(400).json({ error: checked.error }); return }
+
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+
+      // Count cap applies to the resulting set, not the request: upserting an
+      // existing (kind, name) replaces rather than adds.
+      const existing = await workspaceSkillFilesStore!.list(req.params.id, { actingUserId: userId })
+      const isNew = !existing.some(
+        (f) => f.kind === checked.value.kind && f.name === checked.value.name,
+      )
+      const projected = existing
+        .filter((f) => !(f.kind === checked.value.kind && f.name === checked.value.name))
+        .map((f) => ({ kind: f.kind, name: f.name, content: f.content }))
+        .concat([checked.value])
+      const set = validateSupportFileSet(projected)
+      if (!set.ok) { res.status(400).json({ error: set.error }); return }
+
+      const row = await workspaceSkillFilesStore!.upsert(userId, {
+        workspaceSkillId: req.params.id,
+        kind: checked.value.kind,
+        name: checked.value.name,
+        content: checked.value.content,
+        description: checked.value.description ?? null,
+      })
+      res.status(isNew ? 201 : 200).json({ file: toSupportFileJson(row) })
+    } catch (err) {
+      console.error('[skills] support file upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save the support file' })
+    }
+  })
+
+  router.delete('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    // Identified by query rather than path: a file name may carry slashes (the
+    // resolver allows them), so routing on it would need encoding rules the
+    // client would have to match.
+    const selector = supportFileSelectorSchema.safeParse(req.query)
+    if (!selector.success) {
+      res.status(400).json({ error: 'kind and name query parameters are required' }); return
+    }
+    const { kind, name } = selector.data
+
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+      const removed = await workspaceSkillFilesStore!.delete(userId, req.params.id, kind, name)
+      if (!removed) { res.status(404).json({ error: 'Support file not found' }); return }
+      res.json({ deleted: true })
+    } catch (err) {
+      console.error('[skills] support file delete failed:', err)
+      res.status(500).json({ error: 'Failed to delete the support file' })
     }
   })
 

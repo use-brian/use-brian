@@ -43,6 +43,9 @@ vi.mock("@/contexts/feed-profiles-context", () => ({
 // sidebar state don't exist under bare SSR, so mock the hooks it reads.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ back: vi.fn(), forward: vi.fn() }),
+  // The dock reads the pathname to pick its sticky channel: the Plan surface
+  // gets its own `mode='plan'` conversation (feed-revamp.md D9).
+  usePathname: () => "/w/ws-1/feed/voice",
 }));
 vi.mock("@/components/doc/doc-sidebar-data", () => ({
   useSidebarData: () => ({

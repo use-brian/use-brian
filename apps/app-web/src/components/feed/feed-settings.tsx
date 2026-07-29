@@ -47,7 +47,7 @@ export function FeedSettings() {
         </p>
       </header>
 
-      <section className="grid gap-3 sm:grid-cols-2 animate-stagger">
+      <section className="grid gap-3 sm:grid-cols-2">
         <SettingCard
           href={feedPath(team.workspaceId, { platform, segment: "policy" })}
           title={t.settings.policyTitle}

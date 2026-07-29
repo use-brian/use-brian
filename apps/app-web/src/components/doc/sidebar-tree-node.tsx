@@ -37,6 +37,7 @@
  */
 
 import { useState } from "react";
+import { warmDocPage } from "@/lib/surface-prefetch";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 import { ChevronRight, MoreHorizontal, Plus } from "lucide-react";
@@ -170,7 +171,12 @@ export function SidebarTreeNode(props: SidebarTreeNodeProps) {
           caption open instead of collapsing it (the `group/row` hover lives on
           the inner row div and wouldn't reach the caption below it). */}
       <div
-        onMouseEnter={() => setRowHovered(true)}
+        onMouseEnter={() => {
+          setRowHovered(true);
+          // Warm this page's metadata so opening it paints instantly
+          // (lib/surface-prefetch.ts).
+          warmDocPage(row.id);
+        }}
         onMouseLeave={() => setRowHovered(false)}
       >
       <div

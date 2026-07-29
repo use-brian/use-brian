@@ -52,6 +52,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useIntentPrefetch, warmDocPage } from "@/lib/surface-prefetch";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
   DndContext,
@@ -248,6 +249,10 @@ export function DocSidebar(props: Props) {
   // in the bundled app when offline. No-op on web/thin (gate keeps it false).
   const offline = useIsOffline();
   const { workspaceId, saved, drafts, activeId } = props;
+  // Hover/focus on a surface icon starts that surface's route prefetch AND its
+  // landing fetch, so the click lands on work already in flight. See
+  // `lib/surface-prefetch.ts`.
+  const intentPrefetch = useIntentPrefetch();
 
   // ── Inbox unread badge (pending assistant replies + unread mentions) ──
   // Refetched on mount, on window focus, when the Inbox marks items read
@@ -579,6 +584,7 @@ export function DocSidebar(props: Props) {
         <Tooltip label={t.iconHome} shortcut={surfaceShortcutLabel(1)}>
           <Link
             href={props.homeHref}
+            {...intentPrefetch(props.homeHref)}
             aria-label={t.iconHomeAria}
             className={navItemCls(homeActive, !utilityPillOpen)}
           >
@@ -595,6 +601,7 @@ export function DocSidebar(props: Props) {
         <Tooltip label={t.iconBrain} shortcut={surfaceShortcutLabel(2)}>
           <Link
             href={`/w/${workspaceId}/brain`}
+            {...intentPrefetch(`/w/${workspaceId}/brain`)}
             aria-label={t.iconBrainAria}
             className={navItemCls(surfaceActive("brain"), !utilityPillOpen)}
           >
@@ -607,6 +614,7 @@ export function DocSidebar(props: Props) {
         <Tooltip label={t.iconStudio} shortcut={surfaceShortcutLabel(3)}>
           <Link
             href={`/w/${workspaceId}/studio`}
+            {...intentPrefetch(`/w/${workspaceId}/studio`)}
             aria-label={t.iconStudioAria}
             className={navItemCls(surfaceActive("studio"), !utilityPillOpen) + " relative"}
           >
@@ -625,6 +633,7 @@ export function DocSidebar(props: Props) {
         <Tooltip label={t.iconWorkflow} shortcut={surfaceShortcutLabel(4)}>
           <Link
             href={`/w/${workspaceId}/workflow`}
+            {...intentPrefetch(`/w/${workspaceId}/workflow`)}
             aria-label={t.iconWorkflowAria}
             className={navItemCls(surfaceActive("workflow"), !utilityPillOpen)}
           >
@@ -1420,6 +1429,9 @@ function FlatRow({
   });
   return (
     <div
+      // Warm the page's metadata so opening it paints instantly
+      // (lib/surface-prefetch.ts).
+      onMouseEnter={() => warmDocPage(row.id)}
       className={[
         "group/row relative flex w-full items-center gap-1.5 rounded-md pl-2 pr-1 text-sm",
         active

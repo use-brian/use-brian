@@ -1991,7 +1991,7 @@ export function DraftSessionDetail() {
         <div ref={containerRef} className="flex-1 overflow-y-auto">
           <div className="max-w-[780px] mx-auto px-3 py-4 md:px-6 md:py-6 space-y-6">
             {historyLoading ? (
-              <div className="text-sm text-muted-foreground animate-pulse-soft">{td.loadingConversation}</div>
+              <div className="text-sm text-muted-foreground">{td.loadingConversation}</div>
             ) : messages.length === 0 && !isStreaming ? (
               <div className="text-sm text-muted-foreground pt-4 animate-fade-in">
                 {td.chatEmptyPrefix}{" "}
@@ -2458,7 +2458,7 @@ export function DraftSessionDetail() {
                       key={pageIdx}
                       className="snap-center shrink-0 w-full"
                     >
-                      <div className="grid grid-cols-2 gap-3 animate-stagger">
+                      <div className="grid grid-cols-2 gap-3">
                         {page.map((alt) => (
                           <DraftOptionCard
                             key={alt.index}
@@ -2808,7 +2808,7 @@ function DraftOptionCard({
 function DraftPlaceholderCard() {
   const td = useT().feedPage.draftSessions;
   return (
-    <article className="rounded-xl border border-primary/20 bg-card p-4 animate-pulse-soft">
+    <article className="rounded-xl border border-border/60 bg-card p-4">
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] uppercase tracking-wider text-primary/70 font-semibold">
           {td.draftingLabel}
@@ -2863,8 +2863,8 @@ function useTypewriter(target: string, enabled: boolean): string {
 
 const SAVED_STATUS_BADGE_CLASS: Record<FeedSavedDraftStatus, string> = {
   pending: "bg-primary/15 text-primary ring-1 ring-primary/30",
-  ready: "bg-emerald-500/15 text-emerald-400 ring-1 ring-emerald-500/30",
-  posted: "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30",
+  ready: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 ring-1 ring-emerald-500/30",
+  posted: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-500/30",
   rejected: "bg-muted text-muted-foreground ring-1 ring-border",
   expired: "bg-muted text-muted-foreground ring-1 ring-border",
   superseded: "bg-muted text-muted-foreground ring-1 ring-border",
@@ -2939,7 +2939,7 @@ function SavedDraftsPanel(props: {
           </span>
         ) : null}
       </div>
-      <ul className="grid grid-cols-2 gap-3 animate-stagger">
+      <ul className="grid grid-cols-2 gap-3">
         {props.drafts.map((d) => {
           const isPending = d.status === "pending";
           const isPosted = d.status === "posted";

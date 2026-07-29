@@ -33,12 +33,37 @@ import type {
   SearchResultRow,
   Sensitivity,
 } from '@use-brian/core'
+
 import { TASK_STATUSES as TASK_RECORD_STATUSES } from '@use-brian/core'
 import { query } from '../db/client.js'
 import { listCompanies, listContacts, listDeals } from '../db/crm.js'
 import { listTasks as listWorkspaceTasks } from '../db/tasks.js'
 import { resolveWorkspaceViewpoint } from '../db/workspace-viewpoint.js'
 import type { KnowledgeStore } from '../db/knowledge-store.js'
+
+const BLOCKED_KNOWLEDGE_URL_PROTOCOLS = new Set([
+  'about:', 'blob:', 'chrome:', 'chrome-extension:', 'data:', 'devtools:',
+  'file:', 'javascript:', 'vbscript:',
+])
+
+function knowledgeNavigationUrl(metadata: unknown): string | null {
+  const value = metadata && typeof metadata === 'object'
+    ? (metadata as Record<string, unknown>).url
+    : null
+  if (typeof value !== 'string' || value.length > 2048) return null
+  try {
+    const url = new URL(value)
+    if (
+      !/^[a-z][a-z0-9+.-]*:$/.test(url.protocol)
+      || BLOCKED_KNOWLEDGE_URL_PROTOCOLS.has(url.protocol)
+      || url.username
+      || url.password
+    ) return null
+    return url.toString()
+  } catch {
+    return null
+  }
+}
 
 /** Format a pg-parsed DATE (local-midnight Date) back to its YYYY-MM-DD. */
 function formatDateOnly(d: Date): string {
@@ -379,6 +404,62 @@ function projectSearchRow(row: SearchResultRow): WebBrainRow | null {
 
 // ── Route factory ────────────────────────────────────────────────────
 
+/**
+ * Composite cursor for `GET /list`.
+ *
+ * The route reads from two independent sources, so one opaque string has to
+ * carry both positions:
+ *
+ *  - `s` — per-scope retrieval cursors, keyed by scope name (or `*` for the
+ *    unscoped all-kinds search). The VALUES are `retrievalStore.search`'s own
+ *    opaque cursors, passed through untouched — this route never decodes them.
+ *  - `k` — how many knowledge rows have already been consumed.
+ *
+ * **A key's ABSENCE means that arm is exhausted**, which is what stops a
+ * finished arm from restarting at page 1 on every subsequent request (the
+ * failure mode that would repeat the same knowledge rows forever while the
+ * retrieval arm paged onward).
+ *
+ * Opaque base64url JSON: the client stores and echoes it, and never parses it,
+ * so the shape can change without a client release.
+ */
+type ListCursorState = {
+  s?: Record<string, string>
+  k?: number
+}
+
+function encodeListCursor(state: ListCursorState): string {
+  return Buffer.from(JSON.stringify(state), 'utf8').toString('base64url')
+}
+
+/**
+ * Decode a cursor, or `null` if it is absent or unparseable. A malformed
+ * cursor restarts from the first page rather than 400ing: it is an opaque
+ * token the client only ever echoes, so a bad one means our encoding changed
+ * under a stale tab, and dropping the user back to page 1 beats an error.
+ */
+function decodeListCursor(raw: unknown): ListCursorState | null {
+  if (typeof raw !== 'string' || raw.length === 0) return null
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const state = parsed as ListCursorState
+    const scopes: Record<string, string> = {}
+    if (typeof state.s === 'object' && state.s !== null) {
+      for (const [key, value] of Object.entries(state.s)) {
+        if (typeof value === 'string' && value.length > 0) scopes[key] = value
+      }
+    }
+    const k =
+      typeof state.k === 'number' && Number.isFinite(state.k) && state.k >= 0
+        ? Math.floor(state.k)
+        : undefined
+    return { s: Object.keys(scopes).length > 0 ? scopes : undefined, k }
+  } catch {
+    return null
+  }
+}
+
 export function brainRoutes(deps: {
   entitiesStore: EntityStore
   entityLinksStore: EntityLinksStore
@@ -493,7 +574,7 @@ export function brainRoutes(deps: {
   })
 
   /**
-   * GET /list?workspaceId=X&kinds=memories,companies&q=...&limit=100
+   * GET /list?workspaceId=X&kinds=memories,companies&q=...&limit=100&cursor=...
    *
    * Cross-primitive list for the Brain list page. Thin wrapper over the
    * retrieval `search()` surface: translates the web `kinds` primitives
@@ -514,8 +595,13 @@ export function brainRoutes(deps: {
    *   - `pending=true` — needs `pending_approvals.approval_payload` to
    *     carry `entity_ids`; returns empty for now (same gap as the
    *     rollup route's `pendingChanges: []`).
-   *   - `cursor` / pagination — the Brain page requests `limit=100` and
-   *     does not paginate, so `nextCursor` is always `null` for now.
+   * Pagination is a COMPOSITE cursor (`encodeListCursor`), because the route
+   * has two independent arms: the retrieval fan-out (one `search()` per
+   * requested scope, or a single unscoped one) and the knowledge list. Each
+   * arm keeps its own position, and `nextCursor` is null only when EVERY arm
+   * is exhausted. `retrievalStore.search` already implements its own opaque
+   * cursor over the Layer-3 ranked axis, so the route carries those strings
+   * without interpreting them.
    */
   router.get('/list', async (req, res) => {
     const userId = (req as { userId?: string }).userId
@@ -573,10 +659,25 @@ export function brainRoutes(deps: {
       return
     }
 
+    // Composite cursor. On the FIRST page (`state === null`) every arm runs.
+    // On a continuation only the arms still present in the cursor run — an
+    // absent key means that arm is done, and re-running it would replay its
+    // first page under every subsequent request.
+    const state = decodeListCursor(req.query.cursor)
+    const firstPage = state === null
+    const scopeKey = (scope: string | undefined) => scope ?? '*'
+    const activeScopes = firstPage
+      ? scopes
+      : scopes.filter((scope) => state.s?.[scopeKey(scope)] !== undefined)
+    const knowledgeOffset = firstPage ? 0 : state.k
+    const knowledgeActive = knowledgeRequested && knowledgeOffset !== undefined
+
     let merged: WebBrainRow[]
+    const nextScopeCursors: Record<string, string> = {}
+    let nextKnowledgeOffset: number | undefined
     try {
       const tasks: Promise<WebBrainRow[]>[] = []
-      if (scopes.length > 0) {
+      if (activeScopes.length > 0) {
         tasks.push(
           (async () => {
             // `semantic: false` — the Brain page's search box is a FILTER,
@@ -586,15 +687,22 @@ export function brainRoutes(deps: {
             // workspace and "All + search" returns rows that don't contain
             // the text at all.
             const envelopes = await Promise.all(
-              scopes.map((scope) =>
-                retrievalStore.search(
+              activeScopes.map((scope) => {
+                // `search()`'s own opaque cursor over its Layer-3 ranked
+                // axis — carried through, never decoded here.
+                const cursor = state?.s?.[scopeKey(scope)]
+                return retrievalStore.search(
                   ctx,
                   scope === undefined
-                    ? { query: q, limit, semantic: false }
-                    : { query: q, scope, limit, semantic: false },
-                ),
-              ),
+                    ? { query: q, limit, semantic: false, cursor }
+                    : { query: q, scope, limit, semantic: false, cursor },
+                )
+              }),
             )
+            envelopes.forEach((envelope, i) => {
+              const next = envelope.meta.cursor
+              if (next) nextScopeCursors[scopeKey(activeScopes[i])] = next
+            })
             return envelopes
               .flatMap((e) => e.data)
               .map(projectSearchRow)
@@ -602,11 +710,15 @@ export function brainRoutes(deps: {
           })(),
         )
       }
-      if (knowledgeRequested) {
+      if (knowledgeActive) {
+        const offset = knowledgeOffset ?? 0
         tasks.push(
-          knowledgeStore
-            .listForBrain(ctx, q, limit)
-            .then((rows) => rows.map(projectKnowledgeRow)),
+          knowledgeStore.listForBrain(ctx, q, limit, offset).then((rows) => {
+            // A short page means the table is exhausted; leaving the offset
+            // undefined drops this arm from the next cursor.
+            if (rows.length === limit) nextKnowledgeOffset = offset + rows.length
+            return rows.map(projectKnowledgeRow)
+          }),
         )
       }
       const groups = await Promise.all(tasks)
@@ -630,9 +742,32 @@ export function brainRoutes(deps: {
       })
     }
 
-    const results = merged.slice(0, limit)
+    // Return EVERY row the arms produced — no slice to `limit`.
+    //
+    // `limit` is per-arm (each `search()` and the knowledge query take it), so
+    // a page is up to `arms x limit` rows. Slicing the merged list back down
+    // to `limit` would silently DROP rows whose arm cursor had already
+    // advanced past them: with a full retrieval page and a full knowledge
+    // page, half the fetched rows would be binned and never reachable again,
+    // because the next request resumes after them. The arms' cursors are
+    // opaque, so there is no way to rewind one to match a truncated merge.
+    // Handing back everything fetched is both cheaper (the old code paid for
+    // those rows and threw them away) and the only lossless option.
+    const results = merged
 
-    res.status(200).json({ results, nextCursor: null })
+    // `nextCursor` is derived from the ARMS, never from `results.length`.
+    // The `taskStatus` partition filters after the merge, so a page can come
+    // back short while the underlying data continues. Keying "has more" on
+    // the page size would strand the user mid-dataset.
+    const nextState: ListCursorState = {}
+    if (Object.keys(nextScopeCursors).length > 0) nextState.s = nextScopeCursors
+    if (nextKnowledgeOffset !== undefined) nextState.k = nextKnowledgeOffset
+    const exhausted = nextState.s === undefined && nextState.k === undefined
+
+    res.status(200).json({
+      results,
+      nextCursor: exhausted ? null : encodeListCursor(nextState),
+    })
   })
 
   /**
@@ -1246,12 +1381,14 @@ export function brainRoutes(deps: {
         sensitivity: entry.sensitivity,
         sourceId: entry.sourceId,
         sourceSha: entry.sourceSha,
+        navigationUrl: knowledgeNavigationUrl(entry.metadata),
         createdAt: entry.createdAt,
         updatedAt: entry.updatedAt,
         related: related.map((r) => ({ id: r.id, title: r.title, path: r.path })),
         source: source && source.workspaceId === ctx.workspaceId
           ? {
               id: source.id,
+              sourceType: source.sourceType,
               repo: source.repo,
               branch: source.branch,
               rootPath: source.rootPath,

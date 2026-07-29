@@ -49,7 +49,15 @@ const env: OpenApiEnv = {
     (process.env.BRIAN_SUPPORT_DIAGNOSTICS_ENABLED ?? '').trim().toLowerCase(),
   ),
   PORT: process.env.PORT,
-  VOICE_TRANSCRIPTION_ENABLED: process.env.VOICE_TRANSCRIPTION_ENABLED === 'true',
+  // Default ON, matching the hosted `boolFlag(true)` and the documented
+  // default in docs/architecture/media/transcription.md. This is an OPS KILL
+  // SWITCH, never an opt-in: until 2026-07-29 the open entry spelled it
+  // `=== 'true'`, so every self-host booted with voice transcription OFF and
+  // silently dropped every Telegram voice note (nothing in .env.example or
+  // deploy-brian ever set it). Graded by `pnpm check` (invariants/oss-env-defaults).
+  VOICE_TRANSCRIPTION_ENABLED: !['false', '0'].includes(
+    (process.env.VOICE_TRANSCRIPTION_ENABLED ?? '').trim().toLowerCase(),
+  ),
   VOICE_TRANSCRIPTION_MODEL: process.env.VOICE_TRANSCRIPTION_MODEL,
   FALLBACK_PROVIDER_ENABLED: process.env.FALLBACK_PROVIDER_ENABLED === 'true',
   ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
