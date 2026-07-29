@@ -15,7 +15,15 @@
  *   1. Short transaction — `SELECT … FOR UPDATE SKIP LOCKED`, take the ids,
  *      `COMMIT`, release.
  *   2. `handler(rows, …)` — the embedder HTTP call. No connection held.
- *   3. Short transaction per write-back — the vectors, or the failures.
+ *   3. Short transaction per write-back — the vectors, or the failures, as ONE
+ *      `UPDATE … FROM (VALUES …)` rather than a row-at-a-time loop (B4). Up to
+ *      100 round trips collapse into one, shortening exactly the transactions
+ *      that pin a connection. Every id is bound as text and cast once
+ *      (`v.id::uuid`) so the join still rides the primary key — casting the
+ *      table side instead would seq-scan a 5.6 GB table.
+ *
+ * B4 deliberately lands AFTER B2 and B3: a faster drain against a lane that is
+ * not yet isolated is the 2026-07-29 outage on the next unpause.
  *
  * The claim's row lock therefore lasts only for phase 1, not for the whole
  * drain. That is the point: the previous shape ran the embedder INSIDE the
@@ -257,39 +265,50 @@ export function createDbEmbeddingStore(): EmbeddingStore {
         // ── Phase 3: write back, one short transaction each ─────────
         commit: async (results: EmbeddingResult[]) => {
           if (results.length === 0) return
+          const values: unknown[] = []
+          const tuples = results.map((res) => {
+            values.push(
+              res.id,
+              JSON.stringify(res.embedding),
+              res.embeddingModelId,
+              res.contentHash,
+            )
+            const n = values.length
+            return `($${n - 3}, $${n - 2}, $${n - 1}, $${n})`
+          })
           await inShortTransaction(async (client) => {
-            for (const res of results) {
-              await client.query(
-                `UPDATE ${table}
-                    SET embedding                = $1::vector,
-                        embedding_model_id       = $2,
-                        content_hash             = $3,
-                        embedding_updated_at     = now(),
-                        embedding_failed_at      = NULL,
-                        embedding_failure_reason = NULL
-                  WHERE id = $4`,
-                [
-                  JSON.stringify(res.embedding),
-                  res.embeddingModelId,
-                  res.contentHash,
-                  res.id,
-                ],
-              )
-            }
+            await client.query(
+              `UPDATE ${table} AS t
+                  SET embedding                = v.embedding::vector,
+                      embedding_model_id       = v.model_id,
+                      content_hash             = v.content_hash,
+                      embedding_updated_at     = now(),
+                      embedding_failed_at      = NULL,
+                      embedding_failure_reason = NULL
+                 FROM (VALUES ${tuples.join(', ')})
+                      AS v(id, embedding, model_id, content_hash)
+                WHERE t.id = v.id::uuid`,
+              values,
+            )
           })
         },
         fail: async (failures: EmbeddingFailure[]) => {
           if (failures.length === 0) return
+          const values: unknown[] = []
+          const tuples = failures.map((f) => {
+            values.push(f.id, f.reason.slice(0, 1000))
+            const n = values.length
+            return `($${n - 1}, $${n})`
+          })
           await inShortTransaction(async (client) => {
-            for (const f of failures) {
-              await client.query(
-                `UPDATE ${table}
-                    SET embedding_failed_at      = now(),
-                        embedding_failure_reason = $1
-                  WHERE id = $2`,
-                [f.reason.slice(0, 1000), f.id],
-              )
-            }
+            await client.query(
+              `UPDATE ${table} AS t
+                  SET embedding_failed_at      = now(),
+                      embedding_failure_reason = v.reason
+                 FROM (VALUES ${tuples.join(', ')}) AS v(id, reason)
+                WHERE t.id = v.id::uuid`,
+              values,
+            )
           })
         },
       })

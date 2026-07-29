@@ -77,6 +77,11 @@ function claims(): { text: string; values?: unknown[] }[] {
   return queries.filter((q) => q.text.includes('FOR UPDATE SKIP LOCKED'))
 }
 
+/** The content hash the store derives for a given embed text. */
+function rowsHash(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
 describe('[COMP:brain/embedding-store] withClaimedRows', () => {
   it('throws for a primitive without a vector column (episodes)', async () => {
     await expect(
@@ -268,21 +273,79 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     })
     const update = queries.find((q) => q.text.includes('UPDATE memories') && q.text.includes('embedding'))
     expect(update).toBeDefined()
-    expect(update!.text).toContain('$1::vector')
+    expect(update!.text).toContain('v.embedding::vector')
     expect(update!.text).toContain('embedding_failed_at      = NULL')
-    expect(update!.values?.[0]).toBe('[0.1,0.2,0.3]')
-    expect(update!.values?.[1]).toBe('gemini:gemini-embedding-001')
-    expect(update!.values?.[3]).toBe('m-1')
+    expect(update!.values).toEqual([
+      'm-1',
+      '[0.1,0.2,0.3]',
+      'gemini:gemini-embedding-001',
+      rowsHash('hello'),
+    ])
   })
 
-  it('fail() stamps embedding_failed_at + reason', async () => {
+  // ── B4: batched commit ────────────────────────────────────────
+  //
+  // corpus-substrate-hardening §5. Up to 100 round trips become one, which
+  // shortens exactly the transactions that pin a connection.
+
+  it('writes a whole batch in ONE UPDATE ... FROM (VALUES ...)', async () => {
+    claimRows = [
+      { id: 'm-1', embed_text: 'one' },
+      { id: 'm-2', embed_text: 'two' },
+      { id: 'm-3', embed_text: 'three' },
+    ]
+    await store.withClaimedRows('memories', 10, async (rows, apply) => {
+      await apply.commit(
+        rows.map((r, i) => ({
+          id: r.id,
+          embedding: [i],
+          embeddingModelId: 'gemini:gemini-embedding-001',
+          contentHash: r.contentHash,
+        })),
+      )
+    })
+    const updates = queries.filter((q) => q.text.startsWith('UPDATE memories'))
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toContain(
+      'AS v(id, embedding, model_id, content_hash)',
+    )
+    expect(updates[0].text).toContain('($1, $2, $3, $4), ($5, $6, $7, $8), ($9, $10, $11, $12)')
+    expect(updates[0].values).toHaveLength(12)
+    // The join must cast the BOUND side, not the column: `t.id::text = v.id`
+    // would seq-scan a 5.6 GB table instead of riding the primary key.
+    expect(updates[0].text).toContain('WHERE t.id = v.id::uuid')
+    expect(updates[0].text).not.toContain('t.id::')
+  })
+
+  it('fail() stamps embedding_failed_at + reason for the whole batch in one statement', async () => {
+    claimRows = [
+      { id: 'm-1', embed_text: 'hello' },
+      { id: 'm-2', embed_text: 'there' },
+    ]
+    await store.withClaimedRows('memories', 10, async (_rows, apply) => {
+      await apply.fail([
+        { id: 'm-1', reason: 'Gemini API error 429' },
+        { id: 'm-2', reason: 'Gemini API error 429' },
+      ])
+    })
+    const updates = queries.filter((q) => q.text.includes('embedding_failed_at      = now()'))
+    expect(updates).toHaveLength(1)
+    expect(updates[0].text).toContain('AS v(id, reason)')
+    expect(updates[0].values).toEqual([
+      'm-1',
+      'Gemini API error 429',
+      'm-2',
+      'Gemini API error 429',
+    ])
+  })
+
+  it('truncates a failure reason to 1000 chars', async () => {
     claimRows = [{ id: 'm-1', embed_text: 'hello' }]
     await store.withClaimedRows('memories', 10, async (_rows, apply) => {
-      await apply.fail([{ id: 'm-1', reason: 'Gemini API error 429' }])
+      await apply.fail([{ id: 'm-1', reason: 'x'.repeat(5000) }])
     })
     const update = queries.find((q) => q.text.includes('embedding_failed_at      = now()'))
-    expect(update).toBeDefined()
-    expect(update!.values).toEqual(['Gemini API error 429', 'm-1'])
+    expect((update!.values?.[1] as string).length).toBe(1000)
   })
 
   it('rethrows a handler failure with the claim already committed and the connection back', async () => {
