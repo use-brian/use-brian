@@ -6,6 +6,7 @@ import { runMediaUnderstanding, DASHSCOPE_VISION_MODEL, DASHSCOPE_ASR_MODEL, DAS
 import { createVertexEmbedder, createDashScopeEmbedder, VERTEX_EMBEDDING_MODEL_ID } from '../../embeddings/adapters.js'
 import { GEMINI_EMBEDDING_MODEL_ID } from '../../embeddings/embedder.js'
 import { stripUnsignedToolUses, modelRequiresToolSignatures } from '../../engine/tool-pairing.js'
+import { minimalPdf } from '../../files/__tests__/pdf-fixture.js'
 import type { Message } from '../types.js'
 
 describe('[COMP:providers/google-transport] Google transport', () => {
@@ -75,6 +76,8 @@ describe('[COMP:providers/google-auth] Vertex token sources', () => {
 describe('[COMP:media/backend] Multimodal backend per adapter', () => {
   const png = { buffer: Buffer.from('fake-png'), mime: 'image/png' }
   const ogg = { buffer: Buffer.from('fake-audio'), mime: 'audio/ogg' }
+  /** A document with no pages to render — still the qwen-long upload's job. */
+  const OFFICE_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
   const req = (over: Record<string, unknown>) => ({
     prompt: 'p', model: 'gemini-2.5-flash', maxOutputTokens: 100,
     timeoutMs: 5000, errorLabel: 'test call', ...over,
@@ -123,9 +126,10 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(audioContent.some((p) => p.type === 'text')).toBe(false)
   })
 
-  it('uploads a PDF via the Files API and distills it with qwen-long', async () => {
+  it('uploads a non-PDF office document via the Files API and distills it with qwen-long', async () => {
+    // qwen-long survives for documents that have no pages to render. PDFs
+    // deliberately no longer come here (pdf-universal-read §3, one track).
     const calls: Array<{ url: string; init?: RequestInit }> = []
-    let callIndex = 0
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const u = String(url)
       calls.push({ url: u, init })
@@ -140,7 +144,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
 
     const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
     const res = await runMediaUnderstanding(backend, req({
-      buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf', modality: 'document', fetchFn,
+      buffer: Buffer.from('PK office bytes'), mime: OFFICE_MIME, modality: 'document', fetchFn,
     }) as never)
 
     expect(calls[0].url).toBe('https://ds.test/v1/files')
@@ -158,87 +162,57 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     expect(res.usage).toEqual({ inputTokens: 30, outputTokens: 12 })
   })
 
-  it('renders PDF pages for Qwen-VL and appends page-numbered visual content', async () => {
-    const content = 'BT /F1 24 Tf 72 700 Td (Quarterly report) Tj ET'
-    const body =
-      `1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n` +
-      `2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n` +
-      `3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>\nendobj\n` +
-      `4 0 obj\n<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n` +
-      `5 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n`
-    const pdf = Buffer.from(`%PDF-1.4\n${body}trailer\n<</Root 1 0 R/Size 6>>\n%%EOF`, 'latin1')
-    const chatBodies: Array<Record<string, any>> = []
+  it('reads a PDF through Qwen-VL page images only — never the qwen-long track', async () => {
+    // The old shape ran BOTH: a qwen-long file extraction and a page-per-call
+    // vision loop, whose outputs largely duplicated each other. One document,
+    // two bills. Vision subsumes the text track, so `/files` must stay untouched.
+    const chatBodies: Array<Record<string, unknown>> = []
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      if (String(url).endsWith('/files')) {
-        return new Response(JSON.stringify({ id: 'file-visual' }), { status: 200 })
-      }
-      const chatBody = JSON.parse(init!.body as string)
-      chatBodies.push(chatBody)
-      if (chatBody.model === DASHSCOPE_LONG_MODEL) {
-        return new Response(JSON.stringify({
-          choices: [{ message: { content: '# Quarterly report' } }],
-          usage: { prompt_tokens: 30, completion_tokens: 12 },
-        }), { status: 200 })
-      }
+      if (String(url).endsWith('/files')) throw new Error('a PDF must not hit the Files API')
+      chatBodies.push(JSON.parse(init!.body as string))
       return new Response(JSON.stringify({
-        choices: [{ message: { content: 'A bar chart compares quarterly revenue.' } }],
+        choices: [{ message: { content: '## Page 1\n\nQuarterly report\n\n[Figure: bar chart of revenue]' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 20, completion_tokens: 8 },
       }), { status: 200 })
     })
 
     const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
     const res = await runMediaUnderstanding(backend, req({
-      buffer: pdf, mime: 'application/pdf', modality: 'document', fetchFn,
+      buffer: minimalPdf(1, 'Quarterly report'), mime: 'application/pdf', modality: 'document', fetchFn,
     }) as never)
 
-    expect(chatBodies).toHaveLength(2)
-    const visionBody = chatBodies.find((body) => body.model === DASHSCOPE_VISION_MODEL)!
-    expect(visionBody.messages[0].content[0].text).toMatch(/visual information/i)
-    expect(visionBody.messages[0].content[1].image_url.url).toMatch(/^data:image\/jpeg;base64,/)
-    expect(res.text).toContain('# Quarterly report')
-    expect(res.text).toContain('## Visual content')
-    expect(res.text).toContain('### Page 1')
-    expect(res.text).toContain('A bar chart compares quarterly revenue.')
-    expect(res.model).toBe(`${DASHSCOPE_LONG_MODEL}+${DASHSCOPE_VISION_MODEL}`)
-    expect(res.usage).toEqual({ inputTokens: 50, outputTokens: 20 })
-    expect(res.usageByModel).toEqual([
-      { model: DASHSCOPE_LONG_MODEL, usage: { inputTokens: 30, outputTokens: 12 } },
-      { model: DASHSCOPE_VISION_MODEL, usage: { inputTokens: 20, outputTokens: 8 } },
-    ])
+    expect(chatBodies).toHaveLength(1)
+    const visionBody = chatBodies[0] as { model: string; messages: [{ content: Array<{ type: string; text?: string; image_url?: { url: string } }> }] }
+    expect(visionBody.model).toBe(DASHSCOPE_VISION_MODEL)
+    expect(visionBody.messages[0].content[0].text).toMatch(/transcribe/i)
+    expect(visionBody.messages[0].content[1].image_url!.url).toMatch(/^data:image\/jpeg;base64,/)
+    expect(res.text).toContain('Quarterly report')
+    expect(res.text).toContain('[Figure: bar chart of revenue]')
+    expect(res.model).toBe(DASHSCOPE_VISION_MODEL)
+    expect(res.usage).toEqual({ inputTokens: 20, outputTokens: 8 })
   })
 
-  it('keeps Qwen-VL visual extraction when qwen-long is unavailable', async () => {
-    const content = 'BT /F1 24 Tf 72 700 Td (Scanned report) Tj ET'
-    const body =
-      `1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n` +
-      `2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n` +
-      `3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>\nendobj\n` +
-      `4 0 obj\n<</Length ${content.length}>>\nstream\n${content}\nendstream\nendobj\n` +
-      `5 0 obj\n<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>\nendobj\n`
-    const pdf = Buffer.from(`%PDF-1.4\n${body}trailer\n<</Root 1 0 R/Size 6>>\n%%EOF`, 'latin1')
+  it('reads past the retired 10-page cap, batching pages into chunked calls', async () => {
+    // The visual track used to stop at DASHSCOPE_MAX_PDF_VISUAL_PAGES = 10,
+    // so page 11 of a report simply did not exist for the model.
+    const seenPageCounts: number[] = []
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      if (String(url).endsWith('/files')) {
-        return new Response(JSON.stringify({ id: 'file-no-long' }), { status: 200 })
-      }
-      const chatBody = JSON.parse(init!.body as string)
-      if (chatBody.model === DASHSCOPE_LONG_MODEL) {
-        return new Response('model not found', { status: 404 })
-      }
+      if (String(url).endsWith('/files')) throw new Error('a PDF must not hit the Files API')
+      const body = JSON.parse(init!.body as string) as { messages: [{ content: unknown[] }] }
+      seenPageCounts.push(body.messages[0].content.length - 1) // minus the prompt part
       return new Response(JSON.stringify({
-        choices: [{ message: { content: 'A signed approval stamp appears at the bottom.' } }],
-        usage: { prompt_tokens: 25, completion_tokens: 7 },
+        choices: [{ message: { content: 'transcribed' }, finish_reason: 'stop' }],
       }), { status: 200 })
     })
 
-    const res = await runMediaUnderstanding(
+    await runMediaUnderstanding(
       { kind: 'dashscope', apiKey: 'k', baseUrl: 'https://ds.test/v1' },
-      req({ buffer: pdf, mime: 'application/pdf', modality: 'document', fetchFn }) as never,
+      req({ buffer: minimalPdf(12), mime: 'application/pdf', modality: 'document', fetchFn }) as never,
     )
 
-    expect(res.model).toBe(DASHSCOPE_VISION_MODEL)
-    expect(res.text).toContain('### Page 1')
-    expect(res.text).toContain('A signed approval stamp appears at the bottom.')
-    expect(res.usage).toEqual({ inputTokens: 25, outputTokens: 7 })
+    // 12 pages / DASHSCOPE_CHUNK_PAGES(6) = two calls, all 12 pages sent.
+    expect(seenPageCounts).toHaveLength(2)
+    expect(seenPageCounts.reduce((a, b) => a + b, 0)).toBe(12)
   })
 
   it('uses the longModel override for the qwen-long file-extract call', async () => {
@@ -255,7 +229,7 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
 
     const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1', longModel: 'qwen-long-custom' }
     const res = await runMediaUnderstanding(backend, req({
-      buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf', modality: 'document', fetchFn,
+      buffer: Buffer.from('PK office bytes'), mime: OFFICE_MIME, modality: 'document', fetchFn,
     }) as never)
 
     const chatBody = JSON.parse(calls[1].init!.body as string)
@@ -269,9 +243,60 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     const backend = { kind: 'dashscope' as const, apiKey: 'k', baseUrl: 'https://ds.test/v1' }
     await expect(
       runMediaUnderstanding(backend, req({
-        buffer: Buffer.from('%PDF'), mime: 'application/pdf', modality: 'document', fetchFn,
+        buffer: Buffer.from('PK office bytes'), mime: OFFICE_MIME, modality: 'document', fetchFn,
       }) as never),
     ).rejects.toThrow(/file upload failed.*429/s)
+  })
+
+  it('distills a PDF through the deployment\'s own chat provider when no media key exists', async () => {
+    // The Codex-only unblock: a ChatGPT subscription is the sole model
+    // credential, so pages ride ordinary `image` blocks through the chat
+    // adapter. Before this the backend chain fell through to a DashScope
+    // backend with an empty key and every distill attempt 401'd.
+    const requests: Array<{ model: string; blocks: Array<{ type: string; mimeType?: string }> }> = []
+    const provider = {
+      name: 'fake',
+      models: ['gpt-5.6-luna'],
+      createSession: () => { throw new Error('unused') },
+      stream: (request: { model: string; messages: Array<{ content: unknown }> }) => {
+        requests.push({
+          model: request.model,
+          blocks: request.messages[0]!.content as Array<{ type: string; mimeType?: string }>,
+        })
+        return (async function* () {
+          yield { type: 'text_delta' as const, text: '## Page 1\n\nInvoice total 42.00' }
+          yield {
+            type: 'message_end' as const,
+            stopReason: 'end_turn' as const,
+            usage: { inputTokens: 900, outputTokens: 120 },
+          }
+        })()
+      },
+    }
+
+    const res = await runMediaUnderstanding(
+      { kind: 'provider', provider: provider as never, model: 'gpt-5.6-luna' },
+      req({ buffer: minimalPdf(1, 'Invoice'), mime: 'application/pdf', modality: 'document' }) as never,
+    )
+
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.model).toBe('gpt-5.6-luna')
+    expect(requests[0]!.blocks.map((b) => b.type)).toEqual(['text', 'image'])
+    expect(requests[0]!.blocks[1]!.mimeType).toBe('image/jpeg')
+    expect(res.text).toContain('Invoice total 42.00')
+    expect(res.usage).toEqual({ inputTokens: 900, outputTokens: 120 })
+  })
+
+  it('refuses audio on a chat-provider backend instead of returning an empty transcript', async () => {
+    // A silent empty transcript reads to the caller as "this recording has no
+    // speech" — the exact failure mode the transcription spec forbids.
+    const provider = { name: 'fake', models: [], stream: () => { throw new Error('unused') }, createSession: () => { throw new Error('unused') } }
+    await expect(
+      runMediaUnderstanding(
+        { kind: 'provider', provider: provider as never, model: 'gpt-5.6-luna' },
+        req({ ...ogg, modality: 'audio' }) as never,
+      ),
+    ).rejects.toThrow(/cannot transcribe audio/i)
   })
 })
 

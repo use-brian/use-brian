@@ -3,18 +3,22 @@
  * non-text file can feed Pipeline B (which ingests text only).
  *
  * Runs on whichever adapter is configured, via the shared `media/backend.ts`
- * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex, or
- * Qwen-VL (`image_url`) / `qwen-long` (file-upload) over DashScope. PDFs ride
- * Gemini's native inlineData reader or DashScope's `qwen-long` upload flow plus
- * page-rendered Qwen-VL visual analysis; images use Qwen-VL inline.
+ * seam: Gemini `inlineData` (`generateContent`) over AI Studio or Vertex,
+ * Qwen-VL / `qwen-long` over DashScope, or the deployment's own chat model.
+ * A PDF takes one of two paths — Gemini's native inlineData reader, or
+ * full-page image distillation (`files/pdf-distill.ts`) on every other
+ * backend. Images use Qwen-VL inline; non-PDF office documents keep the
+ * `qwen-long` file-upload flow.
  *
  * PDFs additionally have a local text-layer fallback (`extractPdfText`, via
  * unpdf): when the configured adapter cannot distill the document — e.g. a
- * DashScope endpoint without a `qwen-long` model returns "model not found" —
- * the text layer is extracted locally instead of failing. It is a fallback,
- * not the primary path: native distillation is preferred (it reads scanned
- * pages and layout), and local extraction only runs when the adapter errors or
- * returns empty text for a PDF.
+ * DashScope endpoint whose vision model 404s — the text layer is extracted
+ * locally instead of failing. It is a last resort, not a cheaper first try:
+ * a scan has no text layer at all, which is exactly the case full-page
+ * distillation exists to read. It runs only when the adapter errored or
+ * returned empty text for a PDF, and when it ALSO fails the original
+ * distillation error is what surfaces (a pdf.js parse exception from the
+ * fallback would name the wrong problem).
  *
  * The module never reads env (per packages/core/CLAUDE.md) — the caller passes
  * either an AI Studio `apiKey` (back-compat) or an explicit adapter `backend`.
@@ -76,6 +80,7 @@ export async function distillFileToText(
   const backend: MediaBackend =
     options.backend ?? { kind: 'google', transport: aiStudioTransport(options.apiKey) }
   const isPdf = input.mime === 'application/pdf'
+  let distillFailure: unknown
 
   try {
     const result = await runMediaUnderstanding(backend, {
@@ -97,9 +102,19 @@ export async function distillFileToText(
     // The adapter couldn't distill this document. Only PDFs have a local
     // fallback; anything else is a real failure the caller must see.
     if (!isPdf) throw err
+    distillFailure = err
   }
 
   // Local text-layer fallback for PDFs (unpdf) — no adapter, no model call.
-  const text = await extractPdfText(input.buffer)
-  return { text, usage: null, model: 'local-pdf-text' }
+  try {
+    const text = await extractPdfText(input.buffer)
+    return { text, usage: null, model: 'local-pdf-text' }
+  } catch (fallbackErr) {
+    // Both paths are gone. Surface the DISTILLATION error, not the fallback's:
+    // a corrupt-PDF exception out of pdf.js names the last thing tried, while
+    // the adapter failure is what the operator has to act on. With no
+    // distillation error to report (an empty native result), the parse
+    // failure is the real answer.
+    throw distillFailure ?? fallbackErr
+  }
 }
