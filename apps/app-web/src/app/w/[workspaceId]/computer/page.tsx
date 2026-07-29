@@ -18,6 +18,8 @@ import {
   mostRecentComputerTask,
 } from "@/lib/api/computer";
 
+const POLL_MS = 2_000;
+
 export default function BrowsersIndexPage(props: {
   params: Promise<{ workspaceId: string }>;
 }) {
@@ -27,16 +29,22 @@ export default function BrowsersIndexPage(props: {
 
   useEffect(() => {
     let cancelled = false;
-    void listActiveComputerTasks(workspaceId).then((tasks) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const probe = async () => {
+      const tasks = await listActiveComputerTasks(workspaceId);
       const task = mostRecentComputerTask(tasks);
       if (!cancelled && task) {
         router.replace(
           `/w/${workspaceId}/computer/${encodeURIComponent(task.sessionId)}`,
         );
+        return;
       }
-    });
+      if (!cancelled) timer = setTimeout(() => void probe(), POLL_MS);
+    };
+    void probe();
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, [router, workspaceId]);
 
