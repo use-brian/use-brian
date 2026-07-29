@@ -362,3 +362,35 @@ describe('[COMP:providers/model-registry] L6 effective rate', () => {
     expect(cacheExcluded.brackets[0]!.outPerMTok).toBeLessThan(pro31.brackets[0]!.outPerMTok)
   })
 })
+
+describe('[COMP:providers/model-registry] nativePdf capability', () => {
+  it('every row declares nativePdf (the field is required, not inferred)', () => {
+    for (const row of MODEL_REGISTRY) {
+      expect(typeof row.capabilities.nativePdf, `${row.alias} must declare nativePdf`).toBe('boolean')
+    }
+  })
+
+  it('only Gemini multimodal rows read application/pdf natively', () => {
+    for (const row of MODEL_REGISTRY) {
+      if (!row.capabilities.nativePdf) continue
+      expect(row.provider, `${row.alias} claims nativePdf`).toBe('gemini')
+      // Native PDF is delivered as an inlineData part — it presupposes vision.
+      expect(row.capabilities.vision, `${row.alias} claims nativePdf without vision`).toBe(true)
+    }
+  })
+
+  it('the providers the old prefix gate misclassified are non-native', () => {
+    // `!provider.startsWith('openai-compat')` claimed native reading for both
+    // of these: codex shipped a fake data:application/pdf image URL, anthropic
+    // dropped the block. See docs/architecture/engine/file-handling.md.
+    for (const alias of ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-5.5', 'gpt-5.2', 'claude-haiku-4-5']) {
+      expect(registryRow(alias)!.capabilities.nativePdf, `${alias} must not claim native PDF`).toBe(false)
+    }
+  })
+
+  it('the chat tier defaults are all native (the zero-overhead path stays zero-overhead)', () => {
+    for (const alias of Object.values(chatTierDefaults())) {
+      expect(registryRow(alias)!.capabilities.nativePdf, `${alias} is a chat tier default`).toBe(true)
+    }
+  })
+})

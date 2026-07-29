@@ -121,6 +121,20 @@ export type ModelCapabilities = {
   tools: boolean
   vision: boolean
   thinking: boolean
+  /**
+   * The adapter hands `application/pdf` bytes to the model as a native
+   * document part (Gemini `inlineData`). `false` means a PDF must be
+   * distilled to Markdown text before dispatch — see
+   * `providers/document-adaptation.ts`, which reads exactly this field.
+   *
+   * REQUIRED, deliberately: TS forces every present and future row to state
+   * its PDF posture. The prior gate inferred it from the provider id
+   * (`!provider.startsWith('openai-compat')`), which silently misclassified
+   * `openai-codex` (shipped a fake `data:application/pdf` image URL) and
+   * `anthropic` (dropped the block). A capability cannot be inferred from a
+   * name. Spec: docs/architecture/engine/file-handling.md.
+   */
+  nativePdf: boolean
 }
 
 export type ModelRegistryRow = {
@@ -239,7 +253,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH3_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Pro tier — Gemini Flash 3. Records its resolved provider id.
@@ -259,7 +273,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH3_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Max tier default — Gemini Flash 3.6 (GA 2026-07-21).
@@ -276,7 +290,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH36_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Research tier — Pro 3.1 on the deep budget. Synthetic id keeps it
@@ -295,7 +309,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: PRO31_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
 
   // ── Background lane (internal routing, no menu) ──────────────
@@ -315,7 +329,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH_LITE_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
 
   // ── Legacy rows (classification/pricing of historical usage only) ──
@@ -333,7 +347,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH35_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Prior Max default + pre-2026-06-02 research turns (billed as Max).
@@ -351,7 +365,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: PRO31_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Retired chat model (pre-Gemini-3 era). Classifies 'other', priced for
@@ -367,7 +381,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FLASH25_RATES,
     contextWindow: 1_048_576,
     maxOutput: 65_536,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: true },
   },
   {
     // Legacy Standard tier (superseded by Flash Lite). Always $0 (Google AI
@@ -383,7 +397,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 131_072,
     maxOutput: 8_192,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
 
   // ── Anthropic (outage fallback + deferred) ───────────────────
@@ -405,7 +419,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 200_000,
     maxOutput: 64_000,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'claude-sonnet-4-6',
@@ -422,7 +436,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 200_000,
     maxOutput: 64_000,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'claude-opus-4-6',
@@ -439,7 +453,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 200_000,
     maxOutput: 32_000,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
 
   // ── ChatGPT subscription via the pinned Codex app-server ─────
@@ -463,7 +477,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 400_000,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'gpt-5.6-terra',
@@ -477,7 +491,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 400_000,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'gpt-5.6-sol',
@@ -491,7 +505,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 400_000,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'gpt-5.5',
@@ -505,7 +519,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 400_000,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
   {
     alias: 'gpt-5.2',
@@ -519,7 +533,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     rates: FREE_RATES,
     contextWindow: 400_000,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: true, thinking: true },
+    capabilities: { tools: true, vision: true, thinking: true, nativePdf: false },
   },
 
   // ── xAI (special-purpose X-search plumbing, not a chat provider) ──
@@ -539,7 +553,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 2_000_000,
     maxOutput: 8_192,
-    capabilities: { tools: false, vision: false, thinking: true },
+    capabilities: { tools: false, vision: false, thinking: true, nativePdf: false },
   },
   {
     alias: 'grok-4-1-fast-non-reasoning',
@@ -556,7 +570,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 2_000_000,
     maxOutput: 8_192,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
 
   // ── Wave-1 ports (plan §5.1, locked 2026-07-21; DashScope intl) ──
@@ -595,7 +609,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 1_000_000,
     maxOutput: 16_384,
-    capabilities: { tools: true, vision: false, thinking: true },
+    capabilities: { tools: true, vision: false, thinking: true, nativePdf: false },
   },
   {
     // Cheapest credible Pro-class candidate (beats Flash 3 on II/GPQA/
@@ -616,7 +630,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 131_072,
     maxOutput: 8_192,
-    capabilities: { tools: true, vision: false, thinking: true },
+    capabilities: { tools: true, vision: false, thinking: true, nativePdf: false },
   },
   {
     // Background-lane candidate (Flash Lite replacement, 2.5-3.75x cheaper
@@ -637,7 +651,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 1_000_000,
     maxOutput: 16_384,
-    capabilities: { tools: true, vision: false, thinking: true },
+    capabilities: { tools: true, vision: false, thinking: true, nativePdf: false },
   },
   {
     // Permanent metered resident: fails the Max anchor ~3.3x at list and
@@ -659,7 +673,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 262_144,
     maxOutput: 32_768,
-    capabilities: { tools: true, vision: false, thinking: true },
+    capabilities: { tools: true, vision: false, thinking: true, nativePdf: false },
   },
   {
     // Permanent metered resident: capability-credible vs Pro 3.1 (ties
@@ -682,7 +696,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 131_072,
     maxOutput: 8_192,
-    capabilities: { tools: true, vision: false, thinking: true },
+    capabilities: { tools: true, vision: false, thinking: true, nativePdf: false },
   },
 
   // ── Embeddings (own cost class; the models themselves are out of scope
@@ -707,7 +721,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 2_048,
     maxOutput: 0,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
   {
     // DashScope (Qwen) embeddings — used when a deployment has no Google
@@ -731,7 +745,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     },
     contextWindow: 8_192,
     maxOutput: 0,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
   {
     // Retired embedding endpoints — classification only, deliberately
@@ -745,7 +759,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     status: 'legacy',
     contextWindow: 2_048,
     maxOutput: 0,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
   {
     alias: 'text-embedding-005',
@@ -757,7 +771,7 @@ export const MODEL_REGISTRY: readonly ModelRegistryRow[] = [
     status: 'legacy',
     contextWindow: 2_048,
     maxOutput: 0,
-    capabilities: { tools: false, vision: false, thinking: false },
+    capabilities: { tools: false, vision: false, thinking: false, nativePdf: false },
   },
 ]
 

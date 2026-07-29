@@ -1889,18 +1889,20 @@ export function chatRoutes(options: WebChatOptions): Router {
 
         if (validFiles.length > 0) {
           // Does the model this turn actually runs on read `application/pdf`
-          // inline? Gemini (inlineData) and Anthropic do; the OpenAI-compatible
-          // providers (Qwen/DashScope) don't — they reject a PDF sent as an
-          // image_url with HTTP 400. `resolveModel` returns the tier default
-          // (a Gemini id), but a Qwen-only deployment SERVES a substitute via
-          // `ensureServableModel` — so the served model, not the tier default,
-          // names the real provider. Missing that substitution left the gate
-          // seeing `gemini` and skipping distillation on Qwen deployments.
+          // inline? The registry row says so — `capabilities.nativePdf` (true
+          // for Gemini's `inlineData` reader, false everywhere else). It
+          // replaces a provider-id prefix check that only excluded
+          // `openai-compat`, and so wrongly claimed native reading for
+          // `openai-codex` (which shipped a fake `data:application/pdf` image
+          // URL to GPT) and `anthropic` (which drops the block entirely).
+          // `resolveModel` returns the tier default (a Gemini id), but a
+          // Qwen-only deployment SERVES a substitute via `ensureServableModel`
+          // — so the served model, not the tier default, names the real row.
           const resolvedTierModel = resolveModel(requestedModel, userPlan, 'ok')
           const servedModel = options.configuredProviders
             ? ensureServableModel(resolvedTierModel, options.configuredProviders)
             : resolvedTierModel
-          const providerReadsPdfInline = !(registryRow(servedModel)?.provider ?? '').startsWith('openai-compat')
+          const providerReadsPdfInline = registryRow(servedModel)?.capabilities.nativePdf ?? false
           const textParts: string[] = []
           for (const file of validFiles) {
             const isImage = file.mimeType.startsWith('image/')
