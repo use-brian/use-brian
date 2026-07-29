@@ -68,6 +68,11 @@ import {
   type GithubContentsReader,
 } from '../skills/import-service.js'
 import {
+  selectCategorizableSkills,
+  suggestSkillCategories,
+  SKILL_CATEGORIES,
+} from '../skills/categorize.js'
+import {
   validateSupportFile,
   validateSupportFileSet,
   SUPPORT_FILE_KINDS,
@@ -1212,6 +1217,130 @@ export function skillRoutes({
       console.error('[skills] access update failed:', err)
       res.status(500).json({ error: 'Failed to update skill access' })
     }
+  })
+
+  // ── /categorize — suggest a library group for the unsorted skills ──
+  //
+  // A workspace that has been running a while accumulates dozens of skills —
+  // its own plus everything the background curator induced — and every one of
+  // them lands in the `custom` sink, because nothing set `category` until the
+  // editor picker existed. Re-filing them one editor visit at a time is the
+  // friction this removes.
+  //
+  // Two routes, deliberately split: `/categorize` PROPOSES and writes nothing,
+  // `/categorize/apply` takes the explicit per-skill assignments the user
+  // reviewed. The model is guessing a bucket from a name and a description, so
+  // a bulk write nobody looked at is the failure mode to design out.
+  //
+  // Spec: docs/architecture/engine/skill-system.md → "Suggesting groups".
+
+  const categorizeBodySchema = z.object({ workspaceId: z.string().trim().min(1) })
+
+  const categorizeApplySchema = z.object({
+    workspaceId: z.string().trim().min(1),
+    assignments: z
+      .array(
+        z.object({
+          skillRowId: z.string().trim().min(1),
+          category: z.enum(SKILL_CATEGORIES),
+        }),
+      )
+      .min(1)
+      .max(500),
+  })
+
+  router.post('/categorize', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!workspaceSkillStore || !workspaceStore) {
+      res.status(501).json({ error: 'Skill grouping is not available' }); return
+    }
+    if (!draftProvider) {
+      res.status(503).json({ error: 'Skill grouping is not available' }); return
+    }
+
+    const parsed = categorizeBodySchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'workspaceId is required' }); return }
+    const { workspaceId } = parsed.data
+
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(404).json({ error: 'Not found' }); return }
+
+    // Shares the draft limiter: both are user-triggered model calls from the
+    // same surface, and one budget is easier to reason about than two.
+    if (!draftLimiter.check(`u:${userId}`)) {
+      res.status(429).json({ error: 'Too many requests — try again later' }); return
+    }
+
+    const plan = await getWorkspacePlan(workspaceId)
+    const budget = await checkUsageBudget(workspaceId, plan)
+    if (budget.status === 'blocked') {
+      res.status(429).json({ error: 'This workspace has no active plan. Pick a plan to keep going, or self-host the open-source version.' }); return
+    }
+
+    try {
+      const all = await workspaceSkillStore.listForWorkspace(workspaceId, { actingUserId: userId })
+      const candidates = selectCategorizableSkills(
+        all.filter((s) => s.state !== 'archived'),
+      ).map((s) => ({
+        rowId: s.rowId,
+        name: s.name,
+        description: s.description,
+        whenToUse: s.whenToUse ?? null,
+        category: s.category,
+      }))
+
+      if (candidates.length === 0) {
+        res.json({ suggestions: [], considered: 0 })
+        return
+      }
+
+      const suggestions = await suggestSkillCategories({
+        provider: draftProvider,
+        // Bucketing a name + description is the cheapest kind of judgement;
+        // it never needs more than the plan's floor tier.
+        model: resolveModel('standard', plan, budget.status),
+        skills: candidates,
+      })
+      res.json({ suggestions, considered: candidates.length })
+    } catch (err) {
+      console.error('[skills] categorize failed:', err)
+      res.status(500).json({ error: 'Failed to suggest groups' })
+    }
+  })
+
+  router.post('/categorize/apply', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    if (!workspaceSkillStore || !workspaceStore) {
+      res.status(501).json({ error: 'Skill grouping is not available' }); return
+    }
+
+    const parsed = categorizeApplySchema.safeParse(req.body)
+    if (!parsed.success) { res.status(400).json({ error: 'Invalid assignments' }); return }
+    const { workspaceId, assignments } = parsed.data
+
+    const role = await workspaceStore.getRole(userId, workspaceId)
+    if (!role) { res.status(404).json({ error: 'Not found' }); return }
+
+    // `update` scopes by (id, workspace_id), so a row from another workspace
+    // simply matches nothing — it is counted as skipped, never applied.
+    // Category is metadata, so this does NOT carry the D2 trust stamp: a bulk
+    // re-file must not silently verify and activate every Suggested skill it
+    // touches (`skill-store.ts` → "Metadata-only edits ... don't qualify").
+    let updated = 0
+    const failed: string[] = []
+    for (const { skillRowId, category } of assignments) {
+      try {
+        const row = await workspaceSkillStore.update(userId, workspaceId, skillRowId, { category })
+        if (row) updated += 1
+        else failed.push(skillRowId)
+      } catch (err) {
+        console.error('[skills] categorize apply failed for', skillRowId, err)
+        failed.push(skillRowId)
+      }
+    }
+    res.json({ updated, failed })
   })
 
   // ── /:id/files — the skill's support-file bundle ────────────

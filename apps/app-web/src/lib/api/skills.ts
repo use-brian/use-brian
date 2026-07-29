@@ -682,3 +682,83 @@ export async function deleteSkillFile(
   }
   return { ok: true };
 }
+
+// ── Bulk group suggestion ────────────────────────────────────────
+//
+// Propose → review → apply, never one shot: `suggestSkillGroups` writes
+// nothing and `applySkillGroups` takes only the assignments the user has
+// seen. Backed by `POST /api/skills/categorize` + `/categorize/apply`; spec:
+// docs/architecture/engine/skill-system.md → "Suggesting groups".
+
+export type SkillGroupSuggestion = {
+  skillRowId: string;
+  name: string;
+  current: string;
+  suggested: string;
+  /** Short model rationale; absent when it returned none. */
+  rationale?: string;
+};
+
+/**
+ * Ask for a group per unsorted skill. `considered` is how many were in the
+ * batch, which is NOT `suggestions.length` — a skill the model left where it
+ * was produces no row. `501`/`503` (no workspace store / no provider) map to
+ * an unavailable result so the caller can hide the affordance rather than
+ * show an error for a feature this deployment simply lacks.
+ */
+export async function suggestSkillGroups(
+  workspaceId: string,
+): Promise<
+  | { ok: true; suggestions: SkillGroupSuggestion[]; considered: number }
+  | { ok: false; unavailable: boolean; error: string }
+> {
+  const res = await authFetch(`${API_URL}/api/skills/categorize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return {
+      ok: false,
+      unavailable: res.status === 501 || res.status === 503,
+      error: data.error ?? "Failed to suggest groups",
+    };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    suggestions?: SkillGroupSuggestion[];
+    considered?: number;
+  };
+  return {
+    ok: true,
+    suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
+    considered: typeof data.considered === "number" ? data.considered : 0,
+  };
+}
+
+/** Apply the reviewed assignments. `failed` names rows that matched nothing. */
+export async function applySkillGroups(
+  workspaceId: string,
+  assignments: { skillRowId: string; category: string }[],
+): Promise<
+  { ok: true; updated: number; failed: string[] } | { ok: false; error: string }
+> {
+  const res = await authFetch(`${API_URL}/api/skills/categorize/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId, assignments }),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to apply groups" };
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    updated?: number;
+    failed?: string[];
+  };
+  return {
+    ok: true,
+    updated: typeof data.updated === "number" ? data.updated : 0,
+    failed: Array.isArray(data.failed) ? data.failed : [],
+  };
+}

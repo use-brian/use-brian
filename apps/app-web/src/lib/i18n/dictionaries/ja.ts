@@ -3226,6 +3226,33 @@ export const ja: Dictionary = {
       send: "送信",
       attach: "ファイルを添付",
     },
+    skillGroups: {
+      title: "グループを提案",
+      cta: "グループを提案",
+      intentBody:
+        "{count} 件のスキルがまだグループに入っていません。Brian が名前と説明を読んで、それぞれに提案できます。",
+      intentHint:
+        "リストを確認するまで保存されません。すでにグループに入れたスキルはそのままです。",
+      nothingToGroup: "すべてのスキルがすでにグループに入っています。",
+      suggestCta: "提案する",
+      suggesting: "スキルを読み込み中…",
+      noSuggestions:
+        "Brian が確認しましたが、変更の必要はありませんでした。",
+      reviewBody:
+        "{count} 件の変更案です。同意できないものはチェックを外すか、別のグループを選んでください。",
+      groupLabel: "グループ",
+      groupAria: "{name} のグループ",
+      includeAria: "{name} を含める",
+      selectAll: "すべて選択",
+      deselectAll: "選択を解除",
+      applyCta: "{count} 件をグループ分け",
+      applying: "適用中…",
+      appliedBody: "{count} 件のスキルをグループ分けしました。",
+      appliedFailed: "{count} 件は更新できず、そのままになっています。",
+      done: "完了",
+      close: "閉じる",
+      cancel: "キャンセル",
+    },
     skillFiles: {
       heading: "ファイル",
       explainer:
