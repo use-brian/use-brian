@@ -5,7 +5,7 @@
  * Mocks the pg pool/client so the test is DB-free. Verifies the claim
  * SQL (priority ordering + FOR UPDATE SKIP LOCKED), per-primitive table
  * routing, content-hash derivation, commit / fail write-back, the
- * transaction envelope (BEGIN / COMMIT / ROLLBACK), and the
+ * claim → commit → embed → write connection shape (B2), and the
  * unsupported-primitive guard.
  */
 
@@ -19,6 +19,14 @@ let claimRows: { id: string; embed_text: string | null }[] = []
 /** Rows served to the backlog half (`created_at <= cutoff`), when it runs. */
 let olderRows: { id: string; embed_text: string | null }[] = []
 
+/**
+ * Checked-out-connection ledger. B2's whole point is that no pooled
+ * connection is held while the embedder runs, so the test needs to see
+ * checkouts, not just queries.
+ */
+let checkedOut = 0
+let maxCheckedOut = 0
+
 const fakeClient = {
   query: vi.fn(async (text: string, values?: unknown[]) => {
     queries.push({ text, values })
@@ -31,11 +39,19 @@ const fakeClient = {
     }
     return { rows: [], rowCount: 0 }
   }),
-  release: vi.fn(),
+  release: vi.fn(() => {
+    checkedOut -= 1
+  }),
 }
 
 vi.mock('../client.js', () => ({
-  getPool: () => ({ connect: async () => fakeClient }),
+  getPool: () => ({
+    connect: async () => {
+      checkedOut += 1
+      maxCheckedOut = Math.max(maxCheckedOut, checkedOut)
+      return fakeClient
+    },
+  }),
 }))
 
 import { createDbEmbeddingStore } from '../embedding-store.js'
@@ -51,6 +67,8 @@ beforeEach(() => {
   queries.length = 0
   claimRows = []
   olderRows = []
+  checkedOut = 0
+  maxCheckedOut = 0
   fakeClient.query.mockClear()
   fakeClient.release.mockClear()
 })
@@ -172,7 +190,7 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     )
   })
 
-  it('wraps the work in BEGIN/COMMIT (system pool, owner bypasses RLS)', async () => {
+  it('wraps the claim in its own BEGIN/COMMIT (system pool, owner bypasses RLS)', async () => {
     claimRows = []
     await store.withClaimedRows('memories', 10, async () => undefined)
     expect(queries[0].text).toBe('BEGIN')
@@ -180,6 +198,58 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     // which bypasses RLS for the cross-workspace drain.
     expect(queries.every((q) => !q.text.includes('system_bypass'))).toBe(true)
     expect(queries[queries.length - 1].text).toBe('COMMIT')
+    expect(fakeClient.release).toHaveBeenCalledOnce()
+  })
+
+  // ── B2: claim → commit → embed → write ────────────────────────
+  //
+  // corpus-substrate-hardening §4. The embedder call must not run inside the
+  // claim's transaction: doing so denominates provider latency in database
+  // slots, which is how both the 2026-07-28 and 2026-07-29 outages pinned
+  // every Cloud SQL connection. Also graded by `pnpm check`
+  // (`invariants/embed-claim-shape`), which reads the source; this asserts the
+  // runtime behavior.
+
+  it('holds NO pooled connection while the handler runs', async () => {
+    claimRows = [{ id: 'm-1', embed_text: 'hello' }]
+    let heldDuringHandler = -1
+    let committedBeforeHandler = false
+    await store.withClaimedRows('memories', 10, async () => {
+      heldDuringHandler = checkedOut
+      committedBeforeHandler = queries.some((q) => q.text === 'COMMIT')
+    })
+    expect(heldDuringHandler).toBe(0)
+    // ...and the claim was committed before the handler ran, so the rows are
+    // not sitting under an open row lock either.
+    expect(committedBeforeHandler).toBe(true)
+  })
+
+  it('checks out at most one connection at a time across the whole drain', async () => {
+    claimRows = [{ id: 'm-1', embed_text: 'hello' }]
+    await store.withClaimedRows('memories', 10, async (rows, apply) => {
+      await apply.commit([
+        {
+          id: 'm-1',
+          embedding: [0.5],
+          embeddingModelId: 'gemini:gemini-embedding-001',
+          contentHash: rows[0].contentHash,
+        },
+      ])
+    })
+    expect(maxCheckedOut).toBe(1)
+    expect(checkedOut).toBe(0)
+    // Claim transaction + write-back transaction — two separate short ones.
+    expect(queries.filter((q) => q.text === 'BEGIN')).toHaveLength(2)
+    expect(queries.filter((q) => q.text === 'COMMIT')).toHaveLength(2)
+  })
+
+  it('opens no write-back transaction when there is nothing to write', async () => {
+    claimRows = [{ id: 'm-1', embed_text: 'hello' }]
+    await store.withClaimedRows('memories', 10, async (_rows, apply) => {
+      await apply.commit([])
+      await apply.fail([])
+    })
+    expect(queries.filter((q) => q.text === 'BEGIN')).toHaveLength(1)
     expect(fakeClient.release).toHaveBeenCalledOnce()
   })
 
@@ -215,15 +285,62 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     expect(update!.values).toEqual(['Gemini API error 429', 'm-1'])
   })
 
-  it('ROLLBACKs and rethrows when the handler throws', async () => {
+  it('rethrows a handler failure with the claim already committed and the connection back', async () => {
+    // The claim commits before the embedder runs (B2), so a thrown batch no
+    // longer rolls anything back — the rows simply stay `embedding IS NULL`
+    // and return to the queue on the next tick. That is correct, not a leak
+    // (D4: `maxScale = 1` + the worker tick guard are the concurrency
+    // argument, not a held lease).
     claimRows = [{ id: 'm-1', embed_text: 'hello' }]
     await expect(
       store.withClaimedRows('memories', 10, async () => {
         throw new Error('embed batch exploded')
       }),
     ).rejects.toThrow('embed batch exploded')
-    expect(sql()).toContain('ROLLBACK')
-    expect(sql()).not.toContain('COMMIT')
+    expect(sql()).toContain('COMMIT')
+    expect(sql()).not.toContain('ROLLBACK')
+    expect(checkedOut).toBe(0)
     expect(fakeClient.release).toHaveBeenCalledOnce()
+  })
+
+  it('ROLLBACKs and releases when the CLAIM itself throws', async () => {
+    fakeClient.query.mockImplementationOnce(async (text: string) => {
+      queries.push({ text })
+      return { rows: [], rowCount: 0 }
+    })
+    fakeClient.query.mockImplementationOnce(async () => {
+      throw new Error('claim exploded')
+    })
+    await expect(
+      store.withClaimedRows('memories', 10, async () => undefined),
+    ).rejects.toThrow('claim exploded')
+    expect(sql()).toContain('ROLLBACK')
+    expect(checkedOut).toBe(0)
+    expect(fakeClient.release).toHaveBeenCalledOnce()
+  })
+
+  it('ROLLBACKs the write-back transaction when a commit UPDATE throws', async () => {
+    claimRows = [{ id: 'm-1', embed_text: 'hello' }]
+    await expect(
+      store.withClaimedRows('memories', 10, async (rows, apply) => {
+        fakeClient.query.mockImplementationOnce(async (text: string) => {
+          queries.push({ text })
+          return { rows: [], rowCount: 0 }
+        })
+        fakeClient.query.mockImplementationOnce(async () => {
+          throw new Error('write-back exploded')
+        })
+        await apply.commit([
+          {
+            id: 'm-1',
+            embedding: [0.1],
+            embeddingModelId: 'gemini:gemini-embedding-001',
+            contentHash: rows[0].contentHash,
+          },
+        ])
+      }),
+    ).rejects.toThrow('write-back exploded')
+    expect(sql()).toContain('ROLLBACK')
+    expect(checkedOut).toBe(0)
   })
 })

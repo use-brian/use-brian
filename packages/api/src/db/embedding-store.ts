@@ -7,14 +7,35 @@
  * transaction, the `SELECT ... FOR UPDATE SKIP LOCKED` lease, the priority
  * ordering, and the commit / fail write-back.
  *
- * Lease model: transaction-scoped row locks. A single worker instance
- * (same single-instance assumption as the scheduled-jobs poll worker)
- * `BEGIN`s, claims rows with `FOR UPDATE SKIP LOCKED`, embeds them via the
- * Gemini batch API inside the open transaction, writes the vectors back,
- * then `COMMIT`s. No `locked_until` column is needed — the row locks are
- * held for the transaction's lifetime. `embeddings.md` references a
- * `locked_until` lease only for the multi-instance future; single-instance
- * v1 does not need it.
+ * Lease model: **claim → commit → embed → write** (B2 —
+ * docs/plans/corpus-substrate-hardening.md §4). Three phases, and the
+ * embedder call happens in the gap between them with NO pooled connection
+ * held:
+ *
+ *   1. Short transaction — `SELECT … FOR UPDATE SKIP LOCKED`, take the ids,
+ *      `COMMIT`, release.
+ *   2. `handler(rows, …)` — the embedder HTTP call. No connection held.
+ *   3. Short transaction per write-back — the vectors, or the failures.
+ *
+ * The claim's row lock therefore lasts only for phase 1, not for the whole
+ * drain. That is the point: the previous shape ran the embedder INSIDE the
+ * open transaction, so provider latency was denominated in database slots.
+ * At a 30s tick against ~415k unembedded `email_archive_segments` rows that
+ * is roughly 4,150 ticks of continuous connection-holding, and it is how
+ * both the 2026-07-28 and 2026-07-29 outages pinned every Cloud SQL slot.
+ *
+ * Releasing the lease early is safe because `brian-api-workers` runs at
+ * `maxScale = 1` and the worker's tick guard (`if (running) return`)
+ * serializes a primitive's drains — the two facts that make this
+ * concurrency-safe without a lease column (D4). `FOR UPDATE SKIP LOCKED`
+ * still earns its keep inside phase 1: it keeps two simultaneous claims from
+ * taking the same ids. A crashed tick's rows simply return to the
+ * `embedding IS NULL` queue, which is correct rather than a leak.
+ *
+ * **Going horizontal on workers requires a real lease column first**
+ * (`embedding_leased_until`, one migration across the seven drainable
+ * tables) — see deployment.md → "Scale runbook" item 4. Not now: it buys
+ * nothing at `maxScale = 1` and costs a migration on a 5.6 GB table.
  *
  * System-level access: the worker embeds rows across every workspace and
  * user, so the transaction runs with `app.system_bypass = 'true'` (the
@@ -34,6 +55,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import type pg from 'pg'
 import type {
   EmbeddingCandidate,
   EmbeddingFailure,
@@ -115,6 +137,32 @@ type ClaimedRow = {
   user_id: string | null
 }
 
+/**
+ * Run `fn` inside a transaction on a freshly checked-out system-pool client,
+ * and give the connection back before returning. Every phase of the drain that
+ * touches the database goes through this, so no caller can accidentally hold a
+ * pooled connection across an await that isn't SQL.
+ *
+ * The invariant this exists to make greppable: `handler` is never invoked from
+ * inside one of these. Graded by `pnpm check` (`invariants/embed-claim-shape`).
+ */
+async function inShortTransaction<T>(
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await getPool().connect()
+  try {
+    await client.query('BEGIN')
+    const out = await fn(client)
+    await client.query('COMMIT')
+    return out
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 export function createDbEmbeddingStore(): EmbeddingStore {
   return {
     async withClaimedRows<T>(
@@ -137,12 +185,10 @@ export function createDbEmbeddingStore(): EmbeddingStore {
       }
       const { table, textExpr } = config
 
-      const client = await getPool().connect()
-      try {
-        await client.query('BEGIN')
-        // System worker — runs on the system pool (owner), which bypasses RLS,
-        // for the cross-workspace drain.
-
+      // ── Phase 1: claim, commit, release ──────────────────────────
+      // System worker — runs on the system pool (owner), which bypasses RLS,
+      // for the cross-workspace drain.
+      const claimedRows = await inShortTransaction(async (client) => {
         // Priority queue per embeddings.md §"Worker priority queue":
         // new writes (< 24h) first, then everything else, oldest-first
         // within each class. The content-hash-mismatch re-embed class is a
@@ -160,7 +206,7 @@ export function createDbEmbeddingStore(): EmbeddingStore {
         // unembedded row, carrying the embed text, to take LIMIT rows off the
         // top. That planned fine at small table sizes and took down the API on
         // 2026-07-28: at 415k unembedded email_archive_segments rows (5.6 GB)
-        // each claim ran 5-20 min, and because the claim holds this open
+        // each claim ran 5-20 min, and because the claim holds this
         // transaction's connection for its whole duration, claims outlived the
         // 30s tick, stacked, and exhausted all 25 Cloud SQL slots. Splitting on
         // the 24h boundary is exactly equivalent — bucket 1 is `created_at >
@@ -179,30 +225,39 @@ export function createDbEmbeddingStore(): EmbeddingStore {
             FOR UPDATE SKIP LOCKED`
 
         const recent = await client.query<ClaimedRow>(claimSql('>'), [limit])
-        const claimedRows = [...recent.rows]
+        const claimed = [...recent.rows]
         // Only reach for the backlog when the priority class did not fill the
         // batch, so a busy write stream never pays for the second scan.
-        if (claimedRows.length < limit) {
+        if (claimed.length < limit) {
           const older = await client.query<ClaimedRow>(claimSql('<='), [
-            limit - claimedRows.length,
+            limit - claimed.length,
           ])
-          claimedRows.push(...older.rows)
+          claimed.push(...older.rows)
         }
+        return claimed
+      })
 
-        const rows: EmbeddingCandidate[] = claimedRows.map((r) => {
-          const text = (r.embed_text ?? '').trim()
-          return {
-            id: r.id,
-            primitive,
-            text,
-            contentHash: sha256(text),
-            workspaceId: r.workspace_id,
-            userId: r.user_id,
-          }
-        })
+      const rows: EmbeddingCandidate[] = claimedRows.map((r) => {
+        const text = (r.embed_text ?? '').trim()
+        return {
+          id: r.id,
+          primitive,
+          text,
+          contentHash: sha256(text),
+          workspaceId: r.workspace_id,
+          userId: r.user_id,
+        }
+      })
 
-        const result = await handler(rows, {
-          commit: async (results: EmbeddingResult[]) => {
+      // ── Phase 2: embed, holding NO connection ────────────────────
+      // `handler` is the embedder HTTP call. It MUST NOT run inside a
+      // transaction — that is the exact structural defect behind both
+      // outages, and `pnpm check` grades it.
+      return await handler(rows, {
+        // ── Phase 3: write back, one short transaction each ─────────
+        commit: async (results: EmbeddingResult[]) => {
+          if (results.length === 0) return
+          await inShortTransaction(async (client) => {
             for (const res of results) {
               await client.query(
                 `UPDATE ${table}
@@ -221,8 +276,11 @@ export function createDbEmbeddingStore(): EmbeddingStore {
                 ],
               )
             }
-          },
-          fail: async (failures: EmbeddingFailure[]) => {
+          })
+        },
+        fail: async (failures: EmbeddingFailure[]) => {
+          if (failures.length === 0) return
+          await inShortTransaction(async (client) => {
             for (const f of failures) {
               await client.query(
                 `UPDATE ${table}
@@ -232,17 +290,9 @@ export function createDbEmbeddingStore(): EmbeddingStore {
                 [f.reason.slice(0, 1000), f.id],
               )
             }
-          },
-        })
-
-        await client.query('COMMIT')
-        return result
-      } catch (err) {
-        await client.query('ROLLBACK').catch(() => {})
-        throw err
-      } finally {
-        client.release()
-      }
+          })
+        },
+      })
     },
   }
 }
