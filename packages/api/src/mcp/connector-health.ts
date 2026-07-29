@@ -201,6 +201,8 @@ function providerDisplayName(provider: string): string {
       return 'Google Drive'
     case 'imap':
       return 'Company email (IMAP)'
+    case 'msgraph':
+      return 'Microsoft Teams'
     default:
       return provider
   }

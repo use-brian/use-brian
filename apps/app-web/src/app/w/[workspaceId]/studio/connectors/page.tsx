@@ -81,6 +81,7 @@ import { resolveAutoExpose, type AutoExposeArm } from "@/lib/connector-auto-expo
 import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
+import { buildMsGraphAuthorizeUrl } from "@/lib/msgraph-oauth";
 import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
@@ -96,6 +97,10 @@ const FATHOM_CLIENT_ID = process.env.NEXT_PUBLIC_FATHOM_CLIENT_ID ?? "";
 const FATHOM_AUTHORIZE_URL =
   process.env.NEXT_PUBLIC_FATHOM_AUTHORIZE_URL ??
   "https://fathom.video/oauth2/authorize";
+// Use Brian-owned Entra app (docs/architecture/integrations/msgraph.md).
+// Absent -> the Microsoft Teams connect button builds an authorize URL with an
+// empty client_id and Entra rejects it; nothing else in the page changes.
+const MSGRAPH_CLIENT_ID = process.env.NEXT_PUBLIC_MSGRAPH_CLIENT_ID ?? "";
 // Absent → the Shopify OAuth path stays dark and the connect form offers only
 // the pasted admin-token path (docs/architecture/integrations/shopify.md).
 const SHOPIFY_CLIENT_ID = process.env.NEXT_PUBLIC_SHOPIFY_CLIENT_ID ?? "";
@@ -1182,6 +1187,34 @@ function ConnectorsList() {
         state: buildConnectorState({ connector: "fathom", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
       });
       window.location.href = `${FATHOM_AUTHORIZE_URL}?${sp}`;
+      return;
+    }
+
+    // Microsoft Graph (Teams) OAuth - delegated authorization-code grant with
+    // `offline_access` against the Use Brian-owned Entra app. MUST stay ahead
+    // of the generic scopes branch below, for the same reason Shopify does:
+    // OFFICIAL_OAUTH_SCOPES carries an `msgraph` entry, so falling through
+    // would send the user to the GOOGLE authorize URL with a Google client id.
+    if (id === "msgraph") {
+      // Without a client id the authorize URL is still well-formed, so the
+      // browser navigates away and Entra answers AADSTS900144 ("the request
+      // body must contain 'client_id'") on its own error page - a dead end
+      // that names Microsoft rather than the missing local config. Fail here
+      // instead, where we can say what is actually wrong.
+      if (!MSGRAPH_CLIENT_ID) {
+        void confirmDialog({
+          title: t.settings.connectors.title,
+          description: t.settings.connectors.notConfigured,
+        });
+        return;
+      }
+      const nonce = armConnectorOauthState();
+      const redirectUri = `${window.location.origin}/api/auth/callback/msgraph`;
+      window.location.href = buildMsGraphAuthorizeUrl({
+        clientId: MSGRAPH_CLIENT_ID,
+        redirectUri,
+        state: buildConnectorState({ connector: "msgraph", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId, nonce }),
+      });
       return;
     }
 

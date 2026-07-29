@@ -1380,6 +1380,12 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
        * envelope, discriminated by the presence of refreshToken + expiresAt.
        */
       shopifyTokens?: { accessToken?: string; refreshToken?: string; expiresAt?: string; shopDomain?: string }
+      /**
+       * Microsoft Graph's rotating tuple (docs/architecture/integrations/msgraph.md).
+       * Graph replaces the refresh token on every use, so access + refresh +
+       * expiry must persist together, plus the Entra tenant the grant is in.
+       */
+      msgraphTokens?: { accessToken?: string; refreshToken?: string; expiresAt?: string; tenantId?: string }
       email?: string
       label?: string
       instanceId?: string
@@ -1420,6 +1426,34 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       email = email ?? shopDomain
       label = label ?? shopDomain
       configPatch = { shopDomain }
+    } else if (provider === 'msgraph') {
+      const t = body.msgraphTokens
+      if (
+        typeof t?.accessToken !== 'string' ||
+        typeof t?.refreshToken !== 'string' ||
+        typeof t?.expiresAt !== 'string'
+      ) {
+        res.status(400).json({ error: 'Missing msgraphTokens (accessToken/refreshToken/expiresAt)' })
+        return
+      }
+      // Fathom's rotating-tuple envelope plus the Entra tenant id. `client_id`
+      // is the credential-type discriminator, not an OAuth client id.
+      //
+      // TWO-WRITER CONTRACT: `packMsGraphTokens` (src/msgraph/token.ts)
+      // rewrites this blob in FULL on every refresh, so a field written here
+      // and not handled there is erased at the first rotation rather than
+      // ignored. Add to both in the same change. See
+      // docs/architecture/integrations/msgraph.md §6 → "The rotation invariant".
+      credentials = {
+        type: 'oauth',
+        client_id: 'msgraph_oauth',
+        client_secret: JSON.stringify({
+          accessToken: t.accessToken,
+          refreshToken: t.refreshToken,
+          expiresAt: t.expiresAt,
+          ...(typeof t.tenantId === 'string' ? { tenantId: t.tenantId } : {}),
+        }),
+      }
     } else {
       const secret = (body.refreshToken ?? body.pat ?? body.accessToken ?? body.token ?? '').trim()
       if (!secret) {
