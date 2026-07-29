@@ -53,6 +53,18 @@ export function createOpenChannelMediaIntakeDeps(infra: {
           const { text, summary } = await parseFileContent(blob.bytes, mime, fileName ?? 'document')
           if (!text.trim()) return { status: 'empty' }
 
+          // `parseFileContent` returns BASE64 for inline media (a PDF or an
+          // image), not text — that string is meant for an `image` ContentBlock,
+          // never for Pipeline B. The hosted path never noticed because it has
+          // `filesApi` and hands the bytes to the file-ingest worker, which
+          // distills properly. The OSS-minimal path below does not, and fed
+          // base64 straight into decomposition: the brain ingested garbage and
+          // said nothing. Deriving real text needs a model distill, which this
+          // seam has no port for, so report it honestly instead.
+          if (!infra.filesApi && (mime === 'application/pdf' || mime.startsWith('image/'))) {
+            return { status: 'store_only_needs_distill' }
+          }
+
           if (infra.filesApi) {
             const ctx: FilesContext = { workspaceId, userId: actingUserId, assistantId }
             const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)

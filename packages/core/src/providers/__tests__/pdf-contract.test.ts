@@ -129,6 +129,41 @@ describe('[COMP:providers/pdf-contract] every registered provider handles a PDF 
     }
   })
 
+  it('anthropic forwards real images, so an outage no longer eats the photo', async () => {
+    // The adapter dropped EVERY non-text block, so a photo sent during a
+    // Gemini outage vanished and Claude answered as if nothing was attached.
+    // Claude is multimodal; only PDFs ever needed converting.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const captured: { body?: string } = {}
+    vi.stubGlobal('fetch', capturingFetch(captured))
+    try {
+      const provider = createAnthropicProvider({ apiKey: 'k', baseURL: 'https://anthropic.test' })
+      await drainQuietly(provider.stream({
+        model: 'claude-haiku-4-5-20251001',
+        systemPrompt: 'sys',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'What is in this photo?' },
+            { type: 'image', mimeType: 'image/png', data: 'aGk=' },
+          ],
+        }],
+      }))
+    } finally {
+      vi.unstubAllGlobals()
+      warn.mockRestore()
+    }
+
+    const body = JSON.parse(captured.body ?? '{}') as {
+      messages: Array<{ content: Array<{ type: string; source?: { media_type: string; data: string } }> }>
+    }
+    const parts = body.messages[0]!.content
+    expect(parts.map((p) => p.type)).toEqual(['text', 'image'])
+    expect(parts[1]!.source).toEqual({ type: 'base64', media_type: 'image/png', data: 'aGk=' })
+    // An unsupported image mime still degrades rather than being sent blind.
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   it('a non-native provider never receives base64 PDF bytes once wrapped', async () => {
     // The end-to-end statement of the contract: whatever an adapter would do
     // with a PDF, the wrapper makes sure it never sees one.

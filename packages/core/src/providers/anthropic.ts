@@ -40,7 +40,22 @@ function resolveModel(model: string): string {
 // ── Message conversion (engine → Anthropic) ────────────────────
 
 type AnthropicTextBlock = { type: 'text'; text: string }
-type AnthropicContentBlock = AnthropicTextBlock
+/**
+ * Anthropic's inline-image part. Only `image/{jpeg,png,gif,webp}` are
+ * accepted; anything else must not be sent at all.
+ */
+type AnthropicImageBlock = {
+  type: 'image'
+  source: { type: 'base64'; media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'; data: string }
+}
+type AnthropicContentBlock = AnthropicTextBlock | AnthropicImageBlock
+
+/** The mimes Anthropic decodes. A PDF is NOT one of them — by the time a
+ *  request reaches this adapter `wrapDocumentAdaptation` has already turned
+ *  every PDF into text (`claude-haiku-4-5` declares `nativePdf: false`). */
+const ANTHROPIC_IMAGE_MIMES = new Set<AnthropicImageBlock['source']['media_type']>([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
+])
 
 type AnthropicMessage = {
   role: 'user' | 'assistant'
@@ -67,15 +82,34 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
       out.push({ role: msg.role, content: msg.content })
       continue
     }
-    const texts: AnthropicTextBlock[] = []
+    const parts: AnthropicContentBlock[] = []
     let droppedTypes: Set<string> | null = null
     for (const block of msg.content) {
       if (block.type === 'text') {
-        if (block.text.length > 0) texts.push({ type: 'text', text: block.text })
+        if (block.text.length > 0) parts.push({ type: 'text', text: block.text })
+        continue
+      }
+      // Real images ride through. Claude is multimodal and always was; the
+      // adapter dropping every non-text block meant a photo sent during a
+      // Gemini outage vanished and the model answered as if nothing was
+      // attached. PDFs never reach here as bytes — the document-adaptation
+      // wrapper swapped them for text before dispatch.
+      if (
+        block.type === 'image' &&
+        ANTHROPIC_IMAGE_MIMES.has(block.mimeType as AnthropicImageBlock['source']['media_type'])
+      ) {
+        parts.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: block.mimeType as AnthropicImageBlock['source']['media_type'],
+            data: block.data,
+          },
+        })
         continue
       }
       if (!droppedTypes) droppedTypes = new Set()
-      droppedTypes.add(block.type)
+      droppedTypes.add(block.type === 'image' ? block.mimeType : block.type)
     }
     if (droppedTypes && droppedTypes.size > 0) {
       console.warn(
@@ -83,12 +117,12 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
         `${[...droppedTypes].join(',')}. Text-only fallback — multimodal/tool follow-up pending.`,
       )
     }
-    if (texts.length === 0) continue
-    // Anthropic accepts an array of text blocks; merging them keeps the
-    // wire payload compact for short messages.
+    if (parts.length === 0) continue
+    // Anthropic accepts an array of blocks; a lone text block collapses to a
+    // plain string to keep short payloads compact.
     out.push({
       role: msg.role,
-      content: texts.length === 1 ? texts[0].text : texts,
+      content: parts.length === 1 && parts[0]!.type === 'text' ? parts[0].text : parts,
     })
   }
   return mergeConsecutiveSameRole(out)
@@ -99,19 +133,20 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
  * Engine history that came through Gemini can produce these (a multi-part
  * user turn that got split). Coalesce them defensively.
  */
+function asBlocks(content: string | AnthropicContentBlock[]): AnthropicContentBlock[] {
+  return typeof content === 'string' ? [{ type: 'text', text: content }] : content
+}
+
 function mergeConsecutiveSameRole(messages: AnthropicMessage[]): AnthropicMessage[] {
   if (messages.length <= 1) return messages
   const out: AnthropicMessage[] = []
   for (const msg of messages) {
     const prev = out[out.length - 1]
     if (prev && prev.role === msg.role) {
-      const prevText = typeof prev.content === 'string'
-        ? prev.content
-        : prev.content.map((b) => b.text).join('\n')
-      const nextText = typeof msg.content === 'string'
-        ? msg.content
-        : msg.content.map((b) => b.text).join('\n')
-      prev.content = `${prevText}\n${nextText}`
+      // Concatenate BLOCKS, not text: flattening to a string here used to be
+      // safe only because images could not get this far. Now they can, and a
+      // merge that joined `.text` would silently drop them.
+      prev.content = [...asBlocks(prev.content), ...asBlocks(msg.content)]
     } else {
       out.push({ ...msg })
     }
