@@ -98,11 +98,20 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
       'Propose a new workspace skill (a reusable procedure the brain can follow). The ' +
       'proposal is STAGED for human review — it never becomes an active skill directly; a ' +
       'workspace member approves it in the web app, and the skill is then born under the ' +
-      'standard governance gate. Provide a clear name, a one-line description of when to ' +
-      'use it, and the full procedure content in markdown.',
+      'standard governance gate. Provide a clear name, a one-line description of what it ' +
+      'does, the trigger condition that should make it fire, and the full procedure ' +
+      'content in markdown.',
     inputSchema: z.object({
       name: z.string().min(3).max(100).describe('Human-readable skill name'),
-      description: z.string().min(3).max(250).describe('One line: what this skill does / when to use it'),
+      description: z.string().min(3).max(250).describe('One line: what this skill does'),
+      // Required for the same reason as `skill_manage`'s create_umbrella: the
+      // trigger is the only thing the skill listing offers the model to select
+      // on, so a proposal without one produces a skill nothing can ever reach.
+      whenToUse: z
+        .string()
+        .min(3)
+        .max(300)
+        .describe('The trigger: what the user says or does that should make this skill fire'),
       content: z.string().min(10).max(5000).describe('The full procedure, markdown'),
     }),
     requiresCapability: CONFIGURE_CAPABILITY,
@@ -118,6 +127,7 @@ export function createAgentWriteTools(deps: AgentWriteToolDeps): Tool[] {
           slug,
           name: input.name,
           description: input.description,
+          whenToUse: input.whenToUse,
           content: input.content,
         },
         approverUserId,
