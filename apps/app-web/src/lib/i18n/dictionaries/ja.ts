@@ -330,6 +330,7 @@ export const ja: Dictionary = {
       imapSearchMessages: "会社のメールボックスを検索中",
       imapGetMessage: "会社のメールを読み込み中",
       imapSendMessage: "会社のメールボックスからメールを送信中",
+      imapSaveAttachment: "メールの添付ファイルを保存中",
       searchEmailArchive: "メールアーカイブを検索中",
       fileWrite: "ワークスペース ファイルを保存中",
       fileAppend: "ワークスペース ファイルに追記中",

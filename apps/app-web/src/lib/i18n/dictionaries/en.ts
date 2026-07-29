@@ -382,6 +382,7 @@ export const en = {
       imapSearchMessages: "Searching your company mailbox",
       imapGetMessage: "Reading company email",
       imapSendMessage: "Sending email from your company mailbox",
+      imapSaveAttachment: "Saving the email attachment",
       searchEmailArchive: "Searching your mailbox archive",
       fileWrite: "Saving workspace file",
       fileAppend: "Appending to workspace file",

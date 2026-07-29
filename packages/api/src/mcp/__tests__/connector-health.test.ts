@@ -30,6 +30,19 @@ describe('[COMP:integrations/connector-health] classifyConnectorAuthError', () =
     expect(classifyConnectorAuthError(new Error('401 Unauthorized'))).toBe(true)
   })
 
+  it('flags the STRUCTURAL credential rejections mail clients use instead of HTTP prose', () => {
+    // imapflow and nodemailer never say "401" or "unauthorized" — they set a
+    // flag / code and their message is just "Invalid credentials". Without
+    // these two the company-mailbox health wrap can never fire.
+    expect(
+      classifyConnectorAuthError(Object.assign(new Error('Invalid credentials'), { authenticationFailed: true })),
+    ).toBe(true)
+    expect(classifyConnectorAuthError(Object.assign(new Error('535 auth failed'), { code: 'EAUTH' }))).toBe(true)
+    // The flag must be the signal, not the wording — an unflagged connection
+    // error with mail-ish text is still transient.
+    expect(classifyConnectorAuthError(Object.assign(new Error('Invalid credentials'), { code: 'ECONNRESET' }))).toBe(false)
+  })
+
   it('does NOT flag transient / non-auth errors (so a blip never marks a live connector dead)', () => {
     expect(classifyConnectorAuthError(new Error('GitHub API error (404): Not Found'))).toBe(false)
     expect(classifyConnectorAuthError(new Error('fetch failed: ECONNRESET'))).toBe(false)

@@ -28,6 +28,9 @@ import {
   queryWithRLS,
   rollbackAndRelease,
   resolvePoolMax,
+  resolveStatementTimeoutMs,
+  INTERACTIVE_STATEMENT_TIMEOUT_MS,
+  BACKGROUND_STATEMENT_TIMEOUT_MS,
   seedCurrentUserIdSentinel,
 } from '../client.js'
 import pg from 'pg'
@@ -94,6 +97,29 @@ describe('[COMP:api/db-client] Database client', () => {
     expect(resolvePoolMax('not-a-number')).toBe(4)
     expect(resolvePoolMax('0')).toBe(4)
     expect(resolvePoolMax('-2')).toBe(4)
+  })
+
+  // ── resolveStatementTimeoutMs() — backend lifetime (B1a) ────
+
+  it('defaults to the interactive 15s when PG_STATEMENT_TIMEOUT_MS is unset', () => {
+    expect(resolveStatementTimeoutMs(undefined)).toBe(INTERACTIVE_STATEMENT_TIMEOUT_MS)
+    expect(resolveStatementTimeoutMs('')).toBe(INTERACTIVE_STATEMENT_TIMEOUT_MS)
+    expect(INTERACTIVE_STATEMENT_TIMEOUT_MS).toBe(15_000)
+  })
+
+  it('honors the background lane value and an explicit 0 (disabled)', () => {
+    expect(resolveStatementTimeoutMs(String(BACKGROUND_STATEMENT_TIMEOUT_MS))).toBe(120_000)
+    expect(resolveStatementTimeoutMs(' 120000 ')).toBe(120_000)
+    // 0 is the documented escape hatch: no statement_timeout at all.
+    expect(resolveStatementTimeoutMs('0')).toBe(0)
+  })
+
+  it('falls back to the interactive value on garbage — never to unbounded', () => {
+    // A typo'd env var must not silently restore the orphan-backend class that
+    // pinned 24 of 25 Cloud SQL slots on 2026-07-29.
+    for (const raw of ['not-a-number', '-1', 'NaN', '12s']) {
+      expect(resolveStatementTimeoutMs(raw), raw).toBe(INTERACTIVE_STATEMENT_TIMEOUT_MS)
+    }
   })
 
   // ── query() — system pool ───────────────────────────────────
@@ -203,6 +229,55 @@ describe('[COMP:api/db-client] getAppPool production fail-closed', () => {
     vi.stubEnv('PG_SINGLE_CONNECTION', '')
     const fresh = await freshClient()
     expect(() => fresh.getAppPool()).toThrow(/DATABASE_URL_APP/)
+  })
+
+  it('applies statement_timeout as a startup option on BOTH pools, never as a SET', async () => {
+    // B1a (corpus-substrate-hardening §3): the cap must arrive in the libpq
+    // startup packet, not from a fire-and-forget `connect` handler that races
+    // the checkout's first query.
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    vi.stubEnv('PG_STATEMENT_TIMEOUT_MS', '')
+    vi.stubEnv('DATABASE_URL_APP', 'postgres://app_user@localhost/db')
+    const fresh = await freshClient()
+    const Pool = vi.mocked((await import('pg')).default.Pool)
+    Pool.mockClear()
+    fresh.getPool()
+    fresh.getAppPool()
+    const configs = Pool.mock.calls.map((c) => c[0] as { options?: string })
+    expect(configs).toHaveLength(2)
+    for (const cfg of configs) {
+      expect(cfg.options).toBe('-c statement_timeout=15000')
+    }
+  })
+
+  it('omits the option entirely when the timeout is disabled with 0', async () => {
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '')
+    vi.stubEnv('PG_STATEMENT_TIMEOUT_MS', '0')
+    vi.stubEnv('DATABASE_URL_APP', 'postgres://app_user@localhost/db')
+    const fresh = await freshClient()
+    const Pool = vi.mocked((await import('pg')).default.Pool)
+    Pool.mockClear()
+    fresh.getPool()
+    const cfg = Pool.mock.calls[0]?.[0] as { options?: string }
+    expect(cfg.options).toBeUndefined()
+  })
+
+  it('PG_SINGLE_CONNECTION collapses to ONE pool that still carries the interactive cap', async () => {
+    // The PGLite OSS path: one pool, interactive value — there is no second
+    // lane to hand a different timeout to.
+    vi.stubEnv('NODE_ENV', 'test')
+    vi.stubEnv('PG_SINGLE_CONNECTION', '1')
+    vi.stubEnv('PG_STATEMENT_TIMEOUT_MS', '')
+    const fresh = await freshClient()
+    const Pool = vi.mocked((await import('pg')).default.Pool)
+    Pool.mockClear()
+    expect(fresh.getAppPool()).toBe(fresh.getPool())
+    expect(Pool.mock.calls).toHaveLength(1)
+    const cfg = Pool.mock.calls[0]![0] as { options?: string; max?: number }
+    expect(cfg.options).toBe('-c statement_timeout=15000')
+    expect(cfg.max).toBe(1)
   })
 
   it('falls back with a loud warning outside production', async () => {

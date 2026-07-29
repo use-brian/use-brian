@@ -569,10 +569,12 @@ export function gripVerticalOffset(dom: HTMLElement): number {
   // inner `<p>` (`.ProseMirror li > p`), not the `<li>` - so the text metric read
   // off the `<li>` sees padding-top 0 and pins the grip a few px above the
   // bullet's / number's optical centre. Read the metric off the direct `<p>`
-  // child instead. (Task rows nest their `<p>` under a flex content div and their
-  // checkbox owns the column, so they fall through to the box metric below.)
+  // child instead. A TASK row (to-do) nests its `<p>` one level deeper - Tiptap's
+  // TaskItem node view wraps the content in a `<div>` beside the checkbox label -
+  // so it needs the same treatment via `:scope > div > p`, or it falls through to
+  // the `<li>` box metric and the grip sits ~3px high, off the checkbox's centre.
   if (dom.tagName === "LI") {
-    const inner = dom.querySelector<HTMLElement>(":scope > p");
+    const inner = dom.querySelector<HTMLElement>(":scope > p, :scope > div > p");
     if (inner) {
       const { lineHeight, padTop } = firstLineMetrics(inner);
       const innerTopDelta =

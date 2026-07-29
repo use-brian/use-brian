@@ -104,6 +104,39 @@ describe('[COMP:api/email-archive-store] insertEmailArchiveMessage', () => {
     expect(segInsert!.params?.[5]).toBe('owner-1') // user_id = owner
   })
 
+  it('stamps segment valid_from with the message SENT time, not the sync clock', async () => {
+    // D6 / B5. `created_at` is when the sync wrote the row, so a backfill
+    // stamps a decade of history with `now()`; the embedding drain keys its
+    // priority tier and its 12-month window on `valid_from` for this corpus.
+    const { calls } = makeTxClient('am-1')
+    await insertEmailArchiveMessage(INPUT)
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    expect(segInsert!.sql).toContain('created_by_user_id, valid_from')
+    expect(segInsert!.params?.[8]).toEqual(INPUT.sentAt)
+  })
+
+  it('clamps a future-dated sent time to now — a skewed Date: header cannot hide the row', async () => {
+    const { calls } = makeTxClient('am-1')
+    const before = Date.now()
+    await insertEmailArchiveMessage({
+      ...INPUT,
+      sentAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000),
+    })
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    const validFrom = segInsert!.params?.[8] as Date
+    expect(validFrom.getTime()).toBeGreaterThanOrEqual(before)
+    expect(validFrom.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('falls back to now when the message carries no sent time', async () => {
+    const { calls } = makeTxClient('am-1')
+    const before = Date.now()
+    await insertEmailArchiveMessage({ ...INPUT, sentAt: null })
+    const segInsert = calls.find((c) => c.sql.includes('INSERT INTO email_archive_segments'))
+    const validFrom = segInsert!.params?.[8] as Date
+    expect(validFrom.getTime()).toBeGreaterThanOrEqual(before)
+  })
+
   it('is idempotent on (instance_id, provider_message_id) — a re-synced UID writes nothing', async () => {
     const { calls } = makeTxClient(null) // ON CONFLICT DO NOTHING → no RETURNING row
     const result = await insertEmailArchiveMessage(INPUT)
@@ -118,44 +151,110 @@ describe('[COMP:api/email-archive-store] searchEmailArchive (person compartment)
   it('owner-gates in the predicate AND runs under the owner RLS context; instance is caller-bound', async () => {
     mockQueryWithRLS.mockResolvedValue({ rows: [], rowCount: 0 } as never)
     await searchEmailArchive({ ownerUserId: 'owner-1', instanceId: 'inst-1', query: 'deposit' })
-    // No embedder → single (ILIKE) arm.
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
-    const [rlsUser, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
-    expect(rlsUser).toBe('owner-1') // RLS braces: the owner policy applies
-    expect(sql).toContain('es.user_id = $1') // predicate belt
-    expect(sql).toContain('es.instance_id = $2')
-    expect(params[0]).toBe('owner-1')
-    expect(params[1]).toBe('inst-1')
-    expect(sql).toContain('es.retracted_at IS NULL')
+    // No embedder → lexical arm + the coverage probe.
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
+    for (const call of mockQueryWithRLS.mock.calls) {
+      const [rlsUser, sql, params] = call as unknown as [string, string, unknown[]]
+      expect(rlsUser).toBe('owner-1') // RLS braces: the owner policy applies
+      expect(sql).toContain('es.user_id = $1') // predicate belt
+      expect(sql).toContain('es.instance_id = $2')
+      expect(params[0]).toBe('owner-1')
+      expect(params[1]).toBe('inst-1')
+      expect(sql).toContain('es.retracted_at IS NULL')
+    }
   })
 
-  it('fuses vector + ILIKE arms, vector rank first, deduped by message#segment', async () => {
+  it('fuses the vector and lexical arms by reciprocal rank, deduped by message#segment', async () => {
     const vecRow = {
       provider_message_id: 'INBOX:1', folder: 'INBOX', subject: 'a', from_addr: 'x@y.z',
       sent_at: '2026-07-20T10:00:00Z', segment_index: 0, segment_text: 'vector hit', distance: 0.1,
     }
-    const likeRow = { ...vecRow, provider_message_id: 'INBOX:2', segment_text: 'ilike hit' }
+    const likeRow = { ...vecRow, provider_message_id: 'INBOX:2', segment_text: 'lexical hit' }
     mockQueryWithRLS
       .mockResolvedValueOnce({ rows: [vecRow], rowCount: 1 } as never)
       .mockResolvedValueOnce({ rows: [vecRow, likeRow], rowCount: 2 } as never)
-    const hits = await searchEmailArchive(
-      { ownerUserId: 'owner-1', instanceId: 'inst-1', query: 'deposit' },
+      .mockResolvedValueOnce({ rows: [{ n: '0' }], rowCount: 1 } as never)
+    const { hits } = await searchEmailArchive(
+      { ownerUserId: 'owner-1', instanceId: 'inst-1', query: 'deposit refund' },
       { embedder: { embed: async () => [[0.1, 0.2]] } },
     )
     expect(hits).toHaveLength(2)
+    // Found by BOTH arms, so it outranks the passage only one arm found.
     expect(hits[0].segment_text).toBe('vector hit')
-    expect(hits[1].segment_text).toBe('ilike hit')
+    expect(hits[1].segment_text).toBe('lexical hit')
   })
 
-  it('vector arm soft-fails to ILIKE-only on embed error', async () => {
+  it('ranks a multi-term natural-language query with the vector arm disabled', async () => {
+    // B6: the lexical arm used to bind `%<whole query>%`, so a sentence like
+    // this matched only if all 52 characters appeared verbatim — i.e. never,
+    // which left the vector arm doing all the work.
+    const row = {
+      provider_message_id: 'INBOX:7', folder: 'INBOX', subject: 'Shipment', from_addr: 's@x.example',
+      sent_at: '2026-07-20T10:00:00Z', segment_index: 0, segment_text: 'the shipment is delayed',
+    }
+    mockQueryWithRLS
+      .mockResolvedValueOnce({ rows: [row], rowCount: 1 } as never)
+      .mockResolvedValueOnce({ rows: [{ n: '0' }], rowCount: 1 } as never)
+    const { hits } = await searchEmailArchive({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      query: 'what did the supplier say about the delayed shipment',
+    })
+    expect(hits).toHaveLength(1)
+    const [, sql, params] = mockQueryWithRLS.mock.calls[0] as unknown as [string, string, unknown[]]
+    // Individual terms, ranked by how many of them hit — never the raw query.
+    expect(params).toContain('%supplier%')
+    expect(params).toContain('%delayed%')
+    expect(params).toContain('%shipment%')
+    expect(params).not.toContain('%what did the supplier say about the delayed shipment%')
+    expect(sql).toContain('ORDER BY term_hits DESC')
+    // Stopwords carry no signal and would match every passage equally.
+    expect(params).not.toContain('%the%')
+    expect(params).not.toContain('%what%')
+  })
+
+  it('reports partial coverage when unembedded rows fall inside the filter scope', async () => {
+    mockQueryWithRLS
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [{ n: '42' }], rowCount: 1 } as never)
+    const { coverage } = await searchEmailArchive({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      query: 'deposit',
+    })
+    expect(coverage.partial).toBe(true)
+    expect(coverage.unembeddedInScope).toBe(42)
+    expect(coverage.note).toContain('42 passages')
+    expect(coverage.note).toContain('inconclusive')
+    // Scoped to THIS query's filters, not to the corpus at large.
+    const [, probeSql] = mockQueryWithRLS.mock.calls[1] as unknown as [string, string, unknown[]]
+    expect(probeSql).toContain('es.embedding IS NULL')
+    expect(probeSql).toContain('es.user_id = $1')
+    expect(probeSql).toContain('LIMIT')
+  })
+
+  it('says nothing when the whole filter scope is embedded', async () => {
+    mockQueryWithRLS
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+      .mockResolvedValueOnce({ rows: [{ n: '0' }], rowCount: 1 } as never)
+    const { coverage } = await searchEmailArchive({
+      ownerUserId: 'owner-1',
+      instanceId: 'inst-1',
+      query: 'deposit',
+    })
+    expect(coverage).toEqual({ partial: false, unembeddedInScope: 0, capped: false, note: null })
+  })
+
+  it('vector arm soft-fails to lexical-only on embed error', async () => {
     mockQueryWithRLS.mockResolvedValue({ rows: [], rowCount: 0 } as never)
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const hits = await searchEmailArchive(
-      { ownerUserId: 'owner-1', instanceId: 'inst-1', query: 'q' },
+    const { hits } = await searchEmailArchive(
+      { ownerUserId: 'owner-1', instanceId: 'inst-1', query: 'quarterly report' },
       { embedder: { embed: async () => { throw new Error('embed down') } } },
     )
     expect(hits).toEqual([])
-    expect(mockQueryWithRLS).toHaveBeenCalledTimes(1)
+    // Lexical arm + coverage probe; the vector arm never issued a query.
+    expect(mockQueryWithRLS).toHaveBeenCalledTimes(2)
     warn.mockRestore()
   })
 })

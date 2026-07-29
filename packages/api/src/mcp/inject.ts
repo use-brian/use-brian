@@ -26,6 +26,7 @@ import { createMailboxApi } from '../mailbox/mailbox-api.js'
 import { createSearchEmailArchiveTool, getGlobalMailboxArchiveDeps } from '../mailbox/archive-search-tool.js'
 import { createSyncMailboxNowTool, getGlobalMailboxSyncDeps } from '../mailbox/sync-tool.js'
 import type { MailboxAccountSettings } from '../mailbox/types.js'
+import { enqueueFileIngestJob } from '../db/file-ingest-jobs-store.js'
 import type { ConnectorStore } from '../db/connector-store.js'
 import type { AssistantConnectorStore } from '../db/assistant-connector-store.js'
 import type { ConnectorActionAudit, ConnectorActionPreflight } from '../connector-action-port.js'
@@ -303,6 +304,7 @@ export const INJECTED_BUILTIN_TOOLS_BY_CONNECTOR: Record<string, readonly string
     'imapSearchMessages',
     'imapGetMessage',
     'imapSendMessage',
+    'imapSaveAttachment',
     'searchEmailArchive',
   ],
 }
@@ -877,6 +879,7 @@ export async function injectMcpTools(params: {
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
     healthProbe: { report: reportHealth },
+    filesApi,
   })
   const enricher = await injectGoogleTools(connectors, connectorStore, settingsStore, userId, assistantId, assistantConnectorStore, tools, userTimezone, unavailable, gdriveFilesStore, undefined, connectorActionAudit, assistantConnectorGrantsStore, workspaceDomain, filesApi, extrasByProvider, resolveInstanceCreds, reportHealth)
 
@@ -991,6 +994,7 @@ export async function injectMcpTools(params: {
             connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
             instanceIdOverride: g.instance.id,
             healthProbe: { report: reportHealth },
+            filesApi,
           })
         } else if (p === 'gcal' || p === 'gmail' || p === 'gdrive') {
           // Scope the injector to the GRANTED provider only. `injectGoogleTools`
@@ -1143,6 +1147,7 @@ export async function injectMcpTools(params: {
             connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore,
             instanceIdOverride: inst.id,
             healthProbe: { report: reportHealth },
+            filesApi,
           })
         } else if (p === 'msgraph') {
           // A workspace-owned Microsoft identity. Reads and the rotated tuple
@@ -3251,10 +3256,17 @@ async function injectMailboxTools(params: {
   /** Grant-overlay path: bind to this EXACT exposed instance id. */
   instanceIdOverride?: string | null
   healthProbe?: { report: HealthReporter }
+  /**
+   * Workspace file primitive. Present = `imapSaveAttachment` is built
+   * (Phase 3 / D17); absent = the tool is simply not injected, never a tool
+   * that always errors.
+   */
+  filesApi?: FilesApi
 }): Promise<void> {
   const {
     connectors, settingsStore, userId, assistantId, assistantConnectorStore, tools, unavailable,
     connectorInstanceStore, connectorActionAudit, assistantConnectorGrantsStore, instanceIdOverride, healthProbe,
+    filesApi,
   } = params
 
   const imapConnectors = connectors.filter((c) => c.connectorId === 'imap' && c.connected)
@@ -3297,6 +3309,10 @@ async function injectMailboxTools(params: {
     return {
       searchMessages: (p) => guard(() => raw.searchMessages(p)),
       getMessage: (id) => guard(() => raw.getMessage(id)),
+      // Attachment fetches log in like every other IMAP call, so a dead
+      // credential must flip health here too — a bare pass-through would
+      // typecheck and silently skip the auth-failure report.
+      getAttachment: (id, partId) => guard(() => raw.getAttachment(id, partId)),
       sendMessage: (p) => guard(() => raw.sendMessage(p)),
     }
   }
@@ -3308,6 +3324,9 @@ async function injectMailboxTools(params: {
   const withAudit = (raw: MailboxApi, fromEmail: string): MailboxApi => ({
     searchMessages: (p) => raw.searchMessages(p),
     getMessage: (id) => raw.getMessage(id),
+    // Reads are unaudited (the `getMessage` precedent) — `connector_actions`
+    // records egress, and an attachment save stays inside the workspace.
+    getAttachment: (id, partId) => raw.getAttachment(id, partId),
     sendMessage: async (p) => {
       const auditPayload = {
         to: p.to,
@@ -3406,7 +3425,32 @@ async function injectMailboxTools(params: {
       list: () => bound.map((b, i) => ({ email: b.email, isPrimary: i === 0 })),
       get: (email) => bound.find((b) => b.email.trim().toLowerCase() === email.trim().toLowerCase())?.api,
     }
-    const built = gateToolsOnActionGrants(createMailboxTools(router), 'imap', assistantConnectorGrantsStore, assistantId)
+    // Attachment saves (Phase 3) land bytes in the workspace file primitive
+    // and then ride the existing file-ingest queue so the saved document is
+    // searchable — the `channel-media-deps` persist shape, on request only (D15).
+    const built = gateToolsOnActionGrants(
+      createMailboxTools(router, {
+        ...(filesApi
+          ? {
+              attachments: {
+                filesApi,
+                enqueueIngest: async ({ fileId, workspaceId, actingUserId, assistantId: forAssistant }) => {
+                  await enqueueFileIngestJob({
+                    fileId,
+                    workspaceId,
+                    actingUserId,
+                    assistantId: forAssistant,
+                    sourceLabel: 'email-attachment',
+                  })
+                },
+              },
+            }
+          : {}),
+      }),
+      'imap',
+      assistantConnectorGrantsStore,
+      assistantId,
+    )
 
     // Archive search (Phase 2) — injected only when boot wired the archive
     // seam (DB + embedder). Read-only; a DB search must not flip connector

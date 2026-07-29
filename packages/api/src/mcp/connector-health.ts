@@ -92,6 +92,15 @@ function hasHttpStatus(msg: string, code: '401' | '403'): boolean {
  *          says the token needs re-authorizing (SSO/SAML).
  */
 export function classifyConnectorAuthError(err: unknown): boolean {
+  // Mail clients flag credential rejection STRUCTURALLY, not in prose:
+  // imapflow sets `authenticationFailed`, nodemailer uses code 'EAUTH'. Their
+  // wording ("Invalid credentials", "AUTHENTICATIONFAILED") matches none of the
+  // HTTP-shaped signals below, so without this the company-mailbox health wrap
+  // could never flip a dead app password to `auth_failed`.
+  const flagged = err as { authenticationFailed?: boolean; code?: string } | null | undefined
+  if (flagged?.authenticationFailed === true) return true
+  if (flagged?.code === 'EAUTH') return true
+
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
 
   // Unambiguous credential death wins outright.

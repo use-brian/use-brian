@@ -21,10 +21,52 @@
  */
 
 import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
+import { runInBackgroundLane } from '../scheduling/background-lane.js'
 import { GEMINI_EMBEDDING_MODEL_ID, type Embedder } from './embedder.js'
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000
 const DEFAULT_BATCH_LIMIT = 100
+
+/**
+ * The embed budget (D10 — docs/plans/corpus-substrate-hardening.md §5).
+ *
+ * **Finishing the drain is not a goal.** `email_archive_segments.embedding` is
+ * `VECTOR(768)` with HNSW `m = 16`, and pgvector stores the full vector in the
+ * index — about 3.2 KB per row. A fully drained email corpus is therefore a
+ * ~1.7 GB HNSW index on an instance with 0.6 GB of RAM and a 128 MB
+ * `shared_buffers`: completing it does not merely take a long time, it produces
+ * an index that can never be resident. An unaffordable index is worse than
+ * partial recall (D7), so the drain is bounded on two axes instead:
+ *
+ * - a rolling **12-month window** on the primitive's recency expression, and
+ * - a hard ceiling of **150,000 embedded segments per corpus** — at ~3.2 KB
+ *   per row that is a ~480 MB index, against ~1.7 GB for the full corpus.
+ *
+ * Both are config constants, retunable without a code change (how much of an
+ * archive gets vectors trades recall on old material against index size and
+ * COGS, which is an owner call). Beyond the budget rows stay queued and
+ * unembedded, and retrieval says so rather than quietly answering from a
+ * fraction of the corpus — see the coverage note in the archive search.
+ */
+export const DEFAULT_EMBED_RECENCY_WINDOW_MONTHS = 12
+export const DEFAULT_EMBED_BUDGET_SEGMENTS = 150_000
+
+function resolvePositiveInt(raw: string | undefined, fallback: number): number {
+  const trimmed = (raw ?? '').trim()
+  if (!/^\d+$/.test(trimmed)) return fallback
+  const n = Number(trimmed)
+  return n > 0 ? n : fallback
+}
+
+/** `EMBED_RECENCY_WINDOW_MONTHS` — months of history eligible to embed. */
+export function resolveEmbedRecencyWindowMonths(raw: string | undefined): number {
+  return resolvePositiveInt(raw, DEFAULT_EMBED_RECENCY_WINDOW_MONTHS)
+}
+
+/** `EMBED_BUDGET_SEGMENTS` — embedded rows allowed per corpus. */
+export function resolveEmbedBudgetSegments(raw: string | undefined): number {
+  return resolvePositiveInt(raw, DEFAULT_EMBED_BUDGET_SEGMENTS)
+}
 
 /**
  * The set of primitives that carry embeddings per `embeddings.md` §"What
@@ -259,12 +301,19 @@ export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
   }
 
   async function tick() {
+    // The re-entry guard is load-bearing beyond skipping overlapped work: it
+    // is half of why the store can release its claim lease before embedding
+    // (D4 — `maxScale = 1` plus this guard serialize a primitive's drains).
     if (running) return
     running = true
     try {
-      for (const primitive of primitives) {
-        await drainPrimitive(primitive)
-      }
+      // Admitted through the background lane so this drain cannot check out
+      // concurrently with every other worker loop in the process.
+      await runInBackgroundLane(async () => {
+        for (const primitive of primitives) {
+          await drainPrimitive(primitive)
+        }
+      })
     } catch (err) {
       console.error('[embedding-worker] tick error:', err)
     } finally {

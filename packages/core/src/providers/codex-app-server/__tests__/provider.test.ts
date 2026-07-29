@@ -638,4 +638,67 @@ describe('[COMP:providers/codex-app-server] Codex app-server provider bridge', (
     expect(harness.outbound).toEqual([])
     harness.peer.close()
   })
+
+  it('degrades an undeliverable inline mime to a typed note instead of a fake image part', async () => {
+    // A PDF rides an `image` ContentBlock (the engine's carrier for any inline
+    // media — shaped for Gemini's native inlineData reader). Forwarding it as
+    // `data:application/pdf;base64,…` under an image part is accepted by the
+    // app-server and undecodable by GPT, so the turn proceeds as if the
+    // document had been read. See docs/architecture/engine/file-handling.md.
+    const harness = createHarness()
+    const provider = createCodexAppServerProvider({
+      transport: { rpc: harness.peer, cwd: '/tmp/brian-codex-test' },
+      models: [MODEL],
+    })
+    const session = provider.createSession({ model: MODEL, systemPrompt: 'You are Brian.' })
+    const chunks = collect(
+      session.send([
+        // History replay path (`thread/inject_items`).
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Earlier attachment.' },
+            { type: 'image', mimeType: 'application/pdf', data: 'JVBERi0xLjQK' },
+          ],
+        },
+        // Current-turn path (`turn/start` input).
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Read this.' },
+            { type: 'image', mimeType: 'application/pdf', data: 'JVBERi0xLjQK' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        },
+      ]),
+    )
+
+    const threadStart = await waitForMethod(harness, 'thread/start')
+    respondToThreadStart(harness, threadStart)
+
+    const inject = await waitForMethod(harness, 'thread/inject_items')
+    const injected = (inject.params as { items: Array<{ content: Array<{ type: string; text?: string }> }> }).items
+    expect(injected[0]!.content[1]).toMatchObject({ type: 'input_text' })
+    expect(injected[0]!.content[1]!.text).toContain('application/pdf')
+    expect(injected[0]!.content[1]!.text).toContain('was not read')
+    expect(JSON.stringify(injected)).not.toContain('data:application/pdf')
+    respond(harness, inject, {})
+
+    const turnStart = await waitForMethod(harness, 'turn/start')
+    const input = (turnStart.params as { input: Array<{ type: string; text?: string; url?: string }> }).input
+    expect(input).toEqual([
+      { type: 'text', text: 'Read this.' },
+      { type: 'text', text: expect.stringContaining('application/pdf') },
+      { type: 'image', url: 'data:image/png;base64,iVBORw0KGgo=' },
+    ])
+    // A real image still rides through untouched; only the undecodable mime degrades.
+    expect(JSON.stringify(input)).not.toContain('data:application/pdf')
+    respondToTurnStart(harness, turnStart)
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    usage(harness, 'thread-1', 'turn-1')
+    complete(harness, 'thread-1', 'turn-1')
+
+    await chunks
+    harness.peer.close()
+  })
 })

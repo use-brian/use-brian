@@ -37,8 +37,9 @@ export {
   MAILBOX_DEFAULT_WINDOW_DAYS,
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,
+  MAILBOX_ATTACHMENT_MAX_BYTES,
 } from './base/mailbox.js'
-export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread } from './base/mailbox.js'
+export type { MailboxApi, MailboxAccountRouter, MailboxAccountRef, MailboxSearchParams, MailboxSearchHit, MailboxMessage, MailboxThread, MailboxAttachment, MailboxAttachmentBytes, MailboxAttachmentDeps, CreateMailboxToolsOptions } from './base/mailbox.js'
 export { createKnowledgeTools } from './base/knowledge.js'
 export { createInterAssistantTools } from './base/ask-assistant.js'
 export type { InterAssistantDeps } from './base/ask-assistant.js'

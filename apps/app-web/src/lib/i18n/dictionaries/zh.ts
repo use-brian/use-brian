@@ -326,6 +326,7 @@ export const zh: Dictionary = {
       imapSearchMessages: "正在搜尋公司信箱",
       imapGetMessage: "正在讀取公司郵件",
       imapSendMessage: "正在從公司信箱寄送郵件",
+      imapSaveAttachment: "正在儲存郵件附件",
       searchEmailArchive: "正在搜尋郵件封存",
       fileWrite: "正在儲存工作空間檔案",
       fileAppend: "正在附加至工作空間檔案",

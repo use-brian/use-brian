@@ -41,7 +41,38 @@ export type ImapClientLike = {
     query: { messages: true; uidNext: true; uidValidity: true },
   ): Promise<{ path: string; messages?: number; uidNext?: number; uidValidity?: bigint }>
   append(path: string, content: Buffer, flags?: string[]): Promise<unknown>
+  /**
+   * Stream ONE BODYSTRUCTURE part, transfer-encoding already decoded
+   * (Phase 3 / D14). This is the only byte path for attachments — the
+   * `source` fetch `getMessage` uses is byte-capped and would truncate.
+   */
+  download(
+    range: string,
+    part: string,
+    opts: { uid: true },
+  ): Promise<{
+    meta?: { contentType?: string; filename?: string; expectedSize?: number }
+    content: AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }
+  }>
   usable: boolean
+}
+
+/**
+ * One BODYSTRUCTURE node as imapflow parses it. The server's own part tree —
+ * the sole authority for part ids and attachment listings (D14).
+ */
+export type ImapBodyStructureNode = {
+  /** Dotted IMAP part number ("2", "1.2"). Absent on the root of a single-part message. */
+  part?: string
+  /** Lowercased MIME type, e.g. "application/pdf". */
+  type: string
+  parameters?: Record<string, string>
+  disposition?: string
+  dispositionParameters?: Record<string, string>
+  /** Encoded octets as the server reports them. */
+  size?: number
+  encoding?: string
+  childNodes?: ImapBodyStructureNode[]
 }
 
 export type ImapFetchedMessage = {
@@ -58,6 +89,7 @@ export type ImapFetchedMessage = {
   headers?: Buffer
   internalDate?: Date
   source?: Buffer
+  bodyStructure?: ImapBodyStructureNode
 }
 
 export const MAILBOX_SESSION_IDLE_MS = 60_000

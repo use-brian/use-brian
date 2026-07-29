@@ -80,6 +80,38 @@ describeIf('[COMP:api/mailbox-imap-client] live IMAP/SMTP round-trip', () => {
     expect(typeof message.body).toBe('string')
   }, 120_000)
 
+  it('lists attachment parts and downloads one for real (Phase 3, D14)', async () => {
+    // Walk back until a message with an attachment turns up; a scratch mailbox
+    // with none simply proves the listing path runs and returns [].
+    const since = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10)
+    const { hits } = await api.searchMessages({ since, limit: 25 })
+    if (hits.length === 0) return
+
+    let withAttachment: { id: string; partId: string; filename: string; size: number } | null = null
+    for (const h of hits) {
+      const message = await api.getMessage(h.id)
+      expect(Array.isArray(message.attachments)).toBe(true)
+      const candidate = message.attachments.find((a) => a.size > 0 && a.size < 5 * 1024 * 1024)
+      if (candidate) {
+        // Every listed attachment must carry a real IMAP part number.
+        expect(candidate.partId).toMatch(/^\d+(\.\d+)*$/)
+        withAttachment = { id: h.id, ...candidate }
+        break
+      }
+    }
+    if (!withAttachment) {
+      console.info('[mailbox-integration] no attachment found in the sampled window — listing path exercised only')
+      return
+    }
+
+    const fetched = await api.getAttachment(withAttachment.id, withAttachment.partId)
+    console.info(
+      `[mailbox-integration] downloaded ${fetched.filename} (${fetched.bytes.length} bytes, declared ${withAttachment.size} encoded)`,
+    )
+    expect(fetched.bytes.length).toBeGreaterThan(0)
+    expect(fetched.mime).toBeTruthy()
+  }, 180_000)
+
   it('sends a markdown message round-trip (only when TEST_IMAP_SEND_TO is set)', async () => {
     const to = process.env.TEST_IMAP_SEND_TO
     if (!to) return

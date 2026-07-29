@@ -14,11 +14,21 @@
  * result cap, snippet truncation, and client-side thread stitching from
  * `References`/`In-Reply-To` (never the optional server THREAD extension).
  *
+ * Attachment delivery (Phase 3, D15-D17): `imapGetMessage` lists parts with
+ * their BODYSTRUCTURE ids, `imapSaveAttachment` lands one part's bytes in the
+ * workspace file primitive, and the existing `sendFile` delivers it. The chain
+ * always runs through the file layer — never a direct email-to-channel byte
+ * pipe — so the sensitivity / size / quota gates stay in one place.
+ *
  * [COMP:tools/mailbox-imap]
+ * [COMP:tools/imap-attachments]
  */
 
 import { z } from 'zod'
 import { buildTool, type Tool } from '../types.js'
+import type { FilesApi } from '../../workspace-files/api.js'
+import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
+import { ctxFor, errorMessage, workspaceGate } from '../../workspace-files/tool-helpers.js'
 
 /** Default lookback window for searches with no explicit `since` (D12 #4). */
 export const MAILBOX_DEFAULT_WINDOW_DAYS = 90
@@ -27,6 +37,13 @@ export const MAILBOX_DEFAULT_LIMIT = 20
 export const MAILBOX_MAX_LIMIT = 50
 /** Snippets are truncated so a broad search stays token-bounded. */
 export const MAILBOX_SNIPPET_CHARS = 200
+/**
+ * Max attachment size `imapSaveAttachment` will pull (D16). Deliberately
+ * EQUAL to `MAX_EXTERNAL_DOCUMENT_BYTES`: a save that succeeds is always
+ * deliverable by `sendFile` on a messaging channel, so the chain never
+ * strands a stored file the user asked to be sent.
+ */
+export const MAILBOX_ATTACHMENT_MAX_BYTES = MAX_EXTERNAL_DOCUMENT_BYTES
 
 /** One search hit — already projected to documented fields by the seam impl. */
 export type MailboxSearchHit = {
@@ -45,6 +62,28 @@ export type MailboxSearchHit = {
   references?: string[]
 }
 
+/**
+ * One attachment as listed by `imapGetMessage`. Derived from the server's
+ * BODYSTRUCTURE, which is the sole authority for part ids (D14) — a parse of
+ * the (size-capped) message source numbers raw-stream boundaries, not the
+ * IMAP part tree, and silently addresses the wrong part on nested multiparts.
+ */
+export type MailboxAttachment = {
+  filename: string
+  mime: string
+  /**
+   * Encoded size in octets, as the server reports it. Base64 inflates the
+   * decoded bytes by ~33%, so this over-states the real file — which is what
+   * a size gate wants.
+   */
+  size: number
+  /**
+   * IMAP part number (`"2"`, `"1.2"`, …) — the `partId` `imapSaveAttachment`
+   * takes to fetch exactly this part.
+   */
+  partId: string
+}
+
 export type MailboxMessage = {
   id: string
   folder: string
@@ -55,11 +94,22 @@ export type MailboxMessage = {
   subject: string
   /** Text body: text/plain part preferred, stripped HTML fallback. */
   body: string
-  /** Attachment METADATA only — content extraction is out of scope (D10). */
-  attachments: Array<{ filename: string; mime: string; size: number }>
+  /**
+   * Attachment metadata + part ids. Bytes are fetched on request only
+   * (D15) — one part at a time, via `imapSaveAttachment`; sync-time content
+   * extraction remains out of scope (D10).
+   */
+  attachments: MailboxAttachment[]
   messageId?: string | null
   inReplyTo?: string | null
   references?: string[]
+}
+
+/** One attachment's decoded bytes — the `getAttachment` return (D14/D16). */
+export type MailboxAttachmentBytes = {
+  filename: string
+  mime: string
+  bytes: Uint8Array
 }
 
 export type MailboxSearchParams = {
@@ -86,6 +136,15 @@ export type MailboxApi = {
     note?: string
   }>
   getMessage(id: string): Promise<MailboxMessage>
+  /**
+   * Stream ONE attachment part's decoded bytes (D14). Implementations must
+   * fetch the part directly — never the size-capped full-source fetch
+   * `getMessage` uses — and must refuse over-cap parts from the
+   * BODYSTRUCTURE metadata *before* streaming, then count bytes while
+   * buffering so a lying/absent size cannot blow past
+   * {@link MAILBOX_ATTACHMENT_MAX_BYTES}.
+   */
+  getAttachment(id: string, partId: string): Promise<MailboxAttachmentBytes>
   sendMessage(params: {
     to: string[]
     /** Visible carbon-copy recipients (a real `Cc:` header). */
@@ -260,7 +319,45 @@ const accountField = z
     'Omit to use the primary (first-connected) mailbox. Only needed when more than one mailbox is connected.',
   )
 
-export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
+/**
+ * Everything `imapSaveAttachment` needs beyond the mailbox seam. Absent =
+ * the tool is not built at all (never a tool that always errors) — the
+ * `gmailSendMessage` attachments conditioning.
+ */
+export type MailboxAttachmentDeps = {
+  /** Workspace file primitive — the only place email bytes ever land (D17). */
+  filesApi: FilesApi
+  /**
+   * Make the saved file searchable (the API layer's file-ingest queue).
+   * Best-effort: a queue hiccup must not lose a file the user can already
+   * be handed. Absent = saved but not indexed.
+   */
+  enqueueIngest?: (params: {
+    fileId: string
+    workspaceId: string
+    actingUserId: string
+    assistantId: string | null
+  }) => Promise<void>
+}
+
+export type CreateMailboxToolsOptions = {
+  attachments?: MailboxAttachmentDeps
+}
+
+/** Filesystem-safe leaf name, mirroring the channel-media persist shape. */
+function safeAttachmentName(filename: string): string {
+  return filename.replace(/[^\p{L}\p{N}._-]+/gu, '-').slice(0, 120) || 'attachment'
+}
+
+function formatMb(bytes: number): string {
+  return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
+}
+
+export function createMailboxTools(
+  router: MailboxAccountRouter,
+  opts?: CreateMailboxToolsOptions,
+): Tool[] {
+  const attachmentDeps = opts?.attachments
   const searchMessages = buildTool({
     name: 'imapSearchMessages',
     description:
@@ -333,7 +430,12 @@ export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
     name: 'imapGetMessage',
     description:
       "Read a full email from the user's connected company mailbox by id (the `id` returned by imapSearchMessages, shaped `folder:uid`). " +
-      'Returns headers, the text body, and attachment names/sizes (attachment contents cannot be fetched).',
+      'Returns headers, the text body, and the attachment list (filename, type, size, and the `partId` that identifies each part). ' +
+      // Only claim the save path exists when it was actually wired — the
+      // tool-awareness rule applied at the description level.
+      (attachmentDeps
+        ? 'To hand an attachment to the user, save it with imapSaveAttachment using its `partId`, then deliver it with sendFile.'
+        : 'Attachment contents cannot be fetched here.'),
     inputSchema: z.object({
       messageId: z.string().describe('The message id from imapSearchMessages results (`folder:uid`).'),
       account: accountField,
@@ -418,5 +520,97 @@ export function createMailboxTools(router: MailboxAccountRouter): Tool[] {
     },
   })
 
-  return [searchMessages, getMessage, sendMessage]
+  // ── imapSaveAttachment (Phase 3, D15-D17) ───────────────────────────────
+  //
+  // Built ONLY when the workspace-file primitive is wired: the whole point is
+  // to land bytes in the file layer so `sendFile` can deliver them, and a
+  // tool that always answers "storage is not available here" is worse than an
+  // absent one (the `gmailSendMessage` attachments conditioning).
+  //
+  // Read/allow like `syncMailboxNow` — it writes only inside the workspace,
+  // outbound delivery stays gated by `sendFile`. On-request only (D15): the
+  // sync worker never calls this, and nothing auto-mirrors a mailbox.
+  const saveAttachment = attachmentDeps
+    ? buildTool({
+        name: 'imapSaveAttachment',
+        requiresCapability: 'files',
+        description:
+          "Save one attachment from an email in the user's company mailbox into the workspace as a real file, then attach it to your reply with sendFile. " +
+          'Use this when the user asks for a document that arrived by email (a boarding pass, invoice, statement, contract) — read the message with imapGetMessage first, take the `partId` of the attachment you want from its attachment list, save it here, then pass the returned `fileId` to sendFile. ' +
+          `One attachment per call, up to ${formatMb(MAILBOX_ATTACHMENT_MAX_BYTES)}. ` +
+          'If more than one company mailbox is connected, pass `account` (the mailbox email) to choose which; omit it for the primary.',
+        inputSchema: z.object({
+          messageId: z.string().describe('The message id from imapSearchMessages or imapGetMessage (`folder:uid`).'),
+          partId: z
+            .string()
+            .describe('The `partId` of the attachment, taken from imapGetMessage\'s attachment list (e.g. "2" or "1.2").'),
+          title: z
+            .string()
+            .min(1)
+            .max(256)
+            .optional()
+            .describe('Display label for the saved file. Defaults to the attachment filename.'),
+          account: accountField,
+        }),
+        isConcurrencySafe: false,
+        isReadOnly: false,
+        requiresConfirmation: false,
+        // A multi-MB part over a residential link does not fit imapGetMessage's 20s.
+        timeoutMs: 60_000,
+
+        async execute(input, context) {
+          const gate = workspaceGate(context.workspaceId)
+          if (gate) return gate
+          const resolved = resolveMailboxAccount(router, input.account)
+          if (!resolved.ok) return { data: resolved.error, isError: true }
+          try {
+            // Both size gates (BODYSTRUCTURE pre-check + streamed byte count)
+            // live in the seam — only it can see the part metadata.
+            const attachment = await resolved.api.getAttachment(input.messageId, input.partId)
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            const safeName = safeAttachmentName(attachment.filename)
+            const stored = await attachmentDeps.filesApi.writeBytes(ctxFor(context), {
+              path: `/uploads/email/${stamp}-${safeName}`,
+              bytes: attachment.bytes,
+              mime: attachment.mime,
+              title: input.title ?? attachment.filename,
+              // Flat `internal` (D16) — no instance-level sensitivity exists
+              // on a mailbox to inherit from.
+              sensitivity: 'internal',
+            })
+            if (!stored.ok) return { data: errorMessage(stored.error), isError: true }
+            const file = stored.value
+            if (attachmentDeps.enqueueIngest) {
+              try {
+                await attachmentDeps.enqueueIngest({
+                  fileId: file.id,
+                  workspaceId: context.workspaceId!,
+                  actingUserId: context.userId,
+                  assistantId: context.assistantId ?? null,
+                })
+              } catch (err) {
+                console.warn(
+                  '[mailbox] attachment saved but ingest enqueue failed (best-effort):',
+                  err instanceof Error ? err.message : String(err),
+                )
+              }
+            }
+            return {
+              data: {
+                fileId: file.id,
+                path: file.path,
+                filename: attachment.filename,
+                sizeBytes: file.sizeBytes,
+              },
+            }
+          } catch (err) {
+            return mailboxError(err)
+          }
+        },
+      })
+    : null
+
+  return saveAttachment
+    ? [searchMessages, getMessage, sendMessage, saveAttachment]
+    : [searchMessages, getMessage, sendMessage]
 }

@@ -18,8 +18,10 @@ import { z } from 'zod'
 import { buildTool, type Tool } from '../tools/types.js'
 import type { FilesApi } from './api.js'
 import {
+  DOCUMENT_CAPABLE_CHANNELS,
   MAX_ATTACHMENTS_PER_TURN,
   MAX_EXTERNAL_DOCUMENT_BYTES,
+  documentByteCapFor,
 } from './attachments.js'
 import {
   ctxFor,
@@ -78,10 +80,17 @@ export function createSendFileTool(
           isError: true,
         }
       }
-      if (context.channelType === 'whatsapp') {
+      // A channel whose adapter ignores `documents` must be refused HERE.
+      // The pipeline hands documents to every adapter and the incapable ones
+      // drop them silently, so without this the tool would report success and
+      // the model would tell the user a file is attached that never arrives.
+      if (!DOCUMENT_CAPABLE_CHANNELS.has(context.channelType)) {
+        const where = 'Tell the user to fetch the file from the web app, or to ask again on web chat, Telegram, or Slack.'
         return {
           data:
-            'File attachments are not supported on WhatsApp. Tell the user to fetch the file from the web app, or to ask again on web chat, Telegram, or Slack.',
+            context.channelType === 'whatsapp'
+              ? `File attachments are not supported on WhatsApp. ${where}`
+              : `File attachments are not supported on this channel (${context.channelType}). ${where}`,
           isError: true,
         }
       }
@@ -102,9 +111,13 @@ export function createSendFileTool(
       }
 
       // ── Gate 3: caps ──
-      if (external && file.sizeBytes > MAX_EXTERNAL_DOCUMENT_BYTES) {
+      // Per-channel, because some platforms are stricter than our own ceiling
+      // (Discord: 10 MiB unboosted). Refusing here beats a 413 at the adapter,
+      // where the only honest outcome left is a "could not attach" notice.
+      const byteCap = external ? documentByteCapFor(context.channelType) : MAX_EXTERNAL_DOCUMENT_BYTES
+      if (external && file.sizeBytes > byteCap) {
         return {
-          data: `${file.path} is ${formatMb(file.sizeBytes)} — over the ${formatMb(MAX_EXTERNAL_DOCUMENT_BYTES)} limit for messaging channels. Tell the user to download it from the web app.`,
+          data: `${file.path} is ${formatMb(file.sizeBytes)} — over the ${formatMb(byteCap)} limit for this channel. Tell the user to download it from the web app.`,
           isError: true,
         }
       }

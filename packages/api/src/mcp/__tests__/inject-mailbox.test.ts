@@ -63,7 +63,19 @@ function preflightResult(over: Partial<ConnectorActionPreflight> = {}): Connecto
   }
 }
 
-async function injectImap(over: { audit?: ConnectorActionAudit } = {}) {
+/** Workspace-file primitive — present = `imapSaveAttachment` is built (D17). */
+function filesApiStub() {
+  return {
+    writeBytes: vi.fn(async () => ({
+      ok: true as const,
+      value: { id: 'file-1', path: '/uploads/email/x.pdf', sizeBytes: 3, mime: 'application/pdf' },
+    })),
+  } as never
+}
+
+async function injectImap(
+  over: { audit?: ConnectorActionAudit; instanceStore?: ConnectorInstanceStore; withFiles?: boolean } = {},
+) {
   const tools = new Map<string, Tool>()
   const result = await injectMcpTools({
     userId: 'u-1',
@@ -71,8 +83,9 @@ async function injectImap(over: { audit?: ConnectorActionAudit } = {}) {
     tools,
     connectorStore: { list: vi.fn().mockResolvedValue([imapConnectorRow()]) } as never,
     settingsStore: settingsStoreStub() as never,
-    connectorInstanceStore: instanceStoreStub(),
+    connectorInstanceStore: over.instanceStore ?? instanceStoreStub(),
     keepBuiltinsDirect: true,
+    ...(over.withFiles ? { filesApi: filesApiStub() } : {}),
     ...(over.audit ? { connectorActionAudit: over.audit } : {}),
   })
   return { tools, result }
@@ -235,5 +248,52 @@ describe('[COMP:tools/mailbox-imap] imap injection', () => {
     // The deny threw before createMailboxApi's sendMessage — no IMAP/SMTP
     // connection was ever attempted (nothing here stubs the network; a real
     // attempt would reject with a connection error, not the classifier copy).
+  })
+})
+
+describe('[COMP:tools/imap-attachments] imapSaveAttachment injection', () => {
+  it('registry classifies it read/allow — the write lands inside the workspace, sendFile gates egress', () => {
+    const row = OFFICIAL_CONNECTOR_TOOLS.imap.find((t) => t.name === 'imapSaveAttachment')
+    expect(row).toMatchObject({ classification: 'read', defaultPolicy: 'allow' })
+  })
+
+  it('is injected only when the workspace-file primitive is wired', async () => {
+    const withoutFiles = await injectImap()
+    expect(withoutFiles.tools.has('imapGetMessage')).toBe(true)
+    expect(withoutFiles.tools.has('imapSaveAttachment')).toBe(false)
+
+    const withFiles = await injectImap({ withFiles: true })
+    expect(withFiles.tools.has('imapSaveAttachment')).toBe(true)
+    expect(withFiles.tools.get('imapSaveAttachment')?.requiresConfirmation).toBeFalsy()
+  })
+
+  it('routes an auth failure inside getAttachment to the health probe (auth_failed)', async () => {
+    // The credential dies after binding: the injector resolved the mailbox
+    // email, then the per-call `getSettings` is refused the way imapflow
+    // refuses a revoked app password (structural flag, not HTTP prose).
+    const authError = Object.assign(new Error('Invalid credentials'), { authenticationFailed: true })
+    let calls = 0
+    const markHealth = vi.fn(async () => {})
+    const instanceStore = {
+      getAuthCredentialsSystem: vi.fn(async () => {
+        calls += 1
+        if (calls === 1) return IMAP_CREDS
+        throw authError
+      }),
+      getCredentialsSystem: vi.fn(async () => null),
+      markHealth,
+    } as unknown as ConnectorInstanceStore
+
+    const { tools } = await injectImap({ instanceStore, withFiles: true })
+    const save = tools.get('imapSaveAttachment')!
+    const result = await save.execute(
+      { messageId: 'INBOX:7', partId: '2' },
+      { workspaceId: 'ws-1', userId: 'u-1', assistantId: 'a-1' } as never,
+    )
+
+    expect(result.isError).toBe(true)
+    // markHealth is fire-and-forget inside the reporter — let the microtask run.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(markHealth).toHaveBeenCalledWith('inst-imap-1', 'auth_failed', expect.stringContaining('Invalid credentials'))
   })
 })

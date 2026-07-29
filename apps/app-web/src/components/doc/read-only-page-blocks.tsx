@@ -465,10 +465,26 @@ function BlockView({
       // Nested to-dos carry `indent` — mirror the editor's pitch with a
       // per-level inset (the public view has no taskList wrapper to nest).
       const indent = typeof block.indent === "number" && block.indent > 0 ? block.indent : 0;
+      // The checkbox sits in a one-line-tall band (`h-7` == the body's
+      // `leading-7`) and centres inside it, so it lands on the first text line
+      // and STAYS there when the row wraps — the editor's task row does the
+      // same with `calc(1.5em + 6px)`. The empty `<span>` is the tick (masked in
+      // `.doc-todo-check`, globals.css), mirroring the span Tiptap's TaskItem
+      // node view renders, so a published to-do renders the same control as the
+      // editor it was authored in.
       return (
         <label className="flex items-start gap-2" style={indent ? { marginLeft: indent * 24 } : undefined}>
-          <input type="checkbox" checked={Boolean(block.checked)} readOnly disabled className="mt-1" />
-          <div className="min-w-0 flex-1"><RichText value={block.richText} /></div>
+          <span className="doc-todo-check grid h-7 flex-none place-items-center">
+            <input type="checkbox" checked={Boolean(block.checked)} readOnly disabled />
+            <span />
+          </span>
+          <div
+            className={`min-w-0 flex-1${
+              block.checked ? " text-muted-foreground line-through" : ""
+            }`}
+          >
+            <RichText value={block.richText} />
+          </div>
         </label>
       );
     }

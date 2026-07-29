@@ -27,6 +27,58 @@ export function resolvePoolMax(raw: string | undefined): number {
 }
 
 const POOL_MAX = resolvePoolMax(process.env.PG_POOL_MAX)
+
+/**
+ * Per-CONNECTION `statement_timeout`, in milliseconds. The server-side half of
+ * backend-lifetime enforcement (B1a — docs/plans/corpus-substrate-hardening.md
+ * §3): a `PG_POOL_MAX` cap governs what a *live process* opens and says nothing
+ * about a backend whose client container died mid-query. PostgreSQL does not
+ * notice, and the backend runs on — the 2026-07-28 incident included a 33-hour
+ * `INSERT`, and the gap between the budgeted 20 backends and the observed 24
+ * was orphans. Only the server can reap those.
+ *
+ * Two values, chosen per service by the deploy script:
+ *   - interactive pools (`brian-api`, `brian-doc-sync`, `brian-api-admin`) —
+ *     **15s**. A user-facing query that runs longer has already failed the user;
+ *     failing it loudly beats pinning a slot the fleet has no spare of.
+ *   - the background lane (`brian-api-workers`) — **120s**, set via
+ *     `PG_STATEMENT_TIMEOUT_MS` in `scripts/deploy-api-workers.sh`. Background
+ *     work legitimately runs longer than a request, but not for hours.
+ *
+ * Set on the connection, never on the ROLE (D3): the system pool connects as
+ * the table OWNER, which is also the migration identity, so a role-level
+ * `statement_timeout` would cap `pnpm migrate` and `CREATE INDEX` too. Applying
+ * it from `POOL_OPTS` scopes it to pooled traffic and leaves `psql` and the
+ * migrate script alone.
+ *
+ * Delivered as a libpq startup option (`options: '-c statement_timeout=…'`)
+ * rather than a `SET` from a pool `connect` handler, because the handler is
+ * fire-and-forget: it races the checkout's first query (that race is exactly
+ * why `getPool()` carries no sentinel seed). The startup packet applies the
+ * setting before the connection is ever handed out.
+ *
+ * `0` disables it — the escape hatch for a self-host whose background work
+ * genuinely needs an unbounded statement, and the fallback if a Postgres-
+ * compatible target rejects the startup option. Exported for tests.
+ */
+/** Interactive lane (the default): a user-facing query gets 15s. */
+export const INTERACTIVE_STATEMENT_TIMEOUT_MS = 15_000
+/** Background lane: `scripts/deploy-api-workers.sh` sets this explicitly. */
+export const BACKGROUND_STATEMENT_TIMEOUT_MS = 120_000
+
+export function resolveStatementTimeoutMs(raw: string | undefined): number {
+  const trimmed = (raw ?? '').trim()
+  if (trimmed === '') return INTERACTIVE_STATEMENT_TIMEOUT_MS
+  // Whole-string digits only. `parseInt` would read `12s` as 12 and a typo'd
+  // unit would silently become a 12ms timeout that fails every query; garbage
+  // falls back to the interactive value rather than to "unbounded", because a
+  // typo must not restore the orphan-backend class either.
+  if (!/^\d+$/.test(trimmed)) return INTERACTIVE_STATEMENT_TIMEOUT_MS
+  return Number(trimmed)
+}
+
+const STATEMENT_TIMEOUT_MS = resolveStatementTimeoutMs(process.env.PG_STATEMENT_TIMEOUT_MS)
+
 // `connectionTimeoutMillis` is how long a checkout waits in the pool's queue
 // when all `max` connections are busy before it throws `timeout exceeded when
 // trying to connect`. Bumped 5s → 8s (2026-06-29) so a brief burst rides out as
@@ -36,7 +88,18 @@ const POOL_MAX = resolvePoolMax(process.env.PG_POOL_MAX)
 // would also slow failure detection during a real outage and stack onto
 // synchronous HTTP request timeouts. See docs/architecture/platform/deployment.md
 // → "fleet-wide connection budget".
-const POOL_OPTS = { max: POOL_MAX, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 8_000 }
+const POOL_OPTS = {
+  max: POOL_MAX,
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 8_000,
+  // Rides the libpq startup packet (see resolveStatementTimeoutMs). Both pools
+  // in a process share the lane, and PG_SINGLE_CONNECTION's one pool inherits
+  // the interactive value along with everything else — there is no second lane
+  // to give it.
+  ...(STATEMENT_TIMEOUT_MS > 0
+    ? { options: `-c statement_timeout=${STATEMENT_TIMEOUT_MS}` }
+    : {}),
+}
 
 /**
  * Single-connection mode for the embedded PGLite brain (the OSS local default).

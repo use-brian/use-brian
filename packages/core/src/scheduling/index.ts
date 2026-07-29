@@ -17,6 +17,13 @@ export {
 } from './tools.js'
 export { createPollWorker, createBatchWorker, isSessionResumeJob } from './poll-worker.js'
 export { startJitteredInterval, stopJitteredInterval } from './jitter.js'
+export {
+  runInBackgroundLane,
+  backgroundLaneStats,
+  configureBackgroundLane,
+  resolveBackgroundLaneConcurrency,
+  DEFAULT_BACKGROUND_LANE_CONCURRENCY,
+} from './background-lane.js'
 export type { JitteredIntervalHandle } from './jitter.js'
 export type {
   JobExecutor,

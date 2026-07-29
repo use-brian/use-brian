@@ -123,15 +123,19 @@ export function createDiscordApi(options: DiscordApiOptions) {
     path: string,
     body?: unknown,
   ): Promise<T> {
+    // A FormData body is a file upload: it must go out as multipart with the
+    // boundary fetch generates, so we neither stringify it nor set
+    // Content-Type (doing either produces an unparseable request).
+    const isMultipart = typeof FormData !== 'undefined' && body instanceof FormData
     for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       const res = await fetch(`${base}${path}`, {
         method,
         headers: {
           Authorization: `Bot ${options.token}`,
           'User-Agent': USER_AGENT,
-          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(body !== undefined && !isMultipart ? { 'Content-Type': 'application/json' } : {}),
         },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
+        body: body === undefined ? undefined : isMultipart ? (body as FormData) : JSON.stringify(body),
       })
 
       // 204 No Content (typing, reactions, delete) — nothing to parse.
@@ -167,6 +171,33 @@ export function createDiscordApi(options: DiscordApiOptions) {
     /** POST /channels/{channel.id}/messages — returns the created message (we read `id`). */
     createMessage: (channelId: string, body: DiscordCreateMessageBody) =>
       call<DiscordRestMessage>('POST', `/channels/${channelId}/messages`, body),
+
+    /**
+     * POST /channels/{channel.id}/messages as multipart — one real file
+     * attachment. Discord's contract: the JSON message goes in `payload_json`,
+     * the bytes in `files[0]`, and the two are linked by the `attachments`
+     * array's `id` matching the file index.
+     */
+    createMessageWithFile: (
+      channelId: string,
+      body: DiscordCreateMessageBody,
+      file: { filename: string; mime: string; data: Uint8Array },
+    ) => {
+      const form = new FormData()
+      form.append(
+        'payload_json',
+        JSON.stringify({
+          ...body,
+          attachments: [{ id: 0, filename: file.filename }],
+        }),
+      )
+      form.append(
+        'files[0]',
+        new Blob([Buffer.from(file.data)], { type: file.mime || 'application/octet-stream' }),
+        file.filename,
+      )
+      return call<DiscordRestMessage>('POST', `/channels/${channelId}/messages`, form)
+    },
 
     /** PATCH /channels/{channel.id}/messages/{message.id} */
     editMessage: (channelId: string, messageId: string, body: DiscordEditMessageBody) =>

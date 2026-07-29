@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import sharp from 'sharp'
 import { distillFileToText } from '../distill.js'
+import { minimalPdf } from './pdf-fixture.js'
 
 function mockResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
@@ -93,33 +94,64 @@ describe('[COMP:files/distill] distillFileToText', () => {
     expect(fetchFn).toHaveBeenCalledOnce()
   })
 
-  it('distills a PDF on DashScope via the qwen-long file-upload flow', async () => {
+  it('distills a PDF on DashScope by rendering every page to Qwen-VL, not qwen-long', async () => {
+    // One track, not two (pdf-universal-read §3). The `qwen-long` file-upload
+    // extraction used to run in parallel with a page-per-call vision loop;
+    // its output largely duplicated the transcription, so the document was
+    // paid for twice. Full-page vision subsumes it — there must be no
+    // `/files` upload for a PDF at all.
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetchFn = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      const u = String(url)
-      calls.push({ url: u, init })
-      if (u.endsWith('/files')) {
-        return mockResponse({ id: 'file-fe-xyz' })
-      }
+      calls.push({ url: String(url), init })
       return mockResponse({
-        choices: [{ message: { content: '# PDF content' } }],
+        choices: [{ message: { content: '## Page 1\n\n# PDF content' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 40, completion_tokens: 15 },
       })
     })
 
     const result = await distillFileToText(
-      { buffer: Buffer.from('%PDF-1.4 fake'), mime: 'application/pdf' },
+      { buffer: minimalPdf(1, 'PDF content'), mime: 'application/pdf' },
       {
         backend: { kind: 'dashscope', apiKey: 'test-key', baseUrl: 'https://dashscope.example/v1' },
         fetchFn: fetchFn as unknown as typeof fetch,
       },
     )
 
-    expect(result.text).toBe('# PDF content')
-    expect(result.model).toBe('qwen-long')
+    expect(result.text).toBe('## Page 1\n\n# PDF content')
+    expect(result.model).toBe('qwen-vl-max')
     expect(result.usage).toEqual({ inputTokens: 40, outputTokens: 15 })
-    expect(calls[0].url).toBe('https://dashscope.example/v1/files')
-    const chatBody = JSON.parse(calls[1].init!.body as string)
-    expect(chatBody.messages[0].content).toBe('fileid://file-fe-xyz')
+    expect(calls.every((c) => !c.url.endsWith('/files'))).toBe(true)
+
+    const body = JSON.parse(calls[0].init!.body as string)
+    expect(body.model).toBe('qwen-vl-max')
+    const content = body.messages[0].content as Array<{ type: string; image_url?: { url: string } }>
+    expect(content[0].type).toBe('text')
+    expect(content[1].image_url!.url).toMatch(/^data:image\/jpeg;base64,/)
+  })
+
+  it('batches consecutive pages into one vision call and stitches them in order', async () => {
+    // Six pages = one DashScope chunk (DASHSCOPE_CHUNK_PAGES), so the whole
+    // document is one call — the ~6x prompt-overhead saving over the old
+    // page-per-call loop.
+    const bodies: unknown[] = []
+    const fetchFn = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(init!.body as string))
+      return mockResponse({
+        choices: [{ message: { content: '## Page 1\n\na\n\n## Page 2\n\nb' }, finish_reason: 'stop' }],
+      })
+    })
+
+    const result = await distillFileToText(
+      { buffer: minimalPdf(6), mime: 'application/pdf' },
+      {
+        backend: { kind: 'dashscope', apiKey: 'k', baseUrl: 'https://ds.test/v1' },
+        fetchFn: fetchFn as unknown as typeof fetch,
+      },
+    )
+
+    expect(fetchFn).toHaveBeenCalledOnce()
+    const content = (bodies[0] as { messages: Array<{ content: unknown[] }> }).messages[0].content
+    expect(content).toHaveLength(7) // one prompt + six page images
+    expect(result.text).toContain('## Page 1')
   })
 })

@@ -150,6 +150,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   imapSearchMessages: 'Search company mailbox',
   imapGetMessage: 'Read company email',
   imapSendMessage: 'Send email from company mailbox',
+  imapSaveAttachment: 'Save email attachment',
   syncMailboxNow: 'Sync company mailbox now',
   searchEmailArchive: 'Search mailbox archive',
 

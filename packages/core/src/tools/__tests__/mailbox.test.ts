@@ -6,17 +6,22 @@ import {
   MAILBOX_DEFAULT_LIMIT,
   MAILBOX_MAX_LIMIT,
   MAILBOX_SNIPPET_CHARS,
+  MAILBOX_ATTACHMENT_MAX_BYTES,
   type MailboxApi,
   type MailboxAccountRouter,
+  type MailboxAttachmentDeps,
   type MailboxSearchHit,
 } from '../base/mailbox.js'
+import { MAX_EXTERNAL_DOCUMENT_BYTES } from '../../workspace-files/attachments.js'
+import type { FilesApi } from '../../workspace-files/api.js'
+import type { WorkspaceFile } from '../../workspace-files/types.js'
 import type { Tool, ToolContext } from '../types.js'
 
 const EMAIL = 'me@corp.com'
 
 /** The one-mailbox common case — wrap an api as the primary account. */
-function toolsFor(api: MailboxApi): Tool[] {
-  return createMailboxTools(singleMailboxRouter(api, EMAIL))
+function toolsFor(api: MailboxApi, opts?: { attachments?: MailboxAttachmentDeps }): Tool[] {
+  return createMailboxTools(singleMailboxRouter(api, EMAIL), opts)
 }
 
 function hit(overrides: Partial<MailboxSearchHit> = {}): MailboxSearchHit {
@@ -41,11 +46,35 @@ function makeApi(overrides: Partial<MailboxApi> = {}): MailboxApi {
       date: '2026-07-20T10:00:00.000Z',
       subject: 'Q3 numbers',
       body: 'The numbers are up.',
-      attachments: [{ filename: 'q3.pdf', mime: 'application/pdf', size: 1024 }],
+      attachments: [{ filename: 'q3.pdf', mime: 'application/pdf', size: 1024, partId: '2' }],
+    })),
+    getAttachment: vi.fn(async () => ({
+      filename: 'q3.pdf',
+      mime: 'application/pdf',
+      bytes: new Uint8Array([1, 2, 3, 4]),
     })),
     sendMessage: vi.fn(async () => ({ messageId: '<m1@corp.com>' })),
     ...overrides,
   }
+}
+
+/** Minimal workspace-file row — only the fields the tool reads back. */
+function storedFile(over: Partial<WorkspaceFile> = {}): WorkspaceFile {
+  return {
+    id: 'file-1',
+    path: '/uploads/email/2026-07-29T10-00-00-q3.pdf',
+    mime: 'application/pdf',
+    sizeBytes: 4,
+    ...over,
+  } as WorkspaceFile
+}
+
+function makeFilesApi(over: Partial<FilesApi> = {}): FilesApi {
+  return {
+    writeBytes: vi.fn(async () => ({ ok: true as const, value: storedFile() })),
+    stat: vi.fn(async () => ({ ok: true as const, value: storedFile() })),
+    ...over,
+  } as unknown as FilesApi
 }
 
 function toolByName(tools: Tool[], name: string): Tool {
@@ -252,6 +281,185 @@ describe('[COMP:tools/mailbox-imap] Multi-account routing (account param, defaul
     const result = await search.execute({ keywords: ['x'] }, CTX)
     expect(result.isError).toBe(true)
     expect(result.data).toMatch(/no company mailbox/i)
+  })
+})
+
+describe('[COMP:tools/imap-attachments] imapSaveAttachment (email bytes → workspace file)', () => {
+  const ATTACH_CTX = {
+    workspaceId: 'ws-1',
+    userId: 'user-1',
+    assistantId: 'asst-1',
+  } as unknown as ToolContext
+
+  function setup(over: { api?: MailboxApi; filesApi?: FilesApi } = {}) {
+    const api = over.api ?? makeApi()
+    const filesApi = over.filesApi ?? makeFilesApi()
+    const enqueueIngest = vi.fn(async () => {})
+    const tools = toolsFor(api, { attachments: { filesApi, enqueueIngest } })
+    return { api, filesApi, enqueueIngest, tool: toolByName(tools, 'imapSaveAttachment') }
+  }
+
+  it('is not built at all when no workspace-file api is wired (never a tool that always errors)', () => {
+    const names = toolsFor(makeApi()).map((t) => t.name)
+    expect(names).not.toContain('imapSaveAttachment')
+    expect(names).toContain('imapGetMessage')
+
+    const { tool } = setup()
+    expect(tool.name).toBe('imapSaveAttachment')
+    // Read/allow, no confirmation (the syncMailboxNow precedent) — the write
+    // lands inside the workspace; outbound delivery stays gated by sendFile.
+    expect(tool.requiresConfirmation).toBeFalsy()
+    expect(tool.requiresCapability).toBe('files')
+    expect(tool.timeoutMs).toBe(60_000)
+    // The description carries the chain — tool descriptions are the sanctioned
+    // place for tool-name references (Layer 1 stays tool-agnostic).
+    expect(tool.description).toContain('sendFile')
+    expect(tool.description).toContain('imapGetMessage')
+  })
+
+  it('only advertises the save chain from imapGetMessage when attachments are wired', () => {
+    const withoutFiles = toolByName(toolsFor(makeApi()), 'imapGetMessage')
+    expect(withoutFiles.description).not.toContain('imapSaveAttachment')
+
+    const { tool: _save } = setup()
+    const withFiles = toolByName(
+      toolsFor(makeApi(), { attachments: { filesApi: makeFilesApi() } }),
+      'imapGetMessage',
+    )
+    expect(withFiles.description).toContain('imapSaveAttachment')
+  })
+
+  it('caps saves at the sendFile document limit so a successful save is always deliverable (D16)', () => {
+    expect(MAILBOX_ATTACHMENT_MAX_BYTES).toBe(MAX_EXTERNAL_DOCUMENT_BYTES)
+  })
+
+  it('writes the bytes to /uploads/email as internal, enqueues ingest, and returns the file ref', async () => {
+    const { api, filesApi, enqueueIngest, tool } = setup()
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
+
+    expect(api.getAttachment).toHaveBeenCalledWith('INBOX:7', '2')
+    const [ctx, params] = (filesApi.writeBytes as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(ctx).toMatchObject({ workspaceId: 'ws-1', userId: 'user-1', assistantId: 'asst-1' })
+    expect(params.path).toMatch(/^\/uploads\/email\/.*q3\.pdf$/)
+    expect(params.mime).toBe('application/pdf')
+    expect(params.sensitivity).toBe('internal')
+    expect(params.title).toBe('q3.pdf')
+    expect(Array.from(params.bytes as Uint8Array)).toEqual([1, 2, 3, 4])
+
+    expect(enqueueIngest).toHaveBeenCalledWith({
+      fileId: 'file-1',
+      workspaceId: 'ws-1',
+      actingUserId: 'user-1',
+      assistantId: 'asst-1',
+    })
+    expect(result.isError).toBeFalsy()
+    expect(result.data).toEqual({
+      fileId: 'file-1',
+      path: '/uploads/email/2026-07-29T10-00-00-q3.pdf',
+      filename: 'q3.pdf',
+      sizeBytes: 4,
+    })
+  })
+
+  it('hands back a file id that resolves through FilesApi.stat, the shape sendFile needs', async () => {
+    const { filesApi, tool } = setup()
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
+    const { fileId } = result.data as { fileId: string }
+    const stat = await filesApi.stat(
+      { workspaceId: 'ws-1', userId: 'user-1' },
+      fileId,
+    )
+    expect(stat.ok).toBe(true)
+    expect(stat.ok && stat.value.id).toBe(fileId)
+  })
+
+  it('sanitises the stored filename and honors an explicit title', async () => {
+    const api = makeApi({
+      getAttachment: vi.fn(async () => ({
+        filename: '../../etc/boarding pass?.pdf',
+        mime: 'application/pdf',
+        bytes: new Uint8Array([9]),
+      })),
+    })
+    const { filesApi, tool } = setup({ api })
+    await tool.execute({ messageId: 'INBOX:7', partId: '2', title: 'Boarding pass' }, ATTACH_CTX)
+    const params = (filesApi.writeBytes as ReturnType<typeof vi.fn>).mock.calls[0][1]
+    // Separators and shell-hostile characters are stripped, so the mail-supplied
+    // name collapses to ONE leaf segment under /uploads/email — no traversal,
+    // whatever the sender called the file. (Dots survive inside the leaf; the
+    // stamp prefix means the leaf can never itself be "." or "..".)
+    expect(params.path).toMatch(/^\/uploads\/email\/[^/]+$/)
+    expect(params.path).not.toContain('?')
+    expect(params.path.split('/').pop()).not.toBe('..')
+    expect(params.title).toBe('Boarding pass')
+  })
+
+  it('refuses without a workspace, before touching the mailbox', async () => {
+    const { api, tool } = setup()
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, { userId: 'user-1' } as unknown as ToolContext)
+    expect(result.isError).toBe(true)
+    expect(api.getAttachment).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a stale-ref seam error verbatim so the model re-searches', async () => {
+    const api = makeApi({
+      getAttachment: vi.fn(async () => {
+        throw new Error('Message INBOX:7 is no longer in the mailbox (it may have been moved or deleted). Run imapSearchMessages again to get a current message id.')
+      }),
+    })
+    const { filesApi, tool } = setup({ api })
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('imapSearchMessages')
+    expect(filesApi.writeBytes).not.toHaveBeenCalled()
+  })
+
+  it('names the storage limit when the workspace quota refuses the write', async () => {
+    const filesApi = makeFilesApi({
+      writeBytes: vi.fn(async () => ({
+        ok: false as const,
+        error: { kind: 'quota_exceeded' as const, currentBytes: 10, limitBytes: 20, attemptedBytes: 30 },
+      })),
+    })
+    const { tool } = setup({ filesApi })
+    const result = await tool.execute({ messageId: 'INBOX:7', partId: '2' }, ATTACH_CTX)
+    expect(result.isError).toBe(true)
+    expect(result.data).toContain('quota')
+  })
+
+  it('still returns the saved file when the ingest enqueue fails (best-effort indexing)', async () => {
+    const filesApi = makeFilesApi()
+    const tools = toolsFor(makeApi(), {
+      attachments: { filesApi, enqueueIngest: async () => { throw new Error('queue down') } },
+    })
+    const result = await toolByName(tools, 'imapSaveAttachment').execute(
+      { messageId: 'INBOX:7', partId: '2' },
+      ATTACH_CTX,
+    )
+    expect(result.isError).toBeFalsy()
+    expect((result.data as { fileId: string }).fileId).toBe('file-1')
+  })
+
+  it('routes to the named account like every other mailbox tool', async () => {
+    const primary = makeApi()
+    const other = makeApi({
+      getAttachment: vi.fn(async () => ({ filename: 'o.pdf', mime: 'application/pdf', bytes: new Uint8Array([7]) })),
+    })
+    const bound = [
+      { email: 'me@corp.com', isPrimary: true, api: primary },
+      { email: 'other@corp.com', isPrimary: false, api: other },
+    ]
+    const router: MailboxAccountRouter = {
+      list: () => bound.map(({ email, isPrimary }) => ({ email, isPrimary })),
+      get: (email) => bound.find((b) => b.email.toLowerCase() === email.trim().toLowerCase())?.api,
+    }
+    const tools = createMailboxTools(router, { attachments: { filesApi: makeFilesApi() } })
+    await toolByName(tools, 'imapSaveAttachment').execute(
+      { messageId: 'INBOX:7', partId: '2', account: 'other@corp.com' },
+      ATTACH_CTX,
+    )
+    expect(other.getAttachment).toHaveBeenCalledTimes(1)
+    expect(primary.getAttachment).not.toHaveBeenCalled()
   })
 })
 

@@ -875,6 +875,34 @@ function mapThinkingLevel(level: 'low' | 'high' | undefined): 'low' | 'high' | u
   return level
 }
 
+/**
+ * The Codex app-server takes `image` and `audio` inline parts and nothing
+ * else. An `image` ContentBlock is the engine's carrier for ANY inline media,
+ * `application/pdf` included (Gemini's native `inlineData` reader is what that
+ * contract was shaped for) — so a PDF arriving here must never be forwarded as
+ * `data:application/pdf;base64,…` under an `image` part. GPT cannot decode it,
+ * the app-server does not reject it, and the turn proceeds as if the document
+ * had been read.
+ *
+ * `wrapDocumentAdaptation` swaps every PDF to distilled text before dispatch
+ * (`providers/document-adaptation.ts`), so this guard is the defense-in-depth
+ * layer behind it: it degrades to a typed note the model can report honestly
+ * rather than a silent misread. Spec: docs/architecture/engine/file-handling.md.
+ */
+function codexInlineMediaKind(mimeType: string): 'image' | 'audio' | null {
+  if (mimeType.startsWith('image/')) return 'image'
+  if (mimeType.startsWith('audio/')) return 'audio'
+  return null
+}
+
+function undeliverableMediaNote(mimeType: string): string {
+  return (
+    `[A ${mimeType} attachment could not be delivered to this model and was not converted to text ` +
+    `before dispatch. Tell the user plainly that the attachment was not read; do NOT guess at its ` +
+    `contents or claim it is still processing.]`
+  )
+}
+
 function messagesToUserInput(messages: readonly Message[]): UserInput[] {
   const input: UserInput[] = []
   for (const message of messages) {
@@ -886,10 +914,12 @@ function messagesToUserInput(messages: readonly Message[]): UserInput[] {
       if (block.type === 'text') {
         input.push({ type: 'text', text: truncateUtf8(block.text, MAX_HISTORY_ITEM_BYTES) })
       } else if (block.type === 'image') {
-        input.push({
-          type: block.mimeType.startsWith('audio/') ? 'audio' : 'image',
-          url: `data:${block.mimeType};base64,${block.data}`,
-        })
+        const kind = codexInlineMediaKind(block.mimeType)
+        if (kind) {
+          input.push({ type: kind, url: `data:${block.mimeType};base64,${block.data}` })
+        } else {
+          input.push({ type: 'text', text: undeliverableMediaNote(block.mimeType) })
+        }
       } else if (block.type === 'tool_result') {
         input.push({
           type: 'text',
@@ -934,11 +964,17 @@ function messageToInjectedItems(message: Message): unknown[] {
           text: `[Prior assistant image: ${block.mimeType}]`,
           annotations: [],
         })
-      } else {
+      } else if (codexInlineMediaKind(block.mimeType) === 'image') {
         content.push({
           type: 'input_image',
           image_url: `data:${block.mimeType};base64,${block.data}`,
         })
+      } else {
+        // Same guard as `messagesToUserInput`. History replay reaches here, so
+        // an undistilled PDF from an older turn degrades to a note rather than
+        // a fake image part. Audio has no injected-history part either. The
+        // assistant role was already handled above, so this is user/system.
+        content.push({ type: 'input_text', text: undeliverableMediaNote(block.mimeType) })
       }
     }
   }

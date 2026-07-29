@@ -32,6 +32,8 @@ import {
   vertexTransport, resolveVertexTokenSource, aiStudioTransport,
   createEmbedderForAdapter, type EmbedderAdapterConfig, type GoogleTransport, type MediaBackend,
   createGeminiProvider, createAnthropicProvider, createOpenAICompatProvider, createRoutingProvider,
+  distillConfigKey, DASHSCOPE_RENDER_WIDTH, DASHSCOPE_CHUNK_PAGES, PROVIDER_RENDER_WIDTH, PROVIDER_CHUNK_PAGES,
+  type DocumentDistillPort, type DistillateCachePort,
   DASHSCOPE_INTL_BASE_URL, DASHSCOPE_INTL_LABEL, wrapProvider,
   createBaseTools, LAYER_1_SYSTEM_PROMPT,
   createWorkerManager, createWorkerTools,
@@ -436,6 +438,7 @@ import { createDbCacheStore } from './db/cache-store.js'
 import { createDbFileStore } from './db/file-store.js'
 import { createDbAnalyticsStore } from './db/analytics-store.js'
 import { createDbJobStore } from './db/job-store.js'
+import { getPdfDistillate, savePdfDistillate } from './db/pdf-distillate-store.js'
 import { createDbSessionResumeStore } from './db/session-resume-store.js'
 import { createDbWorkerRunsStore } from './db/worker-runs-store.js'
 import { sweepStaleWorkerRuns } from './workers/worker-runs-cleanup.js'
@@ -1146,33 +1149,39 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
 
   // Media backend for file distillation + short-audio transcription. Google
   // (Gemini inlineData) via Vertex or AI Studio; a pure-Qwen deployment uses
-  // DashScope (Qwen-VL for images, qwen-long file-upload for PDFs/office docs,
-  // Qwen-ASR for audio). See media/backend.ts.
-  const mediaBackend: MediaBackend = vertexTx
+  // DashScope (Qwen-VL for images and page-rendered PDFs, qwen-long
+  // file-upload for office docs, Qwen-ASR for audio). See media/backend.ts.
+  //
+  // Preference is google → dashscope → the chat provider itself. That last
+  // rung is not cosmetic: this chain used to FALL THROUGH to a DashScope
+  // backend with `apiKey: ''` whenever neither a Google credential nor a
+  // DashScope key existed, so a Codex-only deployment (ChatGPT subscription
+  // as the sole model credential) 401'd on every distill attempt and had no
+  // working non-native document path at all. The provider-backed rung is
+  // resolved after the provider stack is built (see `resolveMediaBackend`
+  // below) because it needs the routing provider that does not exist yet.
+  const keyedMediaBackend: MediaBackend | undefined = vertexTx
     ? { kind: 'google', transport: vertexTx }
     : env.GEMINI_API_KEY
       ? { kind: 'google', transport: aiStudioTransport(env.GEMINI_API_KEY) }
-      : {
-          kind: 'dashscope',
-          apiKey: env.DASHSCOPE_API_KEY ?? '',
-          baseUrl: dashscopeBaseUrl,
-          ...(env.DASHSCOPE_VISION_MODEL ? { visionModel: env.DASHSCOPE_VISION_MODEL } : {}),
-          ...(env.DASHSCOPE_ASR_MODEL ? { asrModel: env.DASHSCOPE_ASR_MODEL } : {}),
-          ...(env.DASHSCOPE_LONG_MODEL ? { longModel: env.DASHSCOPE_LONG_MODEL } : {}),
-        }
-
-  const voiceTranscription = {
-    enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
-    apiKey: env.GEMINI_API_KEY ?? '',
-    backend: mediaBackend,
-    model: env.VOICE_TRANSCRIPTION_MODEL,
+      : env.DASHSCOPE_API_KEY
+        ? {
+            kind: 'dashscope',
+            apiKey: env.DASHSCOPE_API_KEY,
+            baseUrl: dashscopeBaseUrl,
+            ...(env.DASHSCOPE_VISION_MODEL ? { visionModel: env.DASHSCOPE_VISION_MODEL } : {}),
+            ...(env.DASHSCOPE_ASR_MODEL ? { asrModel: env.DASHSCOPE_ASR_MODEL } : {}),
+            ...(env.DASHSCOPE_LONG_MODEL ? { longModel: env.DASHSCOPE_LONG_MODEL } : {}),
+          }
+        : undefined
+  // Placeholder identity until the provider stack resolves the final rung.
+  // Everything between here and `resolveMediaBackend` only stores the value.
+  let mediaBackend: MediaBackend = keyedMediaBackend ?? {
+    kind: 'dashscope',
+    apiKey: '',
+    baseUrl: dashscopeBaseUrl,
   }
-  // Only Gemini/Anthropic ingest `application/pdf` inline; the OpenAI-compatible
-  // adapter (Qwen) sends every image block as an `image_url` and rejects a PDF.
-  // The media backend is always available for distillation; chat.ts decides
-  // per-turn whether the resolved model needs it (routing is per-model, so this
-  // can't be gated on the deployment).
-  const inlineDocumentDistill = { backend: mediaBackend }
+
   const memoryStore = createDbMemoryStore()
   const brainCandidateStore = ports.brainCandidateStore
   const memoryRecallEventsStore = createMemoryRecallEventsStore()
@@ -1370,8 +1379,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   if (extractionModel !== EXTRACTION_MODEL) {
     console.log(`[provider] extraction: ${extractionModel} (${EXTRACTION_MODEL} not servable)`)
   }
+  // A PDF bound for a model whose registry row says `nativePdf: false` is
+  // swapped for its distillate HERE, at the provider boundary — so web chat,
+  // every channel adapter, the outage fallback firing mid-turn, and replayed
+  // history all inherit it with no per-route wiring. Ports keep core DB-free.
+  //
+  // `mediaBackend` is read lazily inside `distill` because the provider-backed
+  // rung is resolved AFTER this provider exists (it needs `provider` itself).
+  const documentDistill: DocumentDistillPort = {
+    get configKey() {
+      return distillConfigKey({
+        renderWidth: mediaBackend.kind === 'dashscope' ? DASHSCOPE_RENDER_WIDTH : PROVIDER_RENDER_WIDTH,
+        chunkPages: mediaBackend.kind === 'dashscope' ? DASHSCOPE_CHUNK_PAGES : PROVIDER_CHUNK_PAGES,
+        model: mediaBackend.kind === 'provider' ? mediaBackend.model : mediaBackend.kind,
+      })
+    },
+    distill: async ({ buffer, mime }) => {
+      const result = await distillFileToText({ buffer, mime }, { backend: mediaBackend })
+      return { text: result.text, model: result.model, usage: result.usage }
+    },
+  }
+  const distillateCache: DistillateCachePort = {
+    get: (contentHash, configKey) => getPdfDistillate(contentHash, configKey),
+    set: (row) => savePdfDistillate(row),
+  }
+
   const provider: LLMProvider = createRoutingProvider(providerInstances, {
     availability: configuredProviders,
+    documentAdaptation: { distill: documentDistill, cache: distillateCache },
     // Re-evaluate at request time as well as boot. The ChatGPT catalog is
     // empty until OAuth completes, so boot-selected background/extraction
     // model ids must be able to move onto the newly available provider
@@ -1393,6 +1428,34 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     },
   })
 
+  // ── Media backend, final rung ──
+  //
+  // With no Google and no DashScope credential, distillation runs through the
+  // deployment's OWN chat model (`{ kind: 'provider' }`): pages render to
+  // images and ride ordinary `image` blocks, so any adapter that accepts them
+  // works and a ChatGPT subscription pays nothing per token. Before this, the
+  // chain fell through to `{ kind: 'dashscope', apiKey: '' }` and every
+  // distill attempt 401'd on a Codex-only box.
+  if (!keyedMediaBackend && configuredProviders.size > 0) {
+    const mediaModel = ensureServableModel(BACKGROUND_MODEL, configuredProviders)
+    const mediaModelRow = registryRow(mediaModel)
+    if (mediaModelRow?.capabilities.vision) {
+      mediaBackend = { kind: 'provider', provider, model: mediaModel }
+      console.log(`[media] backend: chat provider (${mediaModel}) — no Google or DashScope credential`)
+    } else {
+      console.warn(
+        `[media] no media backend: no Google/DashScope credential and the servable model ` +
+        `'${mediaModel}' has no vision capability. Documents will fall back to local text extraction.`,
+      )
+    }
+  }
+
+  const voiceTranscription = {
+    enabled: env.VOICE_TRANSCRIPTION_ENABLED ?? false,
+    apiKey: env.GEMINI_API_KEY ?? '',
+    backend: mediaBackend,
+    model: env.VOICE_TRANSCRIPTION_MODEL,
+  }
   const jobStore = createDbJobStore()
   const sessionResumeStore = createDbSessionResumeStore()
   const workerRunsStore = createDbWorkerRunsStore()
@@ -3485,7 +3548,6 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     planStore,
     jobStore,
     voiceTranscription,
-    inlineDocumentDistill,
     connectorActionStore,
     episodesStore,
     buildConnectorActionAudit: ports.buildConnectorActionAudit,
