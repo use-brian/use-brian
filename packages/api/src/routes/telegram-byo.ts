@@ -1497,7 +1497,7 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
           actions,
         })
       },
-      async sendResponse(text) {
+      async sendResponse(text, documents) {
         // Delete the tool status message, then send response as a new message
         if (statusMessageId) {
           await adapter.deleteMessage?.(incoming.channelId, statusMessageId)
@@ -1505,8 +1505,16 @@ async function processMessage(params: ProcessMessageParams): Promise<void> {
         }
         // Strip zero-width spaces (U+200B, U+FEFF) that some models emit as "empty" responses
         const cleaned = text.replace(/[\u200B\uFEFF]/g, '').trim()
-        if (cleaned) {
-          await adapter.sendMessage(incoming.channelId, { text, format: 'markdown' })
+        if (cleaned || documents?.length) {
+          // Documents must ride this send \u2014 the adapter uploads them after
+          // the text, and handles a documents-only message. A hook that
+          // ignores the parameter turns sendFile's success into a lie: the
+          // pipeline resolved the bytes, nothing errors, the file vanishes.
+          await adapter.sendMessage(incoming.channelId, {
+            text: cleaned ? text : '',
+            format: 'markdown',
+            documents,
+          })
         } else {
           // Loud-fail after query-loop's empty-response retries exhausted.
           // See telegram.ts comment + docs/architecture/engine/query-loop.md.

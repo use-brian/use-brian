@@ -452,18 +452,21 @@ export function msteamsRoutes(options: MsTeamsRouteOptions): Router {
             text: `${displayName}${inputSummary}\n\n${replyHint}`,
           })
         },
-        async sendResponse(text) {
+        async sendResponse(text, documents) {
           const finalText = text.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-          const reply = finalText || "I couldn't generate a reply — please rephrase or try again."
+          const hasDocuments = !!documents?.length
+          const reply = finalText || (hasDocuments ? '' : "I couldn't generate a reply — please rephrase or try again.")
           let channelMessageId: string | undefined
           // Edit-in-place: morph the status message into the response when it
           // fits one Teams activity; otherwise send fresh (chunked).
-          if (statusMessageId && reply.length <= adapter.maxMessageLength) {
+          // A reply carrying documents always sends fresh — an edit cannot
+          // attach uploads, so the edit path would silently drop them.
+          if (statusMessageId && !hasDocuments && reply.length <= adapter.maxMessageLength) {
             await adapter.editMessage(channelId, statusMessageId, { text: reply, format: 'markdown' })
             channelMessageId = statusMessageId
             statusMessageId = undefined
           } else {
-            channelMessageId = await adapter.sendMessage(channelId, { text: reply, format: 'markdown' })
+            channelMessageId = await adapter.sendMessage(channelId, { text: reply, format: 'markdown', documents })
             if (statusMessageId) {
               await adapter.editMessage(channelId, statusMessageId, { text: '…' }).catch(() => {})
               statusMessageId = undefined

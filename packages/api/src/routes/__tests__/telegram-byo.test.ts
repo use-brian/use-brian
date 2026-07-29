@@ -63,8 +63,8 @@ vi.mock('@use-brian/channels', async () => {
     createTelegramAdapter: (opts: Parameters<typeof actual.createTelegramAdapter>[0]) => {
       const real = actual.createTelegramAdapter(opts)
       return Object.assign(real, {
-        sendMessage: vi.fn(async (channelId: string, message: { text: string }) => {
-          adapterSendCalls.push({ channelId, text: message.text })
+        sendMessage: vi.fn(async (channelId: string, message: { text: string; documents?: OutgoingTestDocument[] }) => {
+          adapterSendCalls.push({ channelId, text: message.text, documents: message.documents })
           return 'msg_stub'
         }),
         sendStatus: vi.fn(async () => 'status_stub'),
@@ -134,7 +134,7 @@ vi.mock('../channel-pipeline.js', () => ({
     messageText?: string
     userContentBlocks?: Array<{ type: string; mimeType?: string }>
     hooks: {
-      sendResponse: (text: string) => Promise<void>
+      sendResponse: (text: string, documents?: OutgoingTestDocument[]) => Promise<void>
       sendError?: (err: Error) => Promise<void>
     }
   }) => {
@@ -145,7 +145,7 @@ vi.mock('../channel-pipeline.js', () => ({
       messageText: params.messageText,
       userContentBlocks: params.userContentBlocks,
     })
-    await params.hooks.sendResponse('ok')
+    await params.hooks.sendResponse('ok', pipelineDocuments)
   }),
 }))
 
@@ -204,7 +204,11 @@ vi.mock('../../db/channel-user-store.js', async () => {
 })
 
 // Capture outbound sendMessage invocations so we can assert the channel id.
-const adapterSendCalls: Array<{ channelId: string; text: string }> = []
+type OutgoingTestDocument = { filename: string; mime: string; data: Buffer; caption?: string }
+const adapterSendCalls: Array<{ channelId: string; text: string; documents?: OutgoingTestDocument[] }> = []
+// Set by a test to make the mocked pipeline hand documents to `sendResponse`
+// (the second argument the real pipeline passes at turn_complete).
+let pipelineDocuments: OutgoingTestDocument[] | undefined
 vi.mock('../../db/chat-lock.js', () => ({
   withChatLock: vi.fn(async (key: string, fn: () => Promise<unknown>) => {
     chatLockCalls.push(key)
@@ -274,6 +278,7 @@ beforeEach(() => {
   chatLockCalls.length = 0
   pipelineCalls.length = 0
   adapterSendCalls.length = 0
+  pipelineDocuments = undefined
   leaveChatCalls.length = 0
   teamRoleCalls.length = 0
   teamRoleResponse = null
@@ -1618,5 +1623,47 @@ describe('[COMP:api/telegram-byo-route] legacy URL self-heal', () => {
 
     expect(setWebhookCalls).toEqual([])
     expect(pipelineCalls).toHaveLength(1)
+  })
+})
+
+describe('[COMP:api/telegram-byo-route] outbound documents', () => {
+  it('threads pipeline documents through sendResponse to the adapter send', async () => {
+    // Regression: this hook used to declare only `(text)`, so the documents
+    // the pipeline resolved from sendFile vanished at this seam — adapter
+    // capable, pipeline correct, tool successful, file never delivered
+    // (the 2026-07-30 "sent your PDF" that never arrived).
+    pipelineDocuments = [
+      { filename: 'boarding-pass.pdf', mime: 'application/pdf', data: Buffer.from('%PDF-stub') },
+    ]
+    const app = createTestApp(
+      '/webhook/telegram-byo',
+      telegramByoRoutes({
+        provider: {} as never,
+        systemPrompt: '',
+        tools: new Map(),
+        memoryStore: {} as never,
+        integrationStore: makeIntegrationStore() as never,
+        capabilityStore: {} as never,
+        apiUrl: 'http://test',
+      }),
+    )
+
+    await postUpdate(app, {
+      update_id: 7001,
+      message: {
+        message_id: 700,
+        from: { id: 42, first_name: 'Hinson', username: 'hinson' },
+        chat: { id: 42, type: 'private' },
+        date: Math.floor(Date.now() / 1000),
+        text: 'send me the pdf',
+      },
+    })
+    await flushMicrotasks()
+    await flushMicrotasks()
+
+    expect(pipelineCalls).toHaveLength(1)
+    const send = adapterSendCalls.at(-1)
+    expect(send?.text).toBe('ok')
+    expect(send?.documents?.map((d) => d.filename)).toEqual(['boarding-pass.pdf'])
   })
 })
