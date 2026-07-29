@@ -213,7 +213,10 @@ describe('[COMP:media/backend] Multimodal backend per adapter', () => {
     // 12 pages / DASHSCOPE_CHUNK_PAGES(6) = two calls, all 12 pages sent.
     expect(seenPageCounts).toHaveLength(2)
     expect(seenPageCounts.reduce((a, b) => a + b, 0)).toBe(12)
-  })
+    // Rasterizing 12 real pages sits right at vitest's 5s default on CI
+    // runners (5016ms observed) — the count can't shrink below 11 without
+    // gutting the past-the-cap claim, so the budget grows instead.
+  }, 20_000)
 
   it('uses the longModel override for the qwen-long file-extract call', async () => {
     // A deployment whose Model Studio catalog lacks the default `qwen-long`
