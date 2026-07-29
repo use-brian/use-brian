@@ -125,7 +125,7 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
         target = accounts.find((a) => a.isPrimary) ?? accounts[0]
       }
       try {
-        const hits = await search(
+        const { hits, coverage } = await search(
           {
             ownerUserId: opts.ownerUserId,
             instanceId: target.instanceId,
@@ -137,7 +137,11 @@ export function createSearchEmailArchiveTool(opts: CreateArchiveSearchToolOption
           },
           opts.deps.embedder ? { embedder: opts.deps.embedder } : undefined,
         )
-        return { data: hits }
+        // Partial coverage rides WITH the results (B7). Without it the model
+        // cannot tell "nothing matched" from "not all of it is indexed yet",
+        // and reports an absence it has no basis for — which the embed budget
+        // makes a permanent condition, not a transient one.
+        return { data: coverage.note ? { hits, coverage: coverage.note } : hits }
       } catch (err) {
         return {
           data: `searchEmailArchive failed: ${err instanceof Error ? err.message : String(err)}`,
