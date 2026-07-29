@@ -289,6 +289,11 @@ export class FirefoxBidiExecutor {
         return { typed: true };
       case "currentUrl":
         return this.currentUrl();
+      case "captureFrame":
+        return this.captureFrame();
+      case "takeoverInput":
+        await this.takeoverInput(args.event as Record<string, unknown>);
+        return { forwarded: true };
       default:
         throw new FirefoxBidiError(`Unknown browser operation ${op}.`, "backend_error");
     }
@@ -412,6 +417,102 @@ export class FirefoxBidiExecutor {
       url: context.url ?? "",
       title: typeof decodeRemoteValue(titleResponse.result) === "string" ? String(decodeRemoteValue(titleResponse.result)) : "",
     };
+  }
+
+  private async captureFrame(): Promise<{ data: string; mimeType: string }> {
+    const result = (await this.command("browsingContext.captureScreenshot", {
+      context: this.mustContext(),
+      origin: "viewport",
+      format: { type: "image/jpeg", quality: 0.55 },
+    })) as { data?: unknown };
+    if (typeof result.data !== "string" || !result.data) {
+      throw new FirefoxBidiError("Firefox returned an empty browser frame.", "backend_error");
+    }
+    return { data: result.data, mimeType: "image/jpeg" };
+  }
+
+  private async takeoverInput(event: Record<string, unknown>): Promise<void> {
+    const context = this.mustContext();
+    if (event.kind === "click") {
+      const x = Number(event.x);
+      const y = Number(event.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw new FirefoxBidiError("Invalid Take-Over click coordinates.", "backend_error");
+      }
+      const viewportResult = await this.callFunction("() => ({ width: window.innerWidth, height: window.innerHeight })");
+      const viewport = decodeRemoteValue(viewportResult.result) as { width?: unknown; height?: unknown };
+      const frameW = Number(event.frameW);
+      const frameH = Number(event.frameH);
+      const px = frameW > 0 && typeof viewport.width === "number" ? (x * viewport.width) / frameW : x;
+      const py = frameH > 0 && typeof viewport.height === "number" ? (y * viewport.height) / frameH : y;
+      await this.command("input.performActions", {
+        context,
+        actions: [{
+          type: "pointer",
+          id: "use-brian-takeover-mouse",
+          parameters: { pointerType: "mouse" },
+          actions: [
+            { type: "pointerMove", x: Math.round(px), y: Math.round(py), duration: 0, origin: "viewport" },
+            { type: "pointerDown", button: 0 },
+            { type: "pointerUp", button: 0 },
+          ],
+        }],
+      });
+      return;
+    }
+    if (event.kind === "key") {
+      const raw = String(event.text ?? "");
+      const named: Record<string, string> = {
+        Enter: "\uE007", Tab: "\uE004", Backspace: "\uE003", Delete: "\uE017",
+        Escape: "\uE00C", ArrowLeft: "\uE012", ArrowUp: "\uE013",
+        ArrowRight: "\uE014", ArrowDown: "\uE015", Home: "\uE011", End: "\uE010",
+        PageUp: "\uE00E", PageDown: "\uE00F",
+      };
+      const value = raw.length === 1 ? raw : named[raw];
+      if (!value) return;
+      await this.command("input.performActions", {
+        context,
+        actions: [{
+          type: "key",
+          id: "use-brian-takeover-keyboard",
+          actions: [{ type: "keyDown", value }, { type: "keyUp", value }],
+        }],
+      });
+      return;
+    }
+    if (event.kind === "scroll") {
+      const deltaY = Number(event.deltaY);
+      if (!Number.isFinite(deltaY)) {
+        throw new FirefoxBidiError("Invalid Take-Over scroll distance.", "backend_error");
+      }
+      await this.command("input.performActions", {
+        context,
+        actions: [{
+          type: "wheel",
+          id: "use-brian-takeover-wheel",
+          actions: [{ type: "scroll", x: 0, y: 0, deltaX: 0, deltaY: Math.round(deltaY), duration: 0, origin: "viewport" }],
+        }],
+      });
+      return;
+    }
+    if (event.kind !== "navigate") {
+      throw new FirefoxBidiError("Invalid Take-Over input event.", "backend_error");
+    }
+    const action = String(event.action ?? "");
+    if (action === "reload") {
+      await this.command("browsingContext.reload", { context, wait: "complete" });
+    } else if (action === "goto") {
+      const url = String(event.url ?? "");
+      if (!/^https?:\/\//i.test(url)) {
+        throw new FirefoxBidiError("Take-Over navigation accepts only http(s) URLs.", "backend_error");
+      }
+      this.refs.clear();
+      await this.command("browsingContext.navigate", { context, url, wait: "complete" });
+    } else if (action === "back" || action === "forward") {
+      await this.command("browsingContext.traverseHistory", { context, delta: action === "back" ? -1 : 1 });
+    } else {
+      throw new FirefoxBidiError("Invalid Take-Over navigation action.", "backend_error");
+    }
   }
 
   async stop(): Promise<void> {

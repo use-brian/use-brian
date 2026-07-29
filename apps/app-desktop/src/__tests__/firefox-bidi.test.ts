@@ -55,6 +55,8 @@ class FakeSocket {
       }
     } else if (message.method === "browsingContext.navigate") {
       result = { url: message.params.url };
+    } else if (message.method === "browsingContext.captureScreenshot") {
+      result = { data: "jpeg-data" };
     }
     queueMicrotask(() => this.emit("message", { data: JSON.stringify({ id: message.id, result }) }));
   }
@@ -87,6 +89,14 @@ describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
       url: "https://example.com",
       title: "Example",
     });
+    expect(await executor.execute("captureFrame", {})).toEqual({
+      data: "jpeg-data",
+      mimeType: "image/jpeg",
+    });
+    await executor.execute("takeoverInput", {
+      event: { kind: "click", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+    expect(socket.sent.some((message) => message.method === "browsingContext.captureScreenshot")).toBe(true);
   });
 
   it("rejects generic protocol access and non-http navigation", async () => {
