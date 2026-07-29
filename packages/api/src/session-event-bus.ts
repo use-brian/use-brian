@@ -7,11 +7,11 @@
  *
  * Wires three jobs into one module:
  *
- *   1. **Cross-instance fan-out.** A dedicated `pg.Client` (outside the
- *      pool) holds `LISTEN session_event` for the lifetime of the
- *      Cloud Run instance. Whenever a route emits an event for a session,
- *      every instance with a subscriber for that sessionId receives the
- *      NOTIFY and pushes the SSE frame.
+ *   1. **Cross-instance fan-out.** `LISTEN session_event` rides the
+ *      process-wide shared connection (`./db/notify-listener.ts`), which
+ *      owns connect, reconnect-with-backoff, and re-subscribe. Whenever a
+ *      route emits an event for a session, every instance with a subscriber
+ *      for that sessionId receives the NOTIFY and pushes the SSE frame.
  *
  *   2. **Local in-process fan-out.** The producer instance does not wait
  *      for the NOTIFY round-trip — `emit()` dispatches to local
@@ -32,8 +32,12 @@
  * See docs/architecture/features/doc-comments.md → "Live turn reconnect".
  */
 
-import pg from 'pg'
 import { getPool, query } from './db/client.js'
+import {
+  registerNotifyChannel,
+  startNotifyListener,
+  unregisterNotifyChannel,
+} from './db/notify-listener.js'
 import { getSessionMessages } from './db/sessions.js'
 // The event TYPES live in the port (so route builders can reference them as an
 // injected dependency). Re-exported below for consumers that import them here.
@@ -80,88 +84,29 @@ type PresenceEntry = {
   connections: number
 }
 
-let listenerClient: pg.Client | null = null
-let listenerStatus: 'idle' | 'connecting' | 'listening' | 'reconnecting' = 'idle'
-let reconnectTimer: NodeJS.Timeout | null = null
 let sweepTimer: NodeJS.Timeout | null = null
-let backoffMs = 1_000
 
 const subscribers = new Set<Subscriber>()
 /** Per-session presence: sessionId → userId → entry. */
 const presence = new Map<string, Map<string, PresenceEntry>>()
 
-function buildClient(): pg.Client {
-  return new pg.Client({ connectionString: process.env.DATABASE_URL })
-}
-
-async function startListener(): Promise<void> {
-  if (listenerStatus === 'connecting' || listenerStatus === 'listening') return
-  listenerStatus = 'connecting'
-
-  const client = buildClient()
-  listenerClient = client
-
-  client.on('notification', (msg) => {
-    if (msg.channel !== CHANNEL || !msg.payload) return
-    let parsed: { kind: SessionEvent['kind']; sessionId: string; payload?: unknown; pointer?: { sequenceNum: number } }
-    try {
-      parsed = JSON.parse(msg.payload)
-    } catch {
-      return
-    }
-    if (!parsed.sessionId || !parsed.kind) return
-
-    if (parsed.pointer) {
-      // Large payload — fetch before fanout.
-      void hydrateAndDispatch(parsed.sessionId, parsed.kind, parsed.pointer.sequenceNum)
-      return
-    }
-
-    dispatchToLocal({ kind: parsed.kind, sessionId: parsed.sessionId, payload: parsed.payload } as SessionEvent)
-  })
-
-  client.on('error', (err) => {
-    console.warn('[session-event-bus] listener error, will reconnect:', err.message)
-    scheduleReconnect()
-  })
-  client.on('end', () => {
-    if (listenerStatus !== 'reconnecting') {
-      console.warn('[session-event-bus] listener ended unexpectedly')
-      scheduleReconnect()
-    }
-  })
-
+/** Shared-connection handler for `session_event`. */
+function handleSessionNotification(payload: string): void {
+  let parsed: { kind: SessionEvent['kind']; sessionId: string; payload?: unknown; pointer?: { sequenceNum: number } }
   try {
-    await client.connect()
-    await client.query(`LISTEN ${CHANNEL}`)
-    listenerStatus = 'listening'
-    backoffMs = 1_000
-    console.log(`[session-event-bus] LISTEN ${CHANNEL} active`)
-  } catch (err) {
-    console.warn('[session-event-bus] failed to start listener:', err)
-    scheduleReconnect()
+    parsed = JSON.parse(payload)
+  } catch {
+    return
   }
-}
+  if (!parsed.sessionId || !parsed.kind) return
 
-function scheduleReconnect(): void {
-  if (listenerStatus === 'reconnecting') return
-  listenerStatus = 'reconnecting'
-
-  if (listenerClient) {
-    listenerClient.removeAllListeners()
-    listenerClient.end().catch(() => {})
-    listenerClient = null
+  if (parsed.pointer) {
+    // Large payload — fetch before fanout.
+    void hydrateAndDispatch(parsed.sessionId, parsed.kind, parsed.pointer.sequenceNum)
+    return
   }
 
-  const delay = backoffMs
-  backoffMs = Math.min(backoffMs * 2, 30_000)
-
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    listenerStatus = 'idle'
-    void startListener()
-  }, delay)
+  dispatchToLocal({ kind: parsed.kind, sessionId: parsed.sessionId, payload: parsed.payload } as SessionEvent)
 }
 
 function dispatchToLocal(event: SessionEvent): void {
@@ -310,11 +255,12 @@ function startSweep(): void {
  * before the first SSE subscriber connects.
  */
 export function startSessionEventBus(): void {
-  // Single-process boot skips the dedicated LISTEN connection entirely (no
+  // Single-process boot skips the LISTEN subscription entirely (no
   // cross-instance fan-out to receive). The local-dispatch + presence sweep
   // below is the whole bus in that mode.
-  if (!SINGLE_PROCESS && listenerStatus === 'idle') {
-    void startListener()
+  if (!SINGLE_PROCESS) {
+    registerNotifyChannel(CHANNEL, handleSessionNotification)
+    startNotifyListener()
   }
   startSweep()
 }
@@ -435,18 +381,15 @@ export function _getSessionSubscriberCount(): number {
   return subscribers.size
 }
 
-/** Test helper — graceful shutdown for vitest cleanup. */
+/**
+ * Test helper — graceful shutdown for vitest cleanup. Deregisters only THIS
+ * module's channel; the shared connection closes itself once the last channel
+ * goes, so tearing this bus down never silences the others.
+ */
 export async function _shutdownSessionEventBus(): Promise<void> {
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = null
   if (sweepTimer) clearInterval(sweepTimer)
   sweepTimer = null
-  if (listenerClient) {
-    listenerClient.removeAllListeners()
-    await listenerClient.end().catch(() => {})
-    listenerClient = null
-  }
-  listenerStatus = 'idle'
+  await unregisterNotifyChannel(CHANNEL)
   subscribers.clear()
   presence.clear()
   void getPool

@@ -1,22 +1,23 @@
 /**
  * Postgres LISTEN/NOTIFY fan-out for the brain realtime stream.
  *
- * Mirrors the feed inbox SSE pattern (`../feed/sse-fanout.ts`). One dedicated
- * `pg.Client` per process holds the LISTEN connection (LISTEN binds to a
- * single connection — pool checkouts can't carry it). Subscribers register a
- * callback against a `workspaceId`; whenever a writer calls
+ * Mirrors the feed inbox SSE pattern (`../feed/sse-fanout.ts`). Subscribers
+ * register a callback against a `workspaceId`; whenever a writer calls
  * `notifyBrainChange({ workspaceId, primitive, rowId?, action })`, the
  * Postgres NOTIFY fans out to every interested subscriber across this
  * process — and across every other Cloud Run instance.
  *
- * Reconnect is exponential-backoff (1s → 30s cap). On reconnect we re-issue
- * LISTEN so we resume receiving events.
+ * The LISTEN side rides the process-wide shared connection
+ * (`../db/notify-listener.ts`), which owns connect, reconnect-with-backoff, and
+ * re-subscribe. This module used to hold its own `pg.Client`; three fan-out
+ * modules each doing that put six dedicated connections against a 22-slot
+ * fleet budget. See that module's header for the incident.
  *
  * Spec: docs/architecture/platform/realtime-sync.md.
  *
  * [COMP:api/brain-stream-fanout]
  */
-import pg from 'pg'
+import { registerNotifyChannel, startNotifyListener, unregisterNotifyChannel } from '../db/notify-listener.js'
 
 export const BRAIN_CHANNEL = 'brain_events'
 
@@ -95,77 +96,18 @@ type Subscriber = {
   cb: BrainSubscriber
 }
 
-let listenerClient: pg.Client | null = null
-let listenerStatus: 'idle' | 'connecting' | 'listening' | 'reconnecting' = 'idle'
-let reconnectTimer: NodeJS.Timeout | null = null
-let backoffMs = 1_000
 const subscribers = new Set<Subscriber>()
 
-function buildClient(): pg.Client {
-  return new pg.Client({ connectionString: process.env.DATABASE_URL })
-}
-
-async function startListener(): Promise<void> {
-  if (listenerStatus === 'connecting' || listenerStatus === 'listening') return
-  listenerStatus = 'connecting'
-
-  const client = buildClient()
-  listenerClient = client
-
-  client.on('notification', (msg) => {
-    if (msg.channel !== BRAIN_CHANNEL || !msg.payload) return
-    let parsed: BrainChangePayload
-    try {
-      parsed = JSON.parse(msg.payload) as BrainChangePayload
-    } catch {
-      return
-    }
-    if (!parsed.workspaceId) return
-    dispatchBrainChangeLocal(parsed)
-  })
-
-  client.on('error', (err) => {
-    console.warn('[brain-stream] listener error, will reconnect:', err.message)
-    scheduleReconnect()
-  })
-  client.on('end', () => {
-    if (listenerStatus !== 'reconnecting') {
-      console.warn('[brain-stream] listener ended unexpectedly')
-      scheduleReconnect()
-    }
-  })
-
+/** Shared-connection handler for `brain_events`. Parses, then dispatches locally. */
+function handleBrainNotification(payload: string): void {
+  let parsed: BrainChangePayload
   try {
-    await client.connect()
-    await client.query(`LISTEN ${BRAIN_CHANNEL}`)
-    listenerStatus = 'listening'
-    backoffMs = 1_000
-    console.log(`[brain-stream] LISTEN ${BRAIN_CHANNEL} active`)
-  } catch (err) {
-    console.warn('[brain-stream] failed to start listener:', err)
-    scheduleReconnect()
+    parsed = JSON.parse(payload) as BrainChangePayload
+  } catch {
+    return
   }
-}
-
-function scheduleReconnect(): void {
-  if (listenerStatus === 'reconnecting') return
-  listenerStatus = 'reconnecting'
-
-  if (listenerClient) {
-    listenerClient.removeAllListeners()
-    listenerClient.end().catch(() => {})
-    listenerClient = null
-  }
-
-  const delay = backoffMs
-  backoffMs = Math.min(backoffMs * 2, 30_000)
-
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    listenerStatus = 'idle'
-    void startListener()
-  }, delay)
+  if (!parsed.workspaceId) return
+  dispatchBrainChangeLocal(parsed)
 }
 
 /**
@@ -176,9 +118,9 @@ function scheduleReconnect(): void {
 export function startBrainStreamFanout(): void {
   // Single-process boot skips the LISTEN connection entirely — writes reach
   // local subscribers directly via dispatchBrainChangeLocal (see notify.ts).
-  if (!SINGLE_PROCESS && listenerStatus === 'idle') {
-    void startListener()
-  }
+  if (SINGLE_PROCESS) return
+  registerNotifyChannel(BRAIN_CHANNEL, handleBrainNotification)
+  startNotifyListener()
 }
 
 /**
@@ -210,15 +152,12 @@ export function _dispatchLocalForTests(payload: BrainChangePayload): void {
   dispatchBrainChangeLocal(payload)
 }
 
-/** Test helper — graceful shutdown for vitest cleanup. */
+/**
+ * Test helper — graceful shutdown for vitest cleanup. Deregisters only THIS
+ * module's channel; the shared connection closes itself once the last channel
+ * goes, so tearing this fan-out down never silences the others.
+ */
 export async function _shutdownBrainStreamFanout(): Promise<void> {
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-  reconnectTimer = null
-  if (listenerClient) {
-    listenerClient.removeAllListeners()
-    await listenerClient.end().catch(() => {})
-    listenerClient = null
-  }
-  listenerStatus = 'idle'
+  await unregisterNotifyChannel(BRAIN_CHANNEL)
   subscribers.clear()
 }
