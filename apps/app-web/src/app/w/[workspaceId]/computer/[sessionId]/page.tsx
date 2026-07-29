@@ -121,6 +121,9 @@ export default function ComputerTakeoverPage(props: {
   const [stream, setStream] = useState<TakeoverStreamSession | null>(null);
   const [mode, setMode] = useState<StreamMode>("connecting");
   const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
+  const [inputStatus, setInputStatus] = useState<
+    "idle" | "sending" | "holding" | "delivered" | "failed"
+  >("idle");
   const [site, setSite] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<
@@ -145,6 +148,7 @@ export default function ComputerTakeoverPage(props: {
   } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pointerDeliveryFailed = useRef(false);
   const streamRef = useRef<TakeoverStreamSession | null>(null);
   streamRef.current = stream;
 
@@ -342,21 +346,40 @@ export default function ComputerTakeoverPage(props: {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(event));
+        setInputStatus(event.kind === "pointer" && event.action === "down" ? "holding" : "delivered");
         return;
       }
       if (event.kind === "move") return;
+      if (event.kind === "pointer" && event.action === "down") pointerDeliveryFailed.current = false;
+      setInputStatus("sending");
       // HTTP requests have no ordering guarantee. Serialize them so a quick
       // pointer-up can never overtake pointer-down and leave the remote mouse stuck.
       inputQueueRef.current = inputQueueRef.current
         .catch(() => {})
         .then(async () => {
-          const live = streamRef.current;
-          if (live && (await sendStreamInput(live.inputUrl, event))) return;
-          await sendComputerInput(sessionId, event);
+          let delivered = false;
+          try {
+            const live = streamRef.current;
+            delivered = !!(live && (await sendStreamInput(live.inputUrl, event)));
+            if (!delivered) delivered = await sendComputerInput(sessionId, event);
+          } catch {
+            delivered = false;
+          }
+          if (!delivered && event.kind === "pointer") pointerDeliveryFailed.current = true;
+          if (!delivered || (event.kind === "pointer" && pointerDeliveryFailed.current)) {
+            setInputStatus("failed");
+          } else {
+            setInputStatus(event.kind === "pointer" && event.action === "down" ? "holding" : "delivered");
+          }
         });
     },
     [sessionId],
   );
+  useEffect(() => {
+    if (inputStatus !== "delivered") return;
+    const timer = setTimeout(() => setInputStatus("idle"), 900);
+    return () => clearTimeout(timer);
+  }, [inputStatus]);
 
   const forwardPointerDown = useCallback(
     (e: React.PointerEvent<HTMLImageElement>) => {
@@ -763,6 +786,26 @@ export default function ComputerTakeoverPage(props: {
             className="pointer-events-none absolute h-5 w-5 animate-ping rounded-full border-2 border-primary/70"
             style={{ left: ripple.x - 10, top: ripple.y - 10 }}
           />
+        ) : null}
+        {inputStatus !== "idle" ? (
+          <div
+            role="status"
+            className={`pointer-events-none absolute left-3 top-3 rounded-full border px-2.5 py-1 text-[11px] font-medium shadow-sm ${
+              inputStatus === "failed"
+                ? "border-destructive/50 bg-destructive/10 text-destructive"
+                : inputStatus === "holding"
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-600"
+                  : "border-border bg-background/90 text-muted-foreground"
+            }`}
+          >
+            {inputStatus === "sending"
+              ? t.computer.inputSending
+              : inputStatus === "holding"
+                ? t.computer.inputHolding
+                : inputStatus === "failed"
+                  ? t.computer.inputFailed
+                  : t.computer.inputDelivered}
+          </div>
         ) : null}
         {stalled ? (
           <div className="absolute inset-x-0 bottom-0 bg-background/80 px-3 py-1.5 text-center text-xs text-muted-foreground">
