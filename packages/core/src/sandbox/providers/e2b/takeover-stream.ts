@@ -294,11 +294,20 @@ async function dispatchInput(event, retried) {
     // width applies (their frame IS the latest frame, minus a tiny race).
     const fw = Number(event.frameW) || (latest ? latest.frameW : 0)
     const scale = fw > 0 && latest && latest.deviceW > 0 ? latest.deviceW / fw : 1
-    if (event.kind === 'click') {
+    if (event.kind === 'click' || event.kind === 'pointer') {
       const base = { x: Math.round(event.x * scale), y: Math.round(event.y * scale), button: 'left', clickCount: 1, pointerType: 'mouse' }
-      await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' }, sid)
-      await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sid)
-      await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sid)
+      await cdpSend(conn, 'Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mouseMoved',
+        button: 'none',
+        buttons: event.kind === 'pointer' && event.action !== 'down' ? 1 : 0,
+      }, sid)
+      if (event.kind === 'click' || event.action === 'down') {
+        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 }, sid)
+      }
+      if (event.kind === 'click' || event.action === 'up') {
+        await cdpSend(conn, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }, sid)
+      }
     } else if (event.kind === 'move') {
       await cdpSend(conn, 'Input.dispatchMouseEvent', {
         type: 'mouseMoved',
@@ -346,6 +355,15 @@ async function dispatchInput(event, retried) {
     if (!retried) return dispatchInput(event, true)
     throw err
   }
+}
+
+// WebSocket frames and HTTP requests can arrive concurrently. Serialize the
+// browser input sequence so pointer up cannot overtake pointer down or move.
+let inputQueue = Promise.resolve()
+function queueInput(event) {
+  const next = inputQueue.then(() => dispatchInput(event, false))
+  inputQueue = next.catch(() => {})
+  return next
 }
 
 // ── WebSocket server leg (dependency-free RFC 6455 subset) ──
@@ -423,7 +441,7 @@ function handleUpgrade(req, socket, head) {
       if (opcode === 8) { close(); return }
       if (opcode === 9) { socket.write(wsFrame(10, data)); continue }
       if (opcode === 1) {
-        try { void dispatchInput(JSON.parse(data.toString('utf8')), false).catch(() => {}) } catch {}
+        try { void queueInput(JSON.parse(data.toString('utf8'))).catch(() => {}) } catch {}
       }
     }
   })
@@ -469,7 +487,7 @@ const server = http.createServer((req, res) => {
     req.on('data', (c) => { body += c; if (body.length > 65536) req.destroy() })
     req.on('end', async () => {
       try {
-        await dispatchInput(JSON.parse(body), false)
+        await queueInput(JSON.parse(body))
         res.writeHead(204)
         res.end()
       } catch (err) {

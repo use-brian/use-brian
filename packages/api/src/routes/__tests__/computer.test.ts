@@ -1,15 +1,17 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import request from 'supertest'
 import { createTestApp } from './helpers.js'
-import { computerRoutes } from '../computer.js'
+import { computerRoutes, createInMemoryLocalComputerTaskStore } from '../computer.js'
 import {
   StubSandboxProvider,
   createCloudBrowserProvider,
   createInMemoryBrowserProfileStore,
   createInMemorySandboxTaskStore,
   createInMemorySessionVault,
+  createLocalBrowserProvider,
   createSandboxOrchestrator,
 } from '@use-brian/core'
+import type { BrowserProvider } from '@use-brian/core'
 
 const MEMBER_ROLE = async (_userId: string, _workspaceId: string) => 'member'
 
@@ -20,6 +22,9 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
   let profileStore: ReturnType<typeof createInMemoryBrowserProfileStore>
   let profileId: string
   let backendFlips: Array<{ sessionId: string; backend: string | null }>
+  let localProvider: BrowserProvider
+  let localTasks: ReturnType<typeof createInMemoryLocalComputerTaskStore>
+  let localOps: Array<{ op: string; args?: Record<string, unknown> }>
   let app: ReturnType<typeof createTestApp>
 
   function makeApp(userId: string) {
@@ -28,6 +33,8 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
       computerRoutes({
         orchestrator,
         provider,
+        localProvider,
+        localTasks,
         vault,
         profileStore,
         getWorkspaceRole: MEMBER_ROLE,
@@ -42,6 +49,19 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     vault = createInMemorySessionVault()
     profileStore = createInMemoryBrowserProfileStore()
     backendFlips = []
+    localOps = []
+    localTasks = createInMemoryLocalComputerTaskStore()
+    localProvider = createLocalBrowserProvider({
+      transport: {
+        async send({ op, args }) {
+          localOps.push({ op, args })
+          if (op === 'captureFrame') {
+            return { ok: true, data: { data: 'local-jpeg', mimeType: 'image/jpeg' } }
+          }
+          return { ok: true, data: { url: 'https://example.com/', title: 'Example' } }
+        },
+      },
+    })
     const profile = await profileStore.create({
       workspaceId: 'ws-1',
       ownerUserId: 'user-1',
@@ -68,7 +88,7 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     const mine = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
     expect(mine.status).toBe(200)
     expect(mine.body.tasks).toHaveLength(1)
-    expect(mine.body.tasks[0]).toMatchObject({ sessionId: 'sess-1', status: 'running' })
+    expect(mine.body.tasks[0]).toMatchObject({ sessionId: 'sess-1', status: 'running', backend: 'cloud' })
 
     // A member who does not own the task cannot open its live view, so the
     // list must not advertise it to them.
@@ -152,6 +172,94 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     const task = await orchestrator.getActiveTask('sess-1')
     const ops = provider.sandboxes.get(task!.sandboxId)?.actions.map((a) => a.op)
     expect(ops).toContain('takeoverInput')
+  })
+
+  it('discovers and controls an owned local-browser task through the same Take-Over routes', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' }, 'skyscanner.com')
+
+    const list = await request(app).get('/api/computer/tasks?workspaceId=ws-1')
+    expect(list.body.tasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: 'sess-local', backend: 'local', injectedSite: 'skyscanner.com' }),
+    ]))
+    const detail = await request(app).get('/api/computer/tasks/sess-local')
+    expect(detail.body).toMatchObject({ backend: 'local', workspaceId: 'ws-1' })
+
+    const frame = await request(app).get('/api/computer/tasks/sess-local/frame')
+    expect(frame.body).toEqual({ data: 'local-jpeg', mimeType: 'image/jpeg' })
+    const input = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'click', x: 100, y: 50, frameW: 200, frameH: 100 })
+    expect(input.status).toBe(200)
+    expect(localOps.at(-1)).toEqual({
+      op: 'takeoverInput',
+      args: { event: { kind: 'click', x: 100, y: 50, frameW: 200, frameH: 100 } },
+    })
+    const pointerDown = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 })
+    const pointerMove = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'move', x: 120, y: 60, frameW: 200, frameH: 100 })
+    const pointerUp = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'up', x: 120, y: 60, frameW: 200, frameH: 100 })
+    expect([pointerDown.status, pointerUp.status, pointerMove.status]).toEqual([200, 200, 200])
+    expect(localOps.slice(-3).map((entry) => entry.args)).toEqual([
+      { event: { kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 } },
+      { event: { kind: 'pointer', action: 'move', x: 120, y: 60, frameW: 200, frameH: 100 } },
+      { event: { kind: 'pointer', action: 'up', x: 120, y: 60, frameW: 200, frameH: 100 } },
+    ])
+    expect((await request(app).post('/api/computer/tasks/sess-local/stream-session')).status).toBe(501)
+    expect((await request(app).post('/api/computer/tasks/sess-local/captured').send({ site: 'skyscanner.com' })).body.code)
+      .toBe('local_session')
+
+    expect((await request(app).post('/api/computer/tasks/sess-local/complete')).status).toBe(200)
+    expect(localOps.at(-1)?.op).toBe('stop')
+    expect((await request(app).get('/api/computer/tasks/sess-local')).status).toBe(404)
+  })
+
+  it('keeps one ephemeral local task per user and expires abandoned bindings', () => {
+    let now = 1_000
+    const tasks = createInMemoryLocalComputerTaskStore(() => now)
+    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'first' }, 'one.test')
+    tasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'second' }, 'two.test')
+    expect(tasks.getActiveBySession('first')).toBeNull()
+    expect(tasks.getActiveBySession('second')?.injectedSite).toBe('two.test')
+
+    now += 20 * 60 * 1000
+    expect(tasks.getActiveBySession('second')).toBeNull()
+  })
+
+  it('keeps a local task discoverable when Stop cannot reach the extension', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    localProvider = { ...localProvider, stop: async () => { throw new Error('relay unavailable') } }
+    app = makeApp('user-1')
+
+    const stopped = await request(app).post('/api/computer/tasks/sess-local/complete')
+    expect(stopped.status).toBe(502)
+    expect(localTasks.getActiveBySession('sess-local')).not.toBeNull()
+  })
+
+  it('releases a stale local binding when the session switches to cloud', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-1' })
+    const flip = await request(app)
+      .post('/api/computer/sessions/sess-1/backend')
+      .send({ backend: 'cloud' })
+    expect(flip.status).toBe(200)
+    expect(localTasks.getActiveBySession('sess-1')).toBeNull()
+    expect((await request(app).get('/api/computer/tasks/sess-1')).body.backend).toBe('cloud')
+    expect(localOps.at(-1)?.op).toBe('stop')
+  })
+
+  it('does not let another user change or retire an owned local task', async () => {
+    localTasks.touch({ userId: 'user-1', workspaceId: 'ws-1', sessionId: 'sess-local' })
+    const stranger = makeApp('user-2')
+    const flip = await request(stranger)
+      .post('/api/computer/sessions/sess-local/backend')
+      .send({ backend: 'cloud' })
+    expect(flip.status).toBe(404)
+    expect(localTasks.getActiveBySession('sess-local')?.userId).toBe('user-1')
+    expect(backendFlips).toEqual([])
   })
 
   it('mints the live-stream session for the owner; 501 when the backend cannot stream (§5 fallback)', async () => {

@@ -55,6 +55,8 @@ class FakeSocket {
       }
     } else if (message.method === "browsingContext.navigate") {
       result = { url: message.params.url };
+    } else if (message.method === "browsingContext.captureScreenshot") {
+      result = { data: "jpeg-data" };
     }
     queueMicrotask(() => this.emit("message", { data: JSON.stringify({ id: message.id, result }) }));
   }
@@ -87,6 +89,14 @@ describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
       url: "https://example.com",
       title: "Example",
     });
+    expect(await executor.execute("captureFrame", {})).toEqual({
+      data: "jpeg-data",
+      mimeType: "image/jpeg",
+    });
+    await executor.execute("takeoverInput", {
+      event: { kind: "click", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+    expect(socket.sent.some((message) => message.method === "browsingContext.captureScreenshot")).toBe(true);
   });
 
   it("rejects generic protocol access and non-http navigation", async () => {
@@ -98,6 +108,30 @@ describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
     await expect(executor.execute("navigate", { url: "file:///etc/passwd" })).rejects.toMatchObject({
       code: "backend_error",
     });
+  });
+
+  it("keeps the BiDi pointer pressed until a separate pointer-up event", async () => {
+    const socket = new FakeSocket();
+    const executor = new FirefoxBidiExecutor("ws://127.0.0.1:9222/session", () => socket);
+    await executor.connect();
+    await executor.bindFocusedContext();
+    await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "down", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+    await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "move", x: 120, y: 60, frameW: 200, frameH: 100 },
+    });
+    await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "up", x: 100, y: 50, frameW: 200, frameH: 100 },
+    });
+
+    const events = socket.sent.filter((message) => message.method === "input.performActions").slice(-3);
+    const down = ((events[0]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    const move = ((events[1]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    const up = ((events[2]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    expect(down.map((action) => action.type)).toEqual(["pointerMove", "pointerDown"]);
+    expect(move.map((action) => action.type)).toEqual(["pointerMove"]);
+    expect(up.map((action) => action.type)).toEqual(["pointerMove", "pointerUp"]);
   });
 
   it("decodes BiDi remote values without eval", () => {

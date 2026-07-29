@@ -33,6 +33,7 @@ export type ComputerTask = {
   injectedSite: string | null;
   workspaceId: string;
   createdAt: number;
+  backend: "local" | "cloud";
 };
 
 export type TakeoverFrame = { data: string; mimeType: string };
@@ -46,6 +47,7 @@ export type TakeoverFrame = { data: string; mimeType: string };
  */
 export type TakeoverInput =
   | { kind: "click"; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: "pointer"; action: "down" | "move" | "up"; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: "move"; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: "key"; text: string }
   | { kind: "scroll"; deltaY: number }
@@ -94,6 +96,7 @@ export type ComputerTaskSummary = {
   injectedSite: string | null;
   createdAt: number;
   lastActivityAt: number;
+  backend: "local" | "cloud";
 };
 
 /** Task the Browsers index should open when no session was selected explicitly. */
@@ -108,7 +111,8 @@ export function mostRecentComputerTask(
 }
 
 /**
- * The caller's live browser tasks in a workspace — the discovery surface the
+ * The caller's cloud and local browser tasks in a workspace — the discovery
+ * surface the
  * shell pill polls. Empty array on any failure: discovery chrome must never
  * take a surface down.
  */
@@ -208,12 +212,13 @@ export async function markComputerSessionCaptured(
 export async function completeComputerTask(
   sessionId: string,
   outcome: "completed" | "failed" = "completed",
-): Promise<void> {
-  await authFetch(`${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}/complete`, {
+): Promise<boolean> {
+  const res = await authFetch(`${API_URL}/api/computer/tasks/${encodeURIComponent(sessionId)}/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ outcome }),
   });
+  return res.ok;
 }
 
 /** The live backend toggle (R2-3): null clears back to the profile default. */

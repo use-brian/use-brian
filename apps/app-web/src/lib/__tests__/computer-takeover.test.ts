@@ -14,7 +14,15 @@ import {
   createWheelForwarder,
   mapClickToFrame,
   normalizeNavigateUrl,
+  takeoverStartsPolled,
 } from "../computer-takeover";
+
+describe("[COMP:app-web/sandbox-takeover] Backend transport", () => {
+  it("starts local sessions on frame polling and keeps cloud eligible for streaming", () => {
+    expect(takeoverStartsPolled("local")).toBe(true);
+    expect(takeoverStartsPolled("cloud")).toBe(false);
+  });
+});
 
 describe("[COMP:app-web/sandbox-takeover] Take-Over click mapping", () => {
   it("maps 1:1 when the box matches the frame aspect", () => {

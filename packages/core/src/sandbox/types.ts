@@ -113,6 +113,9 @@ export interface BrowserProvider {
   click(ctx: BrowserCallContext, ref: string): Promise<void>
   type(ctx: BrowserCallContext, ref: string, text: string): Promise<void>
   currentUrl(ctx: BrowserCallContext): Promise<BrowserUrlResult>
+  /** Optional watched Take-Over surface. Local uses relay polling; cloud uses SandboxProvider below. */
+  nextTakeoverFrame?(ctx: BrowserCallContext): Promise<TakeoverFrame | null>
+  sendTakeoverInput?(ctx: BrowserCallContext, event: TakeoverInputEvent): Promise<void>
   /** Best-effort release of the task's browsing binding (close-to-stop is user-side). */
   stop(ctx: BrowserCallContext): Promise<void>
 }
@@ -190,7 +193,8 @@ export interface SessionVault {
 // ── Take-Over surface (§4.8) ───────────────────────────────────
 
 export type TakeoverInputEvent =
-  | { kind: 'click'; x: number; y: number }
+  | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'pointer'; action: 'down' | 'move' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
   /**
@@ -201,6 +205,11 @@ export type TakeoverInputEvent =
   | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
 
 export type TakeoverFrame = { data: string; mimeType: string }
+
+export const TakeoverFrameSchema = z.object({
+  data: z.string(),
+  mimeType: z.string(),
+})
 
 export type SandboxTakeover = {
   /** Next screencast frame (base64 image), or null once the stream closes. */

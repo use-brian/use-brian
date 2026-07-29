@@ -5929,9 +5929,16 @@ export const en = {
     liveViewTitle: "Live browser",
     liveViewSubtitle:
       "Your assistant's cloud browser for this task. Click into the page to sign in or take over; what you type goes to the page, never to us.",
+    localViewSubtitle:
+      "Your own approved browser tab for this task. You can also use the physical tab directly; input here is relayed only to that tab.",
+    localViewBadge: "My Browser",
     connecting: "Connecting to the browser...",
     noTask: "No active browser task for this chat. It may have finished or timed out; ask the assistant to try again.",
     frameStalled: "The live view stalled. It resumes as soon as the browser responds.",
+    inputSending: "Sending input...",
+    inputHolding: "Holding mouse button",
+    inputDelivered: "Input delivered",
+    inputFailed: "Input failed to reach the browser",
     streamLive: "Live",
     streamDelayed: "Delayed view",
     navBack: "Back",
@@ -5952,6 +5959,8 @@ export const en = {
     stopConfirmTitle: "Stop this browser task?",
     stopConfirmBody:
       "The cloud browser closes now. Anything it downloaded is already saved to your workspace files.",
+    localStopConfirmBody:
+      "Use Brian will release the approved browser tab and stop controlling it.",
     stopConfirmAction: "Stop task",
     loginDoneCta: "Done: close this browser",
     liveChip: {

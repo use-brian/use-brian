@@ -7,8 +7,8 @@
  * shell (`browsers-surface-shell.tsx`) frames this with the operator top bar
  * and the left live-session rail, so this page owns only the frame + controls.
  *
- * The web half of §4.8: a live look at the cloud sandbox browser for one
- * chat session's computer task. Transport ladder, best-first:
+ * The web half of §4.8: a live look at the active browser for one chat
+ * session's computer task. Cloud transport ladder, best-first:
  *
  *   1. Duplex WebSocket straight to the sandbox bridge (binary JPEG frames
  *      down, JSON input up — sub-second, damage-driven, hover relay).
@@ -18,6 +18,7 @@
  *      shown as "Delayed view", with periodic re-mint attempts to climb
  *      back up the ladder.
  *
+ * Local tasks use rung 3 directly through the authenticated extension relay.
  * Whichever rung is live, frames land through one `createFrameGate`: decoded
  * off-screen first, committed to the <img> second, so the view never blanks
  * between frames (a raw `src` swap discards what the element already painted).
@@ -48,6 +49,7 @@ import {
   createWheelForwarder,
   mapClickToFrame,
   normalizeNavigateUrl,
+  takeoverStartsPolled,
 } from "@/lib/computer-takeover";
 import {
   SearchableSelect,
@@ -70,6 +72,7 @@ import {
 
 const FRAME_INTERVAL_MS = 1_200;
 const MOVE_THROTTLE_MS = 50;
+const DRAG_THROTTLE_MS = 80;
 const REMINT_INTERVAL_MS = 20_000;
 const REMINT_MAX_ATTEMPTS = 3;
 
@@ -119,6 +122,9 @@ export default function ComputerTakeoverPage(props: {
   const [stream, setStream] = useState<TakeoverStreamSession | null>(null);
   const [mode, setMode] = useState<StreamMode>("connecting");
   const [ripple, setRipple] = useState<{ x: number; y: number; id: number } | null>(null);
+  const [inputStatus, setInputStatus] = useState<
+    "idle" | "sending" | "holding" | "delivered" | "failed"
+  >("idle");
   const [site, setSite] = useState("");
   const [capturing, setCapturing] = useState(false);
   const [captureStatus, setCaptureStatus] = useState<
@@ -130,10 +136,22 @@ export default function ComputerTakeoverPage(props: {
   // The take-over toolbar's address bar (§5). Local until submitted — never
   // forwarded as keystrokes, only as a `navigate` goto.
   const [address, setAddress] = useState("");
+  const isLocalTask = task !== "loading" && task?.backend === "local";
   const imgRef = useRef<HTMLImageElement | null>(null);
   const frameBoxRef = useRef<HTMLDivElement | null>(null);
   const naturalSize = useRef<{ w: number; h: number } | null>(null);
+  const pressedPointer = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    frameW: number;
+    frameH: number;
+  } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pointerDeliveryFailed = useRef(false);
+  const moveLast = useRef(0);
+  const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<TakeoverStreamSession | null>(null);
   streamRef.current = stream;
 
@@ -164,7 +182,11 @@ export default function ComputerTakeoverPage(props: {
       setTask(found);
       if (found) {
         setSite(found.injectedSite ?? loginFlow.site);
-        await resumeComputerTask(sessionId).catch(() => {});
+        if (takeoverStartsPolled(found.backend)) {
+          setMode("poll");
+        } else {
+          await resumeComputerTask(sessionId).catch(() => {});
+        }
       }
     })();
     return () => {
@@ -175,7 +197,7 @@ export default function ComputerTakeoverPage(props: {
   // Mint the live stream once the task is resolved. Any failure lands on
   // the polled fallback below - nothing breaks.
   useEffect(() => {
-    if (!task || task === "loading") return;
+    if (!task || task === "loading" || takeoverStartsPolled(task.backend)) return;
     let cancelled = false;
     void mintComputerStreamSession(sessionId)
       .then((info) => {
@@ -300,7 +322,7 @@ export default function ComputerTakeoverPage(props: {
   // While polled, periodically try to climb back up the ladder - a bridge
   // that was mid-restart (or a flaky hop) should not demote the whole visit.
   useEffect(() => {
-    if (!task || task === "loading" || mode !== "poll") return;
+    if (!task || task === "loading" || takeoverStartsPolled(task.backend) || mode !== "poll") return;
     let cancelled = false;
     let attempts = 0;
     const timer = setInterval(() => {
@@ -323,40 +345,116 @@ export default function ComputerTakeoverPage(props: {
   // One input door, best transport first: the duplex socket, the bridge's
   // POST route, then the API relay. `move` is socket-only by design.
   const forwardInput = useCallback(
-    (event: TakeoverInput) => {
+    (event: TakeoverInput): Promise<void> => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(event));
-        return;
+        setInputStatus(event.kind === "pointer" && event.action !== "up" ? "holding" : "delivered");
+        return Promise.resolve();
       }
-      if (event.kind === "move") return;
-      const apiEvent: TakeoverInput =
-        event.kind === "click" ? { kind: "click", x: event.x, y: event.y } : event;
-      const live = streamRef.current;
-      if (live) {
-        void sendStreamInput(live.inputUrl, event).then((ok) => {
-          if (!ok) void sendComputerInput(sessionId, apiEvent);
+      if (event.kind === "move") return Promise.resolve();
+      if (event.kind === "pointer" && event.action === "down") pointerDeliveryFailed.current = false;
+      setInputStatus(event.kind === "pointer" && event.action === "move" ? "holding" : "sending");
+      // HTTP requests have no ordering guarantee. Serialize them so a quick
+      // pointer-up can never overtake pointer-down and leave the remote mouse stuck.
+      const queued = inputQueueRef.current
+        .catch(() => {})
+        .then(async () => {
+          let delivered = false;
+          try {
+            const live = streamRef.current;
+            delivered = !!(live && (await sendStreamInput(live.inputUrl, event)));
+            if (!delivered) delivered = await sendComputerInput(sessionId, event);
+          } catch {
+            delivered = false;
+          }
+          if (!delivered && event.kind === "pointer") pointerDeliveryFailed.current = true;
+          if (!delivered || (event.kind === "pointer" && pointerDeliveryFailed.current)) {
+            setInputStatus("failed");
+          } else {
+            setInputStatus(event.kind === "pointer" && event.action !== "up" ? "holding" : "delivered");
+          }
         });
-      } else {
-        void sendComputerInput(sessionId, apiEvent);
-      }
+      inputQueueRef.current = queued;
+      return queued;
     },
     [sessionId],
   );
+  useEffect(() => {
+    if (inputStatus !== "delivered") return;
+    const timer = setTimeout(() => setInputStatus("idle"), 900);
+    return () => clearTimeout(timer);
+  }, [inputStatus]);
 
-  const forwardClick = useCallback(
-    (e: React.MouseEvent<HTMLImageElement>) => {
+  // Local input uses ordered HTTP calls, so drag positions are coalesced
+  // latest-wins instead of queuing every browser pointermove event.
+  const pendingDrag = useRef<TakeoverInput | null>(null);
+  const dragDrain = useRef<Promise<void> | null>(null);
+  const startDragDrain = useCallback(function drainDrag() {
+    if (dragDrain.current || !pendingDrag.current) return;
+    dragDrain.current = (async () => {
+      while (pressedPointer.current && pendingDrag.current) {
+        const event = pendingDrag.current;
+        pendingDrag.current = null;
+        await forwardInput(event);
+        if (pendingDrag.current) {
+          await new Promise((resolve) => setTimeout(resolve, DRAG_THROTTLE_MS));
+        }
+      }
+    })().finally(() => {
+      dragDrain.current = null;
+      if (pressedPointer.current && pendingDrag.current) drainDrag();
+    });
+  }, [forwardInput]);
+  const flushPendingDrag = useCallback(() => {
+    const event = pendingDrag.current;
+    pendingDrag.current = null;
+    if (!event) return;
+    void forwardInput(event);
+  }, [forwardInput]);
+  const scheduleDrag = useCallback(
+    (event: TakeoverInput) => {
+      pendingDrag.current = event;
+      startDragDrain();
+    },
+    [startDragDrain],
+  );
+  useEffect(
+    () => () => {
+      pendingDrag.current = null;
+    },
+    [],
+  );
+
+  const forwardPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      if (!e.isPrimary || e.button !== 0 || pressedPointer.current) return;
       const img = imgRef.current;
       const natural = naturalSize.current;
       if (!img || !natural) return;
       const point = mapClickToFrame(img.getBoundingClientRect(), natural, e.clientX, e.clientY);
       if (!point) return; // letterbox bar — nothing under it in the frame
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      frameBoxRef.current?.focus();
+      if (moveTimer.current) {
+        clearTimeout(moveTimer.current);
+        moveTimer.current = null;
+      }
+      pressedPointer.current = {
+        pointerId: e.pointerId,
+        x: point.x,
+        y: point.y,
+        frameW: natural.w,
+        frameH: natural.h,
+      };
       const box = frameBoxRef.current?.getBoundingClientRect();
       if (box) {
         setRipple({ x: e.clientX - box.left, y: e.clientY - box.top, id: Date.now() });
       }
       forwardInput({
-        kind: "click",
+        kind: "pointer",
+        action: "down",
         x: point.x,
         y: point.y,
         frameW: natural.w,
@@ -365,6 +463,79 @@ export default function ComputerTakeoverPage(props: {
     },
     [forwardInput],
   );
+  const forwardPointerDrag = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const pressed = pressedPointer.current;
+      const natural = naturalSize.current;
+      if (!pressed || pressed.pointerId !== e.pointerId || !natural) return;
+      const point = mapClickToFrame(
+        e.currentTarget.getBoundingClientRect(),
+        natural,
+        e.clientX,
+        e.clientY,
+      );
+      if (!point) return;
+      pressed.x = point.x;
+      pressed.y = point.y;
+      pressed.frameW = natural.w;
+      pressed.frameH = natural.h;
+      scheduleDrag({
+        kind: "pointer",
+        action: "move",
+        x: point.x,
+        y: point.y,
+        frameW: natural.w,
+        frameH: natural.h,
+      });
+    },
+    [scheduleDrag],
+  );
+  const forwardPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const pressed = pressedPointer.current;
+      if (!pressed || pressed.pointerId !== e.pointerId) return;
+      e.preventDefault();
+      const natural = naturalSize.current;
+      const point = natural
+        ? mapClickToFrame(e.currentTarget.getBoundingClientRect(), natural, e.clientX, e.clientY)
+        : null;
+      flushPendingDrag();
+      pressedPointer.current = null;
+      forwardInput({
+        kind: "pointer",
+        action: "up",
+        x: point?.x ?? pressed.x,
+        y: point?.y ?? pressed.y,
+        frameW: natural?.w ?? pressed.frameW,
+        frameH: natural?.h ?? pressed.frameH,
+      });
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    },
+    [flushPendingDrag, forwardInput],
+  );
+  useEffect(() => {
+    const releaseOnBlur = () => {
+      const pressed = pressedPointer.current;
+      if (!pressed) return;
+      flushPendingDrag();
+      pressedPointer.current = null;
+      forwardInput({
+        kind: "pointer",
+        action: "up",
+        x: pressed.x,
+        y: pressed.y,
+        frameW: pressed.frameW,
+        frameH: pressed.frameH,
+      });
+    };
+    window.addEventListener("blur", releaseOnBlur);
+    return () => {
+      releaseOnBlur();
+      window.removeEventListener("blur", releaseOnBlur);
+    };
+  }, [flushPendingDrag, forwardInput]);
   useEffect(() => {
     if (!ripple) return;
     const timer = setTimeout(() => setRipple(null), 450);
@@ -373,10 +544,9 @@ export default function ComputerTakeoverPage(props: {
 
   // Hover relay (socket-only): dropdown menus and hover states stay alive
   // under the viewer's cursor. Throttled, latest-position-wins.
-  const moveLast = useRef(0);
-  const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forwardMove = useCallback(
     (e: React.MouseEvent<HTMLImageElement>) => {
+      if (pressedPointer.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const img = imgRef.current;
@@ -453,7 +623,7 @@ export default function ComputerTakeoverPage(props: {
   // An identity-less task needs a profile to save into (409 profile_required)
   // — offer the workspace's profiles to pick from.
   useEffect(() => {
-    if (!task || task === "loading" || task.profileId) return;
+    if (!task || task === "loading" || task.backend === "local" || task.profileId) return;
     let cancelled = false;
     void listBrowserProfiles(workspaceId)
       .then((res) => {
@@ -483,22 +653,27 @@ export default function ComputerTakeoverPage(props: {
   // Login-flow exit: the sandbox existed only for this sign-in, so a
   // successful capture can complete the task (capture + kill) and go home.
   const onLoginDone = useCallback(async () => {
-    await completeComputerTask(sessionId, "completed").catch(() => {});
+    const stopped = await completeComputerTask(sessionId, "completed").catch(() => false);
+    if (!stopped) return;
     router.push(`/w/${workspaceId}`);
   }, [router, sessionId, workspaceId]);
 
   const onStop = useCallback(async () => {
     const confirmed = await confirmDialog({
       title: t.computer.stopConfirmTitle,
-      description: t.computer.stopConfirmBody,
+      description:
+        isLocalTask
+          ? t.computer.localStopConfirmBody
+          : t.computer.stopConfirmBody,
       confirmLabel: t.computer.stopConfirmAction,
     });
     if (!confirmed) return;
-    await completeComputerTask(sessionId, "failed").catch(() => {});
+    const stopped = await completeComputerTask(sessionId, "failed").catch(() => false);
+    if (!stopped) return;
     // Return to the Browsers surface index — the session rail keeps any other
     // live sessions in view, rather than dropping to the workspace root.
     router.push(`/w/${workspaceId}/computer`);
-  }, [router, sessionId, t, workspaceId]);
+  }, [isLocalTask, router, sessionId, t, workspaceId]);
 
   if (task === "loading") {
     return (
@@ -522,7 +697,12 @@ export default function ComputerTakeoverPage(props: {
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold">{t.computer.liveViewTitle}</h1>
-            {mode === "ws" || mode === "sse" ? (
+            {task.backend === "local" ? (
+              <span className="flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                {t.computer.localViewBadge}
+              </span>
+            ) : mode === "ws" || mode === "sse" ? (
               <span className="flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted-foreground">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                 {t.computer.streamLive}
@@ -534,7 +714,11 @@ export default function ComputerTakeoverPage(props: {
               </span>
             ) : null}
           </div>
-          <p className="mt-0.5 max-w-xl text-xs text-muted-foreground">{t.computer.liveViewSubtitle}</p>
+          <p className="mt-0.5 max-w-xl text-xs text-muted-foreground">
+            {task.backend === "local"
+              ? t.computer.localViewSubtitle
+              : t.computer.liveViewSubtitle}
+          </p>
         </div>
         <button
           type="button"
@@ -661,7 +845,11 @@ export default function ComputerTakeoverPage(props: {
                 h: e.currentTarget.naturalHeight,
               };
             }}
-            onClick={forwardClick}
+            onPointerDown={forwardPointerDown}
+            onPointerMove={forwardPointerDrag}
+            onPointerUp={forwardPointerUp}
+            onPointerCancel={forwardPointerUp}
+            onContextMenu={(e) => e.preventDefault()}
             onMouseMove={forwardMove}
             className="h-full w-full cursor-pointer select-none object-contain"
           />
@@ -677,6 +865,26 @@ export default function ComputerTakeoverPage(props: {
             style={{ left: ripple.x - 10, top: ripple.y - 10 }}
           />
         ) : null}
+        {inputStatus !== "idle" ? (
+          <div
+            role="status"
+            className={`pointer-events-none absolute left-3 top-3 rounded-full border px-2.5 py-1 text-[11px] font-medium shadow-sm ${
+              inputStatus === "failed"
+                ? "border-destructive/50 bg-destructive/10 text-destructive"
+                : inputStatus === "holding"
+                  ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-600"
+                  : "border-border bg-background/90 text-muted-foreground"
+            }`}
+          >
+            {inputStatus === "sending"
+              ? t.computer.inputSending
+              : inputStatus === "holding"
+                ? t.computer.inputHolding
+                : inputStatus === "failed"
+                  ? t.computer.inputFailed
+                  : t.computer.inputDelivered}
+          </div>
+        ) : null}
         {stalled ? (
           <div className="absolute inset-x-0 bottom-0 bg-background/80 px-3 py-1.5 text-center text-xs text-muted-foreground">
             {t.computer.frameStalled}
@@ -684,6 +892,7 @@ export default function ComputerTakeoverPage(props: {
         ) : null}
       </div>
 
+      {task.backend === "cloud" ? (
       <div className="flex flex-wrap items-end gap-2 rounded-lg border border-border p-3">
         <label className="flex min-w-56 flex-1 flex-col gap-1 text-xs font-medium">
           {t.computer.siteInputLabel}
@@ -741,6 +950,7 @@ export default function ComputerTakeoverPage(props: {
           </button>
         ) : null}
       </div>
+      ) : null}
     </div>
   );
 }

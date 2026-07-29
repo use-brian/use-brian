@@ -39,6 +39,7 @@ function task(overrides: Partial<ComputerTaskSummary>): ComputerTaskSummary {
     injectedSite: null,
     createdAt: 1,
     lastActivityAt: 1,
+    backend: "cloud",
     ...overrides,
   };
 }

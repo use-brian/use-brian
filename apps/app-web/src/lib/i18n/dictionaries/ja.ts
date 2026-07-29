@@ -5715,9 +5715,16 @@ export const ja: Dictionary = {
     liveViewTitle: "ライブブラウザ",
     liveViewSubtitle:
       "このタスクでアシスタントが使っているクラウドブラウザです。ページをクリックしてサインインや操作ができます。入力内容はページにのみ送信され、当社には送信されません。",
+    localViewSubtitle:
+      "このタスクで許可したご自身のブラウザタブです。実際のタブを直接操作することもでき、ここでの入力はそのタブにのみ中継されます。",
+    localViewBadge: "マイブラウザ",
     connecting: "ブラウザに接続しています...",
     noTask: "このチャットに実行中のブラウザタスクはありません。終了したかタイムアウトした可能性があります。アシスタントにもう一度依頼してください。",
     frameStalled: "ライブ表示が一時停止しています。ブラウザが応答すると再開します。",
+    inputSending: "入力を送信しています...",
+    inputHolding: "マウスボタンを長押し中",
+    inputDelivered: "入力を送信しました",
+    inputFailed: "ブラウザに入力を送信できませんでした",
     streamLive: "ライブ",
     streamDelayed: "遅延表示",
     navBack: "戻る",
@@ -5738,6 +5745,8 @@ export const ja: Dictionary = {
     stopConfirmTitle: "このブラウザタスクを停止しますか？",
     stopConfirmBody:
       "クラウドブラウザを今すぐ閉じます。ダウンロード済みのファイルはワークスペースのファイルに保存済みです。",
+    localStopConfirmBody:
+      "許可したブラウザタブを解放し、Use Brian による操作を停止します。",
     stopConfirmAction: "タスクを停止",
     loginDoneCta: "完了: このブラウザを閉じる",
     liveChip: {
