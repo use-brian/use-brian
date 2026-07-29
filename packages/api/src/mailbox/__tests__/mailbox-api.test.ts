@@ -1,6 +1,19 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createMailboxApi, parseMessageRef, parseReferencesHeader, htmlToText } from '../mailbox-api.js'
-import { createMailboxSessionCache, type ImapClientLike, type ImapFetchedMessage } from '../imap-session.js'
+import { MAILBOX_ATTACHMENT_MAX_BYTES } from '@use-brian/core'
+import {
+  createMailboxApi,
+  parseMessageRef,
+  parseReferencesHeader,
+  htmlToText,
+  collectAttachmentParts,
+  findPartNode,
+} from '../mailbox-api.js'
+import {
+  createMailboxSessionCache,
+  type ImapBodyStructureNode,
+  type ImapClientLike,
+  type ImapFetchedMessage,
+} from '../imap-session.js'
 import type { MailboxAccountSettings } from '../types.js'
 
 const SETTINGS: MailboxAccountSettings = {
@@ -12,12 +25,20 @@ const SETTINGS: MailboxAccountSettings = {
   smtpPort: 465,
 }
 
+type FakePart = {
+  /** Chunks `download()` streams, in order. */
+  chunks: Buffer[]
+  meta?: { contentType?: string; filename?: string }
+}
+
 type FakeFolder = {
   /** UIDs the server search returns for this folder (any criteria). */
   uids: number[]
   messages: Record<number, ImapFetchedMessage>
   /** When set, the FIRST search with keyword criteria throws (BADCHARSET). */
   rejectKeywordSearch?: boolean
+  /** Downloadable body parts, keyed `${uid}:${partId}`. */
+  parts?: Record<string, FakePart>
 }
 
 function rfc822(body: string, headers: Record<string, string>): Buffer {
@@ -28,6 +49,9 @@ function rfc822(body: string, headers: Record<string, string>): Buffer {
 function makeFakeClient(folders: Record<string, FakeFolder>, opts?: { specialUseSent?: string }) {
   const searches: Array<{ folder: string; query: Record<string, unknown> }> = []
   const appends: Array<{ path: string; content: Buffer }> = []
+  const fetchOnes: Array<{ folder: string; id: string; query: Record<string, unknown> }> = []
+  const downloads: Array<{ folder: string; range: string; part: string }> = []
+  let destroyed = false
   let openFolder = ''
   const client = {
     usable: true,
@@ -63,8 +87,9 @@ function makeFakeClient(folders: Record<string, FakeFolder>, opts?: { specialUse
         }
       })()
     },
-    async fetchOne(id: string) {
+    async fetchOne(id: string, query: Record<string, unknown>) {
       const folder = folders[openFolder]
+      fetchOnes.push({ folder: openFolder, id, query })
       return folder.messages[Number(id)] ?? false
     },
     async status() {
@@ -74,8 +99,23 @@ function makeFakeClient(folders: Record<string, FakeFolder>, opts?: { specialUse
       appends.push({ path, content })
       return {}
     },
+    async download(range: string, part: string) {
+      const folder = folders[openFolder]
+      downloads.push({ folder: openFolder, range, part })
+      const payload = folder.parts?.[`${range}:${part}`]
+      if (!payload) throw new Error(`no such part ${part}`)
+      return {
+        meta: payload.meta ?? {},
+        content: Object.assign(
+          (async function* () {
+            for (const chunk of payload.chunks) yield chunk
+          })(),
+          { destroy: () => { destroyed = true } },
+        ),
+      }
+    },
   } as unknown as ImapClientLike
-  return { client, searches, appends }
+  return { client, searches, appends, fetchOnes, downloads, wasDestroyed: () => destroyed }
 }
 
 function msg(uid: number, over: Partial<ImapFetchedMessage['envelope']> = {}, source?: Buffer): ImapFetchedMessage {
@@ -209,6 +249,184 @@ describe('[COMP:api/mailbox-imap-client] getMessage', () => {
     const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
     const api = makeApi(client)
     await expect(api.getMessage('not-a-ref')).rejects.toThrow(/folder:uid/)
+  })
+})
+
+// ── Phase 3: attachment listing + byte fetch (D14 / D16) ─────────────────
+//
+// The airline shape the feature was built for: multipart/mixed carrying a
+// multipart/alternative (text + multipart/related with an inline image) plus a
+// real PDF attachment. mailparser numbers these by raw-stream position; only
+// BODYSTRUCTURE gives the IMAP part tree the server will honor in a FETCH.
+const NESTED_BODY_STRUCTURE: ImapBodyStructureNode = {
+  type: 'multipart/mixed',
+  childNodes: [
+    {
+      part: '1',
+      type: 'multipart/alternative',
+      childNodes: [
+        { part: '1.1', type: 'text/plain', size: 400 },
+        {
+          part: '1.2',
+          type: 'multipart/related',
+          childNodes: [
+            { part: '1.2.1', type: 'text/html', size: 2_000 },
+            {
+              part: '1.2.2',
+              type: 'image/png',
+              disposition: 'inline',
+              dispositionParameters: { filename: 'logo.png' },
+              size: 5_000,
+            },
+          ],
+        },
+      ],
+    },
+    {
+      part: '2',
+      type: 'application/pdf',
+      disposition: 'attachment',
+      dispositionParameters: { filename: 'boarding-pass.pdf' },
+      encoding: 'base64',
+      size: 120_000,
+    },
+  ],
+}
+
+describe('[COMP:tools/imap-attachments] BODYSTRUCTURE attachment listing (D14)', () => {
+  it('lists nested-multipart attachments with the IMAP part-tree ids, skipping body parts', async () => {
+    const message = msg(7, {}, rfc822('body', { Subject: 'Boarding pass' }))
+    message.bodyStructure = NESTED_BODY_STRUCTURE
+    const { client } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: message } } })
+    const result = await makeApi(client).getMessage('INBOX:7')
+
+    expect(result.attachments).toEqual([
+      { filename: 'logo.png', mime: 'image/png', size: 5_000, partId: '1.2.2' },
+      { filename: 'boarding-pass.pdf', mime: 'application/pdf', size: 120_000, partId: '2' },
+    ])
+  })
+
+  it('lists completely for a message larger than the 4 MB source cap (the latent Phase 1 bug)', async () => {
+    // The source fetch is capped, so a >4 MB message reaches mailparser
+    // truncated — its attachment list would go short. BODYSTRUCTURE is
+    // metadata and carries the whole tree regardless of message size.
+    const truncatedSource = rfc822('Only the first megabytes arrived…', { Subject: 'Big' })
+    const message = msg(9, {}, truncatedSource)
+    message.bodyStructure = {
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', size: 100 },
+        {
+          part: '2',
+          type: 'application/pdf',
+          disposition: 'attachment',
+          dispositionParameters: { filename: 'huge-deck.pdf' },
+          size: 30 * 1024 * 1024,
+        },
+      ],
+    }
+    const { client } = makeFakeClient({ INBOX: { uids: [9], messages: { 9: message } } })
+    const result = await makeApi(client).getMessage('INBOX:9')
+    expect(result.attachments).toHaveLength(1)
+    expect(result.attachments[0]).toMatchObject({ filename: 'huge-deck.pdf', partId: '2' })
+  })
+
+  it('asks the server for bodyStructure alongside the capped source', async () => {
+    const message = msg(7, {}, rfc822('body', {}))
+    message.bodyStructure = NESTED_BODY_STRUCTURE
+    const { client, fetchOnes } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: message } } })
+    await makeApi(client).getMessage('INBOX:7')
+    expect(fetchOnes.at(-1)!.query.bodyStructure).toBe(true)
+  })
+
+  it('reports no attachments for a plain single-part message', async () => {
+    const message = msg(7, {}, rfc822('just text', {}))
+    message.bodyStructure = { type: 'text/plain', size: 9 }
+    const { client } = makeFakeClient({ INBOX: { uids: [7], messages: { 7: message } } })
+    expect((await makeApi(client).getMessage('INBOX:7')).attachments).toEqual([])
+  })
+
+  it('collectAttachmentParts / findPartNode walk the tree directly', () => {
+    expect(collectAttachmentParts(NESTED_BODY_STRUCTURE).map((a) => a.partId)).toEqual(['1.2.2', '2'])
+    expect(findPartNode(NESTED_BODY_STRUCTURE, '1.2.1')?.type).toBe('text/html')
+    expect(findPartNode(NESTED_BODY_STRUCTURE, '9.9')).toBeNull()
+  })
+})
+
+describe('[COMP:tools/imap-attachments] getAttachment byte fetch (D14 / D16)', () => {
+  function mailboxWithPdf(over: { size?: number; chunks?: Buffer[] } = {}) {
+    const message = msg(7, {}, rfc822('body', {}))
+    message.bodyStructure = {
+      type: 'multipart/mixed',
+      childNodes: [
+        { part: '1', type: 'text/plain', size: 100 },
+        {
+          part: '2',
+          type: 'application/pdf',
+          disposition: 'attachment',
+          dispositionParameters: { filename: 'boarding-pass.pdf' },
+          size: over.size ?? 120_000,
+        },
+      ],
+    }
+    return makeFakeClient({
+      INBOX: {
+        uids: [7],
+        messages: { 7: message },
+        parts: {
+          '7:2': {
+            chunks: over.chunks ?? [Buffer.from('%PDF-1.4 '), Buffer.from('boarding')],
+            meta: { contentType: 'application/pdf', filename: 'boarding-pass.pdf' },
+          },
+        },
+      },
+    })
+  }
+
+  it('streams the part with download(), never the capped source fetch', async () => {
+    const { client, downloads, fetchOnes } = mailboxWithPdf()
+    const result = await makeApi(client).getAttachment('INBOX:7', '2')
+
+    expect(downloads).toEqual([{ folder: 'INBOX', range: '7', part: '2' }])
+    expect(result.filename).toBe('boarding-pass.pdf')
+    expect(result.mime).toBe('application/pdf')
+    expect(Buffer.from(result.bytes).toString()).toBe('%PDF-1.4 boarding')
+    // The only fetch is the metadata probe — no `source` range is requested,
+    // so the 4 MB cap never touches the bytes.
+    for (const call of fetchOnes) expect(call.query.source).toBeUndefined()
+  })
+
+  it('refuses an over-cap part from BODYSTRUCTURE metadata before any byte streams', async () => {
+    const { client, downloads } = mailboxWithPdf({ size: MAILBOX_ATTACHMENT_MAX_BYTES + 1 })
+    await expect(makeApi(client).getAttachment('INBOX:7', '2')).rejects.toThrow(/limit/i)
+    expect(downloads).toEqual([])
+  })
+
+  it('aborts mid-download when the stream itself overruns the cap (metadata is never trusted alone)', async () => {
+    // Server under-reports the size, so only the running byte count can stop it.
+    const { client, wasDestroyed } = mailboxWithPdf({
+      size: 10,
+      chunks: [Buffer.alloc(MAILBOX_ATTACHMENT_MAX_BYTES + 1)],
+    })
+    await expect(makeApi(client).getAttachment('INBOX:7', '2')).rejects.toThrow(/larger than/i)
+    expect(wasDestroyed()).toBe(true)
+  })
+
+  it('names imapSearchMessages when the message is gone (stale ref)', async () => {
+    const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    await expect(makeApi(client).getAttachment('INBOX:7', '2')).rejects.toThrow(/imapSearchMessages/)
+  })
+
+  it('lists the real parts when the requested partId does not exist', async () => {
+    const { client } = mailboxWithPdf()
+    await expect(makeApi(client).getAttachment('INBOX:7', '4')).rejects.toThrow(
+      /boarding-pass\.pdf \(partId 2\)/,
+    )
+  })
+
+  it('rejects a malformed ref honestly', async () => {
+    const { client } = makeFakeClient({ INBOX: { uids: [], messages: {} } })
+    await expect(makeApi(client).getAttachment('not-a-ref', '2')).rejects.toThrow(/folder:uid/)
   })
 })
 

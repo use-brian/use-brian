@@ -14,10 +14,19 @@
  */
 
 import { simpleParser, type ParsedMail } from 'mailparser'
-import type { MailboxApi, MailboxMessage, MailboxSearchHit, MailboxSearchParams } from '@use-brian/core'
+import {
+  MAILBOX_ATTACHMENT_MAX_BYTES,
+  type MailboxApi,
+  type MailboxAttachment,
+  type MailboxAttachmentBytes,
+  type MailboxMessage,
+  type MailboxSearchHit,
+  type MailboxSearchParams,
+} from '@use-brian/core'
 import { buildImapSearchQuery, hasNonAsciiTerm } from './search-criteria.js'
 import {
   defaultMailboxSessionCache,
+  type ImapBodyStructureNode,
   type ImapClientLike,
   type ImapFetchedMessage,
   type MailboxSessionCache,
@@ -85,6 +94,100 @@ export function htmlToText(html: string): string {
 
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
+}
+
+// ── Attachment listing from BODYSTRUCTURE (D14) ───────────────────────────
+//
+// The server's own part tree is the ONLY authority for part ids and for what
+// a message actually carries. mailparser is not: it numbers parts by raw
+// stream boundaries rather than the IMAP tree (wrong part on nested
+// multiparts — `related` inside `alternative` inside `mixed`, the airline
+// shape), and it only ever sees the first FULL_MESSAGE_SOURCE_BYTES of a
+// large message, so its listing silently goes short. BODYSTRUCTURE is
+// metadata, so fetching it has no size-cap exposure at all.
+
+/** Body-text leaves with no disposition are the message, not attachments. */
+function isBodyTextNode(node: ImapBodyStructureNode): boolean {
+  const type = (node.type ?? '').toLowerCase()
+  return !node.disposition && (type === 'text/plain' || type === 'text/html')
+}
+
+function attachmentFilename(node: ImapBodyStructureNode): string | undefined {
+  return node.dispositionParameters?.filename ?? node.parameters?.name
+}
+
+/**
+ * Walk the part tree and collect every attachment-ish leaf: anything
+ * explicitly dispositioned (`attachment` or `inline` — inline images are
+ * exactly the boarding-pass case) or carrying a filename. Multipart nodes
+ * are containers; only leaves are downloadable parts.
+ */
+export function collectAttachmentParts(
+  node: ImapBodyStructureNode | undefined,
+  out: MailboxAttachment[] = [],
+): MailboxAttachment[] {
+  if (!node) return out
+  if (node.childNodes?.length) {
+    for (const child of node.childNodes) collectAttachmentParts(child, out)
+    return out
+  }
+  if (!node.part) return out  // root of a single-part message = the body itself
+  if (isBodyTextNode(node)) return out
+  const disposition = (node.disposition ?? '').toLowerCase()
+  const filename = attachmentFilename(node)
+  const isAttachment = disposition === 'attachment' || disposition === 'inline' || Boolean(filename)
+  if (!isAttachment) return out
+  out.push({
+    filename: filename ?? `part-${node.part}`,
+    mime: (node.type ?? 'application/octet-stream').toLowerCase(),
+    size: node.size ?? 0,
+    partId: node.part,
+  })
+  return out
+}
+
+/** Find one part by its dotted IMAP part number. */
+export function findPartNode(
+  node: ImapBodyStructureNode | undefined,
+  partId: string,
+): ImapBodyStructureNode | null {
+  if (!node) return null
+  if (node.part === partId) return node
+  for (const child of node.childNodes ?? []) {
+    const hit = findPartNode(child, partId)
+    if (hit) return hit
+  }
+  return null
+}
+
+function formatMb(bytes: number): string {
+  return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`
+}
+
+/**
+ * Buffer a part stream, aborting the moment the running total passes the cap.
+ * The BODYSTRUCTURE pre-check above is advisory — a server may under-report or
+ * omit `size` — so the byte count is what actually enforces D16.
+ */
+async function bufferCapped(
+  content: AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void },
+  cap: number,
+  filename: string,
+): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  let total = 0
+  for await (const chunk of content) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    total += buf.length
+    if (total > cap) {
+      content.destroy?.()
+      throw new Error(
+        `Attachment "${filename}" is larger than the ${formatMb(cap)} limit, so it cannot be saved to the workspace. Ask the user to download it from their mail client instead.`,
+      )
+    }
+    chunks.push(buf)
+  }
+  return Buffer.concat(chunks)
 }
 
 async function resolveSentPath(client: ImapClientLike): Promise<string | null> {
@@ -296,7 +399,10 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
         try {
           const msg = await client.fetchOne(
             String(ref.uid),
-            { envelope: true, source: { start: 0, maxLength: FULL_MESSAGE_SOURCE_BYTES } },
+            // bodyStructure rides along: metadata-only, and it is what the
+            // attachment listing is derived from (D14) — never the capped
+            // source below, whose parse goes blind past 4 MB.
+            { envelope: true, bodyStructure: true, source: { start: 0, maxLength: FULL_MESSAGE_SOURCE_BYTES } },
             { uid: true },
           )
           if (!msg || !msg.source) throw new Error(`Message ${id} not found.`)
@@ -323,16 +429,63 @@ export function createMailboxApi(opts: CreateMailboxApiOptions): MailboxApi {
             : null,
           subject: parsed.subject ?? fetched.envelope?.subject ?? '',
           body,
-          attachments: (parsed.attachments ?? []).map((a) => ({
-            filename: a.filename ?? 'attachment',
-            mime: a.contentType ?? 'application/octet-stream',
-            size: a.size ?? 0,
-          })),
+          attachments: collectAttachmentParts(fetched.bodyStructure),
           messageId: parsed.messageId ?? fetched.envelope?.messageId ?? null,
           inReplyTo: parsed.inReplyTo ?? fetched.envelope?.inReplyTo ?? null,
           references: refs ? (Array.isArray(refs) ? refs : [refs]) : [],
         }
         return message
+      })
+    },
+
+    async getAttachment(id, partId): Promise<MailboxAttachmentBytes> {
+      const ref = parseMessageRef(id)
+      if (!ref) throw new Error(`Invalid message id "${id}" — expected the folder:uid shape from imapSearchMessages.`)
+      const settings = await opts.getSettings()
+      return sessions.withClient(opts.cacheKey, settings, async (client) => {
+        const lock = await client.getMailboxLock(ref.folder)
+        try {
+          // 1. Authoritative part metadata. A missing message here is a stale
+          //    ref (UIDVALIDITY rotated, message moved or deleted) — say so and
+          //    point at the tool that produces fresh ids.
+          const msg = await client.fetchOne(String(ref.uid), { bodyStructure: true }, { uid: true })
+          if (!msg) {
+            throw new Error(
+              `Message ${id} is no longer in the mailbox (it may have been moved or deleted). Run imapSearchMessages again to get a current message id.`,
+            )
+          }
+          const node = findPartNode(msg.bodyStructure, partId)
+          if (!node) {
+            const available = collectAttachmentParts(msg.bodyStructure)
+            throw new Error(
+              available.length > 0
+                ? `Message ${id} has no part "${partId}". Its attachments are: ${available.map((a) => `${a.filename} (partId ${a.partId})`).join(', ')}.`
+                : `Message ${id} has no attachments to save.`,
+            )
+          }
+          const filename = attachmentFilename(node) ?? `part-${partId}`
+
+          // 2. Pre-download refusal from metadata — encoded octets, so the
+          //    check is conservative (base64 inflates by ~33%). Nothing has
+          //    streamed yet at this point.
+          if ((node.size ?? 0) > MAILBOX_ATTACHMENT_MAX_BYTES) {
+            throw new Error(
+              `Attachment "${filename}" is ${formatMb(node.size ?? 0)}, over the ${formatMb(MAILBOX_ATTACHMENT_MAX_BYTES)} limit, so it cannot be saved to the workspace. Ask the user to download it from their mail client instead.`,
+            )
+          }
+
+          // 3. Stream exactly this part (transfer-encoding decoded by
+          //    imapflow), counting bytes as they arrive.
+          const download = await client.download(String(ref.uid), partId, { uid: true })
+          const bytes = await bufferCapped(download.content, MAILBOX_ATTACHMENT_MAX_BYTES, filename)
+          return {
+            filename: download.meta?.filename ?? filename,
+            mime: (download.meta?.contentType ?? node.type ?? 'application/octet-stream').toLowerCase(),
+            bytes,
+          }
+        } finally {
+          lock.release()
+        }
       })
     },
 
