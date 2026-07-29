@@ -1344,6 +1344,11 @@ export async function injectMcpTools(params: {
   // stay direct so the workflow executor still sees per-tool
   // `requiresConfirmation` flags and can apply `kind='workflow_step'`
   // approvals + per-step permission grants correctly.
+  // Both overlays have run and `tools` still holds every built-in (the pluck
+  // below moves them into the search index), so this is the one point where a
+  // stale not-connected notice can be correlated against reality.
+  clearStaleNotConnectedNotices(tools, unavailable)
+
   const localSources: LocalSource[] = []
   if (!keepBuiltinsDirect) {
     for (const [connectorId, toolNames] of Object.entries(INJECTED_BUILTIN_TOOLS_BY_CONNECTOR)) {
@@ -1594,6 +1599,61 @@ async function injectInstanceVariants(opts: {
  *
  * Spec: `docs/architecture/integrations/mcp.md` -> "Unavailable capabilities".
  */
+/**
+ * Connector id → the display name its {@link notConnectedNotice} uses.
+ *
+ * Exists so `clearStaleNotConnectedNotices` can retract a notice once the
+ * provider's tools actually landed. Every `notConnectedNotice(...)` call site
+ * for a connector that appears in `INJECTED_BUILTIN_TOOLS_BY_CONNECTOR` must
+ * have a row here — the drift is graded by the accompanying test, which
+ * asserts each id's generated notice is matchable.
+ *
+ * `imap` is intentionally absent: it has no
+ * `INJECTED_BUILTIN_TOOLS_BY_CONNECTOR` entry, so there is nothing to
+ * correlate against and its notice can never go stale this way.
+ */
+export const NOT_CONNECTED_DISPLAY_NAMES: Record<string, string> = {
+  gcal: 'Google Calendar and Google Tasks',
+  gmail: 'Gmail',
+  gdrive: 'Google Drive, Docs, Sheets and Slides',
+  github: 'GitHub',
+  notion: 'Notion',
+  fathom: 'Fathom',
+  shopify: 'Shopify',
+}
+
+/**
+ * Retract "not connected" notices for providers whose tools DID get injected.
+ *
+ * A workspace-scoped assistant never loads the owner's personal connectors
+ * (`loadOwnerPersonalConnectors` is false whenever `assistantTeamId` is set),
+ * so each built-in injector runs against an empty list and pushes its
+ * not-connected notice. The team-grant and team-native overlays then re-inject
+ * the very same provider from a shared instance. Nothing retracted the notice,
+ * so the system prompt asserted the connector was unavailable while the model
+ * held its tools — and the model correctly believes the prompt over the tool
+ * list. Observed live on 2026-07-29: `[mcp-inject] Shopify: injected tools`
+ * in the same turn the assistant told the user Shopify was not connected.
+ *
+ * Must run AFTER both overlays and BEFORE the `mcp_search` pluck moves
+ * built-in tools out of `tools` and into `localSources`.
+ */
+export function clearStaleNotConnectedNotices(
+  tools: Map<string, Tool>,
+  unavailable: string[],
+): void {
+  for (const [connectorId, displayName] of Object.entries(NOT_CONNECTED_DISPLAY_NAMES)) {
+    const toolNames = INJECTED_BUILTIN_TOOLS_BY_CONNECTOR[connectorId] ?? []
+    // Multi-instance variants are `<canonical>__<acct>`, so compare on the base.
+    const injected = [...tools.keys()].some((n) => toolNames.includes(baseToolName(n)))
+    if (!injected) continue
+    const prefix = `${displayName}: not connected`
+    for (let i = unavailable.length - 1; i >= 0; i--) {
+      if (unavailable[i].startsWith(prefix)) unavailable.splice(i, 1)
+    }
+  }
+}
+
 function notConnectedNotice(displayName: string, capabilities: string): string {
   return (
     `${displayName}: not connected for this assistant, so ${capabilities} are unavailable this turn. ` +

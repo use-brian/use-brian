@@ -9,7 +9,11 @@
  */
 import { describe, it, expect } from "vitest";
 import { createHmac } from "node:crypto";
-import { verifyShopifyCallbackHmac } from "../shopify-oauth";
+import {
+  buildShopifyTokenExchangeBody,
+  classifyShopifyTokens,
+  verifyShopifyCallbackHmac,
+} from "../shopify-oauth";
 import { normalizeShopifyShopDomain } from "../shopify-domain";
 
 const SECRET = "app-client-secret";
@@ -61,5 +65,63 @@ describe("[COMP:api/shopify-oauth] Shopify OAuth callback verification", () => {
     expect(normalizeShopifyShopDomain("mystore.com")).toBeNull();
     expect(normalizeShopifyShopDomain("evil.com/#.myshopify.com")).toBeNull();
     expect(normalizeShopifyShopDomain("")).toBeNull();
+  });
+
+  it("asks for an EXPIRING offline token in the code exchange", () => {
+    // Regression guard. Dropping `expiring` makes Shopify mint a permanent
+    // token with no refresh token, which silently strands the whole rotation
+    // path — and nothing else in the suite would notice.
+    const body = buildShopifyTokenExchangeBody({
+      clientId: "cid",
+      clientSecret: "csec",
+      code: "c0de",
+    });
+    expect(body.expiring).toBe(1);
+    expect(body).toEqual({
+      client_id: "cid",
+      client_secret: "csec",
+      code: "c0de",
+      expiring: 1,
+    });
+  });
+
+  it("classifies an expiring token response into a managed tuple", () => {
+    const now = Date.UTC(2026, 6, 28, 12, 0, 0);
+    const tuple = classifyShopifyTokens(
+      {
+        access_token: "shpat_new",
+        refresh_token: "shprt_new",
+        expires_in: 3600,
+        scope: "read_products",
+      },
+      now,
+    );
+    expect(tuple).toEqual({
+      accessToken: "shpat_new",
+      refreshToken: "shprt_new",
+      expiresAt: new Date(now + 3_600_000).toISOString(),
+    });
+  });
+
+  it("classifies a legacy non-expiring response as a static tuple", () => {
+    // No refreshToken/expiresAt: the SHAPE is what isManagedShopifyTokens
+    // reads downstream, so a static tuple must carry neither key.
+    const tuple = classifyShopifyTokens({ access_token: "shpat_legacy" }, 0);
+    expect(tuple).toEqual({ accessToken: "shpat_legacy" });
+    expect(tuple).not.toHaveProperty("refreshToken");
+    expect(tuple).not.toHaveProperty("expiresAt");
+  });
+
+  it("treats a half-expiring response as static and a token-less one as null", () => {
+    // refresh_token without expires_in (or vice versa) is not a usable
+    // rotation tuple — fall back to static rather than storing a broken one.
+    expect(classifyShopifyTokens({ access_token: "t", refresh_token: "r" }, 0)).toEqual({
+      accessToken: "t",
+    });
+    expect(classifyShopifyTokens({ access_token: "t", expires_in: 3600 }, 0)).toEqual({
+      accessToken: "t",
+    });
+    expect(classifyShopifyTokens({ refresh_token: "r", expires_in: 3600 }, 0)).toBeNull();
+    expect(classifyShopifyTokens({}, 0)).toBeNull();
   });
 });

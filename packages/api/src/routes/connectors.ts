@@ -1414,7 +1414,13 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       const managed = typeof t?.refreshToken === 'string' && typeof t?.expiresAt === 'string'
       credentials = {
         type: 'oauth',
-        client_id: accessToken.startsWith('shpat_') ? 'shopify_token' : 'shopify_oauth',
+        // Discriminate on tuple SHAPE, never on the token prefix: Shopify's
+        // EXPIRING offline tokens are also `shpat_`-prefixed, so a prefix test
+        // labels every OAuth install `shopify_token`. Harmless while the
+        // marker stays advisory (readers use isManagedShopifyTokens), but it
+        // is a false provenance record and anything that later trusts it is
+        // wrong. Same rule the parser uses.
+        client_id: managed ? 'shopify_oauth' : 'shopify_token',
         client_secret: packShopifyTokens({
           accessToken,
           shopDomain,

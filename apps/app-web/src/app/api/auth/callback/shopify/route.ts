@@ -5,10 +5,23 @@ import {
   parseConnectorState,
   verifyConnectorState,
 } from "@/lib/connector-oauth-state";
-import { verifyShopifyCallbackHmac } from "@/lib/shopify-oauth";
+import {
+  buildShopifyTokenExchangeBody,
+  classifyShopifyTokens,
+  verifyShopifyCallbackHmac,
+  type ShopifyTokenResponse,
+} from "@/lib/shopify-oauth";
 import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
+// SERVER-side hop to the API — must be INTERNAL_API_URL, never the browser's
+// NEXT_PUBLIC_API_URL. next.config inlines that one as "" in development so the
+// browser goes through the /api rewrite; a Route Handler runs in Node, where a
+// relative URL has no origin and fetch throws ERR_INVALID_URL. That is why the
+// Shopify connect died at store-credentials on 2026-07-29 AFTER a fully
+// successful consent + token exchange. In production the same var resolves to
+// the PUBLIC origin, which sends app-web's own call back out through the CDN —
+// the exact Cloudflare-Access-returns-HTML trap documented in
+// lib/internal-api-url.ts.
+import { INTERNAL_API_URL as API_URL } from "@/lib/internal-api-url";
 const SHOPIFY_CLIENT_ID =
   process.env.SHOPIFY_CLIENT_ID ?? process.env.NEXT_PUBLIC_SHOPIFY_CLIENT_ID ?? "";
 const SHOPIFY_CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET ?? "";
@@ -79,11 +92,13 @@ export async function GET(request: Request) {
     const tokenRes = await fetch(`https://${shopDomain}/admin/oauth/access_token`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        client_id: SHOPIFY_CLIENT_ID,
-        client_secret: SHOPIFY_CLIENT_SECRET,
-        code,
-      }),
+      body: JSON.stringify(
+        buildShopifyTokenExchangeBody({
+          clientId: SHOPIFY_CLIENT_ID,
+          clientSecret: SHOPIFY_CLIENT_SECRET,
+          code,
+        }),
+      ),
     });
 
     if (!tokenRes.ok) {
@@ -93,26 +108,22 @@ export async function GET(request: Request) {
       );
     }
 
-    const tokens = (await tokenRes.json()) as {
-      access_token?: string;
-      scope?: string;
-      expires_in?: number;
-      refresh_token?: string;
-    };
+    const tokens = (await tokenRes.json()) as ShopifyTokenResponse;
 
-    if (!tokens.access_token) {
+    // Expiring offline token (what `expiring: 1` asks for) vs a legacy
+    // non-expiring one: only the former carries refresh_token + expires_in,
+    // and the resulting tuple SHAPE is what discriminates downstream.
+    const classified = classifyShopifyTokens(tokens, Date.now());
+
+    if (!classified) {
       console.error("[shopify] incomplete token response");
       return NextResponse.redirect(
         new URL(connectorsPath(workspaceId, { error: "no_access_token" }), request.url),
       );
     }
 
-    // Expiring offline token (public apps after 2026-04) vs legacy
-    // non-expiring: only the former carries refresh_token + expires_in.
-    const managed = !!tokens.refresh_token && typeof tokens.expires_in === "number";
-    const expiresAt = managed
-      ? new Date(Date.now() + Math.max(0, (tokens.expires_in as number) * 1000)).toISOString()
-      : undefined;
+    const managed = !!classified.refreshToken;
+    const expiresAt = classified.expiresAt;
 
     // Best-effort identity fetch — confirms the token works and picks up the
     // canonical myshopify domain. Failure is non-fatal (the `shop` param is
@@ -125,7 +136,7 @@ export async function GET(request: Request) {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "X-Shopify-Access-Token": tokens.access_token,
+            "X-Shopify-Access-Token": classified.accessToken,
           },
           body: JSON.stringify({ query: "query { shop { name myshopifyDomain } }" }),
         },
@@ -154,8 +165,8 @@ export async function GET(request: Request) {
       },
       body: JSON.stringify({
         shopifyTokens: {
-          accessToken: tokens.access_token,
-          ...(managed ? { refreshToken: tokens.refresh_token, expiresAt } : {}),
+          accessToken: classified.accessToken,
+          ...(managed ? { refreshToken: classified.refreshToken, expiresAt } : {}),
           shopDomain: canonicalDomain,
         },
         // The shop domain plays the connectedEmail role in the Settings UI

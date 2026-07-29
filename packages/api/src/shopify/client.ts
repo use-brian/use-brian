@@ -1013,7 +1013,10 @@ export async function createDiscountCode(auth: ShopifyAuth, params: {
       code: params.code,
       startsAt: params.startsAt ?? new Date().toISOString(),
       ...(params.endsAt ? { endsAt: params.endsAt } : {}),
-      ...(params.usageLimit ? { usageLimit: params.usageLimit } : {}),
+      // Explicit undefined check: `usageLimit ? ...` would silently drop a
+      // deliberate 0 (a code redeemable zero times) and create an unlimited
+      // one instead - the opposite of what was asked for.
+      ...(params.usageLimit !== undefined ? { usageLimit: params.usageLimit } : {}),
       appliesOncePerCustomer: params.appliesOncePerCustomer ?? false,
       customerSelection: { all: true },
       customerGets: { items: { all: true }, value },
@@ -1076,23 +1079,29 @@ export async function cancelOrder(auth: ShopifyAuth, params: {
   notifyCustomer?: boolean
   staffNote?: string
 }): Promise<unknown> {
+  // `refund: Boolean` was deprecated in 2025-07 when orderCancel gained
+  // store-credit refunds. `originalPaymentMethods: {}` is the documented
+  // replacement for the old `refund: true`; refund: false omits refundMethod
+  // entirely. Authorized-but-uncaptured payments are voided either way.
+  const refundMethod = (params.refund ?? true) ? { originalPaymentMethods: {} } : null
   const data = await shopifyGraphql(auth, `
-    mutation CancelOrder($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $refund: Boolean!, $notifyCustomer: Boolean, $staffNote: String) {
-      orderCancel(orderId: $orderId, reason: $reason, restock: $restock, refund: $refund, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
+    mutation CancelOrder($orderId: ID!, $reason: OrderCancelReason!, $restock: Boolean!, $refundMethod: OrderCancelRefundMethodInput, $notifyCustomer: Boolean, $staffNote: String) {
+      orderCancel(orderId: $orderId, reason: $reason, restock: $restock, refundMethod: $refundMethod, notifyCustomer: $notifyCustomer, staffNote: $staffNote) {
         job { id }
         orderCancelUserErrors { field message }
-        userErrors { field message }
       }
     }
   `, {
     orderId: toShopifyGid('Order', params.orderId),
     reason: params.reason ?? 'OTHER',
     restock: params.restock ?? true,
-    refund: params.refund ?? true,
+    refundMethod,
     notifyCustomer: params.notifyCustomer ?? true,
     staffNote: params.staffNote ?? null,
   })
-  // orderCancel reports through its own error key alongside the generic one.
+  // orderCancel reports through orderCancelUserErrors, NOT the generic
+  // `userErrors` (deprecated on this payload, so it is no longer selected —
+  // selecting a removed field would fail the whole query).
   const payload = (data as Record<string, unknown>).orderCancel as
     | { orderCancelUserErrors?: Array<{ field?: string[] | null; message?: string }> }
     | undefined
@@ -1100,7 +1109,6 @@ export async function cancelOrder(auth: ShopifyAuth, params: {
   if (cancelErrors.length > 0) {
     throw new Error(`Shopify API error: ${cancelErrors.map((e) => e.message ?? 'invalid').join('; ').slice(0, 300)}`)
   }
-  expectNoUserErrors(data, 'orderCancel')
   return (data as Record<string, unknown>).orderCancel
 }
 

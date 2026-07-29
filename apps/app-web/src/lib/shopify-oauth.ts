@@ -32,3 +32,53 @@ export function verifyShopifyCallbackHmac(
   const b = Buffer.from(provided.toLowerCase(), "utf8");
   return a.length === b.length && timingSafeEqual(a, b);
 }
+
+/**
+ * Body for the authorization-code exchange.
+ *
+ * `expiring: 1` is load-bearing and must never be dropped. Omitting it makes
+ * Shopify mint a PERMANENT offline token with no refresh token, which in turn
+ * makes `createShopifyTokenManager` unreachable dead code — a failure that is
+ * invisible locally (the connector works fine) right up until Shopify starts
+ * rejecting non-expiring tokens on 2027-01-01. Public apps created on or
+ * after 2026-04-01 are required to use expiring tokens.
+ */
+export function buildShopifyTokenExchangeBody(params: {
+  clientId: string;
+  clientSecret: string;
+  code: string;
+}): Record<string, string | number> {
+  return {
+    client_id: params.clientId,
+    client_secret: params.clientSecret,
+    code: params.code,
+    expiring: 1,
+  };
+}
+
+export type ShopifyTokenResponse = {
+  access_token?: string;
+  scope?: string;
+  expires_in?: number;
+  refresh_token?: string;
+};
+
+/**
+ * Classify a token response into the stored tuple. The SHAPE is the
+ * discriminator downstream (`isManagedShopifyTokens`), not any explicit flag:
+ * a managed tuple carries `refreshToken` + `expiresAt`, a static one carries
+ * neither. `now` is injected so the expiry math is testable.
+ */
+export function classifyShopifyTokens(
+  tokens: ShopifyTokenResponse,
+  now: number,
+): { accessToken: string; refreshToken?: string; expiresAt?: string } | null {
+  if (!tokens.access_token) return null;
+  const managed = !!tokens.refresh_token && typeof tokens.expires_in === "number";
+  if (!managed) return { accessToken: tokens.access_token };
+  return {
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    expiresAt: new Date(now + Math.max(0, (tokens.expires_in as number) * 1000)).toISOString(),
+  };
+}
