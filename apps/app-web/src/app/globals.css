@@ -29,6 +29,16 @@
      titles, and editor H1–H4 stay in one type system. (Aliased; both lead with
      the OS UI font, which also gives Latin headings genuine heavy weights.) */
   --font-display: var(--font-rocknroll);
+  /* To-do checkmark, as a MASK (not an image): the shape lives here, the ink
+     comes from `--primary-foreground` at the use site, so one glyph serves every
+     palette and both themes. Used by the editor's task list and the read-only
+     public body — see the task-list block below. It is a SHAPE, not a colour, so
+     it belongs in this palette-independent root and NOT in a themed token block:
+     when it was defined under `[data-palette="custom"]` the var resolved empty on
+     every other palette, `mask-image` fell back to `none`, and the tick `<span>`
+     painted as an opaque `--primary-foreground` square that hid the whole
+     checkbox on any checked row. */
+  --doc-check-tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.4l3 3 6-6.4' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 @theme inline {
@@ -1031,7 +1041,32 @@
     margin: 0;
     padding: 3px 0;
   }
-  /* Task list (to-do): no marker — the checkbox owns the leading column. */
+  /* ── Task list (to-do) ──────────────────────────────────────────────────
+     No drawn marker — the checkbox owns the leading column. Tiptap's TaskItem
+     node view renders
+
+         <li><label contenteditable="false"><input type="checkbox"><span></span></label>
+             <div>…paragraph + any nested blocks…</div></li>
+
+     so the ROW is a flex box whose two children are the checkbox label and the
+     content column. Both need explicit rules; without them the row broke in two
+     ways (both measured headless, both reported 2026-07-29):
+
+       1. The label is a flex item under `align-items: flex-start`, so a bare
+          checkbox pins to the ROW TOP — its centre landed 3.5px ABOVE the first
+          line box's centre (11.5px vs 15px), reading as "the checkbox is not
+          vertically aligned with its text". Give the label the height of the
+          first line BAND — the 24px line box plus the `<p>`'s 3px top/bottom
+          padding, `calc(1.5em + 6px)` — and centre inside it. That lands the box
+          on the first text line exactly like the drawn bullet marker's
+          `top: 0.75em`, and (unlike centring the row) KEEPS it on line one when
+          the to-do wraps.
+       2. The content `<div>` is a flex item with an auto basis, so an EMPTY
+          to-do's content column measured **0px wide**: no line box for the caret
+          to paint in, and nothing right of the checkbox to click. `flex: 1 1
+          auto` hands the row's whole width to the text column (Notion
+          behaviour) — the caret shows on an empty row and a click anywhere
+          along the row lands in the text. */
   .doc-collab-editor .ProseMirror ul[data-type="taskList"] {
     list-style: none;
     padding-left: 0.25rem;
@@ -1040,6 +1075,93 @@
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
+  }
+  /* One-cell grid: the checkbox and its tick `<span>` stack in the SAME cell
+     (`grid-area: 1/1`), so the tick needs no absolute positioning. Tiptap always
+     renders that span (its `checkboxStyler`) — it is the intended styling hook,
+     and using a real element instead of `input::after` keeps the tick painting
+     in engines that don't render pseudo-elements on form controls. */
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    height: calc(1.5em + 6px);
+    user-select: none;
+  }
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > div {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li[data-checked="true"] > div {
+    color: var(--muted-foreground);
+    text-decoration: line-through;
+  }
+  /* The control itself. The browser default is a 13px platform widget that
+     ignores the theme (and paints system blue when checked), so it's replaced
+     with a themed 16px box: `--border` is far too faint for an empty control, so
+     the resting outline is a muted-foreground tint that firms on hover. Shared
+     with the read-only/public body (`.doc-public-body`) so a published page
+     renders the same control as the editor it was authored in. */
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"],
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > span,
+  .doc-public-body .doc-todo-check > input[type="checkbox"],
+  .doc-public-body .doc-todo-check > span {
+    grid-area: 1 / 1;
+    width: 1rem;
+    height: 1rem;
+  }
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"],
+  .doc-public-body .doc-todo-check > input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
+    border: 1.5px solid color-mix(in srgb, var(--muted-foreground) 55%, transparent);
+    border-radius: 0.25rem;
+    background-color: transparent;
+    transition:
+      background-color 0.12s ease,
+      border-color 0.12s ease;
+  }
+  .doc-collab-editor
+    .ProseMirror
+    ul[data-type="taskList"]
+    li
+    > label:hover
+    > input[type="checkbox"] {
+    border-color: var(--muted-foreground);
+  }
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > input[type="checkbox"]:checked,
+  .doc-public-body .doc-todo-check > input[type="checkbox"]:checked {
+    background-color: var(--primary);
+    border-color: var(--primary);
+  }
+  /* Tick: a mask over a `--primary-foreground` fill, so it stays legible on the
+     brand colour in every palette + both themes (the token is the theme's own
+     on-primary ink). Scales in on check. */
+  .doc-collab-editor .ProseMirror ul[data-type="taskList"] li > label > span,
+  .doc-public-body .doc-todo-check > span {
+    pointer-events: none;
+    background-color: var(--primary-foreground);
+    transform: scale(0);
+    transition: transform 0.12s ease;
+    -webkit-mask-image: var(--doc-check-tick);
+    mask-image: var(--doc-check-tick);
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+  }
+  .doc-collab-editor
+    .ProseMirror
+    ul[data-type="taskList"]
+    li
+    > label
+    > input[type="checkbox"]:checked
+    + span,
+  .doc-public-body .doc-todo-check > input[type="checkbox"]:checked + span {
+    transform: scale(1);
   }
   .doc-collab-editor .ProseMirror blockquote {
     border-left: 3px solid var(--border);
