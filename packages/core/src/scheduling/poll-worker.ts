@@ -7,6 +7,7 @@
  */
 
 import type { BatchStore, JobStore, PendingBatch, ScheduledJob } from './types.js'
+import { runInBackgroundLane } from './background-lane.js'
 import { computeNextRun } from './schedule.js'
 
 export type JobExecutor = (job: ScheduledJob) => Promise<string>
@@ -132,7 +133,11 @@ export function createPollWorker(options: PollWorkerOptions) {
     running = true
 
     try {
-      const dueJobs = await store.getDueJobs()
+      // Only the CLAIM is lane-admitted, not the dispatch loop below: executing
+      // a due job runs a full model turn, and holding a background-lane slot
+      // across that would starve every other loop for minutes. The lane exists
+      // to bound concurrent DB checkouts, not to serialize work.
+      const dueJobs = await runInBackgroundLane(() => store.getDueJobs())
 
       for (const job of dueJobs) {
         // Path B durable chat resume — dispatch to `resumeHandler` instead
@@ -294,6 +299,11 @@ export function createBatchWorker(options: BatchWorkerOptions) {
     running = true
 
     try {
+      // Deliberately NOT admitted through the background lane: this store call
+      // holds its claim transaction across `processBatch` (Pipeline B model
+      // work), so a lane slot taken here would be held across a provider round
+      // trip and starve every other loop — the same coupling B2 removed from
+      // the embedding drain, still present here. Decoupling it is its own item.
       await store.withClaimedBatches(batchLimit, async (batches, markProcessed) => {
         for (const batch of batches) {
           try {

@@ -21,6 +21,7 @@
  */
 
 import { calculateCost, type UsageStore } from '../billing/cost-tracker.js'
+import { runInBackgroundLane } from '../scheduling/background-lane.js'
 import { GEMINI_EMBEDDING_MODEL_ID, type Embedder } from './embedder.js'
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000
@@ -259,12 +260,19 @@ export function createEmbeddingWorker(options: EmbeddingWorkerOptions) {
   }
 
   async function tick() {
+    // The re-entry guard is load-bearing beyond skipping overlapped work: it
+    // is half of why the store can release its claim lease before embedding
+    // (D4 — `maxScale = 1` plus this guard serialize a primitive's drains).
     if (running) return
     running = true
     try {
-      for (const primitive of primitives) {
-        await drainPrimitive(primitive)
-      }
+      // Admitted through the background lane so this drain cannot check out
+      // concurrently with every other worker loop in the process.
+      await runInBackgroundLane(async () => {
+        for (const primitive of primitives) {
+          await drainPrimitive(primitive)
+        }
+      })
     } catch (err) {
       console.error('[embedding-worker] tick error:', err)
     } finally {

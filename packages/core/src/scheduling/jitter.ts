@@ -16,8 +16,15 @@
  * worker ticks aligned, all competing for 22 usable Cloud SQL slots.
  *
  * The fix is to spread the first tick over a full interval window.
- * Steady-state behaviour is identical to `setInterval` — only the
- * phase changes.
+ * Steady-state behaviour is otherwise identical to `setInterval` — only
+ * the phase changes.
+ *
+ * Jitter only spreads the FIRST tick, though, so it says nothing about
+ * steady state: once several loops run long enough to overlap, they
+ * check out together again. Every tick is therefore also admitted
+ * through the background lane (`background-lane.ts`), and a loop whose
+ * previous tick has not settled skips its turn rather than stacking a
+ * second one — see the `tick` closure below.
  *
  * Usage:
  *   const timer = startJitteredInterval(tick, 60_000)
@@ -31,11 +38,15 @@
  * Spec: `docs/architecture/platform/deployment.md` → "Worker tick jitter".
  */
 
+import { runInBackgroundLane } from './background-lane.js'
+
 export type JitteredIntervalHandle = {
   /** Internal — opaque. Treat as a token; do not introspect. */
   _initialTimeout: ReturnType<typeof setTimeout> | null
   _interval: ReturnType<typeof setInterval> | null
   _stopped: boolean
+  /** True from the moment a tick asks for a lane slot until it settles. */
+  _ticking: boolean
 }
 
 /**
@@ -62,6 +73,29 @@ export function startJitteredInterval(
     _initialTimeout: null,
     _interval: null,
     _stopped: false,
+    _ticking: false,
+  }
+
+  /**
+   * One tick: admitted through the background lane, and skipped outright when
+   * this loop's previous tick has not settled.
+   *
+   * The re-entry guard is what keeps the lane's queue bounded. Without it, a
+   * loop whose tick outlives its interval enqueues a fresh waiter every period
+   * and the backlog grows without limit — the failure mode the lane exists to
+   * prevent, re-created one level up. With it, each loop contributes at most
+   * one waiter, so the queue is bounded by the number of loops.
+   */
+  const tick = () => {
+    if (handle._stopped || handle._ticking) return
+    handle._ticking = true
+    void runInBackgroundLane(async () => fn())
+      .catch(() => {
+        /* per-tick errors are the worker's responsibility */
+      })
+      .finally(() => {
+        handle._ticking = false
+      })
   }
 
   // Random offset in [0, intervalMs). The half-open upper bound matters:
@@ -78,17 +112,9 @@ export function startJitteredInterval(
     // first tick throws synchronously we still want subsequent ticks
     // to run — that's how plain setInterval behaves, and the workers'
     // own try/catch should already swallow per-tick errors.
-    void Promise.resolve()
-      .then(() => fn())
-      .catch(() => {
-        /* per-tick errors are the worker's responsibility */
-      })
+    tick()
     if (!handle._stopped) {
-      handle._interval = setInterval(() => {
-        void Promise.resolve()
-          .then(() => fn())
-          .catch(() => {})
-      }, intervalMs)
+      handle._interval = setInterval(tick, intervalMs)
     }
   }, firstDelayMs)
 
