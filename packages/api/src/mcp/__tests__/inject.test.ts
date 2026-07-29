@@ -60,6 +60,7 @@ import {
   INJECTED_BUILTIN_TOOLS_BY_CONNECTOR,
   _getMcpDiscoveryCacheSize,
 } from '../inject.js'
+import { buildUnavailableCapabilitiesPrompt } from '../../routes/route-helpers.js'
 
 function settingsStoreStub() {
   // Generous stub — the no-connector path touches few of these, but
@@ -1137,5 +1138,48 @@ describe('[COMP:api/mcp-inject] built-in fold vs direct (keepBuiltinsDirect)', (
     expect(tools.has('githubListPullRequests')).toBe(false)
     expect(tools.has('mcp_search')).toBe(true)
     expect(tools.has('mcp_call')).toBe(true)
+  })
+
+  // ── The prod failure this fold caused (2026-07-23) ────────────────
+  // Composed against the REAL injector, because the bug lives in the gap
+  // between two individually-correct halves: the pluck (above) and the
+  // closed-world prompt. TaskMaster held a live github grant, saw
+  // ["mcp_search","mcp_call"] as its whole tool map, read a system prompt
+  // asserting that map plus the unavailable list was the complete
+  // integration surface, and denied a GitHub write it was authorized for.
+  describe('closed-world prompt vs the folded surface', () => {
+    it('never leaves a connected connector in neither the tool map nor the unavailable list without a search order', async () => {
+      // ONE injector run supplies BOTH halves — the map and the unavailable
+      // list have to come from the same turn or the composition proves nothing.
+      const tools = new Map()
+      const result = await injectMcpTools({
+        userId: 'u-1',
+        assistantId: 'a-1',
+        tools,
+        connectorStore: githubConnector() as never,
+        settingsStore: settingsStoreStub() as never,
+        keepBuiltinsDirect: false,
+      })
+
+      // Guard the guard: an empty list would make the github assertion below
+      // vacuous, and this turn genuinely adverts other disconnected providers.
+      expect(result.unavailable.length).toBeGreaterThan(0)
+      // github is connected, so it is correctly absent from `unavailable`...
+      expect(result.unavailable.some((u) => /github/i.test(u))).toBe(false)
+      // ...and plucked, so it is absent from the visible tool map too.
+      expect([...tools.keys()].some((n) => /^github/i.test(n))).toBe(false)
+      expect(tools.has('mcp_search')).toBe(true)
+
+      // Which means the prompt must NOT treat those two sets as exhaustive.
+      const prompt = buildUnavailableCapabilitiesPrompt(result.unavailable, tools)
+      expect(prompt).not.toContain('This list plus your tools is the complete integration surface')
+      expect(prompt).toContain('mcp_search')
+    })
+
+    it('still emits the search order when every connector is healthy (empty unavailable list)', async () => {
+      const tools = await injectWith(false)
+      const prompt = buildUnavailableCapabilitiesPrompt([], tools)
+      expect(prompt).toContain('mcp_search')
+    })
   })
 })

@@ -1089,10 +1089,21 @@ export function createCalleeExecutor(options: CalleeExecutorOptions): CalleeExec
     // dependency chain and this file is on the boot path (cf. the boot-time TDZ
     // this repo has hit before). Skipped entirely when nothing is unavailable.
     let unavailableBlock = ''
-    if (unavailableCapabilities.length > 0) {
+    // Also fires with an EMPTY list when the callee holds a search surface:
+    // its connectors are folded behind `mcp_search`, so without the
+    // search-before-denial rule it answers from absence (2026-07-23). The
+    // lazy import still only happens when there is something to emit.
+    //
+    // `finalTools`, NOT `calleeTools` — a pinned `allowedTools` runs through
+    // `filterToolsByAllowList`, which keeps only the named tools and so can
+    // strip `mcp_search`. Gating on the pre-filter map would order the callee
+    // to search with a tool it does not hold (tool-awareness rule), and that
+    // combination is the normal case: pinning an allow-list is exactly what
+    // sets `keepBuiltinsDirect` above. Same map the blueprint gate reads.
+    if (unavailableCapabilities.length > 0 || finalTools.has('mcp_search')) {
       try {
         const { buildUnavailableCapabilitiesPrompt } = await import('../routes/route-helpers.js')
-        unavailableBlock = buildUnavailableCapabilitiesPrompt(unavailableCapabilities)
+        unavailableBlock = buildUnavailableCapabilitiesPrompt(unavailableCapabilities, finalTools)
       } catch (err) {
         console.error('[inter-assistant] unavailable-capabilities prompt failed (skipped):', err)
       }

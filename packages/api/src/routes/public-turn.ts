@@ -458,7 +458,7 @@ export async function executePublicTurn(
   // Append the unavailable-capabilities block so the model doesn't
   // burn turns hunting for tools that aren't connected. Same pattern
   // as chat.ts (line 1124).
-  const fullSystemPrompt = promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable)
+  const fullSystemPrompt = promptWithMemory + buildUnavailableCapabilitiesPrompt(mcpInjection.unavailable, baseTools)
 
   // ── 10. Load history + proactive compaction ──────────────
   // Mirrors web chat (chat.ts:797–816). `runProactiveCompaction`

@@ -205,10 +205,63 @@ export function isValidDateString(date: string): boolean {
  * arbitrary services ("enable the Jira connector in Settings") and invent
  * integrations that do not exist (caught by the WS2 probe battery,
  * conn-jira-post / wf-crm-deal-won).
+ *
+ * The closed world has to account for the DEFERRED surface (prod incident
+ * 2026-07-23). `injectMcpTools` deletes every built-in connector tool from
+ * the map and folds it behind `mcp_search`, so a connected + granted
+ * connector sits in NEITHER `capabilities` (it is connected, so it is never
+ * adverted unavailable) NOR the visible tool map (it was plucked). The old
+ * wording — "this list plus your tools is the complete integration surface:
+ * for a service in neither, Use Brian has no integration" — therefore told
+ * the model to deny a capability it held a live grant for. TaskMaster
+ * refused a GitHub write, then listed 8 GitHub tools the moment the user
+ * pushed it into running `mcp_search`.
+ *
+ * So when the search surface exists, the closed world is widened to include
+ * it and a search is ordered before any denial. `tools` gates that wording
+ * the same way `buildBrowserEscalationPrompt` gates its own: `injectMcpTools`
+ * skips the search pair entirely when no source is present, and naming a
+ * tool that is not in the map is exactly what the tool-awareness rule bans.
+ * It is REQUIRED, not optional, so a new call site cannot silently restore
+ * the pre-incident wording — the compiler is the enforcement.
+ *
+ * Pass the map the QUERY LOOP receives, not an earlier one. Anything that
+ * narrows the map afterwards (the inter-assistant allow-list filter) can
+ * drop `mcp_search`, and ordering a search for a tool the callee does not
+ * hold is the same tool-awareness violation in the opposite direction.
  */
-export function buildUnavailableCapabilitiesPrompt(capabilities: string[]): string {
-  if (capabilities.length === 0) return ''
-  return `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead). This list plus your tools is the complete integration surface: for a service in neither, Use Brian has no integration to enable. Say so plainly and offer the nearest supported alternative. Never point the user to a Settings toggle or connector for a service that is not listed here.`
+const SEARCH_BEFORE_DENIAL =
+  'Before you tell the user a capability is unavailable, run `mcp_search` for it.'
+
+/**
+ * Deliberately "may be folded", not "is folded": the workflow path runs with
+ * `keepBuiltinsDirect`, which leaves built-ins in the map by name while a
+ * custom remote source can still put `mcp_search` there. "Every connector is
+ * hidden" would be a falsehood on that path.
+ */
+const FOLDED_SURFACE =
+  'Your visible tools are not the whole integration surface: connector tools may be folded behind `mcp_search` and not appear by name until you search for them.'
+
+export function buildUnavailableCapabilitiesPrompt(
+  capabilities: string[],
+  tools: { has(name: string): boolean },
+): string {
+  const searchable = tools.has('mcp_search')
+
+  // Nothing unavailable, but connectors may still be folded out of sight:
+  // the model needs the search-before-denial rule or it answers from absence.
+  if (capabilities.length === 0) {
+    if (!searchable) return ''
+    return `\n\n# Connector tools\n\n${FOLDED_SURFACE} ${SEARCH_BEFORE_DENIAL}`
+  }
+
+  const head = `\n\n# Unavailable capabilities\n\nThe following services are NOT available. Do not attempt to use them or search for them:\n${capabilities.map((c) => `- ${c}`).join('\n')}\n\nIf the user asks for something that requires one of the services listed above, say it is not connected and suggest enabling it in Settings (when an entry includes its own connect phrase, use that instead).`
+
+  const closedWorld = searchable
+    ? ` This list, your visible tools, and every tool reachable through \`mcp_search\` together are the complete integration surface. ${FOLDED_SURFACE} ${SEARCH_BEFORE_DENIAL} Only a service listed above, or one \`mcp_search\` cannot find, has no integration to enable: say so plainly then and offer the nearest supported alternative.`
+    : ` This list plus your tools is the complete integration surface: for a service in neither, Use Brian has no integration to enable. Say so plainly and offer the nearest supported alternative.`
+
+  return `${head}${closedWorld} Never point the user to a Settings toggle or connector for a service that is not listed here.`
 }
 
 /**
