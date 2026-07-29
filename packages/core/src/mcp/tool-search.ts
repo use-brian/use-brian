@@ -715,8 +715,36 @@ async function dispatchLocal(params: {
   blockedTools: Set<string>
   allowedTools: Set<string>
 }) {
-  const { entry, server, tool, toolKey, args, context, blockedTools, allowedTools } = params
+  const { entry, server, tool, toolKey, context, blockedTools, allowedTools } = params
   const targetTool = entry.tool
+
+  // Validate against the tool's own schema before anything else. Direct-
+  // injected tools get shape-correct input by construction — the provider's
+  // function-calling is constrained by the declared schema — but mcp_call's
+  // provider-facing schema only says `args: object`, so nothing upstream
+  // guarantees the inner shape. Without this, a misnamed argument reaches
+  // execute() as `undefined` and surfaces as a deep TypeError the model
+  // cannot act on (imapGetMessage called with `id` instead of `messageId`);
+  // a zod issue list names the right parameters, so the model self-corrects.
+  // Parsed output replaces `args` so defaults and preprocessing apply the
+  // same as on the direct path.
+  // (Guarded: every buildTool() tool carries a zod schema, but test doubles
+  // and gateway shims may not — those dispatch unvalidated as before.)
+  let args = params.args
+  const parsedArgs =
+    typeof targetTool.inputSchema?.safeParse === 'function'
+      ? targetTool.inputSchema.safeParse(args)
+      : { success: true as const, data: args }
+  if (!parsedArgs.success) {
+    const issues = parsedArgs.error.issues
+      .map((i) => `${i.path.join('.') || '(args)'}: ${i.message}`)
+      .join('; ')
+    return {
+      data: `ERROR: invalid arguments for "${tool}": ${issues}. Re-check this tool's parameter names and types in its mcp_search entry, then retry.`,
+      isError: true,
+    }
+  }
+  args = parsedArgs.data as Record<string, unknown>
 
   // Resolve confirmation requirement — same logic the executor uses for
   // direct-injected tools (`resolveConfirmation` overrides `requiresConfirmation`).
