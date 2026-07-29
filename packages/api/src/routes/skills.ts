@@ -61,12 +61,19 @@ import {
 } from '../skills/draft-generator.js'
 import {
   importSkillFromGithub,
+  importSkillFromPaste,
   importSkillFromUrl,
   SkillImportError,
-  IMPORT_MAX_SUPPORT_FILES,
-  IMPORT_MAX_SUPPORT_FILE_BYTES,
+  IMPORT_MAX_FILE_BYTES,
   type GithubContentsReader,
 } from '../skills/import-service.js'
+import {
+  validateSupportFile,
+  validateSupportFileSet,
+  SUPPORT_FILE_KINDS,
+  SUPPORT_FILE_NAME_MAX,
+  type SupportFile,
+} from '../skills/support-files.js'
 import type { RawImportFetcher } from '../skills/import-source.js'
 import {
   listWorkspaceGithubInstances,
@@ -239,6 +246,8 @@ export function skillRoutes({
       description: s.description,
       whenToUse: s.whenToUse ?? null,
       content: s.content,
+      // The library groups on this; without it every skill reads as "custom".
+      category: s.category,
       state: s.state,
       confidence: s.confidence,
       activatedAt: s.activatedAt ? s.activatedAt.toISOString() : null,
@@ -504,27 +513,13 @@ export function skillRoutes({
 
     // Skill-import extension: validate support files up front so a bad batch
     // never leaves a half-written skill (`workspace_skill_files` rows are
-    // written after the insert; the caps mirror the import service's).
-    const SUPPORT_KINDS = new Set(['reference', 'template', 'script'])
-    let validSupportFiles: Array<{ kind: 'reference' | 'template' | 'script'; name: string; content: string; description?: string }> = []
+    // written after the insert). One validator backs this and the editor's
+    // PUT /:id/files, so the two paths cannot drift.
+    let validSupportFiles: SupportFile[] = []
     if (supportFiles !== undefined) {
-      if (!Array.isArray(supportFiles) || supportFiles.length > IMPORT_MAX_SUPPORT_FILES) {
-        res.status(400).json({ error: `supportFiles must be an array of at most ${IMPORT_MAX_SUPPORT_FILES}` }); return
-      }
-      const seen = new Set<string>()
-      for (const f of supportFiles) {
-        if (!f || typeof f.kind !== 'string' || !SUPPORT_KINDS.has(f.kind)
-          || typeof f.name !== 'string' || !f.name.trim() || f.name.length > 200
-          || typeof f.content !== 'string' || f.content.length > IMPORT_MAX_SUPPORT_FILE_BYTES) {
-          res.status(400).json({ error: 'Invalid support file' }); return
-        }
-        const key = `${f.kind}:${f.name}`
-        if (seen.has(key)) {
-          res.status(400).json({ error: `Duplicate support file: ${key}` }); return
-        }
-        seen.add(key)
-      }
-      validSupportFiles = supportFiles as typeof validSupportFiles
+      const checked = validateSupportFileSet(supportFiles)
+      if (!checked.ok) { res.status(400).json({ error: checked.error }); return }
+      validSupportFiles = checked.value
     }
     if (importSource !== undefined
       && (typeof importSource !== 'object' || importSource === null || Array.isArray(importSource))) {
@@ -642,6 +637,14 @@ export function skillRoutes({
     workspaceId: z.string().trim().min(1),
     source: z.discriminatedUnion('kind', [
       z.object({ kind: z.literal('url'), url: z.string().trim().min(1).max(2000) }),
+      // Paste / .md upload — the bytes ride in the request, so unlike `url`
+      // there is no server-side fetch and therefore no host allowlist to
+      // enforce. `fileName` only informs dialect detection + name derivation.
+      z.object({
+        kind: z.literal('paste'),
+        content: z.string().min(1).max(IMPORT_MAX_FILE_BYTES),
+        fileName: z.string().trim().max(200).optional(),
+      }),
       z.object({
         kind: z.literal('github'),
         connectorInstanceId: z.string().trim().min(1),
@@ -692,6 +695,10 @@ export function skillRoutes({
       if (source.kind === 'url') {
         const result = await importSkillFromUrl(source.url, fetchRawImport)
         res.json(result)
+        return
+      }
+      if (source.kind === 'paste') {
+        res.json(importSkillFromPaste(source.content, source.fileName))
         return
       }
       const resolved = await resolveWorkspaceGithubPat(
@@ -1204,6 +1211,138 @@ export function skillRoutes({
     } catch (err) {
       console.error('[skills] access update failed:', err)
       res.status(500).json({ error: 'Failed to update skill access' })
+    }
+  })
+
+  // ── /:id/files — the skill's support-file bundle ────────────
+  //
+  // A skill is a bundle, not a lone body: `workspace_skill_files` holds its
+  // reference / template / script files and `useSkill` expands their
+  // `{{kind:name}}` pointers at load time. These three routes are the human
+  // half of that surface — before them the rows were write-once at import and
+  // the background curator's `add_support_file` could attach a file the
+  // owning user could never see, edit, or remove.
+  //
+  // Spec: docs/architecture/engine/skill-system.md → "Support files".
+
+  /** Membership + store gate shared by the three file routes. Answers on
+   *  `res` and returns false when the caller must not proceed. */
+  async function passesSkillFilesGate(
+    userId: string,
+    skillRowId: string,
+    res: import('express').Response,
+  ): Promise<boolean> {
+    if (!workspaceSkillFilesStore) {
+      res.status(501).json({ error: 'Support files are not available on this deployment.' })
+      return false
+    }
+    const scope = await resolveSkillMutationScope(userId, skillRowId)
+    if (scope.kind !== 'workspace') {
+      // `legacy` means the workspace stores aren't injected — the same
+      // not-configured answer as a missing files store.
+      if (scope.kind === 'legacy') {
+        res.status(501).json({ error: 'Support files are not available on this deployment.' })
+      } else {
+        res.status(404).json({ error: 'Skill not found' })
+      }
+      return false
+    }
+    return true
+  }
+
+  /** Wire shape of one support-file row. */
+  function toSupportFileJson(row: {
+    kind: string
+    name: string
+    content: string
+    description: string | null
+    updatedAt: Date | string
+  }) {
+    return {
+      kind: row.kind,
+      name: row.name,
+      content: row.content,
+      description: row.description,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+    }
+  }
+
+  const supportFileSelectorSchema = z.object({
+    kind: z.enum(SUPPORT_FILE_KINDS),
+    name: z.string().trim().min(1).max(SUPPORT_FILE_NAME_MAX),
+  })
+
+  router.get('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+      const rows = await workspaceSkillFilesStore!.list(req.params.id, { actingUserId: userId })
+      res.json({ files: rows.map(toSupportFileJson) })
+    } catch (err) {
+      console.error('[skills] list support files failed:', err)
+      res.status(500).json({ error: 'Failed to list support files' })
+    }
+  })
+
+  router.put('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const checked = validateSupportFile(req.body)
+    if (!checked.ok) { res.status(400).json({ error: checked.error }); return }
+
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+
+      // Count cap applies to the resulting set, not the request: upserting an
+      // existing (kind, name) replaces rather than adds.
+      const existing = await workspaceSkillFilesStore!.list(req.params.id, { actingUserId: userId })
+      const isNew = !existing.some(
+        (f) => f.kind === checked.value.kind && f.name === checked.value.name,
+      )
+      const projected = existing
+        .filter((f) => !(f.kind === checked.value.kind && f.name === checked.value.name))
+        .map((f) => ({ kind: f.kind, name: f.name, content: f.content }))
+        .concat([checked.value])
+      const set = validateSupportFileSet(projected)
+      if (!set.ok) { res.status(400).json({ error: set.error }); return }
+
+      const row = await workspaceSkillFilesStore!.upsert(userId, {
+        workspaceSkillId: req.params.id,
+        kind: checked.value.kind,
+        name: checked.value.name,
+        content: checked.value.content,
+        description: checked.value.description ?? null,
+      })
+      res.status(isNew ? 201 : 200).json({ file: toSupportFileJson(row) })
+    } catch (err) {
+      console.error('[skills] support file upsert failed:', err)
+      res.status(500).json({ error: 'Failed to save the support file' })
+    }
+  })
+
+  router.delete('/:id/files', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    // Identified by query rather than path: a file name may carry slashes (the
+    // resolver allows them), so routing on it would need encoding rules the
+    // client would have to match.
+    const selector = supportFileSelectorSchema.safeParse(req.query)
+    if (!selector.success) {
+      res.status(400).json({ error: 'kind and name query parameters are required' }); return
+    }
+    const { kind, name } = selector.data
+
+    try {
+      if (!(await passesSkillFilesGate(userId, req.params.id, res))) return
+      const removed = await workspaceSkillFilesStore!.delete(userId, req.params.id, kind, name)
+      if (!removed) { res.status(404).json({ error: 'Support file not found' }); return }
+      res.json({ deleted: true })
+    } catch (err) {
+      console.error('[skills] support file delete failed:', err)
+      res.status(500).json({ error: 'Failed to delete the support file' })
     }
   })
 

@@ -52,6 +52,9 @@ export type WorkspaceSkillSummary = {
   whenToUse: string | null;
   /** The skill body (markdown). */
   content: string;
+  /** Library grouping bucket. TEXT server-side, so normalize with
+   *  `skillCategoryOf` before rendering — never trust it to be in the enum. */
+  category: string;
   state: SkillLifecycleState;
   confidence: number;
   /** ISO timestamp; null ⇒ Suggested (not yet activated). */
@@ -120,6 +123,8 @@ export type CreateSkillInput = {
   content: string;
   description?: string;
   whenToUse?: string;
+  /** Library grouping bucket; the server defaults it to `custom`. */
+  category?: string;
   workspaceId: string;
   sensitivity?: SkillSensitivity;
   /** D4 — `'all'` writes enablement rows for every current workspace
@@ -193,6 +198,9 @@ export type UpdateSkillInput = {
   description?: string;
   whenToUse?: string;
   sensitivity?: SkillSensitivity;
+  /** Library grouping bucket. Without a write surface the column stays at its
+   *  `custom` default and the grouped library renders one bucket forever. */
+  category?: string;
 };
 
 /**
@@ -447,6 +455,9 @@ export type SkillImportResult = {
 
 export type SkillImportSource =
   | { kind: "url"; url: string }
+  /** Markdown pasted into the dialog or read off a picked `.md` file.
+   *  `fileName` only informs dialect detection and name derivation. */
+  | { kind: "paste"; content: string; fileName?: string }
   | {
       kind: "github";
       connectorInstanceId: string;
@@ -578,4 +589,96 @@ export async function listImportGithubContents(
     entries?: SkillImportGithubEntry[];
   };
   return { ok: true, entries: Array.isArray(data.entries) ? data.entries : [] };
+}
+
+// ── Support files (the skill's bundle) ───────────────────────────
+//
+// A skill is a folder, not a lone body: these rows hold its reference /
+// template / script files and the body reaches them through `{{kind:name}}`
+// pointers the loader expands at `useSkill` time. Backed by
+// `GET/PUT/DELETE /api/skills/:id/files`; spec:
+// docs/architecture/engine/skill-system.md → "Support files".
+
+export type SkillFileKind = "reference" | "template" | "script";
+
+export const SKILL_FILE_KINDS: SkillFileKind[] = [
+  "reference",
+  "template",
+  "script",
+];
+
+export type SkillFile = {
+  kind: SkillFileKind;
+  name: string;
+  content: string;
+  description: string | null;
+  /** ISO timestamp of the last write (the curator writes here too). */
+  updatedAt: string;
+};
+
+/** The `{{kind:name}}` pointer that expands this file into the body. */
+export function skillFilePointer(file: {
+  kind: SkillFileKind;
+  name: string;
+}): string {
+  return `{{${file.kind}:${file.name}}}`;
+}
+
+/**
+ * A skill's support files. `501` (deployment without the files store) maps to
+ * an empty list so the editor simply renders no bundle section rather than an
+ * error — same degrade-quietly posture as the access rail.
+ */
+export async function listSkillFiles(
+  skillRowId: string,
+): Promise<{ ok: true; files: SkillFile[] } | { ok: false; error: string }> {
+  const res = await authFetch(`${API_URL}/api/skills/${skillRowId}/files`);
+  if (res.status === 501) return { ok: true, files: [] };
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to load support files" };
+  }
+  const data = (await res.json().catch(() => ({}))) as { files?: SkillFile[] };
+  return { ok: true, files: Array.isArray(data.files) ? data.files : [] };
+}
+
+/** Create or replace one support file, keyed by `(kind, name)`. */
+export async function saveSkillFile(
+  skillRowId: string,
+  file: {
+    kind: SkillFileKind;
+    name: string;
+    content: string;
+    description?: string | null;
+  },
+): Promise<{ ok: true; file: SkillFile } | { ok: false; error: string }> {
+  const res = await authFetch(`${API_URL}/api/skills/${skillRowId}/files`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(file),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to save the file" };
+  }
+  const data = (await res.json().catch(() => ({}))) as { file?: SkillFile };
+  if (!data.file) return { ok: false, error: "Failed to save the file" };
+  return { ok: true, file: data.file };
+}
+
+export async function deleteSkillFile(
+  skillRowId: string,
+  kind: SkillFileKind,
+  name: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const params = new URLSearchParams({ kind, name });
+  const res = await authFetch(
+    `${API_URL}/api/skills/${skillRowId}/files?${params.toString()}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    return { ok: false, error: data.error ?? "Failed to delete the file" };
+  }
+  return { ok: true };
 }

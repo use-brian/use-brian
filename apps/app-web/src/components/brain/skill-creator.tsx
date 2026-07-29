@@ -97,6 +97,9 @@ export type SkillImportPrefill = {
     description: string;
     whenToUse?: string;
     content: string;
+    /** The dialect normalizer's bucket — carried through so an import lands
+     *  in the right library group instead of defaulting to `custom`. */
+    category?: string;
   };
   supportFiles: SkillImportSupportFile[];
   importSource: Record<string, unknown>;
@@ -284,6 +287,7 @@ export function SkillCreator({ workspaceId, onBack, onCreated, initialImport }: 
       content: trimmedContent,
       workspaceId,
       sensitivity,
+      category: initialImport?.draft.category,
       enabledAssistantIds: "all",
       // Imported drafts carry their folder support files + provenance through
       // the save; hand-authored drafts send neither.

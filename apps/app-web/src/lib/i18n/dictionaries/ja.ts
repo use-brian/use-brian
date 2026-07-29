@@ -2989,6 +2989,12 @@ export const ja: Dictionary = {
       nameRequired: "スキルに名前を付けてください。",
     },
     skillsLibrary: {
+      categories: {
+        productivity: "生産性",
+        communication: "コミュニケーション",
+        research: "リサーチ",
+        custom: "カスタム",
+      },
       countOne: "1 件のスキル",
       countMany: "{count} 件のスキル",
       searchPlaceholder: "スキルを検索…",
@@ -3154,6 +3160,7 @@ export const ja: Dictionary = {
       saveConfirm: "保存して承認",
       saveConfirmHint:
         "編集を保存すると、このスキルは確認済みとなり、信頼度が100%になります。",
+      categoryLabel: "カテゴリ",
       aboutHeading: "概要",
       usageLabel: "利用状況",
       usageSummary: "実行 {runs} · 成功 {ok} · 修正 {corrected}",
@@ -3219,10 +3226,52 @@ export const ja: Dictionary = {
       send: "送信",
       attach: "ファイルを添付",
     },
+    skillFiles: {
+      heading: "ファイル",
+      explainer:
+        "このスキルが読み込めるリファレンス、テンプレート、スクリプトです。本文にファイルのトークンを入れると、スキルの実行時にアシスタントがそのファイルを読みます。",
+      add: "ファイルを追加",
+      empty: "ファイルはまだありません。このスキルは本文だけで動作します。",
+      edit: "編集",
+      close: "閉じる",
+      delete: "削除",
+      deleteTitle: "このファイルを削除しますか？",
+      deleteBody:
+        "{name} をこのスキルから削除します。本文にあるこのファイルのトークンは解決できなくなります。",
+      copyPointer: "トークンをコピー",
+      notReferenced: "本文はまだこのファイルを参照していません。",
+      kindLabel: "種類",
+      kinds: {
+        reference: "リファレンス",
+        template: "テンプレート",
+        script: "スクリプト",
+      },
+      nameLabel: "ファイル名",
+      descriptionLabel: "説明（任意）",
+      descriptionPlaceholder: "次に読む人のための一行メモ。",
+      renameLeftBehind:
+        "保存しましたが、元のファイル {name} を削除できず、両方が残っています。{name} を手動で削除してください。（{error}）",
+      namePlaceholder: "weekly-status.md",
+      contentPlaceholder: "アシスタントが読むファイルの内容。",
+      save: "ファイルを保存",
+      saving: "保存中…",
+      cancel: "キャンセル",
+    },
     skillImport: {
       title: "スキルをインポート",
+      tabPaste: "貼り付け",
       tabUrl: "URLから",
       tabGithub: "GitHubから",
+      pasteLabel: "スキルのマークダウン",
+      pasteUpload: "ファイルをアップロード",
+      pastePlaceholder:
+        "---\nname: 週次ステータス\ndescription: 週次更新の書き方\n---\n\n更新を集めてから、メモを書きます。",
+      pasteHint:
+        "Agent SkillsのSKILL.md、Claude Codeのコマンド、Cursorのルール、または任意のプロンプトのマークダウンを貼り付けてください。確認するまで保存されません。",
+      pasteFromFile:
+        "{name} から読み込みました。テキストを編集するとファイル名は消えます。",
+      fileReadFailed:
+        "そのファイルを読み込めませんでした。内容を貼り付けてお試しください。",
       urlLabel: "公開ファイルのURL",
       urlPlaceholder: "https://github.com/owner/repo/blob/main/SKILL.md",
       urlHint:

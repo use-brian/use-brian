@@ -25,6 +25,7 @@ export function toSkillImportPrefill(
       description: result.draft.description,
       whenToUse: result.draft.whenToUse,
       content: result.draft.content,
+      category: result.draft.category,
     },
     supportFiles: result.supportFiles,
     importSource: result.importSource,
