@@ -128,6 +128,44 @@ export const OFFICIAL_CONNECTORS: ConnectorEntry[] = [
     tags: ['commerce', 'shopify'],
   },
   {
+    id: 'msgraph',
+    name: 'Microsoft Teams',
+    description: 'Read Teams channels, chats, and members, and search your Teams history, including messages from before the assistant joined. Read-only.',
+    category: 'official',
+    // Per-user delegated OAuth against ONE Use Brian-owned Entra app: client
+    // id + secret resolve through `getConnectorConfig('msgraph')`
+    // (MSGRAPH_CLIENT_ID / MSGRAPH_CLIENT_SECRET), the notion/fathom shape,
+    // and the token manager authorizes against the `organizations` authority
+    // (never `common` — that admits personal Microsoft accounts, for which
+    // every Teams permission is "Not supported") so each user consents for
+    // their own work account. D3 holds (delegated, not
+    // application permissions — search is delegated-only), but the plan's D2
+    // (BYO per-workspace Entra app, credentials read off the Teams
+    // `channel_integrations` row, Teams channel required first) is a LATER
+    // token-acquisition swap and NOT what ships here — `msgraph/token.ts`
+    // carries a `tenantId` override for exactly that day.
+    // Id is `msgraph`, not `msteams` — that provider slug is already taken by
+    // the channel's credential-less ingest anchor (D5).
+    // See docs/architecture/integrations/msgraph.md §2, §6.
+    auth_type: 'oauth',
+    oauth_required: true,
+    enabled: true,
+    tags: ['productivity', 'microsoft'],
+    // One Microsoft identity per user — a deliberate v1 boundary, NOT a
+    // structural impossibility: `organizations` narrows the account picker to
+    // work/school, but a person can still belong to more than one tenant, so
+    // a second work account remains possible in principle. This is the imap
+    // D11 call (one mailbox per user), made for the same reason — "read the
+    // company's Teams" is one work identity in practice.
+    // It is also what keeps msgraph out of MULTI_INSTANCE_RUNTIME_PROVIDERS
+    // (inject.ts), so the injector needs no `extrasByProvider` plumbing;
+    // without the flag Studio offers "Add another" and a no-extras injector
+    // silently never uses the second account. Multi-account is a later,
+    // deliberate change: drop this flag AND consume the extras in
+    // injectMsGraphTools (the github/google injector pattern).
+    single_instance: true,
+  },
+  {
     id: 'imap',
     name: 'Company Email (IMAP)',
     description:

@@ -23,7 +23,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
 
-export type ConnectorProvider = 'google' | 'notion' | 'fathom' | 'shopify'
+export type ConnectorProvider = 'google' | 'notion' | 'fathom' | 'shopify' | 'msgraph'
 
 export type ConnectorAppConfig = {
   clientId: string
@@ -41,6 +41,7 @@ const fileSchema = z
     notion: appConfigSchema.optional(),
     fathom: appConfigSchema.optional(),
     shopify: appConfigSchema.optional(),
+    msgraph: appConfigSchema.optional(),
   })
   .partial()
 
@@ -78,6 +79,12 @@ const ENV_KEYS: Record<ConnectorProvider, { id: string; secret: string }> = {
   notion: { id: 'NOTION_CLIENT_ID', secret: 'NOTION_CLIENT_SECRET' },
   fathom: { id: 'FATHOM_CLIENT_ID', secret: 'FATHOM_CLIENT_SECRET' },
   shopify: { id: 'SHOPIFY_CLIENT_ID', secret: 'SHOPIFY_CLIENT_SECRET' },
+  // Microsoft Graph (Teams connector) — one Use Brian-owned Entra app, with a
+  // per-user delegated authorization-code grant against the `organizations`
+  // tenant (work/school only; Teams delegated permissions are documented "Not
+  // supported" for personal Microsoft accounts).
+  // See docs/architecture/integrations/msgraph.md.
+  msgraph: { id: 'MSGRAPH_CLIENT_ID', secret: 'MSGRAPH_CLIENT_SECRET' },
 }
 
 /**
