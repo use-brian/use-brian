@@ -73,6 +73,34 @@ export const MAX_DISTILL_PAGES = 150
 
 const DEFAULT_TIMEOUT_MS = 180_000
 
+/**
+ * Above this page count the user is asked before the document is distilled.
+ *
+ * Distilling is credit-incurring and long-running, so the preflight-confirmation
+ * invariant applies (`docs/architecture/engine/preflight-confirmation.md`).
+ * Below the threshold the worst case is a few cents and a few seconds, which
+ * is not worth a dialog; above it the user should know the page count and the
+ * cost before it is spent. A free-rated backend (a ChatGPT subscription) skips
+ * the confirm entirely — there is nothing to confirm.
+ */
+export const PDF_CONFIRM_PAGE_THRESHOLD = 30
+
+/**
+ * Rough input+output token estimate for distilling `pages` pages, used ONLY to
+ * quote a cost in the confirm. Deliberately arithmetic, not a probe: the
+ * estimate must be cheaper than the thing it is estimating.
+ */
+export function estimateDistillTokens(pages: number, renderWidth: number): {
+  inputTokens: number
+  outputTokens: number
+} {
+  const bounded = Math.max(0, Math.min(pages, MAX_DISTILL_PAGES))
+  // A4 portrait at `renderWidth`; Qwen-VL bills (w x h)/784 and GPT tiles to a
+  // similar order. Output is the transcription itself, ~1k tokens per page.
+  const perPageInput = Math.round((renderWidth * renderWidth * 1.294) / 784)
+  return { inputTokens: bounded * perPageInput, outputTokens: bounded * 1_000 }
+}
+
 const PDF_DISTILL_PROMPT =
   'Transcribe these rendered PDF pages into faithful Markdown.\n' +
   '- Transcribe all text verbatim. Do NOT summarize, paraphrase, or invent content.\n' +

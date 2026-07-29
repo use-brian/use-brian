@@ -2,7 +2,7 @@ export type { FileStore, CachedFile } from './types.js'
 export { parseFileContent, parseDocxToMarkdown, shouldInline } from './parsers.js'
 export { distillFileToText, type DistillOptions, type DistillResult } from './distill.js'
 export { extractPdfText } from './pdf-text.js'
-export { renderPdfPages, type RenderedPdfPage, type RenderPdfPagesResult } from './pdf-pages.js'
+export { renderPdfPages, probePdfPageCount, type RenderedPdfPage, type RenderPdfPagesResult } from './pdf-pages.js'
 export {
   distillPdfViaPages,
   distillConfigKey,
@@ -11,6 +11,8 @@ export {
   PROVIDER_CHUNK_PAGES,
   PROVIDER_RENDER_WIDTH,
   MAX_DISTILL_PAGES,
+  PDF_CONFIRM_PAGE_THRESHOLD,
+  estimateDistillTokens,
   type DistillPdfOptions,
   type DistillPdfResult,
   type VisionCaller,

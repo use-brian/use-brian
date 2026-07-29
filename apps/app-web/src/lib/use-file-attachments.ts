@@ -28,6 +28,7 @@
 import * as React from "react";
 import { authFetch } from "@/lib/auth-fetch";
 import { useT } from "@/lib/i18n/client";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -84,7 +85,14 @@ export type FileAttachmentsApi = {
 
 type UploadResponse = {
   sessionId?: string;
-  files: Array<{ id?: string; error?: string }>;
+  files: Array<{
+    id?: string;
+    error?: string;
+    /** Present for PDFs: the cheap page-count probe run at upload time. */
+    pdfPageCount?: number;
+    /** Over the page threshold on a metered backend — ask before reading it. */
+    needsReadConfirm?: boolean;
+  }>;
 };
 
 // ── Pure reconciliation helpers (unit-tested without a DOM) ──────────
@@ -405,6 +413,28 @@ export function useFileAttachments(
       const data = (await res.json()) as UploadResponse;
       const stagedIds = new Set(staged.map((s) => s.localId));
       setAttachments((prev) => applyUploadResult(prev, stagedIds, data.files));
+
+      // Pre-flight confirm for a big PDF. Reading one is credit-incurring and
+      // long-running, so the user is asked BEFORE the turn spends anything —
+      // the probe that decided this (a page count) is free. Declining removes
+      // the chip, so the document is never sent and never distilled.
+      // See docs/architecture/engine/preflight-confirmation.md.
+      const copy = rejectCopyRef.current;
+      for (const [i, f] of data.files.entries()) {
+        if (!f.needsReadConfirm || !f.id) continue;
+        const chip = staged[i];
+        const ok = await confirmDialog({
+          title: copy.readPdfTitle,
+          description: copy.readPdfBody
+            .replace("{fileName}", chip?.fileName ?? "")
+            .replace("{pages}", String(f.pdfPageCount ?? 0)),
+          confirmLabel: copy.readPdfConfirm,
+          cancelLabel: copy.readPdfCancel,
+        });
+        if (!ok && chip) {
+          setAttachments((prev) => prev.filter((a) => a.localId !== chip.localId));
+        }
+      }
     } catch (err) {
       const stagedIds = new Set(staged.map((s) => s.localId));
       setAttachments((prev) => markStagedError(prev, stagedIds, (err as Error).message));
