@@ -160,6 +160,8 @@ describe('[COMP:sandbox/e2b-cloud] E2BCloudProvider', () => {
     const helper = new TextDecoder().decode(files.get(TAKEOVER_INPUT_HELPER_PATH))
     expect(helper).toBe(TAKEOVER_INPUT_HELPER_MJS)
     expect(helper).toContain(`event.kind === 'pointer'`)
+    expect(helper).toContain(`event.action !== 'down'`)
+    expect(helper).toContain('buttons:')
     expect(helper).toContain('Input.dispatchMouseEvent')
     expect(helper).toContain('Input.insertText')
     expect(helper).not.toContain('elementFromPoint')

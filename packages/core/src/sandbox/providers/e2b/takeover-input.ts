@@ -108,9 +108,14 @@ ws.onopen = async () => {
 
     if (event.kind === 'click' || event.kind === 'pointer') {
       const base = { x: event.x, y: event.y, button: 'left', clickCount: 1, pointerType: 'mouse' }
-      await send('Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' }, sessionId)
-      if (event.kind === 'click' || event.action === 'down') await send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed' }, sessionId)
-      if (event.kind === 'click' || event.action === 'up') await send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' }, sessionId)
+      await send('Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mouseMoved',
+        button: 'none',
+        buttons: event.kind === 'pointer' && event.action !== 'down' ? 1 : 0,
+      }, sessionId)
+      if (event.kind === 'click' || event.action === 'down') await send('Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 }, sessionId)
+      if (event.kind === 'click' || event.action === 'up') await send('Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 }, sessionId)
     } else if (event.kind === 'key') {
       if (event.text.length === 1) {
         await send('Input.insertText', { text: event.text }, sessionId)

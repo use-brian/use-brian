@@ -72,6 +72,7 @@ import {
 
 const FRAME_INTERVAL_MS = 1_200;
 const MOVE_THROTTLE_MS = 50;
+const DRAG_THROTTLE_MS = 80;
 const REMINT_INTERVAL_MS = 20_000;
 const REMINT_MAX_ATTEMPTS = 3;
 
@@ -149,6 +150,8 @@ export default function ComputerTakeoverPage(props: {
   const wsRef = useRef<WebSocket | null>(null);
   const inputQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pointerDeliveryFailed = useRef(false);
+  const moveLast = useRef(0);
+  const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const streamRef = useRef<TakeoverStreamSession | null>(null);
   streamRef.current = stream;
 
@@ -342,19 +345,19 @@ export default function ComputerTakeoverPage(props: {
   // One input door, best transport first: the duplex socket, the bridge's
   // POST route, then the API relay. `move` is socket-only by design.
   const forwardInput = useCallback(
-    (event: TakeoverInput) => {
+    (event: TakeoverInput): Promise<void> => {
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(event));
-        setInputStatus(event.kind === "pointer" && event.action === "down" ? "holding" : "delivered");
-        return;
+        setInputStatus(event.kind === "pointer" && event.action !== "up" ? "holding" : "delivered");
+        return Promise.resolve();
       }
-      if (event.kind === "move") return;
+      if (event.kind === "move") return Promise.resolve();
       if (event.kind === "pointer" && event.action === "down") pointerDeliveryFailed.current = false;
-      setInputStatus("sending");
+      setInputStatus(event.kind === "pointer" && event.action === "move" ? "holding" : "sending");
       // HTTP requests have no ordering guarantee. Serialize them so a quick
       // pointer-up can never overtake pointer-down and leave the remote mouse stuck.
-      inputQueueRef.current = inputQueueRef.current
+      const queued = inputQueueRef.current
         .catch(() => {})
         .then(async () => {
           let delivered = false;
@@ -369,9 +372,11 @@ export default function ComputerTakeoverPage(props: {
           if (!delivered || (event.kind === "pointer" && pointerDeliveryFailed.current)) {
             setInputStatus("failed");
           } else {
-            setInputStatus(event.kind === "pointer" && event.action === "down" ? "holding" : "delivered");
+            setInputStatus(event.kind === "pointer" && event.action !== "up" ? "holding" : "delivered");
           }
         });
+      inputQueueRef.current = queued;
+      return queued;
     },
     [sessionId],
   );
@@ -380,6 +385,46 @@ export default function ComputerTakeoverPage(props: {
     const timer = setTimeout(() => setInputStatus("idle"), 900);
     return () => clearTimeout(timer);
   }, [inputStatus]);
+
+  // Local input uses ordered HTTP calls, so drag positions are coalesced
+  // latest-wins instead of queuing every browser pointermove event.
+  const pendingDrag = useRef<TakeoverInput | null>(null);
+  const dragDrain = useRef<Promise<void> | null>(null);
+  const startDragDrain = useCallback(function drainDrag() {
+    if (dragDrain.current || !pendingDrag.current) return;
+    dragDrain.current = (async () => {
+      while (pressedPointer.current && pendingDrag.current) {
+        const event = pendingDrag.current;
+        pendingDrag.current = null;
+        await forwardInput(event);
+        if (pendingDrag.current) {
+          await new Promise((resolve) => setTimeout(resolve, DRAG_THROTTLE_MS));
+        }
+      }
+    })().finally(() => {
+      dragDrain.current = null;
+      if (pressedPointer.current && pendingDrag.current) drainDrag();
+    });
+  }, [forwardInput]);
+  const flushPendingDrag = useCallback(() => {
+    const event = pendingDrag.current;
+    pendingDrag.current = null;
+    if (!event) return;
+    void forwardInput(event);
+  }, [forwardInput]);
+  const scheduleDrag = useCallback(
+    (event: TakeoverInput) => {
+      pendingDrag.current = event;
+      startDragDrain();
+    },
+    [startDragDrain],
+  );
+  useEffect(
+    () => () => {
+      pendingDrag.current = null;
+    },
+    [],
+  );
 
   const forwardPointerDown = useCallback(
     (e: React.PointerEvent<HTMLImageElement>) => {
@@ -392,6 +437,10 @@ export default function ComputerTakeoverPage(props: {
       e.preventDefault();
       e.currentTarget.setPointerCapture(e.pointerId);
       frameBoxRef.current?.focus();
+      if (moveTimer.current) {
+        clearTimeout(moveTimer.current);
+        moveTimer.current = null;
+      }
       pressedPointer.current = {
         pointerId: e.pointerId,
         x: point.x,
@@ -414,6 +463,33 @@ export default function ComputerTakeoverPage(props: {
     },
     [forwardInput],
   );
+  const forwardPointerDrag = useCallback(
+    (e: React.PointerEvent<HTMLImageElement>) => {
+      const pressed = pressedPointer.current;
+      const natural = naturalSize.current;
+      if (!pressed || pressed.pointerId !== e.pointerId || !natural) return;
+      const point = mapClickToFrame(
+        e.currentTarget.getBoundingClientRect(),
+        natural,
+        e.clientX,
+        e.clientY,
+      );
+      if (!point) return;
+      pressed.x = point.x;
+      pressed.y = point.y;
+      pressed.frameW = natural.w;
+      pressed.frameH = natural.h;
+      scheduleDrag({
+        kind: "pointer",
+        action: "move",
+        x: point.x,
+        y: point.y,
+        frameW: natural.w,
+        frameH: natural.h,
+      });
+    },
+    [scheduleDrag],
+  );
   const forwardPointerUp = useCallback(
     (e: React.PointerEvent<HTMLImageElement>) => {
       const pressed = pressedPointer.current;
@@ -423,25 +499,27 @@ export default function ComputerTakeoverPage(props: {
       const point = natural
         ? mapClickToFrame(e.currentTarget.getBoundingClientRect(), natural, e.clientX, e.clientY)
         : null;
+      flushPendingDrag();
       pressedPointer.current = null;
       forwardInput({
         kind: "pointer",
         action: "up",
         x: point?.x ?? pressed.x,
         y: point?.y ?? pressed.y,
-        frameW: pressed.frameW,
-        frameH: pressed.frameH,
+        frameW: natural?.w ?? pressed.frameW,
+        frameH: natural?.h ?? pressed.frameH,
       });
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId);
       }
     },
-    [forwardInput],
+    [flushPendingDrag, forwardInput],
   );
   useEffect(() => {
     const releaseOnBlur = () => {
       const pressed = pressedPointer.current;
       if (!pressed) return;
+      flushPendingDrag();
       pressedPointer.current = null;
       forwardInput({
         kind: "pointer",
@@ -457,7 +535,7 @@ export default function ComputerTakeoverPage(props: {
       releaseOnBlur();
       window.removeEventListener("blur", releaseOnBlur);
     };
-  }, [forwardInput]);
+  }, [flushPendingDrag, forwardInput]);
   useEffect(() => {
     if (!ripple) return;
     const timer = setTimeout(() => setRipple(null), 450);
@@ -466,10 +544,9 @@ export default function ComputerTakeoverPage(props: {
 
   // Hover relay (socket-only): dropdown menus and hover states stay alive
   // under the viewer's cursor. Throttled, latest-position-wins.
-  const moveLast = useRef(0);
-  const moveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const forwardMove = useCallback(
     (e: React.MouseEvent<HTMLImageElement>) => {
+      if (pressedPointer.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const img = imgRef.current;
@@ -769,6 +846,7 @@ export default function ComputerTakeoverPage(props: {
               };
             }}
             onPointerDown={forwardPointerDown}
+            onPointerMove={forwardPointerDrag}
             onPointerUp={forwardPointerUp}
             onPointerCancel={forwardPointerUp}
             onContextMenu={(e) => e.preventDefault()}

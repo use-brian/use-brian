@@ -119,13 +119,18 @@ describe("[COMP:app-desktop/firefox-native-host] Firefox BiDi executor", () => {
       event: { kind: "pointer", action: "down", x: 100, y: 50, frameW: 200, frameH: 100 },
     });
     await executor.execute("takeoverInput", {
+      event: { kind: "pointer", action: "move", x: 120, y: 60, frameW: 200, frameH: 100 },
+    });
+    await executor.execute("takeoverInput", {
       event: { kind: "pointer", action: "up", x: 100, y: 50, frameW: 200, frameH: 100 },
     });
 
-    const events = socket.sent.filter((message) => message.method === "input.performActions").slice(-2);
+    const events = socket.sent.filter((message) => message.method === "input.performActions").slice(-3);
     const down = ((events[0]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
-    const up = ((events[1]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    const move = ((events[1]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
+    const up = ((events[2]?.params.actions as Array<{ actions: Array<{ type: string }> }>)[0]?.actions ?? []);
     expect(down.map((action) => action.type)).toEqual(["pointerMove", "pointerDown"]);
+    expect(move.map((action) => action.type)).toEqual(["pointerMove"]);
     expect(up.map((action) => action.type)).toEqual(["pointerMove", "pointerUp"]);
   });
 

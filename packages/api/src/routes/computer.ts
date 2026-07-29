@@ -38,7 +38,7 @@ const InputEventSchema = z.union([
   }),
   z.object({
     kind: z.literal('pointer'),
-    action: z.enum(['down', 'up']),
+    action: z.enum(['down', 'move', 'up']),
     x: z.number(),
     y: z.number(),
     frameW: z.number().positive().optional(),

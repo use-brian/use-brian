@@ -119,6 +119,9 @@ describe('[COMP:sandbox/takeover-stream] Take-Over live stream', () => {
     for (const marker of [
       `event.kind === 'click'`,
       `event.kind === 'pointer'`,
+      `event.action !== 'down'`,
+      'buttons:',
+      'queueInput',
       `event.kind === 'move'`,
       `event.kind === 'key'`,
       `event.kind === 'scroll'`,

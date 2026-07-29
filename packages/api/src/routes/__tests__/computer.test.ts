@@ -197,13 +197,17 @@ describe('[COMP:routes/computer] Take-Over live view + backend toggle + Profile-
     const pointerDown = await request(app)
       .post('/api/computer/tasks/sess-local/input')
       .send({ kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 })
+    const pointerMove = await request(app)
+      .post('/api/computer/tasks/sess-local/input')
+      .send({ kind: 'pointer', action: 'move', x: 120, y: 60, frameW: 200, frameH: 100 })
     const pointerUp = await request(app)
       .post('/api/computer/tasks/sess-local/input')
-      .send({ kind: 'pointer', action: 'up', x: 100, y: 50, frameW: 200, frameH: 100 })
-    expect([pointerDown.status, pointerUp.status]).toEqual([200, 200])
-    expect(localOps.slice(-2).map((entry) => entry.args)).toEqual([
+      .send({ kind: 'pointer', action: 'up', x: 120, y: 60, frameW: 200, frameH: 100 })
+    expect([pointerDown.status, pointerUp.status, pointerMove.status]).toEqual([200, 200, 200])
+    expect(localOps.slice(-3).map((entry) => entry.args)).toEqual([
       { event: { kind: 'pointer', action: 'down', x: 100, y: 50, frameW: 200, frameH: 100 } },
-      { event: { kind: 'pointer', action: 'up', x: 100, y: 50, frameW: 200, frameH: 100 } },
+      { event: { kind: 'pointer', action: 'move', x: 120, y: 60, frameW: 200, frameH: 100 } },
+      { event: { kind: 'pointer', action: 'up', x: 120, y: 60, frameW: 200, frameH: 100 } },
     ])
     expect((await request(app).post('/api/computer/tasks/sess-local/stream-session')).status).toBe(501)
     expect((await request(app).post('/api/computer/tasks/sess-local/captured').send({ site: 'skyscanner.com' })).body.code)

@@ -49,7 +49,7 @@ export function retryableAfterReattach(op: string): boolean {
 
 type TakeoverInput =
   | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
-  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'pointer'; action: 'down' | 'move' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
   | { kind: 'navigate'; action: 'back' | 'forward' | 'reload' | 'goto'; url?: string }
@@ -80,6 +80,7 @@ async function sendCdp<T = unknown>(tabId: number, method: string, params?: Reco
 export class TabExecutor {
   private attachedTabId: number | null = null
   private lastSnapshot: BuiltSnapshot | null = null
+  private takeoverPointer: { x: number; y: number } | null = null
 
   async attach(tabId: number): Promise<void> {
     if (this.attachedTabId === tabId) return
@@ -93,7 +94,24 @@ export class TabExecutor {
     const tabId = this.attachedTabId
     this.attachedTabId = null
     this.lastSnapshot = null
+    const pressed = this.takeoverPointer
+    this.takeoverPointer = null
     if (tabId != null) {
+      if (pressed) {
+        try {
+          await sendCdp(tabId, 'Input.dispatchMouseEvent', {
+            type: 'mouseReleased',
+            x: pressed.x,
+            y: pressed.y,
+            button: 'left',
+            buttons: 0,
+            clickCount: 1,
+            pointerType: 'mouse',
+          })
+        } catch {
+          // The debugger may already be gone; detach still clears browser input state.
+        }
+      }
       try {
         await chrome.debugger.detach({ tabId })
       } catch {
@@ -118,6 +136,7 @@ export class TabExecutor {
     if (this.attachedTabId !== tabId) return false
     this.attachedTabId = null
     this.lastSnapshot = null
+    this.takeoverPointer = null
     return true
   }
 
@@ -262,12 +281,20 @@ export class TabExecutor {
       const x = event.frameW && event.frameW > 0 ? (event.x * width) / event.frameW : event.x
       const y = event.frameH && event.frameH > 0 ? (event.y * height) / event.frameH : event.y
       const base = { x, y, button: 'left', clickCount: 1, pointerType: 'mouse' } as const
-      await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseMoved', button: 'none' })
+      await this.cdp(tabId, 'Input.dispatchMouseEvent', {
+        ...base,
+        type: 'mouseMoved',
+        button: 'none',
+        buttons: event.kind === 'pointer' && event.action !== 'down' ? 1 : 0,
+      })
       if (event.kind === 'click' || event.action === 'down') {
-        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed' })
+        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mousePressed', buttons: 1 })
+        if (event.kind === 'pointer') this.takeoverPointer = { x, y }
       }
+      if (event.kind === 'pointer' && event.action === 'move') this.takeoverPointer = { x, y }
       if (event.kind === 'click' || event.action === 'up') {
-        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased' })
+        await this.cdp(tabId, 'Input.dispatchMouseEvent', { ...base, type: 'mouseReleased', buttons: 0 })
+        if (event.kind === 'pointer') this.takeoverPointer = null
       }
       return
     }

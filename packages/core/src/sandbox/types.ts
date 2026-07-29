@@ -194,7 +194,7 @@ export interface SessionVault {
 
 export type TakeoverInputEvent =
   | { kind: 'click'; x: number; y: number; frameW?: number; frameH?: number }
-  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
+  | { kind: 'pointer'; action: 'down' | 'move' | 'up'; x: number; y: number; frameW?: number; frameH?: number }
   | { kind: 'key'; text: string }
   | { kind: 'scroll'; deltaY: number }
   /**
