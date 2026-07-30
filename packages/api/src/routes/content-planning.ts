@@ -125,7 +125,7 @@ export function contentPlanningRoutes(
       const body = (req.body ?? {}) as Record<string, unknown>
       if (!isContentPlanningPlatform(body.platform)) {
         res.status(400).json({
-          error: 'platform must be one of "instagram", "threads", "twitter", "xhs"',
+          error: 'platform must be one of "instagram", "threads", "twitter", "xhs", "linkedin"',
         })
         return
       }

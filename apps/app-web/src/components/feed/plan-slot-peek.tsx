@@ -33,6 +33,9 @@ export type PlanSlotDraft = {
   scheduledFor: string;
   title: string;
   brief: string;
+  /** Set when this draft was opened from a backlog idea ("Plan it"); saving
+   *  the new slot binds the idea to it so the jot leaves the open backlog. */
+  fromIdeaId?: string;
 };
 
 export function planSlotToDraft(slot: PlanSlot): PlanSlotDraft {

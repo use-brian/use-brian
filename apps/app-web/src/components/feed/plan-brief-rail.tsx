@@ -1,12 +1,17 @@
 "use client";
 
 /**
- * The Plan rail's default view: the month brief, the pipeline counts, and the
- * assistant's proposed slots waiting to be accepted.
+ * The Plan rail's default view: the month brief, the pipeline counts, the
+ * idea backlog, and the assistant's proposed slots waiting to be accepted.
  *
  * The brief is the artefact the operator and the assistant actually iterate
  * (feed-revamp.md D8) - a bag of dated chips is not a plan. It edits as a
  * document, not a labelled form card, per the locked app-web editor idiom.
+ *
+ * The ideas tray is the capture end of the backlog: one input, Enter to jot,
+ * and each open idea waits until the operator plans or discards it. Planning
+ * an idea opens the slot editor prefilled from it (feed-plan.tsx wires the
+ * promote), so a jot becomes a dated slot without retyping.
  *
  * The proposal cardboard reads `proposePlan` tool calls out of the plan
  * conversation and offers each slot for acceptance. Nothing the assistant
@@ -17,12 +22,13 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, RefreshCw, X } from "lucide-react";
+import { CalendarPlus, Check, Lightbulb, RefreshCw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
 import { PlatformIcon } from "@/components/feed/platform-icon";
 import { StatusDot } from "@/components/feed/feed-status";
+import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   createPlanSlot,
   fetchFeedSessionIdByChannel,
@@ -36,6 +42,7 @@ import {
 import {
   PLAN_SLOT_STATUSES,
   parseIsoDay,
+  type FeedIdea,
   type PlanBrief,
   type PlanSlot,
   type PlanSlotStatus,
@@ -61,9 +68,13 @@ export function PlanBriefRail({
   busy,
   assistantId,
   existingSlots,
+  ideas,
   watchToken,
   onSave,
   onSlotsAccepted,
+  onAddIdea,
+  onDiscardIdea,
+  onPlanIdea,
 }: {
   month: string;
   brief: PlanBrief | null;
@@ -72,16 +83,35 @@ export function PlanBriefRail({
   busy: boolean;
   assistantId: string;
   existingSlots: readonly PlanSlot[];
+  /** The open backlog, newest first. */
+  ideas: readonly FeedIdea[];
   /** Bumped when the operator asks the assistant to plan; starts the watch. */
   watchToken: number;
   onSave: (next: { brief: string; themes: string[] }) => void;
   onSlotsAccepted: () => void;
+  /** Resolves true when the jot saved, so the input knows to clear. */
+  onAddIdea: (text: string) => Promise<boolean>;
+  onDiscardIdea: (idea: FeedIdea) => void;
+  onPlanIdea: (idea: FeedIdea) => void;
 }) {
   const t = useT().feedPage;
   const tp = t.plan;
 
   const [body, setBody] = useState(brief?.brief ?? "");
   const [themes, setThemes] = useState((brief?.themes ?? []).join(", "));
+  const [ideaText, setIdeaText] = useState("");
+  const [savingIdea, setSavingIdea] = useState(false);
+
+  async function submitIdea() {
+    const text = ideaText.trim();
+    if (!text || savingIdea) return;
+    setSavingIdea(true);
+    try {
+      if (await onAddIdea(text)) setIdeaText("");
+    } finally {
+      setSavingIdea(false);
+    }
+  }
   // Re-seed the editor when the month (and so the brief) changes underneath.
   useEffect(() => {
     setBody(brief?.brief ?? "");
@@ -280,6 +310,83 @@ export function PlanBriefRail({
             </ul>
           </section>
         ) : null}
+
+        {/* The idea backlog: jot now, plan later. */}
+        <section className="space-y-2">
+          <h3 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground">
+            <Lightbulb className="size-3" aria-hidden />
+            {tp.ideasHeading}
+          </h3>
+          {canEdit ? (
+            <input
+              type="text"
+              value={ideaText}
+              disabled={savingIdea}
+              onChange={(e) => setIdeaText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  void submitIdea();
+                }
+              }}
+              placeholder={tp.ideaPlaceholder}
+              aria-label={tp.ideasHeading}
+              className="h-8 w-full rounded-lg border border-border/60 bg-background px-2.5 text-[12.5px] placeholder:text-muted-foreground/60 focus:border-primary/40 focus:outline-none disabled:opacity-70"
+            />
+          ) : null}
+          {ideas.length === 0 ? (
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {tp.ideasEmpty}
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {ideas.map((idea) => (
+                <li
+                  key={idea.id}
+                  className="rounded-lg border border-border/60 bg-card p-2"
+                >
+                  <p className="line-clamp-3 whitespace-pre-wrap text-[12.5px] leading-relaxed">
+                    {idea.text}
+                  </p>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {new Date(idea.createdAt).toLocaleDateString()}
+                  </div>
+                  {canEdit ? (
+                    <div className="mt-2 flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onPlanIdea(idea)}
+                        className="inline-flex h-7 flex-1 items-center justify-center gap-1 rounded-md border border-border px-2 text-[11px] font-medium transition-colors hover:bg-accent"
+                      >
+                        <CalendarPlus className="size-3" aria-hidden />
+                        {tp.planIdea}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const ok = await confirmDialog({
+                            title: tp.discardIdeaTitle,
+                            description: format(tp.discardIdeaBody, {
+                              text: idea.text,
+                            }),
+                            confirmLabel: tp.discardIdeaConfirm,
+                            variant: "destructive",
+                          });
+                          if (ok) onDiscardIdea(idea);
+                        }}
+                        aria-label={tp.discardIdea}
+                        title={tp.discardIdea}
+                        className="inline-flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                      >
+                        <X className="size-3" aria-hidden />
+                      </button>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
 
         {/* The month brief, edited as a document. */}
         <section className="space-y-2">

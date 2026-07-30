@@ -134,6 +134,9 @@ export function PostEditor({
       key={sessionId}
       assistantId={assistantId}
       assistantName={assistant?.name ?? ""}
+      assistantIconSeed={
+        assistant && "iconSeed" in assistant ? assistant.iconSeed : undefined
+      }
       platform={platform}
       sessionId={sessionId}
       workspaceId={team.workspaceId}
@@ -209,12 +212,14 @@ function NewPost({
 function PostPane({
   assistantId,
   assistantName,
+  assistantIconSeed,
   platform,
   sessionId,
   workspaceId,
 }: {
   assistantId: string;
   assistantName: string;
+  assistantIconSeed?: number;
   platform: FeedPlatform;
   sessionId: string;
   workspaceId: string;
@@ -603,6 +608,7 @@ function PostPane({
         <TuningChatPanel
           assistantId={assistantId}
           assistantName={assistantName}
+          iconSeed={assistantIconSeed}
           workspaceId={workspaceId}
           sessionId={sessionId}
           title={te.chatTitle}

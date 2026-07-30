@@ -15,17 +15,26 @@ import {
 
 describe("[COMP:app-web/feed-nav] feed navigation config", () => {
   it("supports exactly the Create split's target + connectable platforms", () => {
-    expect(FEED_PLATFORMS).toEqual(["instagram", "threads", "twitter", "xhs"]);
+    // linkedin joined as a manual-publish target (feed-import-account.md D4/D10).
+    expect(FEED_PLATFORMS).toEqual([
+      "instagram",
+      "threads",
+      "twitter",
+      "xhs",
+      "linkedin",
+    ]);
     expect(FEED_CONNECTABLE_PLATFORMS).toEqual(["threads", "twitter"]);
     expect(isFeedPlatform("threads")).toBe(true);
     expect(isFeedPlatform("instagram")).toBe(true);
     expect(isFeedPlatform("xhs")).toBe(true);
+    expect(isFeedPlatform("linkedin")).toBe(true);
     expect(isFeedPlatform("mastodon")).toBe(false);
     expect(isFeedPlatform(null)).toBe(false);
     expect(isFeedPlatform(undefined)).toBe(false);
     expect(isConnectableFeedPlatform("twitter")).toBe(true);
     expect(isConnectableFeedPlatform("instagram")).toBe(false);
     expect(isConnectableFeedPlatform("xhs")).toBe(false);
+    expect(isConnectableFeedPlatform("linkedin")).toBe(false);
   });
 
   // Platform-led (feed-revamp.md §8a, D13): Company sits above a platform

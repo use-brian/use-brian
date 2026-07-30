@@ -169,6 +169,46 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
       : base;
     requestFeedChatSeed({ prefill });
   }
+
+  /**
+   * Voice import by X handle (feed-import-account.md D8): the operator names
+   * any PUBLIC X account and the tuning chat runs the `import-voice-from-x`
+   * skill for it — fetch, analyze, propose, approve. Same seeded-chat
+   * pattern as the paste-in import: the dialog collects the handle + scope,
+   * the chat owns everything else. No new backend route.
+   */
+  async function importFromHandle() {
+    let handle = "";
+    let platform: FeedPlatform | null =
+      voicePlatform === "company" ? null : voicePlatform;
+    const ok = await confirmDialog({
+      title: t.importHandleTitle,
+      description: t.importHandleBody,
+      confirmLabel: t.importHandleCta,
+      content: (
+        <ImportHandleContent
+          initialPlatform={platform}
+          onHandleChange={(v) => {
+            handle = v;
+          }}
+          onPlatformChange={(p) => {
+            platform = p;
+          }}
+        />
+      ),
+    });
+    const trimmed = handle.trim().replace(/^@/, "").slice(0, 30);
+    if (!ok || !trimmed) return;
+    const base = format(t.importHandlePrompt, { handle: trimmed });
+    const chosen = platform as FeedPlatform | null;
+    const prefill = chosen
+      ? `${format(t.importHandlePlatformNote, {
+          platform: feedT.platformLabels[chosen],
+          tag: chosen,
+        })}\n\n${base}`
+      : base;
+    requestFeedChatSeed({ prefill });
+  }
   const t = feedT.voice;
   // Create split (feed-create-split.md D7): voice works with zero
   // connections — fall back to the workspace's brand-voice assistant when
@@ -446,6 +486,15 @@ export function FeedVoice({ scope }: { scope: VoiceScope }) {
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              {isAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => void importFromHandle()}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-[12.5px] font-medium transition-colors hover:bg-accent"
+                >
+                  {t.importHandle}
+                </button>
+              ) : null}
               {isAdmin ? (
                 <button
                   type="button"
@@ -921,6 +970,58 @@ function ChatBubbleSmallIcon() {
  * contract: the caller owns the values, the dialog hosts the node).
  * "All platforms" = null platform = general brand voice, no tagging note.
  */
+/**
+ * Dialog body for the X handle import (feed-import-account.md D8): one
+ * handle input + the same platform-scope chips as the paste-in dialog.
+ */
+function ImportHandleContent({
+  initialPlatform = null,
+  onHandleChange,
+  onPlatformChange,
+}: {
+  /** Pre-selected scope — the Voice page's active platform (D12). */
+  initialPlatform?: FeedPlatform | null;
+  onHandleChange: (v: string) => void;
+  onPlatformChange: (p: FeedPlatform | null) => void;
+}) {
+  const feedT = useT().feedPage;
+  const t = feedT.voice;
+  const [platform, setPlatform] = useState<FeedPlatform | null>(initialPlatform);
+  const pick = (p: FeedPlatform | null) => {
+    setPlatform(p);
+    onPlatformChange(p);
+  };
+  const chip = (active: boolean) =>
+    "press h-7 rounded-full border px-3 text-xs font-medium transition-colors " +
+    (active
+      ? "border-transparent bg-foreground text-background"
+      : "border-border bg-background/60 text-muted-foreground hover:bg-accent");
+  return (
+    <div className="space-y-3">
+      <input
+        type="text"
+        autoFocus
+        placeholder={t.importHandlePlaceholder}
+        onChange={(e) => onHandleChange(e.target.value)}
+        className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:border-primary/50"
+      />
+      <div className="space-y-1">
+        <div className="text-xs text-muted-foreground">{t.importSamplesPlatformLabel}</div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button type="button" onClick={() => pick(null)} aria-pressed={platform === null} className={chip(platform === null)}>
+            {t.importSamplesAllPlatforms}
+          </button>
+          {FEED_PLATFORMS.map((p) => (
+            <button key={p} type="button" onClick={() => pick(p)} aria-pressed={platform === p} className={chip(platform === p)}>
+              {feedT.platformLabels[p]}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ImportSamplesContent({
   initialPlatform = null,
   onSamplesChange,

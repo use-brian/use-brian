@@ -86,6 +86,10 @@ describe("[COMP:app-web/feed-voice] FeedVoice", () => {
     // Admin sees the Inject rule button even while loading. (Anchor on the
     // closing tag — the subtitle prose also contains "Inject rule".)
     expect(html).toContain(`${en.feedPage.voice.injectRule}</button>`);
+    // Admin also sees both import entries: paste-in and X-handle
+    // (feed-import-account.md D8).
+    expect(html).toContain(`${en.feedPage.voice.importSamples}</button>`);
+    expect(html).toContain(`${en.feedPage.voice.importHandle}</button>`);
     // Loading: skeleton cards, no empty state.
     expect(html).toContain("skeleton");
     expect(html).not.toContain(en.feedPage.voice.emptyTitle);
@@ -95,6 +99,7 @@ describe("[COMP:app-web/feed-voice] FeedVoice", () => {
     const html = render(workspace([profile("acme")], "member"));
     expect(html).toContain("Threads voice");
     expect(html).not.toContain(`${en.feedPage.voice.injectRule}</button>`);
+    expect(html).not.toContain(`${en.feedPage.voice.importHandle}</button>`);
   });
 
   it("zero profiles: renders the no-voice state with a CTA into the feed home", () => {

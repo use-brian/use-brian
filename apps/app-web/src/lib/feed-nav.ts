@@ -30,7 +30,7 @@ type FeedGroupKey = keyof ReturnType<typeof useT>["feedPage"]["groups"];
  * URL segment is the platform id. Mirrors the backend's
  * `FEED_TARGET_PLATFORMS` (`packages/api-platform/src/db/feed-store.ts`).
  */
-export const FEED_PLATFORMS = ["instagram", "threads", "twitter", "xhs"] as const;
+export const FEED_PLATFORMS = ["instagram", "threads", "twitter", "xhs", "linkedin"] as const;
 export type FeedPlatform = (typeof FEED_PLATFORMS)[number];
 
 /**

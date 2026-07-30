@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import request from 'supertest'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTestApp } from './helpers.js'
@@ -283,7 +283,10 @@ describe('[COMP:api/knowledge-proposals] local source navigation', () => {
         .post('/api/workspaces/ws-1/knowledge/sources/src-1/open')
         .send({ path: '/etc' })
       expect(res.status).toBe(200)
-      expect(openLocalPath).toHaveBeenCalledWith(dir)
+      // The route realpaths the root before the escape check, so compare
+      // against the resolved dir — on macOS `tmpdir()` returns the `/var`
+      // symlink to `/private/var` and the raw path never matches.
+      expect(openLocalPath).toHaveBeenCalledWith(await realpath(dir))
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

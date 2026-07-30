@@ -20,7 +20,7 @@ const planSlotSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe(
     'The calendar day for this post, YYYY-MM-DD. Must fall inside the month being planned.',
   ),
-  platform: z.enum(['instagram', 'threads', 'twitter', 'xhs']).describe(
+  platform: z.enum(['instagram', 'threads', 'twitter', 'xhs', 'linkedin']).describe(
     'Which platform this slot targets.',
   ),
   title: z.string().min(1).max(200).describe(
