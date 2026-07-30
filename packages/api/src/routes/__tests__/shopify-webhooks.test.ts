@@ -30,24 +30,25 @@ function instanceRow(overrides: Partial<ConnectorInstance> = {}): ConnectorInsta
 function mockStore(
   instances: ConnectorInstance[] = [],
   /** Per-instance decrypted credentials, keyed by instance id (BYO app pairs). */
-  credsById: Record<string, { client_secret?: string } | null> = {},
+  credsById: Record<string, { type?: string; client_id?: string; client_secret?: string } | null> = {},
 ) {
   return {
     listByProviderSystem: vi.fn().mockResolvedValue(instances),
     deleteSystem: vi.fn().mockResolvedValue(undefined),
     setConnectedSystem: vi.fn().mockResolvedValue(undefined),
-    getCredentialsSystem: vi.fn(async (id: string) => credsById[id] ?? null),
+    getAuthCredentialsSystem: vi.fn(async (id: string) => credsById[id] ?? null),
   } as unknown as ConnectorInstanceStore & {
     listByProviderSystem: ReturnType<typeof vi.fn>
     deleteSystem: ReturnType<typeof vi.fn>
     setConnectedSystem: ReturnType<typeof vi.fn>
-    getCredentialsSystem: ReturnType<typeof vi.fn>
+    getAuthCredentialsSystem: ReturnType<typeof vi.fn>
   }
 }
 
 /** The stored envelope for an instance connected through a merchant's own app. */
 function byoEnvelope(clientSecret: string, clientId = 'merchant_cid') {
   return {
+    type: 'oauth' as const, client_id: 'shopify_byo',
     client_secret: JSON.stringify({
       accessToken: 'shpat_merchant',
       shopDomain: SHOP,
@@ -197,7 +198,7 @@ describe('[COMP:api/shopify-webhooks] Shopify compliance webhook receiver', () =
       .send(body)
 
     expect(res.status).toBe(200)
-    expect(store.getCredentialsSystem).toHaveBeenCalledWith('inst-1')
+    expect(store.getAuthCredentialsSystem).toHaveBeenCalledWith('inst-1')
   })
 
   it("rejects a delivery signed with the WRONG merchant's secret", async () => {
@@ -219,7 +220,7 @@ describe('[COMP:api/shopify-webhooks] Shopify compliance webhook receiver', () =
   it('still accepts the deployment secret for a Use Brian-owned install', async () => {
     // The fallback must survive: an instance with no merchant pair is signed by
     // our own app.
-    const store = mockStore([instanceRow()], { 'inst-1': { client_secret: JSON.stringify({ accessToken: 'shpat_x', shopDomain: SHOP }) } })
+    const store = mockStore([instanceRow()], { 'inst-1': { type: 'oauth', client_id: 'shopify_token', client_secret: JSON.stringify({ accessToken: 'shpat_x', shopDomain: SHOP }) } })
     const body = JSON.stringify({ id: 1 })
 
     const res = await request(buildApp(store, SECRET))
@@ -277,7 +278,7 @@ describe('[COMP:api/shopify-webhooks] Shopify compliance webhook receiver', () =
       [instanceRow(), { ...instanceRow(), id: 'inst-2' } as ConnectorInstance],
       { 'inst-2': byoEnvelope('good-secret') },
     )
-    ;(store.getCredentialsSystem as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+    ;(store.getAuthCredentialsSystem as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
       if (id === 'inst-1') throw new Error('decrypt failed')
       return byoEnvelope('good-secret')
     })

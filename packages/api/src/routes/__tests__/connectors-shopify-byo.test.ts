@@ -24,8 +24,8 @@ const IID = '11111111-1111-1111-1111-111111111111'
 function makeApp(over: { storedBlob?: string } = {}) {
   const createUserInstance = vi.fn().mockResolvedValue({ id: IID })
   const update = vi.fn().mockResolvedValue({ id: IID })
-  const getCredentialsSystem = vi.fn().mockResolvedValue(
-    over.storedBlob ? { client_secret: over.storedBlob } : null,
+  const getAuthCredentialsSystem = vi.fn().mockResolvedValue(
+    over.storedBlob ? { type: 'oauth', client_id: 'shopify_byo_pending', client_secret: over.storedBlob } : null,
   )
   const app = express()
   app.use(express.json())
@@ -37,13 +37,13 @@ function makeApp(over: { storedBlob?: string } = {}) {
       listByUser: vi.fn().mockResolvedValue([]),
       createUserInstance,
       update,
-      getCredentialsSystem,
+      getAuthCredentialsSystem,
       setConfig: vi.fn().mockResolvedValue(undefined),
     } as unknown as ConnectorInstanceStore,
     // The pasted-token probe: never reached on the BYO path, but the route needs it.
     shopifyVerifyToken: vi.fn().mockResolvedValue({ myshopifyDomain: SHOP }),
   }))
-  return { app, createUserInstance, update, getCredentialsSystem }
+  return { app, createUserInstance, update, getAuthCredentialsSystem }
 }
 
 describe('[COMP:api/shopify-byo-credentials] Shopify per-merchant app credentials (open edition)', () => {
@@ -130,7 +130,7 @@ describe('[COMP:api/shopify-byo-credentials] Shopify per-merchant app credential
     const stored = JSON.stringify({
       shopDomain: SHOP, appClientId: 'merchant_cid', appClientSecret: 'shpss_merchant',
     })
-    const { app, update, getCredentialsSystem } = makeApp({ storedBlob: stored })
+    const { app, update, getAuthCredentialsSystem } = makeApp({ storedBlob: stored })
 
     const res = await request(app).post(STORE_PATH).send({
       shopifyTokens: { accessToken: 'shpat_new', shopDomain: SHOP },
@@ -138,7 +138,7 @@ describe('[COMP:api/shopify-byo-credentials] Shopify per-merchant app credential
     })
 
     expect(res.status).toBe(200)
-    expect(getCredentialsSystem).toHaveBeenCalledWith(IID)
+    expect(getAuthCredentialsSystem).toHaveBeenCalledWith(IID)
     const patch = update.mock.calls[0]![2] as { credentials: { client_secret: string } }
     expect(unpackShopifyTokens(patch.credentials.client_secret)).toMatchObject({
       accessToken: 'shpat_new',
@@ -158,4 +158,28 @@ describe('[COMP:api/shopify-byo-credentials] Shopify per-merchant app credential
     const arg = createUserInstance.mock.calls[0]![0] as { credentials: { client_secret: string } }
     expect(unpackShopifyAppCredentials(arg.credentials.client_secret)).toBeNull()
   })
-})
+
+  it('reads the pair off a DISCONNECTED instance (the accessor trap)', async () => {
+    // Step 1 leaves the instance `connected: false` on purpose, and
+    // `getCredentialsSystem` filters `connected = true`. Using it here returned
+    // null and surfaced as `app_credentials_missing` after a fully successful
+    // Shopify consent — an otherwise correct connect failing at the last hop.
+    // The store method must be the one WITHOUT the connected filter.
+    const stored = JSON.stringify({
+      shopDomain: SHOP, appClientId: 'merchant_cid', appClientSecret: 'shpss_merchant',
+    });
+    const { app, getAuthCredentialsSystem } = makeApp({ storedBlob: stored });
+
+    // oauth-callback is the path that reads it back; a bad accessor 400s here.
+    const res = await request(app).post('/api/connectors/shopify/oauth-callback').send({
+      instanceId: IID,
+      params: { code: 'c0de', shop: SHOP, hmac: 'deadbeef', state: 'x' },
+    });
+
+    expect(getAuthCredentialsSystem).toHaveBeenCalledWith(IID);
+    // The pair WAS found, so we get as far as the HMAC gate rather than
+    // bailing out with app_credentials_missing.
+    expect(res.body.error).not.toBe('app_credentials_missing');
+    expect(res.body.error).toBe('invalid_hmac');
+  });
+});

@@ -70,6 +70,10 @@ export async function findShopifyInstancesByShopDomain(
  * one decrypt per matching instance, normally exactly one) on an unauthenticated
  * request. That is the deliberate trade for supporting per-merchant apps; keep
  * the domain filter ahead of the decrypt so the work stays bounded.
+ *
+ * `getAuthCredentialsSystem` (not `getCredentialsSystem`) because the latter
+ * filters `connected = true`, which would skip an instance still mid-connect —
+ * exactly the window in which a first delivery can arrive.
  */
 export async function resolveShopifyWebhookSecrets(
   store: ConnectorInstanceStore,
@@ -79,10 +83,10 @@ export async function resolveShopifyWebhookSecrets(
   const secrets: string[] = []
   for (const inst of instances) {
     try {
-      const creds = await store.getCredentialsSystem(inst.id)
-      const blob = creds?.client_secret
-      if (typeof blob !== 'string') continue
-      const pair = unpackShopifyAppCredentials(blob)
+      const creds = await store.getAuthCredentialsSystem(inst.id)
+      // Normalized union: only the oauth variant carries a client_secret.
+      if (creds?.type !== 'oauth') continue
+      const pair = unpackShopifyAppCredentials(creds.client_secret)
       if (pair && !secrets.includes(pair.clientSecret)) secrets.push(pair.clientSecret)
     } catch (err) {
       // One unreadable instance must not stop a delivery another instance can

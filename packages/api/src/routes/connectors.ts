@@ -1382,15 +1382,22 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
    * `store-credentials` rewrites the envelope wholesale, so a call that omits
    * `shopifyApp` would erase the credentials and break refresh + webhook
    * verification — the same whole-blob-rewrite hazard msgraph documents.
+   *
+   * Uses `getAuthCredentialsSystem`, NOT `getCredentialsSystem`: the latter
+   * filters `connected = true`, and this row is deliberately disconnected until
+   * the callback lands a token. Reading it with the wrong accessor returns null
+   * and surfaces as `app_credentials_missing` on an otherwise correct connect.
    */
   async function loadStoredShopifyAppPair(
     instanceId: string | undefined,
   ): Promise<{ clientId: string; clientSecret: string } | null> {
     if (!instanceId) return null
     try {
-      const creds = await connectorInstanceStore.getCredentialsSystem(instanceId)
-      const blob = creds?.client_secret
-      return typeof blob === 'string' ? unpackShopifyAppCredentials(blob) : null
+      const creds = await connectorInstanceStore.getAuthCredentialsSystem(instanceId)
+      // The accessor returns the NORMALIZED union; only the oauth variant carries
+      // a client_secret, and that is the variant every Shopify envelope uses.
+      if (creds?.type !== 'oauth') return null
+      return unpackShopifyAppCredentials(creds.client_secret)
     } catch (err) {
       console.warn(`[connectors] could not read stored shopify app pair for ${instanceId}:`, err instanceof Error ? err.message : String(err))
       return null
