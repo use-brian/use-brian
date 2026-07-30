@@ -32,7 +32,8 @@
 -- exactly like the `/doc/%` media prefix.
 --
 -- Filenames are globally unique across BOTH migration dirs (one shared
--- _migrations table). Next free number after this is 387.
+-- _migrations table). Next free number after this is 388 (387 is the CLI
+-- connector credentials-type migration, renumbered from a duplicate 370).
 
 BEGIN;
 
