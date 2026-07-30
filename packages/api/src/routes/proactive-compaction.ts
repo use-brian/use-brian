@@ -142,6 +142,14 @@ export type ProactiveCompactionParams = {
   /** User's timezone for message-stamping. Callers should pass the channel user's tz (falling back to 'UTC'). */
   timezone: string
   /**
+   * `sender_user_id` → display name, for multi-participant sessions. Forwarded
+   * verbatim to `toStampedMessages`, which labels each human turn so the model
+   * can tell teammates apart in a workspace-shared chat. Omitted (the common
+   * case) on every single-participant session. Assembly-time only — nothing
+   * here is written back to `session_messages`.
+   */
+  senderNames?: ReadonlyMap<string, string>
+  /**
    * Session row, needed for `compactSummary` (prepended in-memory as a
    * system message) and `compactBoundarySequence` (used as the expected
    * value for the optimistic-concurrency guard).
@@ -279,7 +287,7 @@ export async function runProactiveCompaction(
   params: ProactiveCompactionParams,
 ): Promise<ProactiveCompactionResult> {
   const {
-    sessionMessages, timezone, session,
+    sessionMessages, timezone, senderNames, session,
     tier, provider, systemPrompt,
     assistantId, userId, ownerId, channelType,
     memoryStore, episodicStore, sessionStateStore, analytics,
@@ -295,7 +303,7 @@ export async function runProactiveCompaction(
   // each DB row to one Message). We compute the split on THIS array so
   // the DB-row ↔ in-memory-index mapping stays trivial. Pairing is
   // applied separately, downstream, to each half.
-  const stamped = toStampedMessages(sessionMessages, timezone) as Message[]
+  const stamped = toStampedMessages(sessionMessages, timezone, senderNames) as Message[]
 
   // 2. Prepend the existing compact summary as a system message so the
   // model sees prior context on every turn. `findRecentSplit` treats

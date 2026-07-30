@@ -4112,6 +4112,18 @@ export const en = {
     composerPlaceholder: "Message your assistant",
     send: "Send",
     errorGeneric: "Something went wrong. Try again.",
+    viewSwitchAria: "Chat scope",
+    viewPersonal: "Personal",
+    viewWorkspace: "Workspace",
+    newWorkspaceChat: "New workspace chat",
+    newWorkspaceChatFailed: "Could not start a workspace chat.",
+    workspaceRailEmpty: "No shared chats yet",
+    sharedBadge: "Shared with workspace",
+    startedBy: "Started by {name}",
+    startedByUnknown: "Shared chat",
+    sharedTranscriptEmpty: "Anyone in the workspace can read and reply here.",
+    sharedBusy: "A teammate is sending a message. Try again in a moment.",
+    teammateWorking: "A teammate's message is being answered",
   },
   // ── CRM operator surface ([COMP:app-web/crm-surface]) ──
   crmPage: {

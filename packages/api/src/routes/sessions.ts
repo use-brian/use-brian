@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { findSessionByChannel, findSessionById, getSessionMessages, renameSession } from '../db/sessions.js'
+import { createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessages, isSharedChatSession, renameSession } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
@@ -163,6 +163,153 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   })
 
   /**
+   * GET /api/sessions/workspace?workspaceId=X — the Chat app's Workspace view.
+   *
+   * A SEPARATE query from the owner-scoped list above, deliberately. That
+   * query's `visibility = 'owner'` filter is load-bearing (its comment explains
+   * why) and relaxing it would leak every doc comment thread and feed draft
+   * into everyone's recents. Shared chats are their own list with their own
+   * predicate: `visibility='workspace' AND channel_type='web' AND
+   * app_origin='chat'`, scoped to the workspace, clearance-filtered against
+   * the caller's membership clearance, `last_active_at DESC`.
+   *
+   * A member below a session's clearance simply never sees the row — there is
+   * no "you lack clearance" state, because the existence of the conversation
+   * is itself the thing being withheld.
+   *
+   * Spec: docs/architecture/features/chat-app.md → "Workspace view".
+   */
+  router.get('/workspace', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.json([]); return }
+
+      const workspaceId = req.query.workspaceId as string | undefined
+      if (!workspaceId) {
+        res.status(400).json({ error: 'Missing workspaceId' })
+        return
+      }
+
+      // Membership + clearance in one read. Non-members get 403 rather than an
+      // empty list: "you are not in this workspace" is not the same answer as
+      // "this workspace has no shared chats", and conflating them makes a
+      // broken workspace switch look like an empty feature.
+      const membership = await getWorkspaceMembershipWithClearanceSystem(user.id, workspaceId)
+      if (!membership) {
+        res.status(403).json({ error: 'Not a member of this workspace' })
+        return
+      }
+
+      const result = await query<{
+        id: string; title: string | null; channelId: string
+        lastActiveAt: Date; status: string
+        starterUserId: string; effectiveClearance: string | null
+      }>(
+        `SELECT s.id, s.title, s.channel_id AS "channelId",
+                s.last_active_at AS "lastActiveAt", s.status,
+                s.user_id AS "starterUserId",
+                s.effective_clearance AS "effectiveClearance"
+           FROM sessions s
+           JOIN assistants a ON a.id = s.assistant_id
+          WHERE a.workspace_id = $1
+            AND s.visibility = 'workspace'
+            AND s.channel_type = 'web'
+            AND s.app_origin = 'chat'
+          ORDER BY s.last_active_at DESC
+          LIMIT 50`,
+        [workspaceId],
+      )
+
+      // Clearance filter in JS rather than SQL: `sensitivity_rank` is a
+      // domain rule that already lives in `canRead`, and duplicating the
+      // ordering into a WHERE clause is how the two drift.
+      const visible = result.rows.filter(
+        (r) =>
+          !r.effectiveClearance ||
+          canRead(membership.clearance, r.effectiveClearance as 'public' | 'internal' | 'confidential'),
+      )
+
+      // Starter identity for the "Started by" chip. One batched lookup;
+      // `users` RLS is own-row only, so this is a system read — membership
+      // above already authorized seeing who is in this workspace.
+      const profiles = await getUserProfilesByIds(visible.map((r) => r.starterUserId))
+      res.json(visible.map((s) => ({
+        id: s.id,
+        title: s.title ?? 'New Chat',
+        channelId: s.channelId,
+        lastActive: s.lastActiveAt,
+        status: s.status,
+        startedByUserId: s.starterUserId,
+        startedByName: profiles.get(s.starterUserId)?.name ?? null,
+        startedByAvatarUrl: profiles.get(s.starterUserId)?.avatarUrl ?? null,
+      })))
+    } catch (err) {
+      console.error('Workspace sessions list error:', err)
+      res.status(500).json({ error: 'Failed to load workspace chats' })
+    }
+  })
+
+  /**
+   * POST /api/sessions/workspace — start a workspace-shared chat.
+   * Body: { workspaceId: string }
+   *
+   * An explicit create (rather than a `shared: true` flag on the first
+   * `POST /api/chat`) so the session exists — and is listable by teammates —
+   * from the moment the user starts it, not from the moment they happen to
+   * send their first message.
+   *
+   * Any workspace member may create one; the session's read floor is the
+   * assistant's clearance, so a shared chat can never be more readable than
+   * the assistant it runs on.
+   */
+  router.post('/workspace', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const { workspaceId } = req.body as { workspaceId?: string }
+      if (!workspaceId) {
+        res.status(400).json({ error: 'Missing workspaceId' })
+        return
+      }
+
+      // `getWorkspacePrimaryAssistant` is membership-checked, so this single
+      // call is both "which assistant" and "may this user be here".
+      const assistant = await getWorkspacePrimaryAssistant(user.id, workspaceId)
+      if (!assistant) {
+        res.status(403).json({ error: 'Not a member of this workspace' })
+        return
+      }
+
+      const clearanceRow = await query<{ clearance: string | null }>(
+        `SELECT clearance FROM assistants WHERE id = $1`,
+        [assistant.id],
+      )
+
+      const session = await createWorkspaceChatSession({
+        assistantId: assistant.id,
+        starterUserId: user.id,
+        workspaceId,
+        effectiveClearance: clearanceRow.rows[0]?.clearance ?? null,
+      })
+
+      res.status(201).json({
+        id: session.id,
+        title: session.title ?? 'New Chat',
+        channelId: session.channelId,
+        lastActive: session.lastActiveAt,
+        status: session.status,
+        startedByUserId: user.id,
+      })
+    } catch (err) {
+      console.error('Workspace session create error:', err)
+      res.status(500).json({ error: 'Failed to start a workspace chat' })
+    }
+  })
+
+  /**
    * GET /api/sessions/by-channel?assistantId=X&channelId=Y[&channelType=web]
    *
    * Lookup an existing session by its identity tuple — does NOT create one.
@@ -237,24 +384,34 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         return
       }
 
-      // Verify ownership before allowing rename. Draft sessions are
+      // Verify ownership before allowing rename. Shared sessions are
       // team-shared, so we accept rename from the original starter OR any
-      // team admin/owner of the assistant's team. Non-draft sessions stay
+      // team admin/owner of the assistant's team. Non-shared sessions stay
       // strictly per-user.
-      // NOTE: `visibility='workspace'` doc-thread sessions (migration 223)
-      // are READABLE by any workspace member, but rename/delete deliberately
-      // stay owner-only — a teammate reading a thread is not license to
-      // retitle or destroy it. Do NOT "unify" this onto the workspace RLS
-      // gate: DELETE cascades to comment_threads + every comment.
+      // NOTE the asymmetry inside `visibility='workspace'` (migration 223).
+      // A workspace-shared CHAT (`app_origin='chat'`) widens to
+      // starter-or-admin, because a shared thread nobody but its starter can
+      // retitle is a shared thread with a private owner. A doc COMMENT THREAD
+      // does not: it is workspace-READABLE, but renaming or destroying it is
+      // still the author's call, and DELETE cascades to `comment_threads` plus
+      // every comment on it. That is why the predicate is
+      // `isSharedChatSession`, not a bare `visibility` check — do NOT "unify"
+      // them.
       const sessionResult = await query<{
         id: string
         userId: string
         mode: string | null
+        visibility: string | null
+        channelType: string
+        appOrigin: string | null
         workspaceId: string | null
       }>(
         `SELECT s.id,
                 s.user_id as "userId",
                 s.mode,
+                s.visibility,
+                s.channel_type as "channelType",
+                s.app_origin as "appOrigin",
                 a.workspace_id as "workspaceId"
            FROM sessions s
            LEFT JOIN assistants a ON a.id = s.assistant_id
@@ -272,7 +429,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       if (jwtUserId) {
         if (session.userId === jwtUserId) {
           allowed = true
-        } else if (session.mode === 'draft' && session.workspaceId) {
+        } else if (
+          (session.mode === 'draft' || isSharedChatSession(session)) &&
+          session.workspaceId
+        ) {
           const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
           if (role === 'admin' || role === 'owner') allowed = true
         }
@@ -303,8 +463,16 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       // 1. Verify session exists and get ownership info
       const sessionResult = await query<{
         id: string; userId: string; status: string; channelType: string
+        mode: string | null; visibility: string | null; appOrigin: string | null
+        workspaceId: string | null
       }>(
-        `SELECT id, user_id as "userId", status, channel_type as "channelType" FROM sessions WHERE id = $1`,
+        `SELECT s.id, s.user_id as "userId", s.status,
+                s.channel_type as "channelType", s.mode, s.visibility,
+                s.app_origin as "appOrigin",
+                a.workspace_id as "workspaceId"
+           FROM sessions s
+           LEFT JOIN assistants a ON a.id = s.assistant_id
+          WHERE s.id = $1`,
         [sessionId],
       )
 
@@ -315,14 +483,19 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
 
       const session = sessionResult.rows[0]
 
-      // 2. Verify ownership — session must belong to the requesting user.
-      // Workspace-shared doc-thread sessions (migration 223) stay
-      // delete-restricted to the creator by design (see the rename note
-      // above): deletion cascades to the comment_threads row + all comments.
+      // 2. Verify ownership — session must belong to the requesting user, OR
+      // be a workspace-shared CHAT the caller administers. Doc-thread sessions
+      // stay delete-restricted to the creator by design (see the rename note
+      // above): deletion cascades to the `comment_threads` row + all comments,
+      // which is why this gates on `isSharedChatSession` and not `visibility`.
       const jwtUserId = (req as { userId?: string }).userId
       if (jwtUserId) {
-        // Authenticated user — check session's user_id matches
-        if (session.userId !== jwtUserId) {
+        let allowed = session.userId === jwtUserId
+        if (!allowed && isSharedChatSession(session) && session.workspaceId) {
+          const role = await getWorkspaceRoleSystem(jwtUserId, session.workspaceId)
+          allowed = role === 'admin' || role === 'owner'
+        }
+        if (!allowed) {
           res.status(403).json({ error: 'Not your session' })
           return
         }
