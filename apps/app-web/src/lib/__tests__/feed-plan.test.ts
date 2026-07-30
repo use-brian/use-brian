@@ -30,6 +30,10 @@ function slot(overrides: Partial<PlanSlot> = {}): PlanSlot {
   };
 }
 
+// Also the unit half of the two Plan surfaces built over these helpers —
+// [COMP:app-web/feed-plan-surface] (pure slot/status helpers; the board
+// interaction itself is web-QA) and [COMP:app-web/plan-calendar] (the
+// month-grid math; drag is web-QA). Their component-map rows point here.
 describe("[COMP:app-web/feed-plan] marketing plan helpers", () => {
   it("formats local calendar days, never UTC", () => {
     // Late-evening local time is the next day in UTC. A slot is a day, so
