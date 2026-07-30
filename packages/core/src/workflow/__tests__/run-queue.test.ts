@@ -12,10 +12,15 @@ import {
  * contract (bounded concurrency, drain-until-empty, reap-first, error
  * isolation, nudge coalescing) is what's under test.
  */
-function makeStore(queue: ClaimedRun[]) {
-  const store: RunQueueStore & { claims: number; reaps: number } = {
+function makeStore(queue: ClaimedRun[], opts?: { abandoned?: number }) {
+  const store: RunQueueStore & {
+    claims: number
+    reaps: number
+    abandonedSweeps: Array<{ abandonedSeconds: number }>
+  } = {
     claims: 0,
     reaps: 0,
+    abandonedSweeps: [],
     async claimNextPendingRunSystem() {
       store.claims++
       return queue.shift() ?? null
@@ -26,6 +31,10 @@ function makeStore(queue: ClaimedRun[]) {
     },
     async requeueStaleRunningRunsSystem() {
       return 0
+    },
+    async failAbandonedInlineRunsSystem(params) {
+      store.abandonedSweeps.push(params)
+      return opts?.abandoned ?? 0
     },
   }
   return store
@@ -124,6 +133,9 @@ describe('[COMP:workflow/run-queue] createRunQueueWorker', () => {
       async requeueStaleRunningRunsSystem() {
         return 0
       },
+      async failAbandonedInlineRunsSystem() {
+        return 0
+      },
     }
     const worker = createRunQueueWorker({ store, onError, advance: async () => {} })
     await expect(worker.tick()).resolves.toBeUndefined()
@@ -170,5 +182,81 @@ describe('[COMP:workflow/run-queue] createRunQueueWorker', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('[COMP:workflow/run-queue] abandoned inline-run reaper', () => {
+  // The queue refuses to CLAIM an inline-path run (schedule / manual / button)
+  // because re-running it re-fires its delivery. That left orphaned
+  // inline runs with no owner at all: a SIGKILL mid-advance writes no status, so
+  // the row shows in-flight forever. This sweep is the "leave it dead" half —
+  // mark, never resurrect.
+
+  it('sweeps on every tick, alongside the queue-owned reapers', async () => {
+    const store = makeStore([])
+    const worker = createRunQueueWorker({ store, advance: async () => {} })
+    await worker.tick()
+    expect(store.abandonedSweeps).toHaveLength(1)
+    expect(store.reaps).toBe(1)
+  })
+
+  it('passes a window far wider than the stale-running one, since nothing is retried off it', async () => {
+    const store = makeStore([])
+    const worker = createRunQueueWorker({ store, advance: async () => {}, staleSeconds: 1_800 })
+    await worker.tick()
+    expect(store.abandonedSweeps[0].abandonedSeconds).toBeGreaterThan(1_800)
+  })
+
+  it('honours an explicit window', async () => {
+    const store = makeStore([])
+    const worker = createRunQueueWorker({ store, advance: async () => {}, abandonedSeconds: 7_200 })
+    await worker.tick()
+    expect(store.abandonedSweeps[0]).toEqual({ abandonedSeconds: 7_200 })
+  })
+
+  it('reports what it failed, so the sweep is not silent', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const store = makeStore([], { abandoned: 216 })
+      const worker = createRunQueueWorker({ store, advance: async () => {} })
+      await worker.tick()
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('216'))
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('says nothing on a clean sweep', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const store = makeStore([], { abandoned: 0 })
+      const worker = createRunQueueWorker({ store, advance: async () => {} })
+      await worker.tick()
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('a sweep failure routes to onError and still lets the pass claim', async () => {
+    const onError = vi.fn()
+    const store = makeStore([run(1)])
+    store.failAbandonedInlineRunsSystem = async () => {
+      throw new Error('db down')
+    }
+    const advanced: string[] = []
+    const worker = createRunQueueWorker({
+      store,
+      onError,
+      advance: async (id) => {
+        advanced.push(id)
+      },
+    })
+    await worker.tick()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(onError).toHaveBeenCalled()
+    // reap() swallows into onError and the drain still runs — a reaper outage
+    // must not stop event runs from advancing.
+    expect(advanced).toEqual(['r1'])
   })
 })

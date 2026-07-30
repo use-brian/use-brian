@@ -463,3 +463,141 @@ describeIf('[COMP:workflow/run-queue] claimNextPendingRunSystem (mig 302)', () =
     }
   })
 })
+
+describeIf('[COMP:workflow/run-queue] failAbandonedInlineRunsSystem', () => {
+  // The inverse gate of everything above: these are the runs the queue does NOT
+  // own. It may only mark them dead. Regression cover for 2026-07-28, when a
+  // crash-looping worker orphaned 216 schedule runs that no sweeper could see.
+  const WINDOW = { abandonedSeconds: 3600 }
+
+  it('fails an abandoned inline run — pending AND running, whatever the inline kind', async () => {
+    const f = await makeFixture()
+    try {
+      // The whole non-event half of the trigger_kind check constraint. Webhook
+      // receivers have no kind of their own — they stamp 'manual'.
+      const kinds = ['schedule', 'manual', 'button']
+      const pendings = await Promise.all(
+        kinds.map((k) =>
+          f.addRun({ workflowId: f.wfA, status: 'pending', lastActiveAgoSeconds: 7200, triggerKind: k }),
+        ),
+      )
+      // 'running' is the mid-step death: the executor wrote a step, then died.
+      const mid = await f.addRun({
+        workflowId: f.wfB,
+        status: 'running',
+        lastActiveAgoSeconds: 7200,
+        triggerKind: 'schedule',
+      })
+
+      const n = await queue.failAbandonedInlineRunsSystem(WINDOW)
+      expect(n).toBeGreaterThanOrEqual(kinds.length + 1)
+
+      for (const id of [...pendings, mid]) {
+        const state = await rowState(id)
+        expect(state.status).toBe('failed')
+        expect(state.reason).toBe('run_abandoned')
+      }
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it('never touches an EVENT run — those belong to the claim/requeue path', async () => {
+    const f = await makeFixture()
+    try {
+      // Long-abandoned but queue-owned: the stale-running reaper re-queues this
+      // one (event runs are safe to retry). This sweep must leave it alone, or
+      // a retryable run gets killed instead.
+      const evt = await f.addRun({
+        workflowId: f.wfA,
+        status: 'running',
+        lastActiveAgoSeconds: 99_999,
+        triggerKind: 'event',
+      })
+      const evtPending = await f.addRun({
+        workflowId: f.wfB,
+        status: 'pending',
+        lastActiveAgoSeconds: 99_999,
+        triggerKind: 'event',
+      })
+
+      await queue.failAbandonedInlineRunsSystem(WINDOW)
+      expect((await rowState(evt)).status).toBe('running')
+      expect((await rowState(evtPending)).status).toBe('pending')
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it('leaves a still-active inline run alone', async () => {
+    const f = await makeFixture()
+    try {
+      // Every step write bumps last_active_at, so a live multi-step run keeps
+      // proving it is alive. 10s of inactivity is a working run, not a corpse.
+      const live = await f.addRun({
+        workflowId: f.wfA,
+        status: 'running',
+        lastActiveAgoSeconds: 10,
+        triggerKind: 'schedule',
+      })
+      const justStarted = await f.addRun({
+        workflowId: f.wfB,
+        status: 'pending',
+        lastActiveAgoSeconds: 0,
+        triggerKind: 'manual',
+      })
+
+      expect(await queue.failAbandonedInlineRunsSystem(WINDOW)).toBe(0)
+      expect((await rowState(live)).status).toBe('running')
+      expect((await rowState(justStarted)).status).toBe('pending')
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it('never touches a run parked on a wait or an approval, however long it waits', async () => {
+    const f = await makeFixture()
+    try {
+      // These are idle BY DESIGN — a wait step until next Monday, or a human
+      // approval nobody has answered yet. Failing them would break the feature.
+      const waiting = await f.addRun({
+        workflowId: f.wfA,
+        status: 'awaiting_wait',
+        lastActiveAgoSeconds: 99_999,
+        triggerKind: 'schedule',
+      })
+      const forInput = await f.addRun({
+        workflowId: f.wfB,
+        status: 'awaiting_input',
+        lastActiveAgoSeconds: 99_999,
+        triggerKind: 'manual',
+      })
+
+      await queue.failAbandonedInlineRunsSystem(WINDOW)
+      expect((await rowState(waiting)).status).toBe('awaiting_wait')
+      expect((await rowState(forInput)).status).toBe('awaiting_input')
+    } finally {
+      await f.cleanup()
+    }
+  })
+
+  it('is idempotent — a second sweep finds nothing and does not re-stamp', async () => {
+    const f = await makeFixture()
+    try {
+      const run = await f.addRun({
+        workflowId: f.wfA,
+        status: 'pending',
+        lastActiveAgoSeconds: 7200,
+        triggerKind: 'schedule',
+      })
+      expect(await queue.failAbandonedInlineRunsSystem(WINDOW)).toBeGreaterThanOrEqual(1)
+      const first = await pool!.query(`SELECT finished_at FROM workflow_runs WHERE id = $1`, [run])
+
+      expect(await queue.failAbandonedInlineRunsSystem(WINDOW)).toBe(0)
+      const second = await pool!.query(`SELECT finished_at FROM workflow_runs WHERE id = $1`, [run])
+      expect(second.rows[0].finished_at).toEqual(first.rows[0].finished_at)
+    } finally {
+      await f.cleanup()
+    }
+  })
+})

@@ -54,6 +54,19 @@ export type ImapClientLike = {
     meta?: { contentType?: string; filename?: string; expectedSize?: number }
     content: AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }
   }>
+  /**
+   * Keep the socket from going quiet while we hold the session but are not
+   * talking IMAP (the backfill's per-message DB insert phase — sync-worker.ts).
+   * `socketTimeout` is INACTIVITY-based, so a long insert phase reads to the
+   * socket exactly like a dead server.
+   */
+  noop(): Promise<unknown>
+  /**
+   * imapflow surfaces post-connect failures as an `'error'` EVENT, not a
+   * rejection — see `attachSessionErrorSink`. Registering a listener is the
+   * only thing that stops Node rethrowing it as an uncaughtException.
+   */
+  on(event: 'error', listener: (err: unknown) => void): unknown
   usable: boolean
 }
 
@@ -103,9 +116,99 @@ export const MAILBOX_SESSION_MAX_LIFETIME_MS = 10 * 60_000
  */
 export const MAILBOX_SOCKET_TIMEOUT_MS = 90_000
 export const MAILBOX_GREETING_TIMEOUT_MS = 20_000
+/**
+ * How long the socket may sit quiet while we hold the session but are NOT
+ * talking IMAP, before we spend a NOOP to keep it warm. Must stay well under
+ * `MAILBOX_SOCKET_TIMEOUT_MS` — the NOOP itself needs room to complete.
+ */
+export const MAILBOX_KEEP_WARM_MS = 30_000
+
+/** Guards the non-IMAP phase of a sync against the inactivity timeout. */
+export type SocketKeepWarm = {
+  /**
+   * Call once per unit of non-IMAP work. Issues a NOOP only when the socket
+   * has actually been quiet longer than `everyMs`, so a fast loop costs
+   * nothing. Rethrows if the session is gone: the caller's walk must abort
+   * rather than keep inserting against a dead connection.
+   */
+  pingIfIdle(): Promise<void>
+}
+
+/**
+ * `socketTimeout` is INACTIVITY-based, not a command deadline — it fires when
+ * no bytes cross the socket for `MAILBOX_SOCKET_TIMEOUT_MS`, and it cannot
+ * tell a dead server from a busy client. The sync worker fetches a chunk of
+ * messages, releases the mailbox lock, then spends the next stretch on
+ * per-message MIME parsing, archive inserts and (delta path) brain routing —
+ * all of it with the IMAP session still held and the socket silent. When those
+ * inserts are slow (a starved DB pool, statement timeouts) the quiet stretch
+ * passes 90 s and imapflow kills the connection out from under a walk that was
+ * making perfectly good progress.
+ *
+ * Raising or dropping the timeout is the wrong lever: it exists so a server
+ * that stops responding mid-FETCH cannot hang the tick forever, and the
+ * backfill's poison-UID bisection needs that throw. The fix is to stop holding
+ * a silent socket while we work — one cheap NOOP per idle window.
+ */
+export function createSocketKeepWarm(
+  client: ImapClientLike,
+  opts?: { everyMs?: number; now?: () => number },
+): SocketKeepWarm {
+  const everyMs = opts?.everyMs ?? MAILBOX_KEEP_WARM_MS
+  const now = opts?.now ?? (() => Date.now())
+  // Seeded at construction: the caller builds this right after the fetch that
+  // was the socket's last real activity.
+  let lastActivity = now()
+  return {
+    async pingIfIdle() {
+      if (now() - lastActivity < everyMs) return
+      await client.noop()
+      lastActivity = now()
+    },
+  }
+}
+
+/**
+ * Register the `'error'` sink every long-lived IMAP session must carry.
+ *
+ * imapflow is an EventEmitter, and once `connect()` has resolved it reports
+ * every later failure — socket timeout, mid-command disconnect, server reset —
+ * by calling `emitError`, which ends in `this.emit('error', err)`. Node's
+ * EventEmitter treats `'error'` as a special case: with **zero** listeners it
+ * RETHROWS the error instead of dropping it. That throw happens on the timer
+ * stack that fired it (`Socket._onTimeout`), so no `try/catch` around any
+ * `await` of ours is on the stack to catch it — the process dies with
+ * `Unhandled 'error' event`.
+ *
+ * That is not theoretical: from 2026-07-28 the single-instance
+ * `brian-api-workers` container crash-looped every ~100 s for two days on
+ * `Error: Socket timeout` out of a mailbox backfill, taking all 19 background
+ * workers with it. Every scheduled workflow run longer than the crash interval
+ * orphaned mid-flight (216 rows stuck `pending`/`running`), because a SIGKILL
+ * leaves no status behind.
+ *
+ * Attaching the listener is not swallowing the error — `emitError` calls
+ * `closeAfter()` BEFORE emitting, so the connection is already torn down and
+ * `usable` is already false. The listener only stops the process death, which
+ * lets the failure path that already exists run: the in-flight command
+ * rejects, `withClient` drops the dead session, and `syncInstance` records
+ * `lastError` on the instance and logs the failure. One tick degrades instead
+ * of the whole fleet dying.
+ */
+export function attachSessionErrorSink(
+  client: ImapClientLike,
+  label: string,
+  log: (msg: string) => void = (msg) => console.warn(msg),
+): void {
+  client.on('error', (err) => {
+    const text = err instanceof Error ? err.message : String(err)
+    const code = (err as { code?: string } | null)?.code
+    log(`[mailbox] IMAP session error for ${label}: ${text}${code ? ` (${code})` : ''}`)
+  })
+}
 
 export function createImapClient(settings: MailboxAccountSettings): ImapClientLike {
-  return new ImapFlow({
+  const client = new ImapFlow({
     host: settings.imapHost,
     port: settings.imapPort,
     secure: true,
@@ -114,6 +217,8 @@ export function createImapClient(settings: MailboxAccountSettings): ImapClientLi
     greetingTimeout: MAILBOX_GREETING_TIMEOUT_MS,
     socketTimeout: MAILBOX_SOCKET_TIMEOUT_MS,
   }) as unknown as ImapClientLike
+  attachSessionErrorSink(client, settings.email)
+  return client
 }
 
 type SessionEntry = {
