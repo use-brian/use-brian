@@ -27,13 +27,33 @@ function instanceRow(overrides: Partial<ConnectorInstance> = {}): ConnectorInsta
   } as unknown as ConnectorInstance
 }
 
-function mockStore(instances: ConnectorInstance[] = []) {
+function mockStore(
+  instances: ConnectorInstance[] = [],
+  /** Per-instance decrypted credentials, keyed by instance id (BYO app pairs). */
+  credsById: Record<string, { client_secret?: string } | null> = {},
+) {
   return {
     listByProviderSystem: vi.fn().mockResolvedValue(instances),
     deleteSystem: vi.fn().mockResolvedValue(undefined),
+    setConnectedSystem: vi.fn().mockResolvedValue(undefined),
+    getCredentialsSystem: vi.fn(async (id: string) => credsById[id] ?? null),
   } as unknown as ConnectorInstanceStore & {
     listByProviderSystem: ReturnType<typeof vi.fn>
     deleteSystem: ReturnType<typeof vi.fn>
+    setConnectedSystem: ReturnType<typeof vi.fn>
+    getCredentialsSystem: ReturnType<typeof vi.fn>
+  }
+}
+
+/** The stored envelope for an instance connected through a merchant's own app. */
+function byoEnvelope(clientSecret: string, clientId = 'merchant_cid') {
+  return {
+    client_secret: JSON.stringify({
+      accessToken: 'shpat_merchant',
+      shopDomain: SHOP,
+      appClientId: clientId,
+      appClientSecret: clientSecret,
+    }),
   }
 }
 
@@ -156,5 +176,126 @@ describe('[COMP:api/shopify-webhooks] Shopify compliance webhook receiver', () =
     const hits = await findShopifyInstancesByShopDomain(store, 'TESTSTORE.myshopify.com')
     expect(hits.map((h) => h.id)).toEqual(['inst-1'])
     expect(await findShopifyInstancesByShopDomain(store, 'not-a-shop')).toEqual([])
+  })
+
+  // ── Per-merchant app secrets (BYO client id + secret) ─────
+
+  it("verifies a delivery signed with the MERCHANT's app secret, with no deployment secret set", async () => {
+    // The whole point of BYO: ambient ingest works for a store connected through
+    // the merchant's own custom-distribution app, which plan D9 excluded because
+    // we held no secret capable of verifying its deliveries.
+    const merchantSecret = 'merchant-app-secret'
+    const store = mockStore([instanceRow()], { 'inst-1': byoEnvelope(merchantSecret) })
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, undefined))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, merchantSecret))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(store.getCredentialsSystem).toHaveBeenCalledWith('inst-1')
+  })
+
+  it("rejects a delivery signed with the WRONG merchant's secret", async () => {
+    const store = mockStore([instanceRow()], { 'inst-1': byoEnvelope('the-right-secret') })
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, undefined))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, 'some-other-secret'))
+      .send(body)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Invalid signature' })
+  })
+
+  it('still accepts the deployment secret for a Use Brian-owned install', async () => {
+    // The fallback must survive: an instance with no merchant pair is signed by
+    // our own app.
+    const store = mockStore([instanceRow()], { 'inst-1': { client_secret: JSON.stringify({ accessToken: 'shpat_x', shopDomain: SHOP }) } })
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, SECRET))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, SECRET))
+      .send(body)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('accepts when ANY instance on the shop verifies, across different merchant apps', async () => {
+    // Two instances can share a shop domain (multi-workspace). A delivery signed
+    // by the second app must not be rejected because the first one was tried.
+    const store = mockStore(
+      [instanceRow(), { ...instanceRow(), id: 'inst-2' } as ConnectorInstance],
+      { 'inst-1': byoEnvelope('secret-one'), 'inst-2': byoEnvelope('secret-two') },
+    )
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, undefined))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, 'secret-two'))
+      .send(body)
+
+    expect(res.status).toBe(200)
+  })
+
+  it('fails closed with no merchant pair and no deployment secret', async () => {
+    const store = mockStore([instanceRow()], { 'inst-1': null })
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, undefined))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, 'anything'))
+      .send(body)
+
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Webhook verification not configured' })
+  })
+
+  it('survives an unreadable instance and still verifies via another', async () => {
+    // A decrypt failure on one instance must not deny a delivery another can
+    // verify — and must not be swallowed silently either.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const store = mockStore(
+      [instanceRow(), { ...instanceRow(), id: 'inst-2' } as ConnectorInstance],
+      { 'inst-2': byoEnvelope('good-secret') },
+    )
+    ;(store.getCredentialsSystem as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+      if (id === 'inst-1') throw new Error('decrypt failed')
+      return byoEnvelope('good-secret')
+    })
+    const body = JSON.stringify({ id: 1 })
+
+    const res = await request(buildApp(store, undefined))
+      .post('/webhook/shopify')
+      .set('Content-Type', 'application/json')
+      .set('X-Shopify-Topic', 'orders/create')
+      .set('X-Shopify-Shop-Domain', SHOP)
+      .set('X-Shopify-Hmac-Sha256', sign(body, 'good-secret'))
+      .send(body)
+
+    expect(res.status).toBe(200)
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('could not read credentials for instance inst-1'),
+      expect.any(String),
+    )
+    warn.mockRestore()
   })
 })

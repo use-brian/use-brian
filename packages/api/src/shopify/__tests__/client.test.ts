@@ -5,6 +5,9 @@ import {
   toShopifyGid,
   packShopifyTokens,
   unpackShopifyTokens,
+  packShopifyAppCredentials,
+  unpackShopifyAppCredentials,
+  shopifyAppCredentialsFromTokens,
   isManagedShopifyTokens,
   exchangeShopifyAuthorizationCode,
   refreshShopifyTokens,
@@ -202,6 +205,108 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       store: { async getTokens() { return null }, async persistTokens() {} },
     })
     await expect(mgr.getAuth()).rejects.toThrow(/Shopify not connected/)
+  })
+
+  // ── Per-merchant app credentials (BYO client id + secret) ─
+
+  it("manager refreshes with the MERCHANT's app pair, not the deployment config", async () => {
+    // The token was minted by the merchant's own custom-distribution app, so
+    // only their secret can refresh it. Presenting a Use Brian-owned secret
+    // here fails in a way that reads like a revoked grant.
+    const past = new Date(Date.now() - 60_000).toISOString()
+    mockFetch.mockResolvedValue(jsonResponse({ access_token: 'rot_at', refresh_token: 'rot_rt', expires_in: 3600 }))
+    const mgr = createShopifyTokenManager({
+      getAppConfig: () => ({ clientId: 'PLATFORM_cid', clientSecret: 'PLATFORM_csec' }),
+      store: {
+        async getTokens() {
+          return {
+            accessToken: 'at', refreshToken: 'rt', expiresAt: past, shopDomain: SHOP,
+            appClientId: 'merchant_cid', appClientSecret: 'merchant_csec',
+          }
+        },
+        async persistTokens() {},
+      },
+    })
+
+    await mgr.getAuth()
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(body.client_id).toBe('merchant_cid')
+    expect(body.client_secret).toBe('merchant_csec')
+  })
+
+  it('carries the app pair across rotation so the NEXT refresh still has a secret', async () => {
+    // The token endpoint response says nothing about which app credentials were
+    // used, so a bare refreshed tuple drops the pair — and the next refresh
+    // would fail as if the grant were revoked. Regression guard.
+    const past = new Date(Date.now() - 60_000).toISOString()
+    let stored: ShopifyTokens = {
+      accessToken: 'old_at', refreshToken: 'old_rt', expiresAt: past, shopDomain: SHOP,
+      appClientId: 'merchant_cid', appClientSecret: 'merchant_csec',
+    }
+    mockFetch.mockResolvedValue(jsonResponse({ access_token: 'rot_at', refresh_token: 'rot_rt', expires_in: 3600 }))
+    const mgr = createShopifyTokenManager({
+      getAppConfig: () => undefined,
+      store: {
+        async getTokens() { return stored },
+        async persistTokens(t) { stored = t },
+      },
+    })
+
+    await mgr.getAuth()
+    expect(stored.appClientId).toBe('merchant_cid')
+    expect(stored.appClientSecret).toBe('merchant_csec')
+    // And it survives a serialize round trip, which is how it is actually stored.
+    expect(unpackShopifyTokens(packShopifyTokens(stored))).toMatchObject({
+      appClientId: 'merchant_cid',
+      appClientSecret: 'merchant_csec',
+    })
+  })
+
+  it('a BYO instance can refresh with NO deployment config at all', async () => {
+    // The whole point: a self-host or a hosted deploy with SHOPIFY_CLIENT_SECRET
+    // unset must still refresh a merchant-app token.
+    const past = new Date(Date.now() - 60_000).toISOString()
+    mockFetch.mockResolvedValue(jsonResponse({ access_token: 'rot_at', refresh_token: 'rot_rt', expires_in: 3600 }))
+    const mgr = createShopifyTokenManager({
+      getAppConfig: () => undefined,
+      store: {
+        async getTokens() {
+          return {
+            accessToken: 'at', refreshToken: 'rt', expiresAt: past, shopDomain: SHOP,
+            appClientId: 'merchant_cid', appClientSecret: 'merchant_csec',
+          }
+        },
+        async persistTokens() {},
+      },
+    })
+    expect((await mgr.getAuth()).accessToken).toBe('rot_at')
+  })
+
+  it('packs/reads the app pair only when BOTH halves are present', async () => {
+    const base = { accessToken: 'shpat_x', shopDomain: SHOP }
+    // Half a pair is not a pair — a lone id or secret must not be stored.
+    expect(unpackShopifyTokens(packShopifyTokens({ ...base, appClientId: 'cid' }))).not.toHaveProperty('appClientId')
+    expect(unpackShopifyTokens(packShopifyTokens({ ...base, appClientSecret: 'csec' }))).not.toHaveProperty('appClientSecret')
+    expect(shopifyAppCredentialsFromTokens({ ...base, appClientId: 'cid' })).toBeNull()
+    expect(shopifyAppCredentialsFromTokens({ ...base, appClientId: 'cid', appClientSecret: 'csec' }))
+      .toEqual({ clientId: 'cid', clientSecret: 'csec' })
+  })
+
+  it('reads app credentials from a token-less blob, while unpackShopifyTokens still says "not connected"', async () => {
+    // Step 1 of the BYO connect stores the pair with no token yet. The two
+    // readers answer different questions and must disagree here.
+    const blob = packShopifyAppCredentials({ shopDomain: SHOP, clientId: 'cid', clientSecret: 'csec' })
+    expect(unpackShopifyAppCredentials(blob)).toEqual({ clientId: 'cid', clientSecret: 'csec' })
+    expect(unpackShopifyTokens(blob)).toBeNull()
+  })
+
+  it('unpackShopifyAppCredentials rejects malformed, empty and pair-less blobs', async () => {
+    expect(unpackShopifyAppCredentials('not json')).toBeNull()
+    expect(unpackShopifyAppCredentials('{}')).toBeNull()
+    expect(unpackShopifyAppCredentials(JSON.stringify({ appClientId: 'cid' }))).toBeNull()
+    expect(unpackShopifyAppCredentials(JSON.stringify({ appClientId: '', appClientSecret: 'csec' }))).toBeNull()
+    // A plain pasted-token envelope carries no pair.
+    expect(unpackShopifyAppCredentials(packShopifyTokens({ accessToken: 'shpat_x', shopDomain: SHOP }))).toBeNull()
   })
 
   // ── GraphQL transport ────────────────────────────────────
