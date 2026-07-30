@@ -139,3 +139,43 @@ export async function deleteCustomHomeApp(appId: string): Promise<void> {
     throw new Error(body.error ?? `Remove failed: ${res.status}`);
   }
 }
+
+/**
+ * Import an app from a repository. The FIRST SYNC RUNS INLINE server-side, so
+ * a rejection here is the real validation result — the caller can show the
+ * author exactly what is wrong with their bundle rather than "added, check
+ * back in 15 minutes".
+ */
+export async function importCustomHomeAppFromGithub(params: {
+  workspaceId: string;
+  repo: string;
+  branch: string;
+  rootPath: string;
+  connectorInstanceId: string | null;
+}): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/home-apps/github`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Import failed: ${res.status}`);
+  }
+}
+
+/** Sync now. Resolves to whether the app just dropped to `needs_consent`. */
+export async function syncCustomHomeApp(
+  appId: string,
+): Promise<{ droppedToNeedsConsent: boolean }> {
+  const res = await authFetch(
+    `${API_URL}/api/home-apps/${encodeURIComponent(appId)}/sync`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Sync failed: ${res.status}`);
+  }
+  const body = (await res.json()) as { droppedToNeedsConsent?: boolean };
+  return { droppedToNeedsConsent: body.droppedToNeedsConsent === true };
+}

@@ -25,17 +25,26 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { AppScopes } from "@use-brian/brian-app";
-import { AlertTriangle, Check, GitBranch, Puzzle, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, GitBranch, Plus, RefreshCw, Puzzle, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   deleteCustomHomeApp,
   grantCustomHomeApp,
+  importCustomHomeAppFromGithub,
   listCustomHomeApps,
   setCustomHomeAppStatus,
+  syncCustomHomeApp,
   type CustomHomeApp,
 } from "@/lib/api/home-apps";
+import {
+  listImportGithubInstances,
+  listImportGithubRepos,
+  type SkillImportGithubInstance,
+  type SkillImportGithubRepo,
+} from "@/lib/api/skills";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 
 /**
  * Requested scopes as sentences an admin can act on. Deliberately verbose:
@@ -165,6 +174,8 @@ export function CustomAppsSection({
         </p>
       )}
 
+      {canEdit && <AddFromGithub workspaceId={workspaceId} onAdded={refresh} />}
+
       {apps !== null && apps.length === 0 && (
         <p className="mt-3 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
           {t.empty}
@@ -260,6 +271,25 @@ export function CustomAppsSection({
                       </button>
                     </>
                   )}
+                  {app.kind === "github" && (
+                    <button
+                      type="button"
+                      disabled={busy === app.id}
+                      onClick={() =>
+                        void run(app.id, async () => {
+                          const { droppedToNeedsConsent } = await syncCustomHomeApp(app.id);
+                          // A sync that succeeded but pulled the app off Home is
+                          // NOT a plain success — say so, or the admin discovers
+                          // it by noticing a missing icon.
+                          if (droppedToNeedsConsent) setError(t.syncedButWidened);
+                        })
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50"
+                    >
+                      <RefreshCw className="size-3" aria-hidden />
+                      {t.syncAction}
+                    </button>
+                  )}
                   {app.status === "disabled" && (
                     <button
                       type="button"
@@ -330,5 +360,155 @@ function StatusChip({
     >
       {label}
     </span>
+  );
+}
+
+/**
+ * Add from GitHub — the instance-first picker (connector → repo → branch), the
+ * same shape as the Knowledge source flow.
+ *
+ * The import's first sync runs INLINE server-side, so the error surfaced here
+ * is the real validation result. That is deliberate: an author who just pushed
+ * a broken manifest should learn it now, not by noticing 15 minutes later that
+ * their app never appeared.
+ */
+function AddFromGithub({
+  workspaceId,
+  onAdded,
+}: {
+  workspaceId: string;
+  onAdded: () => Promise<void>;
+}) {
+  const t = useT().studioPage.customApps;
+  const [open, setOpen] = useState(false);
+  const [instances, setInstances] = useState<SkillImportGithubInstance[]>([]);
+  const [instanceId, setInstanceId] = useState<string>("");
+  const [repos, setRepos] = useState<SkillImportGithubRepo[]>([]);
+  const [repo, setRepo] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [rootPath, setRootPath] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    void listImportGithubInstances(workspaceId).then((r) => {
+      if (!r.ok) return;
+      setInstances(r.instances);
+      // One connector is the common case — pre-select it rather than making
+      // the user choose from a list of one.
+      if (r.instances.length === 1) setInstanceId(r.instances[0].id);
+    });
+  }, [open, workspaceId]);
+
+  useEffect(() => {
+    if (!instanceId) return;
+    setRepos([]);
+    void listImportGithubRepos(workspaceId, instanceId).then((r) => {
+      if (r.ok) setRepos(r.repos);
+    });
+  }, [instanceId, workspaceId]);
+
+  const submit = useCallback(async () => {
+    if (!repo) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await importCustomHomeAppFromGithub({
+        workspaceId,
+        repo,
+        branch: branch.trim() || "main",
+        rootPath: rootPath.trim(),
+        connectorInstanceId: instanceId || null,
+      });
+      await onAdded();
+      setOpen(false);
+      setRepo("");
+      setRootPath("");
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, [branch, instanceId, onAdded, repo, rootPath, workspaceId]);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent"
+      >
+        <Plus className="size-3.5" aria-hidden />
+        {t.addFromGithub}
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-border p-3">
+      <p className="text-xs font-medium">{t.addFromGithub}</p>
+      {instances.length === 0 ? (
+        <p className="mt-2 text-[11px] text-muted-foreground">{t.noConnector}</p>
+      ) : (
+        <div className="mt-2 flex flex-col gap-2">
+          <SearchableSelect
+            value={instanceId}
+            onValueChange={setInstanceId}
+            items={instances.map((i) => ({
+              value: i.id,
+              label: i.connectedEmail ?? i.id,
+            }))}
+            placeholder={t.pickConnector}
+            aria-label={t.pickConnector}
+          />
+          <SearchableSelect
+            value={repo}
+            onValueChange={setRepo}
+            items={repos.map((r) => ({ value: r.fullName, label: r.fullName }))}
+            placeholder={t.pickRepo}
+            aria-label={t.pickRepo}
+          />
+          <div className="flex gap-2">
+            <input
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+              placeholder={t.branchPlaceholder}
+              aria-label={t.branchPlaceholder}
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none"
+            />
+            <input
+              value={rootPath}
+              onChange={(e) => setRootPath(e.target.value)}
+              placeholder={t.rootPathPlaceholder}
+              aria-label={t.rootPathPlaceholder}
+              className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1.5 text-xs outline-none"
+            />
+          </div>
+        </div>
+      )}
+      {error && (
+        <p className="mt-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive whitespace-pre-wrap">
+          {error}
+        </p>
+      )}
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={busy || !repo}
+          onClick={() => void submit()}
+          className="rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+        >
+          {busy ? t.addBusy : t.addConfirm}
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="rounded-md border border-border px-2 py-1 text-[11px]"
+        >
+          {t.addCancel}
+        </button>
+      </div>
+    </div>
   );
 }
