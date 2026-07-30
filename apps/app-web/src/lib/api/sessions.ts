@@ -168,6 +168,78 @@ export async function fetchLatestSession(opts: {
 }
 
 /**
+ * The caller's own web sessions for an assistant, newest first — the Chat
+ * app's Personal rail (chat-app.md → "Personal view").
+ *
+ * Deliberately sends NO `appOrigin`: T3 makes Personal a *unified* history, so
+ * a thread started in the floating dock and one started here are the same list.
+ * Filtering by origin would split a user's history across two surfaces for no
+ * reason they could see.
+ *
+ * Returns `[]` on any failure — an empty rail reads as "no history yet", which
+ * is the same thing the user does next either way (start a chat).
+ */
+export async function listSessions(opts: {
+  workspaceId: string;
+  assistantId: string;
+  signal?: AbortSignal;
+}): Promise<DocSession[]> {
+  const qs = new URLSearchParams();
+  qs.set("assistantId", opts.assistantId);
+  qs.set("workspaceId", opts.workspaceId);
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/sessions?${qs.toString()}`,
+      opts.signal ? { signal: opts.signal } : {},
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as RawListRow[];
+    if (!Array.isArray(data)) return [];
+    return data.map((r) => ({
+      id: r.id,
+      title: r.title,
+      channelId: r.channelId,
+      lastActive: toIso(r.lastActive),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/** Rename a session (`PATCH /api/sessions/:id`). Throws on rejection so the
+ *  rail can surface why (403 on someone else's private thread). */
+export async function renameSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Rename failed: ${res.status}`);
+  }
+}
+
+/** Delete a session (`DELETE /api/sessions/:id`). Throws on rejection — a 409
+ *  means a turn is still running, which the caller shows as a retry hint. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Delete failed: ${res.status}`);
+  }
+}
+
+/**
  * Fetch the message history for one session. Returns `[]` on any error
  * or when the session has no messages — the caller treats both as
  * "start fresh".

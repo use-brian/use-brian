@@ -37,6 +37,10 @@
     "./page-icon": {
       "types": "./dist/page-icon.d.ts",
       "default": "./dist/page-icon.js"
+    },
+    "./home-apps": {
+      "types": "./dist/home-apps.d.ts",
+      "default": "./dist/home-apps.js"
     }
   },
   "scripts": {

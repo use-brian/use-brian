@@ -42,6 +42,7 @@ import {
   FileText,
   Users,
   Megaphone,
+  MessageSquare,
   MonitorPlay,
   type LucideIcon,
 } from "lucide-react";
@@ -64,6 +65,7 @@ export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
   feed: Megaphone,
   crm: Users,
   browsers: MonitorPlay,
+  chat: MessageSquare,
 };
 
 export function OperatorAppBar({
@@ -90,6 +92,7 @@ export function OperatorAppBar({
     feed: t.feed,
     crm: t.crm,
     browsers: t.browsers,
+    chat: t.chat,
   };
   const apps =
     active === null

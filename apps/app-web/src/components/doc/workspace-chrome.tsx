@@ -46,11 +46,11 @@ import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
 import {
   DEFAULT_OPERATOR_APP,
   OPERATOR_APP_KEYS,
+  homeAppPath,
   operatorAppFromSurface,
-  operatorAppPath,
   readOperatorApp,
   writeOperatorApp,
-  type OperatorAppKey,
+  type HomeAppEntry,
 } from "@/lib/operator-apps";
 import { useDocChatOthersRun } from "@/lib/doc-chat-relay";
 import { useOfflineSync } from "@/lib/offline/use-offline-sync";
@@ -263,18 +263,18 @@ export function WorkspaceChrome({
   }, [activeOperatorApp, workspaceId, feedEnabled]);
   // localStorage is client-only; render the SSR-safe default first and
   // resolve after mount (and whenever a visit updates the cache).
-  const [homeApp, setHomeApp] = useState<OperatorAppKey>(DEFAULT_OPERATOR_APP);
+  const [homeApp, setHomeApp] = useState<HomeAppEntry>(DEFAULT_OPERATOR_APP);
   useEffect(() => {
-    const enabled = OPERATOR_APP_KEYS.filter(
+    const enabled: HomeAppEntry[] = OPERATOR_APP_KEYS.filter(
       (key) => key !== "feed" || feedEnabled,
     );
-    if (activeOperatorApp && enabled.includes(activeOperatorApp)) {
+    if (activeOperatorApp && (enabled as string[]).includes(activeOperatorApp)) {
       setHomeApp(activeOperatorApp);
     } else {
       setHomeApp(readOperatorApp(workspaceId, enabled));
     }
   }, [workspaceId, activeOperatorApp, feedEnabled]);
-  const homeHref = operatorAppPath(workspaceId, homeApp);
+  const homeHref = homeAppPath(workspaceId, homeApp);
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
     try {

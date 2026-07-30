@@ -48,7 +48,9 @@ export function surfaceSkeletonKind(
   switch (surface) {
     case "brain":
       return "brain";
+    // Studio and Chat both open as "narrow left rail + wide detail pane".
     case "studio":
+    case "chat":
       return "rail";
     case "workflow":
     case "feed":
@@ -61,8 +63,11 @@ export function surfaceSkeletonKind(
     case "approvals":
       return "list";
     // `p`, `inbox` (redirects to `/p`), and the root land on the doc surface.
+    // `apps` is one full-bleed pane under a chrome row (the custom-app frame),
+    // which is the page shape too.
     case "p":
     case "inbox":
+    case "apps":
     case null:
     case undefined:
       return "page";

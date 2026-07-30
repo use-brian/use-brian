@@ -129,6 +129,7 @@ import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
 import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
 import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
+import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -732,7 +733,7 @@ export function DocSidebar(props: Props) {
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-4">
         {/* Surface-aware body. The page tree (Favorites / Drafts / search) shows
             ONLY on Home (`'p'`); Brain / Studio / Workflow / Tasks / CRM /
-            Browsers each swap in their own panel; every other surface
+            Browsers / Chat each swap in their own panel; every other surface
             (approvals, knowledge-base, root) renders nothing here. */}
         {props.activeSurface === "brain" ? (
           <BrainSidebarPanel workspaceId={workspaceId} />
@@ -748,6 +749,8 @@ export function DocSidebar(props: Props) {
           <CrmSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "computer" ? (
           <BrowsersSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "chat" ? (
+          <ChatSidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (
