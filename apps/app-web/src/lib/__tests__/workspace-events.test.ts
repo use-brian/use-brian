@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
 import { BRAIN_REFRESH_EVENT } from "@/lib/brain-events";
 import { APPROVALS_REFRESH_EVENT } from "@/lib/approvals-events";
 import { WORKFLOW_REFRESH_EVENT } from "@/lib/workflow-events";
+import { HOME_APPS_REFRESH_EVENT } from "@/lib/home-apps-events";
 import {
   allDomainDispatches,
   createRefreshFolder,
@@ -95,6 +96,15 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     ]);
   });
 
+  // Same class of bug as the assistant roster: the Home app-bar renders inside
+  // the never-unmounting workspace layout, so a config change has to arrive as
+  // a signal or the strip stays stale until a full reload.
+  it("routes workspace_config to the home-apps bus", () => {
+    expect(routeWorkspaceChange(payload("workspace_config"))).toEqual([
+      { event: HOME_APPS_REFRESH_EVENT, detail: { workspaceId: "ws-1" } },
+    ]);
+  });
+
   it("ignores unknown primitives — a newer server must never break an older client", () => {
     expect(
       routeWorkspaceChange(
@@ -115,6 +125,8 @@ describe("[COMP:app-web/workspace-events] routeWorkspaceChange", () => {
     // asleep or the stream is down still has to reach the never-unmounting
     // chrome on reconnect.
     expect(events).toContain("sidan:assistant-refresh");
+    // ...and the app-bar config, for the same reason.
+    expect(events).toContain(HOME_APPS_REFRESH_EVENT);
   });
 });
 

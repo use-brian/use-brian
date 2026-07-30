@@ -78,7 +78,8 @@ import {
   Users,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
-import { operatorAppFromSurface } from "@/lib/operator-apps";
+import { usePathname } from "next/navigation";
+import { homeAppFromPathname, type HomeAppEntry } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
 import {
   DropdownMenu,
@@ -213,7 +214,10 @@ type Props = {
    * OSS edition 404s the surface). Gates the Feed entry in the operator
    * app-bar; the routes stay deep-linkable regardless.
    */
-  feedEnabled: boolean;
+  /** The workspace's Home app-bar config — which apps the strip renders, in
+   *  order (`workspaces.home_apps`). Carried by `WorkspaceChrome` from the
+   *  sidebar-data provider, which owns the fetch + live repair. */
+  homeApps: readonly HomeAppEntry[];
 };
 
 function collapseKey(workspaceId: string): string {
@@ -308,7 +312,10 @@ export function DocSidebar(props: Props) {
   const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
   /** Home is the operator hub: it lights up for ANY operator-app surface
    *  (Page / Tasks / Feed) — the app-bar row below shows which. */
-  const activeOperatorApp = operatorAppFromSurface(props.activeSurface);
+  // Custom apps all share the `apps` surface, so the ACTIVE entry has to come
+  // off the path (which app id), not the segment.
+  const pathname = usePathname();
+  const activeOperatorApp = homeAppFromPathname(props.activeSurface, pathname);
   const homeActive = activeOperatorApp !== null;
   const homePill = homeActive && !utilityPillOpen;
   const matches = useCallback(
@@ -701,7 +708,8 @@ export function DocSidebar(props: Props) {
       </nav>
 
       {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
-          Feed), between the icon row and the surface body. Clicking an app
+          Feed / Browsers / Chat + the workspace's custom apps), between the
+          icon row and the surface body. WHICH apps show is workspace config. Clicking an app
           navigates AND persists the per-workspace selection the Home icon
           resumes. It also carries "My Browser" as a trailing square: that is
           workspace-wide chrome rather than an operator app, so the strip is
@@ -712,7 +720,7 @@ export function DocSidebar(props: Props) {
       <OperatorAppBar
         workspaceId={workspaceId}
         active={activeOperatorApp}
-        feedEnabled={props.feedEnabled}
+        homeApps={props.homeApps}
       />
 
       {/* Search input — revealed by the Search icon (Home only). */}

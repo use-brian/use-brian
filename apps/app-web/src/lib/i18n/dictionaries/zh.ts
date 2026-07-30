@@ -4925,11 +4925,27 @@ export const zh: Dictionary = {
       ingestRules: "事件",
       taskRules: "任務規則",
       knowledge: "知識",
+      miniApps: "小應用",
     },
     groups: {
       ingest: "餵養",
       consume: "使用",
       develop: "開發",
+    },
+    // ── Studio → Mini apps ([COMP:app-web/studio-mini-apps]) ──
+    miniAppsPage: {
+      heading: "小應用",
+      intro: "選擇要顯示在首頁的應用。工作區的所有成員看到的都相同。",
+      counter: "已顯示 {count} / {max}",
+      atLeastOne: "首頁至少要保留一個應用。",
+      atMost: "首頁最多顯示 {max} 個應用。",
+      readOnlyNote: "只有工作區的擁有者或管理員可以變更。",
+      saveFailed: "無法儲存，變更未套用。",
+      leavingTitle: "要隱藏正在使用的應用嗎？",
+      leavingBody: "「{name}」會從首頁消失。你仍然可以透過連結或書籤開啟，也可以隨時在這裡開回來。",
+      leavingConfirm: "隱藏",
+      routesStayNote: "隱藏只是把應用移出首頁，連結和書籤仍然可用。",
+      toggleAria: "在首頁顯示 {name}",
     },
     knowledgePage: {
       heading: "知識",

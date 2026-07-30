@@ -5,9 +5,15 @@
  *
  * Rendered by `DocSidebar` between the top icon row and the surface body
  * whenever the active surface belongs to an operator app (Page / Tasks /
- * CRM / Feed / Browsers) — the sidebar owns navigation in this design
+ * CRM / Feed / Browsers / Chat) — the sidebar owns navigation in this design
  * language, so the app switcher lives here rather than as an extra chrome
  * band over the content pane.
+ *
+ * WHICH apps render is WORKSPACE CONFIG (`workspaces.home_apps`, migration
+ * 385), passed down from `WorkspaceChrome` — which reads it from the
+ * sidebar-data provider, the one place that owns both the fetch and the
+ * `workspace_config` live repair. This component is deliberately dumb about
+ * where the list came from. See docs/architecture/features/home-apps.md.
  *
  * UI/UX (founder redesign 2026-07-22, settled after four iterations): a
  * **dock-style icon strip** — ONE fixed-height row of 28px icon squares
@@ -25,9 +31,7 @@
  *
  * Clicking a row navigates to that app's route AND persists the selection
  * per workspace (`writeOperatorApp`), so the top-row Home icon and ⌘/Ctrl+1
- * resume it later. Feed (4th slot) shows on every hosted workspace —
- * zero-profile visits land on its connect-account onboarding state — and is
- * hidden only on the OSS edition (`feedEnabled`), where the surface 404s.
+ * resume it later.
  *
  * The top icon row stays frozen at Home / Brain / Studio / Workflow; this
  * block is where the operator-app family grows.
@@ -50,9 +54,10 @@ import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
-  OPERATOR_APP_KEYS,
-  operatorAppPath,
+  homeAppPath,
+  isBuiltinHomeAppKey,
   writeOperatorApp,
+  type HomeAppEntry,
   type OperatorAppKey,
 } from "@/lib/operator-apps";
 
@@ -71,18 +76,23 @@ export const APP_ICON: Record<OperatorAppKey, LucideIcon> = {
 export function OperatorAppBar({
   workspaceId,
   active,
-  feedEnabled,
+  homeApps,
 }: {
   workspaceId: string;
   /**
-   * The operator app the current route belongs to, or `null` off the family
-   * (Brain / Studio / Workflow) — where the bar renders nothing at all. The
-   * switcher stays scoped to the family: offering Page/Tasks/CRM/Feed from
-   * Studio would claim a relationship the routes do not have.
+   * The strip entry the current route belongs to — a built-in key or
+   * `custom:<id>` — or `null` off the family (Brain / Studio / Workflow),
+   * where the bar renders nothing at all. The switcher stays scoped to the
+   * family: offering Page/Tasks/CRM/Feed from Studio would claim a
+   * relationship the routes do not have.
    */
-  active: OperatorAppKey | null;
-  /** Whether the Feed app is available for this workspace. */
-  feedEnabled: boolean;
+  active: HomeAppEntry | null;
+  /**
+   * The workspace's configured strip, in order (`workspaces.home_apps`).
+   * Built-ins render first in registry order, then custom apps — user-defined
+   * ordering is deferred.
+   */
+  homeApps: readonly HomeAppEntry[];
 }) {
   const t = useT().operatorBar;
   const intentPrefetch = useIntentPrefetch();
@@ -94,10 +104,12 @@ export function OperatorAppBar({
     browsers: t.browsers,
     chat: t.chat,
   };
-  const apps =
-    active === null
-      ? []
-      : OPERATOR_APP_KEYS.filter((key) => key !== "feed" || feedEnabled);
+  // Off the family the bar renders nothing (below). Custom (`custom:<id>`)
+  // entries are filtered until the custom-app registry lands: rendering one
+  // with no name and no icon would be a dead square, and a dangling entry from
+  // a deleted app must never leave a hole in the strip either way.
+  const apps: OperatorAppKey[] =
+    active === null ? [] : homeApps.filter(isBuiltinHomeAppKey);
   // Off the operator family (Brain / Studio / Workflow) there is nothing to
   // switch between, so the bar renders nothing. The browser connect/reconnect
   // affordance that once kept an empty strip alive now lives in the Browsers
@@ -112,16 +124,17 @@ export function OperatorAppBar({
     >
       {apps.map((key) => {
         const Icon = APP_ICON[key];
+        const label = labels[key];
         const isActive = key === active;
-        const href = operatorAppPath(workspaceId, key);
+        const href = homeAppPath(workspaceId, key);
         return (
-          <Tooltip key={key} label={labels[key]}>
+          <Tooltip key={key} label={label}>
             <Link
               href={href}
               // Hover/focus warms the route AND the app's landing list, so the
               // Tasks / CRM tables are usually already in cache on click.
               {...intentPrefetch(href)}
-              aria-label={labels[key]}
+              aria-label={label}
               aria-current={isActive ? "page" : undefined}
               onClick={() => writeOperatorApp(workspaceId, key)}
               className={cn(

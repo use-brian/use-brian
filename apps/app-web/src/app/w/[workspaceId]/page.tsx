@@ -1,24 +1,59 @@
-import { redirect } from "next/navigation";
+"use client";
 
 /**
- * The workspace root in app-web is the doc surface itself —
- * server-side redirect to the canonical `/p` index (latest-or-empty).
+ * The workspace root — forwards to the workspace's Home app.
  *
- * Post Doc v1 URL refactor (§9.3) the canonical page URL is
- * `/w/<id>/p/<pageId>`, and `/w/<id>/p` is the index that resolves
- * latest-or-empty. Redirecting the workspace root straight to `/p`
- * (rather than the legacy `/doc`, which only 302s onward to `/p`
- * anyway) keeps the URL bar canonical and saves a hop.
+ * This used to be a server component that hard-redirected to `/p`. It cannot
+ * be any more: which apps a workspace shows is configuration
+ * (`workspaces.home_apps`, migration 385) and Page may be deselected, so a
+ * fixed `/p` would drop those workspaces onto a surface that is not on their
+ * strip. Home resolution is now one rule everywhere — the persisted app,
+ * constrained to the configured list, falling back to its first entry
+ * (`homePath`, `lib/operator-apps.ts`).
+ *
+ * Resolution is client-side because the sticky selection lives in
+ * localStorage. That costs nothing here: this route renders no UI, it only
+ * forwards, and it sits under the workspace layout, so the config is already
+ * in the sidebar-data provider — no extra fetch, no flash of a wrong surface.
+ *
+ * The desktop quick-capture (`?capture=1`) and recorder (`?record=1`) hints
+ * always land on `/p` regardless of config: both are doc-surface affordances
+ * (open a fresh draft, start the dock recorder), so honouring them anywhere
+ * else would silently drop what the user was capturing.
+ *
+ * Spec: docs/architecture/features/home-apps.md → "Home resolution".
  */
-export default async function WorkspaceRootPage(props: {
-  params: Promise<{ workspaceId: string }>;
-  searchParams: Promise<{ capture?: string; record?: string }>;
-}) {
-  const { workspaceId } = await props.params;
-  // Preserve the desktop quick-capture hint into the `/p` index so the shell
-  // can open a fresh draft (see app-desktop.md → "quick-capture.ts"), and the
-  // record hint so the dock recorder auto-starts (live-capture.md).
-  const { capture, record } = await props.searchParams;
-  const suffix = capture === "1" ? "?capture=1" : record === "1" ? "?record=1" : "";
-  redirect(`/w/${workspaceId}/p${suffix}`);
+
+import { Suspense, useEffect } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useSidebarData } from "@/components/doc/doc-sidebar-data";
+import { homePath } from "@/lib/operator-apps";
+
+function WorkspaceRootRedirect() {
+  const params = useParams<{ workspaceId: string }>();
+  const workspaceId = params?.workspaceId ?? "";
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { homeApps } = useSidebarData();
+
+  useEffect(() => {
+    if (!workspaceId) return;
+    const capture = searchParams?.get("capture") === "1";
+    const record = searchParams?.get("record") === "1";
+    if (capture || record) {
+      router.replace(`/w/${workspaceId}/p?${capture ? "capture=1" : "record=1"}`);
+      return;
+    }
+    router.replace(homePath(workspaceId, homeApps));
+  }, [homeApps, router, searchParams, workspaceId]);
+
+  return null;
+}
+
+export default function WorkspaceRootPage() {
+  return (
+    <Suspense fallback={null}>
+      <WorkspaceRootRedirect />
+    </Suspense>
+  );
 }

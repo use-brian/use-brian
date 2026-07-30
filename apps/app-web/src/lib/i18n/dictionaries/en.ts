@@ -5175,11 +5175,27 @@ export const en = {
       ingestRules: "Events",
       taskRules: "Task rules",
       knowledge: "Knowledge",
+      miniApps: "Mini apps",
     },
     groups: {
       ingest: "Ingest",
       consume: "Consume",
       develop: "Develop",
+    },
+    // ── Studio → Mini apps ([COMP:app-web/studio-mini-apps]) ──
+    miniAppsPage: {
+      heading: "Mini apps",
+      intro: "Choose which apps show on Home. Everyone in this workspace sees the same set.",
+      counter: "{count} of {max} shown",
+      atLeastOne: "Keep at least one app on Home.",
+      atMost: "Home shows at most {max} apps.",
+      readOnlyNote: "Only a workspace owner or admin can change this.",
+      saveFailed: "Could not save. Your change was not applied.",
+      leavingTitle: "Hide the app you are using?",
+      leavingBody: "\"{name}\" disappears from Home. You can still reach it from a link or a bookmark, and you can turn it back on here.",
+      leavingConfirm: "Hide it",
+      routesStayNote: "Hiding an app only takes it off Home. Its links and bookmarks keep working.",
+      toggleAria: "Show {name} on Home",
     },
     knowledgePage: {
       heading: "Knowledge",

@@ -4969,11 +4969,27 @@ export const ja: Dictionary = {
       ingestRules: "イベント",
       taskRules: "タスクルール",
       knowledge: "ナレッジ",
+      miniApps: "ミニアプリ",
     },
     groups: {
       ingest: "取り込む",
       consume: "活用する",
       develop: "開発",
+    },
+    // ── Studio → Mini apps ([COMP:app-web/studio-mini-apps]) ──
+    miniAppsPage: {
+      heading: "ミニアプリ",
+      intro: "ホームに表示するアプリを選びます。このワークスペースの全員に同じ構成が表示されます。",
+      counter: "{max} 個中 {count} 個を表示",
+      atLeastOne: "ホームには最低 1 つのアプリを残してください。",
+      atMost: "ホームに表示できるアプリは最大 {max} 個です。",
+      readOnlyNote: "変更できるのはワークスペースのオーナーまたは管理者のみです。",
+      saveFailed: "保存できませんでした。変更は適用されていません。",
+      leavingTitle: "使用中のアプリを非表示にしますか？",
+      leavingBody: "「{name}」がホームから消えます。リンクやブックマークからは引き続き開けますし、ここでいつでも戻せます。",
+      leavingConfirm: "非表示にする",
+      routesStayNote: "非表示にしてもホームから外れるだけです。リンクやブックマークはそのまま使えます。",
+      toggleAria: "{name} をホームに表示",
     },
     knowledgePage: {
       heading: "ナレッジ",

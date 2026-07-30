@@ -39,6 +39,7 @@ import {
   getWorkspaceMembershipWithClearanceSystem,
   InvalidRecordingBlueprintError,
   setWorkspaceTranscriptionPrefs,
+  setWorkspaceHomeApps,
 } from '../db/workspace-store.js'
 import { flushWorkspaceData, WorkspaceFlushNotOwnerError } from '../db/workspace-flush.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
@@ -441,6 +442,15 @@ export function workspaceRoutes({
       .optional(),
   })
 
+  // Home apps (migration 385) — the ordered strip config. Validated in BOTH
+  // places (C-T10): loosely here so the route can 400 on shape, and strictly
+  // again inside `setWorkspaceHomeApps`, which is the enforcement point for
+  // membership AND the vocabulary (`workspaces` has no RLS, and the route is
+  // only one of the setter's callers).
+  const homeAppsFieldSchema = z.object({
+    homeApps: z.array(z.string()).optional(),
+  })
+
   router.patch('/:workspaceId', async (req, res) => {
     const userId = req.userId
     if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
@@ -468,6 +478,13 @@ export function workspaceRoutes({
       prefsField.data.transcriptionPrefs !== undefined &&
       'chineseScript' in prefsField.data.transcriptionPrefs
 
+    const homeAppsField = homeAppsFieldSchema.safeParse(req.body)
+    if (!homeAppsField.success) {
+      res.status(400).json({ error: 'homeApps must be an array of app keys' })
+      return
+    }
+    const hasHomeAppsUpdate = homeAppsField.data.homeApps !== undefined
+
     if (name !== undefined) {
       if (typeof name !== 'string' || name.trim().length === 0) {
         res.status(400).json({ error: 'Name must be a non-empty string' })
@@ -492,8 +509,13 @@ export function workspaceRoutes({
       updates.purpose = purpose.trim()
     }
 
-    if (Object.keys(updates).length === 0 && !hasBlueprintUpdate && !hasPrefsUpdate) {
-      res.status(400).json({ error: 'At least one of name, purpose, defaultRecordingBlueprintId, or transcriptionPrefs is required' })
+    if (
+      Object.keys(updates).length === 0 &&
+      !hasBlueprintUpdate &&
+      !hasPrefsUpdate &&
+      !hasHomeAppsUpdate
+    ) {
+      res.status(400).json({ error: 'At least one of name, purpose, defaultRecordingBlueprintId, transcriptionPrefs, or homeApps is required' })
       return
     }
 
@@ -518,7 +540,10 @@ export function workspaceRoutes({
             })
           }
           // Nothing else to apply → return the blueprint-updated row.
-          if (Object.keys(updates).length === 0 && !hasPrefsUpdate) { res.json(updated); return }
+          if (Object.keys(updates).length === 0 && !hasPrefsUpdate && !hasHomeAppsUpdate) {
+            res.json(updated)
+            return
+          }
         } catch (err) {
           if (err instanceof InvalidRecordingBlueprintError) {
             res.status(400).json({ error: err.message })
@@ -550,6 +575,40 @@ export function workspaceRoutes({
         }
         // Nothing else to apply → return the fresh row (carries the updated
         // `transcriptionPrefs` via WORKSPACE_COLUMNS).
+        if (Object.keys(updates).length === 0 && !hasHomeAppsUpdate) {
+          const team = await workspaceStore.get(userId, req.params.workspaceId)
+          if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }
+          res.json(team)
+          return
+        }
+      }
+
+      // Home apps — own setter (admin/owner + vocabulary enforcement live
+      // there). Emits `workspace_config` so every open tab, device, and
+      // teammate repairs its app-bar from ONE server write: the strip renders
+      // inside the never-unmounting workspace layout, so a mount-only effect
+      // there could never self-heal (the realtime-sync anti-pattern).
+      if (hasHomeAppsUpdate) {
+        const result = await setWorkspaceHomeApps(
+          userId,
+          req.params.workspaceId,
+          homeAppsField.data.homeApps,
+        )
+        if (!result.ok) {
+          const status =
+            result.reason === 'not_found' ? 404 : result.reason === 'invalid' ? 400 : 403
+          res.status(status).json({ error: result.message })
+          return
+        }
+        if (auditStore) {
+          void auditStore.append({
+            workspaceId: req.params.workspaceId,
+            actorUserId: userId,
+            eventType: 'workspace.settings_changed',
+            details: { homeApps: result.homeApps },
+          })
+        }
+        notifyWorkspaceChange(req.params.workspaceId, 'workspace_config', 'update')
         if (Object.keys(updates).length === 0) {
           const team = await workspaceStore.get(userId, req.params.workspaceId)
           if (!team) { res.status(404).json({ error: 'Workspace not found' }); return }

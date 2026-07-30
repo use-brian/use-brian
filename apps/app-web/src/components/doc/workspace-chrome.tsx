@@ -45,9 +45,8 @@ import { surfaceShortcutModifierPressed } from "@/lib/surface-shortcuts";
 import { useChatDockSuppressed } from "@/lib/chat-dock-suppress";
 import {
   DEFAULT_OPERATOR_APP,
-  OPERATOR_APP_KEYS,
+  homeAppFromPathname,
   homeAppPath,
-  operatorAppFromSurface,
   readOperatorApp,
   writeOperatorApp,
   type HomeAppEntry,
@@ -133,6 +132,7 @@ export function WorkspaceChrome({
     sidebarOpen,
     setSidebarOpen,
     studioSetupIncomplete,
+    homeApps,
     reloadSidebar,
     handleNewDraft,
     handleAddChild,
@@ -246,34 +246,36 @@ export function WorkspaceChrome({
   }, [workspaceId]);
   const studioNudge = studioSetupIncomplete === true && !nudgeDismissed;
 
-  // Content planning is an operator app in both editions. Hosted-only
-  // platform integration is gated inside the Feed subtree.
-  const feedEnabled = true;
-
   // ── Operator app-bar + sticky Home resolution (operator-apps.ts) ───────
-  // The active surface's operator app (Page / Tasks / Feed), or null on
-  // Brain / Studio / Workflow / etc. Visiting an operator app persists it
-  // per workspace, and the top-row Home icon + ⌘/Ctrl+1 resolve to the
-  // persisted app — Home resumes your last app, never a hard-coded `/p`.
-  const activeOperatorApp = operatorAppFromSurface(activeSurface);
+  // WHICH apps show is workspace config (`workspaces.home_apps`, migration
+  // 385), carried by the sidebar-data provider and repaired live off the
+  // `workspace_config` signal — this component never unmounts during SPA
+  // navigation, so it cannot fetch config on mount and stay correct. The old
+  // `feedEnabled = true` hardcode is subsumed: Feed is on the strip when the
+  // workspace put it there.
+  //
+  // The active surface's operator app (or the open custom app), or null on
+  // Brain / Studio / Workflow. Visiting an app persists it per workspace, and
+  // the top-row Home icon + ⌘/Ctrl+1 resolve to the persisted app — Home
+  // resumes your last app, never a hard-coded `/p`.
+  const activeOperatorApp = homeAppFromPathname(activeSurface, pathname);
   useEffect(() => {
-    if (activeOperatorApp && (activeOperatorApp !== "feed" || feedEnabled)) {
+    // Only remember an app the workspace actually shows. Persisting a disabled
+    // one would make Home resolve to a surface that is not on the strip.
+    if (activeOperatorApp && (homeApps as string[]).includes(activeOperatorApp)) {
       writeOperatorApp(workspaceId, activeOperatorApp);
     }
-  }, [activeOperatorApp, workspaceId, feedEnabled]);
+  }, [activeOperatorApp, workspaceId, homeApps]);
   // localStorage is client-only; render the SSR-safe default first and
   // resolve after mount (and whenever a visit updates the cache).
   const [homeApp, setHomeApp] = useState<HomeAppEntry>(DEFAULT_OPERATOR_APP);
   useEffect(() => {
-    const enabled: HomeAppEntry[] = OPERATOR_APP_KEYS.filter(
-      (key) => key !== "feed" || feedEnabled,
-    );
-    if (activeOperatorApp && (enabled as string[]).includes(activeOperatorApp)) {
+    if (activeOperatorApp && (homeApps as string[]).includes(activeOperatorApp)) {
       setHomeApp(activeOperatorApp);
     } else {
-      setHomeApp(readOperatorApp(workspaceId, enabled));
+      setHomeApp(readOperatorApp(workspaceId, homeApps));
     }
-  }, [workspaceId, activeOperatorApp, feedEnabled]);
+  }, [workspaceId, activeOperatorApp, homeApps]);
   const homeHref = homeAppPath(workspaceId, homeApp);
   const onDismissStudioNudge = useCallback(() => {
     setNudgeDismissed(true);
@@ -405,7 +407,7 @@ export function WorkspaceChrome({
           studioNudge={studioNudge}
           onDismissStudioNudge={onDismissStudioNudge}
           homeHref={homeHref}
-          feedEnabled={feedEnabled}
+          homeApps={homeApps}
         />
       </div>
 

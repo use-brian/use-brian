@@ -31,8 +31,10 @@ export type StudioGroup = { key: StudioGroupKey; sections: readonly StudioSectio
  *   Develop — credentials for external MCP clients (Programmatic access)
  *
  * Every section is edition-independent: the nav renders identically in hosted
- * and OSS. (Mini-apps, removed 2026-07-23, was the one hosted-only section —
- * its edition filter went with it.)
+ * and OSS. "Mini apps" returns here (2026-07-31) doing a DIFFERENT job than
+ * the card gallery removed on 2026-07-23: it configures which operator apps
+ * show on Home (`workspaces.home_apps`), and it is both-editions — the old
+ * hosted-only edition filter is not coming back with it.
  */
 export const STUDIO_GROUPS: readonly StudioGroup[] = [
   {
@@ -51,6 +53,9 @@ export const STUDIO_GROUPS: readonly StudioGroup[] = [
     sections: [
       { key: "assistants", segment: "assistants" },
       { key: "channels", segment: "channels" },
+      // Which operator apps show on Home, up to six.
+      // docs/architecture/features/home-apps.md
+      { key: "miniApps", segment: "mini-apps" },
     ],
   },
   {

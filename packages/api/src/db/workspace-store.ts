@@ -23,6 +23,11 @@
 
 import type { PoolClient } from 'pg'
 import { minSensitivity, parseTranscriptionPrefs } from '@use-brian/core'
+import {
+  normalizeHomeApps,
+  validateHomeApps,
+  type HomeAppEntry,
+} from '@use-brian/shared/home-apps'
 import type { Sensitivity, WorkspaceTranscriptionPrefs } from '@use-brian/core'
 import { joinDefaultTeamspacesSystem, leaveWorkspaceTeamspacesSystem } from './teamspace-store.js'
 import { query, queryWithRLS, getPool } from './client.js'
@@ -89,6 +94,16 @@ export type Workspace = {
    * docs/architecture/platform/workspaces.md → "Transcription preferences".
    */
   transcriptionPrefs: WorkspaceTranscriptionPrefs
+  /**
+   * Home app-bar configuration (migration 385) — an ordered array of 1-6
+   * operator-app entries. `[]` means UNSET and resolves to the built-in
+   * default; callers should read it through `getWorkspaceHomeApps` (or
+   * `normalizeHomeApps`) rather than trusting the raw column, which may hold
+   * entries this build does not know. Surfaced on the detail fetch so the
+   * Studio tab and the sidebar can render the strip without a second call.
+   * See docs/architecture/features/home-apps.md.
+   */
+  homeApps: unknown
   createdAt: Date
   updatedAt: Date
 }
@@ -157,6 +172,7 @@ const WORKSPACE_COLUMNS = `
   plan,
   default_recording_blueprint_id AS "defaultRecordingBlueprintId",
   transcription_prefs AS "transcriptionPrefs",
+  home_apps AS "homeApps",
   created_at AS "createdAt",
   updated_at AS "updatedAt"
 ` as const
@@ -753,6 +769,93 @@ export async function setWorkspaceTranscriptionPrefs(
     [workspaceId, JSON.stringify(next)],
   )
   return { ok: true, prefs: next }
+}
+
+// ── Home apps (migration 385) ──────────────────────────────────
+
+/**
+ * System-level lookup of a workspace's Home app-bar config.
+ *
+ * Null-safe and never throws: the app-bar is chrome on every authenticated
+ * surface, so a config read that fails must degrade to the default strip, not
+ * take the shell down. Unknown entries are filtered here (the additive
+ * contract) — pass `knownCustomIds` to also drop custom apps the workspace
+ * cannot currently render (deleted, disabled, or dropped to `needs_consent`
+ * because a sync widened their requested scopes).
+ */
+export async function getWorkspaceHomeApps(
+  workspaceId: string | null | undefined,
+  opts: { knownCustomIds?: ReadonlySet<string> } = {},
+): Promise<HomeAppEntry[]> {
+  if (!workspaceId) return normalizeHomeApps(null, opts)
+  try {
+    const row = await query<{ home_apps: unknown }>(
+      `SELECT home_apps FROM workspaces WHERE id = $1`,
+      [workspaceId],
+    )
+    return normalizeHomeApps(row.rows[0]?.home_apps, opts)
+  } catch (err) {
+    console.error('[workspace-store] home apps lookup failed, using defaults:', err)
+    return normalizeHomeApps(null, opts)
+  }
+}
+
+export type SetHomeAppsResult =
+  | { ok: true; homeApps: HomeAppEntry[] }
+  | { ok: false; reason: 'not_admin' | 'not_found' | 'invalid'; message: string }
+
+/**
+ * Replace a workspace's Home app-bar config. Admin/owner-gated HERE — the
+ * `workspaces` table carries no RLS, so the setter is the enforcement point
+ * (the same bar as `setWorkspaceTranscriptionPrefs`).
+ *
+ * Validation is STRICT and runs here as well as in the route schema: the route
+ * is one caller, and the stored value is what every client's strip trusts.
+ * Returns a discriminated result rather than throwing so a plain member gets
+ * told why the change did not apply.
+ */
+export async function setWorkspaceHomeApps(
+  userId: string,
+  workspaceId: string,
+  apps: unknown,
+): Promise<SetHomeAppsResult> {
+  const membership = await query<{ role: string }>(
+    `SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2`,
+    [workspaceId, userId],
+  )
+  const role = membership.rows[0]?.role
+  if (role !== 'owner' && role !== 'admin') {
+    return {
+      ok: false,
+      reason: 'not_admin',
+      message: 'Only a workspace owner or admin can change which apps show on Home.',
+    }
+  }
+
+  const validated = validateHomeApps(apps)
+  if (!validated.ok) {
+    return {
+      ok: false,
+      reason: 'invalid',
+      message:
+        validated.reason === 'empty'
+          ? 'Pick at least one app to show on Home.'
+          : validated.reason === 'too-many'
+            ? 'Home shows at most 6 apps.'
+            : validated.reason === 'duplicate'
+              ? 'An app can only appear once.'
+              : 'That is not an app this workspace can show.',
+    }
+  }
+
+  const updated = await query(
+    `UPDATE workspaces SET home_apps = $2::jsonb, updated_at = now() WHERE id = $1`,
+    [workspaceId, JSON.stringify(validated.apps)],
+  )
+  if (updated.rowCount === 0) {
+    return { ok: false, reason: 'not_found', message: 'Workspace not found.' }
+  }
+  return { ok: true, homeApps: validated.apps }
 }
 
 /**
