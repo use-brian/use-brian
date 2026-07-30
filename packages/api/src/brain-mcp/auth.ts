@@ -14,6 +14,17 @@
  *      Workspace-scoped at the grant level. Expires after 10 min; the
  *      client refreshes via `grant_type=refresh_token`.
  *
+ *   3. **Custom Home app bridge token** — a compact HMAC signature over
+ *      `JWT_SECRET` with `aud:'home-app'` (migration 386). Minted per VIEWER
+ *      when the app frame mounts, carrying the app's consented scope and
+ *      clearance cap. This is what makes custom apps cost zero new tool code:
+ *      an app resolves to the same `BrainAuth` shape as a key, so the existing
+ *      scope- and clearance-gated tool registration governs it identically.
+ *      Unlike the two above there is no stored secret to compare — the
+ *      signature IS the credential — so the grant is re-checked against the
+ *      LIVE app row on every call: a revoked grant must stop working
+ *      immediately, which a self-describing token cannot express.
+ *
  * Both paths are scrypt-hashed at rest (`hashSecret`/`verifySecret`,
  * `api-key-store.ts`) and run a constant-time compare on the secret half
  * after a cheap id-shape gate. A failure of any kind returns null so the
@@ -35,6 +46,7 @@ import {
   parseOAuthBearerToken,
   type OAuthAuthorizationStore,
 } from '../db/oauth-authorization-store.js'
+import { parseBridgeToken } from '../home-apps/tokens.js'
 
 export type BrainAuth = {
   /**
@@ -55,7 +67,13 @@ export type BrainAuth = {
    */
   maxClearance: Sensitivity | null
   /** Which path resolved this principal. Useful for analytics + audit. */
-  authKind: 'api_key' | 'oauth_token'
+  authKind: 'api_key' | 'oauth_token' | 'home_app'
+  /**
+   * The viewer a custom Home app is acting for (`authKind: 'home_app'` only).
+   * An app never acts as "the workspace" in the abstract — it acts inside a
+   * page someone has open, and writes should be attributable to that person.
+   */
+  actingUserId?: string
 }
 
 export type BrainAuthOptions = {
@@ -65,6 +83,21 @@ export type BrainAuthOptions = {
    * dependency injectable for tests + lets boot order vary across apps.
    */
   authorizationStore?: OAuthAuthorizationStore
+  /**
+   * Optional — when unset the custom-Home-app path is skipped. `secret` is the
+   * single server-side signing secret; `getApp` resolves the LIVE row so the
+   * grant is re-checked per call rather than trusted from the token.
+   */
+  homeApps?: {
+    secret: string
+    getApp: (appId: string) => Promise<{
+      id: string
+      workspaceId: string
+      status: string
+      grantedScopes: { data: BrainKeyScope } | null
+      maxClearance: Sensitivity | null
+    } | null>
+  }
 }
 
 /**
@@ -122,6 +155,34 @@ export async function authenticateBrainRequest(
         // oauth_authorizations grows a per-grant override (follow-up).
         maxClearance: 'internal',
         authKind: 'oauth_token',
+      }
+    }
+  }
+
+  // ── Path 3: custom Home app bridge token (aud: 'home-app') ──────
+  if (opts.homeApps) {
+    const parsed = parseBridgeToken({ token, secret: opts.homeApps.secret })
+    if (parsed.ok) {
+      const app = await opts.homeApps.getApp(parsed.payload.appId)
+      // Re-derive EVERYTHING from the row. The token's workspace, scope, and
+      // cap are convenience claims for the frame; the row is the authority,
+      // so revoking a grant takes effect on the next call rather than on the
+      // next token expiry.
+      if (!app || app.status !== 'active' || !app.grantedScopes) return null
+      if (app.workspaceId !== parsed.payload.workspaceId) return null
+      // The narrower of what was granted and what the token claims: a token
+      // minted before a grant was narrowed must not out-rank the new grant.
+      const scope: BrainKeyScope =
+        app.grantedScopes.data === 'read_write' && parsed.payload.scope === 'read_write'
+          ? 'read_write'
+          : 'read'
+      return {
+        keyId: app.id,
+        workspaceId: app.workspaceId,
+        scope,
+        maxClearance: app.maxClearance,
+        authKind: 'home_app',
+        actingUserId: parsed.payload.userId,
       }
     }
   }

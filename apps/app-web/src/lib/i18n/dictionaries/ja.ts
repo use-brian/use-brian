@@ -3890,6 +3890,19 @@ export const ja: Dictionary = {
     chat: "チャット",
   },
   // ── Chat operator app ([COMP:app-web/chat-surface]) ──
+  // ── Custom Home apps ([COMP:app-web/home-app-frame]) ──
+  homeApps: {
+    fallbackName: "アプリ",
+    loading: "アプリを読み込み中",
+    notFoundTitle: "このアプリは利用できません",
+    notFoundBody: "削除されたか、アクセス権がない可能性があります。",
+    needsConsentTitle: "承認待ちです",
+    needsConsentBody: "{name} はまだ許可されていないアクセスを求めています。ワークスペースのオーナーまたは管理者が、Studio のミニアプリで内容を確認できます。",
+    disabledTitle: "このアプリはオフになっています",
+    disabledBody: "管理者がオフにしました。Studio のミニアプリから再びオンにできます。",
+    syncErrorTitle: "このアプリを読み込めませんでした",
+    syncErrorBody: "前回の同期が完了しませんでした。Studio のミニアプリからもう一度同期してください。",
+  },
   chatApp: {
     newChat: "新しいチャット",
     searchPlaceholder: "チャットを検索",

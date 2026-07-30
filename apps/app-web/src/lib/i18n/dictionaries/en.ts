@@ -4090,6 +4090,19 @@ export const en = {
     chat: "Chat",
   },
   // ── Chat operator app ([COMP:app-web/chat-surface]) ──
+  // ── Custom Home apps ([COMP:app-web/home-app-frame]) ──
+  homeApps: {
+    fallbackName: "App",
+    loading: "Loading the app",
+    notFoundTitle: "This app is not available",
+    notFoundBody: "It may have been removed, or you may not have access to it.",
+    needsConsentTitle: "Waiting for approval",
+    needsConsentBody: "{name} is asking for access it has not been granted yet. A workspace owner or admin can review what it wants in Studio, under Mini apps.",
+    disabledTitle: "This app is turned off",
+    disabledBody: "An admin turned it off. It can be turned back on in Studio, under Mini apps.",
+    syncErrorTitle: "This app could not be loaded",
+    syncErrorBody: "The last sync did not finish. Try syncing it again from Studio, under Mini apps.",
+  },
   chatApp: {
     newChat: "New chat",
     searchPlaceholder: "Search chats",

@@ -79,6 +79,7 @@ import {
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
 import { usePathname } from "next/navigation";
+import type { CustomHomeApp } from "@/lib/api/home-apps";
 import { homeAppFromPathname, type HomeAppEntry } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
 import {
@@ -218,6 +219,8 @@ type Props = {
    *  order (`workspaces.home_apps`). Carried by `WorkspaceChrome` from the
    *  sidebar-data provider, which owns the fetch + live repair. */
   homeApps: readonly HomeAppEntry[];
+  /** The workspace's custom apps, for resolving `custom:<id>` strip entries. */
+  customApps: readonly CustomHomeApp[];
 };
 
 function collapseKey(workspaceId: string): string {
@@ -721,6 +724,7 @@ export function DocSidebar(props: Props) {
         workspaceId={workspaceId}
         active={activeOperatorApp}
         homeApps={props.homeApps}
+        customApps={props.customApps}
       />
 
       {/* Search input — revealed by the Search icon (Home only). */}

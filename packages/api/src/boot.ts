@@ -144,6 +144,7 @@ import { devAuthRoutes, isLocalDevEnv } from './routes/dev-auth.js'
 import { localSessionRoutes, isOssEdition, isSelfHostedOssEnv } from './routes/local-session.js'
 import { contentPlanningRoutes } from './routes/content-planning.js'
 import { contentPlanRoutes } from './routes/content-plan.js'
+import { contentIdeasRoutes } from './routes/content-ideas.js'
 import {
   injectContentPlanningTools,
   resolveContentPlanningPrompt,
@@ -191,6 +192,7 @@ import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
+import { homeAppRoutes } from './routes/home-apps.js'
 import { browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
@@ -3671,6 +3673,10 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // the edition mounts below. Spec: docs/plans/feed-revamp.md §6.
   app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentPlanRoutes())
 
+  // The idea backlog rides the same open mount for the same reason: capturing
+  // and developing an idea must never require a credential in either edition.
+  app.use('/api/distribution', requireAuth(env.JWT_SECRET), contentIdeasRoutes())
+
   // OSS content planning reuses the app-web `/api/distribution/*` wire
   // contract but contains no provider integration. Hosted mounts its
   // provider-backed distribution routers later through mountExtraRoutes.
@@ -3694,6 +3700,20 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
       gcs: filesBlobClient,
       resolver: filesResolver ?? undefined,
       membership: getWorkspaceMembershipWithClearanceSystem,
+    }))
+  }
+  // Custom Home app bundles + bridge KV. Mounted HERE, well before the bare
+  // `app.use('/api', requireAuth(...))` guards further down: `/bundle/*` and
+  // `/state` are reached by an opaque-origin iframe that carries no session,
+  // so a bare guard registered earlier would 401 them before their own
+  // capability check ran (the Mini-App sign-in outage, CLAUDE.md → route mount
+  // order). Auth is applied per-route inside the router instead.
+  if (filesApi) {
+    app.use('/api/home-apps', homeAppRoutes({
+      requireAuth: requireAuth(env.JWT_SECRET),
+      filesApi,
+      signingSecret: env.JWT_SECRET,
+      apiOrigin: env.API_URL ?? '',
     }))
   }
   if (process.env.USEBRIAN_EDITION === 'oss' && filesResolver && filesBlobClient) {

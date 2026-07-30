@@ -133,6 +133,7 @@ export function WorkspaceChrome({
     setSidebarOpen,
     studioSetupIncomplete,
     homeApps,
+    customApps,
     reloadSidebar,
     handleNewDraft,
     handleAddChild,
@@ -408,6 +409,7 @@ export function WorkspaceChrome({
           onDismissStudioNudge={onDismissStudioNudge}
           homeHref={homeHref}
           homeApps={homeApps}
+          customApps={customApps}
         />
       </div>
 

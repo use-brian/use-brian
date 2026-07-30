@@ -46,7 +46,11 @@ export type { HomeAppEntry } from "@use-brian/shared/home-apps";
 // registry they already import, rather than half of them going direct to the
 // shared package. Only what is actually consumed here — an unused re-export is
 // dead surface the ratchet catches.
-export { HOME_APPS_MAX, isBuiltinHomeAppKey } from "@use-brian/shared/home-apps";
+export {
+  HOME_APPS_MAX,
+  customHomeAppId,
+  isBuiltinHomeAppKey,
+} from "@use-brian/shared/home-apps";
 
 /** The built-in operator apps, in app-bar order. Page is the historical
  *  default; Feed holds the 4th slot, Browsers the 5th, Chat the 6th. */

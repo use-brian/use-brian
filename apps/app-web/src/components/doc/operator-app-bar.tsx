@@ -48,18 +48,21 @@ import {
   Megaphone,
   MessageSquare,
   MonitorPlay,
+  Puzzle,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
 import { Tooltip } from "@/components/ui/tooltip";
 import {
+  customHomeAppId,
   homeAppPath,
   isBuiltinHomeAppKey,
   writeOperatorApp,
   type HomeAppEntry,
   type OperatorAppKey,
 } from "@/lib/operator-apps";
+import type { CustomHomeApp } from "@/lib/api/home-apps";
 
 /** App key → glyph — shared with the operator top bar's tab chip
  *  (`components/operator/operator-topbar.tsx`) so the app-bar entry and the
@@ -77,6 +80,7 @@ export function OperatorAppBar({
   workspaceId,
   active,
   homeApps,
+  customApps,
 }: {
   workspaceId: string;
   /**
@@ -93,6 +97,8 @@ export function OperatorAppBar({
    * ordering is deferred.
    */
   homeApps: readonly HomeAppEntry[];
+  /** The workspace's custom apps, for resolving `custom:<id>` entries. */
+  customApps: readonly CustomHomeApp[];
 }) {
   const t = useT().operatorBar;
   const intentPrefetch = useIntentPrefetch();
@@ -104,12 +110,21 @@ export function OperatorAppBar({
     browsers: t.browsers,
     chat: t.chat,
   };
-  // Off the family the bar renders nothing (below). Custom (`custom:<id>`)
-  // entries are filtered until the custom-app registry lands: rendering one
-  // with no name and no icon would be a dead square, and a dangling entry from
-  // a deleted app must never leave a hole in the strip either way.
-  const apps: OperatorAppKey[] =
-    active === null ? [] : homeApps.filter(isBuiltinHomeAppKey);
+  // Off the family the bar renders nothing (below). A `custom:<id>` entry
+  // survives only if its row exists AND is renderable — which is how the T3
+  // drift rule reaches the strip: an app whose re-synced manifest widened its
+  // scopes drops to `needs_consent` and disappears here until re-granted. A
+  // dangling entry from a deleted app is dropped by the same filter, so
+  // neither leaves a dead square behind.
+  const byId = new Map(customApps.map((a) => [a.id, a]));
+  const apps: HomeAppEntry[] =
+    active === null
+      ? []
+      : homeApps.filter((entry) => {
+          if (isBuiltinHomeAppKey(entry)) return true;
+          const id = customHomeAppId(entry);
+          return Boolean(id && byId.get(id)?.renderable);
+        });
   // Off the operator family (Brain / Studio / Workflow) there is nothing to
   // switch between, so the bar renders nothing. The browser connect/reconnect
   // affordance that once kept an empty strip alive now lives in the Browsers
@@ -123,8 +138,14 @@ export function OperatorAppBar({
       className="flex flex-row items-center gap-0.5 pl-4 pr-2 pb-1.5"
     >
       {apps.map((key) => {
-        const Icon = APP_ICON[key];
-        const label = labels[key];
+        // A custom app's icon and label are WORKSPACE DATA (its manifest), not
+        // i18n — the strip takes them verbatim, with `Puzzle` standing in for a
+        // manifest icon this build's lucide set does not carry.
+        const custom = isBuiltinHomeAppKey(key)
+          ? null
+          : byId.get(customHomeAppId(key) ?? '');
+        const Icon = custom ? Puzzle : APP_ICON[key as OperatorAppKey];
+        const label = custom ? custom.name : labels[key as OperatorAppKey];
         const isActive = key === active;
         const href = homeAppPath(workspaceId, key);
         return (

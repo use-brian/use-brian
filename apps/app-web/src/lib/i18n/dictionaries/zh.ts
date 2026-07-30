@@ -3848,6 +3848,19 @@ export const zh: Dictionary = {
     chat: "對話",
   },
   // ── Chat operator app ([COMP:app-web/chat-surface]) ──
+  // ── Custom Home apps ([COMP:app-web/home-app-frame]) ──
+  homeApps: {
+    fallbackName: "應用",
+    loading: "正在載入應用",
+    notFoundTitle: "無法使用這個應用",
+    notFoundBody: "它可能已被移除，或你沒有存取權限。",
+    needsConsentTitle: "等待核准",
+    needsConsentBody: "{name} 要求的存取權尚未獲得授權。工作區的擁有者或管理員可以在 Studio 的小應用中檢視它要求什麼。",
+    disabledTitle: "這個應用已關閉",
+    disabledBody: "管理員已將其關閉。可以在 Studio 的小應用中重新開啟。",
+    syncErrorTitle: "無法載入這個應用",
+    syncErrorBody: "上次同步未完成。請到 Studio 的小應用重新同步。",
+  },
   chatApp: {
     newChat: "新對話",
     searchPlaceholder: "搜尋對話",

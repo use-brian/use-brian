@@ -79,6 +79,7 @@ import {
 import { getUserInfo } from "@/lib/user";
 import { hasAnyConnectedConnector } from "@/lib/api/studio";
 import { getWorkspaceHomeApps } from "@/lib/api/workspaces";
+import { listCustomHomeApps, type CustomHomeApp } from "@/lib/api/home-apps";
 import {
   HOME_APPS_REFRESH_EVENT,
   type HomeAppsRefreshDetail,
@@ -183,6 +184,14 @@ type SidebarData = {
    * app-bar is navigation and the user must always have some.
    */
   homeApps: HomeAppEntry[];
+  /**
+   * The workspace's custom (workspace-built) apps. Fetched here beside the
+   * config and refreshed by the same `workspace_config` signal, because the
+   * strip needs BOTH to render a `custom:<id>` entry — the config says whether
+   * it is on Home, the row says whether it may render at all and what it is
+   * called.
+   */
+  customApps: CustomHomeApp[];
   /**
    * The workspace's connected feed (distribution) profiles — the Feed
    * surface's availability signal, probed once per workspace like the
@@ -309,9 +318,11 @@ export function DocSidebarDataProvider({
   const [homeApps, setHomeApps] = useState<HomeAppEntry[]>(() =>
     normalizeHomeApps(null),
   );
+  const [customApps, setCustomApps] = useState<CustomHomeApp[]>([]);
   const reloadHomeApps = useCallback(() => {
     if (!workspaceId) return;
     void getWorkspaceHomeApps(workspaceId).then(setHomeApps);
+    void listCustomHomeApps(workspaceId).then(setCustomApps);
   }, [workspaceId]);
   useEffect(() => {
     reloadHomeApps();
@@ -869,6 +880,7 @@ export function DocSidebarDataProvider({
       setSidebarOpen,
       studioSetupIncomplete,
       homeApps,
+      customApps,
       feedProfiles,
       dock,
       dockLoading,
@@ -905,6 +917,7 @@ export function DocSidebarDataProvider({
       sidebarOpen,
       studioSetupIncomplete,
       homeApps,
+      customApps,
       feedProfiles,
       dock,
       dockLoading,
