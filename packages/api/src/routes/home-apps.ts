@@ -33,7 +33,10 @@ import { contentTypeFor } from '@use-brian/brian-app'
 import type { FilesApi } from '@use-brian/core'
 import {
   consumeHomeAppBudget,
+  deleteHomeApp,
   getHomeApp,
+  grantHomeApp,
+  setHomeAppStatus,
   getHomeAppState,
   isRenderableHomeApp,
   listHomeApps,
@@ -42,6 +45,7 @@ import {
 } from '../db/home-apps-store.js'
 import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { buildBundleCsp } from '../home-apps/csp.js'
+import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import {
   BRIDGE_TOKEN_TTL_MS,
   mintBridgeToken,
@@ -74,6 +78,25 @@ export type HomeAppRouteOptions = {
   signingSecret: string
   /** The API's own origin, folded into the bundle CSP's `connect-src`. */
   apiOrigin: string
+}
+
+/** Store-result reason → HTTP status. */
+function statusFor(reason: 'not_admin' | 'not_found' | 'invalid'): number {
+  return reason === 'not_found' ? 404 : reason === 'invalid' ? 400 : 403
+}
+
+/** Remove every stored file under an app's reserved bundle prefix. */
+export async function deleteBundle(
+  filesApi: FilesApi,
+  workspaceId: string,
+  appId: string,
+): Promise<void> {
+  const ctx = { workspaceId, userId: '', system: true } as never
+  const prefix = `${APPS_PATH_PREFIX}${appId}/`
+  const existing = await filesApi.search(ctx, { parentPath: prefix, limit: 100 })
+  for (const file of existing) {
+    await filesApi.delete(ctx, file.path)
+  }
 }
 
 /** The manifest we will act on — the stored, validated one, never the bundle. */
@@ -128,6 +151,89 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
         dailyUsed: app.dailyUsed,
       })),
     )
+  })
+
+  /**
+   * POST /api/home-apps/:appId/grant — the consent action.
+   *
+   * Owner/admin only, enforced in the STORE (the brain-keys pattern), and the
+   * granted scopes come from the app's stored manifest rather than the body —
+   * otherwise the screen an admin read and the grant that lands could differ.
+   * The body carries only the two things the admin actually chooses: an
+   * optional clearance ceiling and an optional daily budget.
+   */
+  router.post('/:appId/grant', opts.requireAuth, async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const body = (req.body ?? {}) as { maxClearance?: unknown; dailyCallLimit?: unknown }
+    const maxClearance =
+      body.maxClearance === 'public' ||
+      body.maxClearance === 'internal' ||
+      body.maxClearance === 'confidential'
+        ? body.maxClearance
+        : null
+    const dailyCallLimit =
+      typeof body.dailyCallLimit === 'number' && Number.isInteger(body.dailyCallLimit) &&
+      body.dailyCallLimit >= 0
+        ? body.dailyCallLimit
+        : undefined
+    const result = await grantHomeApp({
+      actingUserId: userId,
+      appId: String(req.params.appId),
+      maxClearance,
+      ...(dailyCallLimit !== undefined ? { dailyCallLimit } : {}),
+    })
+    if (!result.ok) {
+      res.status(statusFor(result.reason)).json({ error: result.message })
+      return
+    }
+    notifyWorkspaceChange(result.app.workspaceId, 'workspace_config', 'update')
+    res.json({ ok: true, status: result.app.status })
+  })
+
+  /**
+   * PATCH /api/home-apps/:appId — enable, disable, or revoke consent.
+   * Revoking sets `needs_consent`, which CLEARS the grant in the store.
+   */
+  router.patch('/:appId', opts.requireAuth, async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const status = (req.body as { status?: unknown })?.status
+    if (status !== 'active' && status !== 'disabled' && status !== 'needs_consent') {
+      res.status(400).json({ error: "status must be 'active', 'disabled', or 'needs_consent'" })
+      return
+    }
+    const result = await setHomeAppStatus({
+      actingUserId: userId,
+      appId: String(req.params.appId),
+      status,
+    })
+    if (!result.ok) {
+      res.status(statusFor(result.reason)).json({ error: result.message })
+      return
+    }
+    notifyWorkspaceChange(result.app.workspaceId, 'workspace_config', 'update')
+    res.json({ ok: true, status: result.app.status })
+  })
+
+  /** DELETE /api/home-apps/:appId — remove the app and its bundle. */
+  router.delete('/:appId', opts.requireAuth, async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const appId = String(req.params.appId)
+    const result = await deleteHomeApp({ actingUserId: userId, appId })
+    if (!result.ok) {
+      res.status(statusFor(result.reason)).json({ error: result.message })
+      return
+    }
+    // Best-effort bundle cleanup. The row is gone either way — a stale blob is
+    // storage debt, but a row that survives a "remove" is a live grant the
+    // admin believes they revoked.
+    void deleteBundle(opts.filesApi, result.app.workspaceId, appId).catch((err) => {
+      console.warn('[home-apps] bundle cleanup failed:', err)
+    })
+    notifyWorkspaceChange(result.app.workspaceId, 'workspace_config', 'update')
+    res.json({ ok: true })
   })
 
   /**

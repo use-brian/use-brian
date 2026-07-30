@@ -89,3 +89,53 @@ export async function listCustomHomeApps(
     return [];
   }
 }
+
+/** Grant an app the scopes its manifest asks for, activating it. */
+export async function grantCustomHomeApp(
+  appId: string,
+  opts: { maxClearance?: "public" | "internal" | "confidential" | null } = {},
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/home-apps/${encodeURIComponent(appId)}/grant`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxClearance: opts.maxClearance ?? null }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Grant failed: ${res.status}`);
+  }
+}
+
+/**
+ * Enable, disable, or revoke consent. Revoking (`needs_consent`) CLEARS the
+ * grant server-side, so re-activating later cannot silently restore powers
+ * nobody re-approved.
+ */
+export async function setCustomHomeAppStatus(
+  appId: string,
+  status: "active" | "disabled" | "needs_consent",
+): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/home-apps/${encodeURIComponent(appId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Update failed: ${res.status}`);
+  }
+}
+
+/** Remove an app and its stored bundle. */
+export async function deleteCustomHomeApp(appId: string): Promise<void> {
+  const res = await authFetch(`${API_URL}/api/home-apps/${encodeURIComponent(appId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Remove failed: ${res.status}`);
+  }
+}

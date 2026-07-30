@@ -36,6 +36,7 @@ import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import { APP_ICON } from "@/components/doc/operator-app-bar";
+import { CustomAppsSection } from "@/components/studio/custom-apps-section";
 import {
   HOME_APPS_MAX,
   isBuiltinHomeAppKey,
@@ -221,6 +222,8 @@ export default function StudioMiniAppsPage() {
       </div>
 
       <p className="mt-4 text-xs text-muted-foreground">{copy.routesStayNote}</p>
+
+      <CustomAppsSection workspaceId={workspaceId} canEdit={canEdit} />
     </div>
   );
 }
