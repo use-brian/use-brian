@@ -10,6 +10,7 @@
  */
 
 import { ImapFlow } from 'imapflow'
+import { attachSessionErrorSink, type ImapClientLike } from './imap-session.js'
 import { verifySmtpLogin } from './smtp.js'
 import type { MailboxAccountSettings, MailboxVerifyResult } from './types.js'
 
@@ -56,6 +57,13 @@ async function defaultVerifyImap(settings: MailboxAccountSettings): Promise<void
     logger: false,
     verifyOnly: true,
   })
+  // While `connect()` is pending imapflow's own `initialReject` owns the error
+  // path, so a failed login rejects here and is classified below. The moment it
+  // resolves that ownership ends and any later failure becomes a bare `'error'`
+  // EVENT — which Node rethrows as an uncaughtException when unlistened, taking
+  // the process down. This route runs on the user-traffic service, so the sink
+  // goes on before `connect()`, not after. See `attachSessionErrorSink`.
+  attachSessionErrorSink(client as unknown as ImapClientLike, settings.email)
   await client.connect()
   try {
     await client.logout()

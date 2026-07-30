@@ -63,6 +63,7 @@ function makeFakeImap(
   },
 ) {
   let openFolder = ''
+  let noopCalls = 0
   const client = {
     usable: true,
     async connect() {},
@@ -121,8 +122,17 @@ function makeFakeImap(
     async append() {
       return {}
     },
+    // Counted, because the insert phase's socket keep-warm calls it — a real
+    // client that never gets one loses the session to the inactivity timeout.
+    async noop() {
+      noopCalls++
+      return {}
+    },
+    on() {},
   } as unknown as ImapClientLike
-  return client
+  return Object.defineProperty(client, 'noopCalls', { get: () => noopCalls }) as ImapClientLike & {
+    noopCalls: number
+  }
 }
 
 function makeInstanceStore(instance: ConnectorInstance) {
@@ -174,6 +184,7 @@ function makeWorker(over: Partial<MailboxSyncWorkerDeps> & { client: ImapClientL
     ...('brain' in over ? { brain: over.brain } : {}),
     backfillChunk: over.backfillChunk,
     deltaChunk: over.deltaChunk,
+    ...(over.keepWarm ? { keepWarm: over.keepWarm } : {}),
   })
   return { worker, configs, insertMessage, deleteFolder, instanceId: instance.id }
 }
@@ -309,6 +320,110 @@ describe('[COMP:api/mailbox-sync-worker] backfill', () => {
     // called at construction; route() only fires on delta inserts).
     await worker.tick()
     expect(route).not.toHaveBeenCalled()
+  })
+})
+
+// ── The insert phase must not hold a silent socket ────────────────
+//
+// Regression cover for the 2026-07-28 crash loop: the worker fetches a chunk,
+// releases the mailbox lock, then spends the rest of the walk parsing and
+// inserting with the IMAP session still held and the socket idle. imapflow's
+// `socketTimeout` is inactivity-based, so a slow insert phase looks exactly
+// like a dead server — it killed the session, the unlistened 'error' event
+// killed the process, and every in-flight scheduled workflow run orphaned.
+// These tests pin that BOTH insert loops go through the keep-warm.
+
+describe('[COMP:api/mailbox-sync-worker] insert-phase socket keep-warm', () => {
+  /** A keep-warm whose window has always already elapsed — one ping per call. */
+  function eagerKeepWarm(pings: string[], label: string) {
+    return (client: ImapClientLike) => ({
+      async pingIfIdle() {
+        pings.push(label)
+        await client.noop()
+      },
+    })
+  }
+
+  it('keeps the socket warm through the BACKFILL insert loop', async () => {
+    const pings: string[] = []
+    const sources = Object.fromEntries([1, 2, 3, 4, 5, 6].map((u) => [u, rfc822(u)]))
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1, 2, 3, 4, 5, 6], sources } })
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 6 } },
+          backfill: { scope: 'all', requestedAt: '2026-07-22T00:00:00Z', status: 'running', totalEstimate: 6 },
+        },
+      },
+    } as never)
+    const { worker, insertMessage } = makeWorker({
+      client,
+      instance,
+      backfillChunk: 10,
+      keepWarm: eagerKeepWarm(pings, 'backfill'),
+    })
+    await worker.tick()
+
+    expect(insertMessage).toHaveBeenCalledTimes(6)
+    // One guarded step per message — the walk is never unguarded.
+    expect(pings).toHaveLength(6)
+    expect(client.noopCalls).toBe(6)
+  })
+
+  it('keeps the socket warm through the DELTA insert loop (where brain routing runs)', async () => {
+    const pings: string[] = []
+    const sources = Object.fromEntries([1, 2, 3].map((u) => [u, rfc822(u)]))
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1, 2, 3], sources } })
+    const instance = instanceRow({
+      config: { mailboxSync: { folders: { INBOX: { uidvalidity: '7', lastUid: 0 } } } },
+    } as never)
+    const { worker, insertMessage } = makeWorker({
+      client,
+      instance,
+      keepWarm: eagerKeepWarm(pings, 'delta'),
+    })
+    await worker.tick()
+
+    expect(insertMessage).toHaveBeenCalledTimes(3)
+    expect(pings).toEqual(['delta', 'delta', 'delta'])
+  })
+
+  it('a keep-warm failure aborts the walk with progress already persisted', async () => {
+    // A dead session must stop the walk, not have it keep inserting into the
+    // void — but the checkpoints earned before the failure have to survive, or
+    // the next tick re-fetches work that was already archived.
+    const sources = Object.fromEntries([1, 2, 3, 4, 5, 6].map((u) => [u, rfc822(u)]))
+    const client = makeFakeImap({ INBOX: { uidvalidity: '7', uids: [1, 2, 3, 4, 5, 6], sources } })
+    const instance = instanceRow({
+      config: {
+        mailboxSync: {
+          folders: { INBOX: { uidvalidity: '7', lastUid: 6 } },
+          backfill: { scope: 'all', requestedAt: '2026-07-22T00:00:00Z', status: 'running', totalEstimate: 6 },
+        },
+      },
+    } as never)
+    let calls = 0
+    const { worker, insertMessage, configs } = makeWorker({
+      client,
+      instance,
+      backfillChunk: 10,
+      keepWarm: () => ({
+        async pingIfIdle() {
+          if (++calls > 3) throw new Error('Socket is already closed')
+        },
+      }),
+    })
+    // `tick()` swallows per-instance failures (it logs and moves on).
+    await worker.tick()
+
+    // Stopped, did not grind through all six.
+    expect(insertMessage).toHaveBeenCalledTimes(3)
+    // Newest-first walk got 6, 5, 4 in — and the checkpoint says so, so the
+    // next tick resumes below 4 instead of redoing them.
+    const state = readMailboxSyncState(configs.get('inst-1'))
+    expect(state.folders.INBOX.backfillLow).toBe(4)
+    expect(state.lastError).toContain('Socket is already closed')
+    expect(state.folders.INBOX.backfillDone).toBeUndefined()
   })
 })
 
