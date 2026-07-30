@@ -86,6 +86,21 @@ type AvailableProvider = {
   nature: IngestNature;
 };
 
+/**
+ * Providers whose ambient ingest cannot fire, whatever this page shows.
+ *
+ * Shopify webhook deliveries are HMAC-signed with OUR app's client secret, so
+ * only an OAuth-connected shop produces verifiable events (shopify.md → plan
+ * D9). The Shopify OAuth path is not offered — every Shopify instance is
+ * pasted-token — so enabling ingestion here would flip `ingestion_enabled`,
+ * report success, and never deliver an episode. A toggle that reports success
+ * and does nothing is worse than no toggle, so the row says so instead.
+ *
+ * Remove the entry when the OAuth connect path returns.
+ * docs/architecture/integrations/shopify.md → "Ambient ingest".
+ */
+const INGEST_UNAVAILABLE_PROVIDERS = new Set(["shopify"]);
+
 type RepoOption = {
   fullName: string;
   private: boolean;
@@ -428,7 +443,13 @@ export default function StudioIngestRulesPage() {
           ownedPersonal?: boolean;
         }) => {
           setSources(data.sources);
-          setAvailable(data.available ?? []);
+          // Never advertise "connect this to ingest" for a provider whose
+          // ingest cannot fire (INGEST_UNAVAILABLE_PROVIDERS).
+          setAvailable(
+            (data.available ?? []).filter(
+              (a) => !INGEST_UNAVAILABLE_PROVIDERS.has(a.provider),
+            ),
+          );
           setOwnedPersonal(
             typeof data.ownedPersonal === "boolean" ? data.ownedPersonal : undefined,
           );
@@ -563,14 +584,22 @@ export default function StudioIngestRulesPage() {
           </div>
           <span
             className={pillCls(
-              !s.connected ? "attention" : s.ingestionEnabled ? "on" : "off",
+              INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+                ? "off"
+                : !s.connected
+                  ? "attention"
+                  : s.ingestionEnabled
+                    ? "on"
+                    : "off",
             )}
           >
-            {!s.connected
-              ? copy.sectionAttention
-              : s.ingestionEnabled
-                ? copy.statusOn
-                : copy.statusOff}
+            {INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+              ? copy.statusUnavailable
+              : !s.connected
+                ? copy.sectionAttention
+                : s.ingestionEnabled
+                  ? copy.statusOn
+                  : copy.statusOff}
           </span>
         </div>
 
@@ -620,24 +649,32 @@ export default function StudioIngestRulesPage() {
           </div>
         )}
 
-        {/* Actions — enable/disable, plus the GitHub repo-picker toggle. */}
+        {/* Actions — enable/disable, plus the GitHub repo-picker toggle.
+            A provider whose ingest cannot fire gets an explanation instead of
+            a switch (INGEST_UNAVAILABLE_PROVIDERS). */}
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => handleToggle(s)}
-            disabled={busy || !s.connected}
-            className={cn(
-              "text-xs font-medium px-3 py-1 rounded-lg shrink-0 transition-colors disabled:opacity-40",
-              s.ingestionEnabled
-                ? "border border-border text-muted-foreground hover:text-destructive hover:border-destructive/30"
-                : "bg-primary text-primary-foreground hover:bg-primary/90",
-            )}
-          >
-            {busy
-              ? copy.working
-              : s.ingestionEnabled
-                ? copy.disableAction
-                : copy.enableAction}
-          </button>
+          {INGEST_UNAVAILABLE_PROVIDERS.has(s.provider) ? (
+            <p className="text-[12px] leading-relaxed text-muted-foreground">
+              {copy.unavailableNote}
+            </p>
+          ) : (
+            <button
+              onClick={() => handleToggle(s)}
+              disabled={busy || !s.connected}
+              className={cn(
+                "text-xs font-medium px-3 py-1 rounded-lg shrink-0 transition-colors disabled:opacity-40",
+                s.ingestionEnabled
+                  ? "border border-border text-muted-foreground hover:text-destructive hover:border-destructive/30"
+                  : "bg-primary text-primary-foreground hover:bg-primary/90",
+              )}
+            >
+              {busy
+                ? copy.working
+                : s.ingestionEnabled
+                  ? copy.disableAction
+                  : copy.enableAction}
+            </button>
+          )}
           {s.provider === "github" && s.connected && (
             <button
               onClick={() =>
@@ -788,7 +825,15 @@ export default function StudioIngestRulesPage() {
       iconId = s.provider;
       label = s.label;
       subtitle = s.connectedEmail;
-      dot = !s.connected ? "attention" : s.ingestionEnabled ? "on" : null;
+      // No status dot when ingest cannot fire — an "on" dot would claim the
+      // source is delivering (INGEST_UNAVAILABLE_PROVIDERS).
+      dot = INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+        ? null
+        : !s.connected
+          ? "attention"
+          : s.ingestionEnabled
+            ? "on"
+            : null;
     } else if (row.kind === "whatsapp") {
       iconId = "whatsapp";
       label = copy.whatsapp.sourceLabel;

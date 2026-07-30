@@ -67,7 +67,7 @@ import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
-import { normalizeShopDomain, packShopifyTokens } from '../shopify/client.js'
+import { normalizeShopDomain, packShopifyTokens, getShopIdentity } from '../shopify/client.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -156,6 +156,13 @@ type ConnectorRouteOptions = {
    * Defaults to the real SSRF-guarded probe. See `../shopify/resolve-domain.ts`.
    */
   shopifyResolveDomain?: typeof resolveShopifyDomain
+  /**
+   * Test seam for the verify-before-store probe on a pasted Shopify token
+   * (`store-credentials`). Defaults to the real Admin API `shop { name
+   * myshopifyDomain }` call. See docs/architecture/integrations/shopify.md
+   * → "Auth model".
+   */
+  shopifyVerifyToken?: typeof getShopIdentity
 }
 
 /** Built-in connector that carries an external credential (excludes auth_type 'none'). */
@@ -1412,6 +1419,30 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         return
       }
       const managed = typeof t?.refreshToken === 'string' && typeof t?.expiresAt === 'string'
+      // Verify a PASTED token against the store before storing anything. This
+      // is the only credential the Shopify connector has (the OAuth path is
+      // not offered — shopify.md → "Auth model"), so an unverified paste means
+      // a store that reads "Connected" and fails at the first tool call. The
+      // imap `/imap/connect` verify-before-store precedent.
+      //
+      // Managed tuples skip it: they arrive from the OAuth callback, which
+      // already proved the token by fetching shop identity, and re-probing
+      // there would spend a request on a path this route does not own.
+      let verifiedDomain: string | null = null
+      if (!managed) {
+        const verify = opts.shopifyVerifyToken ?? getShopIdentity
+        try {
+          const identity = await verify({ accessToken, shopDomain })
+          verifiedDomain = normalizeShopDomain(identity.myshopifyDomain ?? '')
+        } catch (err) {
+          console.warn(`[connectors] shopify token verify failed for ${shopDomain}:`, err instanceof Error ? err.message : String(err))
+          res.status(400).json({ error: 'invalid_token' })
+          return
+        }
+      }
+      // Shopify's own answer for the canonical host wins over what the user
+      // typed — the same precedence the OAuth callback applies.
+      const storedDomain = verifiedDomain ?? shopDomain
       credentials = {
         type: 'oauth',
         // Discriminate on tuple SHAPE, never on the token prefix: Shopify's
@@ -1423,15 +1454,17 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
         client_id: managed ? 'shopify_oauth' : 'shopify_token',
         client_secret: packShopifyTokens({
           accessToken,
-          shopDomain,
+          shopDomain: storedDomain,
           ...(managed ? { refreshToken: t?.refreshToken, expiresAt: t?.expiresAt } : {}),
         }),
       }
       // The shop domain plays the connectedEmail role ("Connected:
-      // mystore.myshopify.com") and is the default instance label (D3).
-      email = email ?? shopDomain
-      label = label ?? shopDomain
-      configPatch = { shopDomain }
+      // mystore.myshopify.com") and is the default instance label (D3). A
+      // verified domain overrides the caller's, so the displayed host can never
+      // disagree with the config.shopDomain that webhook routing keys on.
+      email = verifiedDomain ?? email ?? storedDomain
+      label = label ?? storedDomain
+      configPatch = { shopDomain: storedDomain }
     } else if (provider === 'msgraph') {
       const t = body.msgraphTokens
       if (

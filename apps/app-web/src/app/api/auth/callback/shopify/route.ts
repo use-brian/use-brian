@@ -41,11 +41,17 @@ const SHOPIFY_API_VERSION = "2026-04";
  * public apps after 2026-04) or legacy non-expiring; both are POSTed as the
  * `shopifyTokens` tuple and the shape discriminates downstream.
  *
- * DARK until `SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET` exist (P0 app
- * registration): the connectors page only offers this path when
- * `NEXT_PUBLIC_SHOPIFY_CLIENT_ID` is set, and this route fails closed.
+ * NOT REACHABLE as of 2026-07-30 — kept deliberately, do not delete. Shopify
+ * connects by pasted Admin API token only, and the connectors page no longer
+ * builds an authorize URL, so nothing in the product ever redirects here. This
+ * route stays because the flow is correct and expensive to re-derive (the
+ * `expiring: 1` exchange, the state + query-hmac double gate, and
+ * rotate-persist-before-use); re-enabling means restoring the UI branch AND
+ * setting `SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET`. It also still fails
+ * closed without those secrets.
  *
- * See docs/architecture/integrations/shopify.md → "OAuth flow".
+ * See docs/architecture/integrations/shopify.md → "Auth model" for why the
+ * OAuth path is not offered and what re-enabling requires.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
