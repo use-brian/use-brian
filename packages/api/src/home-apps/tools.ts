@@ -26,7 +26,7 @@
 
 import { z } from 'zod'
 import type { FilesApi } from '@use-brian/core'
-import { MANIFEST_FILENAME, lintBundle, validateBundle } from '@use-brian/brian-app'
+import { MANIFEST_FILENAME, contentTypeFor, lintBundle, validateBundle } from '@use-brian/brian-app'
 import {
   applyHomeAppManifest,
   createHomeApp,
@@ -37,6 +37,18 @@ import {
 
 /** One authored file. Text only — an assistant cannot produce binary here. */
 export type AuthoredFile = { path: string; content: string }
+
+/**
+ * What the WRITE SEAM accepts: authored text, or raw bytes. The zip importer
+ * is the bytes producer — a zip can carry a png or a woff, which the
+ * assistant's text-only tool schema cannot express, and round-tripping binary
+ * through a utf8 string would corrupt it.
+ */
+export type BundleWriteFile = AuthoredFile | { path: string; bytes: Uint8Array }
+
+function fileByteLength(file: BundleWriteFile): number {
+  return 'bytes' in file ? file.bytes.byteLength : Buffer.byteLength(file.content, 'utf8')
+}
 
 export type HomeAppToolDeps = {
   filesApi: FilesApi
@@ -55,8 +67,14 @@ const fileSchema = z.object({
 })
 
 export type WriteHomeAppInput = {
-  name: string
-  files: AuthoredFile[]
+  files: BundleWriteFile[]
+  /**
+   * Provenance of the write — `assistant` (the tool) or `upload` (the zip
+   * importer). Same-kind + same-name is an UPDATE, so a re-uploaded zip
+   * replaces the uploaded app it came from and never touches an
+   * assistant-authored app that happens to share a name.
+   */
+  kind?: 'assistant' | 'upload'
 }
 
 export type WriteHomeAppResult =
@@ -76,18 +94,19 @@ export async function writeHomeAppBundle(
   if (!manifestFile) {
     return { ok: false, message: `The bundle must include ${MANIFEST_FILENAME}.` }
   }
+  const manifestText =
+    'bytes' in manifestFile
+      ? Buffer.from(manifestFile.bytes).toString('utf8')
+      : manifestFile.content
   let manifestJson: unknown
   try {
-    manifestJson = JSON.parse(manifestFile.content)
+    manifestJson = JSON.parse(manifestText)
   } catch (err) {
     return { ok: false, message: `${MANIFEST_FILENAME} is not valid JSON: ${(err as Error).message}` }
   }
 
   const validated = validateBundle({
-    files: input.files.map((f) => ({
-      path: f.path,
-      bytes: Buffer.byteLength(f.content, 'utf8'),
-    })),
+    files: input.files.map((f) => ({ path: f.path, bytes: fileByteLength(f) })),
     manifestJson,
   })
   if (!validated.ok) {
@@ -99,18 +118,21 @@ export async function writeHomeAppBundle(
     }
   }
 
-  // Same workspace + same name = an UPDATE. Assistant-authored apps have no
-  // repo to key on, and minting a second row per edit would leave the strip
-  // holding a stale twin of every app the assistant ever touched.
+  // Same workspace + same KIND + same name = an UPDATE. Assistant-authored and
+  // uploaded apps have no repo to key on, and minting a second row per write
+  // would leave the strip holding a stale twin of every app ever touched. The
+  // kind is part of the key so a re-uploaded zip can never overwrite an
+  // assistant-authored app that shares its name.
+  const kind = input.kind ?? 'assistant'
   const existing = (await listHomeApps(deps.workspaceId)).find(
-    (a) => a.kind === 'assistant' && a.name === validated.manifest.name,
+    (a) => a.kind === kind && a.name === validated.manifest.name,
   )
 
   const app = existing
     ? (await applyHomeAppManifest({ appId: existing.id, manifest: validated.manifest }))?.app
     : await createHomeApp({
         workspaceId: deps.workspaceId,
-        kind: 'assistant',
+        kind,
         manifest: validated.manifest,
         createdBy: deps.actingUserId,
       })
@@ -119,11 +141,21 @@ export async function writeHomeAppBundle(
   // Full replace. A patch would let a file from a previous version survive
   // that the current manifest never declared — and it would still be served.
   await deps.clearBundle(deps.workspaceId, app.id)
+  const ctx = { workspaceId: deps.workspaceId, userId: deps.actingUserId ?? '', system: true } as never
   for (const file of input.files) {
-    const written = await deps.filesApi.write(
-      { workspaceId: deps.workspaceId, userId: deps.actingUserId ?? '', system: true } as never,
-      { path: deps.bundlePath(app.id, file.path), content: file.content },
-    )
+    // Bytes ride `writeBytes` (byte-preserving — a png through a utf8 string
+    // would corrupt); authored text rides `write`.
+    const written =
+      'bytes' in file
+        ? await deps.filesApi.writeBytes(ctx, {
+            path: deps.bundlePath(app.id, file.path),
+            bytes: file.bytes,
+            mime: contentTypeFor(file.path) ?? 'application/octet-stream',
+          })
+        : await deps.filesApi.write(ctx, {
+            path: deps.bundlePath(app.id, file.path),
+            content: file.content,
+          })
     if (!written.ok) {
       return { ok: false, message: `Could not store ${file.path}.` }
     }

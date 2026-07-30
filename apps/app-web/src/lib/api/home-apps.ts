@@ -53,7 +53,7 @@ export type CustomHomeApp = {
   name: string;
   description: string | null;
   icon: string | null;
-  kind: "github" | "assistant";
+  kind: "github" | "assistant" | "upload";
   status: "active" | "disabled" | "needs_consent";
   /**
    * Whether the strip may render it — `status='active'` AND a live grant.
@@ -162,6 +162,49 @@ export async function importCustomHomeAppFromGithub(params: {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Import failed: ${res.status}`);
   }
+}
+
+/**
+ * Import an app from a zip bundle. Extraction, validation, and the consent
+ * gate all run server-side; a rejection here is the real validation result.
+ */
+export async function importCustomHomeAppZip(
+  workspaceId: string,
+  file: File,
+): Promise<void> {
+  const form = new FormData();
+  form.set("workspaceId", workspaceId);
+  form.set("file", file);
+  const res = await authFetch(`${API_URL}/api/home-apps/import`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Import failed: ${res.status}`);
+  }
+}
+
+/**
+ * Download the stored bundle as a zip. Fetched (not an anchor href) because
+ * the credential rides the Authorization header, then handed to the browser
+ * as an object-URL download.
+ */
+export async function exportCustomHomeApp(appId: string, name: string): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/home-apps/${encodeURIComponent(appId)}/export`,
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Export failed: ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${name.replace(/[^\w.-]+/g, "-").replace(/^-+|-+$/g, "") || "app"}.zip`;
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 /** Sync now. Resolves to whether the app just dropped to `needs_consent`. */

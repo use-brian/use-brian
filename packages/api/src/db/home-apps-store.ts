@@ -30,7 +30,7 @@ import {
 } from '@use-brian/brian-app'
 import { query } from './client.js'
 
-export type HomeAppKind = 'github' | 'assistant'
+export type HomeAppKind = 'github' | 'assistant' | 'upload'
 export type HomeAppStatus = 'active' | 'disabled' | 'needs_consent'
 
 export type HomeAppRow = {

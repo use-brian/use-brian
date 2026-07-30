@@ -4990,6 +4990,9 @@ export const zh: Dictionary = {
       addBusy: "正在檢查應用…",
       addCancel: "取消",
       syncAction: "立即同步",
+      importZip: "匯入套件",
+      importZipBusy: "正在匯入套件…",
+      exportAction: "匯出",
       syncedButWidened: "已同步，但這個應用現在要求的存取權超出已核准的範圍，因此已從首頁移除。請重新檢視並核准。",
     },
     miniAppsPage: {

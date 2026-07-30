@@ -28,8 +28,9 @@
  */
 
 import { Router, type RequestHandler } from 'express'
+import multer from 'multer'
 import type { AppManifest, AppScopes } from '@use-brian/brian-app'
-import { contentTypeFor } from '@use-brian/brian-app'
+import { BUNDLE_MAX_TOTAL_BYTES, contentTypeFor } from '@use-brian/brian-app'
 import type { FilesApi } from '@use-brian/core'
 import {
   consumeHomeAppBudget,
@@ -50,6 +51,8 @@ import {
   getWorkspaceRoleSystem,
 } from '../db/workspace-store.js'
 import { buildBundleCsp } from '../home-apps/csp.js'
+import { writeHomeAppBundle } from '../home-apps/tools.js'
+import { buildBundleZip, filesFromZipBuffer } from '../home-apps/zip.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import {
   BRIDGE_TOKEN_TTL_MS,
@@ -129,6 +132,11 @@ function storedManifest(app: HomeAppRow): AppManifest | null {
 
 export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
   const router = Router()
+
+  const uploadZip = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: BUNDLE_MAX_TOTAL_BYTES + 1024 * 1024, files: 1 },
+  })
 
   /**
    * GET /api/home-apps?workspaceId= — the workspace's custom apps.
@@ -268,6 +276,67 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
   }
 
   /**
+   * POST /api/home-apps/import — import an app from a zip (multipart `file`).
+   *
+   * The GitHub path without the repo, mounted UNCONDITIONALLY (a zip needs no
+   * credentials, so a build with no GitHub sync still imports). Extraction
+   * feeds the same `writeHomeAppBundle` seam the assistant path uses — one
+   * validator, one write path, and the imported app lands at `needs_consent`
+   * exactly like every other arrival. Same manifest name re-imported = an
+   * update to the same `upload`-kind app.
+   */
+  const receiveZip: RequestHandler = (req, res, next) => {
+    // Multer's memory storage, capped just above the bundle total so the
+    // recognisable "too large" answer comes from us, not a socket error.
+    uploadZip.single('file')(req, res, (err?: unknown) => {
+      if (err) {
+        res.status(400).json({ error: 'That zip is too large to import.' })
+        return
+      }
+      next()
+    })
+  }
+  router.post('/import', opts.requireAuth, receiveZip, async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const workspaceId = (req.body as { workspaceId?: unknown })?.workspaceId
+    if (typeof workspaceId !== 'string' || !workspaceId) {
+      res.status(400).json({ error: 'Missing workspaceId' })
+      return
+    }
+    if (!(await isWorkspaceAdmin(userId, workspaceId))) {
+      res.status(403).json({ error: 'Only a workspace owner or admin can add an app.' })
+      return
+    }
+    const file = (req as { file?: { buffer: Buffer } }).file
+    if (!file) { res.status(400).json({ error: 'Attach the bundle zip as `file`.' }); return }
+
+    const extracted = await filesFromZipBuffer(file.buffer)
+    if (!extracted.ok) { res.status(400).json({ error: extracted.message }); return }
+
+    const result = await writeHomeAppBundle(
+      {
+        filesApi: opts.filesApi,
+        workspaceId,
+        actingUserId: userId,
+        bundlePath: bundleStoragePath,
+        clearBundle: (ws, appId) => deleteBundle(opts.filesApi, ws, appId),
+      },
+      { files: extracted.files, kind: 'upload' },
+    )
+    if (!result.ok) { res.status(400).json({ error: result.message }); return }
+
+    notifyWorkspaceChange(workspaceId, 'workspace_config', 'update')
+    res.status(201).json({
+      id: result.app.id,
+      name: result.app.name,
+      created: result.created,
+      status: result.app.status,
+      warnings: result.warnings,
+    })
+  })
+
+  /**
    * POST /api/home-apps/:appId/grant — the consent action.
    *
    * Owner/admin only, enforced in the STORE (the brain-keys pattern), and the
@@ -348,6 +417,43 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
     })
     notifyWorkspaceChange(result.app.workspaceId, 'workspace_config', 'update')
     res.json({ ok: true })
+  })
+
+  /**
+   * GET /api/home-apps/:appId/export — the stored bundle as a zip.
+   *
+   * Member-gated, not admin-gated: any member's browser already receives every
+   * one of these bytes through the bundle route, so export reveals nothing new
+   * — it just makes the app portable (C2: the exported bundle + manifest is
+   * the unit of sharing). What ships is what is STORED, i.e. exactly what the
+   * serving route serves, never a re-fetch from the app's origin.
+   */
+  router.get('/:appId/export', opts.requireAuth, async (req, res) => {
+    const userId = (req as { userId?: string }).userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const app = await getHomeApp(String(req.params.appId))
+    if (!app) { res.status(404).json({ error: 'App not found' }); return }
+    const membership = await getWorkspaceMembershipWithClearanceSystem(userId, app.workspaceId)
+    if (!membership) { res.status(403).json({ error: 'Not a member of this workspace' }); return }
+
+    const ctx = { workspaceId: app.workspaceId, userId: '', system: true } as never
+    const prefix = `${APPS_PATH_PREFIX}${app.id}/`
+    const rows = await opts.filesApi.search(ctx, { parentPath: prefix, limit: 100 })
+    if (rows.length === 0) {
+      res.status(404).json({ error: 'This app has no stored bundle yet.' })
+      return
+    }
+    const files: Array<{ path: string; bytes: Uint8Array }> = []
+    for (const row of rows) {
+      const read = await opts.filesApi.readBytes(ctx, row.path)
+      if (read.ok) files.push({ path: row.path.slice(prefix.length), bytes: read.value.bytes })
+    }
+
+    // ASCII-safe filename — the slug is also the header-injection guard.
+    const slug = app.name.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '') || 'app'
+    res.setHeader('Content-Type', 'application/zip')
+    res.setHeader('Content-Disposition', `attachment; filename="${slug}.zip"`)
+    res.send(await buildBundleZip(files))
   })
 
   /**

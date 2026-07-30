@@ -34,6 +34,7 @@
     "dotenv": "^16",
     "express": "^5",
     "imapflow": "^1.0.191",
+    "jszip": "^3.10.1",
     "mailparser": "^3.7.4",
     "multer": "^2.1.1",
     "nodemailer": "^8.0.9",

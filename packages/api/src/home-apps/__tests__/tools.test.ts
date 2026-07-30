@@ -65,14 +65,20 @@ function bundle(over: Record<string, unknown> = {}) {
 
 function deps() {
   const written: string[] = []
+  const writtenBytes: string[] = []
   const cleared: string[] = []
   return {
     written,
+    writtenBytes,
     cleared,
     value: {
       filesApi: {
         write: vi.fn(async (_ctx: unknown, p: { path: string }) => {
           written.push(p.path)
+          return { ok: true, value: {} }
+        }),
+        writeBytes: vi.fn(async (_ctx: unknown, p: { path: string }) => {
+          writtenBytes.push(p.path)
           return { ok: true, value: {} }
         }),
       } as never,
@@ -94,7 +100,7 @@ beforeEach(() => {
 describe('[COMP:api/home-app-tools] writeHomeApp', () => {
   it('creates an app and stores every file under its bundle prefix', async () => {
     const d = deps()
-    const result = await writeHomeAppBundle(d.value, { name: '', files: bundle() })
+    const result = await writeHomeAppBundle(d.value, { files: bundle() })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.created).toBe(true)
@@ -103,7 +109,7 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
 
   it('lands at needs_consent — authoring never bypasses a human', async () => {
     const d = deps()
-    const result = await writeHomeAppBundle(d.value, { name: '', files: bundle() })
+    const result = await writeHomeAppBundle(d.value, { files: bundle() })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.app.status).toBe('needs_consent')
@@ -114,14 +120,14 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
     // Otherwise a file from a previous version survives undeclared, and the
     // serving route would happily keep handing it out.
     const d = deps()
-    await writeHomeAppBundle(d.value, { name: '', files: bundle() })
+    await writeHomeAppBundle(d.value, { files: bundle() })
     expect(d.cleared).toEqual(['app-1'])
   })
 
   it('updates the SAME row on a second write of the same app', async () => {
     const d = deps()
-    await writeHomeAppBundle(d.value, { name: '', files: bundle() })
-    const second = await writeHomeAppBundle(d.value, { name: '', files: bundle() })
+    await writeHomeAppBundle(d.value, { files: bundle() })
+    const second = await writeHomeAppBundle(d.value, { files: bundle() })
     expect(second.ok).toBe(true)
     if (!second.ok) return
     expect(second.created).toBe(false)
@@ -132,7 +138,6 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
   it('refuses a bundle with no manifest', async () => {
     const d = deps()
     const result = await writeHomeAppBundle(d.value, {
-      name: '',
       files: [{ path: 'index.html', content: '<h1>hi</h1>' }],
     })
     expect(result).toMatchObject({ ok: false })
@@ -142,7 +147,6 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
   it('refuses unparseable manifest JSON without writing anything', async () => {
     const d = deps()
     const result = await writeHomeAppBundle(d.value, {
-      name: '',
       files: [
         { path: 'brian-app.json', content: '{ not json' },
         { path: 'index.html', content: 'x' },
@@ -156,7 +160,6 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
   it('FAILS CLOSED on an invalid manifest — nothing is stored', async () => {
     const d = deps()
     const result = await writeHomeAppBundle(d.value, {
-      name: '',
       files: bundle({ scopes: { data: 'god-mode' } }),
     })
     expect(result).toMatchObject({ ok: false })
@@ -171,17 +174,41 @@ describe('[COMP:api/home-app-tools] writeHomeApp', () => {
   it('refuses a bundle whose declared entry is missing', async () => {
     const d = deps()
     const result = await writeHomeAppBundle(d.value, {
-      name: '',
       files: [{ path: 'brian-app.json', content: JSON.stringify(MANIFEST) }],
     })
     expect(result).toMatchObject({ ok: false })
     expect(rows).toEqual([])
   })
 
+  it('stores byte files via writeBytes — binary never round-trips a utf8 string', async () => {
+    const d = deps()
+    const result = await writeHomeAppBundle(d.value, {
+      files: [...bundle(), { path: 'assets/icon.png', bytes: Buffer.from([0x89, 0x50]) }],
+      kind: 'upload',
+    })
+    expect(result.ok).toBe(true)
+    expect(d.written).toContain('/apps/app-1/brian-app.json')
+    expect(d.writtenBytes).toEqual(['/apps/app-1/assets/icon.png'])
+  })
+
+  it('keys updates on kind + name — a zip re-import never overwrites an assistant app', async () => {
+    const d = deps()
+    await writeHomeAppBundle(d.value, { files: bundle() }) // assistant
+    const uploaded = await writeHomeAppBundle(d.value, { files: bundle(), kind: 'upload' })
+    expect(uploaded.ok).toBe(true)
+    if (!uploaded.ok) return
+    // Same manifest name, different provenance: a SECOND row, not an update.
+    expect(uploaded.created).toBe(true)
+    expect(rows).toHaveLength(2)
+    // Re-importing the zip updates the upload-kind row in place.
+    const again = await writeHomeAppBundle(d.value, { files: bundle(), kind: 'upload' })
+    expect(again.ok && !again.created).toBe(true)
+    expect(rows).toHaveLength(2)
+  })
+
   it('surfaces advisory lint findings without failing', async () => {
     const d = deps()
     const result = await writeHomeAppBundle(d.value, {
-      name: '',
       files: bundle({ scopes: { data: 'read_write' } }),
     })
     expect(result.ok).toBe(true)

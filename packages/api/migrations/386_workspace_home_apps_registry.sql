@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS workspace_home_apps (
 
   -- 'github'    — synced from a repo (the KB source model)
   -- 'assistant' — authored in-app by the workspace assistant; no repo fields
-  kind                   text NOT NULL CHECK (kind IN ('github', 'assistant')),
+  -- 'upload'    — imported from a zip; static like 'assistant', no repo fields
+  kind                   text NOT NULL CHECK (kind IN ('github', 'assistant', 'upload')),
 
   -- Display identity, denormalized from the last validated manifest so the
   -- app-bar can render a strip entry without parsing a bundle on every read.

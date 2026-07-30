@@ -1677,7 +1677,7 @@ export function buildHomeAppTools(deps: HomeAppToolDeps): BrainTool[] {
       inputSchema: writeHomeAppSchema,
       handler: async (args) => {
         const input = args as { files: Array<{ path: string; content: string }> }
-        const result = await writeHomeAppBundle(deps, { name: '', files: input.files })
+        const result = await writeHomeAppBundle(deps, { files: input.files })
         if (!result.ok) return text(result.message, true)
         const warned = result.warnings.length
           ? `\nAdvisory:\n${result.warnings.map((w) => `  ${w}`).join('\n')}`

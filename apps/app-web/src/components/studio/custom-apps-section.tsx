@@ -23,16 +23,28 @@
  * [COMP:app-web/studio-custom-apps]
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AppScopes } from "@use-brian/brian-app";
-import { AlertTriangle, Check, GitBranch, Plus, RefreshCw, Puzzle, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Check,
+  Download,
+  GitBranch,
+  Plus,
+  RefreshCw,
+  Puzzle,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT, format } from "@/lib/i18n/client";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
 import {
   deleteCustomHomeApp,
+  exportCustomHomeApp,
   grantCustomHomeApp,
   importCustomHomeAppFromGithub,
+  importCustomHomeAppZip,
   listCustomHomeApps,
   setCustomHomeAppStatus,
   syncCustomHomeApp,
@@ -174,7 +186,12 @@ export function CustomAppsSection({
         </p>
       )}
 
-      {canEdit && <AddFromGithub workspaceId={workspaceId} onAdded={refresh} />}
+      {canEdit && (
+        <div className="flex flex-wrap items-start gap-2">
+          <AddFromGithub workspaceId={workspaceId} onAdded={refresh} />
+          <ImportZip workspaceId={workspaceId} onAdded={refresh} onError={setError} />
+        </div>
+      )}
 
       {apps !== null && apps.length === 0 && (
         <p className="mt-3 rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
@@ -202,6 +219,8 @@ export function CustomAppsSection({
               <div className="flex items-center gap-2">
                 {app.kind === "github" ? (
                   <GitBranch className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                ) : app.kind === "upload" ? (
+                  <Upload className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 ) : (
                   <Puzzle className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 )}
@@ -303,6 +322,15 @@ export function CustomAppsSection({
                   <button
                     type="button"
                     disabled={busy === app.id}
+                    onClick={() => void run(app.id, () => exportCustomHomeApp(app.id, app.name))}
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] disabled:opacity-50"
+                  >
+                    <Download className="size-3" aria-hidden />
+                    {t.exportAction}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy === app.id}
                     onClick={() => void onRemove(app)}
                     className="ml-auto inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-destructive hover:bg-accent disabled:opacity-50"
                   >
@@ -360,6 +388,67 @@ function StatusChip({
     >
       {label}
     </span>
+  );
+}
+
+/**
+ * Import bundle — the zip half of C2's "the exported bundle is the unit of
+ * sharing". One hidden file input; extraction, validation, and the consent
+ * gate all run server-side, so the error shown here is the real reason.
+ */
+function ImportZip({
+  workspaceId,
+  onAdded,
+  onError,
+}: {
+  workspaceId: string;
+  onAdded: () => Promise<void>;
+  onError: (message: string | null) => void;
+}) {
+  const t = useT().studioPage.customApps;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+
+  const onPick = useCallback(
+    async (file: File | undefined) => {
+      if (!file) return;
+      setBusy(true);
+      onError(null);
+      try {
+        await importCustomHomeAppZip(workspaceId, file);
+        await onAdded();
+      } catch (err) {
+        onError((err as Error).message);
+      } finally {
+        setBusy(false);
+        // Clear the value so re-picking the SAME fixed file fires again.
+        if (inputRef.current) inputRef.current.value = "";
+      }
+    },
+    [onAdded, onError, workspaceId],
+  );
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".zip,application/zip"
+        className="hidden"
+        aria-hidden
+        tabIndex={-1}
+        onChange={(e) => void onPick(e.target.files?.[0])}
+      />
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => inputRef.current?.click()}
+        className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-50"
+      >
+        <Upload className="size-3.5" aria-hidden />
+        {busy ? t.importZipBusy : t.importZip}
+      </button>
+    </>
   );
 }
 

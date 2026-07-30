@@ -499,6 +499,9 @@ importers:
       imapflow:
         specifier: ^1.0.191
         version: 1.4.8
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
       mailparser:
         specifier: ^3.7.4
         version: 3.9.14

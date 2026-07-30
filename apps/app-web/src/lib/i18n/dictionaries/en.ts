@@ -5240,6 +5240,9 @@ export const en = {
       addBusy: "Checking the app…",
       addCancel: "Cancel",
       syncAction: "Sync now",
+      importZip: "Import bundle",
+      importZipBusy: "Importing the bundle…",
+      exportAction: "Export",
       syncedButWidened: "Synced, but the app now asks for more access than was approved, so it has left Home. Review and approve it again.",
     },
     miniAppsPage: {

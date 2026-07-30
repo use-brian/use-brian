@@ -5034,6 +5034,9 @@ export const ja: Dictionary = {
       addBusy: "アプリを確認中…",
       addCancel: "キャンセル",
       syncAction: "今すぐ同期",
+      importZip: "バンドルをインポート",
+      importZipBusy: "バンドルをインポート中…",
+      exportAction: "エクスポート",
       syncedButWidened: "同期しましたが、承認済みより多くのアクセスを要求するようになったため、ホームから外れました。内容を確認して再度承認してください。",
     },
     miniAppsPage: {
