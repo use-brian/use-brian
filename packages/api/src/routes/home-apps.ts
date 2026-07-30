@@ -33,8 +33,10 @@ import { contentTypeFor } from '@use-brian/brian-app'
 import type { FilesApi } from '@use-brian/core'
 import {
   consumeHomeAppBudget,
+  createHomeApp,
   deleteHomeApp,
   getHomeApp,
+  recordHomeAppSyncError,
   grantHomeApp,
   setHomeAppStatus,
   getHomeAppState,
@@ -43,7 +45,10 @@ import {
   putHomeAppState,
   type HomeAppRow,
 } from '../db/home-apps-store.js'
-import { getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
+import {
+  getWorkspaceMembershipWithClearanceSystem,
+  getWorkspaceRoleSystem,
+} from '../db/workspace-store.js'
 import { buildBundleCsp } from '../home-apps/csp.js'
 import { notifyWorkspaceChange } from '../brain-stream/notify.js'
 import {
@@ -62,6 +67,11 @@ export function bundleStoragePath(appId: string, path: string): string {
   return `${APPS_PATH_PREFIX}${appId}/${path}`
 }
 
+/** Sync one app now (injected — the route module does not own GitHub). */
+export type SyncNow = (app: HomeAppRow) => Promise<
+  { status: 'unchanged' | 'synced'; droppedToNeedsConsent?: boolean } | { status: 'failed'; error: string }
+>
+
 export type HomeAppRouteOptions = {
   /**
    * The auth middleware, applied PER ROUTE rather than to the whole mount.
@@ -78,6 +88,18 @@ export type HomeAppRouteOptions = {
   signingSecret: string
   /** The API's own origin, folded into the bundle CSP's `connect-src`. */
   apiOrigin: string
+  /**
+   * Sync-now. Optional — when unset the GitHub import + manual sync routes are
+   * not mounted at all, so a build with no GitHub reads (or no credentials
+   * resolver) advertises no half-working import.
+   */
+  syncNow?: SyncNow
+}
+
+/** Owner/admin gate for the routes that do not go through a store setter. */
+async function isWorkspaceAdmin(userId: string, workspaceId: string): Promise<boolean> {
+  const role = await getWorkspaceRoleSystem(userId, workspaceId)
+  return role === 'owner' || role === 'admin'
 }
 
 /** Store-result reason → HTTP status. */
@@ -152,6 +174,98 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
       })),
     )
   })
+
+  if (opts.syncNow) {
+    const syncNow = opts.syncNow
+
+    /**
+     * POST /api/home-apps/github — import an app from a repository.
+     *
+     * Owner/admin only, and the FIRST SYNC RUNS INLINE: an import that
+     * silently created a row and left the bundle to arrive within 15 minutes
+     * would show the admin a consent screen for a manifest nobody had read
+     * yet. If the first sync fails, the row is removed rather than left as a
+     * broken shell the admin has to clean up.
+     */
+    router.post('/github', opts.requireAuth, async (req, res) => {
+      const userId = (req as { userId?: string }).userId
+      if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const body = (req.body ?? {}) as {
+        workspaceId?: unknown
+        repo?: unknown
+        branch?: unknown
+        rootPath?: unknown
+        connectorInstanceId?: unknown
+      }
+      const workspaceId = typeof body.workspaceId === 'string' ? body.workspaceId : ''
+      const repo = typeof body.repo === 'string' ? body.repo.trim() : ''
+      if (!workspaceId || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+        res.status(400).json({ error: 'workspaceId and repo (owner/name) are required' })
+        return
+      }
+      if (!(await isWorkspaceAdmin(userId, workspaceId))) {
+        res.status(403).json({ error: 'Only a workspace owner or admin can add an app.' })
+        return
+      }
+
+      // A placeholder manifest until the first sync writes the real one. The
+      // row is never renderable in this state — `status` defaults to
+      // `needs_consent` and `granted_scopes` is NULL.
+      const app = await createHomeApp({
+        workspaceId,
+        kind: 'github',
+        manifest: {
+          manifestVersion: 1,
+          name: repo.split('/')[1] ?? repo,
+          entry: 'index.html',
+          scopes: { data: 'read' },
+          metadata: {},
+        },
+        repo,
+        branch: typeof body.branch === 'string' && body.branch ? body.branch : 'main',
+        rootPath: typeof body.rootPath === 'string' ? body.rootPath : '',
+        connectorInstanceId:
+          typeof body.connectorInstanceId === 'string' ? body.connectorInstanceId : null,
+        createdBy: userId,
+      })
+
+      const outcome = await syncNow(app)
+      if (outcome.status === 'failed') {
+        // Roll back rather than leave a broken shell an admin must clean up.
+        await deleteHomeApp({ actingUserId: userId, appId: app.id })
+        res.status(400).json({ error: outcome.error })
+        return
+      }
+      notifyWorkspaceChange(workspaceId, 'workspace_config', 'update')
+      res.status(201).json({ id: app.id, repo, status: 'needs_consent' })
+    })
+
+    /** POST /api/home-apps/:appId/sync — "Sync now". */
+    router.post('/:appId/sync', opts.requireAuth, async (req, res) => {
+      const userId = (req as { userId?: string }).userId
+      if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+      const app = await getHomeApp(String(req.params.appId))
+      if (!app) { res.status(404).json({ error: 'App not found' }); return }
+      if (!(await isWorkspaceAdmin(userId, app.workspaceId))) {
+        res.status(403).json({ error: 'Only a workspace owner or admin can sync an app.' })
+        return
+      }
+      const outcome = await syncNow(app)
+      if (outcome.status === 'failed') {
+        await recordHomeAppSyncError(app.id, outcome.error)
+        res.status(400).json({ error: outcome.error })
+        return
+      }
+      notifyWorkspaceChange(app.workspaceId, 'workspace_config', 'update')
+      res.json({
+        ok: true,
+        status: outcome.status,
+        // Surfaced so the client can say "it synced, but it now asks for more
+        // access and has left Home" rather than a bare success.
+        droppedToNeedsConsent: outcome.droppedToNeedsConsent ?? false,
+      })
+    })
+  }
 
   /**
    * POST /api/home-apps/:appId/grant — the consent action.

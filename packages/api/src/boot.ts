@@ -192,7 +192,13 @@ import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
 import { docFilesRoutes } from './routes/doc-files.js'
-import { homeAppRoutes } from './routes/home-apps.js'
+import { bundleStoragePath, deleteBundle, homeAppRoutes } from './routes/home-apps.js'
+import {
+  createHomeAppSyncWorker,
+  syncHomeAppFromGitHub,
+  type SyncDeps as HomeAppSyncDeps,
+} from './home-apps/sync.js'
+import { listHomeApps as listHomeAppRows } from './db/home-apps-store.js'
 import { browserExtensionRoutes } from './routes/browser-extension.js'
 import { computerRoutes, createInMemoryLocalComputerTaskStore } from './routes/computer.js'
 import {
@@ -3708,12 +3714,53 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   // so a bare guard registered earlier would 401 them before their own
   // capability check ran (the Mini-App sign-in outage, CLAUDE.md → route mount
   // order). Auth is applied per-route inside the router instead.
+  // Custom Home app GitHub sync. Reuses the `syncCredentials` resolver the KB
+  // poller already uses, so an app's PAT resolves through its connector
+  // instance and revoking the connector revokes the sync — never a stored PAT.
+  const homeAppSyncDeps: HomeAppSyncDeps | null = filesApi
+    ? {
+        api: {
+          getBranchHead,
+          getRepoTree: async (pat, owner, repo, sha) =>
+            (await getRepoTree(pat, owner, repo, sha)) as Array<{
+              path: string
+              type: string
+              size?: number
+            }>,
+          getFileText: async (pat, owner, repo, path, ref) => {
+            const data = (await getFileContents(pat, owner, repo, path, ref)) as {
+              content?: string
+              encoding?: string
+            }
+            if (typeof data.content !== 'string') {
+              throw new Error(`${path} is not a file`)
+            }
+            return Buffer.from(data.content, 'base64').toString('utf8')
+          },
+        },
+        getPat: (workspaceId, connectorInstanceId) =>
+          syncCredentials.getPat(workspaceId, connectorInstanceId),
+        writeBundle: async (workspaceId, appId, files) => {
+          await deleteBundle(filesApi, workspaceId, appId)
+          for (const file of files) {
+            await filesApi.write(
+              { workspaceId, userId: '', system: true } as never,
+              { path: bundleStoragePath(appId, file.path), content: file.content },
+            )
+          }
+        },
+      }
+    : null
+
   if (filesApi) {
     app.use('/api/home-apps', homeAppRoutes({
       requireAuth: requireAuth(env.JWT_SECRET),
       filesApi,
       signingSecret: env.JWT_SECRET,
       apiOrigin: env.API_URL ?? '',
+      ...(homeAppSyncDeps
+        ? { syncNow: (row) => syncHomeAppFromGitHub(homeAppSyncDeps, row) }
+        : {}),
     }))
   }
   if (process.env.USEBRIAN_EDITION === 'oss' && filesResolver && filesBlobClient) {
@@ -5139,6 +5186,32 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
   })
   syncWorkerRef = knowledgeSyncWorker
   if (runWorkers) knowledgeSyncWorker.start()
+
+  // ── Custom Home app sync worker ──
+  // Same 15-min cadence and the same credential resolver as the KB poller. The
+  // due-list is every github-kind app that is not disabled; the per-app HEAD
+  // early return keeps a quiet tick cheap.
+  if (homeAppSyncDeps) {
+    const homeAppSyncWorker = createHomeAppSyncWorker({
+      deps: homeAppSyncDeps,
+      getAppsDue: async () => {
+        const workspaces = await query<{ id: string }>(`SELECT id FROM workspaces`)
+        const due = []
+        for (const ws of workspaces.rows) {
+          for (const row of await listHomeAppRows(ws.id)) {
+            if (row.kind === 'github' && row.status !== 'disabled') due.push(row)
+          }
+        }
+        return due
+      },
+      onEvent: ({ repo, outcome }) => {
+        if (outcome.status === 'failed') {
+          console.warn(`[home-app-sync] ${repo}: ${outcome.error}`)
+        }
+      },
+    })
+    if (runWorkers) homeAppSyncWorker.start()
+  }
 
   // ── Mailbox sync worker (imap connector — mailbox-imap.md §Phase 2) ──
   // Archive is unconditional per connected instance; brain routing rides the

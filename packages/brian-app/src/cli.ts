@@ -11,7 +11,13 @@
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
-import { MANIFEST_FILENAME, lintBundle, validateBundle, type BundleFile } from './index.js'
+import {
+  MANIFEST_FILENAME,
+  contentTypeFor,
+  lintBundle,
+  validateBundle,
+  type BundleFile,
+} from './index.js'
 
 /** Directories that are never part of a bundle. */
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', '.github', '.next'])
@@ -44,7 +50,13 @@ function main(): void {
     process.exit(1)
   }
 
-  const result = validateBundle({ files: walk(root), manifestJson })
+  // Filter to bundle assets, exactly as the GitHub import does. A repo
+  // CONTAINS a bundle; README/LICENSE/CI config are repo furniture. If the CLI
+  // and the importer disagreed about this, CI green would mean nothing.
+  const files = walk(root).filter(
+    (f) => f.path === MANIFEST_FILENAME || contentTypeFor(f.path) !== null,
+  )
+  const result = validateBundle({ files, manifestJson })
   if (!result.ok) {
     console.error(`✗ ${result.issues.length} problem(s):\n`)
     for (const issue of result.issues) {
