@@ -677,6 +677,132 @@ describeIf('[COMP:goals/brief] triage brief persistence (§8)', () => {
   })
 })
 
+describeIf('[COMP:goals/host-cascade] host-lifecycle cascade (integration)', () => {
+  let goals: GoalsMod
+  let tasks: TasksMod
+  beforeAll(async () => {
+    process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
+    goals = await import('../goals.js')
+    tasks = await import('../tasks.js')
+  })
+
+  async function seed(): Promise<{ userId: string; workspaceId: string }> {
+    const c = await pool!.connect()
+    try {
+      const userId = await makeUser(c)
+      const workspaceId = await makeWorkspace(c, userId)
+      await addMember(c, workspaceId, userId)
+      return { userId, workspaceId }
+    } finally {
+      c.release()
+    }
+  }
+
+  async function draftOn(
+    workspaceId: string,
+    userId: string,
+    taskId: string,
+    opts: { confirmed?: boolean } = {},
+  ) {
+    return goals.createGoal({
+      workspaceId,
+      host: { type: 'task', id: taskId },
+      outcome: `Work the task ${taskId}`,
+      doneWhen: { kind: 'query', query: { predicate: { hostTaskDone: true } } },
+      confirmed: opts.confirmed ?? false,
+      createdByUserId: userId,
+    })
+  }
+
+  it('a DELETED task retires every non-terminal goal bound to it, and the draft leaves the triage list', async () => {
+    const { userId, workspaceId } = await seed()
+    const stamp = `${Date.now()}-${Math.round(performance.now())}`
+
+    const doomed = await tasks.createTask(userId, { workspaceId, title: `cascade-del-${stamp}` })
+    const draft = await draftOn(workspaceId, userId, doomed.id)
+    const armed = await draftOn(workspaceId, userId, doomed.id, { confirmed: true })
+    // A second task + draft that is NOT deleted — the cascade must be scoped to
+    // the deleted host, never a workspace-wide sweep.
+    const kept = await tasks.createTask(userId, { workspaceId, title: `cascade-keep-${stamp}` })
+    const keptDraft = await draftOn(workspaceId, userId, kept.id)
+
+    // Both drafts are on the triage surface first (this is the count the
+    // home-dock `task_triage` card renders).
+    const before = await goals.listGoals(userId, workspaceId, { confirmed: false })
+    expect(before.map((g) => g.id).sort()).toEqual([draft.id, keptDraft.id].sort())
+
+    // The soft delete the brain-inbox DELETE lane performs, then the cascade.
+    const c = await pool!.connect()
+    try {
+      await c.query(`UPDATE tasks SET valid_to = now() WHERE id = $1 AND valid_to IS NULL`, [
+        doomed.id,
+      ])
+    } finally {
+      c.release()
+    }
+    const retired = await goals.abandonGoalsForHostTaskSystem(doomed.id, 'host_task_deleted')
+    expect(retired).toBe(2) // draft AND armed — the host is gone for both
+
+    expect((await goals.getGoalByIdSystem(draft.id))?.status).toBe('abandoned')
+    expect((await goals.getGoalByIdSystem(draft.id))?.blockerReason).toBe('host_task_deleted')
+    expect((await goals.getGoalByIdSystem(armed.id))?.status).toBe('abandoned')
+
+    // The triage list (and therefore the "Tasks assignable" count) drops it; the
+    // untouched task keeps its draft.
+    const after = await goals.listGoals(userId, workspaceId, { confirmed: false })
+    expect(after.map((g) => g.id)).toEqual([keptDraft.id])
+    expect((await goals.getGoalByIdSystem(keptDraft.id))?.status).toBe('active')
+  })
+
+  it('never touches a RUNNING goal — the acting loop owns a claimed goal (single-flight)', async () => {
+    const { userId, workspaceId } = await seed()
+    const stamp = `${Date.now()}-${Math.round(performance.now())}`
+    const task = await tasks.createTask(userId, { workspaceId, title: `cascade-run-${stamp}` })
+    const running = await draftOn(workspaceId, userId, task.id, { confirmed: true })
+    await goals.setGoalStatusSystem(running.id, 'running')
+
+    expect(await goals.abandonGoalsForHostTaskSystem(task.id, 'host_task_deleted')).toBe(0)
+    expect((await goals.getGoalByIdSystem(running.id))?.status).toBe('running')
+  })
+
+  it('closing a task retires its DRAFT but leaves a CONFIRMED goal to the rollup', async () => {
+    const { userId, workspaceId } = await seed()
+    const stamp = `${Date.now()}-${Math.round(performance.now())}`
+    const task = await tasks.createTask(userId, { workspaceId, title: `cascade-close-${stamp}` })
+    const draft = await draftOn(workspaceId, userId, task.id)
+    const armed = await draftOn(workspaceId, userId, task.id, { confirmed: true })
+
+    // `updateTask` runs the drafts-only cascade in the same transaction as the
+    // close (and repoints host_id first, so both goals move to the new task id).
+    const closed = await tasks.updateTask(userId, task.id, { status: 'done' })
+    expect(closed!.id).not.toBe(task.id)
+
+    expect((await goals.getGoalByIdSystem(draft.id))?.status).toBe('abandoned')
+    expect((await goals.getGoalByIdSystem(draft.id))?.blockerReason).toBe('host_task_closed')
+    // The confirmed goal is the goal SUCCEEDING — completing it belongs to the
+    // rollup / acting loop, not the cascade.
+    expect((await goals.getGoalByIdSystem(armed.id))?.status).toBe('active')
+    expect(await goals.listGoals(userId, workspaceId, { confirmed: false })).toHaveLength(0)
+  })
+
+  it('archiving a task retires its draft too (filed away is not assignable)', async () => {
+    const { userId, workspaceId } = await seed()
+    const stamp = `${Date.now()}-${Math.round(performance.now())}`
+    const task = await tasks.createTask(userId, { workspaceId, title: `cascade-arch-${stamp}` })
+    const draft = await draftOn(workspaceId, userId, task.id)
+
+    await tasks.updateTask(userId, task.id, { status: 'archived' })
+    expect((await goals.getGoalByIdSystem(draft.id))?.status).toBe('abandoned')
+
+    // An ordinary edit (no status change) must NOT retire anything — that path
+    // only repoints.
+    const other = await tasks.createTask(userId, { workspaceId, title: `cascade-edit-${stamp}` })
+    const liveDraft = await draftOn(workspaceId, userId, other.id)
+    await tasks.updateTask(userId, other.id, { title: `cascade-edit-${stamp}-v2` })
+    expect((await goals.getGoalByIdSystem(liveDraft.id))?.status).toBe('active')
+  })
+})
+
 describeIf('[COMP:goals/verifier] verify-termination wiring (integration)', () => {
   let goals: GoalsMod
   let writeback: typeof import('../../goals/writeback.js')

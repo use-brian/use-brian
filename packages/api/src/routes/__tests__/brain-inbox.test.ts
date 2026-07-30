@@ -569,6 +569,36 @@ describe('[COMP:api/brain-inbox-explain] Source descriptor', () => {
     })
   })
 
+  it('DELETE of a task cascades to the goals hosted on it (Tasks-assignable must not outlive the task)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
+    mockQuery.mockResolvedValueOnce({ rowCount: 2 } as never) // goal cascade
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // brain_verifications audit
+
+    const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/task/${ROW}`)
+
+    expect(res.status).toBe(200)
+    const cascadeSql = mockQuery.mock.calls[2][0] as string
+    expect(cascadeSql).toMatch(/UPDATE goals/)
+    expect(cascadeSql).toMatch(/status = 'abandoned'/)
+    expect(cascadeSql).toMatch(/host_type = 'task'/)
+    // Never a `running` goal — the acting loop owns a claimed goal.
+    expect(mockQuery.mock.calls[2][1]).toEqual([ROW, 'host_task_deleted', ['done', 'abandoned', 'running']])
+  })
+
+  it('DELETE of a non-task primitive runs no goal cascade', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ workspace_id: WS }] } as never) // ownership
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // soft delete
+    mockQuery.mockResolvedValueOnce({ rows: [] } as never) // memory_verifications audit
+
+    const res = await request(makeApp()).delete(`/api/brain-inbox/${WS}/memory/${ROW}`)
+
+    expect(res.status).toBe(200)
+    for (const call of mockQuery.mock.calls) {
+      expect(String(call[0])).not.toMatch(/UPDATE goals/)
+    }
+  })
+
   it('labels a workflow run from the assistant-call session + workflow tag', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{
