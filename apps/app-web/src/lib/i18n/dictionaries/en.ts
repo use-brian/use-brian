@@ -1775,10 +1775,12 @@ export const en = {
         tokenHelpTitle: "Where do I get this?",
         tokenHelpBody: "In Shopify admin: open Settings, then Apps and sales channels, then Develop apps, then your store's custom app, and reveal the Admin API access token. Shopify no longer lets anyone create new custom apps from the admin, so this works for stores that already have one.",
         tokenHelpScopes: "That custom app needs read access to products, orders, customers, inventory and locations. Add write access only for the actions you want the assistant to take.",
+        tokenHelpNotSecret: "The access token starts with shpat_ or shpca_. It is not the API secret key or client secret (those start with shpss_), and not the API key or client ID. If the only credentials you can see are a client ID and a client secret, that app issues tokens through a sign-in flow instead, and its token cannot be copied here.",
         connectBtn: "Verify and connect",
         verifyingBtn: "Verifying...",
         errDomain: "Enter your store's website or a domain like yourstore.myshopify.com.",
         errInvalidToken: "Shopify rejected that token. Check that you copied the Admin API access token for this store, then try again.",
+        errSecretPasted: "That looks like the API secret key (it starts with shpss_), not an access token. Copy the Admin API access token instead: it starts with shpat_ or shpca_.",
         errSave: "Could not connect the store. Check the domain and token, then try again.",
       },
       imap: {

@@ -82,7 +82,7 @@ import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { buildMsGraphAuthorizeUrl } from "@/lib/msgraph-oauth";
-import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
+import { normalizeShopifyShopDomain, isShpssPrefixed } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -1471,6 +1471,13 @@ function ConnectorsList() {
       return;
     }
     if (!shopifyToken.trim()) return;
+    // Catch the API secret key before spending a round trip. Shopify would
+    // answer 401 and the generic "rejected" message would not tell the user
+    // that they pasted the right-looking credential from the wrong field.
+    if (isShpssPrefixed(shopifyToken)) {
+      setShopifyError(tc.shopify.errSecretPasted);
+      return;
+    }
     const rid = rowId(c);
     const opts = shopifyConnectOpts;
     setConnecting(rid);
@@ -3033,6 +3040,7 @@ function ConnectorsList() {
                     {shopifyShowHelp && (
                       <div className="space-y-1">
                         <p className="text-[11px] text-muted-foreground">{tc.shopify.tokenHelpBody}</p>
+                        <p className="text-[11px] text-muted-foreground">{tc.shopify.tokenHelpNotSecret}</p>
                         <p className="text-[11px] text-muted-foreground">{tc.shopify.tokenHelpScopes}</p>
                       </div>
                     )}

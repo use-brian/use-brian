@@ -1586,10 +1586,12 @@ export const zh: Dictionary = {
         tokenHelpTitle: "要去哪裡取得？",
         tokenHelpBody: "在 Shopify 管理後台依序開啟「設定」>「應用程式與銷售管道」>「開發應用程式」，找到商店的自訂應用程式，顯示並複製 Admin API 存取權杖。Shopify 已不再允許從管理後台建立新的自訂應用程式，因此這個方式適用於已經有自訂應用程式的商店。",
         tokenHelpScopes: "該自訂應用程式需要商品、訂單、客戶、庫存與地點的讀取權限。只有你希望助理實際執行的操作，才需要加上寫入權限。",
+        tokenHelpNotSecret: "存取權杖以 shpat_ 或 shpca_ 開頭。它不是 API 密鑰或用戶端密鑰（那些以 shpss_ 開頭），也不是 API key 或用戶端 ID。如果你只看得到用戶端 ID 和用戶端密鑰，代表該應用程式改以登入流程發放權杖，沒有可以貼到這裡的權杖。",
         connectBtn: "驗證並連接",
         verifyingBtn: "驗證中...",
         errDomain: "請輸入商店的網站，或類似 yourstore.myshopify.com 的網域。",
         errInvalidToken: "Shopify 拒絕了這個權杖。請確認你複製的是這家商店的 Admin API 存取權杖，然後再試一次。",
+        errSecretPasted: "這看起來是 API 密鑰（以 shpss_ 開頭），不是存取權杖。請改為複製以 shpat_ 或 shpca_ 開頭的 Admin API 存取權杖。",
         errSave: "無法連接商店。請檢查網域與權杖後再試一次。",
       },
       imap: {
