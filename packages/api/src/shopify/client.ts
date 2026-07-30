@@ -61,6 +61,26 @@ export type ShopifyTokens = {
   refreshToken?: string
   expiresAt?: string  // ISO timestamp
   shopDomain: string
+  /**
+   * The MERCHANT's own Shopify app credentials, when this instance connected
+   * through their custom-distribution app rather than a Use Brian-owned one
+   * (docs/architecture/integrations/shopify.md → "Per-merchant app
+   * credentials"). Present together or not at all.
+   *
+   * They live in this envelope rather than a new column because it is already
+   * encrypted with CHANNEL_CREDENTIAL_KEY and already loaded everywhere the
+   * pair is needed — refresh and webhook HMAC. A client secret is a higher-value
+   * credential than an access token (it can mint tokens and sign deliveries for
+   * that app), so it must never move to plaintext `config`.
+   */
+  appClientId?: string
+  appClientSecret?: string
+}
+
+/** Just the merchant app pair — what refresh and webhook HMAC need. */
+export type ShopifyAppCredentials = {
+  clientId: string
+  clientSecret: string
 }
 
 /** What every API call needs. */
@@ -75,7 +95,45 @@ export function packShopifyTokens(tokens: ShopifyTokens): string {
     ...(tokens.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
     ...(tokens.expiresAt ? { expiresAt: tokens.expiresAt } : {}),
     shopDomain: tokens.shopDomain,
+    ...(tokens.appClientId && tokens.appClientSecret
+      ? { appClientId: tokens.appClientId, appClientSecret: tokens.appClientSecret }
+      : {}),
   })
+}
+
+/**
+ * The app-credentials-only blob written at step 1 of the BYO connect, BEFORE any
+ * token exists. Deliberately not `packShopifyTokens` with an empty token:
+ * `unpackShopifyTokens` must keep answering "no token → not connected", and a
+ * blank `accessToken` would blur that.
+ */
+export function packShopifyAppCredentials(params: {
+  shopDomain: string
+  clientId: string
+  clientSecret: string
+}): string {
+  return JSON.stringify({
+    shopDomain: params.shopDomain,
+    appClientId: params.clientId,
+    appClientSecret: params.clientSecret,
+  })
+}
+
+/**
+ * Read ONLY the merchant app pair out of the envelope. Lenient by design: it
+ * answers "are there app credentials?", which is a different question from
+ * `unpackShopifyTokens`'s "is there a usable token?" and is true at a point in
+ * the connect flow where the latter is deliberately false.
+ */
+export function unpackShopifyAppCredentials(blob: string): ShopifyAppCredentials | null {
+  try {
+    const parsed = JSON.parse(blob) as { appClientId?: unknown; appClientSecret?: unknown }
+    if (typeof parsed.appClientId !== 'string' || typeof parsed.appClientSecret !== 'string') return null
+    if (!parsed.appClientId || !parsed.appClientSecret) return null
+    return { clientId: parsed.appClientId, clientSecret: parsed.appClientSecret }
+  } catch {
+    return null
+  }
 }
 
 export function unpackShopifyTokens(blob: string): ShopifyTokens | null {
@@ -83,10 +141,14 @@ export function unpackShopifyTokens(blob: string): ShopifyTokens | null {
     const parsed = JSON.parse(blob) as Partial<ShopifyTokens>
     if (typeof parsed.accessToken !== 'string' || typeof parsed.shopDomain !== 'string') return null
     const managed = typeof parsed.refreshToken === 'string' && typeof parsed.expiresAt === 'string'
+    const byo =
+      typeof parsed.appClientId === 'string' && typeof parsed.appClientSecret === 'string' &&
+      !!parsed.appClientId && !!parsed.appClientSecret
     return {
       accessToken: parsed.accessToken,
       shopDomain: parsed.shopDomain,
       ...(managed ? { refreshToken: parsed.refreshToken, expiresAt: parsed.expiresAt } : {}),
+      ...(byo ? { appClientId: parsed.appClientId, appClientSecret: parsed.appClientSecret } : {}),
     }
   } catch {
     return null  // malformed payload = "no tokens"
@@ -96,6 +158,14 @@ export function unpackShopifyTokens(blob: string): ShopifyTokens | null {
 /** True when the tuple is an expiring OAuth token (vs a static pasted one). */
 export function isManagedShopifyTokens(tokens: ShopifyTokens): boolean {
   return typeof tokens.refreshToken === 'string' && typeof tokens.expiresAt === 'string'
+}
+
+/** The merchant app pair carried on a tuple, if this is a BYO instance. */
+export function shopifyAppCredentialsFromTokens(
+  tokens: ShopifyTokens,
+): ShopifyAppCredentials | null {
+  if (!tokens.appClientId || !tokens.appClientSecret) return null
+  return { clientId: tokens.appClientId, clientSecret: tokens.appClientSecret }
 }
 
 // ── OAuth token endpoint ─────────────────────────────────────
@@ -142,11 +212,22 @@ export async function exchangeShopifyAuthorizationCode(params: {
   code: string
   clientId: string
   clientSecret: string
+  /**
+   * Request an EXPIRING offline token (default). `expiring` defaults to `0` at
+   * Shopify, which mints a PERMANENT offline token carrying no refresh token —
+   * that silently strands the whole rotation path, which is why the app-web
+   * exchange has a regression test pinning it. Kept as a parameter rather than a
+   * constant because a merchant's own custom app is exempt from the expiring
+   * mandate (only public apps must expire), so non-expiring is a legitimate
+   * choice there; see shopify.md → "Per-merchant app credentials".
+   */
+  expiring?: boolean
 }): Promise<ShopifyTokens> {
   return tokenEndpointCall(params.shopDomain, {
     client_id: params.clientId,
     client_secret: params.clientSecret,
     code: params.code,
+    ...(params.expiring === false ? {} : { expiring: '1' }),
   })
 }
 
@@ -200,7 +281,12 @@ export function createShopifyTokenManager(params: {
         return { accessToken: current.accessToken, shopDomain: current.shopDomain }
       }
 
-      const cfg = params.getAppConfig()
+      // The MERCHANT's own app pair, when this instance carries one, wins over
+      // the deployment-wide config: the token was minted by their app, so only
+      // their secret can refresh it. Falling through to a Use Brian-owned
+      // SHOPIFY_CLIENT_SECRET here would send the wrong credentials to the token
+      // endpoint and fail in a way that reads like an expired grant.
+      const cfg = shopifyAppCredentialsFromTokens(current) ?? params.getAppConfig()
       if (!cfg) {
         // Managed tuple but the server has no app credentials (env unset).
         // Inside the leeway window the current token may still work — use it
@@ -213,12 +299,22 @@ export function createShopifyTokenManager(params: {
         )
       }
 
-      const next = await refreshShopifyTokens({
+      const refreshed = await refreshShopifyTokens({
         shopDomain: current.shopDomain,
         refreshToken: current.refreshToken as string,
         clientId: cfg.clientId,
         clientSecret: cfg.clientSecret,
       })
+      // CARRY THE APP PAIR FORWARD. The token endpoint's response knows nothing
+      // about which app credentials were used, so a bare `refreshed` tuple drops
+      // them — and the NEXT refresh would then have no secret to present and
+      // would fail as if the grant had been revoked. The pair survives rotation.
+      const next: ShopifyTokens = {
+        ...refreshed,
+        ...(current.appClientId && current.appClientSecret
+          ? { appClientId: current.appClientId, appClientSecret: current.appClientSecret }
+          : {}),
+      }
       // Rotation invariant: persist BEFORE first use. If this write fails the
       // old refresh token is already burned and the user must reconnect —
       // failing loudly here beats silently continuing with a tuple we cannot

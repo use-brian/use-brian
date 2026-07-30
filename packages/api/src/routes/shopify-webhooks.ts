@@ -8,9 +8,11 @@
  * `X-Shopify-Hmac-Sha256` (base64 HMAC-SHA256 of the raw body, keyed by the
  * app client secret) and expects a 2xx within ~5s — verify, ack, then act.
  *
- * With no app client secret configured (`SHOPIFY_CLIENT_ID`/`SECRET` unset —
- * P0 registration pending) the receiver fails CLOSED: every delivery gets a
- * 401 and a one-time log line. Code-complete but inert.
+ * Signing keys are resolved PER SHOP, merchant-app first: an instance connected
+ * through the merchant's own custom-distribution app is signed with that app's
+ * secret, which is stored on the instance. The deployment-wide
+ * `SHOPIFY_CLIENT_SECRET` is the fallback for Use Brian-owned installs. With
+ * neither available the receiver fails CLOSED: 401 plus a one-time log line.
  *
  * v1 actions (docs/architecture/integrations/shopify.md → "Compliance webhook
  * receiver"): the customer topics only ack — v1 persists no customer data
@@ -24,7 +26,7 @@
 
 import { Router } from 'express'
 import { getConnectorConfig } from '../connector-config.js'
-import { normalizeShopDomain, verifyShopifyWebhookHmac } from '../shopify/client.js'
+import { normalizeShopDomain, verifyShopifyWebhookHmac, unpackShopifyAppCredentials } from '../shopify/client.js'
 import type { ConnectorInstanceStore } from '../db/connector-instance-store.js'
 
 export type ShopifyWebhookRouteOptions = {
@@ -58,24 +60,52 @@ export async function findShopifyInstancesByShopDomain(
   })
 }
 
+/**
+ * The app client secrets that could legitimately have signed a delivery for this
+ * shop: the merchant app pair of every instance bound to the domain.
+ *
+ * The shop domain arrives in an attacker-controlled header and is read BEFORE
+ * verification, which is safe: choosing a candidate secret cannot grant anything
+ * — a wrong choice simply fails the HMAC. What it does cost is a store read (and
+ * one decrypt per matching instance, normally exactly one) on an unauthenticated
+ * request. That is the deliberate trade for supporting per-merchant apps; keep
+ * the domain filter ahead of the decrypt so the work stays bounded.
+ *
+ * `getAuthCredentialsSystem` (not `getCredentialsSystem`) because the latter
+ * filters `connected = true`, which would skip an instance still mid-connect —
+ * exactly the window in which a first delivery can arrive.
+ */
+export async function resolveShopifyWebhookSecrets(
+  store: ConnectorInstanceStore,
+  shopDomain: string,
+): Promise<string[]> {
+  const instances = await findShopifyInstancesByShopDomain(store, shopDomain)
+  const secrets: string[] = []
+  for (const inst of instances) {
+    try {
+      const creds = await store.getAuthCredentialsSystem(inst.id)
+      // Normalized union: only the oauth variant carries a client_secret.
+      if (creds?.type !== 'oauth') continue
+      const pair = unpackShopifyAppCredentials(creds.client_secret)
+      if (pair && !secrets.includes(pair.clientSecret)) secrets.push(pair.clientSecret)
+    } catch (err) {
+      // One unreadable instance must not stop a delivery another instance can
+      // verify — and must not be silent either.
+      console.warn(`[shopify-webhook] could not read credentials for instance ${inst.id}:`, err instanceof Error ? err.message : String(err))
+    }
+  }
+  return secrets
+}
+
 export function shopifyWebhookRoutes(options: ShopifyWebhookRouteOptions): Router {
   const router = Router()
   const getClientSecret =
     options.getClientSecret ?? (() => getConnectorConfig('shopify')?.clientSecret)
   let warnedInert = false
 
-  router.post('/', (req, res) => {
-    const clientSecret = getClientSecret()
-    if (!clientSecret) {
-      // Inert mode (P0 registration pending): fail closed. Shopify keeps
-      // retrying / flags the endpoint, which is honest — we cannot verify.
-      if (!warnedInert) {
-        warnedInert = true
-        console.warn('[shopify-webhook] SHOPIFY_CLIENT_SECRET not configured; rejecting deliveries (401)')
-      }
-      res.status(401).json({ error: 'Webhook verification not configured' })
-      return
-    }
+  router.post('/', async (req, res) => {
+    const topic = req.header('x-shopify-topic') ?? ''
+    const shopDomain = req.header('x-shopify-shop-domain') ?? ''
 
     // Raw body captured by the global express.json verify hook; fall back to
     // a Buffer body for a route-level raw parser (workflow-webhooks pattern).
@@ -90,13 +120,37 @@ export function shopifyWebhookRoutes(options: ShopifyWebhookRouteOptions): Route
       return
     }
 
-    if (!verifyShopifyWebhookHmac(body, req.header('x-shopify-hmac-sha256'), clientSecret)) {
+    // Candidate signing keys, merchant-app first. A per-merchant custom
+    // distribution app signs with ITS secret, which only that instance holds;
+    // the deployment-wide secret stays as the fallback for instances connected
+    // through a Use Brian-owned app. See "Per-merchant app credentials".
+    let candidates: string[] = []
+    try {
+      candidates = await resolveShopifyWebhookSecrets(options.connectorInstanceStore, shopDomain)
+    } catch (err) {
+      console.error('[shopify-webhook] instance secret lookup failed:', err)
+    }
+    const deploymentSecret = getClientSecret()
+    if (deploymentSecret && !candidates.includes(deploymentSecret)) candidates.push(deploymentSecret)
+
+    if (candidates.length === 0) {
+      // No merchant app bound to this shop and no deployment secret: fail
+      // CLOSED. Shopify keeps retrying / flags the endpoint, which is honest —
+      // we genuinely cannot verify.
+      if (!warnedInert) {
+        warnedInert = true
+        console.warn('[shopify-webhook] no signing secret for any instance and SHOPIFY_CLIENT_SECRET unset; rejecting deliveries (401)')
+      }
+      res.status(401).json({ error: 'Webhook verification not configured' })
+      return
+    }
+
+    const providedHmac = req.header('x-shopify-hmac-sha256')
+    if (!candidates.some((secret) => verifyShopifyWebhookHmac(body, providedHmac, secret))) {
       res.status(401).json({ error: 'Invalid signature' })
       return
     }
 
-    const topic = req.header('x-shopify-topic') ?? ''
-    const shopDomain = req.header('x-shopify-shop-domain') ?? ''
     const payload = req.body
 
     // Ack immediately (Shopify's ~5s timeout), then act.

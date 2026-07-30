@@ -67,7 +67,7 @@ import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
-import { normalizeShopDomain, packShopifyTokens, getShopIdentity } from '../shopify/client.js'
+import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -1356,6 +1356,206 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     res.json({ shopDomain: result.shopDomain, source: result.source })
   })
 
+  // ── Per-merchant Shopify app credentials ──────────────────────────
+  //
+  // A merchant's own custom-distribution app is capped at one store, so its
+  // client id + secret belong to the connector INSTANCE, not to deployment
+  // config. See docs/architecture/integrations/shopify.md → "Per-merchant app
+  // credentials".
+
+  /** Validate a caller-supplied app pair. Returns null when absent or unusable. */
+  function readShopifyAppPair(
+    input: { clientId?: string; clientSecret?: string } | undefined,
+  ): { clientId: string; clientSecret: string } | null {
+    const clientId = input?.clientId?.trim()
+    const clientSecret = input?.clientSecret?.trim()
+    if (!clientId || !clientSecret) return null
+    // Size caps + no CR/LF: these values are interpolated into an authorize URL
+    // and used as an HMAC key, so header/URL injection is the shape to block.
+    if (clientId.length > 2048 || clientSecret.length > 8192) return null
+    if (/[\r\n]/.test(clientId) || /[\r\n]/.test(clientSecret)) return null
+    return { clientId, clientSecret }
+  }
+
+  /**
+   * Re-read the pair already stored on an instance. Load-bearing for reconnects:
+   * `store-credentials` rewrites the envelope wholesale, so a call that omits
+   * `shopifyApp` would erase the credentials and break refresh + webhook
+   * verification — the same whole-blob-rewrite hazard msgraph documents.
+   *
+   * Uses `getAuthCredentialsSystem`, NOT `getCredentialsSystem`: the latter
+   * filters `connected = true`, and this row is deliberately disconnected until
+   * the callback lands a token. Reading it with the wrong accessor returns null
+   * and surfaces as `app_credentials_missing` on an otherwise correct connect.
+   */
+  async function loadStoredShopifyAppPair(
+    instanceId: string | undefined,
+  ): Promise<{ clientId: string; clientSecret: string } | null> {
+    if (!instanceId) return null
+    try {
+      const creds = await connectorInstanceStore.getAuthCredentialsSystem(instanceId)
+      // The accessor returns the NORMALIZED union; only the oauth variant carries
+      // a client_secret, and that is the variant every Shopify envelope uses.
+      if (creds?.type !== 'oauth') return null
+      return unpackShopifyAppCredentials(creds.client_secret)
+    } catch (err) {
+      console.warn(`[connectors] could not read stored shopify app pair for ${instanceId}:`, err instanceof Error ? err.message : String(err))
+      return null
+    }
+  }
+
+  // POST /shopify/app-credentials — step 1 of the BYO connect: store the
+  // merchant's app pair BEFORE the authorize redirect, when no token exists
+  // yet. The instance stays `connected: false` until the callback lands a
+  // token, so nothing claims a working connection in between.
+  router.post('/shopify/app-credentials', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+    const body = (req.body ?? {}) as {
+      shopDomain?: string
+      clientId?: string
+      clientSecret?: string
+      instanceId?: string
+    }
+    const shopDomain = normalizeShopDomain(body.shopDomain ?? '')
+    if (!shopDomain) {
+      res.status(400).json({ error: 'invalid_shop_domain' }); return
+    }
+    const pair = readShopifyAppPair(body)
+    if (!pair) {
+      res.status(400).json({ error: 'invalid_app_credentials' }); return
+    }
+    if (body.instanceId !== undefined && !UUID_RE.test(body.instanceId)) {
+      res.status(400).json({ error: 'Invalid instanceId' }); return
+    }
+
+    const credentials: ConnectorCredentials = {
+      type: 'oauth',
+      client_id: 'shopify_byo_pending',
+      client_secret: packShopifyAppCredentials({
+        shopDomain,
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
+      }),
+    }
+
+    try {
+      if (body.instanceId) {
+        await connectorInstanceStore.update(userId, body.instanceId, { credentials, connected: false })
+        res.json({ ok: true, connectorInstanceId: body.instanceId })
+        return
+      }
+      const created = await connectorInstanceStore.createUserInstance({
+        userId,
+        provider: 'shopify',
+        label: shopDomain,
+        connectedEmail: shopDomain,
+        credentials,
+        // Not connected: there is no token yet. The webhook routing key is set
+        // now so a delivery arriving mid-flow can still resolve this instance.
+        connected: false,
+        config: { shopDomain },
+      })
+      res.json({ ok: true, connectorInstanceId: created.id })
+    } catch (err) {
+      console.error('[connectors] shopify app-credentials failed:', err)
+      res.status(500).json({ error: 'store_failed' })
+    }
+  })
+
+  // POST /shopify/oauth-callback — step 3 of the BYO connect.
+  //
+  // The exchange lives HERE, not in the app-web callback, because app-web has no
+  // database: letting it verify the HMAC or exchange the code would mean shipping
+  // a merchant's client secret out of the API over HTTP. app-web keeps only the
+  // job that needs its cookie (the state-nonce CSRF gate) and forwards the raw
+  // query here. The secret never leaves this process.
+  //
+  // `instanceId` is always present: the BYO flow stores app credentials first,
+  // so the row exists before the merchant ever reaches Shopify's consent screen.
+  router.post('/shopify/oauth-callback', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      params?: Record<string, string | string[] | undefined>
+      instanceId?: string
+    }
+    const params = body.params ?? {}
+    const instanceId = body.instanceId
+    if (!instanceId || !UUID_RE.test(instanceId)) {
+      res.status(400).json({ error: 'invalid_instance' }); return
+    }
+    const code = typeof params.code === 'string' ? params.code : ''
+    const shopDomain = normalizeShopDomain(typeof params.shop === 'string' ? params.shop : '')
+    if (!code || !shopDomain) {
+      res.status(400).json({ error: 'invalid_callback' }); return
+    }
+
+    const pair = await loadStoredShopifyAppPair(instanceId)
+    if (!pair) {
+      // Step 1 never ran, or the instance is not a BYO one. Without the app
+      // secret we can neither verify this callback nor exchange the code.
+      res.status(400).json({ error: 'app_credentials_missing' }); return
+    }
+
+    // Shopify signs the callback query with the app secret. Verified BEFORE the
+    // exchange so a forged callback never reaches the token endpoint.
+    if (!verifyShopifyOAuthQueryHmac(params, pair.clientSecret)) {
+      res.status(401).json({ error: 'invalid_hmac' }); return
+    }
+
+    try {
+      const tokens = await exchangeShopifyAuthorizationCode({
+        shopDomain,
+        code,
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
+      })
+
+      // Best-effort identity fetch: proves the token works and yields the
+      // canonical host. Non-fatal — `shop` was already validated and canonical.
+      let canonical = shopDomain
+      try {
+        const identity = await (opts.shopifyVerifyToken ?? getShopIdentity)({
+          accessToken: tokens.accessToken,
+          shopDomain,
+        })
+        canonical = normalizeShopDomain(identity.myshopifyDomain ?? '') ?? shopDomain
+      } catch (err) {
+        console.warn(`[connectors] shopify identity fetch failed for ${shopDomain}:`, err instanceof Error ? err.message : String(err))
+      }
+
+      const updated = await connectorInstanceStore.update(userId, instanceId, {
+        connected: true,
+        connectedEmail: canonical,
+        credentials: {
+          type: 'oauth',
+          client_id: 'shopify_oauth',
+          client_secret: packShopifyTokens({
+            ...tokens,
+            shopDomain: canonical,
+            // The pair must survive this write, or refresh and webhook
+            // verification both break on the very next call.
+            appClientId: pair.clientId,
+            appClientSecret: pair.clientSecret,
+          }),
+        },
+      })
+      if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      // `byoApp` is a NON-SECRET marker: it tells the ingest UI that this
+      // instance's deliveries are verifiable (we hold the signing secret), which
+      // a paste-path instance's are not. Kept in plaintext config precisely so
+      // the sources list can read it without decrypting anything.
+      await connectorInstanceStore.setConfig(userId, instanceId, { shopDomain: canonical, byoApp: true })
+
+      res.json({ ok: true, connectorInstanceId: instanceId })
+    } catch (err) {
+      console.error('[connectors] shopify oauth-callback failed:', err)
+      res.status(502).json({ error: 'token_exchange_failed' })
+    }
+  })
+
   // ── POST /:provider/store-credentials — persist an OAuth/PAT grant ──
   //
   // Request body (any one secret field, per the open OAuth callbacks +
@@ -1387,6 +1587,14 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
        * envelope, discriminated by the presence of refreshToken + expiresAt.
        */
       shopifyTokens?: { accessToken?: string; refreshToken?: string; expiresAt?: string; shopDomain?: string }
+      /**
+       * The MERCHANT's own app pair, when this instance connected through their
+       * custom-distribution app. Kept separate from `shopifyTokens` at the API
+       * boundary because it answers a different question (which app minted this)
+       * even though both land in one encrypted envelope.
+       * docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
+       */
+      shopifyApp?: { clientId?: string; clientSecret?: string }
       /**
        * Microsoft Graph's rotating tuple (docs/architecture/integrations/msgraph.md).
        * Graph replaces the refresh token on every use, so access + refresh +
@@ -1443,6 +1651,17 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
       // Shopify's own answer for the canonical host wins over what the user
       // typed — the same precedence the OAuth callback applies.
       const storedDomain = verifiedDomain ?? shopDomain
+      // The merchant app pair, either supplied on this call (the OAuth callback
+      // sends it alongside the token) or already stored from the app-credentials
+      // step. Re-reading the stored pair matters: without it a reconnect that
+      // omits `shopifyApp` would silently strip the credentials and break every
+      // later refresh and webhook verification for that instance.
+      const appPair = readShopifyAppPair(body.shopifyApp)
+      if (body.shopifyApp && !appPair) {
+        res.status(400).json({ error: 'Invalid shopifyApp credentials' })
+        return
+      }
+      const carriedPair = appPair ?? (await loadStoredShopifyAppPair(body.instanceId))
       credentials = {
         type: 'oauth',
         // Discriminate on tuple SHAPE, never on the token prefix: Shopify's
@@ -1456,6 +1675,9 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
           accessToken,
           shopDomain: storedDomain,
           ...(managed ? { refreshToken: t?.refreshToken, expiresAt: t?.expiresAt } : {}),
+          ...(carriedPair
+            ? { appClientId: carriedPair.clientId, appClientSecret: carriedPair.clientSecret }
+            : {}),
         }),
       }
       // The shop domain plays the connectedEmail role ("Connected:
