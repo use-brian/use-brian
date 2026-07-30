@@ -103,10 +103,25 @@ describe('[COMP:api/shopify-client] Shopify GraphQL client', () => {
       expect.objectContaining({ method: 'POST' }),
     )
     const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
-    expect(body).toEqual({ client_id: 'cid', client_secret: 'csec', code: 'c0de' })
+    // `expiring` defaults to 0 at Shopify, which mints a PERMANENT token with no
+    // refresh token and silently strands the whole rotation path. Asking for it
+    // by default is the invariant; app-web's exchange has the same guard.
+    expect(body).toEqual({ client_id: 'cid', client_secret: 'csec', code: 'c0de', expiring: '1' })
     expect(tokens.refreshToken).toBe('rt')
     expect(tokens.shopDomain).toBe(SHOP)
     expect(Date.parse(tokens.expiresAt as string)).toBeGreaterThan(Date.now())
+  })
+
+  it('exchange can opt OUT of expiring for a merchant-owned custom app', async () => {
+    // Only PUBLIC apps must use expiring tokens (and only they face the 2027
+    // cutoff); a merchant's own custom app may legitimately hold a non-expiring
+    // one. The opt-out has to be explicit, never the default.
+    mockFetch.mockResolvedValue(jsonResponse({ access_token: 'perm_at', scope: 'read_products' }))
+    await exchangeShopifyAuthorizationCode({
+      shopDomain: SHOP, code: 'c0de', clientId: 'cid', clientSecret: 'csec', expiring: false,
+    })
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)
+    expect(body).not.toHaveProperty('expiring')
   })
 
   it('exchange maps a legacy non-expiring response to a static tuple', async () => {

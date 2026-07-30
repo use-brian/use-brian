@@ -212,11 +212,22 @@ export async function exchangeShopifyAuthorizationCode(params: {
   code: string
   clientId: string
   clientSecret: string
+  /**
+   * Request an EXPIRING offline token (default). `expiring` defaults to `0` at
+   * Shopify, which mints a PERMANENT offline token carrying no refresh token —
+   * that silently strands the whole rotation path, which is why the app-web
+   * exchange has a regression test pinning it. Kept as a parameter rather than a
+   * constant because a merchant's own custom app is exempt from the expiring
+   * mandate (only public apps must expire), so non-expiring is a legitimate
+   * choice there; see shopify.md → "Per-merchant app credentials".
+   */
+  expiring?: boolean
 }): Promise<ShopifyTokens> {
   return tokenEndpointCall(params.shopDomain, {
     client_id: params.clientId,
     client_secret: params.clientSecret,
     code: params.code,
+    ...(params.expiring === false ? {} : { expiring: '1' }),
   })
 }
 

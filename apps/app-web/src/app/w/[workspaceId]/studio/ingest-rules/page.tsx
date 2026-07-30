@@ -74,6 +74,8 @@ type IngestSource = {
   connectedEmail: string | null;
   connected: boolean;
   ingestionEnabled: boolean;
+  /** False when this instance's events cannot reach the brain (see ingestUnavailable). */
+  ambientIngestSupported?: boolean;
   nature: IngestNature;
   rules: IngestRule[];
 };
@@ -87,19 +89,22 @@ type AvailableProvider = {
 };
 
 /**
- * Providers whose ambient ingest cannot fire, whatever this page shows.
+ * Whether a source's events can actually reach the brain.
  *
- * Shopify webhook deliveries are HMAC-signed with OUR app's client secret, so
- * only an OAuth-connected shop produces verifiable events (shopify.md → plan
- * D9). The Shopify OAuth path is not offered — every Shopify instance is
- * pasted-token — so enabling ingestion here would flip `ingestion_enabled`,
- * report success, and never deliver an episode. A toggle that reports success
- * and does nothing is worse than no toggle, so the row says so instead.
+ * The server decides (`ambientIngestSupported` on the sources DTO) because the
+ * answer is per INSTANCE, not per provider: a Shopify store connected through
+ * the merchant's own app is verifiable and ingests fine, while one connected
+ * with a pasted admin token is not (its deliveries are signed by an app whose
+ * secret we do not hold). Older API responses omit the field, so absent means
+ * supported.
  *
- * Remove the entry when the OAuth connect path returns.
+ * A toggle that reports success and delivers nothing is worse than no toggle,
+ * which is why the row says so instead.
  * docs/architecture/integrations/shopify.md → "Ambient ingest".
  */
-const INGEST_UNAVAILABLE_PROVIDERS = new Set(["shopify"]);
+function ingestUnavailable(s: { ambientIngestSupported?: boolean }): boolean {
+  return s.ambientIngestSupported === false;
+}
 
 type RepoOption = {
   fullName: string;
@@ -443,13 +448,7 @@ export default function StudioIngestRulesPage() {
           ownedPersonal?: boolean;
         }) => {
           setSources(data.sources);
-          // Never advertise "connect this to ingest" for a provider whose
-          // ingest cannot fire (INGEST_UNAVAILABLE_PROVIDERS).
-          setAvailable(
-            (data.available ?? []).filter(
-              (a) => !INGEST_UNAVAILABLE_PROVIDERS.has(a.provider),
-            ),
-          );
+          setAvailable(data.available ?? []);
           setOwnedPersonal(
             typeof data.ownedPersonal === "boolean" ? data.ownedPersonal : undefined,
           );
@@ -584,7 +583,7 @@ export default function StudioIngestRulesPage() {
           </div>
           <span
             className={pillCls(
-              INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+              ingestUnavailable(s)
                 ? "off"
                 : !s.connected
                   ? "attention"
@@ -593,7 +592,7 @@ export default function StudioIngestRulesPage() {
                     : "off",
             )}
           >
-            {INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+            {ingestUnavailable(s)
               ? copy.statusUnavailable
               : !s.connected
                 ? copy.sectionAttention
@@ -651,9 +650,9 @@ export default function StudioIngestRulesPage() {
 
         {/* Actions — enable/disable, plus the GitHub repo-picker toggle.
             A provider whose ingest cannot fire gets an explanation instead of
-            a switch (INGEST_UNAVAILABLE_PROVIDERS). */}
+            a switch (ingestUnavailable). */}
         <div className="flex flex-wrap items-center gap-2">
-          {INGEST_UNAVAILABLE_PROVIDERS.has(s.provider) ? (
+          {ingestUnavailable(s) ? (
             <p className="text-[12px] leading-relaxed text-muted-foreground">
               {copy.unavailableNote}
             </p>
@@ -826,8 +825,8 @@ export default function StudioIngestRulesPage() {
       label = s.label;
       subtitle = s.connectedEmail;
       // No status dot when ingest cannot fire — an "on" dot would claim the
-      // source is delivering (INGEST_UNAVAILABLE_PROVIDERS).
-      dot = INGEST_UNAVAILABLE_PROVIDERS.has(s.provider)
+      // source is delivering (ingestUnavailable).
+      dot = ingestUnavailable(s)
         ? null
         : !s.connected
           ? "attention"

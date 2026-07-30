@@ -67,7 +67,7 @@ import { validateGcsByoBinding } from '../files/gcs-byo-validate.js'
 import type { GcsServiceAccountCredentials } from '../files/gcs-client.js'
 import { validateS3ByoBinding } from '../files/s3-byo-validate.js'
 import type { S3Credentials } from '../files/s3-client.js'
-import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity } from '../shopify/client.js'
+import { normalizeShopDomain, packShopifyTokens, packShopifyAppCredentials, unpackShopifyAppCredentials, getShopIdentity, verifyShopifyOAuthQueryHmac, exchangeShopifyAuthorizationCode } from '../shopify/client.js'
 import { resolveShopifyDomain, type ShopifyDomainResolution } from '../shopify/resolve-domain.js'
 import { DESKTOP_OAUTH_EXCHANGERS, type DesktopOAuthExchangeResult } from '../connectors/desktop-oauth-exchange.js'
 import { resolveMailboxPreset } from '../mailbox/presets.js'
@@ -1453,6 +1453,99 @@ export function connectorRoutes(opts: ConnectorRouteOptions): Router {
     } catch (err) {
       console.error('[connectors] shopify app-credentials failed:', err)
       res.status(500).json({ error: 'store_failed' })
+    }
+  })
+
+  // POST /shopify/oauth-callback — step 3 of the BYO connect.
+  //
+  // The exchange lives HERE, not in the app-web callback, because app-web has no
+  // database: letting it verify the HMAC or exchange the code would mean shipping
+  // a merchant's client secret out of the API over HTTP. app-web keeps only the
+  // job that needs its cookie (the state-nonce CSRF gate) and forwards the raw
+  // query here. The secret never leaves this process.
+  //
+  // `instanceId` is always present: the BYO flow stores app credentials first,
+  // so the row exists before the merchant ever reaches Shopify's consent screen.
+  router.post('/shopify/oauth-callback', async (req, res) => {
+    const userId = req.userId
+    if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+    const body = (req.body ?? {}) as {
+      params?: Record<string, string | string[] | undefined>
+      instanceId?: string
+    }
+    const params = body.params ?? {}
+    const instanceId = body.instanceId
+    if (!instanceId || !UUID_RE.test(instanceId)) {
+      res.status(400).json({ error: 'invalid_instance' }); return
+    }
+    const code = typeof params.code === 'string' ? params.code : ''
+    const shopDomain = normalizeShopDomain(typeof params.shop === 'string' ? params.shop : '')
+    if (!code || !shopDomain) {
+      res.status(400).json({ error: 'invalid_callback' }); return
+    }
+
+    const pair = await loadStoredShopifyAppPair(instanceId)
+    if (!pair) {
+      // Step 1 never ran, or the instance is not a BYO one. Without the app
+      // secret we can neither verify this callback nor exchange the code.
+      res.status(400).json({ error: 'app_credentials_missing' }); return
+    }
+
+    // Shopify signs the callback query with the app secret. Verified BEFORE the
+    // exchange so a forged callback never reaches the token endpoint.
+    if (!verifyShopifyOAuthQueryHmac(params, pair.clientSecret)) {
+      res.status(401).json({ error: 'invalid_hmac' }); return
+    }
+
+    try {
+      const tokens = await exchangeShopifyAuthorizationCode({
+        shopDomain,
+        code,
+        clientId: pair.clientId,
+        clientSecret: pair.clientSecret,
+      })
+
+      // Best-effort identity fetch: proves the token works and yields the
+      // canonical host. Non-fatal — `shop` was already validated and canonical.
+      let canonical = shopDomain
+      try {
+        const identity = await (opts.shopifyVerifyToken ?? getShopIdentity)({
+          accessToken: tokens.accessToken,
+          shopDomain,
+        })
+        canonical = normalizeShopDomain(identity.myshopifyDomain ?? '') ?? shopDomain
+      } catch (err) {
+        console.warn(`[connectors] shopify identity fetch failed for ${shopDomain}:`, err instanceof Error ? err.message : String(err))
+      }
+
+      const updated = await connectorInstanceStore.update(userId, instanceId, {
+        connected: true,
+        connectedEmail: canonical,
+        credentials: {
+          type: 'oauth',
+          client_id: 'shopify_oauth',
+          client_secret: packShopifyTokens({
+            ...tokens,
+            shopDomain: canonical,
+            // The pair must survive this write, or refresh and webhook
+            // verification both break on the very next call.
+            appClientId: pair.clientId,
+            appClientSecret: pair.clientSecret,
+          }),
+        },
+      })
+      if (!updated) { res.status(404).json({ error: 'Connector instance not found' }); return }
+      // `byoApp` is a NON-SECRET marker: it tells the ingest UI that this
+      // instance's deliveries are verifiable (we hold the signing secret), which
+      // a paste-path instance's are not. Kept in plaintext config precisely so
+      // the sources list can read it without decrypting anything.
+      await connectorInstanceStore.setConfig(userId, instanceId, { shopDomain: canonical, byoApp: true })
+
+      res.json({ ok: true, connectorInstanceId: instanceId })
+    } catch (err) {
+      console.error('[connectors] shopify oauth-callback failed:', err)
+      res.status(502).json({ error: 'token_exchange_failed' })
     }
   })
 
