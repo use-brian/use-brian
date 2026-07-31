@@ -20,6 +20,18 @@ export const DECK_PAGE_H = 7.5;
 const MARGIN = 0.9;
 const BODY_W = DECK_PAGE_W - 2 * MARGIN;
 
+/**
+ * The content band on a chromed slide, between the header rule and the footer.
+ * Body content is CENTERED in this band rather than top-anchored: boxes are
+ * sized for the maximum a slide may hold (10 bullets), so a realistic 3-bullet
+ * slide top-anchored in one leaves ~55% of the page visibly empty and the deck
+ * reads as unfinished. Centering costs nothing when a slide is full and fixes
+ * the common case.
+ */
+const BODY_TOP = 2.15;
+const BODY_BOTTOM = DECK_PAGE_H - 0.85;
+const BODY_H = BODY_BOTTOM - BODY_TOP;
+
 export interface DeckBox {
   x: number;
   y: number;
@@ -166,7 +178,13 @@ function plainText(
   };
 }
 
-function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSizePt = 18): DeckPrimitive {
+function bulletBlock(
+  style: DeckStyle,
+  bullets: string[],
+  box: DeckBox,
+  fontSizePt = 22,
+  valign: 'top' | 'middle' = 'middle',
+): DeckPrimitive {
   return {
     kind: 'text',
     box,
@@ -174,11 +192,11 @@ function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSize
     fontFace: style.bodyFont,
     fontSizePt,
     align: 'left',
-    valign: 'top',
+    valign,
     shrinkToFit: true,
-    lineSpacingMultiple: 1.15,
-    paraSpaceAfterPt: 14,
-    bulletIndentPt: 14,
+    lineSpacingMultiple: 1.25,
+    paraSpaceAfterPt: Math.round(fontSizePt * 0.85),
+    bulletIndentPt: 16,
   };
 }
 
@@ -186,36 +204,52 @@ function bulletBlock(style: DeckStyle, bullets: string[], box: DeckBox, fontSize
 // Slide chrome
 // ---------------------------------------------------------------------------
 
+/**
+ * Title slide: a full-height accent spine on the left edge anchors the page so
+ * the generous whitespace reads as deliberate rather than as a slide nobody
+ * finished. Title block sits on the lower-middle third, the way a book cover
+ * carries its title.
+ */
 function layoutTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.1, h: 0.14 }, fill: style.accent },
-    plainText(spec.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 1.9 }, {
+    { kind: 'rect', box: { x: 0, y: 0, w: 0.32, h: DECK_PAGE_H }, fill: style.accent },
+    plainText(spec.title, style.text, { x: MARGIN, y: 2.75, w: BODY_W, h: 2.2 }, {
       fontFace: style.headingFont,
-      fontSizePt: 54,
+      fontSizePt: 60,
       bold: true,
+      valign: 'bottom',
       shrinkToFit: true,
+      lineSpacingMultiple: 1.05,
     }),
   ];
   if (spec.subtitle) {
     primitives.push(
-      plainText(spec.subtitle, style.muted, { x: MARGIN, y: 4.55, w: BODY_W, h: 0.9 }, {
+      plainText(spec.subtitle, style.muted, { x: MARGIN, y: 5.42, w: BODY_W, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 20,
+        fontSizePt: 22,
       }),
     );
   }
   return { background: style.background, primitives };
 }
 
+/**
+ * Header rule spans the full body width rather than the old 0.75" accent stub,
+ * which read as a stray artifact. The accent is the leading segment of the
+ * rule, so the motif survives while the line does real compositional work.
+ */
 function header(style: DeckStyle, title: string): DeckPrimitive[] {
+  const ruleY = 1.72;
   return [
-    plainText(title, style.text, { x: MARGIN, y: 0.5, w: BODY_W, h: 0.85 }, {
+    plainText(title, style.text, { x: MARGIN, y: 0.62, w: BODY_W, h: 1.0 }, {
       fontFace: style.headingFont,
-      fontSizePt: 28,
+      fontSizePt: 34,
       bold: true,
+      valign: 'bottom',
       shrinkToFit: true,
     }),
-    { kind: 'rect', box: { x: MARGIN + 0.02, y: 1.42, w: 0.75, h: 0.09 }, fill: style.accent },
+    { kind: 'rect', box: { x: MARGIN, y: ruleY, w: BODY_W, h: 0.02 }, fill: style.grid },
+    { kind: 'rect', box: { x: MARGIN, y: ruleY - 0.03, w: 1.6, h: 0.08 }, fill: style.accent },
   ];
 }
 
@@ -240,24 +274,26 @@ function withFooter(slide: DeckSlideLayout, style: DeckStyle, deckTitle: string,
 
 function layoutContentSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives = header(style, slide.title);
-  const top = 1.85;
-  const bodyH = DECK_PAGE_H - top - 0.75;
   const hasBullets = !!slide.bullets?.length;
-  const sideBox: DeckBox = { x: 6.6, y: top, w: DECK_PAGE_W - 6.6 - MARGIN, h: bodyH };
-  const fullBox: DeckBox = { x: MARGIN, y: top, w: BODY_W, h: bodyH };
+  const textW = 5.5;
+  const sideBox: DeckBox = { x: MARGIN + textW + 0.5, y: BODY_TOP, w: DECK_PAGE_W - MARGIN * 2 - textW - 0.5, h: BODY_H };
+  const fullBox: DeckBox = { x: MARGIN, y: BODY_TOP, w: BODY_W, h: BODY_H };
+  const textBox: DeckBox = { x: MARGIN, y: BODY_TOP, w: textW, h: BODY_H };
 
   if (slide.chart && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, textBox, 18));
     primitives.push(...layoutChart(slide.chart, style, sideBox));
   } else if (slide.chart) {
     primitives.push(...layoutChart(slide.chart, style, fullBox));
   } else if (slide.image && hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: 5.3, h: bodyH }, 16));
+    primitives.push(bulletBlock(style, slide.bullets!, textBox, 18));
     primitives.push(...layoutImage(slide.image, style, sideBox));
   } else if (slide.image) {
     primitives.push(...layoutImage(slide.image, style, fullBox));
   } else if (hasBullets) {
-    primitives.push(bulletBlock(style, slide.bullets!, { x: MARGIN, y: top + 0.1, w: BODY_W, h: bodyH }));
+    // few bullets => bigger type, so a 3-point slide still fills the band
+    const size = slide.bullets!.length <= 4 ? 26 : slide.bullets!.length <= 6 ? 22 : 19;
+    primitives.push(bulletBlock(style, slide.bullets!, fullBox, size));
   }
   return { background: style.background, primitives };
 }
@@ -329,9 +365,9 @@ function layoutHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
     },
     // Same accent tick as the title slide — the motif is what ties the deck together.
     { kind: 'rect', box: { x: MARGIN, y: bandY + 0.5, w: 1.1, h: 0.14 }, fill: style.accent },
-    plainText(slide.title, style.text, { x: MARGIN, y: bandY + 0.8, w: BODY_W, h: 1.2 }, {
+    plainText(slide.title, style.text, { x: MARGIN, y: bandY + 0.78, w: BODY_W, h: 1.25 }, {
       fontFace: style.headingFont,
-      fontSizePt: 44,
+      fontSizePt: 48,
       bold: true,
       shrinkToFit: true,
     }),
@@ -371,35 +407,37 @@ function layoutSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: numb
     });
   }
   primitives.push(
-    plainText(slide.title, style.text, { x: textX, y: 1.6, w: textW, h: 1.4 }, {
+    plainText(slide.title, style.text, { x: textX, y: 1.5, w: textW, h: 1.5 }, {
       fontFace: style.headingFont,
-      fontSizePt: 30,
+      fontSizePt: 34,
       bold: true,
+      valign: 'bottom',
       shrinkToFit: true,
     }),
-    { kind: 'rect', box: { x: textX + 0.02, y: 3.12, w: 0.75, h: 0.09 }, fill: style.accent },
+    { kind: 'rect', box: { x: textX, y: 3.2, w: 1.6, h: 0.08 }, fill: style.accent },
   );
   if (slide.bullets?.length) {
-    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 3.5, w: textW, h: 3.2 }, 16));
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 3.6, w: textW, h: 2.9 }, 19, 'top'));
   }
   return { background: style.background, primitives };
 }
 
 function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    plainText(slide.title, style.background, { x: MARGIN, y: 2.75, w: BODY_W, h: 1.6 }, {
+    plainText(slide.title, style.background, { x: MARGIN, y: 2.55, w: BODY_W, h: 1.9 }, {
       fontFace: style.headingFont,
-      fontSizePt: 44,
+      fontSizePt: 54,
       bold: true,
       align: 'center',
+      valign: 'middle',
       shrinkToFit: true,
     }),
   ];
   if (slide.subtext) {
     primitives.push(
-      plainText(slide.subtext, style.background, { x: MARGIN, y: 4.4, w: BODY_W, h: 0.8 }, {
+      plainText(slide.subtext, style.background, { x: MARGIN + 1.5, y: 4.6, w: BODY_W - 3, h: 0.8 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: 20,
         align: 'center',
       }),
     );
@@ -410,20 +448,22 @@ function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
 
 function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    { kind: 'rect', box: { x: DECK_PAGE_W / 2 - 0.55, y: 2.1, w: 1.1, h: 0.12 }, fill: style.accent },
-    plainText(slide.title, style.text, { x: MARGIN, y: 2.5, w: BODY_W, h: 2.0 }, {
+    { kind: 'rect', box: { x: DECK_PAGE_W / 2 - 0.8, y: 2.1, w: 1.6, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.65, w: BODY_W, h: 2.1 }, {
       fontFace: style.headingFont,
-      fontSizePt: 40,
+      fontSizePt: 48,
       bold: true,
       align: 'center',
+      valign: 'middle',
       shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
     }),
   ];
   if (slide.subtext) {
     primitives.push(
-      plainText(slide.subtext, style.muted, { x: MARGIN + 1.2, y: 4.6, w: BODY_W - 2.4, h: 0.9 }, {
+      plainText(slide.subtext, style.muted, { x: MARGIN + 1.5, y: 5.0, w: BODY_W - 3, h: 0.9 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 18,
+        fontSizePt: 20,
         align: 'center',
       }),
     );
@@ -434,57 +474,68 @@ function layoutStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayo
 function layoutStatsSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives = header(style, slide.title);
   const stats: DeckStat[] = slide.stats ?? [];
-  const gap = 0.4;
+  const gap = 0.36;
   const tileW = (BODY_W - gap * (stats.length - 1)) / stats.length;
-  const tileY = 2.35;
-  const tileH = 2.7;
+  // A tile holds two lines, so it is capped rather than stretched to the band —
+  // a full-height tile ends up taller than it is wide and reads as an empty box
+  // with text floating in it. Cap, then centre the row in the band.
+  const notes = slide.bullets?.length ? 1.5 : 0;
+  const availH = BODY_H - notes;
+  const tileH = Math.min(availH, 3.3);
+  const tileY = BODY_TOP + (availH - tileH) / 2;
   stats.forEach((stat, i) => {
     const x = MARGIN + i * (tileW + gap);
     primitives.push(
-      { kind: 'rect', box: { x, y: tileY, w: tileW, h: tileH }, fill: style.panel, radiusIn: 0.08 },
-      plainText(stat.value, style.accent, { x, y: tileY + 0.45, w: tileW, h: 1.2 }, {
+      { kind: 'rect', box: { x, y: tileY, w: tileW, h: tileH }, fill: style.panel, radiusIn: 0.1 },
+      plainText(stat.value, style.accent, { x, y: tileY + tileH * 0.24, w: tileW, h: tileH * 0.34 }, {
         fontFace: style.headingFont,
-        fontSizePt: 40,
+        fontSizePt: 60,
         bold: true,
         align: 'center',
+        valign: 'middle',
         shrinkToFit: true,
       }),
-      plainText(stat.label, style.muted, { x: x + 0.15, y: tileY + 1.7, w: tileW - 0.3, h: 0.8 }, {
+      plainText(stat.label, style.muted, { x: x + 0.2, y: tileY + tileH * 0.6, w: tileW - 0.4, h: 0.65 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 13,
+        fontSizePt: 16,
         align: 'center',
       }),
     );
   });
   if (slide.bullets?.length) {
-    primitives.push(bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.35, w: BODY_W, h: 1.4 }, 14));
+    primitives.push(
+      bulletBlock(style, slide.bullets, { x: MARGIN, y: tileY + tileH + 0.3, w: BODY_W, h: notes - 0.3 }, 16),
+    );
   }
   return { background: style.background, primitives };
 }
 
+/**
+ * A pull quote is one idea, so it gets the whole page: no header, an accent
+ * rule instead of the old stranded 120pt glyph, and the block optically
+ * centered. The previous version left ~2.4" dead under the attribution.
+ */
 function layoutQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const quote = slide.quote;
-  const primitives = quote
-    ? [
-        plainText('“', style.accent, { x: MARGIN - 0.15, y: 0.9, w: 1.6, h: 1.6 }, {
-          fontFace: 'Georgia',
-          fontSizePt: 120,
-          bold: true,
-        }),
-        plainText(quote.text, style.text, { x: MARGIN + 0.7, y: 2.4, w: BODY_W - 1.4, h: 2.5 }, {
-          fontFace: style.bodyFont,
-          fontSizePt: 26,
-          italic: true,
-          shrinkToFit: true,
-          lineSpacingMultiple: 1.2,
-        }),
-      ]
-    : [];
-  if (quote?.attribution) {
+  if (!quote) return { background: style.background, primitives: [] };
+  const inset = MARGIN + 0.8;
+  const width = DECK_PAGE_W - inset - MARGIN - 0.8;
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: inset, y: 2.15, w: 1.6, h: 0.09 }, fill: style.accent },
+    plainText(quote.text, style.text, { x: inset, y: 2.75, w: width, h: 2.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 34,
+      italic: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.25,
+    }),
+  ];
+  if (quote.attribution) {
     primitives.push(
-      plainText(quote.attribution, style.muted, { x: MARGIN + 0.7, y: 5.1, w: BODY_W - 1.4, h: 0.5 }, {
+      plainText(quote.attribution, style.muted, { x: inset, y: 5.45, w: width, h: 0.5 }, {
         fontFace: style.bodyFont,
-        fontSizePt: 15,
+        fontSizePt: 17,
       }),
     );
   }
