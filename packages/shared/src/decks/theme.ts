@@ -80,7 +80,29 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
  * designed rather than generated: a white background is the default nobody
  * chose.
  */
-export const DECK_PACK_STYLES: Record<'editorial', DeckStyle> = {
+export const DECK_PACK_STYLES: Record<'editorial' | 'minimal', DeckStyle> = {
+  /**
+   * Beige-and-black minimalist, built against a specific reference deck rather
+   * than invented. Deliberately MONOCHROME — `accent` is the same near-black as
+   * `text`, because the reference carries no accent hue at all and gets its
+   * contrast from solid black fields against warm paper instead. Charts run a
+   * greyscale ramp for the same reason.
+   *
+   * Arial Black is the heading face: the reference uses an ultra-heavy
+   * grotesque, and Arial Black is the only genuinely ultra-heavy sans in the
+   * Office/OS-bundled set (fonts are never embedded — see the header note).
+   */
+  minimal: {
+    background: 'EFEBE3', // warm paper
+    text: '111111',
+    muted: '5A554E',
+    accent: '111111', // monochrome by design, not an oversight
+    panel: 'E4DFD5',
+    grid: 'B0A89C',
+    chartCategorical: ['1A1A1A', '4D4D4D', '737373', '9C9C9C', '333333', '616161'],
+    headingFont: 'Arial Black',
+    bodyFont: 'Arial',
+  },
   editorial: {
     background: 'FAF6F0', // warm paper
     text: '1F1B18', // deep ink
@@ -98,7 +120,7 @@ export const DECK_PACK_STYLES: Record<'editorial', DeckStyle> = {
 export function resolveDeckStyle(
   theme: DeckTheme | undefined,
   style: DeckStyle | null | undefined,
-  pack?: 'classic' | 'editorial',
+  pack?: 'classic' | 'editorial' | 'minimal',
 ): DeckStyle {
   if (style) return style;
   if (pack && pack !== 'classic') return DECK_PACK_STYLES[pack];

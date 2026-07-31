@@ -96,7 +96,7 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
         w: p.box.w,
         h: p.box.h,
         fill: { color: p.fill, transparency: p.transparency },
-        line: { type: 'none' },
+        line: p.stroke ? { color: p.stroke.color, width: p.stroke.widthPt } : { type: 'none' },
         rectRadius: p.radiusIn,
       });
       return;

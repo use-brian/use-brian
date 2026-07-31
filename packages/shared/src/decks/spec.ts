@@ -21,7 +21,7 @@ export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
  * as two asymmetric columns with a standing numeral, where 'classic' stacks a
  * header over a centered body. The model picks a named pack, never geometry.
  */
-export const DECK_PACKS = ['classic', 'editorial'] as const;
+export const DECK_PACKS = ['classic', 'editorial', 'minimal'] as const;
 export type DeckPackId = (typeof DECK_PACKS)[number];
 
 const statSchema = z.object({
@@ -184,10 +184,13 @@ export const deckSpecShape = {
     .optional()
     .describe(
       "Design pack: 'classic' (default) is the clean corporate look - header over centered body, on white. " +
-        "'editorial' is a designed magazine treatment - warm paper and rust palette, asymmetric two-column slides " +
-        'with a standing slide numeral, full-bleed color dividers, and headline cards floating over hero images. ' +
-        "Pick 'editorial' when the deck should look designed rather than neutral (pitch, launch, brand, board narrative). " +
-        'A pack sets the palette, so it overrides `theme`; a reference style from `styleFromFile` still wins over both.',
+        "'minimal' is beige-and-black minimalist - warm paper, no accent colour at all, ultra-heavy grotesque headings, " +
+        'a black square carrying the heading beside bordered numbered rows, full-height image bands and line-art marks. ' +
+        "'editorial' is a magazine treatment - warm paper and rust, asymmetric two-column slides with a standing slide " +
+        'numeral, full-bleed colour dividers, and headline cards floating over hero images. ' +
+        "Pick 'minimal' or 'editorial' when the deck should look designed rather than neutral (pitch, launch, brand, " +
+        'board narrative). A pack sets the palette, so it overrides `theme`; a reference style from `styleFromFile` ' +
+        'still wins over both.',
     ),
   slides: z
     .array(deckSlideSchema)

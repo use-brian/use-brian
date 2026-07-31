@@ -322,6 +322,32 @@ describe('[COMP:decks/layout] Deck layout engine', () => {
     expect(panelTiles(editorial[2].primitives)).toBe(0);
   });
 
+  it('keeps the minimal pack monochrome and builds its bordered table', () => {
+    const packStyle = resolveDeckStyle(undefined, null, 'minimal');
+    // monochrome is the design, not an oversight — accent must equal text
+    expect(packStyle.accent).toBe(packStyle.text);
+    const spec = deckSpecSchema.parse({
+      title: 'Project Brief',
+      pack: 'minimal',
+      slides: [{ title: 'Agenda', bullets: ['Overview', 'Goals', 'Timeline'] }],
+    });
+    const [cover, agenda] = layoutDeck(spec, packStyle);
+    // cover sets the title in caps, hung right
+    const coverTitle = cover.primitives.find(
+      (p): p is Extract<DeckPrimitive, { kind: 'text' }> =>
+        p.kind === 'text' && p.paragraphs[0]?.runs[0]?.text === 'PROJECT BRIEF',
+    );
+    expect(coverTitle?.align).toBe('right');
+    // one stroked row per bullet — the bordered table needs rect.stroke on both
+    // renderers, so a missing stroke means the preview and the .pptx disagree
+    const stroked = agenda.primitives.filter((p) => p.kind === 'rect' && p.stroke);
+    expect(stroked).toHaveLength(3);
+    // the black square carrying the heading
+    expect(agenda.primitives.some((p) => p.kind === 'rect' && p.fill === packStyle.text && p.box.w > 5)).toBe(true);
+    // and a rule that bleeds off the left page edge
+    expect(agenda.primitives.some((p) => p.kind === 'rect' && p.box.x < 0)).toBe(true);
+  });
+
   it('floats an opaque card over the editorial hero image', () => {
     const packStyle = resolveDeckStyle(undefined, null, 'editorial');
     const spec = deckSpecSchema.parse({

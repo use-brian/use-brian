@@ -143,6 +143,11 @@ function Primitive({
             ...boxStyle(p.box, scale),
             background: fill(p.fill, p.transparency),
             borderRadius: p.radiusIn ? p.radiusIn * scale : undefined,
+            // box-sizing keeps the outer box identical to the pptx shape extent
+            border: p.stroke
+              ? `${Math.max((p.stroke.widthPt / 72) * scale, 1)}px solid ${hex(p.stroke.color)}`
+              : undefined,
+            boxSizing: "border-box",
           }}
         />
       );
