@@ -155,6 +155,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         title: s.title ?? 'New Chat',
         channelId: s.channelId,
         lastActive: s.lastActiveAt,
+        // The minting surface (or null pre-migration). The Chat app's rail
+        // splits on it — chat-origin rows are "Chats", the rest are the
+        // dock's ambient threads under "Other conversations".
+        appOrigin: s.appOrigin,
       })))
     } catch (err) {
       console.error('Sessions list error:', err)

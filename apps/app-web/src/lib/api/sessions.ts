@@ -43,6 +43,23 @@ export type DocSession = {
   channelId: string;
   /** ISO string — server emits a Date which JSON-serialises here. */
   lastActive: string;
+  /**
+   * The surface that minted the session (migrations 187/255), `null` for rows
+   * predating the migration. The Chat app's sidebar rail uses it to demote
+   * ambient dock threads into a collapsed "Other conversations" section —
+   * `'chat'` and legacy `null` count as chat-app sessions, matching the
+   * server's own `?appOrigin=` filter convention.
+   */
+  appOrigin: string | null;
+  /**
+   * The assistant the session is bound to. Stamped CLIENT-SIDE from the
+   * per-assistant fetch (`GET /api/sessions` is assistant-scoped and doesn't
+   * echo it) — absent on rows from callers that predate the field, and on
+   * workspace-shared rows (those are always the workspace primary). Sessions
+   * are assistant-bound: `/api/chat` rejects a send whose `assistantId`
+   * doesn't match the session's, so the Chat app resolves this per thread.
+   */
+  assistantId?: string;
 };
 
 /**
@@ -97,6 +114,7 @@ type RawListRow = {
   title: string;
   channelId: string;
   lastActive: string | Date;
+  appOrigin?: string | null;
 };
 
 type RawMessageRow = {
@@ -160,6 +178,8 @@ export async function fetchLatestSession(opts: {
       title: first.title,
       channelId: first.channelId,
       lastActive: toIso(first.lastActive),
+      appOrigin: first.appOrigin ?? null,
+      assistantId: opts.assistantId,
     };
   } catch {
     // Network / abort / parse — treat as no resume.
@@ -179,7 +199,7 @@ export async function fetchLatestSession(opts: {
  * Returns `[]` on any failure — an empty rail reads as "no history yet", which
  * is the same thing the user does next either way (start a chat).
  */
-export async function listSessions(opts: {
+async function listSessions(opts: {
   workspaceId: string;
   assistantId: string;
   signal?: AbortSignal;
@@ -200,10 +220,40 @@ export async function listSessions(opts: {
       title: r.title,
       channelId: r.channelId,
       lastActive: toIso(r.lastActive),
+      appOrigin: r.appOrigin ?? null,
+      assistantId: opts.assistantId,
     }));
   } catch {
     return [];
   }
+}
+
+/**
+ * The caller's sessions across EVERY given assistant, merged newest-first —
+ * the Chat app's unified rail. One `listSessions` call per assistant (the
+ * list route is assistant-scoped); a workspace holds a handful of assistants,
+ * so the fan-out stays small and the server needs no new query shape. Each
+ * row carries the `assistantId` it was fetched under, which is what lets the
+ * rail show per-thread assistant icons and the surface send with the RIGHT
+ * assistant when an old thread is reopened.
+ */
+export async function listSessionsForAssistants(opts: {
+  workspaceId: string;
+  assistantIds: string[];
+  signal?: AbortSignal;
+}): Promise<DocSession[]> {
+  const lists = await Promise.all(
+    opts.assistantIds.map((assistantId) =>
+      listSessions({
+        workspaceId: opts.workspaceId,
+        assistantId,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      }),
+    ),
+  );
+  return lists
+    .flat()
+    .sort((a, b) => (a.lastActive < b.lastActive ? 1 : a.lastActive > b.lastActive ? -1 : 0));
 }
 
 /**
@@ -231,6 +281,9 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     title: r.title,
     channelId: r.channelId,
     lastActive: toIso(r.lastActive),
+    // Shared chats are always `app_origin='chat'` (the isSharedChatSession
+    // predicate) — the server list doesn't bother echoing it.
+    appOrigin: r.appOrigin ?? "chat",
     status: r.status ?? "idle",
     startedByUserId: r.startedByUserId ?? "",
     startedByName: r.startedByName ?? null,
