@@ -14,6 +14,7 @@ COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages
 COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
 COPY packages/api/package.json packages/api/tsconfig.json ./packages/api/
 COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/brian-kb/
+COPY packages/brian-app/package.json packages/brian-app/tsconfig.json ./packages/brian-app/
 COPY apps/browser-relay/package.json apps/browser-relay/tsconfig.json ./apps/browser-relay/
 
 RUN pnpm install --frozen-lockfile
@@ -31,6 +32,7 @@ COPY packages/api/migrations ./packages/api/migrations
 # Source only: copying the whole package dir would clobber the node_modules
 # symlinks pnpm created in the deps stage, breaking a clean build.
 COPY packages/brian-kb/src ./packages/brian-kb/src
+COPY packages/brian-app/src ./packages/brian-app/src
 COPY apps/browser-relay/src ./apps/browser-relay/src
 
 # pnpm topological build (deps-first), not turbo — see discord-connector.
@@ -50,6 +52,8 @@ COPY packages/doc-model/package.json ./packages/doc-model/
 COPY packages/core/package.json ./packages/core/
 COPY packages/api/package.json ./packages/api/
 COPY packages/brian-kb/package.json ./packages/brian-kb/
+COPY packages/brian-app/package.json ./packages/brian-app/
+COPY packages/brian-app/bin ./packages/brian-app/bin
 COPY apps/browser-relay/package.json ./apps/browser-relay/
 
 RUN pnpm install --frozen-lockfile --prod
@@ -60,6 +64,7 @@ COPY --from=build /app/packages/doc-model/dist ./packages/doc-model/dist
 COPY --from=build /app/packages/core/dist ./packages/core/dist
 COPY --from=build /app/packages/api/dist ./packages/api/dist
 COPY --from=build /app/packages/brian-kb/dist ./packages/brian-kb/dist
+COPY --from=build /app/packages/brian-app/dist ./packages/brian-app/dist
 COPY --from=build /app/apps/browser-relay/dist ./apps/browser-relay/dist
 
 ENV NODE_ENV=production
