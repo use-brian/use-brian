@@ -82,7 +82,7 @@ import { buildConnectorState } from "@/lib/connector-oauth-state";
 import { armConnectorOauthState } from "@/lib/oauth-state-cookie";
 import { desktopBridge } from "@/lib/desktop-auth-source";
 import { buildMsGraphAuthorizeUrl } from "@/lib/msgraph-oauth";
-import { normalizeShopifyShopDomain } from "@/lib/shopify-domain";
+import { normalizeShopifyShopDomain, isShpssPrefixed } from "@/lib/shopify-domain";
 import {
   buildCustomConnectorPayload,
   type ConnectorAuthFormError,
@@ -101,9 +101,10 @@ const FATHOM_AUTHORIZE_URL =
 // Absent -> the Microsoft Teams connect button builds an authorize URL with an
 // empty client_id and Entra rejects it; nothing else in the page changes.
 const MSGRAPH_CLIENT_ID = process.env.NEXT_PUBLIC_MSGRAPH_CLIENT_ID ?? "";
-// Absent → the Shopify OAuth path stays dark and the connect form offers only
-// the pasted admin-token path (docs/architecture/integrations/shopify.md).
-const SHOPIFY_CLIENT_ID = process.env.NEXT_PUBLIC_SHOPIFY_CLIENT_ID ?? "";
+// NOTE: there is deliberately no SHOPIFY_CLIENT_ID here. Shopify connects by
+// pasted Admin API token only; the OAuth flow is built but not offered (see
+// docs/architecture/integrations/shopify.md → "Auth model"). Re-enabling means
+// restoring the authorize-URL branch AND the env vars, not just the env vars.
 
 /**
  * Frontend shortcut: build the OAuth authorize URL client-side when the page
@@ -736,15 +737,22 @@ function ConnectorsList() {
   const [imapShowHelp, setImapShowHelp] = useState(false);
   const [imapError, setImapError] = useState<string | null>(null);
 
-  // Shopify connect form state. The authorize URL is per-shop, so unlike
-  // Notion/Fathom the OAuth path needs the store domain BEFORE the redirect;
-  // the same form carries the pasted `shpat_` admin-token path (the only live
-  // path until the public app is registered). `shopifyConnectOpts` remembers
-  // the add-another / reconnect intent between opening the form and acting.
+  // Shopify connect form state. One path: the store domain (which the tools key
+  // on) plus a pasted Admin API token. The domain still comes first because the
+  // credential envelope is keyed on the canonical {handle}.myshopify.com host.
+  // `shopifyConnectOpts` remembers the add-another / reconnect intent between
+  // opening the form and acting.
   const [showShopifyForm, setShowShopifyForm] = useState<string | null>(null);
   const [shopifyDomain, setShopifyDomain] = useState("");
   const [shopifyToken, setShopifyToken] = useState("");
   const [shopifyError, setShopifyError] = useState<string | null>(null);
+  const [shopifyShowHelp, setShopifyShowHelp] = useState(false);
+  // BYO app credentials (the primary path): the merchant's own custom-distribution
+  // app. Stored before the authorize redirect, so the instance exists first.
+  // docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
+  const [shopifyAppId, setShopifyAppId] = useState("");
+  const [shopifyAppSecret, setShopifyAppSecret] = useState("");
+  const [shopifyShowPaste, setShopifyShowPaste] = useState(false);
   const [shopifyConnectOpts, setShopifyConnectOpts] = useState<{ addAnother?: boolean; instanceId?: string } | null>(null);
   // Branded-domain resolution: the canonical {handle}.myshopify.com we detected
   // for whatever the user typed (a branded domain resolves via a server probe;
@@ -1218,10 +1226,12 @@ function ConnectorsList() {
       return;
     }
 
-    // Shopify — the authorize host is per-shop, so collect the store domain
-    // first (form below). MUST stay ahead of the generic scopes branch:
-    // OFFICIAL_OAUTH_SCOPES has a shopify entry, and falling through would
-    // redirect a Shopify connect to the Google authorize URL.
+    // Shopify — open the connect form (store domain + pasted Admin API token).
+    // This branch looks like leftover OAuth plumbing and is NOT: it MUST stay
+    // ahead of the generic scopes branch below, because OFFICIAL_OAUTH_SCOPES
+    // still carries a `shopify` entry (it doubles as the scope checklist a
+    // merchant's own custom app has to grant). Delete this early return and a
+    // Shopify connect falls through to the GOOGLE authorize URL.
     if (id === "shopify") {
       setShowShopifyForm(rid);
       setShopifyConnectOpts(opts ?? null);
@@ -1455,30 +1465,75 @@ function ConnectorsList() {
     setShopifyResolving(false);
   }
 
-  // Shopify OAuth — redirect to the per-shop authorize URL. Only offered when
-  // NEXT_PUBLIC_SHOPIFY_CLIENT_ID is configured (P0 app registration).
-  async function startShopifyOauth(c: Connector) {
+  // Shopify BYO connect — the PRIMARY path. Two hops: store the merchant's own
+  // app credentials (so the instance exists and the API holds the secret), then
+  // redirect to THEIR app's authorize URL. The code exchange happens in the API,
+  // never here — app-web must not receive a client secret.
+  // docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
+  async function startShopifyByoConnect(c: Connector) {
     const shopDomain = await resolveEffectiveShopDomain();
     if (!shopDomain) {
       setShopifyResolveFailed(true);
       setShopifyError(tc.shopify.errDomain);
       return;
     }
+    const clientId = shopifyAppId.trim();
+    const clientSecret = shopifyAppSecret.trim();
+    if (!clientId || !clientSecret) return;
+    // The client id and the secret are easy to swap; only the secret is
+    // shpss_-prefixed, so a swapped pair is catchable before any round trip.
+    if (isShpssPrefixed(clientId)) {
+      setShopifyError(tc.shopify.errAppFieldsSwapped);
+      return;
+    }
+    const rid = rowId(c);
     const opts = shopifyConnectOpts;
-    const nonce = armConnectorOauthState();
-    const redirectUri = `${window.location.origin}/api/auth/callback/shopify`;
-    const sp = new URLSearchParams({
-      client_id: SHOPIFY_CLIENT_ID,
-      // Shopify scopes are comma-separated (Wave 1, from the shared registry).
-      scope: (OFFICIAL_OAUTH_SCOPES.shopify ?? []).join(","),
-      redirect_uri: redirectUri,
-      state: buildConnectorState({ connector: "shopify", workspaceId, createNew: !!opts?.addAnother, instanceId: opts?.instanceId ?? c.connectorInstanceId, nonce }),
-    });
-    window.location.href = `https://${shopDomain}/admin/oauth/authorize?${sp}`;
+    setConnecting(rid);
+    setShopifyError(null);
+    try {
+      const res = await authFetch(`${API_URL}/api/connectors/shopify/app-credentials`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          shopDomain,
+          clientId,
+          clientSecret,
+          // Reconnect re-points the existing row; add-another gets a fresh one.
+          ...(opts?.addAnother ? {} : { instanceId: opts?.instanceId ?? c.connectorInstanceId }),
+        }),
+      });
+      if (!res.ok) {
+        setShopifyError(tc.shopify.errAppCredentials);
+        setConnecting(null);
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
+      const instanceId = data.connectorInstanceId;
+      if (!instanceId) {
+        setShopifyError(tc.shopify.errAppCredentials);
+        setConnecting(null);
+        return;
+      }
+      // Hop 2: consent against the merchant's own app. `state` carries the
+      // instanceId so the callback knows whose credentials to exchange with.
+      const nonce = armConnectorOauthState();
+      const sp = new URLSearchParams({
+        client_id: clientId,
+        scope: (OFFICIAL_OAUTH_SCOPES.shopify ?? []).join(","),
+        redirect_uri: `${window.location.origin}/api/auth/callback/shopify`,
+        state: buildConnectorState({ connector: "shopify", workspaceId, instanceId, nonce }),
+      });
+      window.location.href = `https://${shopDomain}/admin/oauth/authorize?${sp}`;
+    } catch {
+      setShopifyError(tc.shopify.errAppCredentials);
+      setConnecting(null);
+    }
   }
 
-  // Shopify pasted admin token (`shpat_...`) — the static-token path. Works
-  // with zero app registration (legacy custom apps, dev stores, self-host).
+  // Shopify pasted Admin API token — the legacy escape hatch, for stores that
+  // still have a pre-2026 admin-created custom app. The server probes the token
+  // against `shop { name myshopifyDomain }` before storing anything, so a bad
+  // paste fails here rather than at the first tool call.
   async function handleSaveShopifyToken(c: Connector) {
     const shopDomain = await resolveEffectiveShopDomain();
     if (!shopDomain) {
@@ -1487,6 +1542,13 @@ function ConnectorsList() {
       return;
     }
     if (!shopifyToken.trim()) return;
+    // Catch the API secret key before spending a round trip. Shopify would
+    // answer 401 and the generic "rejected" message would not tell the user
+    // that they pasted the right-looking credential from the wrong field.
+    if (isShpssPrefixed(shopifyToken)) {
+      setShopifyError(tc.shopify.errSecretPasted);
+      return;
+    }
     const rid = rowId(c);
     const opts = shopifyConnectOpts;
     setConnecting(rid);
@@ -1509,12 +1571,18 @@ function ConnectorsList() {
         setShowShopifyForm(null);
         setShopifyDomain(""); setShopifyToken(""); setShopifyConnectOpts(null);
         setShopifyResolved(null); setShopifyResolving(false); setShopifyResolveFailed(false);
+        setShopifyShowHelp(false);
         setSelected(rid);
         loadTools(c.id);
         fetchConnectors();
         setJustConnected({ slug: c.id, instanceId: data.connectorInstanceId ?? c.connectorInstanceId });
       } else {
-        setShopifyError(tc.shopify.errSave);
+        // The server rejected the token itself (it tried it against the store),
+        // which is a different fix for the user than a domain/network problem.
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        setShopifyError(
+          body.error === "invalid_token" ? tc.shopify.errInvalidToken : tc.shopify.errSave,
+        );
       }
     } catch {
       setShopifyError(tc.shopify.errSave);
@@ -2993,9 +3061,11 @@ function ConnectorsList() {
                   </div>
                 )}
 
-                {/* Shopify connect form — store domain first (the authorize
-                    URL is per-shop), then OAuth (when the app is registered)
-                    or a pasted shpat_ admin token. */}
+                {/* Shopify connect form — store domain (resolved to the
+                    canonical myshopify host) then a pasted Admin API token,
+                    which the server verifies against the store before saving.
+                    There is deliberately no OAuth button: see
+                    docs/architecture/integrations/shopify.md → "Auth model". */}
                 {showShopifyForm === rid && (
                   <div className="space-y-2">
                     <p className="text-xs text-muted-foreground">{tc.shopify.formHelp}</p>
@@ -3019,45 +3089,100 @@ function ConnectorsList() {
                     ) : shopifyResolveFailed ? (
                       <p className="text-xs text-muted-foreground">{tc.shopify.resolveHint}</p>
                     ) : null}
-                    {SHOPIFY_CLIENT_ID && (
-                      <button
-                        onClick={() => startShopifyOauth(sel)}
-                        disabled={!shopifyDomain.trim() || shopifyResolving}
-                        className="w-full text-xs font-medium bg-primary text-primary-foreground px-3 py-2 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
-                      >
-                        {tc.shopify.oauthBtn}
-                      </button>
-                    )}
-                    <p className="text-xs text-muted-foreground">{tc.shopify.orPasteToken}</p>
+                    {/* PRIMARY: the merchant's own app credentials. */}
+                    <p className="text-xs text-muted-foreground">{tc.shopify.appLabel}</p>
                     <input
-                      type="password"
-                      placeholder={tc.shopify.tokenPlaceholder}
-                      value={shopifyToken}
-                      onChange={(e) => setShopifyToken(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter") handleSaveShopifyToken(sel); }}
+                      type="text"
+                      placeholder={tc.shopify.appIdPlaceholder}
+                      value={shopifyAppId}
+                      onChange={(e) => setShopifyAppId(e.target.value)}
+                      autoComplete="off"
                       className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
+                    <input
+                      type="password"
+                      placeholder={tc.shopify.appSecretPlaceholder}
+                      value={shopifyAppSecret}
+                      onChange={(e) => setShopifyAppSecret(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") startShopifyByoConnect(sel); }}
+                      autoComplete="off"
+                      className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    />
+                    {/* Where the credentials come from — the imap
+                        passwordHelpTitle disclosure pattern. Needed: the merchant
+                        has to create the app and allow our redirect URI first. */}
+                    <button
+                      onClick={() => setShopifyShowHelp((v) => !v)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.shopify.appHelpTitle}
+                    </button>
+                    {shopifyShowHelp && (
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-muted-foreground">{tc.shopify.appHelpBody}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {tc.shopify.appHelpRedirect}
+                          <span className="font-medium text-foreground break-all">
+                            {typeof window === "undefined" ? "" : `${window.location.origin}/api/auth/callback/shopify`}
+                          </span>
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">{tc.shopify.tokenHelpScopes}</p>
+                      </div>
+                    )}
                     {shopifyError && <p className="text-xs text-destructive">{shopifyError}</p>}
                     <div className="flex gap-2">
                       <button
                         onClick={() => {
                           setShowShopifyForm(null);
                           setShopifyDomain(""); setShopifyToken("");
+                          setShopifyAppId(""); setShopifyAppSecret("");
                           setShopifyError(null); setShopifyConnectOpts(null);
                           setShopifyResolved(null); setShopifyResolving(false); setShopifyResolveFailed(false);
+                          setShopifyShowHelp(false); setShopifyShowPaste(false);
                         }}
                         className="text-xs font-medium border border-border px-3 py-1 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
                       >
                         {tc.cancel}
                       </button>
                       <button
-                        onClick={() => handleSaveShopifyToken(sel)}
-                        disabled={!shopifyDomain.trim() || !shopifyToken.trim() || connecting === rid || shopifyResolving}
+                        onClick={() => startShopifyByoConnect(sel)}
+                        disabled={!shopifyDomain.trim() || !shopifyAppId.trim() || !shopifyAppSecret.trim() || connecting === rid || shopifyResolving}
                         className="text-xs font-medium bg-primary text-primary-foreground px-3 py-1 rounded-lg hover:bg-primary/90 disabled:opacity-50 transition-colors"
                       >
-                        {connecting === rid ? tc.savingBtn : tc.saveBtn}
+                        {connecting === rid ? tc.shopify.connectingBtn : tc.shopify.appConnectBtn}
                       </button>
                     </div>
+                    {/* ESCAPE HATCH: a pre-2026 admin-created custom app still has
+                        a pasteable token. Collapsed, because no store created
+                        today can produce one. */}
+                    <button
+                      onClick={() => setShopifyShowPaste((v) => !v)}
+                      className="text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground transition-colors"
+                    >
+                      {tc.shopify.pasteToggle}
+                    </button>
+                    {shopifyShowPaste && (
+                      <div className="space-y-2 border-l-2 border-border pl-3">
+                        <p className="text-[11px] text-muted-foreground">{tc.shopify.pasteHelp}</p>
+                        <input
+                          type="password"
+                          placeholder={tc.shopify.tokenPlaceholder}
+                          value={shopifyToken}
+                          onChange={(e) => setShopifyToken(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") handleSaveShopifyToken(sel); }}
+                          autoComplete="off"
+                          className="w-full text-sm bg-muted/50 border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        />
+                        <p className="text-[11px] text-muted-foreground">{tc.shopify.tokenHelpNotSecret}</p>
+                        <button
+                          onClick={() => handleSaveShopifyToken(sel)}
+                          disabled={!shopifyDomain.trim() || !shopifyToken.trim() || connecting === rid || shopifyResolving}
+                          className="text-xs font-medium border border-border px-3 py-1 rounded-lg hover:bg-muted disabled:opacity-50 transition-colors"
+                        >
+                          {connecting === rid ? tc.shopify.verifyingBtn : tc.shopify.connectBtn}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
 

@@ -78,7 +78,9 @@ import {
   Users,
 } from "lucide-react";
 import type { WorkspaceSurface } from "@/lib/doc-page-url";
-import { operatorAppFromSurface } from "@/lib/operator-apps";
+import { usePathname } from "next/navigation";
+import type { CustomHomeApp } from "@/lib/api/home-apps";
+import { homeAppFromPathname, type HomeAppEntry } from "@/lib/operator-apps";
 import { OperatorAppBar } from "./operator-app-bar";
 import {
   DropdownMenu,
@@ -129,6 +131,7 @@ import { FeedSidebarPanel } from "./sidebar-panels/feed-sidebar-panel";
 import { TasksSidebarPanel } from "./sidebar-panels/tasks-sidebar-panel";
 import { CrmSidebarPanel } from "./sidebar-panels/crm-sidebar-panel";
 import { BrowsersSidebarPanel } from "./sidebar-panels/browsers-sidebar-panel";
+import { ChatSidebarPanel } from "./sidebar-panels/chat-sidebar-panel";
 
 export type SidebarMove = {
   viewId: string;
@@ -212,7 +215,12 @@ type Props = {
    * OSS edition 404s the surface). Gates the Feed entry in the operator
    * app-bar; the routes stay deep-linkable regardless.
    */
-  feedEnabled: boolean;
+  /** The workspace's Home app-bar config — which apps the strip renders, in
+   *  order (`workspaces.home_apps`). Carried by `WorkspaceChrome` from the
+   *  sidebar-data provider, which owns the fetch + live repair. */
+  homeApps: readonly HomeAppEntry[];
+  /** The workspace's custom apps, for resolving `custom:<id>` strip entries. */
+  customApps: readonly CustomHomeApp[];
 };
 
 function collapseKey(workspaceId: string): string {
@@ -307,7 +315,10 @@ export function DocSidebar(props: Props) {
   const surfacePill = (s: WorkspaceSurface) => surfaceActive(s) && !utilityPillOpen;
   /** Home is the operator hub: it lights up for ANY operator-app surface
    *  (Page / Tasks / Feed) — the app-bar row below shows which. */
-  const activeOperatorApp = operatorAppFromSurface(props.activeSurface);
+  // Custom apps all share the `apps` surface, so the ACTIVE entry has to come
+  // off the path (which app id), not the segment.
+  const pathname = usePathname();
+  const activeOperatorApp = homeAppFromPathname(props.activeSurface, pathname);
   const homeActive = activeOperatorApp !== null;
   const homePill = homeActive && !utilityPillOpen;
   const matches = useCallback(
@@ -700,7 +711,8 @@ export function DocSidebar(props: Props) {
       </nav>
 
       {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
-          Feed), between the icon row and the surface body. Clicking an app
+          Feed / Browsers / Chat + the workspace's custom apps), between the
+          icon row and the surface body. WHICH apps show is workspace config. Clicking an app
           navigates AND persists the per-workspace selection the Home icon
           resumes. It also carries "My Browser" as a trailing square: that is
           workspace-wide chrome rather than an operator app, so the strip is
@@ -711,7 +723,8 @@ export function DocSidebar(props: Props) {
       <OperatorAppBar
         workspaceId={workspaceId}
         active={activeOperatorApp}
-        feedEnabled={props.feedEnabled}
+        homeApps={props.homeApps}
+        customApps={props.customApps}
       />
 
       {/* Search input — revealed by the Search icon (Home only). */}
@@ -732,7 +745,7 @@ export function DocSidebar(props: Props) {
       <div className="flex-1 min-h-0 overflow-y-auto px-2 pb-4">
         {/* Surface-aware body. The page tree (Favorites / Drafts / search) shows
             ONLY on Home (`'p'`); Brain / Studio / Workflow / Tasks / CRM /
-            Browsers each swap in their own panel; every other surface
+            Browsers / Chat each swap in their own panel; every other surface
             (approvals, knowledge-base, root) renders nothing here. */}
         {props.activeSurface === "brain" ? (
           <BrainSidebarPanel workspaceId={workspaceId} />
@@ -748,6 +761,8 @@ export function DocSidebar(props: Props) {
           <CrmSidebarPanel workspaceId={workspaceId} />
         ) : props.activeSurface === "computer" ? (
           <BrowsersSidebarPanel workspaceId={workspaceId} />
+        ) : props.activeSurface === "chat" ? (
+          <ChatSidebarPanel workspaceId={workspaceId} />
         ) : null}
 
         {props.activeSurface === "p" && (

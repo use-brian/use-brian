@@ -74,6 +74,8 @@ type IngestSource = {
   connectedEmail: string | null;
   connected: boolean;
   ingestionEnabled: boolean;
+  /** False when this instance's events cannot reach the brain (see ingestUnavailable). */
+  ambientIngestSupported?: boolean;
   nature: IngestNature;
   rules: IngestRule[];
 };
@@ -85,6 +87,24 @@ type AvailableProvider = {
   name: string;
   nature: IngestNature;
 };
+
+/**
+ * Whether a source's events can actually reach the brain.
+ *
+ * The server decides (`ambientIngestSupported` on the sources DTO) because the
+ * answer is per INSTANCE, not per provider: a Shopify store connected through
+ * the merchant's own app is verifiable and ingests fine, while one connected
+ * with a pasted admin token is not (its deliveries are signed by an app whose
+ * secret we do not hold). Older API responses omit the field, so absent means
+ * supported.
+ *
+ * A toggle that reports success and delivers nothing is worse than no toggle,
+ * which is why the row says so instead.
+ * docs/architecture/integrations/shopify.md → "Ambient ingest".
+ */
+function ingestUnavailable(s: { ambientIngestSupported?: boolean }): boolean {
+  return s.ambientIngestSupported === false;
+}
 
 type RepoOption = {
   fullName: string;
@@ -563,14 +583,22 @@ export default function StudioIngestRulesPage() {
           </div>
           <span
             className={pillCls(
-              !s.connected ? "attention" : s.ingestionEnabled ? "on" : "off",
+              ingestUnavailable(s)
+                ? "off"
+                : !s.connected
+                  ? "attention"
+                  : s.ingestionEnabled
+                    ? "on"
+                    : "off",
             )}
           >
-            {!s.connected
-              ? copy.sectionAttention
-              : s.ingestionEnabled
-                ? copy.statusOn
-                : copy.statusOff}
+            {ingestUnavailable(s)
+              ? copy.statusUnavailable
+              : !s.connected
+                ? copy.sectionAttention
+                : s.ingestionEnabled
+                  ? copy.statusOn
+                  : copy.statusOff}
           </span>
         </div>
 
@@ -620,24 +648,32 @@ export default function StudioIngestRulesPage() {
           </div>
         )}
 
-        {/* Actions — enable/disable, plus the GitHub repo-picker toggle. */}
+        {/* Actions — enable/disable, plus the GitHub repo-picker toggle.
+            A provider whose ingest cannot fire gets an explanation instead of
+            a switch (ingestUnavailable). */}
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => handleToggle(s)}
-            disabled={busy || !s.connected}
-            className={cn(
-              "text-xs font-medium px-3 py-1 rounded-lg shrink-0 transition-colors disabled:opacity-40",
-              s.ingestionEnabled
-                ? "border border-border text-muted-foreground hover:text-destructive hover:border-destructive/30"
-                : "bg-primary text-primary-foreground hover:bg-primary/90",
-            )}
-          >
-            {busy
-              ? copy.working
-              : s.ingestionEnabled
-                ? copy.disableAction
-                : copy.enableAction}
-          </button>
+          {ingestUnavailable(s) ? (
+            <p className="text-[12px] leading-relaxed text-muted-foreground">
+              {copy.unavailableNote}
+            </p>
+          ) : (
+            <button
+              onClick={() => handleToggle(s)}
+              disabled={busy || !s.connected}
+              className={cn(
+                "text-xs font-medium px-3 py-1 rounded-lg shrink-0 transition-colors disabled:opacity-40",
+                s.ingestionEnabled
+                  ? "border border-border text-muted-foreground hover:text-destructive hover:border-destructive/30"
+                  : "bg-primary text-primary-foreground hover:bg-primary/90",
+              )}
+            >
+              {busy
+                ? copy.working
+                : s.ingestionEnabled
+                  ? copy.disableAction
+                  : copy.enableAction}
+            </button>
+          )}
           {s.provider === "github" && s.connected && (
             <button
               onClick={() =>
@@ -788,7 +824,15 @@ export default function StudioIngestRulesPage() {
       iconId = s.provider;
       label = s.label;
       subtitle = s.connectedEmail;
-      dot = !s.connected ? "attention" : s.ingestionEnabled ? "on" : null;
+      // No status dot when ingest cannot fire — an "on" dot would claim the
+      // source is delivering (ingestUnavailable).
+      dot = ingestUnavailable(s)
+        ? null
+        : !s.connected
+          ? "attention"
+          : s.ingestionEnabled
+            ? "on"
+            : null;
     } else if (row.kind === "whatsapp") {
       iconId = "whatsapp";
       label = copy.whatsapp.sourceLabel;

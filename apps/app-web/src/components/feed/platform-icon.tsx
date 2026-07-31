@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Platform brand glyphs — monochrome inline SVGs for the four Feed target
+ * Platform brand glyphs — monochrome inline SVGs for the five Feed target
  * platforms, replacing the letter-initial tiles (docs/plans/feed-create-split.md
  * D11 stubs shipped with "IG / @ / X / 小" placeholders). Rules:
  *
@@ -9,10 +9,10 @@
  *     colors, so the glyphs stay theme-aware for free and render identically
  *     on the neutral (`bg-muted`) and inverted (`bg-foreground`) tiles.
  *   - Instagram is drawn geometrically (rounded square + lens + dot — the
- *     actual glyph is these three primitives). X and Threads use their
- *     canonical logo paths. XHS has no monochrome logo mark (its identity is
- *     the red wordmark app tile), so it keeps a stroke-drawn 小 — now crisp
- *     vector strokes instead of a font glyph.
+ *     actual glyph is these three primitives). X, Threads, and LinkedIn use
+ *     their canonical logo paths. XHS has no monochrome logo mark (its
+ *     identity is the red wordmark app tile), so it keeps a stroke-drawn 小 —
+ *     now crisp vector strokes instead of a font glyph.
  *   - Decorative: always `aria-hidden` — the adjacent row/chip label names
  *     the platform, so the glyph carries no accessible text of its own.
  *
@@ -85,6 +85,18 @@ export function PlatformIcon({
           <path d="M12 3.5v13.2c0 1.9-1.2 3-3.1 3" />
           <path d="M6.7 9.8 4.2 14.6" />
           <path d="M17.3 9.8l2.5 4.8" />
+        </svg>
+      );
+    case "linkedin":
+      return (
+        <svg
+          viewBox="0 0 24 24"
+          fill="currentColor"
+          aria-hidden
+          data-platform-icon="linkedin"
+          className={className}
+        >
+          <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z" />
         </svg>
       );
   }

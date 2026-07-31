@@ -1272,6 +1272,28 @@ export function createWorkflowRunQueueStore(): RunQueueStore {
       )
       return (requeued.rowCount ?? 0) + (failed.rowCount ?? 0)
     },
+
+    async failAbandonedInlineRunsSystem({ abandonedSeconds }) {
+      const result = await query(
+        `UPDATE workflow_runs
+            SET status = 'failed', finished_at = now(),
+                error = jsonb_build_object(
+                  'message', 'Run was abandoned — the process advancing it stopped without recording an outcome.',
+                  'reason', 'run_abandoned')
+          WHERE status IN ('pending', 'running')
+            -- The INVERSE gate of every method above: these are the inline-path
+            -- runs the queue does not own. It may only mark them dead, never
+            -- claim or re-queue them (re-running re-fires delivery — the
+            -- 2026-07-06 reminder storm). Failing fires nothing.
+            AND trigger_kind <> 'event'
+            -- awaiting_wait / awaiting_input are excluded by the status filter
+            -- above: a run parked on a wait step or a human approval is idle on
+            -- purpose and may legitimately sit for days.
+            AND last_active_at < now() - make_interval(secs => $1)`,
+        [abandonedSeconds],
+      )
+      return result.rowCount ?? 0
+    },
   }
 }
 

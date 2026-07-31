@@ -73,6 +73,30 @@ export type RunQueueStore = {
     staleSeconds: number
     maxClaimAttempts: number
   }): Promise<number>
+  /**
+   * Mark ABANDONED inline-path runs dead — the runs this queue deliberately
+   * does NOT own (`trigger_kind <> 'event'`, i.e. `schedule`, `manual` — which
+   * webhook receivers also stamp — and `button`). Every other method here
+   * refuses to touch them, for a good reason
+   * documented at `claimNextPendingRunSystem`: re-running an inline run
+   * re-fires its delivery, and a reminder re-sent hours late is never right.
+   *
+   * But "never re-run" was implemented as "never look at them", which left a
+   * second failure mode with no owner. When the process advancing an inline run
+   * dies, SIGKILL writes no status: the row stays `pending` (killed before the
+   * first step write) or `running` (killed mid-step) forever. Nothing reaps it,
+   * the UI reports it as in-flight indefinitely, and the operator cannot tell a
+   * dead run from a slow one. On 2026-07-28 a crash-looping worker container
+   * minted 216 such rows in two days.
+   *
+   * So: **fail them, never re-queue them.** Failing is safe — it fires no side
+   * effect and only records what already happened. Resurrecting is the unsafe
+   * direction, and this method never does it. Runs parked legitimately
+   * (`awaiting_wait`, `awaiting_input`) are out of scope by status.
+   *
+   * Returns the number failed.
+   */
+  failAbandonedInlineRunsSystem(params: { abandonedSeconds: number }): Promise<number>
 }
 
 export type RunQueueWorkerDeps = {
@@ -87,6 +111,8 @@ export type RunQueueWorkerDeps = {
   maxConcurrent?: number
   leaseSeconds?: number
   staleSeconds?: number
+  /** Inactivity after which an inline-path run is presumed dead, not slow. */
+  abandonedSeconds?: number
   maxClaimAttempts?: number
   workspaceCap?: number
 }
@@ -112,6 +138,14 @@ export const RUN_QUEUE_DEFAULTS = {
    *  consult) with a wide margin — every step write bumps
    *  `last_active_at`. */
   staleSeconds: 1_800,
+  /**
+   * Inline-path runs only, and only to mark them dead. Deliberately much
+   * wider than `staleSeconds`: nothing is retried off the back of it, so the
+   * cost of waiting is a stale-looking row, while the cost of firing too early
+   * is calling a live run dead. An hour with zero step writes (12x the longest
+   * legal single step, the 300 s deep-tier consult) is not a slow run.
+   */
+  abandonedSeconds: 3_600,
   maxClaimAttempts: 3,
   workspaceCap: 3,
 } as const
@@ -121,6 +155,7 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
   const maxConcurrent = deps.maxConcurrent ?? RUN_QUEUE_DEFAULTS.maxConcurrent
   const leaseSeconds = deps.leaseSeconds ?? RUN_QUEUE_DEFAULTS.leaseSeconds
   const staleSeconds = deps.staleSeconds ?? RUN_QUEUE_DEFAULTS.staleSeconds
+  const abandonedSeconds = deps.abandonedSeconds ?? RUN_QUEUE_DEFAULTS.abandonedSeconds
   const maxClaimAttempts = deps.maxClaimAttempts ?? RUN_QUEUE_DEFAULTS.maxClaimAttempts
   const workspaceCap = deps.workspaceCap ?? RUN_QUEUE_DEFAULTS.workspaceCap
   const onError = deps.onError ?? (() => {})
@@ -136,6 +171,17 @@ export function createRunQueueWorker(deps: RunQueueWorkerDeps): RunQueueWorker {
     try {
       await deps.store.failExhaustedPendingRunsSystem({ leaseSeconds, maxClaimAttempts })
       await deps.store.requeueStaleRunningRunsSystem({ staleSeconds, maxClaimAttempts })
+      // Inline-path runs the queue does not own, and never will. It reaps them
+      // anyway because this is the only ticking sweeper over `workflow_runs`,
+      // and the alternative is what shipped: nobody owning them at all. Marking
+      // dead is not claiming — see `failAbandonedInlineRunsSystem`.
+      const abandoned = await deps.store.failAbandonedInlineRunsSystem({ abandonedSeconds })
+      if (abandoned > 0) {
+        console.warn(
+          `[run-queue] failed ${abandoned} abandoned inline-path run(s) ` +
+          `(no step activity for ${abandonedSeconds}s — the process advancing them died)`,
+        )
+      }
     } catch (err) {
       onError(err, {})
     }

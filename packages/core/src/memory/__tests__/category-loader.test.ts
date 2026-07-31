@@ -115,8 +115,16 @@ describe('[COMP:memory/category-loader] buildMemoryContext voice rules', () => {
     expect(voicePlatformFromDraftTitle('[mastodon] New draft')).toBeNull()
     expect(voicePlatformFromDraftTitle('New Chat')).toBeNull()
     expect(voicePlatformFromDraftTitle(null)).toBeNull()
-    // The tag set mirrors the feed target platforms.
-    expect(VOICE_PLATFORM_TAGS).toEqual(['instagram', 'threads', 'twitter', 'xhs'])
+    // The tag set mirrors the feed target platforms (linkedin joined as a
+    // manual-publish target, feed-import-account.md D4/D10).
+    expect(VOICE_PLATFORM_TAGS).toEqual([
+      'instagram',
+      'threads',
+      'twitter',
+      'xhs',
+      'linkedin',
+    ])
+    expect(voicePlatformFromDraftTitle('[linkedin] New draft')).toBe('linkedin')
   })
 
   it('places the Voice Rules block after the Team Context block', () => {

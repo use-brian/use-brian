@@ -20,6 +20,7 @@ import {
   setCompactSummaryAndBoundary,
   listSessionsForWorkspaceSystem,
   getSessionTranscriptForWorkspaceSystem,
+  toStampedMessages,
 } from '../sessions.js'
 import { query } from '../client.js'
 
@@ -399,5 +400,81 @@ describe('[COMP:api/sessions-route] getSessionTranscriptForWorkspaceSystem', () 
       .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     await getSessionTranscriptForWorkspaceSystem('s_1', 'ws_1', { limit: 999 })
     expect(mockQuery.mock.calls[1][1]).toEqual(['s_1', 100])
+  })
+})
+
+describe('[COMP:api/sessions-route] toStampedMessages speaker attribution', () => {
+  const row = (over: Record<string, unknown> = {}) =>
+    ({
+      id: 'm1',
+      sessionId: 's1',
+      role: 'user',
+      content: [{ type: 'text', text: 'ship it' }],
+      sequenceNum: 1,
+      createdAt: new Date('2026-07-31T04:33:00Z'),
+      replyToText: null,
+      topicLabel: null,
+      topicConfidence: null,
+      channelMessageId: null,
+      senderUserId: null,
+      attachments: [],
+      ...over,
+    }) as never
+
+  function firstText(msg: { content: unknown }): string {
+    const blocks = msg.content as Array<{ type?: string; text?: string }>
+    return blocks.find((b) => b.type === 'text')?.text ?? ''
+  }
+
+  it('stamps time only when no sender map is supplied (personal sessions)', () => {
+    const [msg] = toStampedMessages([row({ senderUserId: 'u1' })], 'UTC')
+    expect(firstText(msg)).toMatch(/^\[[^\]]+\] ship it$/)
+    expect(firstText(msg)).not.toContain(':  ')
+  })
+
+  it('labels the human turn with the sender name in a shared session', () => {
+    const [msg] = toStampedMessages(
+      [row({ senderUserId: 'u1' })],
+      'UTC',
+      new Map([['u1', 'Alice']]),
+    )
+    expect(firstText(msg)).toMatch(/^\[[^\]]+\] Alice: ship it$/)
+  })
+
+  it('falls back to an unlabelled stamp for an unresolved sender', () => {
+    // A deleted user, or a profile lookup that failed — degrade to the plain
+    // stamp rather than inventing a name or dropping the turn.
+    const [msg] = toStampedMessages(
+      [row({ senderUserId: 'ghost' })],
+      'UTC',
+      new Map([['u1', 'Alice']]),
+    )
+    expect(firstText(msg)).toMatch(/^\[[^\]]+\] ship it$/)
+  })
+
+  it('never labels assistant turns', () => {
+    const [msg] = toStampedMessages(
+      [row({ role: 'assistant', senderUserId: 'u1' })],
+      'UTC',
+      new Map([['u1', 'Alice']]),
+    )
+    expect(firstText(msg)).toBe('ship it')
+  })
+
+  it('labels a message that has no text block by prepending one', () => {
+    const [msg] = toStampedMessages(
+      [row({ senderUserId: 'u1', content: [{ type: 'image', data: 'x' }] })],
+      'UTC',
+      new Map([['u1', 'Alice']]),
+    )
+    expect(firstText(msg)).toMatch(/^\[[^\]]+\] Alice:$/)
+  })
+
+  it('leaves the STORED content untouched (labels are assembly-time only)', () => {
+    const source = row({ senderUserId: 'u1' })
+    toStampedMessages([source], 'UTC', new Map([['u1', 'Alice']]))
+    expect((source as unknown as { content: Array<{ text: string }> }).content[0].text).toBe(
+      'ship it',
+    )
   })
 })

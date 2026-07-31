@@ -73,6 +73,39 @@ describe('[COMP:chat-ui/chat-reducer] chat reducer', () => {
     expect(next.messages[0]?.text).toBe('edited')
   })
 
+  it('rekeys a message id while preserving consumer-widened fields', () => {
+    // The `user_message_saved` re-key (optimistic local id → server row id)
+    // must not rebuild the message: consumers widen Message with fields the
+    // reducer doesn't know about (app-web's `userAttachments` image-preview
+    // thumbnails), and a wholesale replace made a sent image vanish the
+    // moment the turn started streaming.
+    const widened = {
+      ...userMessage('local-1', 'see attached'),
+      userAttachments: [{ id: 'f1', name: 'shot.png', mime: 'image/png' }],
+    } as Message
+    const seeded = chatReducer(initialChatState, {
+      type: 'message/append',
+      message: widened,
+    })
+    const next = chatReducer(seeded, {
+      type: 'message/rekey',
+      messageId: 'local-1',
+      id: 'srv-1',
+    })
+    expect(next.messages[0]?.id).toBe('srv-1')
+    expect(next.messages[0]?.text).toBe('see attached')
+    expect(
+      (next.messages[0] as Record<string, unknown>).userAttachments,
+    ).toEqual([{ id: 'f1', name: 'shot.png', mime: 'image/png' }])
+    // A miss is a no-op.
+    const missed = chatReducer(seeded, {
+      type: 'message/rekey',
+      messageId: 'not-there',
+      id: 'srv-2',
+    })
+    expect(missed.messages[0]?.id).toBe('local-1')
+  })
+
   it('marks a stream as starting and accumulates text', () => {
     const started = chatReducer(initialChatState, { type: 'stream/start' })
     expect(started.isStreaming).toBe(true)

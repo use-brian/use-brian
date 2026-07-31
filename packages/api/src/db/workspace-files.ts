@@ -442,11 +442,20 @@ export async function searchWorkspaceFiles(
 ): Promise<WorkspaceFileIndexRow[]> {
   const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100)
   const ap = buildAccessPredicate(ctx, { startIdx: 1 })
-  // Doc-block media lives under the reserved `/doc/` path prefix
-  // (see packages/api/src/routes/doc-files.ts). It is durable storage
-  // but is deliberately EXCLUDED from `fileSearch` so high-volume
-  // decorative paste/drop content does not pollute brain retrieval.
-  const wheres: string[] = [ap.sql, 'valid_to IS NULL', "path NOT LIKE '/doc/%'"]
+  // Two reserved path prefixes are durable storage but deliberately EXCLUDED
+  // from `fileSearch`, so neither pollutes brain retrieval:
+  //   `/doc/`  — doc-block media (packages/api/src/routes/doc-files.ts);
+  //              high-volume decorative paste/drop content.
+  //   `/apps/` — custom Home app bundles (routes/home-apps.ts); an app's HTML
+  //              and JS are program text, not workspace knowledge, and a
+  //              `fileSearch` that returned them would put third-party source
+  //              into the assistant's context.
+  const wheres: string[] = [
+    ap.sql,
+    'valid_to IS NULL',
+    "path NOT LIKE '/doc/%'",
+    "path NOT LIKE '/apps/%'",
+  ]
   const values: unknown[] = [...ap.params]
   let idx = ap.nextIdx
   let orderBy = 'updated_at DESC'
@@ -489,11 +498,14 @@ export async function listWorkspaceFilesIndexRanked(
   // Doc-block media (reserved `/doc/` path prefix — see
   // packages/api/src/routes/doc-files.ts) is excluded from the ranked
   // index that backs the L1 `# Workspace Files` prompt block, so embedded
-  // page decoration never surfaces in the assistant's working context.
+  // page decoration never surfaces in the assistant's working context. Custom
+  // Home app bundles (`/apps/`) are excluded for the same reason: an app's
+  // source is program text, not workspace knowledge.
   const result = await queryWithRLS<IndexRow>(
     ctx.userId,
     `SELECT ${INDEX_SELECT} FROM workspace_files
-     WHERE ${ap.sql} AND valid_to IS NULL AND path NOT LIKE '/doc/%'
+     WHERE ${ap.sql} AND valid_to IS NULL
+       AND path NOT LIKE '/doc/%' AND path NOT LIKE '/apps/%'
      ORDER BY updated_at DESC
      LIMIT $${ap.nextIdx}`,
     [...ap.params, cap],

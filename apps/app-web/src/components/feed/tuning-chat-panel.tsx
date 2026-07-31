@@ -43,6 +43,7 @@ import { fetchSessionMessages, extractMessageText } from "@/lib/api/sessions";
 import { getUsage } from "@/lib/api/usage";
 import { webAppUrl } from "@/lib/primary-auth";
 import { VoiceRecorder } from "@/components/feed/voice-recorder";
+import { AssistantAvatar } from "@/components/assistant-avatar";
 import {
   Select,
   SelectContent,
@@ -96,6 +97,12 @@ export const TuningChatPanel = forwardRef<
     assistantId: string;
     assistantName: string;
     /**
+     * The assistant's stored avatar seed (`FeedProfile.assistant.iconSeed`).
+     * Optional — `AssistantAvatar` falls back to an id-derived seed, the same
+     * fallback the global dock uses, so identity visuals stay in sync.
+     */
+    iconSeed?: number;
+    /**
      * Active workspace — used to resolve the plan (model-tier gating) and
      * the research quota via `GET /api/usage`. Omit to disable gating.
      */
@@ -132,6 +139,7 @@ export const TuningChatPanel = forwardRef<
   const {
     assistantId,
     assistantName,
+    iconSeed,
     workspaceId,
     headline,
     suggestions,
@@ -529,7 +537,6 @@ export const TuningChatPanel = forwardRef<
   const messages = session.state.messages;
   const isStreaming = session.state.isStreaming;
   const streamingText = session.state.streamingText;
-  const assistantInitial = assistantName.charAt(0).toUpperCase();
   const lastAssistantIdx = [...messages].reverse().findIndex((m) => m.role === "assistant");
   const lastAssistantId = lastAssistantIdx >= 0 ? messages[messages.length - 1 - lastAssistantIdx].id : null;
   const showEmpty = messages.length === 0 && !isStreaming;
@@ -538,10 +545,15 @@ export const TuningChatPanel = forwardRef<
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border bg-popover shadow-2xl">
       <div className="relative shrink-0 border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-2.5">
-          <div className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted text-foreground/70 text-xs font-semibold ring-1 ring-border">
-            {assistantInitial}
+          <span className="relative shrink-0" aria-hidden>
+            <AssistantAvatar
+              id={assistantId}
+              name={assistantName}
+              iconSeed={iconSeed}
+              size="sm"
+            />
             <span className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-card" />
-          </div>
+          </span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-sm font-semibold tracking-tight">
@@ -605,9 +617,14 @@ export const TuningChatPanel = forwardRef<
             }
             return (
               <div key={msg.id} className="flex gap-2.5 group">
-                <div className="mt-0.5 shrink-0 w-7 h-7 rounded-lg bg-primary/10 text-primary text-[11px] font-semibold flex items-center justify-center ring-1 ring-primary/15">
-                  {assistantInitial}
-                </div>
+                <span className="mt-0.5 shrink-0" aria-hidden>
+                  <AssistantAvatar
+                    id={assistantId}
+                    name={assistantName}
+                    iconSeed={iconSeed}
+                    size="sm"
+                  />
+                </span>
                 <div className="flex-1 min-w-0 text-[14px] leading-[1.6] text-foreground break-words pt-0.5 space-y-1.5">
                   {msg.text && (
                     <div className="chat-markdown prose prose-sm dark:prose-invert max-w-none">
@@ -631,9 +648,14 @@ export const TuningChatPanel = forwardRef<
 
           {isStreaming && (
             <div className="flex gap-2.5">
-              <div className="mt-0.5 shrink-0 w-7 h-7 rounded-lg bg-primary/10 text-primary text-[11px] font-semibold flex items-center justify-center ring-1 ring-primary/15">
-                {assistantInitial}
-              </div>
+              <span className="mt-0.5 shrink-0" aria-hidden>
+                <AssistantAvatar
+                  id={assistantId}
+                  name={assistantName}
+                  iconSeed={iconSeed}
+                  size="sm"
+                />
+              </span>
               <div className="flex-1 min-w-0 pt-0.5">
                 {streamingText ? (
                   <div className="text-[14px] leading-[1.6] text-foreground break-words chat-markdown prose prose-sm dark:prose-invert max-w-none">

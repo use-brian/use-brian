@@ -43,6 +43,7 @@ import {
   type TaskTombstoneRecord,
 } from '@use-brian/core'
 import { getAppPool, query, rollbackAndRelease } from './client.js'
+import { abandonGoalsForHostTaskSystem } from './goals.js'
 
 // ── Row mappers ──────────────────────────────────────────────────────────────
 
@@ -373,6 +374,13 @@ export async function rejectTask(input: {
         WHERE id = $1 AND valid_to IS NULL`,
       [input.taskId],
     )
+
+    // Host-lifecycle cascade — a rejected task takes its bound goals with it, or
+    // the judge's "your assistant can help with this" draft outlives the task it
+    // was about and sits on the triage surface forever. Same client, so it is
+    // atomic with the soft delete. See db/goals.ts →
+    // `abandonGoalsForHostTaskSystem`.
+    await abandonGoalsForHostTaskSystem(input.taskId, 'host_task_deleted', { exec: client })
 
     const inserted = await client.query<{ id: string }>(
       `INSERT INTO task_tombstones

@@ -76,6 +76,20 @@ export type BrainPrimitive =
   | 'scheduled_job'
   | 'deck'
   | 'assistant'
+  /**
+   * WORKSPACE CONFIGURATION changed — today, the Home app-bar strip
+   * (`workspaces.home_apps`) and the custom-app registry behind its
+   * `custom:<id>` entries. Carries no rowId: the whole config is one small
+   * read, and a signal-not-data payload keeps this identical to every other
+   * primitive.
+   *
+   * This primitive exists because the app-bar renders inside the workspace
+   * layout, which NEVER unmounts during SPA navigation — a mount-only effect
+   * there fires once per full page load and can therefore never self-heal. One
+   * server write has to repair every open tab, device, and teammate. See
+   * docs/architecture/platform/realtime-sync.md.
+   */
+  | 'workspace_config'
 
 /** Alias reflecting the widened, workspace-wide scope. */
 export type WorkspacePrimitive = BrainPrimitive

@@ -30,7 +30,8 @@
 
 import { Router } from 'express'
 import type { WorkerRunsStore, WorkerStatus } from '@use-brian/core'
-import { findSessionById } from '../db/sessions.js'
+import { findSessionById, isSharedChatSession } from '../db/sessions.js'
+import { gateSessionRead } from './sessions.js'
 import { findAssistantById } from '../db/users.js'
 import type { PendingApprovalsStore, PendingApproval } from '../db/pending-approvals-store.js'
 import {
@@ -73,6 +74,15 @@ function isQuestionPendingForUser(
   approval: PendingApproval,
   userId: string,
   sessionId: string,
+  /**
+   * True when the caller has already been authorized for the SESSION (a
+   * workspace-shared chat, gated by `gateSessionRead`). In a shared thread the
+   * model asked the conversation, not one person: whoever is reading it when
+   * the question lands should be able to answer, and requiring the original
+   * starter would strand the turn whenever they stepped away. Personal
+   * sessions pass `false` and keep the strict approver check.
+   */
+  sessionAuthorized = false,
 ): { ok: true } | { ok: false; status: number; body: Record<string, unknown> } {
   if (approval.kind !== 'question') {
     return {
@@ -81,7 +91,7 @@ function isQuestionPendingForUser(
       body: { error: 'Approval is not a question', kind: approval.kind },
     }
   }
-  if (approval.approverUserId !== userId) {
+  if (approval.approverUserId !== userId && !sessionAuthorized) {
     return {
       ok: false,
       status: 403,
@@ -109,6 +119,41 @@ function isQuestionPendingForUser(
   return { ok: true }
 }
 
+/**
+ * Resolve the approval for a question route, allowing a teammate in a
+ * workspace-shared chat to answer.
+ *
+ * The RLS-scoped `getById(userId, …)` returns null for anyone but the asked
+ * user, so a shared thread's other members could not even see the question
+ * they are looking at. When that read comes back empty we re-check through the
+ * SESSION: load it, run `gateSessionRead`, and only for a shared CHAT fall
+ * back to the system read. Every other session shape keeps the RLS answer.
+ */
+async function resolveQuestionApproval(
+  opts: SessionQuestionRouteOptions,
+  userId: string,
+  approvalId: string,
+  sessionId: string,
+): Promise<{ approval: PendingApproval | null; sessionAuthorized: boolean }> {
+  const own = await opts.approvalsStore.getById(userId, approvalId)
+  if (own) return { approval: own, sessionAuthorized: false }
+
+  const session = await findSessionById(sessionId)
+  if (!session || !isSharedChatSession(session)) {
+    return { approval: null, sessionAuthorized: false }
+  }
+  if (await gateSessionRead(userId, session)) {
+    return { approval: null, sessionAuthorized: false }
+  }
+  const shared = await opts.approvalsStore.getByIdSystem(approvalId)
+  // Bind the system read to THIS session before trusting it — otherwise a
+  // member of one shared chat could settle an approval belonging to another.
+  if (!shared || shared.blockingSessionId !== sessionId) {
+    return { approval: null, sessionAuthorized: false }
+  }
+  return { approval: shared, sessionAuthorized: true }
+}
+
 export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router {
   const router = Router({ mergeParams: true })
 
@@ -124,7 +169,15 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
     }
     const sessionId = req.params.sessionId
     const session = await findSessionById(sessionId)
-    if (!session || session.userId !== userId) {
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
+    // `gateSessionRead` rather than a bare `session.userId !== userId`: a
+    // workspace-shared chat's teammate is a legitimate reader, and the old
+    // check 404'd them mid-conversation the moment the model asked something.
+    // Personal sessions are unchanged — the gate falls through to owner-only.
+    if (await gateSessionRead(userId, session)) {
       res.status(404).json({ error: 'Session not found' })
       return
     }
@@ -185,16 +238,20 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       })
       return
     }
-    const approval = await opts.approvalsStore.getById(userId, approvalId)
+    const { approval, sessionAuthorized } = await resolveQuestionApproval(
+      opts, userId, approvalId, sessionId,
+    )
     if (!approval) {
       res.status(404).json({ error: 'Approval not found' })
       return
     }
-    const check = isQuestionPendingForUser(approval, userId, sessionId)
+    const check = isQuestionPendingForUser(approval, userId, sessionId, sessionAuthorized)
     if (!check.ok) {
       res.status(check.status).json(check.body)
       return
     }
+    // `recordAnswer` stamps `userId` as the answerer, so a teammate's answer in
+    // a shared chat is attributed to them, not to whoever was originally asked.
     const updated = await opts.approvalsStore.recordAnswer(approvalId, answer, userId)
     if (!updated) {
       // Lost a race — another submit settled the row first.
@@ -232,7 +289,11 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
     }
     const sessionId = req.params.sessionId
     const session = await findSessionById(sessionId)
-    if (!session || session.userId !== userId) {
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' })
+      return
+    }
+    if (await gateSessionRead(userId, session)) {
       res.status(404).json({ error: 'Session not found' })
       return
     }
@@ -273,12 +334,14 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
       return
     }
     const { sessionId, approvalId } = req.params
-    const approval = await opts.approvalsStore.getById(userId, approvalId)
+    const { approval, sessionAuthorized } = await resolveQuestionApproval(
+      opts, userId, approvalId, sessionId,
+    )
     if (!approval) {
       res.status(404).json({ error: 'Approval not found' })
       return
     }
-    const check = isQuestionPendingForUser(approval, userId, sessionId)
+    const check = isQuestionPendingForUser(approval, userId, sessionId, sessionAuthorized)
     if (!check.ok) {
       res.status(check.status).json(check.body)
       return

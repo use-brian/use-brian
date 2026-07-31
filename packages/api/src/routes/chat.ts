@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { Router } from 'express'
-import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, updateUserLastSeenTz } from '../db/users.js'
+import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz } from '../db/users.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession } from '../db/sessions.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
 import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
@@ -862,6 +862,48 @@ export function buildViewingDeckBlock(deck: {
 // (chat.ts imports channel-pipeline, so the reverse import would cycle).
 // Re-exported here because callers and tests already import it from this
 // module.
+/**
+ * One in-flight turn per multi-participant session.
+ *
+ * Draft sessions and workspace-shared chats are both live multi-watcher
+ * threads: any participant may drive a turn, but two at once interleave into
+ * one history, and the second turn reads the first one's half-written state.
+ * Returns the SSE error payload to send, or `null` when the turn may proceed.
+ *
+ * The two carry DIFFERENT codes because the clients say different things: a
+ * draft says "another team member is in a turn on this draft", a shared chat
+ * says "a teammate is sending a message". Note the shared-chat branch gates on
+ * `isSharedChatSession`, not on `visibility === 'workspace'` — doc comment
+ * threads are workspace-visible too and are single-author by construction, so
+ * busy-blocking them would break replying to your own thread.
+ *
+ * Concurrent-turn QUEUEING stays deferred, same as it is for draft sessions.
+ *
+ * See docs/architecture/features/chat-app.md → "One turn at a time".
+ */
+export function sharedTurnRejection(session: {
+  status: string
+  visibility: string | null
+  channelType: string
+  appOrigin: string | null
+  mode: string | null
+}): { error: string; code: string } | null {
+  if (session.status !== 'running') return null
+  if (session.mode === 'draft') {
+    return {
+      error: 'Another team member is currently sending a turn in this draft. Please wait until it completes.',
+      code: 'draft_session_busy',
+    }
+  }
+  if (isSharedChatSession(session)) {
+    return {
+      error: 'A teammate is sending a message in this chat. Please wait until it completes.',
+      code: 'shared_session_busy',
+    }
+  }
+  return null
+}
+
 export { attachTurnContext }
 
 /**
@@ -1762,11 +1804,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Live multi-watcher sessions (draft mode): any participant can drive a
       // turn, but only one at a time. Reject concurrent turns with a clean 409
       // so the frontend can render "someone else is in a turn".
-      if (session.mode === 'draft' && session.status === 'running') {
-        sendEvent('error', {
-          error: 'Another team member is currently sending a turn in this draft. Please wait until it completes.',
-          code: 'draft_session_busy',
-        })
+      const busy = sharedTurnRejection(session)
+      if (busy) {
+        sendEvent('error', busy)
         res.end()
         return
       }
@@ -2254,17 +2294,17 @@ export function chatRoutes(options: WebChatOptions): Router {
         topicLabel: classification?.topic_label ?? null,
         topicConfidence: classification?.confidence ?? null,
         // Attribute the human author on multi-participant sessions: draft-mode
-        // sessions ('draft') AND doc comment threads ('doc_thread'), where
-        // several people + the AI share one session and per-message authorship
-        // is surfaced.
-        senderUserId:
-          session.mode === 'draft' || session.channelType === 'doc_thread'
-            ? user.id
-            : null,
+        // sessions ('draft'), doc comment threads ('doc_thread'), and
+        // workspace-shared chats — everywhere several people + the AI share
+        // one session and per-message authorship is surfaced. In a shared chat
+        // this also reaches the MODEL (see the sender-name resolution below):
+        // without it "the user" is several people and the reply cannot tell
+        // them apart.
+        senderUserId: isMultiParticipantSession(session) ? user.id : null,
       })
       sendEvent('user_message_saved', {
         id: storedUserMsg.id,
-        ...(session.mode === 'draft' ? { senderUserId: user.id } : {}),
+        ...(isMultiParticipantSession(session) ? { senderUserId: user.id } : {}),
       })
 
       // Adaptive research-classifier overhead — the Gemini call happened
@@ -2283,9 +2323,11 @@ export function chatRoutes(options: WebChatOptions): Router {
           triggerKey: 'adaptive_research_classifier',
         })
       }
-      // Mirror to the session-event bus so other watchers of a live
-      // draft-mode session see the new user turn appear live.
-      if (session.mode === 'draft') {
+      // Mirror to the session-event bus so other watchers of a live shared
+      // session — a draft-mode session, or a workspace-shared chat — see the
+      // new user turn appear live. Without this a teammate's message only
+      // shows up on their next refetch, which reads as the chat being broken.
+      if (session.mode === 'draft' || isSharedChatSession(session)) {
         publishSessionEvent({
           kind: 'user_message_saved',
           sessionId: session.id,
@@ -2378,6 +2420,38 @@ export function chatRoutes(options: WebChatOptions): Router {
         fromSequence: session.compactBoundarySequence,
       })
 
+      // Speaker attribution for a workspace-shared chat (chat-app.md →
+      // "Attribution reaches the model"). One batched profile lookup over the
+      // session's distinct authors; the map rides into `toStampedMessages`,
+      // which labels each human turn `[stamp] Alice: …` at ASSEMBLY time.
+      // Stored content stays clean, so this is reversible and never bakes a
+      // name prefix into history. A lookup failure degrades to unlabelled
+      // turns — worse for the model, never fatal for the user.
+      let sharedSenderNames: Map<string, string> | undefined
+      let sharedParticipants: string[] = []
+      if (isSharedChatSession(session)) {
+        try {
+          const senderIds = [
+            ...new Set(
+              dbMessages
+                .map((m) => m.senderUserId)
+                .filter((id): id is string => Boolean(id)),
+            ),
+          ]
+          if (senderIds.length > 0) {
+            const profiles = await getUserProfilesByIds(senderIds)
+            sharedSenderNames = new Map(
+              [...profiles.entries()]
+                .filter(([, p]) => Boolean(p.name))
+                .map(([id, p]) => [id, p.name as string]),
+            )
+            sharedParticipants = [...new Set(sharedSenderNames.values())]
+          }
+        } catch (err) {
+          console.warn('[chat] shared-session sender lookup failed:', err)
+        }
+      }
+
       // Proactive compaction check (web = 1.0× threshold, linear profile).
       // Web chat: the authenticated user IS the owner, so ownerId === user.id.
       // runProactiveCompaction owns stamping + pairing + summary-prepend
@@ -2387,6 +2461,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       const compactionResult = await runProactiveCompaction({
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
+        senderNames: sharedSenderNames,
         session,
         tier: modelToCompactionTier(resolveModel(requestedModel, userPlan, 'ok')),
         channelClass: 'web',
@@ -2854,6 +2929,22 @@ export function chatRoutes(options: WebChatOptions): Router {
       const turnContextParts: string[] = splitPrompt.turnContext
         ? [splitPrompt.turnContext]
         : []
+
+      // Shared-chat participants note. Rides the TURN-CONTEXT envelope, never
+      // the system prompt: a per-turn block above the injected tool schemas
+      // breaks the provider's implicit cache prefix and re-bills the whole
+      // conversation as fresh input every message (the prompt-cache-alignment
+      // invariant). Personal sessions push nothing here.
+      if (isSharedChatSession(session) && sharedParticipants.length > 0) {
+        turnContextParts.push(
+          [
+            '# Shared chat',
+            'This conversation is shared with the workspace and several people write in it.',
+            `Participants so far: ${sharedParticipants.join(', ')}.`,
+            'Each human turn is prefixed with its timestamp and the sender name. Address the person who wrote the newest message, and do not assume earlier turns came from them.',
+          ].join('\n'),
+        )
+      }
 
       // ── Dispute pre-pass (grounding-gate claim ledger) ──
       // A dispute-shaped message carrying a figure ("唔係要 look 11萬咩")
@@ -3583,10 +3674,10 @@ export function chatRoutes(options: WebChatOptions): Router {
           })
           res.end()
           await updateSessionStatus(session.id, 'idle')
-          // turn_started has already fired for draft sessions (above the
+          // turn_started has already fired for shared sessions (above the
           // budget gate). Pair it with turn_completed so watchers don't
           // see the input dimmed forever.
-          if (session.mode === 'draft') {
+          if (session.mode === 'draft' || isSharedChatSession(session)) {
             publishSessionEvent({
               kind: 'turn_completed',
               sessionId: session.id,
@@ -4302,10 +4393,11 @@ export function chatRoutes(options: WebChatOptions): Router {
               })
             }
           }
-          // Live broadcast for multi-watcher draft-mode sessions. We send
-          // every turn (not just the final one) because a host's per-turn
-          // tool upserts can ride on intermediate tool_use turns.
-          if (session.mode === 'draft') {
+          // Live broadcast for multi-watcher sessions (draft-mode, and the
+          // Chat app's workspace-shared threads). We send every turn (not just
+          // the final one) because a host's per-turn tool upserts can ride on
+          // intermediate tool_use turns.
+          if (session.mode === 'draft' || isSharedChatSession(session)) {
             publishSessionEvent({
               kind: 'assistant_message_saved',
               sessionId: session.id,
@@ -5396,9 +5488,11 @@ export function chatRoutes(options: WebChatOptions): Router {
         if (entry.sessionId === session.id) approvalResolverIndex.delete(approvalId)
       }
 
-      // Tell team-shared draft watchers the turn just finished so they
-      // can re-enable their input boxes. No-op for non-draft sessions.
-      if (session.mode === 'draft') {
+      // Tell shared-session watchers the turn just finished so they can
+      // re-enable their input boxes — draft sessions and workspace-shared
+      // chats both take one turn at a time, so this event is what clears the
+      // other viewers' busy state. No-op for personal sessions.
+      if (session.mode === 'draft' || isSharedChatSession(session)) {
         publishSessionEvent({
           kind: 'turn_completed',
           sessionId: session.id,

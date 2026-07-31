@@ -19,7 +19,7 @@ describe("[COMP:app-web/studio-nav] Studio navigation", () => {
     ]);
     expect(STUDIO_GROUPS.map((g) => g.sections.map((s) => s.segment))).toEqual([
       ["connectors", "ingest-rules", "knowledge", "task-rules"],
-      ["assistants", "channels"],
+      ["assistants", "channels", "mini-apps"],
       ["programmatic-access"],
     ]);
   });

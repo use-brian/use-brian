@@ -212,6 +212,66 @@ export async function listGoals(
   return result.rows.map((row) => ({ ...toRecord(row), hostTitle: row.hostTitle }))
 }
 
+// ── Host-lifecycle cascade ───────────────────────────────────────────────────
+//
+// `host_id` is deliberately not a FK (it points at task|page|entity|workflow),
+// so Postgres cannot cascade for us: when a host task leaves the live set the
+// goals bound to it have to be retired in application code. Without this a
+// deleted task's judge-drafted goal outlives it forever and keeps its slot on
+// the "Tasks assignable" surface + home-dock count — 224 of one workspace's 242
+// drafts were exactly this on 2026-07-30.
+//
+// Cascade, not delete: the host task itself is only SOFT-deleted (`valid_to`),
+// so the goal follows with the reversible discard the Dismiss button already
+// uses (`status='abandoned'`, the reason in `blocker_reason`). Terminal statuses
+// are excluded from every list, count, and sweep, and the judge's brief survives
+// as history.
+
+/** Why a host-lifecycle cascade retired the goal. Lands in `blocker_reason`. */
+export type GoalHostCascadeReason = 'host_task_deleted' | 'host_task_closed'
+
+/** Statuses the cascade never touches: already terminal (nothing to retire), or
+ *  `running` — the acting loop owns a claimed goal and would re-arm straight
+ *  over our write, so we leave it to the loop, whose host resolvers already
+ *  surface a missing host as "not satisfied" and block legibly. Same
+ *  single-flight rule the structural rollup follows. */
+const CASCADE_SKIP_STATUSES = [...TERMINAL_STATUSES, 'running']
+
+/** Minimal executor seam: the default is the owner pool (`query`), but a caller
+ *  already inside a transaction passes its own client so the cascade commits
+ *  atomically with the task write (`updateTask`'s supersede path). */
+type GoalCascadeExecutor = {
+  query: (text: string, values: unknown[]) => Promise<{ rowCount: number | null }>
+}
+
+/**
+ * Retire the goals bound to a task that is no longer assignable. Returns how
+ * many goals were retired (0 is the common case — most tasks have no goal).
+ *
+ * `draftsOnly` is the difference between the two triggers:
+ *   - **deleted** (`host_task_deleted`) — every non-terminal goal goes. The host
+ *     is gone; a confirmed goal driving it can never reach `hostTaskDone`.
+ *   - **closed** (`host_task_closed`, `draftsOnly: true`) — only UNCONFIRMED
+ *     drafts. A confirmed goal whose host task just closed is the goal
+ *     *succeeding*; the rollup / acting loop completes it and must not be
+ *     pre-empted here.
+ */
+export async function abandonGoalsForHostTaskSystem(
+  taskId: string,
+  reason: GoalHostCascadeReason,
+  opts: { draftsOnly?: boolean; exec?: GoalCascadeExecutor } = {},
+): Promise<number> {
+  const exec = opts.exec ?? { query: (text: string, values: unknown[]) => query(text, values) }
+  const result = await exec.query(
+    `UPDATE goals
+        SET status = 'abandoned', blocker_reason = $2
+      WHERE host_type = 'task' AND host_id = $1
+        AND status <> ALL($3)${opts.draftsOnly ? '\n        AND confirmed_at IS NULL' : ''}`,
+    [taskId, reason, CASCADE_SKIP_STATUSES],
+  )
+  return result.rowCount ?? 0
+}
+
 /** System read: goals bound to a given host — the rollup lookup. */
 export async function listGoalsByHostSystem(host: GoalHostRef): Promise<GoalRecord[]> {
   const result = await query<GoalRow>(

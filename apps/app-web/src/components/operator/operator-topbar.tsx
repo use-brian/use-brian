@@ -43,6 +43,7 @@ import {
   ChevronRight,
   PanelLeftClose,
   PanelLeftOpen,
+  Puzzle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n/client";
@@ -56,11 +57,20 @@ const iconBtnCls =
 
 export function OperatorTopbar({
   app,
+  customApp,
   center,
   right,
 }: {
-  /** Which operator app the chip names (icon + `operatorBar` label). */
+  /** Which built-in operator app the chip names (icon + `operatorBar` label).
+   *  Ignored when `customApp` is supplied. */
   app: OperatorAppKey;
+  /**
+   * A CUSTOM (workspace-built) app's identity. Its name and icon are workspace
+   * data from the app's manifest, not i18n — so the chip takes them verbatim
+   * rather than looking them up. `Puzzle` is the fallback for an app whose
+   * manifest names an icon this build's lucide set does not carry.
+   */
+  customApp?: { name: string; icon: string | null };
   /** Cluster after the tab chip (CRM's section switch). Scrolls instead of
    *  painting over the right cluster when the bar is cramped. */
   center?: React.ReactNode;
@@ -72,8 +82,8 @@ export function OperatorTopbar({
   const router = useRouter();
   const { sidebarCollapsed, setSidebarCollapsed } = useSidebarData();
 
-  const Icon = APP_ICON[app];
-  const label = t.operatorBar[app];
+  const Icon = customApp ? Puzzle : APP_ICON[app];
+  const label = customApp ? customApp.name : t.operatorBar[app];
 
   return (
     <div

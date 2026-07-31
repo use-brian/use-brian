@@ -41,6 +41,7 @@ import {
   type BrainInboxPrimitive,
 } from '../db/brain-inbox-store.js'
 import { createInspectionSession } from '../db/sessions.js'
+import { abandonGoalsForHostTaskSystem } from '../db/goals.js'
 import { rejectTask as rejectTaskWithReason } from '../db/task-admission-store.js'
 import {
   updateMemory,
@@ -2033,6 +2034,8 @@ export function brainInboxRoutes({
             `UPDATE tasks SET valid_to = now(), updated_at = now() WHERE id = $1 AND valid_to IS NULL`,
             [id],
           )
+          // Host-lifecycle cascade — see the single-row DELETE below.
+          await abandonGoalsForHostTaskSystem(id, 'host_task_deleted')
           await appendBrainVerification({
             targetKind: 'task',
             targetId: id,
@@ -2154,6 +2157,17 @@ export function brainInboxRoutes({
           WHERE id = $1 AND valid_to IS NULL`,
         [rowId],
       )
+
+      // Host-lifecycle cascade (tasks only): `goals.host_id` is not a FK, so
+      // nothing in the DB retires the goals bound to a task the user just
+      // deleted. Left uncascaded, a judge-drafted goal keeps its slot on the
+      // "Tasks assignable" surface and in the home-dock count for a task that no
+      // longer exists — and no other path ever clears it, because a draft is
+      // inert (the rollup skips unconfirmed goals and no tick fires).
+      // See docs/architecture/features/goals.md → "Host-lifecycle cascade".
+      if (primitiveParam === 'task') {
+        await abandonGoalsForHostTaskSystem(rowId, 'host_task_deleted')
+      }
 
       // Audit. For memory ride memory_verifications.action='delete'; for
       // others use brain_verifications.action='delete'.

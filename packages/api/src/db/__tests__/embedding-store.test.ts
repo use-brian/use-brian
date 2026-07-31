@@ -133,6 +133,8 @@ describe('[COMP:brain/embedding-store] withClaimedRows', () => {
     expect(priority.values).toEqual([50])
   })
 
+  // [COMP:brain/embedding-drain-index] — this is the query shape the partial
+  // drain index exists to serve; its component-map row points here.
   it('claims via indexable range scans — never a CASE-expression sort', async () => {
     // Regression guard for the 2026-07-28 connection-exhaustion outage
     // (embeddings.md §"Worker priority queue"). A `CASE WHEN created_at >

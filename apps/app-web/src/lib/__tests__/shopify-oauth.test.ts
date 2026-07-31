@@ -14,7 +14,7 @@ import {
   classifyShopifyTokens,
   verifyShopifyCallbackHmac,
 } from "../shopify-oauth";
-import { normalizeShopifyShopDomain } from "../shopify-domain";
+import { normalizeShopifyShopDomain, isShpssPrefixed } from "../shopify-domain";
 
 const SECRET = "app-client-secret";
 
@@ -123,5 +123,27 @@ describe("[COMP:api/shopify-oauth] Shopify OAuth callback verification", () => {
     });
     expect(classifyShopifyTokens({ refresh_token: "r", expires_in: 3600 }, 0)).toBeNull();
     expect(classifyShopifyTokens({}, 0)).toBeNull();
+  });
+
+  describe("isShpssPrefixed", () => {
+    // The connect form's only credential is a pasted token, and a Dev Dashboard
+    // app shows a client secret and NO access token, so `shpss_` is the most
+    // likely wrong paste. Catching it locally turns a 401 round trip into a
+    // message that names the mistake.
+    it("flags an API secret key regardless of case or padding", () => {
+      expect(isShpssPrefixed("shpss_abc123")).toBe(true);
+      expect(isShpssPrefixed("  SHPSS_ABC123  ")).toBe(true);
+    });
+
+    it("passes every real access-token prefix through", () => {
+      // Documented access-token prefixes: shpat_ (public), shpca_ (custom),
+      // shppa_ (legacy private). None may be rejected by this guard.
+      for (const t of ["shpat_abc", "shpca_abc", "shppa_abc"]) {
+        expect(isShpssPrefixed(t)).toBe(false);
+      }
+      // And it must not fire on a merely similar prefix or an empty field.
+      expect(isShpssPrefixed("shp_abc")).toBe(false);
+      expect(isShpssPrefixed("")).toBe(false);
+    });
   });
 });

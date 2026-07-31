@@ -100,6 +100,78 @@ export type SessionMessageAttachment = {
   caption?: string
 }
 
+/** The fields the shared-session predicates read. */
+type SessionShape = {
+  visibility: string | null
+  channelType: string
+  appOrigin: string | null
+  mode: string | null
+}
+
+/**
+ * A workspace-shared **chat** session — the Chat app's Workspace view.
+ *
+ * Narrower than `visibility === 'workspace'` on purpose. Doc comment threads
+ * and feed drafts are also workspace-visible, and they have their own
+ * lifecycle rules that must not be widened by accident: deleting a doc-thread
+ * session cascades to its `comment_threads` row and every comment on it. Every
+ * rule this build relaxes (delete by admin, the busy gate, the workspace list)
+ * gates on THIS predicate, not on `visibility` alone.
+ *
+ * See docs/architecture/features/chat-app.md → "Workspace view".
+ */
+export function isSharedChatSession(s: SessionShape): boolean {
+  return (
+    s.visibility === 'workspace' &&
+    s.channelType === 'web' &&
+    s.appOrigin === 'chat'
+  )
+}
+
+/**
+ * A session several humans share, so the model needs speaker labels to tell
+ * "the user" apart: shared chats, feed drafts, and doc comment threads.
+ */
+export function isMultiParticipantSession(s: SessionShape): boolean {
+  return (
+    isSharedChatSession(s) ||
+    s.mode === 'draft' ||
+    s.channelType === 'doc_thread'
+  )
+}
+
+/**
+ * Create a workspace-shared chat session (the Chat app's "New workspace chat").
+ *
+ * Uses the existing `visibility` switch with **no schema change** — the
+ * starter is the `user_id` owner row and other members address the session
+ * **by id**, so the `(assistant_id, user_id, channel_type, channel_id, app_id)`
+ * unique key is untouched. This is the doc-comment-thread insert shape
+ * (`comment-thread-store.ts`), which sets all three of `visibility`,
+ * `workspace_id` and `effective_clearance` — miss one and the RLS predicate
+ * or the clearance filter silently excludes the row.
+ */
+export async function createWorkspaceChatSession(params: {
+  assistantId: string
+  starterUserId: string
+  workspaceId: string
+  /** The owning assistant's clearance — the session's read floor. */
+  effectiveClearance: string | null
+}): Promise<Session> {
+  return findOrCreateSession({
+    assistantId: params.assistantId,
+    userId: params.starterUserId,
+    channelType: 'web',
+    // A fresh UUID, so the identity tuple is unique and the upsert always
+    // inserts — "New workspace chat" starts a new thread, never resumes one.
+    channelId: crypto.randomUUID(),
+    appOrigin: 'chat',
+    visibility: 'workspace',
+    workspaceId: params.workspaceId,
+    effectiveClearance: params.effectiveClearance,
+  })
+}
+
 /**
  * Find or create a session for the given tuple.
  * Updates lastActiveAt on access.
@@ -462,10 +534,21 @@ export async function getSessionMessages(
  * content stays clean for UI display.
  *
  * Format: `[Wed, Apr 15, 12:33 PM HKT] ` — compact, includes day-of-week.
+ *
+ * **Speaker attribution.** In a multi-participant session (a workspace-shared
+ * chat, a feed draft, a doc comment thread) "the user" is several people, and
+ * a reply that cannot tell them apart is wrong in a way the transcript cannot
+ * show. Pass `senderNames` (a `sender_user_id` → display-name map) and each
+ * human turn is labelled `[stamp] Alice: …`. This is the SAME seam as the
+ * timestamp, and for the same reason: the label is assembly-time only, so
+ * `session_messages.content` stays clean and turning the feature off does not
+ * leave name prefixes baked into history. Omit the map (every personal
+ * session) and nothing changes.
  */
 export function toStampedMessages(
   dbMessages: SessionMessage[],
   timezone: string,
+  senderNames?: ReadonlyMap<string, string>,
 ): Array<{ role: 'user' | 'assistant' | 'system'; content: unknown }> {
   return dbMessages.map((m) => {
     const base = {
@@ -484,6 +567,11 @@ export function toStampedMessages(
       hour12: true,
       timeZoneName: 'short',
     })
+    const speaker =
+      m.senderUserId && senderNames?.get(m.senderUserId)
+        ? ` ${senderNames.get(m.senderUserId)}:`
+        : ''
+    const prefix = `[${stamp}]${speaker}`
 
     // Find the first text block and prepend the timestamp
     const content = m.content as Array<{ type?: string; text?: string }>
@@ -494,7 +582,7 @@ export function toStampedMessages(
           ...base,
           content: [
             ...content.slice(0, i),
-            { ...block, text: `[${stamp}] ${block.text}` },
+            { ...block, text: `${prefix} ${block.text}` },
             ...content.slice(i + 1),
           ],
         }
@@ -503,7 +591,7 @@ export function toStampedMessages(
     // No text block — prepend one with just the timestamp
     return {
       ...base,
-      content: [{ type: 'text', text: `[${stamp}]` }, ...content],
+      content: [{ type: 'text', text: prefix }, ...content],
     }
   })
 }

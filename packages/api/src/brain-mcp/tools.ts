@@ -44,6 +44,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import {
+  describeAppStatus,
+  writeHomeAppBundle,
+  writeHomeAppSchema,
+  type HomeAppToolDeps,
+} from '../home-apps/tools.js'
+import { listHomeApps as listHomeAppRows } from '../db/home-apps-store.js'
 import { z } from 'zod'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import {
@@ -1592,6 +1599,96 @@ export function buildWriteBrowserSkillTool(store: BrowserSkillStore, workspaceId
       )
     },
   }
+}
+
+/**
+ * Custom Home apps: `writeHomeApp` / `getHomeApp` / `listHomeApps` — the
+ * assistant authoring path (custom-home-apps.md §4), modelled on
+ * `writeBrowserSkill` above.
+ *
+ * The server RE-VALIDATES the bundle on every write and fails closed: a
+ * bundle that does not validate is not saved at all, because a half-valid app
+ * is a thing an admin would then be asked to grant scopes to. Authoring never
+ * bypasses consent — an app the assistant writes lands at `needs_consent`
+ * until a human admin approves what it asks for, and a later write that widens
+ * its scopes drops it back there.
+ *
+ * `writeHomeApp` is a write tool, so it registers only for `read_write`.
+ */
+export function buildHomeAppTools(deps: HomeAppToolDeps): BrainTool[] {
+  return [
+    {
+      name: 'listHomeApps',
+      description:
+        'List the workspace\'s custom Home apps: name, what each is waiting on (consent, ' +
+        'a re-consent after asking for wider access, or live on Home), and which scopes it ' +
+        'requested versus what was granted.',
+      inputSchema: {},
+      handler: async () => {
+        const apps = await listHomeAppRows(deps.workspaceId)
+        if (apps.length === 0) {
+          return text('This workspace has no custom Home apps yet.')
+        }
+        return text(
+          apps
+            .map(
+              (a) =>
+                `- ${a.name} (${a.kind}) — ${describeAppStatus(a)}` +
+                (a.syncError ? `; last sync failed: ${a.syncError}` : ''),
+            )
+            .join('\n'),
+        )
+      },
+    },
+    {
+      name: 'getHomeApp',
+      description:
+        'Read one custom Home app: its manifest (name, entry, requested scopes), its status, ' +
+        'and the scopes an admin has actually granted it.',
+      inputSchema: {
+        name: z.string().min(1).max(120).describe('The app name'),
+      },
+      handler: async (args) => {
+        const wanted = String((args as { name: string }).name)
+        const app = (await listHomeAppRows(deps.workspaceId)).find((a) => a.name === wanted)
+        if (!app) return text(`No custom Home app named "${wanted}".`, true)
+        return text(
+          [
+            `${app.name} — ${describeAppStatus(app)}`,
+            app.description ? `Description: ${app.description}` : null,
+            `Requested scopes: ${JSON.stringify((app.manifest as { scopes?: unknown }).scopes ?? {})}`,
+            `Granted scopes: ${app.grantedScopes ? JSON.stringify(app.grantedScopes) : 'none yet'}`,
+            app.repo ? `Synced from: ${app.repo}@${app.branch}` : 'Authored in chat',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        )
+      },
+    },
+    {
+      name: 'writeHomeApp',
+      description:
+        'Create or update a custom Home app — a small static web app (HTML/CSS/JS plus a ' +
+        'brian-app.json manifest) that renders full-page on Home and reads the workspace brain ' +
+        'through a scoped bridge. The whole bundle is replaced on every write, so send every ' +
+        'file. The server re-validates and refuses anything that does not fit the format. A new ' +
+        'or newly-widened app does NOT appear on Home until a workspace owner or admin approves ' +
+        'the access it asks for.',
+      inputSchema: writeHomeAppSchema,
+      handler: async (args) => {
+        const input = args as { files: Array<{ path: string; content: string }> }
+        const result = await writeHomeAppBundle(deps, { files: input.files })
+        if (!result.ok) return text(result.message, true)
+        const warned = result.warnings.length
+          ? `\nAdvisory:\n${result.warnings.map((w) => `  ${w}`).join('\n')}`
+          : ''
+        return text(
+          `${result.created ? 'Created' : 'Updated'} "${result.app.name}" — ` +
+            `${describeAppStatus(result.app)}.${warned}`,
+        )
+      },
+    },
+  ]
 }
 
 /**

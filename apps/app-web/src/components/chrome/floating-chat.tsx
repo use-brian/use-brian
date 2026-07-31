@@ -2006,17 +2006,14 @@ export function FloatingChat({
             case "user_message_saved": {
               const id = typeof payload.id === "string" ? payload.id : null;
               if (!id) break;
-              // Re-key the optimistic user message so retry hooks
-              // can reference the real row.
+              // Re-key the optimistic user message so retry hooks can
+              // reference the real row. Rekey (not replace) — the optimistic
+              // message carries `userAttachments` thumbnail previews that a
+              // rebuilt bare message would drop mid-turn.
               session.dispatch({
-                type: "message/replace",
+                type: "message/rekey",
                 messageId: localUserId,
-                message: {
-                  id,
-                  role: "user",
-                  text: trimmed,
-                  timestamp: new Date(),
-                },
+                id,
               });
               break;
             }

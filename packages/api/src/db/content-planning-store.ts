@@ -13,6 +13,7 @@ export const CONTENT_PLANNING_PLATFORMS = [
   'threads',
   'twitter',
   'xhs',
+  'linkedin',
 ] as const
 
 export type ContentPlanningPlatform = (typeof CONTENT_PLANNING_PLATFORMS)[number]
@@ -86,6 +87,7 @@ const TITLE_PREFIX: Record<ContentPlanningPlatform, string> = {
   threads: '[threads]',
   twitter: '[twitter]',
   xhs: '[xhs]',
+  linkedin: '[linkedin]',
 }
 
 const SEED_BODY_RE =

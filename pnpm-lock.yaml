@@ -139,6 +139,9 @@ importers:
       '@tiptap/suggestion':
         specifier: ^2.27.2
         version: 2.27.2(@tiptap/core@2.27.2(@tiptap/pm@2.27.2))(@tiptap/pm@2.27.2)
+      '@use-brian/brian-app':
+        specifier: workspace:*
+        version: link:../../packages/brian-app
       '@use-brian/chat-ui':
         specifier: workspace:*
         version: link:../../packages/chat-ui
@@ -472,6 +475,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@use-brian/brian-app':
+        specifier: workspace:*
+        version: link:../brian-app
       '@use-brian/channels':
         specifier: workspace:*
         version: link:../channels
@@ -493,6 +499,9 @@ importers:
       imapflow:
         specifier: ^1.0.191
         version: 1.4.8
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
       mailparser:
         specifier: ^3.7.4
         version: 3.9.14
@@ -536,6 +545,18 @@ importers:
       tsx:
         specifier: ^4
         version: 4.22.4
+      typescript:
+        specifier: ^5.7
+        version: 5.9.3
+      vitest:
+        specifier: ^3
+        version: 3.2.6(@types/debug@4.1.13)(@types/node@20.19.43)(jiti@2.7.0)(jsdom@29.1.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(tsx@4.22.4)
+
+  packages/brian-app:
+    devDependencies:
+      '@types/node':
+        specifier: ^20.19.39
+        version: 20.19.43
       typescript:
         specifier: ^5.7
         version: 5.9.3

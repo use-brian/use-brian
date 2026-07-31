@@ -5,9 +5,13 @@
  * `apps/feed-web/src/components/floating-chat.tsx`
  * (docs/plans/feed-web-consolidation.md §7.3).
  *
- * Collapsed: a round chat-bubble button anchored bottom-right. Click expands.
+ * Collapsed: the app-standard launcher pill anchored bottom-right — the
+ * assistant's creature avatar beside the global dock's "Ask anything" nudge,
+ * in the exact chrome `WorkspaceChrome`'s dock uses (`chrome/floating-chat.tsx`
+ * launcher), so swapping docks on `/feed/*` is visually seamless. Click expands.
  * Expanded: mounts `<TuningChatPanel />` — the full tuning surface (SSE,
- * voice notes, copy, retry, model picker, research-mode toggle).
+ * voice notes, copy, retry, model picker, research-mode toggle) — anchored
+ * flush to the corner (the launcher hides while open), global-dock idiom.
  *
  * The panel STAYS MOUNTED while collapsed (hidden via classes) so the
  * conversation, streaming, and tool state survive collapse/expand cycles
@@ -41,13 +45,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { FEED_CHAT_SEED_EVENT, type FeedChatSeed } from "@/lib/feed-chat-seed";
+import { AssistantAvatar } from "@/components/assistant-avatar";
 import { useT } from "@/lib/i18n/client";
 
-type ChatAssistant = { id: string; name: string };
+type ChatAssistant = { id: string; name: string; iconSeed?: number };
 
 export function FeedFloatingChat() {
   const { workspaceId, profiles, assistants: brandAssistants } = useFeedWorkspace();
   const t = useT().feedPage.tuningChat;
+  // The collapsed pill reuses the global dock's surface nudge verbatim, so
+  // the two docks read as one affordance across the surface swap.
+  const tChat = useT().chat;
 
   // One distinct assistant per id — a workspace may connect several
   // platforms, but they fan out from the same brand assistant. Dedupe so
@@ -58,7 +66,11 @@ export function FeedFloatingChat() {
     const seen = new Map<string, ChatAssistant>();
     for (const p of profiles) {
       if (!seen.has(p.assistant.id)) {
-        seen.set(p.assistant.id, { id: p.assistant.id, name: p.assistant.name });
+        seen.set(p.assistant.id, {
+          id: p.assistant.id,
+          name: p.assistant.name,
+          iconSeed: p.assistant.iconSeed,
+        });
       }
     }
     for (const a of brandAssistants) {
@@ -152,8 +164,10 @@ export function FeedFloatingChat() {
   if (!activeAssistant) return null;
 
   return (
-    <div ref={panelRef} className="fixed bottom-5 right-5 z-40 flex flex-col items-end gap-3">
-      {/* Expanded panel — ALWAYS mounted, scales in from the FAB.
+    <div ref={panelRef} className="fixed right-4 bottom-4 z-50 flex flex-col items-end gap-2">
+      {/* Expanded panel — ALWAYS mounted, anchored flush to the corner like
+          the global dock (the launcher pill hides while open, so a
+          `bottom-full` perch would just strand an empty strip below).
           `inert` while collapsed keeps the hidden composer/buttons out of
           the tab order and pointer flow without unmounting (so the
           conversation + stream survive). */}
@@ -161,8 +175,8 @@ export function FeedFloatingChat() {
         aria-hidden={!expanded}
         inert={!expanded}
         className={cn(
-          "absolute bottom-full right-0 mb-3 origin-bottom-right",
-          "w-[min(420px,calc(100vw-2.5rem))] h-[min(640px,75vh)]",
+          "absolute right-0 bottom-0 origin-bottom-right",
+          "w-[min(460px,calc(100vw-2rem))] h-[min(640px,92dvh)]",
           "flex flex-col overflow-hidden",
           "transition-[opacity,transform] duration-200 ease-out",
           expanded
@@ -202,6 +216,7 @@ export function FeedFloatingChat() {
             ref={chatRef}
             assistantId={activeAssistant.id}
             assistantName={activeAssistant.name}
+            iconSeed={activeAssistant.iconSeed}
             workspaceId={workspaceId}
             channelId={channelId}
             onClose={() => setExpanded(false)}
@@ -209,7 +224,9 @@ export function FeedFloatingChat() {
         </div>
       </div>
 
-      {/* FAB — fades + scales out when the panel opens. */}
+      {/* Launcher — the app-standard compact pill (chrome/floating-chat.tsx
+          idiom): the assistant's creature avatar beside a short text nudge.
+          Fades + scales out when the panel opens. */}
       <button
         type="button"
         onClick={() => setExpanded(true)}
@@ -217,32 +234,28 @@ export function FeedFloatingChat() {
         aria-label={t.openAria}
         tabIndex={expanded ? -1 : 0}
         className={cn(
-          "inline-flex h-14 w-14 items-center justify-center rounded-full",
-          "bg-primary text-primary-foreground shadow-lg",
-          "transition-[opacity,transform] duration-200 ease-out hover:bg-primary/90 active:scale-95",
-          expanded ? "opacity-0 scale-90 pointer-events-none" : "opacity-100 scale-100",
+          "inline-flex items-center gap-2 rounded-full py-1.5 pl-1.5 pr-3.5 shadow-lg backdrop-blur",
+          "max-w-[min(260px,calc(100vw-3rem))] text-left text-sm",
+          "border border-border bg-background/90 text-foreground/80 hover:bg-accent hover:text-foreground",
+          "transition-[opacity,transform,background-color,box-shadow] duration-200 ease-out",
+          expanded ? "opacity-0 scale-95 pointer-events-none" : "opacity-100 scale-100",
         )}
       >
-        <ChatBubbleIcon />
+        <span
+          aria-hidden
+          className="inline-flex size-7 shrink-0 overflow-hidden rounded-full ring-1 ring-black/10 dark:ring-white/15"
+        >
+          <AssistantAvatar
+            id={activeAssistant.id}
+            name={activeAssistant.name}
+            iconSeed={activeAssistant.iconSeed}
+            size="sm"
+          />
+        </span>
+        <span className="min-w-0 truncate text-muted-foreground">
+          {tChat.surfacePlaceholder}
+        </span>
       </button>
     </div>
-  );
-}
-
-function ChatBubbleIcon() {
-  return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-    </svg>
   );
 }

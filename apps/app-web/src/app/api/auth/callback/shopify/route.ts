@@ -41,11 +41,20 @@ const SHOPIFY_API_VERSION = "2026-04";
  * public apps after 2026-04) or legacy non-expiring; both are POSTed as the
  * `shopifyTokens` tuple and the shape discriminates downstream.
  *
- * DARK until `SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET` exist (P0 app
- * registration): the connectors page only offers this path when
- * `NEXT_PUBLIC_SHOPIFY_CLIENT_ID` is set, and this route fails closed.
+ * TWO paths land here, split on whether `state` carries an `instanceId`:
  *
- * See docs/architecture/integrations/shopify.md → "OAuth flow".
+ *  - **BYO (live)** — the instance already holds the MERCHANT's own app
+ *    credentials, stored before the redirect. This route does the CSRF gate and
+ *    nothing else, then forwards the raw query to
+ *    `POST /api/connectors/shopify/oauth-callback`. Verification and the code
+ *    exchange happen in the API **because app-web has no database and must never
+ *    receive a client secret** — that is the whole reason for the split.
+ *  - **Use Brian-owned app (dormant)** — exchanged inline against
+ *    `SHOPIFY_CLIENT_ID`/`SHOPIFY_CLIENT_SECRET`. No such app is configured, so
+ *    this half fails closed; kept because the flow is correct and expensive to
+ *    re-derive (the `expiring: 1` exchange, the double gate, rotate-persist).
+ *
+ * See docs/architecture/integrations/shopify.md → "Per-merchant app credentials".
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -63,21 +72,72 @@ export async function GET(request: Request) {
     );
   }
 
-  if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
-    console.error("[shopify] callback hit with no app credentials configured");
-    return NextResponse.redirect(
-      new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
-    );
-  }
-
   // CSRF gate: the `state` nonce must match the companion cookie set before
   // the provider redirect; reject a forged callback before token exchange so
-  // an attacker's token can't be bound to the victim.
+  // an attacker's token can't be bound to the victim. This is the ONE job that
+  // has to happen here rather than in the API, because the cookie lives here.
   const cookieStore = await cookies();
   const cookieNonce = cookieStore.get(CONNECTOR_OAUTH_STATE_COOKIE)?.value;
   if (!verifyConnectorState({ stateNonce: nonce, cookieNonce })) {
     return NextResponse.redirect(
       new URL(connectorsPath(workspaceId, { error: "invalid_state" }), request.url),
+    );
+  }
+
+  const accessTokenCookie = cookieStore.get("access_token")?.value;
+  if (!accessTokenCookie) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  // BYO path (the live one): the instance already holds the MERCHANT's app
+  // credentials, so verification and the code exchange happen in the API where
+  // that secret lives. Forward the raw query and let the API do the rest —
+  // app-web must never receive a client secret.
+  if (instanceId) {
+    const params: Record<string, string> = {};
+    for (const [key, value] of url.searchParams.entries()) params[key] = value;
+    try {
+      const res = await fetch(`${API_URL}/api/connectors/shopify/oauth-callback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessTokenCookie}`,
+        },
+        body: JSON.stringify({ params, instanceId }),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))) as { error?: string };
+        console.error("[shopify] oauth-callback rejected:", res.status, detail.error);
+        return NextResponse.redirect(
+          new URL(
+            connectorsPath(workspaceId, {
+              error: detail.error === "invalid_hmac" ? "invalid_state" : "store_failed",
+            }),
+            request.url,
+          ),
+        );
+      }
+      const stored = (await res.json().catch(() => ({}))) as { connectorInstanceId?: string };
+      return NextResponse.redirect(
+        new URL(
+          connectorsPath(workspaceId, { connected: "shopify", instance: stored.connectorInstanceId ?? instanceId }),
+          request.url,
+        ),
+      );
+    } catch (err) {
+      console.error("[shopify] oauth-callback hop failed:", err);
+      return NextResponse.redirect(
+        new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
+      );
+    }
+  }
+
+  // Legacy path: a Use Brian-owned app, exchanged here against the deployment
+  // credentials. Unreachable while no such app is configured; see shopify.md.
+  if (!SHOPIFY_CLIENT_ID || !SHOPIFY_CLIENT_SECRET) {
+    console.error("[shopify] callback hit with no instanceId and no app credentials configured");
+    return NextResponse.redirect(
+      new URL(connectorsPath(workspaceId, { error: "unexpected" }), request.url),
     );
   }
 
@@ -152,10 +212,7 @@ export async function GET(request: Request) {
       console.error("[shopify] shop identity fetch failed:", err);
     }
 
-    const accessToken = cookieStore.get("access_token")?.value;
-    if (!accessToken) {
-      return NextResponse.redirect(new URL("/login", request.url));
-    }
+    const accessToken = accessTokenCookie;
 
     const storeRes = await fetch(`${API_URL}/api/connectors/shopify/store-credentials`, {
       method: "POST",

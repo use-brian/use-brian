@@ -53,6 +53,10 @@ function makeApp(userId?: string) {
   // Keep the vi.fn() handles directly (fully typed with .mockResolvedValue
   // etc.); the store objects are thin casts over them.
   const m = {
+    // Shopify verify-before-store probe. Injected in every app so a pasted-token
+    // test never reaches the real Admin API; override per test to simulate a
+    // rejected token or a store that reports a different canonical host.
+    shopifyVerifyToken: vi.fn().mockResolvedValue({ name: 'Test Store', myshopifyDomain: 'teststore.myshopify.com' }),
     setConnected: vi.fn(),
     deleteConnector: vi.fn(),
     listConnectors: vi.fn().mockResolvedValue([]),
@@ -91,7 +95,11 @@ function makeApp(userId?: string) {
       next()
     })
   }
-  app.use('/api/connectors', connectorRoutes({ connectorStore, connectorInstanceStore }))
+  app.use('/api/connectors', connectorRoutes({
+    connectorStore,
+    connectorInstanceStore,
+    shopifyVerifyToken: m.shopifyVerifyToken,
+  }))
   return { app, ...m }
 }
 

@@ -168,6 +168,155 @@ export async function fetchLatestSession(opts: {
 }
 
 /**
+ * The caller's own web sessions for an assistant, newest first — the Chat
+ * app's Personal rail (chat-app.md → "Personal view").
+ *
+ * Deliberately sends NO `appOrigin`: T3 makes Personal a *unified* history, so
+ * a thread started in the floating dock and one started here are the same list.
+ * Filtering by origin would split a user's history across two surfaces for no
+ * reason they could see.
+ *
+ * Returns `[]` on any failure — an empty rail reads as "no history yet", which
+ * is the same thing the user does next either way (start a chat).
+ */
+export async function listSessions(opts: {
+  workspaceId: string;
+  assistantId: string;
+  signal?: AbortSignal;
+}): Promise<DocSession[]> {
+  const qs = new URLSearchParams();
+  qs.set("assistantId", opts.assistantId);
+  qs.set("workspaceId", opts.workspaceId);
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/sessions?${qs.toString()}`,
+      opts.signal ? { signal: opts.signal } : {},
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as RawListRow[];
+    if (!Array.isArray(data)) return [];
+    return data.map((r) => ({
+      id: r.id,
+      title: r.title,
+      channelId: r.channelId,
+      lastActive: toIso(r.lastActive),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A workspace-shared chat row — the Chat app's Workspace rail. Same shape as
+ * `DocSession` plus the starter identity for the "Started by" chip and the
+ * live `status` (a `running` session has a teammate mid-turn).
+ */
+export type WorkspaceSession = DocSession & {
+  status: string;
+  startedByUserId: string;
+  startedByName: string | null;
+  startedByAvatarUrl: string | null;
+};
+
+type RawWorkspaceRow = RawListRow & {
+  status?: string;
+  startedByUserId?: string;
+  startedByName?: string | null;
+  startedByAvatarUrl?: string | null;
+};
+
+function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
+  return {
+    id: r.id,
+    title: r.title,
+    channelId: r.channelId,
+    lastActive: toIso(r.lastActive),
+    status: r.status ?? "idle",
+    startedByUserId: r.startedByUserId ?? "",
+    startedByName: r.startedByName ?? null,
+    startedByAvatarUrl: r.startedByAvatarUrl ?? null,
+  };
+}
+
+/**
+ * The workspace's shared chats (`GET /api/sessions/workspace`), newest first.
+ *
+ * Clearance-filtered server-side: a session above the caller's clearance is
+ * simply absent, with no "you lack clearance" row — the existence of the
+ * conversation is itself the thing being withheld. Returns `[]` on failure.
+ */
+export async function listWorkspaceSessions(opts: {
+  workspaceId: string;
+  signal?: AbortSignal;
+}): Promise<WorkspaceSession[]> {
+  try {
+    const res = await authFetch(
+      `${API_URL}/api/sessions/workspace?workspaceId=${encodeURIComponent(opts.workspaceId)}`,
+      opts.signal ? { signal: opts.signal } : {},
+    );
+    if (!res.ok) return [];
+    const data = (await res.json()) as RawWorkspaceRow[];
+    if (!Array.isArray(data)) return [];
+    return data.map(toWorkspaceSession);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Start a workspace-shared chat (`POST /api/sessions/workspace`). Explicit
+ * create rather than a flag on the first turn, so the thread is listable by
+ * teammates from the moment it is started, not from the first message.
+ */
+export async function createWorkspaceSession(
+  workspaceId: string,
+): Promise<WorkspaceSession> {
+  const res = await authFetch(`${API_URL}/api/sessions/workspace`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspaceId }),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Create failed: ${res.status}`);
+  }
+  return toWorkspaceSession((await res.json()) as RawWorkspaceRow);
+}
+
+/** Rename a session (`PATCH /api/sessions/:id`). Throws on rejection so the
+ *  rail can surface why (403 on someone else's private thread). */
+export async function renameSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Rename failed: ${res.status}`);
+  }
+}
+
+/** Delete a session (`DELETE /api/sessions/:id`). Throws on rejection — a 409
+ *  means a turn is still running, which the caller shows as a retry hint. */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Delete failed: ${res.status}`);
+  }
+}
+
+/**
  * Fetch the message history for one session. Returns `[]` on any error
  * or when the session has no messages — the caller treats both as
  * "start fresh".

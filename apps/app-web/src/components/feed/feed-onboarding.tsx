@@ -6,17 +6,22 @@
  * whenever the workspace has no brand voice yet, so Plan never opens onto an
  * empty calendar the operator cannot fill.
  *
- * Two steps (feed-create-split.md D7 + D14), unchanged by the revamp:
+ * Three steps (feed-create-split.md D7 + D14; step 3 feed-import-account.md §3.3):
  *   1. Name the brand voice -> plain `POST /api/assistants`
  *      (`kind='app'`, `appType='distribution'`; the server sets
  *      `clearance='public'`, satisfying the feed eligibility triple).
  *   2. Pick the platform(s) the brand posts on. Skip = all four. The pick is
  *      a per-device localStorage default read by Plan and Voice.
+ *   3. Optional: "Already posting on X?" — a public handle seeds the tuning
+ *      chat with the voice-import skill prompt and lands on the Voice page.
+ *      Live-first-run only: a workspace whose pick was already stored never
+ *      sees it (the step arms in `confirmPick`, not on mount).
  *
  * [COMP:app-web/feed-onboarding]
  */
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Megaphone } from "lucide-react";
 import { useFeedWorkspace } from "@/contexts/feed-profiles-context";
 import { authFetch } from "@/lib/auth-fetch";
@@ -26,8 +31,9 @@ import {
   setFeedPlatformPick,
   type FeedPlatform,
 } from "@/lib/feed-nav";
+import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
 import { PlatformIcon } from "@/components/feed/platform-icon";
-import { useT } from "@/lib/i18n/client";
+import { useT, format } from "@/lib/i18n/client";
 import { cn } from "@/lib/utils";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
@@ -46,6 +52,7 @@ export function FeedOnboarding({
 }) {
   const t = useT().feedPage;
   const team = useFeedWorkspace();
+  const router = useRouter();
   const brand = team.assistants[0] ?? null;
 
   const [name, setName] = useState("");
@@ -56,6 +63,12 @@ export function FeedOnboarding({
   const [pickState, setPickState] = useState<"loading" | "needed" | "done">(
     "loading",
   );
+  // Step 3 (feed-import-account.md §3.3): offered ONLY on the live first-run
+  // path — `confirmPick` arms it. Default "done" so a workspace whose pick
+  // was already stored (pickState reads "done" on mount) skips straight to
+  // `onReady` exactly as before this step existed.
+  const [voiceState, setVoiceState] = useState<"done" | "offered">("done");
+  const [voiceHandle, setVoiceHandle] = useState("");
   // Read in an effect, not the initialiser: localStorage is unavailable
   // during SSR, and reading it inline would make the first client paint
   // disagree with the server's.
@@ -66,12 +79,29 @@ export function FeedOnboarding({
   }, [team.workspaceId]);
 
   useEffect(() => {
-    if (brand && pickState === "done") onReady();
-  }, [brand, pickState, onReady]);
+    if (brand && pickState === "done" && voiceState === "done") onReady();
+  }, [brand, pickState, voiceState, onReady]);
 
   function confirmPick(platforms: readonly FeedPlatform[]) {
     setFeedPlatformPick(team.workspaceId, platforms);
+    setVoiceState("offered");
     setPickState("done");
+  }
+
+  /**
+   * Seed the tuning chat with the voice-import skill prompt for the given
+   * handle and land on the Voice page. The feed dock stays mounted across
+   * feed route changes, so the seeded composer survives the navigation.
+   */
+  function importVoice() {
+    const trimmed = voiceHandle.trim().replace(/^@/, "").slice(0, 30);
+    if (trimmed) {
+      requestFeedChatSeed({
+        prefill: format(t.voice.importHandlePrompt, { handle: trimmed }),
+      });
+      router.push(`/w/${team.workspaceId}/feed/voice`);
+    }
+    setVoiceState("done");
   }
 
   async function createBrand() {
@@ -161,6 +191,44 @@ export function FeedOnboarding({
               className="text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               {t.home.pickSkip}
+            </button>
+          </>
+        ) : brand && pickState === "done" && voiceState === "offered" ? (
+          <>
+            <h1 className="text-[15px] font-semibold">
+              {t.home.onboardVoiceTitle}
+            </h1>
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              {t.home.onboardVoiceBody}
+            </p>
+            <form
+              className="space-y-3"
+              onSubmit={(e) => {
+                e.preventDefault();
+                importVoice();
+              }}
+            >
+              <input
+                type="text"
+                value={voiceHandle}
+                onChange={(e) => setVoiceHandle(e.target.value)}
+                placeholder={t.home.onboardVoicePlaceholder}
+                className="h-9 w-full rounded-lg border border-border bg-background px-3 text-sm focus:border-primary/50 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={voiceHandle.trim().replace(/^@/, "").length === 0}
+                className="inline-flex h-8 w-full items-center justify-center rounded-lg bg-primary px-3 text-[12.5px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+              >
+                {t.home.onboardVoiceCta}
+              </button>
+            </form>
+            <button
+              type="button"
+              onClick={() => setVoiceState("done")}
+              className="text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {t.home.onboardVoiceSkip}
             </button>
           </>
         ) : (

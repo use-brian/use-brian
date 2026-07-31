@@ -18,7 +18,13 @@
 
 import { authFetch } from "@/lib/auth-fetch";
 import type { FeedPlatform } from "@/lib/feed-nav";
-import type { PlanBrief, PlanSlot, PlanSlotMark } from "@/lib/feed-plan";
+import type {
+  FeedIdea,
+  FeedIdeaStatus,
+  PlanBrief,
+  PlanSlot,
+  PlanSlotMark,
+} from "@/lib/feed-plan";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
@@ -1416,4 +1422,71 @@ export async function ensurePlanSession(
   };
   if (!body.sessionId || !body.channelId) return null;
   return { sessionId: body.sessionId, channelId: body.channelId };
+}
+
+// ── Idea backlog ─────────────────────────────────────────────────────────
+//
+// Served by the open `contentIdeasRoutes()` router beside the plan routes,
+// mounted unconditionally in both editions for the same reason: capturing an
+// idea must never require a credential.
+
+/** The backlog, newest first (`GET /:assistantId/ideas?status=`). */
+export async function fetchFeedIdeas(
+  assistantId: string,
+  status?: FeedIdeaStatus,
+): Promise<FeedIdea[] | null> {
+  const res = await authFetch(
+    apiUrl(`/api/distribution/${assistantId}/ideas`, { status }),
+  );
+  if (!res.ok) return null;
+  const body = (await res.json().catch(() => ({}))) as { ideas?: FeedIdea[] };
+  return body.ideas ?? [];
+}
+
+export async function createFeedIdea(
+  assistantId: string,
+  input: { text: string; note?: string; platformHint?: FeedPlatform },
+): Promise<{ ok: true; idea: FeedIdea } | { ok: false; error: string | null }> {
+  const res = await authFetch(`${API_URL}/api/distribution/${assistantId}/ideas`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    idea?: FeedIdea;
+    error?: string;
+  };
+  if (res.ok && data.idea) return { ok: true, idea: data.idea };
+  return { ok: false, error: data.error ?? null };
+}
+
+/**
+ * Edit an idea. `discarded: true` retires it; `slotId` binds the slot it
+ * became (which is what flips the derived status to `promoted`). Status
+ * itself is never writable, exactly like a plan slot's derived states.
+ */
+export async function updateFeedIdea(
+  assistantId: string,
+  ideaId: string,
+  patch: {
+    text?: string;
+    note?: string | null;
+    discarded?: boolean;
+    slotId?: string | null;
+  },
+): Promise<{ ok: true; idea: FeedIdea } | { ok: false; error: string | null }> {
+  const res = await authFetch(
+    `${API_URL}/api/distribution/${assistantId}/ideas/${ideaId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    idea?: FeedIdea;
+    error?: string;
+  };
+  if (res.ok && data.idea) return { ok: true, idea: data.idea };
+  return { ok: false, error: data.error ?? null };
 }

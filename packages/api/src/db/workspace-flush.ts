@@ -105,6 +105,11 @@ export const WORKSPACE_FLUSH_TABLES = [
   // Knowledge
   'kb_chunks',
   'knowledge_entries',
+  // Custom Home apps — the registry row cascades `home_app_state`. The BUNDLE
+  // FILES go with `workspace_files` above (they live under the reserved
+  // `/apps/` prefix), so a flush leaves no orphaned bytes behind.
+  'workspace_home_apps',
+  'home_app_state', // cascade-covered by `workspace_home_apps`; kept explicit for the classifier
   // Evolution logs (describe the data being deleted)
   'workspace_brain_evolution',
   'workspace_memory_evolution',

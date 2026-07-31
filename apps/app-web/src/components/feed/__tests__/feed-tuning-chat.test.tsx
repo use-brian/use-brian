@@ -8,8 +8,9 @@
  *   - `feed-chat-seed` pure logic: the event name (`feed:chat-seed`, which
  *     must NEVER equal the doc bus's `doc:chat-seed` — the two buses can't
  *     cross-fire), the payload shape, and the empty-prefill drop.
- *   - The collapsed dock's static render: FAB with the open aria-label AND
- *     the always-mounted (hidden) panel — header title, empty-state
+ *   - The collapsed dock's static render: the launcher pill (open aria-label
+ *     + the global dock's surface nudge — the app-standard pill idiom, not a
+ *     FAB) AND the always-mounted (hidden) panel — header title, empty-state
  *     suggestions — plus the zero-assistant null render.
  *   - `FeedSurfaceShell` READY state mounts the feed dock alongside the
  *     children (the dock-swap contract; the `chatDockSuppression` hold is
@@ -142,10 +143,13 @@ describe("[COMP:app-web/feed-tuning-chat] feed chat seed bus", () => {
 });
 
 describe("[COMP:app-web/feed-tuning-chat] FeedFloatingChat", () => {
-  it("collapsed dock: renders the FAB and the always-mounted (hidden) panel", () => {
+  it("collapsed dock: renders the launcher pill and the always-mounted (hidden) panel", () => {
     const html = renderDock([profile("acme")]);
-    // FAB (the collapsed state's only visible affordance).
+    // Launcher pill (the collapsed state's only visible affordance) — carries
+    // the open aria-label and the global dock's surface nudge, so the feed
+    // dock reads as the same affordance as the app-wide chat dock.
     expect(html).toContain(en.feedPage.tuningChat.openAria);
+    expect(html).toContain(en.chat.surfacePlaceholder);
     // Panel is mounted even while collapsed — header + empty state ship in
     // the initial markup so an expand never remounts the conversation.
     expect(html).toContain(en.feedPage.tuningChat.title);

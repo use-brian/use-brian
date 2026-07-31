@@ -68,9 +68,11 @@ import {
 } from '../db/email-archive-store.js'
 import {
   createMailboxSessionCache,
+  createSocketKeepWarm,
   type ImapClientLike,
   type ImapFetchedMessage,
   type MailboxSessionCache,
+  type SocketKeepWarm,
 } from './imap-session.js'
 import { htmlToText, messageRef, parseReferencesHeader } from './mailbox-api.js'
 import type { MailboxAccountSettings } from './types.js'
@@ -476,6 +478,12 @@ export type MailboxSyncWorkerDeps = {
   deltaChunk?: number
   /** Max backfill messages fetched per folder per tick. */
   backfillChunk?: number
+  /**
+   * Builds the guard that keeps the IMAP socket from idling past its
+   * inactivity timeout during the per-message insert phase. Injectable so
+   * tests can drive the NOOP cadence without real clocks.
+   */
+  keepWarm?: (client: ImapClientLike) => SocketKeepWarm
   now?: () => Date
 }
 
@@ -573,6 +581,7 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const deltaChunk = deps.deltaChunk ?? DEFAULT_DELTA_CHUNK
   const backfillChunk = deps.backfillChunk ?? DEFAULT_BACKFILL_CHUNK
+  const keepWarm = deps.keepWarm ?? ((client: ImapClientLike) => createSocketKeepWarm(client))
   const now = deps.now ?? (() => new Date())
   const router = deps.brain ? createMailboxBrainRouter(deps.brain) : null
 
@@ -666,7 +675,14 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
         lock.release()
       }
       fetched.sort((a, b) => a.uid - b.uid)
+      // The IMAP socket goes silent from here to the end of the loop while we
+      // parse, insert and (below) brain-route each message — brain routing is
+      // an LLM call, so this stretch is the longest quiet window in the sync.
+      // Without the keep-warm the inactivity timeout kills the session
+      // mid-walk. See `createSocketKeepWarm`.
+      const deltaKeepWarm = keepWarm(client)
       for (const msg of fetched) {
+        await deltaKeepWarm.pingIfIdle()
         const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg })
         if (parsed) {
           try {
@@ -747,7 +763,12 @@ export function createMailboxSyncWorker(deps: MailboxSyncWorkerDeps): MailboxSyn
       }
       // Newest-first: recent mail is searchable within minutes of consent.
       fetched.sort((a, b) => b.uid - a.uid)
+      // Up to `backfillChunk` (200) sequential inserts with the session held and
+      // the socket silent — the window that crash-looped the workers container
+      // on 2026-07-28. See `createSocketKeepWarm`.
+      const backfillKeepWarm = keepWarm(client)
       for (const msg of fetched) {
+        await backfillKeepWarm.pingIfIdle()
         const parsed = await parseSyncedMessage({ accountEmail: settings.email, folder, msg })
         if (parsed) {
           try {

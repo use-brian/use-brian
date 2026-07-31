@@ -23,6 +23,7 @@ export type ChatAction =
   | { type: 'messages/load'; messages: Message[] }
   | { type: 'message/append'; message: Message }
   | { type: 'message/replace'; messageId: string; message: Message }
+  | { type: 'message/rekey'; messageId: string; id: string }
   | { type: 'stream/start' }
   | { type: 'stream/append'; text: string }
   | { type: 'stream/reset' }
@@ -58,6 +59,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...state,
         messages: state.messages.map((m) =>
           m.id === action.messageId ? action.message : m,
+        ),
+      }
+
+    // Swap ONLY the id (optimistic local id → server row id), keeping every
+    // other field — including consumer-widened ones the reducer doesn't know
+    // about (app-web's `userAttachments` thumbnails, `views`). The
+    // `user_message_saved` re-key must use this, not `message/replace`: a
+    // rebuilt bare message drops the attachment previews the send snapshotted,
+    // so the user's image vanished the moment the turn started streaming.
+    case 'message/rekey':
+      return {
+        ...state,
+        messages: state.messages.map((m) =>
+          m.id === action.messageId ? { ...m, id: action.id } : m,
         ),
       }
 

@@ -30,13 +30,16 @@ import {
 } from "@/components/feed/plan-slot-peek";
 import { PlanBriefRail } from "@/components/feed/plan-brief-rail";
 import {
+  createFeedIdea,
   createPlanSlot,
   deletePlanSlot,
   draftFromPlanSlot,
   ensurePlanSession,
+  fetchFeedIdeas,
   fetchPlanBrief,
   fetchPlanSlots,
   savePlanBrief,
+  updateFeedIdea,
   updatePlanSlot,
 } from "@/lib/api/feed";
 import {
@@ -45,7 +48,14 @@ import {
   isFeedPlatform,
   type FeedPlatform,
 } from "@/lib/feed-nav";
-import { monthKey, planCounts, type PlanBrief, type PlanSlot } from "@/lib/feed-plan";
+import {
+  isoDay,
+  monthKey,
+  planCounts,
+  type FeedIdea,
+  type PlanBrief,
+  type PlanSlot,
+} from "@/lib/feed-plan";
 import { requestFeedChatSeed } from "@/lib/feed-chat-seed";
 import { useT } from "@/lib/i18n/client";
 import { format } from "@/lib/i18n/format";
@@ -98,6 +108,7 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
 
   const [slots, setSlots] = useState<PlanSlot[]>([]);
   const [brief, setBrief] = useState<PlanBrief | null>(null);
+  const [ideas, setIdeas] = useState<FeedIdea[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -126,13 +137,15 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const [nextSlots, nextBrief] = await Promise.all([
+    const [nextSlots, nextBrief, nextIdeas] = await Promise.all([
       fetchPlanSlots(assistantId, month),
       fetchPlanBrief(assistantId, month),
+      fetchFeedIdeas(assistantId, "open"),
     ]);
     if (nextSlots === null) setError(tp.loadFailed);
     setSlots(nextSlots ?? []);
     setBrief(nextBrief);
+    setIdeas(nextIdeas ?? []);
     setLoading(false);
   }, [assistantId, month, tp.loadFailed]);
 
@@ -213,6 +226,16 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
             a.createdAt.localeCompare(b.createdAt),
         );
       });
+      // A slot born from a backlog idea binds the idea, which is what flips
+      // it to `promoted` and takes it off the open backlog. A failed bind
+      // just leaves the idea open - never block the slot on it.
+      if (!draft.id && draft.fromIdeaId) {
+        const ideaId = draft.fromIdeaId;
+        const bound = await updateFeedIdea(assistantId, ideaId, {
+          slotId: result.slot.id,
+        });
+        if (bound.ok) setIdeas((prev) => prev.filter((i) => i.id !== ideaId));
+      }
       setRail({ kind: "slot", draft: planSlotToDraft(result.slot) });
     } finally {
       setBusy(false);
@@ -303,6 +326,54 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
         segment: "draft-sessions",
       })}/${slot.sessionId}`,
     );
+  }
+
+  async function addIdea(text: string): Promise<boolean> {
+    const result = await createFeedIdea(assistantId, { text });
+    if (!result.ok) {
+      setError(result.error ?? tp.ideaSaveFailed);
+      return false;
+    }
+    setIdeas((prev) => [result.idea, ...prev]);
+    return true;
+  }
+
+  /** Optimistic: the card leaves the tray first and snaps back on failure. */
+  async function discardIdea(idea: FeedIdea) {
+    setIdeas((prev) => prev.filter((i) => i.id !== idea.id));
+    const result = await updateFeedIdea(assistantId, idea.id, {
+      discarded: true,
+    });
+    if (!result.ok) {
+      setIdeas((prev) => [idea, ...prev]);
+      setError(result.error ?? tp.saveFailed);
+    }
+  }
+
+  /**
+   * "Plan it": open the slot editor prefilled from the jot, dated today (the
+   * chip drags to its real day afterwards). Saving binds the idea (see
+   * saveSlot), so nothing needs retyping and nothing is written until Save.
+   */
+  function planIdea(idea: FeedIdea) {
+    const text = idea.text.trim();
+    const firstLine = text.split("\n")[0]?.trim().slice(0, 200) ?? "";
+    const title = firstLine || text.slice(0, 200);
+    const overflow = text.length > title.length ? text : "";
+    const briefText = [overflow, idea.note?.trim() ?? ""]
+      .filter(Boolean)
+      .join("\n\n");
+    setRail({
+      kind: "slot",
+      draft: {
+        id: null,
+        platform: idea.platformHint ?? defaultPlatform,
+        scheduledFor: isoDay(today),
+        title,
+        brief: briefText,
+        fromIdeaId: idea.id,
+      },
+    });
   }
 
   async function saveBrief(next: { brief: string; themes: string[] }) {
@@ -418,9 +489,13 @@ function PlanBoard({ assistantId }: { assistantId: string }) {
             busy={busy}
             assistantId={assistantId}
             existingSlots={slots}
+            ideas={ideas}
             watchToken={watchToken}
             onSave={(next) => void saveBrief(next)}
             onSlotsAccepted={() => void load()}
+            onAddIdea={addIdea}
+            onDiscardIdea={(idea) => void discardIdea(idea)}
+            onPlanIdea={planIdea}
           />
         )}
       </aside>

@@ -1,0 +1,43 @@
+{
+  "name": "@use-brian/brian-app",
+  "version": "0.1.0",
+  "description": "Manifest parser, bundle validator, and lint checks for Use Brian custom Home apps. Shared between the API import/sync path, the assistant tools, and the public CLI.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "brian-app": "./bin/brian-app.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/use-brian/use-brian",
+    "directory": "packages/brian-app"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.39",
+    "typescript": "^5.7",
+    "vitest": "^3"
+  }
+}

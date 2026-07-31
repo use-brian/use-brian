@@ -56,6 +56,29 @@ export type PlanBrief = {
   updatedAt: string | null;
 };
 
+/** Derived server-side from the links and `discarded_at`, never stored. */
+export type FeedIdeaStatus = "open" | "promoted" | "discarded";
+
+/**
+ * A raw, undated jot in the idea backlog - captured the moment it occurs,
+ * developed into a plan slot later. Mirrors `ContentIdea` on the server.
+ */
+export type FeedIdea = {
+  id: string;
+  assistantId: string;
+  text: string;
+  note: string | null;
+  platformHint: FeedPlatform | null;
+  source: "manual" | "chat" | "inspiration" | "voice";
+  status: FeedIdeaStatus;
+  slotId: string | null;
+  sessionId: string | null;
+  discardedAt: string | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 /**
  * The §5 derivation, client-side. This is a MIRROR of `deriveSlotStatus` in
  * `use-brian/packages/api/src/db/content-plan-store.ts`, not an import:

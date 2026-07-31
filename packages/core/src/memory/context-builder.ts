@@ -56,7 +56,7 @@ export type IdentityMemory = {
  * `FEED_PLATFORMS` — a cross-package drift test in api-platform asserts the
  * mirror. A rule with none of these tags is the general brand voice.
  */
-export const VOICE_PLATFORM_TAGS = ['instagram', 'threads', 'twitter', 'xhs'] as const
+export const VOICE_PLATFORM_TAGS = ['instagram', 'threads', 'twitter', 'xhs', 'linkedin'] as const
 export type VoicePlatformTag = (typeof VOICE_PLATFORM_TAGS)[number]
 
 export function isVoicePlatformTag(value: string): value is VoicePlatformTag {

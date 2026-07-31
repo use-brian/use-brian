@@ -78,6 +78,16 @@ import {
 } from "@/lib/api/teamspaces";
 import { getUserInfo } from "@/lib/user";
 import { hasAnyConnectedConnector } from "@/lib/api/studio";
+import { getWorkspaceHomeApps } from "@/lib/api/workspaces";
+import { listCustomHomeApps, type CustomHomeApp } from "@/lib/api/home-apps";
+import {
+  HOME_APPS_REFRESH_EVENT,
+  type HomeAppsRefreshDetail,
+} from "@/lib/home-apps-events";
+import {
+  normalizeHomeApps,
+  type HomeAppEntry,
+} from "@use-brian/shared/home-apps";
 import { fetchFeedTeamProfiles, type FeedProfile } from "@/lib/api/feed";
 import { isHostedEdition } from "@/lib/edition";
 import { fetchHomeDock, type ResolvedDock } from "@/lib/api/home-dock";
@@ -161,6 +171,27 @@ type SidebarData = {
    * same signal — no second connectors fetch.
    */
   studioSetupIncomplete: boolean | null;
+  /**
+   * The workspace's Home app-bar config (`workspaces.home_apps`, migration
+   * 385) — which operator apps the strip renders, in order. Fetched HERE
+   * because the strip lives in `WorkspaceChrome`, inside the workspace layout
+   * that never unmounts during SPA navigation: a mount-only effect in the strip
+   * itself would fire once per full page load and could never self-heal after a
+   * config change. This provider owns the fetch AND the `workspace_config`
+   * subscription that repairs it (docs/architecture/platform/realtime-sync.md).
+   *
+   * Never null: a failed read resolves to the default strip, because the
+   * app-bar is navigation and the user must always have some.
+   */
+  homeApps: HomeAppEntry[];
+  /**
+   * The workspace's custom (workspace-built) apps. Fetched here beside the
+   * config and refreshed by the same `workspace_config` signal, because the
+   * strip needs BOTH to render a `custom:<id>` entry — the config says whether
+   * it is on Home, the row says whether it may render at all and what it is
+   * called.
+   */
+  customApps: CustomHomeApp[];
   /**
    * The workspace's connected feed (distribution) profiles — the Feed
    * surface's availability signal, probed once per workspace like the
@@ -278,6 +309,35 @@ export function DocSidebarDataProvider({
       cancelled = true;
     };
   }, [workspaceId]);
+
+  // ── Home app-bar config (fetch + live repair) ─────────────────────────
+  // Seeded with the default strip so the first paint has navigation rather
+  // than an empty bar. The `workspace_config` subscription is what makes this
+  // correct inside a persistent layout: one admin save (here, in another tab,
+  // on another device, or by a teammate) repairs every open strip.
+  const [homeApps, setHomeApps] = useState<HomeAppEntry[]>(() =>
+    normalizeHomeApps(null),
+  );
+  const [customApps, setCustomApps] = useState<CustomHomeApp[]>([]);
+  const reloadHomeApps = useCallback(() => {
+    if (!workspaceId) return;
+    void getWorkspaceHomeApps(workspaceId).then(setHomeApps);
+    void listCustomHomeApps(workspaceId).then(setCustomApps);
+  }, [workspaceId]);
+  useEffect(() => {
+    reloadHomeApps();
+  }, [reloadHomeApps]);
+  useEffect(() => {
+    if (typeof window === "undefined" || !workspaceId) return;
+    const onRefresh = (event: Event) => {
+      const detail = (event as CustomEvent<HomeAppsRefreshDetail>).detail;
+      // Scope to this workspace; the catch-up dispatch carries no id filter.
+      if (detail?.workspaceId && detail.workspaceId !== workspaceId) return;
+      reloadHomeApps();
+    };
+    window.addEventListener(HOME_APPS_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(HOME_APPS_REFRESH_EVENT, onRefresh);
+  }, [reloadHomeApps, workspaceId]);
 
   // ── Feed availability probe (single profiles fetch, non-blocking) ─────
   // Hosted-only: the OSS edition never probes (the surface is edition-gated
@@ -819,6 +879,8 @@ export function DocSidebarDataProvider({
       sidebarOpen,
       setSidebarOpen,
       studioSetupIncomplete,
+      homeApps,
+      customApps,
       feedProfiles,
       dock,
       dockLoading,
@@ -854,6 +916,8 @@ export function DocSidebarDataProvider({
       sidebarCollapsed,
       sidebarOpen,
       studioSetupIncomplete,
+      homeApps,
+      customApps,
       feedProfiles,
       dock,
       dockLoading,

@@ -3,6 +3,7 @@ import { buildAccessPredicate } from './access-predicate.js'
 import { assertAuthorshipPresent } from './authorship-guard.js'
 import { getAppPool, query, queryGated, queryWithRLS, rollbackAndRelease } from './client.js'
 import { emitDependsOnEdges, emitMentionedEdges } from './edge-hooks.js'
+import { abandonGoalsForHostTaskSystem } from './goals.js'
 import { publishTaskLifecycle } from '../task-event-fanout.js'
 
 const FULL_SELECT = `
@@ -598,6 +599,23 @@ export async function updateTask(
          WHERE host_type = 'task' AND host_id = $2`,
         [newRow.id, liveId],
       )
+
+      // Host-lifecycle cascade: a task that just went terminal is no longer
+      // assignable, so its DRAFT goals go with it — a "your assistant could
+      // help with this" offer on work the user already finished or filed away is
+      // noise on the triage surface, and nothing ever clears it (a draft is
+      // inert: the rollup skips it and no tick fires). Drafts only — a CONFIRMED
+      // goal whose host task closes is the goal succeeding, and completing it is
+      // the rollup's / acting loop's job. Runs on the same client as the
+      // supersede above, so it commits atomically with the close, and reads the
+      // NEW id because the repoint just moved the binding there.
+      // See docs/architecture/features/goals.md → "Host-lifecycle cascade".
+      if (newStatus === 'done' || newStatus === 'archived') {
+        await abandonGoalsForHostTaskSystem(newRow.id, 'host_task_closed', {
+          draftsOnly: true,
+          exec: client,
+        })
+      }
 
       await client.query('COMMIT')
       const newTask = toRecord(newRow)

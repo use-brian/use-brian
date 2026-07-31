@@ -106,6 +106,17 @@ export function pageIdFromInAppHref(
  *                       operator surface: a left rail of live browser sessions
  *                       (`sandbox_tasks`) navigating the per-session Take-Over
  *                       live view; the 5th operator app under Home
+ *   - `'chat'`          `/chat` — the full-page Chat operator app (Personal +
+ *                       Workspace views over web sessions); the 6th operator
+ *                       app under Home. Distinct from the floating chat dock,
+ *                       which keeps floating over every surface including this
+ *                       one (chat-app.md → "Relationship to the dock")
+ *   - `'apps'`          `/apps/<appId>` — the shared surface EVERY custom
+ *                       (workspace-built) Home app renders on, inside an
+ *                       opaque-origin iframe. One segment, many apps: the
+ *                       identity is the id, so `operator-apps.ts` reads it off
+ *                       the path rather than the segment
+ *                       (`customAppIdFromPathname`)
  *   - `'goals'`         `/goals` (+ `/goals/<goalId>`) — attention-routed
  *                       (home-dock Autopilot card / Brain task panel), no
  *                       sidebar slot, same pattern as `'approvals'`
@@ -128,6 +139,8 @@ export type WorkspaceSurface =
   | "tasks"
   | "crm"
   | "computer"
+  | "chat"
+  | "apps"
   | "goals"
   | "approvals"
   | "recordings"
@@ -145,6 +158,8 @@ const KNOWN_SURFACES: ReadonlySet<string> = new Set([
   "tasks",
   "crm",
   "computer",
+  "chat",
+  "apps",
   "goals",
   "approvals",
   "recordings",
