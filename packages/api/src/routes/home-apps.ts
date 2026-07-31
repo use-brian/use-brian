@@ -522,7 +522,10 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
    * requests accept the token from either the query or the Referer's query,
    * and fall back to 401.
    */
-  router.get('/:appId/bundle/*', async (req, res) => {
+  // The wildcard MUST be named (`*splat`). Express 5's path-to-regexp v8
+  // rejects a bare `*` by throwing at registration time, which crashes the API
+  // on boot rather than failing this one route.
+  router.get('/:appId/bundle/*splat', async (req, res) => {
     const appId = String(req.params.appId)
     const token = readBundleToken(req)
     if (!token) { res.status(401).json({ error: 'Missing bundle token' }); return }
@@ -530,9 +533,22 @@ export function homeAppRoutes(opts: HomeAppRouteOptions): Router {
     const verified = verifyBundleToken({ token, appId, secret: opts.signingSecret })
     if (!verified.ok) { res.status(401).json({ error: 'Invalid bundle token' }); return }
 
-    // Express puts the `*` wildcard capture at index 0 of `params`.
-    const wildcard = (req.params as unknown as Record<string, unknown>)['0']
-    const rawPath = typeof wildcard === 'string' ? wildcard : ''
+    // Express 5 hands a named wildcard back as an array of already-DECODED
+    // segments. Decoding before we see it is what makes the guard necessary:
+    // `%2e%2e%2f` arrives as `../` *inside* one segment, so a plain join would
+    // let a request climb out of this app's prefix into another app's bundle.
+    const wildcard = (req.params as unknown as Record<string, unknown>).splat
+    const segments = Array.isArray(wildcard)
+      ? wildcard.map((segment) => String(segment))
+      : typeof wildcard === 'string' ? [wildcard] : []
+    const traversal = segments.some((segment) =>
+      segment === '' || segment === '.' || segment === '..'
+      || segment.includes('/') || segment.includes('\\') || segment.includes('\0'))
+    if (segments.length === 0 || traversal) {
+      res.status(404).json({ error: 'Not found' })
+      return
+    }
+    const rawPath = segments.join('/')
     const contentType = contentTypeFor(rawPath)
     // Pinned from an allowlist, never sniffed: the bytes are third-party, and
     // letting the response type follow the content would let an app choose how
