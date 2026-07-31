@@ -3945,6 +3945,7 @@ export const ja: Dictionary = {
     mentionInsertAria: "{name} をメンション",
     unreadDotAria: "新しいアクティビティ",
     confirmNotAllowed: "このターンで質問したメンバー（またはワークスペース管理者）のみ操作できます。",
+    captureIndicator: "カンパニーブレインに記録されます",
     pins: {
       rowAria: "ピン留めコンテキスト",
       add: "追加",

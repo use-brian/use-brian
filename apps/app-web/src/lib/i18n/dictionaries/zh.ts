@@ -3903,6 +3903,7 @@ export const zh: Dictionary = {
     mentionInsertAria: "提及 {name}",
     unreadDotAria: "新動態",
     confirmNotAllowed: "只有本回合發問的成員（或工作區管理員）可以操作。",
+    captureIndicator: "已記錄到公司大腦",
     pins: {
       rowAria: "釘選內容",
       add: "新增",

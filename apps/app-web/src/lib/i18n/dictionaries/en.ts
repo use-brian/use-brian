@@ -4145,6 +4145,7 @@ export const en = {
     mentionInsertAria: "Mention {name}",
     unreadDotAria: "New activity",
     confirmNotAllowed: "Only the member who asked this turn (or a workspace admin) can act on this.",
+    captureIndicator: "Captured to the company brain",
     pins: {
       rowAria: "Pinned context",
       add: "Add",

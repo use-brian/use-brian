@@ -188,6 +188,7 @@ import { assembleHomeSignals } from './home/signals.js'
 import { runHomeRefresh } from './home/refresh.js'
 import { isWorkspaceMember } from './db/home-store.js'
 import { sessionRoutes } from './routes/sessions.js'
+import { createRoomIngestor } from './ingest/room-ingest.js'
 import { sessionQuestionRoutes } from './routes/sessions-questions.js'
 import { analyticsRoutes } from './routes/analytics.js'
 import { fileRoutes } from './routes/files.js'
@@ -817,6 +818,9 @@ export interface OpenApiPorts {
   /** Same flag for the mailbox (imap) brain router — hosted batches its
    *  newsletter digests; OSS executes scheduled matches realtime. */
   mailboxScheduledBatching?: boolean
+  /** Same flag for room ambient capture (multiplayer chat P2) — hosted
+   *  batches room posts into hourly digest windows; OSS runs inline. */
+  roomScheduledBatching?: boolean
   /** A later closed router owns the hosted shared-number fallback. */
   whatsappOfficialFallback?: boolean
   /**
@@ -3644,7 +3648,30 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     requireAuth: requireAuth(env.JWT_SECRET),
   }))
 
-  app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({ subscribeSessionEvents, publishSessionEvent }))
+  // Room ambient capture (multiplayer chat P2/D9): every accepted room post
+  // routes through the room ingest engine — hosted batches hourly digest
+  // windows (`roomScheduledBatching`), OSS runs inline over the same
+  // brain-episode seam. Fire-and-forget at the route; absent without a
+  // Pipeline-B impl (tests, stripped deploys).
+  const roomIngestor = brainEpisodeIngestor
+    ? createRoomIngestor({
+        brainEpisodeIngestor,
+        scheduledBatching: ports.roomScheduledBatching,
+      })
+    : undefined
+  app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({
+    subscribeSessionEvents,
+    publishSessionEvent,
+    ...(roomIngestor
+      ? {
+          onRoomPost: (post) => {
+            void roomIngestor.ingestPost(post).catch((err) => {
+              console.error('[room-ingest] post capture failed:', err)
+            })
+          },
+        }
+      : {}),
+  }))
   app.use('/api/sessions', requireAuth(env.JWT_SECRET), sessionQuestionRoutes({
     approvalsStore: pendingApprovalsStore,
     resumeDeps: {

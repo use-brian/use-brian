@@ -80,6 +80,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUp,
   AtSign,
+  BrainCircuit,
   Check,
   ChevronDown,
   Copy,
@@ -1650,6 +1651,15 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 {format(t.startedBy, { name: activeShared.startedByName })}
               </span>
             )}
+            {/* D9: capture is always on, and visible - the quiet permanent
+                indicator that room talk flows into the company brain. */}
+            <span
+              className="ml-auto flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground/70"
+              title={t.captureIndicator}
+            >
+              <BrainCircuit className="size-3" aria-hidden />
+              {t.captureIndicator}
+            </span>
           </div>
         )}
         {/* The room's pinned working frame (P1b) — one slim chip row under
