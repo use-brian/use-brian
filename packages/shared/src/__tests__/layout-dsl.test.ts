@@ -225,6 +225,51 @@ describe('[COMP:decks/layout-dsl] Composition DSL', () => {
   // Safety: the validators are what make model-driven composition viable
   // -------------------------------------------------------------------------
 
+  it('rejects text that will not fit its area, with the smaller step named', () => {
+    // Found on the first model-composed deck: a 54pt headline overflowed its
+    // block and collided with the subtext while every other validator passed.
+    // Renderers disagree on overflow — pptx `fit: shrink` shrinks silently, the
+    // preview clips — so neither catches it and the two diverge when it happens.
+    const overflowing: DslSlide = {
+      background: 'ink',
+      blocks: [{ area: { col: 0, row: 2, cols: 9, rows: 2 }, kind: 'text', from: 'title', scale: 'xl', on: 'ink' }],
+    };
+    const long = deckSpecSchema.parse({
+      title: 'T',
+      slides: [{ title: 'We build the parts that nobody else in the market will even quote on', bullets: ['x'] }],
+    });
+    const errs = validateDslSlide(overflowing, MINIMAL, { spec: long, slide: long.slides[0], index: 2, total: 2 });
+    expect(errs.join()).toMatch(/needs about .*" at scale 'xl'/);
+    expect(errs.join()).toMatch(/drop to scale 'lg'/); // names the fix, so a model can retry
+  });
+
+  it('rejects text that ends flush against the block below it', () => {
+    const flush: DslSlide = {
+      background: 'paper',
+      blocks: [
+        { area: { col: 0, row: 2, cols: 9, rows: 2 }, kind: 'text', from: 'title', scale: 'lg', valign: 'bottom' },
+        { area: { col: 0, row: 4, cols: 7, rows: 1 }, kind: 'text', from: 'subtext', scale: 'sm' },
+      ],
+    };
+    const withSub = deckSpecSchema.parse({
+      title: 'T',
+      slides: [{ title: 'A headline', layout: 'statement', subtext: 'A supporting line' }],
+    });
+    const c = { spec: withSub, slide: withSub.slides[0], index: 2, total: 2 };
+    expect(validateDslSlide(flush, MINIMAL, c).join()).toMatch(/ends flush against/);
+
+    // but a short mark in a tall box must NOT trip it — box adjacency is the
+    // wrong test, the page tag never comes near the block beneath it
+    const tagged: DslSlide = {
+      background: 'paper',
+      blocks: [
+        { area: { col: 8, row: 0, cols: 4, rows: 1 }, kind: 'text', from: 'pageTag', scale: 'xs', align: 'right' },
+        { area: { col: 0, row: 1, cols: 12, rows: 3 }, kind: 'text', from: 'title', scale: 'lg' },
+      ],
+    };
+    expect(validateDslSlide(tagged, MINIMAL, c)).toEqual([]);
+  });
+
   it('rejects off-grid and overlapping text with actionable messages', () => {
     const offGrid: DslSlide = {
       background: 'paper',

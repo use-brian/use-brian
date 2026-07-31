@@ -336,9 +336,82 @@ export function resolveDslSlide(
 // model can retry rather than silently shipping a broken slide.
 // ---------------------------------------------------------------------------
 
-export function validateDslSlide(dsl: DslSlide, tokens: DslPackTokens): string[] {
+/**
+ * Rough wrapped height of a run of text, in inches.
+ *
+ * Deliberately pessimistic: the cost of over-estimating is the model picking a
+ * smaller type step, and the cost of under-estimating is a slide that ships
+ * broken. Both renderers fail differently on overflow — pptx `fit: shrink`
+ * silently shrinks the type, the preview clips it with overflow:hidden — so
+ * neither catches this for us and the two disagree when it happens.
+ */
+export function estimateTextHeightIn(
+  text: string,
+  widthIn: number,
+  fontSizePt: number,
+  lineSpacing = 1.2,
+  heavy = false,
+): number {
+  const emIn = fontSizePt / 72;
+  // average glyph advance as a fraction of the em; heavy grotesques run wider
+  const charIn = emIn * (heavy ? 0.62 : 0.52);
+  const perLine = Math.max(Math.floor(widthIn / charIn), 1);
+  const lines = text.split('\n').reduce((n, para) => n + Math.max(Math.ceil(para.length / perLine), 1), 0);
+  return lines * emIn * lineSpacing;
+}
+
+export function validateDslSlide(dsl: DslSlide, tokens: DslPackTokens, ctx?: DslSlideContext): string[] {
   const errors: string[] = [];
   const boxes = dsl.blocks.map((b) => ({ block: b, box: dslAreaToBox(b.area, tokens.margin) }));
+
+  // Does the text actually FIT? This is the check whose absence let a 54pt
+  // headline overflow its block and collide with the subtext on the first real
+  // model-composed deck, with every other validator passing.
+  if (ctx) {
+    for (const { block, box } of boxes) {
+      if (block.kind !== 'text') continue;
+      const raw = block.text ?? sourceText(block.from, ctx);
+      if (!raw) continue;
+      const step = tokens.type[block.scale ?? 'md'];
+      const needed = estimateTextHeightIn(raw, box.w, step.size, 1.2, step.face === 'heading');
+      if (needed > box.h * 1.05) {
+        const smaller: DslScale[] = ['xl', 'lg', 'md', 'sm', 'xs'];
+        const next = smaller[Math.min(smaller.indexOf(block.scale ?? 'md') + 1, smaller.length - 1)];
+        errors.push(
+          `text block '${block.from ?? 'literal'}' needs about ${needed.toFixed(1)}" at scale '${block.scale ?? 'md'}' ` +
+            `but its area is ${box.h.toFixed(1)}" tall — drop to scale '${next}', give it more rows, or shorten the text`,
+        );
+      }
+    }
+
+    // Where a block's text actually ENDS, given how it sits in its box. Box
+    // adjacency is the wrong test for flush text: a short page tag in a tall
+    // box touches its neighbour's box without the ink ever coming close.
+    const inked = boxes.flatMap(({ block, box }) => {
+      if (block.kind !== 'text') return [];
+      const raw = block.text ?? sourceText(block.from, ctx);
+      if (!raw) return [];
+      const step = tokens.type[block.scale ?? 'md'];
+      const h = Math.min(estimateTextHeightIn(raw, box.w, step.size, 1.2, step.face === 'heading'), box.h);
+      const top =
+        block.valign === 'bottom' ? box.y + box.h - h : block.valign === 'middle' ? box.y + (box.h - h) / 2 : box.y;
+      return [{ block, x: box.x, w: box.w, top, bottom: top + h }];
+    });
+    for (const upper of inked) {
+      for (const lower of inked) {
+        if (upper === lower) continue;
+        const sideBySide = Math.min(upper.x + upper.w, lower.x + lower.w) - Math.max(upper.x, lower.x) <= 0.05;
+        if (sideBySide) continue;
+        const gap = lower.top - upper.bottom;
+        if (gap >= 0 && gap < 0.12) {
+          errors.push(
+            `'${upper.block.from ?? 'text'}' ends flush against '${lower.block.from ?? 'text'}' (${gap.toFixed(2)}" apart) — ` +
+              'leave a grid row between them, or shorten the upper block by one row',
+          );
+        }
+      }
+    }
+  }
 
   for (const { block, box } of boxes) {
     if (block.area.col < 0 || block.area.row < 0) {
