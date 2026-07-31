@@ -2,6 +2,7 @@ import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
 import { deckSpecSchema, DECK_PRESET_STYLES } from '@use-brian/shared/decks';
 import { isPrivateAddress } from '../image-resolve.js';
+import { derivePackTokens } from '../pack-derive.js';
 import { writeDeckPptx } from '../pptx-writer.js';
 import { extractDeckStyle, parseThemeScheme } from '../style-extract.js';
 
@@ -234,5 +235,80 @@ describe('[COMP:decks/image-resolve] SSRF private-address detection', () => {
     for (const addr of ['8.8.8.8', '104.16.0.1', '2606:4700::6810:1', '172.32.0.1', '100.128.0.1']) {
       expect(isPrivateAddress(addr), addr).toBe(false);
     }
+  });
+});
+
+describe('[COMP:decks/pack-derive] Pack derivation from a reference', () => {
+  /**
+   * Round-trip: build a deck from tokens we KNOW, then measure those tokens back
+   * out of the binary. Anything the deriver gets wrong here it would also get
+   * wrong on a real customer reference — and unlike a real reference, this one
+   * has a ground truth to check against.
+   */
+  const deck = (pack: 'minimal' | 'editorial') =>
+    deckSpecSchema.parse({
+      title: 'Reference Deck',
+      subtitle: 'For derivation',
+      pack,
+      slides: [
+        { title: 'Agenda', bullets: ['Where we are', 'What changed', 'What we are asking for'] },
+        { title: 'Traction', layout: 'stats', stats: [{ value: '$1.2M', label: 'ARR' }] },
+        { title: 'A claim worth a slide', layout: 'statement', subtext: 'With a supporting line beneath it.' },
+      ],
+    });
+
+  it('recovers margin, faces and a strictly decreasing type scale', async () => {
+    const buffer = await writeDeckPptx(deck('minimal'), null);
+    const { tokens, notes } = await derivePackTokens(buffer);
+
+    expect(tokens.margin).toBeCloseTo(0.92, 1); // the minimal pack's actual margin
+    expect(tokens.style.headingFont).toBe('Arial Black');
+    expect(tokens.style.bodyFont).toBe('Arial');
+
+    const steps = [tokens.type.xl, tokens.type.lg, tokens.type.md, tokens.type.sm, tokens.type.xs].map((s) => s.size);
+    expect(steps[0]).toBeGreaterThanOrEqual(40); // a real headline step was found
+    for (let i = 1; i < steps.length; i++) {
+      // a collapsed step would make two named steps render identically and
+      // silently remove a level of hierarchy from every deck built on it
+      expect(steps[i]).toBeLessThan(steps[i - 1]);
+    }
+    expect(notes.join()).toMatch(/chrome .* is not derived/);
+  });
+
+  it('reads the art direction, not just the numbers', async () => {
+    const min = await derivePackTokens(await writeDeckPptx(deck('minimal'), null));
+    const ed = await derivePackTokens(await writeDeckPptx(deck('editorial'), null));
+
+    expect(min.tokens.style.headingFont).not.toBe(ed.tokens.style.headingFont);
+    expect(ed.tokens.style.headingFont).toBe('Georgia');
+    // minimal sets its covers and dividers in caps; editorial does not
+    expect(min.headingCaps).toBe(true);
+    expect(ed.headingCaps).toBe(false);
+  });
+
+  it('observes slide colours rather than trusting the theme', async () => {
+    // pptxgenjs (like most producers) leaves theme1.xml at the Office default
+    // and colours every shape directly, so theme-only extraction returns a
+    // confident white/black/blue that appears nowhere in the deck.
+    const { tokens } = await derivePackTokens(await writeDeckPptx(deck('minimal'), null));
+    expect(tokens.style.background).toBe('EFEBE3'); // the pack's warm paper
+    expect(tokens.style.text).toBe('111111');
+    expect(tokens.style.background).not.toBe('FFFFFF'); // what the theme would have said
+  });
+
+  it('keeps a monochrome reference monochrome', async () => {
+    // rules and panels are greys between paper and ink; taking the most-used
+    // non-text fill promotes one of those to "accent" on every monochrome deck
+    const min = await derivePackTokens(await writeDeckPptx(deck('minimal'), null));
+    expect(min.tokens.style.accent).toBe(min.tokens.style.text);
+    expect(min.notes.join()).toMatch(/monochrome/);
+
+    // a reference that does carry a hue keeps it
+    const ed = await derivePackTokens(await writeDeckPptx(deck('editorial'), null));
+    expect(ed.tokens.style.accent).not.toBe(ed.tokens.style.text);
+  });
+
+  it('refuses a non-pptx rather than returning a confident default', async () => {
+    await expect(derivePackTokens(Buffer.from('PK not really a deck'))).rejects.toThrow();
   });
 });
