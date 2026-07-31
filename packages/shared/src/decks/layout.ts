@@ -158,7 +158,7 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
 // Text helpers
 // ---------------------------------------------------------------------------
 
-function plainText(
+export function plainText(
   text: string,
   color: string,
   box: DeckBox,
@@ -186,7 +186,7 @@ function plainText(
   };
 }
 
-function bulletBlock(
+export function bulletBlock(
   style: DeckStyle,
   bullets: string[],
   box: DeckBox,
@@ -306,7 +306,7 @@ function layoutContentSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout
   return { background: style.background, primitives };
 }
 
-function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
+export function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
   const captionH = image.caption ? 0.45 : 0;
   const primitives: DeckPrimitive[] = [
     {
@@ -573,7 +573,7 @@ function trimZero(value: number): string {
   return value.toFixed(1).replace(/\.0$/, '');
 }
 
-function layoutChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
+export function layoutChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckPrimitive[] {
   if (chart.type === 'pie' || chart.type === 'doughnut') return layoutPieChart(chart, style, box);
   if (chart.type === 'line') return layoutLineChart(chart, style, box);
   return layoutBarChart(chart, style, box);
