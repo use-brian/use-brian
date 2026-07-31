@@ -245,11 +245,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
+        assistantId: string
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
-                s.effective_clearance AS "effectiveClearance"
+                s.effective_clearance AS "effectiveClearance",
+                s.assistant_id AS "assistantId"
            FROM sessions s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
@@ -283,6 +285,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         startedByUserId: s.starterUserId,
         startedByName: profiles.get(s.starterUserId)?.name ?? null,
         startedByAvatarUrl: profiles.get(s.starterUserId)?.avatarUrl ?? null,
+        // The room's bound assistant — the client's avatar / mention / Ask
+        // labels resolve from it (rooms may bind any workspace assistant at
+        // creation, not just the primary).
+        assistantId: s.assistantId,
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -309,15 +315,34 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const user = await resolveUser(jwtUserId)
       if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
 
-      const { workspaceId } = req.body as { workspaceId?: string }
+      const { workspaceId, assistantId } = req.body as {
+        workspaceId?: string
+        assistantId?: string
+      }
       if (!workspaceId) {
         res.status(400).json({ error: 'Missing workspaceId' })
         return
       }
 
-      // `getWorkspacePrimaryAssistant` is membership-checked, so this single
-      // call is both "which assistant" and "may this user be here".
-      const assistant = await getWorkspacePrimaryAssistant(user.id, workspaceId)
+      // Which assistant the room binds to. The starter may pick ANY
+      // workspace assistant at creation (the binding stays per-room for its
+      // lifetime — per-turn multi-assistant routing is the separate P3
+      // work); omitted → the workspace primary. `getUserAssistant` is the
+      // access check; the workspace guard stops a stale client id from
+      // binding another workspace's assistant into this room.
+      // `getWorkspacePrimaryAssistant` is membership-checked, so the default
+      // path is both "which assistant" and "may this user be here".
+      let assistant: { id: string; workspaceId?: string | null } | null = null
+      if (assistantId) {
+        const candidate = await getUserAssistant(user.id, assistantId)
+        if (!candidate || candidate.workspaceId !== workspaceId) {
+          res.status(403).json({ error: 'Assistant not available in this workspace' })
+          return
+        }
+        assistant = candidate
+      } else {
+        assistant = await getWorkspacePrimaryAssistant(user.id, workspaceId)
+      }
       if (!assistant) {
         res.status(403).json({ error: 'Not a member of this workspace' })
         return
@@ -342,6 +367,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         lastActive: session.lastActiveAt,
         status: session.status,
         startedByUserId: user.id,
+        assistantId: session.assistantId,
       })
     } catch (err) {
       console.error('Workspace session create error:', err)

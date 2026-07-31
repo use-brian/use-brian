@@ -54,8 +54,8 @@ export type DocSession = {
   /**
    * The assistant the session is bound to. Stamped CLIENT-SIDE from the
    * per-assistant fetch (`GET /api/sessions` is assistant-scoped and doesn't
-   * echo it) — absent on rows from callers that predate the field, and on
-   * workspace-shared rows (those are always the workspace primary). Sessions
+   * echo it); workspace-shared rows echo it server-side (a room binds ANY
+   * workspace assistant at creation, default the primary). Sessions
    * are assistant-bound: `/api/chat` rejects a send whose `assistantId`
    * doesn't match the session's, so the Chat app resolves this per thread.
    */
@@ -273,6 +273,8 @@ type RawWorkspaceRow = RawListRow & {
   startedByUserId?: string;
   startedByName?: string | null;
   startedByAvatarUrl?: string | null;
+  /** The room's bound assistant (rooms may bind any workspace assistant). */
+  assistantId?: string;
 };
 
 function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
@@ -288,6 +290,7 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     startedByUserId: r.startedByUserId ?? "",
     startedByName: r.startedByName ?? null,
     startedByAvatarUrl: r.startedByAvatarUrl ?? null,
+    ...(r.assistantId ? { assistantId: r.assistantId } : {}),
   };
 }
 
@@ -323,11 +326,14 @@ export async function listWorkspaceSessions(opts: {
  */
 export async function createWorkspaceSession(
   workspaceId: string,
+  /** Bind the room to a specific workspace assistant (default: primary).
+   *  The binding is per-room for its lifetime - per-turn routing is P3. */
+  assistantId?: string,
 ): Promise<WorkspaceSession> {
   const res = await authFetch(`${API_URL}/api/sessions/workspace`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
+    body: JSON.stringify({ workspaceId, ...(assistantId ? { assistantId } : {}) }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };

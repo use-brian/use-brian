@@ -39,9 +39,15 @@ vi.mock('../route-helpers.js', () => ({
 vi.mock('../../db/users.js', () => ({
   findOrCreateUser: vi.fn(),
   getDefaultAssistant: vi.fn(),
-  getUserAssistant: vi.fn(),
+  getUserAssistant: vi.fn(async (_userId: string, assistantId: string) =>
+    assistantId === 'a-sales'
+      ? { id: 'a-sales', workspaceId: 'ws-1', name: 'Sales' }
+      : assistantId === 'a-foreign'
+        ? { id: 'a-foreign', workspaceId: 'ws-OTHER', name: 'Elsewhere' }
+        : null,
+  ),
   getUserProfilesByIds: vi.fn(async () => new Map()),
-  getWorkspacePrimaryAssistant: vi.fn(),
+  getWorkspacePrimaryAssistant: vi.fn(async () => ({ id: 'a-primary', workspaceId: 'ws-1', name: 'Gm' })),
 }))
 
 vi.mock('../../db/sessions.js', async (importOriginal) => {
@@ -49,6 +55,27 @@ vi.mock('../../db/sessions.js', async (importOriginal) => {
   return {
     ...actual,
     findSessionById: vi.fn(),
+    createWorkspaceChatSession: vi.fn(async (params: { assistantId: string; starterUserId: string; workspaceId: string; effectiveClearance: string | null }) => ({
+      id: 's-new',
+      assistantId: params.assistantId,
+      userId: params.starterUserId,
+      channelType: 'web',
+      channelId: 'chan-new',
+      appId: 'Use Brian',
+      appOrigin: 'chat',
+      status: 'idle',
+      compactSummary: null,
+      compactionCount: 0,
+      compactBoundarySequence: null,
+      title: null,
+      downgradeNoticeSent: false,
+      downgradeNoticePinMessageId: null,
+      mode: null,
+      visibility: 'workspace',
+      effectiveClearance: params.effectiveClearance,
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+    })),
     addSessionMessage: vi.fn(async (params: { sessionId: string; role: string; content: unknown; senderUserId?: string | null }) => ({
       id: 'msg-1',
       sessionId: params.sessionId,
@@ -67,7 +94,7 @@ vi.mock('../../db/sessions.js', async (importOriginal) => {
 })
 
 import { sessionRoutes } from '../sessions.js'
-import { addSessionMessage, findSessionById } from '../../db/sessions.js'
+import { addSessionMessage, createWorkspaceChatSession, findSessionById } from '../../db/sessions.js'
 import type { SessionEvent } from '../../session-event-port.js'
 
 const mockFindSession = vi.mocked(findSessionById)
@@ -327,5 +354,46 @@ describe('[COMP:api/room-mechanics] GET /api/sessions/:id/stream — follow mode
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
+  })
+})
+
+describe('[COMP:api/room-mechanics] POST /api/sessions/workspace — assistant binding at creation', () => {
+  const mockCreate = vi.mocked(createWorkspaceChatSession)
+
+  beforeEach(() => {
+    mockCreate.mockClear()
+  })
+
+  it('binds the room to an explicitly picked workspace assistant', async () => {
+    const res = await request(makeApp())
+      .post('/api/sessions/workspace')
+      .send({ workspaceId: 'ws-1', assistantId: 'a-sales' })
+    expect(res.status).toBe(201)
+    expect(res.body.assistantId).toBe('a-sales')
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({ assistantId: 'a-sales', workspaceId: 'ws-1' })
+  })
+
+  it('defaults to the workspace primary when no assistant is picked', async () => {
+    const res = await request(makeApp())
+      .post('/api/sessions/workspace')
+      .send({ workspaceId: 'ws-1' })
+    expect(res.status).toBe(201)
+    expect(res.body.assistantId).toBe('a-primary')
+  })
+
+  it("refuses another workspace's assistant (a stale client id must not cross-bind)", async () => {
+    const res = await request(makeApp())
+      .post('/api/sessions/workspace')
+      .send({ workspaceId: 'ws-1', assistantId: 'a-foreign' })
+    expect(res.status).toBe(403)
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('refuses an assistant the caller has no access to', async () => {
+    const res = await request(makeApp())
+      .post('/api/sessions/workspace')
+      .send({ workspaceId: 'ws-1', assistantId: 'a-unknown' })
+    expect(res.status).toBe(403)
+    expect(mockCreate).not.toHaveBeenCalled()
   })
 })
