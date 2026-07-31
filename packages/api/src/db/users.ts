@@ -225,10 +225,10 @@ export async function findOrCreateUser(params: {
     // The primary assistant is workspace-bound. owner_user_id stays set so
     // the legacy assistant_members fan-out still resolves; the workspace
     // is the canonical owner for new code paths.
-    const assistant = await client.query<{ id: string }>(
+    const assistant = await client.query<{ id: string; clearance: string | null }>(
       `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
        VALUES ($1, $2, $3, 'primary')
-       RETURNING id`,
+       RETURNING id, clearance`,
       [`${workspaceName} Primary Assistant`, user.id, workspaceId],
     )
 
@@ -252,6 +252,20 @@ export async function findOrCreateUser(params: {
               ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
               ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
       [assistant.rows[0].id, user.id],
+    )
+
+    // The default "General" room — same seeding as workspaceStore.create()
+    // (multiplayer chat T6/D4): an ordinary workspace-shared chat session so
+    // the Chat app's Workspace tab lands somewhere alive on day one.
+    // `title_manually_set` keeps the auto-titler off the default name.
+    await client.query(
+      `INSERT INTO sessions
+         (assistant_id, user_id, channel_type, channel_id, app_id,
+          app_origin, visibility, workspace_id, effective_clearance, title,
+          title_manually_set)
+       VALUES ($1, $2, 'web', gen_random_uuid()::text, 'Use Brian',
+               'chat', 'workspace', $3, $4, 'General', true)`,
+      [assistant.rows[0].id, user.id, workspaceId, assistant.rows[0].clearance ?? null],
     )
 
     await client.query('COMMIT')

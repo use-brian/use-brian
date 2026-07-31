@@ -72,12 +72,14 @@ import {
   useChatSession,
   useMessageStream,
   type Message,
+  type PendingConfirmation,
   type ToolUsed,
 } from "@use-brian/chat-ui";
 import remarkGfm from "remark-gfm";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUp,
+  AtSign,
   Check,
   ChevronDown,
   Copy,
@@ -130,9 +132,16 @@ import {
   listSessionsForAssistants,
   listWorkspaceSessions,
   fetchSessionMessages,
+  postRoomMessage,
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
+import { getUserInfo } from "@/lib/user";
+import { markRoomSeen } from "@/lib/chat-seen";
+import { fetchPendingQuestion } from "@/lib/api/pending-questions";
+import { PendingQuestionPanel } from "@/components/chrome/pending-question-panel";
+import { ChatConfirmationCard } from "@/components/chrome/chat-confirmation-card";
+import { ChatContextPins } from "@/components/chat-app/chat-context-pins";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 const REMARK_PLUGINS = [remarkGfm];
@@ -155,6 +164,30 @@ type SurfaceMessage = Message & { senderName?: string };
 function coercePayload(data: unknown): Record<string, unknown> {
   return data && typeof data === "object" ? (data as Record<string, unknown>) : {};
 }
+
+/**
+ * Client-side half of the address decision (multiplayer chat T3): a typed /
+ * autocomplete-inserted `@AssistantName`, case-insensitive. The SERVER
+ * re-validates (`detectRoomAddress`), so this only picks which endpoint the
+ * send takes — a wrong guess degrades to a post, never a phantom turn.
+ */
+function mentionsAssistant(text: string, assistantName: string): boolean {
+  const name = assistantName.trim().toLowerCase();
+  if (!name) return false;
+  return text.toLowerCase().includes(`@${name}`);
+}
+
+/** A pending write confirmation observed by a room VIEWER (T11/D8 — mirrored
+ *  off the per-session bus; the server gates who may act on it). */
+type RemoteConfirmation = {
+  toolCallId: string;
+  toolName: string;
+  displayName?: string;
+  input: Record<string, unknown>;
+  description?: string;
+  displayLines?: string[];
+  addresserUserId: string | null;
+};
 
 export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const t = useT().chatApp;
@@ -196,6 +229,26 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [startingShared, setStartingShared] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  /** The viewer's own user id — filters this client's OWN turn out of the
+   *  room's bus mirror (it streams over this client's POST already). */
+  const meId = getUserInfo()?.id ?? null;
+  /** The composer's Ask affordance (D1/T3): arms address intent for the next
+   *  send in a room without typing a mention. Reset after each send. */
+  const [askArmed, setAskArmed] = useState(false);
+  /** Quiet "will reply after this" line (T5) — set by the server's `queued`
+   *  SSE event, cleared when a turn settles. */
+  const [queuedNotice, setQueuedNotice] = useState(false);
+  /** `@` autocomplete popover (T12 — assistants only). */
+  const [mentionOpen, setMentionOpen] = useState(false);
+  /** A suspended askQuestion in the open room / thread (T11/D8). */
+  const [pendingQuestion, setPendingQuestion] = useState<{
+    approvalId: string;
+    question: string;
+    expiresAt: string | null;
+    sessionId: string;
+  } | null>(null);
+  /** A teammate-turn write confirmation, mirrored to every viewer (T11). */
+  const [remoteConfirmation, setRemoteConfirmation] = useState<RemoteConfirmation | null>(null);
 
   /** The open thread — URL state, so it is linkable and survives navigation. */
   const activeSessionId = searchParams?.get("s") ?? null;
@@ -444,28 +497,218 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId, loadTranscript, resetTurnActivity]);
 
-  // ── Live read of a shared thread ────────────────────────────────────
-  // Every viewer of a shared session subscribes the per-session event bus, so
-  // a teammate's turn appears without a refresh. The stream reports the turn's
-  // status and streams the reply-so-far; when it settles we refetch the
-  // persisted transcript rather than trusting the snapshot text, so what the
-  // viewer ends up with is exactly what was stored.
-  const [remoteTurn, setRemoteTurn] = useState<string | null>(null);
+  // ── Live room follow (T13) ──────────────────────────────────────────
+  // Every open viewer of a room holds ONE persistent subscription to the
+  // per-session stream (follow mode): teammate posts fan in live, a
+  // teammate's turn paints through the SAME feed pipeline the sender uses
+  // (build-events + tool-narration), suspended turns surface, and settle
+  // refetches the persisted transcript — events are signals, never data.
+  // This client's OWN turn is filtered out by `senderUserId` (it streams
+  // over this client's POST), so the subscription stays open even while
+  // sending.
+  const [remoteActive, setRemoteActive] = useState(false);
+  const [remoteText, setRemoteText] = useState("");
+  const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
+  const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
+  const remoteLogRef = useRef<EventLog>(EMPTY_LOG);
+  const remoteToolsRef = useRef<ToolUsed[]>([]);
+  const remoteSeqRef = useRef(0);
+  const remoteNarratedRef = useRef<Set<string>>(new Set());
+  /** Bumped to re-open the stream after a server close (deploy, restart). */
+  const [subscribeEpoch, setSubscribeEpoch] = useState(0);
+  /** Bumped by the room stream's `pins_changed` signal — the chip row
+   *  refetches through its own loader (signals, never data). */
+  const [pinsEpoch, setPinsEpoch] = useState(0);
+  const isSharedOpen = !!activeShared;
+
+  const resetRemoteTurn = useCallback(() => {
+    remoteLogRef.current = EMPTY_LOG;
+    remoteToolsRef.current = [];
+    remoteNarratedRef.current.clear();
+    setRemoteActive(false);
+    setRemoteText("");
+    setRemoteEvents([]);
+    setRemoteTools([]);
+  }, []);
+
+  const refreshPendingQuestion = useCallback(
+    (sessionId: string) => {
+      void fetchPendingQuestion(sessionId)
+        .then((q) => {
+          setPendingQuestion(
+            q
+              ? {
+                  approvalId: q.approvalId,
+                  question: q.question ?? "",
+                  expiresAt: q.expiresAt,
+                  sessionId,
+                }
+              : null,
+          );
+        })
+        .catch(() => {});
+    },
+    [],
+  );
+
   useEffect(() => {
-    if (!activeSessionId || !activeShared) {
-      setRemoteTurn(null);
+    if (!activeSessionId || !isSharedOpen) {
+      resetRemoteTurn();
+      setRemoteConfirmation(null);
       return;
     }
-    // Our OWN turn streams over its POST; a second subscription would
-    // double-drive the same bubble.
-    if (chat.state.isStreaming) return;
-
     let cancelled = false;
     const controller = new AbortController();
+    const sessionId = activeSessionId;
+    const mintRemoteId = () => `rev-${remoteSeqRef.current++}`;
+
+    // Opening a room reads it — stamp the unread watermark (T7).
+    markRoomSeen(workspaceId, sessionId);
+
+    // A room found suspended on open surfaces its answer panel immediately
+    // (any member with read access may answer — D8).
+    refreshPendingQuestion(sessionId);
+
+    const handleRoomEvent = (event: string, payload: Record<string, unknown>) => {
+      const sender = typeof payload.senderUserId === "string" ? payload.senderUserId : null;
+      switch (event) {
+        case "user_message_saved": {
+          if (sender && meId && sender === meId) break;
+          void loadTranscript(sessionId);
+          markRoomSeen(workspaceId, sessionId);
+          break;
+        }
+        case "turn_started": {
+          if (sender && meId && sender === meId) break;
+          resetRemoteTurn();
+          setRemoteActive(true);
+          break;
+        }
+        case "snapshot": {
+          if (sender && meId && sender === meId) break;
+          setRemoteActive(true);
+          setRemoteText(typeof payload.text === "string" ? payload.text : "");
+          const reasoning =
+            typeof payload.reasoning === "string" ? payload.reasoning : "";
+          if (reasoning) {
+            const next = appendReasoning(remoteLogRef.current, reasoning, mintRemoteId);
+            if (next !== remoteLogRef.current) {
+              remoteLogRef.current = next;
+              setRemoteEvents(next.events);
+            }
+          }
+          break;
+        }
+        case "activity": {
+          if (sender && meId && sender === meId) break;
+          setRemoteActive(true);
+          const kind = typeof payload.event === "string" ? payload.event : "";
+          const id = typeof payload.id === "string" ? payload.id : "";
+          const name = typeof payload.name === "string" ? payload.name : "";
+          if (kind === "tool_start" && id && name) {
+            if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
+            const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
+            remoteToolsRef.current = [
+              ...remoteToolsRef.current,
+              { id, name, status: "running", description: seeded.description },
+            ];
+            setRemoteTools(remoteToolsRef.current);
+            remoteLogRef.current = appendStep(
+              remoteLogRef.current,
+              seeded.description,
+              mintRemoteId,
+              { toolId: id },
+            );
+            setRemoteEvents(remoteLogRef.current.events);
+          } else if (kind === "tool_input" && id) {
+            const inputPayload =
+              payload.input && typeof payload.input === "object"
+                ? (payload.input as Record<string, unknown>)
+                : {};
+            const narration = describeToolFromInput(name, inputPayload, tChat.toolNarration);
+            if (!narration) break;
+            remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
+              tool.id === id
+                ? {
+                    ...tool,
+                    description: narration.description,
+                    ...(narration.url ? { url: narration.url } : {}),
+                  }
+                : tool,
+            );
+            setRemoteTools(remoteToolsRef.current);
+            if (!remoteNarratedRef.current.has(id)) {
+              remoteNarratedRef.current.add(id);
+              remoteLogRef.current = updateStepText(
+                remoteLogRef.current,
+                id,
+                narration.description,
+                narration.url,
+              );
+              setRemoteEvents(remoteLogRef.current.events);
+            }
+          } else if (kind === "tool_result" && id) {
+            const isError = payload.isError === true;
+            remoteToolsRef.current = remoteToolsRef.current.map((tool) =>
+              tool.id === id
+                ? { ...tool, status: isError ? ("retried" as const) : ("done" as const) }
+                : tool,
+            );
+            setRemoteTools(remoteToolsRef.current);
+          } else if (kind === "tool_dropped" && id) {
+            remoteToolsRef.current = remoteToolsRef.current.filter((tool) => tool.id !== id);
+            setRemoteTools(remoteToolsRef.current);
+            remoteLogRef.current = removeToolSteps(remoteLogRef.current, id);
+            setRemoteEvents(remoteLogRef.current.events);
+          } else if (kind === "tool_confirmation_required") {
+            // Every viewer sees the pending card (D8); the server gates who
+            // may act on it.
+            setRemoteConfirmation({
+              toolCallId: typeof payload.toolCallId === "string" ? payload.toolCallId : "",
+              toolName: typeof payload.toolName === "string" ? payload.toolName : "",
+              displayName:
+                typeof payload.displayName === "string" ? payload.displayName : undefined,
+              input:
+                payload.input && typeof payload.input === "object"
+                  ? (payload.input as Record<string, unknown>)
+                  : {},
+              description:
+                typeof payload.description === "string" ? payload.description : undefined,
+              displayLines: Array.isArray(payload.displayLines)
+                ? (payload.displayLines as string[])
+                : undefined,
+              addresserUserId:
+                typeof payload.addresserUserId === "string" ? payload.addresserUserId : null,
+            });
+          } else if (kind === "tool_confirmation_resolved") {
+            setRemoteConfirmation(null);
+          }
+          break;
+        }
+        case "pins_changed": {
+          setPinsEpoch((n) => n + 1);
+          break;
+        }
+        case "turn_completed": {
+          resetRemoteTurn();
+          setRemoteConfirmation(null);
+          setQueuedNotice(false);
+          void loadTranscript(sessionId);
+          void reloadShared();
+          dispatchChatSessionsRefresh(workspaceId);
+          markRoomSeen(workspaceId, sessionId);
+          refreshPendingQuestion(sessionId);
+          break;
+        }
+        default:
+          break;
+      }
+    };
+
     void (async () => {
       try {
         const res = await authFetch(
-          `${API_URL}/api/sessions/${encodeURIComponent(activeSessionId)}/stream`,
+          `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/stream`,
           { signal: controller.signal },
         );
         if (!res.ok || !res.body) return;
@@ -476,33 +719,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           const { done, value } = await reader.read();
           if (done || cancelled) break;
           for (const ev of parseSSEStream(decoder.decode(value, { stream: true }), buf)) {
-            if (ev.event === "snapshot") {
-              const d = ev.data as { text?: string };
-              setRemoteTurn(d.text ?? "");
-            } else if (ev.event === "done") {
-              if (!cancelled) {
-                setRemoteTurn(null);
-                void loadTranscript(activeSessionId);
-                void reloadShared();
-                dispatchChatSessionsRefresh(workspaceId);
-              }
-              return;
-            }
+            handleRoomEvent(ev.event, coercePayload(ev.data));
           }
         }
       } catch {
-        // Transport error / abort — the next open of this thread refetches.
+        // Transport error / abort — reconnect below (or unmount).
       } finally {
-        if (!cancelled) setRemoteTurn(null);
+        // Follow mode never closes server-side on idle, so a close means a
+        // deploy / restart / network blip — re-open after a beat.
+        if (!cancelled) {
+          setTimeout(() => {
+            if (!cancelled) setSubscribeEpoch((n) => n + 1);
+          }, 3_000);
+        }
       }
     })();
     return () => {
       cancelled = true;
       controller.abort();
     };
-    // Re-subscribing whenever the teammate's status flips is the point: the
-    // endpoint closes immediately when nothing is in flight.
-  }, [activeSessionId, activeShared, activeShared?.status, chat.state.isStreaming, loadTranscript, reloadShared, workspaceId]);
+    // `resetRemoteTurn` / `refreshPendingQuestion` / `loadTranscript` /
+    // `reloadShared` are stable callbacks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, isSharedOpen, subscribeEpoch, meId, workspaceId, tChat.toolNarration]);
 
   // Keep the transcript pinned to the newest turn as it streams.
   useEffect(() => {
@@ -513,7 +752,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     chat.state.streamingText,
     streamingEvents,
     toolTimeline,
-    remoteTurn,
+    remoteText,
+    remoteEvents,
   ]);
 
   const resetPane = useCallback(() => {
@@ -575,12 +815,25 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   }, []);
 
   // ── Send ────────────────────────────────────────────────────────────
+  /** Tracks whether the in-flight turn streamed an askQuestion step, so the
+   *  settle can fetch the pending row and surface the answer panel. */
+  const askedQuestionRef = useRef(false);
   const send = useCallback(async () => {
     const trimmed = input.trim();
     // Snapshot the interlocutor at send time — the turn belongs to it even
     // if the resolution inputs shift while the reply streams.
     const interlocutor = activeAssistant;
     if (!trimmed || !interlocutor || chat.state.isStreaming) return;
+
+    // The room decision (multiplayer chat D1/T3): in a room, send = POST
+    // unless this message ADDRESSES the assistant (typed @mention or the
+    // armed Ask affordance). The server re-validates either way, so this
+    // only picks the endpoint.
+    const isRoom = activeSessionId ? !!activeShared : view === "workspace";
+    const addressed =
+      !isRoom || askArmed || mentionsAssistant(trimmed, interlocutor.name);
+    setAskArmed(false);
+    setMentionOpen(false);
 
     // First send in a fresh Workspace pane: create the shared thread FIRST
     // (the explicit-create API — the thread is listable by teammates from
@@ -607,6 +860,28 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       }
     }
 
+    // A silent room post (T2): send = post, instantly, for every member —
+    // one durable row, no turn, no busy gate. The optimistic bubble stays;
+    // the follow stream's refetch reconciles it against the stored row.
+    if (isRoom && !addressed && sessionIdRef.current) {
+      const targetId = sessionIdRef.current;
+      chat.appendMessage({
+        id: `local-${Date.now()}`,
+        role: "user",
+        text: trimmed,
+        timestamp: new Date(),
+      });
+      setInput("");
+      setError(null);
+      markRoomSeen(workspaceId, targetId);
+      try {
+        await postRoomMessage(targetId, trimmed);
+      } catch {
+        setError(t.postFailed);
+      }
+      return;
+    }
+
     // "New chat" mints a fresh channel id (the §107 spec). The chat route's
     // sticky-channel fallback reunites every later turn of this conversation
     // on the row that first turn creates, even if the `session` event is
@@ -621,6 +896,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     });
     setInput("");
     setError(null);
+    setQueuedNotice(false);
+    askedQuestionRef.current = false;
     chat.dispatch({ type: "stream/start" });
     turnTextRef.current = "";
     resetTurnActivity();
@@ -637,6 +914,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         appOrigin: APP_ORIGIN,
         // The picked tier rides every turn; the server clamps to plan.
         model,
+        // The Ask affordance marks address intent (T3) — the server decides.
+        ...(isRoom && addressed ? { ask: true } : {}),
         ...(sessionIdRef.current ? { sessionId: sessionIdRef.current } : {}),
         ...(channelId ? { channelId } : {}),
       },
@@ -699,6 +978,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             const id = typeof payload.id === "string" ? payload.id : "";
             const name = typeof payload.name === "string" ? payload.name : "";
             if (!id || !name) break;
+            // An askQuestion step means this turn may SUSPEND — the settle
+            // fetches the pending row and surfaces the answer panel.
+            if (name === "askQuestion") askedQuestionRef.current = true;
             // Dedup — re-emits keep the existing row.
             if (turnToolsRef.current.some((tool) => tool.id === id)) break;
             // Arm the answer-segment reset and clear the live stream buffer
@@ -813,12 +1095,61 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             else if (phase === "research_parallel") setResearchPhase("parallel");
             break;
           }
+          case "queued": {
+            // A quiet "will reply after this" line, never an error (T5). A
+            // folded queue means another member's mention already armed the
+            // follow-up turn — this message's row rides its backlog.
+            setQueuedNotice(true);
+            break;
+          }
+          case "posted": {
+            // The server decided this message was a post, not an address
+            // (T3 re-validation). The optimistic bubble already stands.
+            chat.dispatch({ type: "stream/abort" });
+            resetTurnActivity();
+            break;
+          }
+          case "tool_confirmation_required": {
+            // Suspended-turn card in the room transcript (T11/D8) — the
+            // sender's own copy, off their POST stream.
+            const toolCallId =
+              typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+            if (!toolCallId) break;
+            chat.addConfirmation({
+              toolCallId,
+              toolName: typeof payload.toolName === "string" ? payload.toolName : "",
+              displayName:
+                typeof payload.displayName === "string" ? payload.displayName : undefined,
+              input:
+                payload.input && typeof payload.input === "object"
+                  ? (payload.input as Record<string, unknown>)
+                  : {},
+              description:
+                typeof payload.description === "string" ? payload.description : undefined,
+              displayLines: Array.isArray(payload.displayLines)
+                ? (payload.displayLines as string[])
+                : undefined,
+              sessionId: sessionIdRef.current ?? "",
+              status: "pending",
+            });
+            break;
+          }
           case "error": {
-            // A shared session takes one turn at a time. Say who we are waiting
-            // for in the surface's own words rather than echoing the server
-            // sentence, which is written for every client.
-            if (payload.code === "shared_session_busy") {
-              setError(t.sharedBusy);
+            // Suspended on a question from an earlier turn: restore the
+            // answer panel instead of a red error (the dock's recipe).
+            if (payload.code === "pending_question_exists") {
+              const approvalId =
+                typeof payload.approvalId === "string" ? payload.approvalId : "";
+              const sid = sessionIdRef.current ?? "";
+              if (approvalId && sid) {
+                setPendingQuestion({
+                  approvalId,
+                  question: typeof payload.question === "string" ? payload.question : "",
+                  expiresAt:
+                    typeof payload.expiresAt === "string" ? payload.expiresAt : null,
+                  sessionId: sid,
+                });
+              }
               break;
             }
             const message =
@@ -861,6 +1192,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         }
         turnTextRef.current = "";
         resetTurnActivity();
+        setQueuedNotice(false);
+        chat.dispatch({ type: "confirmation/clear" });
+        // Suspended on a question this turn — fetch the pending row so the
+        // answer panel + composer gate surface immediately (dock recipe).
+        if (askedQuestionRef.current && sessionIdRef.current) {
+          refreshPendingQuestion(sessionIdRef.current);
+        }
+        if (isRoom && sessionIdRef.current) {
+          markRoomSeen(workspaceId, sessionIdRef.current);
+        }
         void reloadShared();
         // The turn may have auto-titled the thread — refresh the rail.
         dispatchChatSessionsRefresh(workspaceId);
@@ -868,11 +1209,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       onError: () => {
         chat.dispatch({ type: "stream/abort" });
         resetTurnActivity();
+        setQueuedNotice(false);
         setError(t.errorGeneric);
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input, activeAssistant, model, view, workspaceId, chat.state.isStreaming, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration]);
+  }, [input, activeAssistant, activeSessionId, activeShared, askArmed, model, view, workspaceId, chat.state.isStreaming, refreshPendingQuestion, reloadShared, resetTurnActivity, selectSession, startingShared, stream, t, tChat.toolNarration]);
 
   // The Personal/Workspace segmented control. Deliberately louder than a
   // typical tab pair (icons + roomier hit area): posting into a shared thread
@@ -932,7 +1274,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     !activeSessionId &&
     chat.state.messages.length === 0 &&
     !chat.state.isStreaming &&
-    remoteTurn === null;
+    !remoteActive;
 
   /** Interlocutor control, rendered INSIDE the composer box (bottom-left):
    *  a NEW personal chat picks its assistant here and the session sticks to
@@ -1008,6 +1350,77 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       </div>
     ));
 
+  /** Whether the CURRENT pane is a room — an open shared thread, or the
+   *  Workspace hero about to create one. Drives the post-vs-ask composer. */
+  const paneIsRoom = activeSessionId ? !!activeShared : view === "workspace";
+
+  /**
+   * Resolve a pending write confirmation (`POST /api/chat/confirm`) — the
+   * dock's recipe. In a room the SERVER gates who may act: the turn's
+   * addresser or a workspace admin (T11/D8); a 403 here surfaces as the
+   * quiet not-allowed note, never a broken card.
+   */
+  const resolveConfirmation = useCallback(
+    async (toolCallId: string, action: "approve" | "deny", comment?: string) => {
+      const sessionId =
+        chat.state.pendingConfirmations.find((c) => c.toolCallId === toolCallId)
+          ?.sessionId ??
+        activeSessionId ??
+        sessionIdRef.current;
+      if (!sessionId) return;
+      chat.updateConfirmation(toolCallId, {
+        status: action === "approve" ? "approving" : "denied",
+      });
+      try {
+        const res = await authFetch(`${API_URL}/api/chat/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            toolCallId,
+            decision: action === "approve" ? "allow" : "deny",
+            ...(action === "deny" && comment ? { comment } : {}),
+          }),
+        });
+        if (res.ok) {
+          chat.updateConfirmation(toolCallId, {
+            status: action === "approve" ? "approved" : "denied",
+          });
+          if (remoteConfirmation?.toolCallId === toolCallId) {
+            setRemoteConfirmation(null);
+          }
+        } else if (res.status === 403) {
+          chat.updateConfirmation(toolCallId, { status: "pending" });
+          setError(t.confirmNotAllowed);
+        } else {
+          chat.updateConfirmation(toolCallId, { status: "pending" });
+        }
+      } catch {
+        chat.updateConfirmation(toolCallId, { status: "pending" });
+      }
+    },
+    // `chat.updateConfirmation` is a stable callback from the hook.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t],
+  );
+
+  /** `@` autocomplete (T12 — assistants only): typing `@` (or a partial
+   *  after it) at the end of the input offers the room's assistant; picking
+   *  inserts the full mention the server's detector matches. */
+  useEffect(() => {
+    if (!paneIsRoom || !activeAssistant) {
+      setMentionOpen(false);
+      return;
+    }
+    setMentionOpen(/(^|\s)@[^@\s]*$/.test(input));
+  }, [input, paneIsRoom, activeAssistant]);
+
+  const insertMention = useCallback(() => {
+    if (!activeAssistant) return;
+    setInput((cur) => cur.replace(/@[^@\s]*$/, `@${activeAssistant.name} `));
+    setMentionOpen(false);
+  }, [activeAssistant]);
+
   /** The composer, styled as the app's composite-control box (globals.css
    *  contract): ONE bordered box carrying the focus ring via `focus-within`,
    *  every inner focusable opting out of the global ring. Textarea on top;
@@ -1017,10 +1430,35 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const composerBox = (
     <div
       className={cn(
-        "rounded-xl border border-border bg-background shadow-sm",
+        "relative rounded-xl border border-border bg-background shadow-sm",
         "focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/35",
       )}
     >
+      {/* Mention autocomplete — one entry (the room's assistant; human
+          mentions are out of scope). Rendered above the box so it never
+          shifts the composer. */}
+      {mentionOpen && activeAssistant && (
+        <div className="absolute bottom-full left-2 z-20 mb-1 overflow-hidden rounded-md border border-border bg-popover shadow-md">
+          <button
+            type="button"
+            onMouseDown={(e) => {
+              // mousedown, not click — keep the textarea focused.
+              e.preventDefault();
+              insertMention();
+            }}
+            aria-label={format(t.mentionInsertAria, { name: activeAssistant.name })}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent"
+          >
+            <AssistantAvatar
+              id={activeAssistant.id}
+              name={activeAssistant.name}
+              iconSeed={activeAssistant.iconSeed ?? undefined}
+              size="xs"
+            />
+            <span className="min-w-0 flex-1 truncate">@{activeAssistant.name}</span>
+          </button>
+        </div>
+      )}
       <ChatComposer
         value={input}
         onChange={setInput}
@@ -1058,6 +1496,30 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               researchExhausted={false}
               selectSide="top"
             />
+            {/* The Ask affordance (D1/T3) — rooms only. In a room, send =
+                post; arming this (or typing an @mention) makes the next send
+                address the assistant. Never a "run a turn?" toggle on
+                personal chats, where every send is already addressed. */}
+            {paneIsRoom && activeAssistant && (
+              <button
+                type="button"
+                onClick={() => setAskArmed((v) => !v)}
+                aria-pressed={askArmed}
+                aria-label={format(t.askLabel, { name: activeAssistant.name })}
+                title={t.askArmedAria}
+                className={cn(
+                  "flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1 text-xs font-medium transition-colors focus-visible:shadow-none",
+                  askArmed
+                    ? "bg-primary/15 text-primary ring-1 ring-primary/30"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                <AtSign className="size-3.5 shrink-0" aria-hidden />
+                <span className="truncate">
+                  {format(t.askLabel, { name: activeAssistant.name })}
+                </span>
+              </button>
+            )}
           </div>
         }
         sendButtonClassName={cn(
@@ -1190,11 +1652,20 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             )}
           </div>
         )}
+        {/* The room's pinned working frame (P1b) — one slim chip row under
+            the header; every assistant turn assembles inside it. */}
+        {activeShared && activeSessionId && (
+          <ChatContextPins
+            sessionId={activeSessionId}
+            workspaceId={workspaceId}
+            refreshKey={pinsEpoch}
+          />
+        )}
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {chat.state.messages.length === 0 &&
               !chat.state.isStreaming &&
-              remoteTurn === null && (
+              !remoteActive && (
                 <p className="py-20 text-center text-sm text-muted-foreground">
                   {activeShared ? t.sharedTranscriptEmpty : t.transcriptEmpty}
                 </p>
@@ -1266,18 +1737,24 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </div>
               </div>
             )}
-            {/* A teammate's turn, relayed off the per-session event bus. Its
-                text is the live snapshot; when the turn settles we refetch
-                the PERSISTED transcript rather than keeping this. */}
-            {remoteTurn !== null && !chat.state.isStreaming && (
+            {/* A teammate's turn, relayed off the per-session event bus
+                through the SAME feed pipeline the sender uses (T13): the
+                shimmer feed (reasoning + tool steps) above the live snapshot
+                text. When the turn settles the PERSISTED transcript is
+                refetched — the snapshot is never kept. */}
+            {remoteActive && !chat.state.isStreaming && (
               <div className="flex gap-2.5">
                 {replyAvatar}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-                  {remoteTurn ? (
-                    <div className={MARKDOWN_CLS}>
-                      <ChatMarkdown text={remoteTurn} remarkPlugins={REMARK_PLUGINS} />
-                    </div>
-                  ) : (
+                  {remoteEvents.length > 0 || remoteTools.length > 0 ? (
+                    <ChatActivityFeed
+                      events={remoteEvents}
+                      tools={remoteTools}
+                      replyStreaming={remoteText.length > 0}
+                      researchPhase={null}
+                      startedAt={null}
+                    />
+                  ) : remoteText ? null : (
                     <span
                       role="status"
                       className="chat-shimmer-text text-xs font-medium"
@@ -1285,8 +1762,70 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                       {t.teammateWorking}
                     </span>
                   )}
+                  {remoteText ? (
+                    <div className={MARKDOWN_CLS}>
+                      <ChatMarkdown text={remoteText} remarkPlugins={REMARK_PLUGINS} />
+                    </div>
+                  ) : null}
                 </div>
               </div>
+            )}
+            {/* Suspended-turn surfaces (T11/D8). The sender's own pending
+                write confirmations ride their POST stream; a teammate's ride
+                the activity mirror. EVERYONE sees the card — the server
+                enforces who may act (addresser or workspace admin). */}
+            {chat.state.pendingConfirmations
+              .filter((c) => c.status === "pending" || c.status === "approving")
+              .map((c) => (
+                <ChatConfirmationCard
+                  key={c.toolCallId}
+                  confirmation={c}
+                  approveLabel={tChat.confirmationApprove}
+                  denyLabel={tChat.confirmationDeny}
+                  approvingLabel={tChat.confirmationApproving}
+                  onApprove={(toolCallId) => void resolveConfirmation(toolCallId, "approve")}
+                  onDeny={(toolCallId, comment) =>
+                    void resolveConfirmation(toolCallId, "deny", comment)
+                  }
+                />
+              ))}
+            {remoteConfirmation && !chat.state.isStreaming && (
+              <ChatConfirmationCard
+                confirmation={{
+                  toolCallId: remoteConfirmation.toolCallId,
+                  toolName: remoteConfirmation.toolName,
+                  displayName: remoteConfirmation.displayName,
+                  input: remoteConfirmation.input,
+                  description: remoteConfirmation.description,
+                  displayLines: remoteConfirmation.displayLines,
+                  sessionId: activeSessionId ?? "",
+                  status: "pending",
+                }}
+                approveLabel={tChat.confirmationApprove}
+                denyLabel={tChat.confirmationDeny}
+                approvingLabel={tChat.confirmationApproving}
+                onApprove={(toolCallId) => void resolveConfirmation(toolCallId, "approve")}
+                onDeny={(toolCallId, comment) =>
+                  void resolveConfirmation(toolCallId, "deny", comment)
+                }
+              />
+            )}
+            {/* A suspended askQuestion — any member with read access may
+                answer, attributed (D8); Answer/Cancel are the reader-gated
+                session routes. */}
+            {pendingQuestion && pendingQuestion.sessionId === activeSessionId && (
+              <PendingQuestionPanel
+                sessionId={pendingQuestion.sessionId}
+                approvalId={pendingQuestion.approvalId}
+                dict={tChat.pendingQuestion}
+                onAnswered={() => setPendingQuestion(null)}
+                onCancelled={() => setPendingQuestion(null)}
+              />
+            )}
+            {/* Quiet queue notice (T5) — a mention landed mid-turn; the
+                follow-up turn is armed. Never an error. */}
+            {queuedNotice && (
+              <p className="px-1 text-xs text-muted-foreground">{t.queuedNotice}</p>
             )}
             {error && (
               <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">

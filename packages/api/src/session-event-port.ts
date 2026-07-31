@@ -41,17 +41,42 @@ export type SessionEvent =
       /**
        * A live snapshot of an in-flight turn's assistant text, for a client
        * that **reconnected** to a running turn after a page refresh (the doc
-       * comment reconnect — `GET /api/sessions/:id/stream`). `text` is the full
+       * comment reconnect — `GET /api/sessions/:id/stream`) or a room VIEWER
+       * watching a teammate's turn (multiplayer chat, T13). `text` is the full
        * reply-so-far (not a delta), capped to the NOTIFY budget at the producer,
        * so a reconnecting subscriber has no missed-prefix gap. `activity` is the
        * raw tool name the turn is currently running (the client maps it to a
-       * friendly label), or null once reply text is flowing. Published throttled
-       * (~150ms) by the chat route for `channel_type='doc_thread'` turns only.
-       * See docs/architecture/features/doc-comments.md → "Live turn reconnect".
+       * friendly label), or null once reply text is flowing. `reasoning` is the
+       * tail of the model's live thinking text (same snapshot semantics as
+       * `text`; viewers fold it through the same reducer the sender uses).
+       * `senderUserId` lets a subscriber ignore its own turn's mirror.
+       * Published throttled (~150ms) by the chat route for
+       * `channel_type='doc_thread'` turns and workspace-shared chat sessions.
+       * See docs/architecture/features/chat-app.md → "Shared live activity".
        */
       kind: 'turn_stream'
       sessionId: string
-      payload: { text: string; activity: string | null }
+      payload: {
+        text: string
+        activity: string | null
+        reasoning?: string | null
+        senderUserId?: string
+      }
+    }
+  | {
+      /**
+       * One discrete activity event of a live shared-session turn, mirrored
+       * onto the bus so every cleared viewer renders the SAME feed the sender
+       * sees (multiplayer chat T13): `event` is the SSE event name
+       * (`tool_start` | `tool_input` | `tool_result` | `tool_dropped` |
+       * `status` | `tool_confirmation_required`), and the rest of the payload
+       * is that event's (size-capped) data. Signals + small data only — a
+       * viewer refetches the persisted transcript at settle; oversized tool
+       * inputs degrade to `{}` so the client falls back to its static label.
+       */
+      kind: 'turn_activity'
+      sessionId: string
+      payload: { event: string; senderUserId?: string } & Record<string, unknown>
     }
   | {
       kind: 'turn_started'
@@ -62,6 +87,16 @@ export type SessionEvent =
       kind: 'turn_completed'
       sessionId: string
       payload: { senderUserId: string }
+    }
+  | {
+      /**
+       * The room's pin set changed (multiplayer chat P1b, T14) — added or
+       * removed. A SIGNAL: every viewer's chip row refetches through its own
+       * authed loader; the payload carries no pin data.
+       */
+      kind: 'pins_changed'
+      sessionId: string
+      payload: { byUserId: string }
     }
   | {
       kind: 'presence'

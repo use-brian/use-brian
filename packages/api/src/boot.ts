@@ -3644,7 +3644,7 @@ export async function bootOpenApi(opts: BootOpenApiOptions): Promise<BootResult>
     requireAuth: requireAuth(env.JWT_SECRET),
   }))
 
-  app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({ subscribeSessionEvents }))
+  app.use('/api/sessions', optionalAuth(env.JWT_SECRET), sessionRoutes({ subscribeSessionEvents, publishSessionEvent }))
   app.use('/api/sessions', requireAuth(env.JWT_SECRET), sessionQuestionRoutes({
     approvalsStore: pendingApprovalsStore,
     resumeDeps: {

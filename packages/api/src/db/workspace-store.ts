@@ -1183,10 +1183,10 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
         // owner_user_id stays NULL: workspace_members is the canonical
         // access path (matches POST /:workspaceId/assistants and the
         // 110 §6b ownership-XOR rule).
-        const assistantResult = await client.query<{ id: string }>(
+        const assistantResult = await client.query<{ id: string; clearance: string | null }>(
           `INSERT INTO assistants (name, owner_user_id, workspace_id, kind)
            VALUES ($1, NULL, $2, 'primary')
-           RETURNING id`,
+           RETURNING id, clearance`,
           [`${name} Primary Assistant`, workspace.id],
         )
 
@@ -1202,6 +1202,31 @@ export function createWorkspaceStore(cascades: WorkspaceStoreCascades = {}): Wor
                   ($1, 'views', $2, 'doc-skill parity — default-on at primary creation'),
                   ($1, 'files', $2, 'doc-skill parity — default-on at primary creation')`,
           [assistantResult.rows[0].id, userId],
+        )
+
+        // Every workspace gets its default "General" ROOM in the same
+        // transaction (multiplayer chat T6/D4) — an ordinary workspace-shared
+        // chat session (no new table), so the Chat app's Workspace tab always
+        // lands somewhere alive. The title is user data (renameable), so the
+        // static English default is correct — never locale-keyed. Deletable
+        // like any room and deliberately not re-provisioned (T12); existing
+        // workspaces are backfilled by migration 388.
+        // `title_manually_set` so the auto-titler never renames the default
+        // room out from under the team (members rename it via the normal
+        // rename route, which sets the same flag).
+        await client.query(
+          `INSERT INTO sessions
+             (assistant_id, user_id, channel_type, channel_id, app_id,
+              app_origin, visibility, workspace_id, effective_clearance, title,
+              title_manually_set)
+           VALUES ($1, $2, 'web', gen_random_uuid()::text, 'Use Brian',
+                   'chat', 'workspace', $3, $4, 'General', true)`,
+          [
+            assistantResult.rows[0].id,
+            userId,
+            workspace.id,
+            assistantResult.rows[0].clearance ?? null,
+          ],
         )
 
         await client.query('COMMIT')

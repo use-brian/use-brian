@@ -597,6 +597,90 @@ export function toStampedMessages(
 }
 
 /**
+ * Coalescing cap (multiplayer chat T12): a merge group keeps its most recent
+ * N user rows; older rows collapse into one "earlier messages omitted" line.
+ * Normal compaction owns long-session history — this only bounds one
+ * assembled turn.
+ */
+export const COALESCE_MAX_MERGED_ROWS = 100
+
+/**
+ * Merge CONSECUTIVE plain user messages into one user turn (multiplayer chat
+ * T4). The provider wire contract is strict `(user, assistant)` alternation,
+ * and a room accumulates one user ROW per post (T2) — so at assembly time
+ * every run of adjacent user messages must collapse into a single user turn
+ * whose content carries each post as its own (already stamped + attributed)
+ * text block. Lives beside `toStampedMessages` because it is the same seam:
+ * assembly-time only, stored rows stay untouched.
+ *
+ * Scope rules:
+ *  - Only PLAIN user messages merge (string or block content with no
+ *    `tool_result`). A tool_result-bearing user row is a pairing carrier
+ *    (query-loop tool-pairing invariant) and both breaks the group and stays
+ *    untouched.
+ *  - Applies to ANY consecutive-user-row history, not just rooms — an aborted
+ *    or errored turn can leave consecutive user rows in a personal session
+ *    too (the pre-existing edge this also fixes).
+ *  - A group longer than `maxMerged` keeps its most recent `maxMerged` rows
+ *    and prepends one omission note (T12; `omittedNote` carries the copy so
+ *    this stays i18n-free at the db layer).
+ */
+export function coalesceConsecutiveUserMessages<
+  M extends { role: string; content: unknown },
+>(
+  messages: M[],
+  opts?: { maxMerged?: number; omittedNote?: string },
+): M[] {
+  const maxMerged = opts?.maxMerged ?? COALESCE_MAX_MERGED_ROWS
+  const omittedNote = opts?.omittedNote ?? '[Earlier messages omitted]'
+
+  const isPlainUser = (m: M): boolean => {
+    if (m.role !== 'user') return false
+    if (typeof m.content === 'string') return true
+    if (!Array.isArray(m.content)) return false
+    return !m.content.some(
+      (b: { type?: string }) => b?.type === 'tool_result',
+    )
+  }
+  const toBlocks = (content: unknown): Array<Record<string, unknown>> =>
+    typeof content === 'string'
+      ? [{ type: 'text', text: content }]
+      : (content as Array<Record<string, unknown>>)
+
+  const out: M[] = []
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]
+    if (!isPlainUser(m)) {
+      out.push(m)
+      continue
+    }
+    // Collect the full run of adjacent plain user messages.
+    let j = i
+    while (j + 1 < messages.length && isPlainUser(messages[j + 1])) j++
+    if (j === i) {
+      out.push(m)
+      continue
+    }
+    let group = messages.slice(i, j + 1)
+    let omitted = 0
+    if (group.length > maxMerged) {
+      omitted = group.length - maxMerged
+      group = group.slice(omitted)
+    }
+    const blocks = group.flatMap((g) => toBlocks(g.content))
+    out.push({
+      ...m,
+      content: [
+        ...(omitted > 0 ? [{ type: 'text', text: omittedNote }] : []),
+        ...blocks,
+      ],
+    })
+    i = j
+  }
+  return out
+}
+
+/**
  * Append a message to a session. Auto-increments sequence_num.
  *
  * Optional fields:

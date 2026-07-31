@@ -33,8 +33,9 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
           .mockResolvedValueOnce({ rows: [{ id: 't_1', name: 'Eng', purpose: 'Backend platform team', ownerUserId: 'u_1', createdAt: new Date(), updatedAt: new Date() }] }) // INSERT workspaces
           .mockResolvedValueOnce(undefined) // INSERT workspace_members
           .mockResolvedValueOnce(undefined) // INSERT teamspaces (General) + member (mig 313)
-          .mockResolvedValueOnce({ rows: [{ id: 'a_primary' }] }) // INSERT assistants (primary)
+          .mockResolvedValueOnce({ rows: [{ id: 'a_primary', clearance: 'internal' }] }) // INSERT assistants (primary)
           .mockResolvedValueOnce(undefined) // INSERT assistant_capabilities
+          .mockResolvedValueOnce(undefined) // INSERT sessions (General room, multiplayer chat T6)
           .mockResolvedValueOnce(undefined), // COMMIT
         release: vi.fn(),
       }
@@ -44,9 +45,9 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
 
       expect(team.name).toBe('Eng')
       expect(team.purpose).toBe('Backend platform team')
-      expect(mockClient.query).toHaveBeenCalledTimes(7)
+      expect(mockClient.query).toHaveBeenCalledTimes(8)
       expect(mockClient.query.mock.calls[0][0]).toBe('BEGIN')
-      expect(mockClient.query.mock.calls[6][0]).toBe('COMMIT')
+      expect(mockClient.query.mock.calls[7][0]).toBe('COMMIT')
 
       // Workspace INSERT carries the purpose
       const wsInsert = mockClient.query.mock.calls[1]
@@ -83,6 +84,18 @@ describe('[COMP:api/workspace-store] createWorkspaceStore', () => {
       expect(capsInsertSql).toContain("'tasks'")
       expect(capsInsertSql).toContain("'crm'")
       expect(capsInsertArgs).toEqual(['a_primary', 'u_1'])
+
+      // Default "General" ROOM — a workspace-shared chat session seeded in
+      // the same transaction (multiplayer chat T6/D4), title pinned against
+      // the auto-titler, read floor = the primary assistant's clearance.
+      const roomInsertSql = mockClient.query.mock.calls[6][0] as string
+      const roomInsertArgs = mockClient.query.mock.calls[6][1] as unknown[]
+      expect(roomInsertSql).toContain('INSERT INTO sessions')
+      expect(roomInsertSql).toContain("'workspace'")
+      expect(roomInsertSql).toContain("'chat'")
+      expect(roomInsertSql).toContain("'General'")
+      expect(roomInsertSql).toContain('title_manually_set')
+      expect(roomInsertArgs).toEqual(['a_primary', 'u_1', 't_1', 'internal'])
 
       expect(mockClient.release).toHaveBeenCalled()
     })

@@ -147,7 +147,7 @@ describe('[COMP:api/sessions-workspace-list] shared-chat predicate scope', () =>
   })
 })
 
-describe('[COMP:api/sessions-workspace-list] one in-flight turn per shared session', () => {
+describe('[COMP:api/sessions-workspace-list] turn serialization is internal for rooms', () => {
   const idle = { status: 'idle', visibility: 'workspace', channelType: 'web', appOrigin: 'chat', mode: null }
   const running = { ...idle, status: 'running' }
 
@@ -156,12 +156,16 @@ describe('[COMP:api/sessions-workspace-list] one in-flight turn per shared sessi
     expect(sharedTurnRejection(idle)).toBeNull()
   })
 
-  it('rejects a concurrent turn in a shared chat with its own code', async () => {
+  it('no longer rejects a concurrent send in a room — D2: `shared_session_busy` left the human path', async () => {
+    // Multiplayer chat (docs/plans/multiplayer-chat.md): a plain post during
+    // a live turn is accepted (the post path is never gated), and an
+    // ADDRESSED send queues exactly one follow-up turn (roomTurnAdmission,
+    // [COMP:api/room-mechanics]). Serialization moved inside the route.
     const { sharedTurnRejection } = await import('../chat.js')
-    expect(sharedTurnRejection(running)?.code).toBe('shared_session_busy')
+    expect(sharedTurnRejection(running)).toBeNull()
   })
 
-  it('keeps the draft session code distinct (the clients say different things)', async () => {
+  it('keeps the draft session busy code (drafts still take one turn at a time)', async () => {
     const { sharedTurnRejection } = await import('../chat.js')
     expect(
       sharedTurnRejection({ ...running, mode: 'draft', appOrigin: null })?.code,

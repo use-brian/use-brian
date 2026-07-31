@@ -336,6 +336,31 @@ export async function createWorkspaceSession(
   return toWorkspaceSession((await res.json()) as RawWorkspaceRow);
 }
 
+/**
+ * Post into a room WITHOUT running a turn (`POST /api/sessions/:id/messages`
+ * — multiplayer chat T2). Send = post, instantly, for every member; the
+ * assistant replies only when addressed (an ordinary `/api/chat` send).
+ * Never busy-gated.
+ */
+export async function postRoomMessage(
+  sessionId: string,
+  message: string,
+): Promise<{ id: string; sequenceNum: number; timestamp: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Post failed: ${res.status}`);
+  }
+  return (await res.json()) as { id: string; sequenceNum: number; timestamp: string };
+}
+
 /** Rename a session (`PATCH /api/sessions/:id`). Throws on rejection so the
  *  rail can surface why (403 on someone else's private thread). */
 export async function renameSessionTitle(

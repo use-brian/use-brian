@@ -61,6 +61,7 @@ import {
   type DocSession,
   type WorkspaceSession,
 } from "@/lib/api/sessions";
+import { isRoomUnread } from "@/lib/chat-seen";
 
 /** The Brain panel's nav-row recipe — active is the `.doc-nav-active` pill. */
 const rowCls = (active: boolean) =>
@@ -246,6 +247,13 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
         ? primary
         : (row.assistantId ? assistantById.get(row.assistantId) : undefined) ??
           primary;
+    // Unread is a DOT, not a count (multiplayer chat T7): shared rows only,
+    // off `last_active_at` vs this device's localStorage watermark. The open
+    // room never dots — the surface stamps the watermark as activity lands.
+    const unread =
+      "startedByUserId" in row &&
+      row.id !== activeSessionId &&
+      isRoomUnread(workspaceId, row.id, row.lastActive);
     return (
     <div key={row.id} className="group relative">
       <Link
@@ -265,7 +273,17 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
             </span>
           )}
           <span className="min-w-0 flex-1">
-            <span className="block truncate">{row.title}</span>
+            <span className="flex items-center gap-1.5">
+              <span className="min-w-0 truncate">{row.title}</span>
+              {unread && (
+                <span
+                  role="status"
+                  aria-label={t.unreadDotAria}
+                  title={t.unreadDotAria}
+                  className="size-1.5 shrink-0 rounded-full bg-primary"
+                />
+              )}
+            </span>
             {"startedByUserId" in row && (
               <span className="mt-0.5 block truncate text-[11px] text-sidebar-foreground/50">
                 {row.startedByName

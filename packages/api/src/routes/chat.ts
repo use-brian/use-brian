@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { Router } from 'express'
 import { getDefaultAssistant, getUserAssistant, getWorkspacePrimaryAssistant, getUserProfilesByIds, updateUserLastSeenTz } from '../db/users.js'
 import { resolvePresenceTimezone } from '../auth/client-timezone.js'
-import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession } from '../db/sessions.js'
+import { findOrCreateSession, findSessionByChannel, findSessionById, addSessionMessage, toStampedMessages, getSessionMessages, updateSessionStatus, updateSessionTitle, countSessionTurns, truncateMessagesFrom, getPreferredChannel, getSessionTopicLabels, isSharedChatSession, isMultiParticipantSession, coalesceConsecutiveUserMessages, type SessionMessage } from '../db/sessions.js'
+import { query } from '../db/client.js'
+import { buildPinnedContextBlock } from '../resolve-session-pins.js'
 import { getSelfEntityId } from '../db/memories.js'
 import { getRecording } from '../db/recordings-store.js'
 import { queryLoop, buildMemoryContext, voicePlatformFromDraftTitle, measureDocContext, createMemoryTools, createSelfProfileTool, createMemoryRecallBuffer, createSkillInvocationBuffer, createRetrievalTools, createSessionStateTools, buildSessionStateBlock, runSessionStateDiff, buildActivePlanBlock, createPlanTools, seedPlanFromTasks, calculateCost, sanitize, shouldInline, ensureToolResultPairing, stripUnsignedToolUses, modelRequiresToolSignatures, elideStaleDocToolResults, synthesizeMissingToolResults, createConfirmationResolver, runPreflight, buildPreflightPrompt, runMemoryNudge, collectStream, classifyTopic, fetchEpisodicContext, transcribeFirstAudio, voiceUnavailableNote, TRANSCRIPTION_DISABLED_REASON, probePdfPageCount, estimateDistillTokens, PDF_CONFIRM_PAGE_THRESHOLD, DASHSCOPE_RENDER_WIDTH, filterToolsByCapabilities, modelToCompactionTier, decodeExternalCostMeta, buildWorkspaceFilesContext, SensitivityAccumulator, CompartmentAccumulator, AttachmentCollector, runLocalMatchCheck, sanitizeTitle, AUTO_TITLE_AI_MIN_CHARS, COORDINATOR_BASE_ADDENDUM, COORDINATOR_RESEARCH_ADDENDUM, buildDocSkillBlock, buildAmbientDocSkillBlock, detectOperateSiteIntent, EvidenceAccumulator, matchesDisputedFigure, buildDisputeContextNote, type MediaBackend } from '@use-brian/core'
@@ -42,6 +44,7 @@ import {
   getWorkspaceIdentity,
   getWorkspacePlan,
   getWorkspaceResearchUsed,
+  getWorkspaceRoleSystem,
   incrementWorkspaceResearchUsed,
   resolveReadCeilingsSystem,
 } from '../db/workspace-store.js'
@@ -863,23 +866,22 @@ export function buildViewingDeckBlock(deck: {
 // Re-exported here because callers and tests already import it from this
 // module.
 /**
- * One in-flight turn per multi-participant session.
+ * One in-flight turn per DRAFT session.
  *
- * Draft sessions and workspace-shared chats are both live multi-watcher
- * threads: any participant may drive a turn, but two at once interleave into
- * one history, and the second turn reads the first one's half-written state.
- * Returns the SSE error payload to send, or `null` when the turn may proceed.
+ * A draft is a live multi-watcher thread: any participant may drive a turn,
+ * but two at once interleave into one history, and the second turn reads the
+ * first one's half-written state. Returns the SSE error payload to send, or
+ * `null` when the turn may proceed.
  *
- * The two carry DIFFERENT codes because the clients say different things: a
- * draft says "another team member is in a turn on this draft", a shared chat
- * says "a teammate is sending a message". Note the shared-chat branch gates on
- * `isSharedChatSession`, not on `visibility === 'workspace'` — doc comment
- * threads are workspace-visible too and are single-author by construction, so
- * busy-blocking them would break replying to your own thread.
+ * Workspace-shared CHAT sessions (rooms) no longer reject here (multiplayer
+ * chat D2): posting is never busy-gated, and an ADDRESSED message landing
+ * mid-turn queues exactly one follow-up turn instead of erroring (T5 — see
+ * the room gate in the POST handler). `shared_session_busy` is gone from the
+ * human path; turn serialization is internal (the status claim below).
  *
- * Concurrent-turn QUEUEING stays deferred, same as it is for draft sessions.
+ * Concurrent-turn QUEUEING for drafts stays deferred.
  *
- * See docs/architecture/features/chat-app.md → "One turn at a time".
+ * See docs/architecture/features/chat-app.md → "The room model".
  */
 export function sharedTurnRejection(session: {
   status: string
@@ -895,13 +897,120 @@ export function sharedTurnRejection(session: {
       code: 'draft_session_busy',
     }
   }
-  if (isSharedChatSession(session)) {
-    return {
-      error: 'A teammate is sending a message in this chat. Please wait until it completes.',
-      code: 'shared_session_busy',
-    }
-  }
   return null
+}
+
+/**
+ * Does this message ADDRESS the room's assistant? (Multiplayer chat D1/T3.)
+ *
+ * The three triggers are one semantic: a typed / autocomplete-inserted
+ * `@AssistantName` mention (case-insensitive), the composer's Ask affordance
+ * (`ask: true` on the request body), or replying to one of the assistant's
+ * messages. The CLIENT marks intent, but this server-side check decides
+ * turn-vs-post — a client that lies can at worst start a turn it was allowed
+ * to start anyway; a client that never learns the mention syntax still posts
+ * safely.
+ */
+export function detectRoomAddress(params: {
+  message: string
+  assistantName: string
+  ask?: boolean
+  replyToAssistant?: boolean
+}): boolean {
+  if (params.ask === true) return true
+  if (params.replyToAssistant === true) return true
+  const name = params.assistantName.trim().toLowerCase()
+  if (!name) return false
+  return params.message.toLowerCase().includes(`@${name}`)
+}
+
+/**
+ * Rooms take one turn at a time, serialized INTERNALLY (multiplayer chat T5)
+ * — never surfaced as an error to a human. One waiter per session per
+ * process: the first mention landing mid-turn arms the follow-up turn;
+ * further mentions fold into it (their rows are durable, and the armed
+ * turn's coalesced assembly reads everything since the assistant's last
+ * turn).
+ */
+const roomQueueWaiters = new Set<string>()
+
+/**
+ * The queue-depth-one admission decision for an ADDRESSED room message
+ * (multiplayer chat T5), pure so the invariant is testable:
+ *   - `run`  — no turn in flight: claim the slot and run now.
+ *   - `wait` — a turn is in flight and no follow-up is armed: this message
+ *              arms THE follow-up turn (persist now, wait for the slot).
+ *   - `fold` — a follow-up turn is already armed: this message's row simply
+ *              lands in its coalesced backlog. Exactly one follow-up turn
+ *              runs no matter how many mentions arrive mid-turn.
+ */
+export type RoomTurnAdmission = 'run' | 'wait' | 'fold'
+export function roomTurnAdmission(params: {
+  status: string
+  waiterArmed: boolean
+}): RoomTurnAdmission {
+  if (params.status !== 'running') return 'run'
+  return params.waiterArmed ? 'fold' : 'wait'
+}
+
+/**
+ * May this user resolve a live write confirmation in a workspace-shared chat?
+ * (Multiplayer chat T11/D8.) The addresser — whoever pulled the assistant in
+ * this turn — or a workspace admin/owner. The room STARTER holds no special
+ * authority. Pure so the gate is testable; the route resolves the inputs.
+ */
+export function mayResolveRoomConfirmation(params: {
+  jwtUserId: string
+  addresserUserId: string | undefined
+  workspaceRole: string | null
+}): boolean {
+  if (params.addresserUserId && params.jwtUserId === params.addresserUserId) return true
+  return params.workspaceRole === 'admin' || params.workspaceRole === 'owner'
+}
+
+/**
+ * Turn addresser per live room turn (multiplayer chat T11/D8): the user whose
+ * addressed message triggered the in-flight turn. Write confirmations in a
+ * shared room may only be resolved by this user or a workspace admin — the
+ * session's `user_id` (the room STARTER) is the wrong identity twice over.
+ * Same lifecycle as `activeResolvers`.
+ */
+const roomTurnAddressers = new Map<string, string>()
+
+/** Atomically claim a room session's turn slot. True = we own the turn. */
+async function claimRoomTurn(sessionId: string): Promise<boolean> {
+  const result = await query(
+    `UPDATE sessions SET status = 'running', last_active_at = now()
+      WHERE id = $1 AND status <> 'running'`,
+    [sessionId],
+  )
+  return (result.rowCount ?? 0) > 0
+}
+
+/**
+ * Wait until the session's turn slot frees (status leaves 'running').
+ * Status-only poll — deliberately NOT `findSessionById`, which touches
+ * `last_active_at` and would keep the stuck-session sweeper (the 6-minute
+ * backstop that rescues a crashed turn) from ever firing. Resolves `false`
+ * on timeout.
+ */
+async function waitForRoomTurnSlot(
+  sessionId: string,
+  opts?: { timeoutMs?: number; pollMs?: number },
+): Promise<boolean> {
+  const timeoutMs = opts?.timeoutMs ?? 15 * 60_000
+  const pollMs = opts?.pollMs ?? 2_000
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const row = await query<{ status: string }>(
+      `SELECT status FROM sessions WHERE id = $1`,
+      [sessionId],
+    )
+    const status = row.rows[0]?.status
+    if (!status || status !== 'running') return true
+    if (Date.now() >= deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, pollMs))
+  }
 }
 
 export { attachTurnContext }
@@ -1255,10 +1364,18 @@ export function chatRoutes(options: WebChatOptions): Router {
   const router = Router()
 
   router.post('/', async (req, res) => {
-    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId, meteredProfileId, meteredToolRounds, meteredAccepted } = req.body as {
+    const { message: rawMessage, sessionId: requestedSessionId, model: requestedModel, fileIds, attachedRecordingIds, truncateFromMessageId, timezone: clientTimezone, assistantId: requestedAssistantId, replyTo, channelId: requestedChannelId, mode: requestedMode, docViewId: requestedDocViewId, docAnchorBlockId: requestedDocAnchorBlockId, docActiveThemeId: requestedActiveThemeId, workspaceId: requestedWorkspaceId, followupChips: requestedFollowupChips, viewingSkillRowId: requestedViewingSkillRowId, viewingDeckId: requestedViewingDeckId, meteredProfileId, meteredToolRounds, meteredAccepted, ask: requestedAsk } = req.body as {
       message?: string
       sessionId?: string
       model?: string
+      /**
+       * The composer's Ask affordance (multiplayer chat D1/T3): the client
+       * marks address intent on a workspace-shared chat so this message runs
+       * a turn even without a typed `@` mention. Server-side re-validation
+       * (`detectRoomAddress`) treats it as one of the three address triggers;
+       * ignored outside shared chat sessions.
+       */
+      ask?: boolean
       /** Metered lane (model = a metered registry alias): saved-profile pick,
        * ad-hoc rounds (10-200), and the client's confirm acknowledgement. */
       meteredProfileId?: string
@@ -1813,6 +1930,113 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       sessionIdForError = session.id
 
+      // ── Multiplayer room gate (T2/T3/T5) ──────────────────────────
+      // In a workspace-shared chat the assistant is a MEMBER, not a vending
+      // machine: it speaks only when addressed. The server decides
+      // turn-vs-post here (T3) — an un-addressed message persists as a post
+      // (durable row + live fan-in, no turn, no busy gate), and an addressed
+      // message landing mid-turn queues exactly ONE follow-up turn over the
+      // backlog (T5) instead of `shared_session_busy` (D2). Posts are rows
+      // read at assembly time, never in-memory buffers — that is what keeps
+      // the §7 mid-task-steering door open.
+      const isRoomSession = isSharedChatSession(session)
+      /** Set on the queued path: the addressed row is persisted BEFORE the
+       *  wait so every viewer sees it instantly; the normal persistence step
+       *  below then reuses it instead of inserting twice. */
+      let prePersistedUserMsg: SessionMessage | null = null
+      if (isRoomSession && typeof message === 'string' && message.trim()) {
+        // Reply-to-assistant trigger: resolve the replied-to row's role. One
+        // cheap indexed read, only when a room message carries replyTo.
+        let replyToAssistant = false
+        if (replyTo?.id) {
+          try {
+            const replied = await query<{ role: string }>(
+              `SELECT role FROM session_messages WHERE id = $1 AND session_id = $2`,
+              [replyTo.id, session.id],
+            )
+            replyToAssistant = replied.rows[0]?.role === 'assistant'
+          } catch {
+            // Unresolvable reply target — fall through to the other triggers.
+          }
+        }
+        const addressed = detectRoomAddress({
+          message,
+          assistantName: assistant.name,
+          ask: requestedAsk === true,
+          replyToAssistant,
+        })
+
+        const persistRoomPost = async (): Promise<SessionMessage> => {
+          const stored = await addSessionMessage({
+            sessionId: session.id,
+            role: 'user',
+            content: [{ type: 'text', text: message }],
+            replyToText: replyTo?.text ?? null,
+            senderUserId: user.id,
+          })
+          sendEvent('user_message_saved', { id: stored.id, senderUserId: user.id })
+          publishSessionEvent({
+            kind: 'user_message_saved',
+            sessionId: session.id,
+            payload: {
+              id: stored.id,
+              sequenceNum: stored.sequenceNum,
+              senderUserId: user.id,
+              content: stored.content,
+            },
+          })
+          return stored
+        }
+
+        if (!addressed) {
+          // A silent post: send = post, instantly, for every member (D2).
+          // No turn runs — the mention gate is also the unit-economics gate.
+          sendEvent('session', { sessionId: session.id })
+          await persistRoomPost()
+          sendEvent('posted', {})
+          sendEvent('done', {})
+          res.end()
+          return
+        }
+
+        const admission = roomTurnAdmission({
+          status: session.status,
+          waiterArmed: roomQueueWaiters.has(session.id),
+        })
+        if (admission !== 'run') {
+          // Addressed mid-turn. Persist now (instant fan-in), then either
+          // fold into the already-armed follow-up turn or become it.
+          sendEvent('session', { sessionId: session.id })
+          prePersistedUserMsg = await persistRoomPost()
+          if (admission === 'fold') {
+            // Depth one: a follow-up turn is already armed — this message's
+            // row folds into its coalesced backlog (T4/T5).
+            sendEvent('queued', { folded: true })
+            sendEvent('done', {})
+            res.end()
+            return
+          }
+          roomQueueWaiters.add(session.id)
+          sendEvent('queued', {})
+          try {
+            const freed = await waitForRoomTurnSlot(session.id)
+            if (!freed) {
+              sendEvent('error', {
+                code: 'room_turn_wait_timeout',
+                error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
+              })
+              res.end()
+              return
+            }
+          } finally {
+            roomQueueWaiters.delete(session.id)
+          }
+          // Slot freed — fall through into the normal turn flow, which
+          // reloads history AFTER the finished turn, so the coalesced
+          // assembly reads the full backlog (T4).
+        }
+      }
+
       // askQuestion suspend-resume guard (Phase 2). If this session is
       // currently suspended on a pending question, reject the new
       // message with a structured 409-equivalent SSE event so the
@@ -2284,7 +2508,9 @@ export function chatRoutes(options: WebChatOptions): Router {
       // reference it later for retry/edit/feedback actions.
       // For team-shared draft sessions, stamp the per-message author so
       // collaborators can see "alice asked, bob refined" attribution.
-      const storedUserMsg = await addSessionMessage({
+      // A QUEUED room turn (T5) already persisted + fanned out its row before
+      // waiting for the slot — reuse it instead of inserting twice.
+      const storedUserMsg = prePersistedUserMsg ?? await addSessionMessage({
         sessionId: session.id,
         role: 'user',
         content: userContentBlocks.length > 0
@@ -2302,10 +2528,12 @@ export function chatRoutes(options: WebChatOptions): Router {
         // them apart.
         senderUserId: isMultiParticipantSession(session) ? user.id : null,
       })
-      sendEvent('user_message_saved', {
-        id: storedUserMsg.id,
-        ...(isMultiParticipantSession(session) ? { senderUserId: user.id } : {}),
-      })
+      if (!prePersistedUserMsg) {
+        sendEvent('user_message_saved', {
+          id: storedUserMsg.id,
+          ...(isMultiParticipantSession(session) ? { senderUserId: user.id } : {}),
+        })
+      }
 
       // Adaptive research-classifier overhead — the Gemini call happened
       // earlier in this turn (before session existed), so we deferred the
@@ -2328,16 +2556,19 @@ export function chatRoutes(options: WebChatOptions): Router {
       // new user turn appear live. Without this a teammate's message only
       // shows up on their next refetch, which reads as the chat being broken.
       if (session.mode === 'draft' || isSharedChatSession(session)) {
-        publishSessionEvent({
-          kind: 'user_message_saved',
-          sessionId: session.id,
-          payload: {
-            id: storedUserMsg.id,
-            sequenceNum: storedUserMsg.sequenceNum,
-            senderUserId: user.id,
-            content: storedUserMsg.content,
-          },
-        })
+        // The queued room path already published its row at queue time.
+        if (!prePersistedUserMsg) {
+          publishSessionEvent({
+            kind: 'user_message_saved',
+            sessionId: session.id,
+            payload: {
+              id: storedUserMsg.id,
+              sequenceNum: storedUserMsg.sequenceNum,
+              senderUserId: user.id,
+              content: storedUserMsg.content,
+            },
+          })
+        }
         publishSessionEvent({
           kind: 'turn_started',
           sessionId: session.id,
@@ -2503,6 +2734,17 @@ export function chatRoutes(options: WebChatOptions): Router {
       // defence-in-depth, like the two transforms above. See
       // docs/architecture/engine/query-loop.md → "Doc tool-result elision".
       messages = elideStaleDocToolResults(messages)
+
+      // Coalesced assembly (multiplayer chat T4). The provider wire contract
+      // is strict `(user, assistant)` alternation; a room accumulates one
+      // user ROW per post between assistant turns, so every run of adjacent
+      // plain user messages collapses into ONE user turn here — each line
+      // already carrying its `[stamp] Name:` prefix from `toStampedMessages`
+      // (inside the compaction pass above). Runs on every web session, not
+      // just rooms: an aborted or errored turn leaves the same consecutive
+      // user rows in a personal session (the pre-existing edge this fixes).
+      // Tool-result-bearing user messages never merge (pairing invariant).
+      messages = coalesceConsecutiveUserMessages(messages)
 
       // Inject retry hint into the last user message (the one we just saved).
       // This is what the model sees — the stored DB version remains clean.
@@ -2944,6 +3186,24 @@ export function chatRoutes(options: WebChatOptions): Router {
             'Each human turn is prefixed with its timestamp and the sender name. Address the person who wrote the newest message, and do not assume earlier turns came from them.',
           ].join('\n'),
         )
+      }
+
+      // Pinned room context (multiplayer chat P1b, T15) — the room's working
+      // frame, resolved FRESH each turn under the session's clearance. An
+      // index, not inlined content; rides the turn-context envelope, never
+      // the system prompt (prompt-cache alignment). Best-effort: a resolver
+      // failure costs the block, never the turn.
+      if (isRoomSession && assistant.workspaceId) {
+        try {
+          const pinBlock = await buildPinnedContextBlock({
+            sessionId: session.id,
+            workspaceId: assistant.workspaceId,
+            clearance: session.effectiveClearance,
+          })
+          if (pinBlock) turnContextParts.push(pinBlock)
+        } catch (err) {
+          console.warn('[chat] pinned-context resolution failed:', err)
+        }
       }
 
       // ── Dispute pre-pass (grounding-gate claim ledger) ──
@@ -4211,8 +4471,30 @@ export function chatRoutes(options: WebChatOptions): Router {
         turnContextParts.push(buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''))
       }
 
-      // Run query loop — stream events to client
-      await updateSessionStatus(session.id, 'running')
+      // Run query loop — stream events to client.
+      // Rooms CLAIM the turn slot atomically instead of blind-setting it
+      // (multiplayer chat T5): two addressed sends racing from idle both
+      // reach here, and the claim serializes them — the loser waits for the
+      // slot (its history was assembled pre-claim, so this window is kept
+      // rare, not impossible; the early queue path catches the common
+      // mid-turn case with a fresh post-wait assembly).
+      if (isRoomSession) {
+        let claimed = await claimRoomTurn(session.id)
+        while (!claimed) {
+          const freed = await waitForRoomTurnSlot(session.id)
+          if (!freed) {
+            sendEvent('error', {
+              code: 'room_turn_wait_timeout',
+              error: 'The in-flight turn did not finish in time. Your message is posted; mention the assistant again to get a reply.',
+            })
+            res.end()
+            return
+          }
+          claimed = await claimRoomTurn(session.id)
+        }
+      } else {
+        await updateSessionStatus(session.id, 'running')
+      }
 
       // Assistant-run presence — announce to every tab viewing this doc page
       // that a run just opened, attributed to this member + the channel they
@@ -4242,29 +4524,37 @@ export function chatRoutes(options: WebChatOptions): Router {
       // is the 6-min backstop. Every other turn keeps the token-saving
       // disconnect-abort (closing a normal chat tab stops generation).
       // See docs/architecture/features/doc-comments.md → "Live turn reconnect".
-      const isBackgroundTurn = session.channelType === 'doc_thread'
+      // Room turns are multiplayer property, not the sender's alone: the
+      // sender closing their tab must not kill a reply every other member is
+      // watching (multiplayer chat T13), so a room turn runs to completion in
+      // the background exactly like a doc_thread comment reply. Viewers (and
+      // the returning sender) follow it over the per-session bus.
+      const isBackgroundTurn = session.channelType === 'doc_thread' || isRoomSession
       req.on('close', () => {
         clientGone = true
         if (!isBackgroundTurn) abortController.abort()
       })
 
-      // Live snapshot publishing for the reconnect stream — only `doc_thread`
-      // turns flow onto the session bus (every other turn pays nothing). The
-      // snapshot carries the full reply-so-far (capped to the NOTIFY budget) so
-      // a client reconnecting mid-turn has no missed-prefix gap; published
-      // throttled so a streamed reply can't NOTIFY-storm the bus.
+      // Live snapshot publishing for the reconnect stream and for room
+      // viewers. `doc_thread` turns publish only after the original client
+      // disconnected (while the SSE is alive the bus is pure overhead — one
+      // watcher, one stream). Room turns publish THROUGHOUT (multiplayer chat
+      // T13): the non-senders are watching live from the start, over the
+      // per-session bus, while the sender streams over their own POST. The
+      // snapshot carries the full reply-so-far (capped to the NOTIFY budget)
+      // so a subscriber joining mid-turn has no missed-prefix gap; published
+      // throttled so a streamed reply can't NOTIFY-storm the bus. Rooms also
+      // carry the live reasoning tail — viewers fold it through the same
+      // reducer the sender's client uses.
       let liveStreamText = ''
       let liveStreamActivity: string | null = null
+      let liveStreamReasoning = ''
       let lastStreamPublishAt = 0
       const STREAM_PUBLISH_THROTTLE_MS = 150
       const STREAM_TEXT_CAP = 4_000 // keeps the NOTIFY payload under budget
+      const STREAM_REASONING_CAP = 1_500
       const publishTurnStream = (force: boolean) => {
-        // Only once the client has actually disconnected — while the original
-        // SSE connection is alive it streams `text_delta` directly, so the bus
-        // (and its per-event NOTIFY) is pure overhead. `liveStreamText` still
-        // accumulates before then, so the first post-disconnect snapshot
-        // carries the full reply-so-far (no missed-prefix gap on reconnect).
-        if (!isBackgroundTurn || !clientGone) return
+        if (!isRoomSession && (!isBackgroundTurn || !clientGone)) return
         const now = Date.now()
         if (!force && now - lastStreamPublishAt < STREAM_PUBLISH_THROTTLE_MS) return
         lastStreamPublishAt = now
@@ -4274,8 +4564,41 @@ export function chatRoutes(options: WebChatOptions): Router {
           payload: {
             text: liveStreamText.slice(-STREAM_TEXT_CAP),
             activity: liveStreamActivity,
+            ...(isRoomSession
+              ? {
+                  reasoning: liveStreamReasoning.slice(-STREAM_REASONING_CAP),
+                  senderUserId: user.id,
+                }
+              : {}),
           },
         })
+      }
+
+      /**
+       * Mirror one discrete activity event onto the per-session bus so every
+       * cleared room viewer renders the same feed the sender sees
+       * (multiplayer chat T13). No-op outside rooms. Payloads are capped:
+       * an oversized tool input degrades to `{}` (the client falls back to
+       * its static label) so the NOTIFY budget holds.
+       */
+      const ROOM_ACTIVITY_INPUT_CAP = 4_000
+      const publishRoomActivity = (
+        event: string,
+        data: Record<string, unknown>,
+      ) => {
+        if (!isRoomSession) return
+        publishSessionEvent({
+          kind: 'turn_activity',
+          sessionId: session.id,
+          payload: { event, senderUserId: user.id, ...data },
+        })
+      }
+      const capToolInput = (input: unknown): unknown => {
+        try {
+          return JSON.stringify(input).length > ROOM_ACTIVITY_INPUT_CAP ? {} : input
+        } catch {
+          return {}
+        }
       }
 
       // ── Persistence buffer ────────────────────────────────────
@@ -4504,6 +4827,10 @@ export function chatRoutes(options: WebChatOptions): Router {
       const confirmationResolver = createConfirmationResolver()
       activeResolvers.set(session.id, confirmationResolver)
       turnResolver = confirmationResolver
+      // Room turns record WHO addressed the assistant this turn — the only
+      // member (besides a workspace admin) who may resolve this turn's write
+      // confirmations (multiplayer chat T11/D8).
+      if (isRoomSession) roomTurnAddressers.set(session.id, user.id)
 
       try {
         for await (const event of queryLoop({
@@ -4754,9 +5081,16 @@ export function chatRoutes(options: WebChatOptions): Router {
           // docs/architecture/engine/live-streaming.md.
           if (event.type === 'thinking_delta') {
             sendEvent('reasoning', { text: event.text })
+            // Room viewers get the reasoning tail via the throttled snapshot
+            // (T13) — same reducer, snapshot semantics instead of deltas.
+            if (isRoomSession) {
+              liveStreamReasoning += event.text
+              publishTurnStream(false)
+            }
           }
           if (event.type === 'tool_start') {
             sendEvent('tool_start', { id: event.id, name: event.name })
+            publishRoomActivity('tool_start', { id: event.id, name: event.name })
             // Surface the running tool to a reconnected client before any reply
             // text lands (the raw name; the client maps it to a friendly label).
             if (!liveStreamText) {
@@ -4769,6 +5103,11 @@ export function chatRoutes(options: WebChatOptions): Router {
             // the tool is actually doing (e.g. "Searching for DRep tools"
             // instead of "Using mcp_search").
             sendEvent('tool_input', { id: event.id, name: event.name, input: event.input })
+            publishRoomActivity('tool_input', {
+              id: event.id,
+              name: event.name,
+              input: capToolInput(event.input),
+            })
             // Mirror tool activity to the session-event bus so other watchers
             // of a live draft-mode session see the host's per-turn tool
             // upserts as they happen.
@@ -4785,6 +5124,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             // dropped from the persisted turn — tell the client to retract
             // the phantom timeline entry. See query-loop.ts strip branch.
             sendEvent('tool_dropped', { id: event.id })
+            publishRoomActivity('tool_dropped', { id: event.id })
           }
           if (event.type === 'grounding_nudge') {
             // The grounding gate fired: the figure-bearing draft carried
@@ -4823,6 +5163,14 @@ export function chatRoutes(options: WebChatOptions): Router {
                   isError: block.isError ?? false,
                   spawnedWorkerId,
                   errorMessage: block.isError ? toolErrorExcerpt(block.content) : undefined,
+                })
+                // Step status only for room viewers — never the result body
+                // (T13: signals + small data; the transcript refetch at
+                // settle is authoritative).
+                publishRoomActivity('tool_result', {
+                  id: block.toolUseId,
+                  name: block.name,
+                  isError: block.isError ?? false,
                 })
                 notifyBrainWriteIfMatch(assistant.workspaceId, block.name, block.isError ?? false)
                 // Q5 (§16) — when renderView returns successfully, parse the
@@ -4978,6 +5326,18 @@ export function chatRoutes(options: WebChatOptions): Router {
               description: event.request.description,
               displayLines: event.request.displayLines,
               allowPersistentApproval: event.request.allowPersistentApproval ?? false,
+            })
+            // Suspended turns are visible in the room (D8/T11): every viewer
+            // sees the pending card; the SERVER gates who may act on it (the
+            // addresser or a workspace admin — the /confirm check below).
+            publishRoomActivity('tool_confirmation_required', {
+              toolCallId: event.request.toolCallId,
+              toolName: event.request.toolName,
+              displayName,
+              input: capToolInput(enrichedInput),
+              description: event.request.description,
+              displayLines: event.request.displayLines,
+              addresserUserId: user.id,
             })
           }
           if (event.type === 'awaiting_approval') {
@@ -5480,6 +5840,7 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       await updateSessionStatus(session.id, 'idle')
       activeResolvers.delete(session.id)
+      roomTurnAddressers.delete(session.id)
       // WU-6.4 — drop any fast-path index entries for this session. If an
       // approval is still genuinely pending at stream close (rare — the
       // 24h web timeout normally outlives the SSE connection), the resume
@@ -5835,6 +6196,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       if (sessionIdForError && turnResolver &&
           activeResolvers.get(sessionIdForError) === turnResolver) {
         activeResolvers.delete(sessionIdForError)
+        roomTurnAddressers.delete(sessionIdForError)
         for (const [approvalId, entry] of approvalResolverIndex) {
           if (entry.sessionId === sessionIdForError) approvalResolverIndex.delete(approvalId)
         }
@@ -5882,12 +6244,56 @@ export function chatRoutes(options: WebChatOptions): Router {
       // who learns a sessionId could approve/deny another user's gated tool
       // action (e.g. deleteMemory / a connector write) against that user's
       // brain. (Mirrors the approverUserId check on the approvals surface.)
+      //
+      // Workspace-shared chats split the authority differently (multiplayer
+      // chat T11/D8): the session's `user_id` is merely the room STARTER, so
+      // the gate is the turn's ADDRESSER (whoever pulled the assistant in
+      // this turn) or a workspace admin/owner. Every member SEES the pending
+      // card; only these may act on it.
       const session = await findSessionById(sessionId)
-      if (!session || session.userId !== jwtUserId) {
+      if (!session) {
+        res.status(403).json({ error: 'Not authorized for this confirmation' })
+        return
+      }
+      if (isSharedChatSession(session)) {
+        let allowed = mayResolveRoomConfirmation({
+          jwtUserId,
+          addresserUserId: roomTurnAddressers.get(sessionId),
+          workspaceRole: null,
+        })
+        if (!allowed) {
+          const wsRow = await query<{ workspaceId: string | null }>(
+            `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+            [session.assistantId],
+          )
+          const workspaceId = wsRow.rows[0]?.workspaceId
+          if (workspaceId) {
+            const role = await getWorkspaceRoleSystem(jwtUserId, workspaceId)
+            allowed = mayResolveRoomConfirmation({
+              jwtUserId,
+              addresserUserId: roomTurnAddressers.get(sessionId),
+              workspaceRole: role,
+            })
+          }
+        }
+        if (!allowed) {
+          res.status(403).json({ error: 'Only the member who asked this turn (or a workspace admin) can resolve this confirmation' })
+          return
+        }
+      } else if (session.userId !== jwtUserId) {
         res.status(403).json({ error: 'Not authorized for this confirmation' })
         return
       }
       resolver.resolve(toolCallId, decision, note)
+      // Tell room viewers the card is resolved so their pending state clears
+      // without waiting for the next activity event (T13).
+      if (isSharedChatSession(session)) {
+        publishSessionEvent({
+          kind: 'turn_activity',
+          sessionId,
+          payload: { event: 'tool_confirmation_resolved', toolCallId, decision },
+        })
+      }
       res.json({ ok: true })
       return
     }
