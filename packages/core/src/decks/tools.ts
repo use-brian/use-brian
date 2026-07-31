@@ -83,11 +83,16 @@ const STYLE_SCOPE_NOTE =
 
 const LAYOUT_MANUAL =
   "Slide layouts: 'content' (title + bullets and/or a chart or image), 'statement' (one big centered claim), " +
-  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider). A title slide is added automatically. " +
+  "'stats' (row of 1-4 big-number tiles), 'quote' (testimonial), 'section' (divider), " +
+  "'hero' (full-bleed image with the title over it), 'split' (image filling one half, title + bullets on the other). " +
+  'A title slide is added automatically. ' +
   "Charts (bar/line for trends, pie/doughnut for shares) go on 'content' slides via `chart`. " +
   "Every 'content' slide MUST have `bullets`, `chart` and/or `image` — body text goes in `bullets` (there is no 'content'/'body' field); " +
   "use 'statement' or 'section' for title-only slides. One idea per slide. " +
-  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 10 per deck).'
+  "'hero' and 'split' both REQUIRE `image`. Use 'hero' to open or close a section on a strong picture — it shows only the title and " +
+  "`subtext`, so put body content on the next slide; use 'split' when the picture and the words carry equal weight (consecutive " +
+  "'split' slides mirror sides automatically). " +
+  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 20 per deck).'
 
 function preview(appOrigin: string | undefined, workspaceId: string, deckId: string): string | undefined {
   return appOrigin ? `${appOrigin.replace(/\/$/, '')}/w/${workspaceId}/decks/${deckId}` : undefined

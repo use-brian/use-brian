@@ -35,6 +35,19 @@ function hex(color: string): string {
   return `#${color}`;
 }
 
+/**
+ * Mirrors pptx `fill: { color, transparency }` — transparency is 0-100 and
+ * applies to the FILL only, so this returns an rgba color rather than setting
+ * CSS `opacity` on the element (which would also fade a border, diverging the
+ * moment rect gains one).
+ */
+function fill(color: string, transparency?: number): string {
+  if (!transparency) return hex(color);
+  const alpha = Math.max(0, Math.min(1, 1 - transparency / 100));
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(color.slice(i, i + 2), 16));
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 function fontStack(face: string): string {
   return `"${face}", Arial, ui-sans-serif, sans-serif`;
 }
@@ -128,7 +141,7 @@ function Primitive({
         <div
           style={{
             ...boxStyle(p.box, scale),
-            background: hex(p.fill),
+            background: fill(p.fill, p.transparency),
             borderRadius: p.radiusIn ? p.radiusIn * scale : undefined,
           }}
         />
@@ -192,7 +205,10 @@ function Primitive({
       );
     }
     case "image": {
-      const style: CSSProperties = { ...boxStyle(p.frame, scale), objectFit: "contain" };
+      const style: CSSProperties = {
+        ...boxStyle(p.frame, scale),
+        objectFit: p.fit === "cover" ? "cover" : "contain",
+      };
       if (p.source.url) {
         return (
           // eslint-disable-next-line @next/next/no-img-element

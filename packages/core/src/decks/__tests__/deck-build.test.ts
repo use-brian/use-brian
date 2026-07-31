@@ -30,6 +30,19 @@ function countSlides(buffer: Buffer): number {
   return count;
 }
 
+const TINY_PNG =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+/** One resolved image keyed by path. `width`/`height` drive the cover crop math. */
+function imageMap(path: string, width: number, height: number) {
+  return new Map([[path, { data: `data:image/png;base64,${TINY_PNG}`, width, height }]]);
+}
+
+async function slideXml(buffer: Buffer, slideNumber: number): Promise<string> {
+  const zip = await JSZip.loadAsync(buffer);
+  return zip.file(`ppt/slides/slide${slideNumber}.xml`)!.async('string');
+}
+
 describe('[COMP:decks/builder] Deck pptx writer', () => {
   it('renders a valid pptx with one slide per spec slide plus the title slide', async () => {
     const buffer = await writeDeckPptx(baseSpec, null);
@@ -64,18 +77,69 @@ describe('[COMP:decks/builder] Deck pptx writer', () => {
   });
 
   it('embeds resolved images into the pptx media folder', async () => {
-    const TINY_PNG =
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
     const spec = deckSpecSchema.parse({
       title: 'With Image',
       slides: [{ title: 'Screenshot', image: { path: 'uploads/shot.png', caption: 'Our app' } }],
     });
+    const buffer = await writeDeckPptx(spec, null, imageMap('uploads/shot.png', 1, 1));
+    expect(buffer.includes('ppt/media/image')).toBe(true);
+  });
+
+  it('builds the image-led hero and split layouts', async () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Launch',
+      slides: [
+        { title: 'Meet Brian', layout: 'hero', subtext: 'Shipping today', image: { path: 'a.png' } },
+        { title: 'How it works', layout: 'split', bullets: ['Fast', 'Simple'], image: { path: 'b.png' } },
+      ],
+    });
     const buffer = await writeDeckPptx(
       spec,
       null,
-      new Map([['uploads/shot.png', { data: `data:image/png;base64,${TINY_PNG}`, width: 1, height: 1 }]]),
+      new Map([...imageMap('a.png', 1600, 1200), ...imageMap('b.png', 1600, 1200)]),
     );
-    expect(buffer.includes('ppt/media/image')).toBe(true);
+    expect(buffer.subarray(0, 2).toString('ascii')).toBe('PK');
+    expect(countSlides(buffer)).toBe(3);
+    expect(buffer.includes('ppt/charts/chart')).toBe(false);
+  });
+
+  it('crops cover images instead of stretching them, and leaves contain uncropped', async () => {
+    // pptxgenjs derives the crop from the declared w/h ratio vs `sizing`; passing
+    // the frame for both yields l=r=t=b=0 and a silently STRETCHED image, which
+    // is exactly the bug this asserts against. 4:3 art in a 16:9 frame must lose
+    // ~12.5% off top and bottom.
+    const hero = deckSpecSchema.parse({
+      title: 'Launch',
+      slides: [{ title: 'Meet Brian', layout: 'hero', image: { path: 'a.png' } }],
+    });
+    const covered = await slideXml(await writeDeckPptx(hero, null, imageMap('a.png', 1600, 1200)), 2);
+    const crop = /<a:srcRect l="(\d+)" r="(\d+)" t="(\d+)" b="(\d+)"\/>/.exec(covered);
+    expect(crop).not.toBeNull();
+    const [, l, r, t, b] = crop!.map(Number);
+    expect(l).toBe(0);
+    expect(r).toBe(0);
+    expect(t).toBeGreaterThan(10_000); // >10% cropped off each edge
+    expect(t).toBe(b); // centered crop
+
+    // a plain content image still center-fits, so it must carry no crop at all
+    const content = deckSpecSchema.parse({
+      title: 'Plain',
+      slides: [{ title: 'Screenshot', image: { path: 'a.png' } }],
+    });
+    const contained = await slideXml(await writeDeckPptx(content, null, imageMap('a.png', 1600, 1200)), 2);
+    expect(contained).not.toContain('<a:srcRect');
+  });
+
+  it('washes the hero image but keeps the text bed opaque', async () => {
+    const spec = deckSpecSchema.parse({
+      title: 'Launch',
+      slides: [{ title: 'Meet Brian', layout: 'hero', image: { path: 'a.png' } }],
+    });
+    const xml = await slideXml(await writeDeckPptx(spec, null, imageMap('a.png', 1600, 1200)), 2);
+    // exactly one translucent fill — the full-page wash at 15% opacity
+    expect(xml.match(/<a:alpha val="\d+"\/>/g)).toEqual(['<a:alpha val="15000"/>']);
+    // the text bed must carry NO alpha: a translucent band lets a text-bearing
+    // image bleed through behind the headline, which reads as a broken render
   });
 });
 

@@ -95,7 +95,7 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
         y: p.box.y,
         w: p.box.w,
         h: p.box.h,
-        fill: { color: p.fill },
+        fill: { color: p.fill, transparency: p.transparency },
         line: { type: 'none' },
         rectRadius: p.radiusIn,
       });
@@ -142,6 +142,23 @@ function writePrimitive(slide: Slide, p: DeckPrimitive, images: ResolvedImages):
       const key = p.source.url ?? p.source.path;
       const image = key ? images.get(key) : undefined;
       if (!image) return; // resolution failures surface earlier, at fetch/read time
+      if (p.fit === 'cover') {
+        // pptxgenjs derives the cover crop from the RATIO of the declared w/h
+        // against `sizing` — so w/h must carry the image's intrinsic aspect,
+        // not the frame's. Passing the frame for both makes the two ratios
+        // equal, which yields a zero crop and silently stretches the image.
+        // pptxgenjs then resizes the cropped result to `sizing`, so the placed
+        // extent is the frame either way.
+        slide.addImage({
+          data: image.data,
+          x: p.frame.x,
+          y: p.frame.y,
+          w: p.frame.w,
+          h: (p.frame.w * image.height) / image.width,
+          sizing: { type: 'cover', w: p.frame.w, h: p.frame.h },
+        });
+        return;
+      }
       // center-fit inside the frame preserving intrinsic aspect ratio
       const scale = Math.min(p.frame.w / image.width, p.frame.h / image.height);
       const w = image.width * scale;

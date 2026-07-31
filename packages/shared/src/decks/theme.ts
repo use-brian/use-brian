@@ -23,7 +23,18 @@ export interface DeckStyle {
   bodyFont: string;
 }
 
-const DEFAULT_FONT = 'Arial';
+/**
+ * There is no font embedding (see the header note), so a face must be present
+ * on the opening machine or it silently falls back. Choices are therefore
+ * drawn from the Office/OS-bundled set — a web font (Inter, Söhne) would look
+ * WORSE than Arial wherever it isn't installed, which is most machines.
+ * Georgia and Calibri ship on Windows, macOS and Office; Georgia is already
+ * assumed present (the quote glyph in layout.ts hardcodes it).
+ */
+const DEFAULT_HEADING_FONT = 'Georgia';
+const DEFAULT_BODY_FONT = 'Calibri';
+/** Sans heading for saturated backgrounds, where a serif reads oddly. */
+const SANS_HEADING_FONT = 'Trebuchet MS';
 
 /** Preset palettes ported from sidanclaw-pptx-mcp (CVD + contrast validated). */
 export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
@@ -35,8 +46,8 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: 'F3F4F6',
     grid: 'E5E7EB',
     chartCategorical: ['2A78D6', '1BAF7A', 'EDA100', '4A3AA7', 'E34948', 'EB6834'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: DEFAULT_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
   dark: {
     background: '111827',
@@ -46,8 +57,8 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: '1F2937',
     grid: '374151',
     chartCategorical: ['3987E5', '199E70', 'C98500', '9085E9', 'E66767', 'D95926'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: SANS_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
   brand: {
     background: '0B2545',
@@ -57,8 +68,8 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
     panel: '13315C',
     grid: '1E3A5F',
     chartCategorical: ['0D9488', '3987E5', 'C98500', '9085E9', 'E66767', 'D95926'],
-    headingFont: DEFAULT_FONT,
-    bodyFont: DEFAULT_FONT,
+    headingFont: SANS_HEADING_FONT,
+    bodyFont: DEFAULT_BODY_FONT,
   },
 };
 
@@ -114,8 +125,8 @@ export function deriveDeckStyle(scheme: ExtractedThemeScheme): DeckStyle {
     panel: mix(background, text, 0.07),
     grid: mix(background, text, 0.15),
     chartCategorical,
-    headingFont: scheme.majorFont?.trim() || DEFAULT_FONT,
-    bodyFont: scheme.minorFont?.trim() || DEFAULT_FONT,
+    headingFont: scheme.majorFont?.trim() || DEFAULT_HEADING_FONT,
+    bodyFont: scheme.minorFont?.trim() || DEFAULT_BODY_FONT,
   };
 }
 

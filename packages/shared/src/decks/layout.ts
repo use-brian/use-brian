@@ -54,7 +54,14 @@ export type DeckPrimitive =
       paraSpaceAfterPt?: number;
       bulletIndentPt?: number;
     }
-  | { kind: 'rect'; box: DeckBox; fill: string; radiusIn?: number }
+  | {
+      kind: 'rect';
+      box: DeckBox;
+      fill: string;
+      radiusIn?: number;
+      /** pptx fill transparency, 0-100 (0/absent = opaque). Used for image scrims. */
+      transparency?: number;
+    }
   | { kind: 'lineSeg'; x1: number; y1: number; x2: number; y2: number; color: string; widthPt: number }
   | { kind: 'ellipse'; box: DeckBox; fill: string; outline?: { color: string; widthPt: number } }
   | {
@@ -70,8 +77,14 @@ export type DeckPrimitive =
     }
   | {
       kind: 'image';
-      /** The frame to center-fit the image into (aspect preserved). */
+      /** The frame to fit the image into. */
       frame: DeckBox;
+      /**
+       * 'contain' (default) center-fits inside the frame, preserving aspect and
+       * leaving letterbox gaps. 'cover' fills the frame edge to edge, cropping
+       * the overflow — what full-bleed layouts need.
+       */
+      fit?: 'contain' | 'cover';
       source: { url?: string; path?: string };
     };
 
@@ -83,6 +96,10 @@ export interface DeckSlideLayout {
 
 export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
   const slides: DeckSlideLayout[] = [layoutTitleSlide(spec, style)];
+  // Split slides mirror on how many splits came BEFORE them, not on their page
+  // number — splits are rarely adjacent, and two of them landing on the same
+  // page parity (say pages 4 and 6) would silently never mirror at all.
+  let splitOrdinal = 0;
   spec.slides.forEach((slide, i) => {
     const pageNum = i + 2;
     let out: DeckSlideLayout;
@@ -98,6 +115,15 @@ export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
         break;
       case 'quote':
         out = withFooter(layoutQuoteSlide(slide, style), style, spec.title, pageNum);
+        break;
+      // hero/split run to the page edge, so they take no header and no footer —
+      // chrome inside a full-bleed image reads as a mistake, and the footer's
+      // right-aligned page number would land on top of the artwork.
+      case 'hero':
+        out = layoutHeroSlide(slide, style);
+        break;
+      case 'split':
+        out = layoutSplitSlide(slide, style, splitOrdinal++);
         break;
       default:
         out = withFooter(layoutContentSlide(slide, style), style, spec.title, pageNum);
@@ -255,6 +281,108 @@ function layoutImage(image: DeckImage, style: DeckStyle, box: DeckBox): DeckPrim
     );
   }
   return primitives;
+}
+
+/**
+ * Full-bleed image with the headline under it. The image is `cover`-fit to the
+ * whole page, gets a light background-color wash, and an OPAQUE bottom band
+ * carries the text while the top ~57% stays photo.
+ *
+ * The band is the background color and the text the normal text color, so the
+ * palette's existing contrast guarantee (see deriveDeckStyle) carries over
+ * unchanged — no per-image color analysis needed. A soft top-to-bottom fade
+ * would be nicer, but pptxgenjs 4.x has no gradient fill.
+ *
+ * Paint order matters and is contractual: image, wash, band, then text.
+ */
+function layoutHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const bandY = 4.25;
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    // A light wash of the background color over the whole photo, pulling an
+    // arbitrary image toward the deck's palette. Subtle enough to keep the
+    // picture, and legibility never depends on it — the text sits on the solid
+    // band below.
+    {
+      kind: 'rect',
+      box: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fill: style.background,
+      transparency: 85,
+    },
+    // The text bed is OPAQUE on purpose. We cannot inspect the image the author
+    // picked, and a partly transparent band lets a busy or text-bearing graphic
+    // (a screenshot, a marketing banner) bleed through behind the headline —
+    // which reads as a rendering fault, not a design. Solid is the only choice
+    // that is legible over every possible image.
+    {
+      kind: 'rect',
+      box: { x: 0, y: bandY, w: DECK_PAGE_W, h: DECK_PAGE_H - bandY },
+      fill: style.background,
+    },
+    // Same accent tick as the title slide — the motif is what ties the deck together.
+    { kind: 'rect', box: { x: MARGIN, y: bandY + 0.5, w: 1.1, h: 0.14 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: bandY + 0.8, w: BODY_W, h: 1.2 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 44,
+      bold: true,
+      shrinkToFit: true,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: bandY + 2.05, w: BODY_W, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * Image filling one half of the page edge to edge, title + bullets on the
+ * other. Sides alternate on `splitOrdinal` (the count of split slides before
+ * this one) so successive splits mirror each other — the rhythm a designer
+ * would apply by hand, without spending a model-facing knob on it (primitives
+ * and composition stay internal).
+ */
+function layoutSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: number): DeckSlideLayout {
+  const imageW = 6.43;
+  const imageOnRight = splitOrdinal % 2 === 0;
+  const imageX = imageOnRight ? DECK_PAGE_W - imageW : 0;
+  const textX = imageOnRight ? MARGIN : imageW + MARGIN * 0.7;
+  const textW = DECK_PAGE_W - imageW - MARGIN * 1.7;
+
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: imageX, y: 0, w: imageW, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    plainText(slide.title, style.text, { x: textX, y: 1.6, w: textW, h: 1.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      shrinkToFit: true,
+    }),
+    { kind: 'rect', box: { x: textX + 0.02, y: 3.12, w: 0.75, h: 0.09 }, fill: style.accent },
+  );
+  if (slide.bullets?.length) {
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 3.5, w: textW, h: 3.2 }, 16));
+  }
+  return { background: style.background, primitives };
 }
 
 function layoutSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
