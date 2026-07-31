@@ -647,6 +647,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         senderUserId: m.senderUserId,
         senderName: m.senderUserId ? profiles.get(m.senderUserId)?.name ?? null : null,
         senderAvatarUrl: m.senderUserId ? profiles.get(m.senderUserId)?.avatarUrl ?? null : null,
+        // The answering assistant per reply (multi-assistant rooms, T9) —
+        // the client resolves the avatar from its roster. Null on human rows
+        // and pre-390 history (rendered as the session's bound assistant).
+        senderAssistantId: m.senderAssistantId,
         // Outbound file attachments (sendFile, migration 273) — rendered
         // as file cards. Omitted when empty to keep the payload lean.
         attachments: m.attachments.length > 0 ? m.attachments : undefined,

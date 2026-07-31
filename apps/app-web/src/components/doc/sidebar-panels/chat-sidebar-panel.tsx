@@ -215,16 +215,21 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
       try {
         await deleteSession(row.id);
         setError(null);
-        // Deleting the OPEN thread: clear the URL so the surface resets to a
-        // fresh chat instead of hydrating a dead session id.
-        if (row.id === activeSessionId) router.replace(base, { scroll: false });
+        // Deleting the OPEN thread clears only the dead session selection.
+        // Keep the audience in URL state: dropping `v=workspace` here makes
+        // the surface default back to Personal after a Workspace delete.
+        if (row.id === activeSessionId) {
+          router.replace(view === "workspace" ? `${base}?v=workspace` : base, {
+            scroll: false,
+          });
+        }
         await refresh();
         dispatchChatSessionsRefresh(workspaceId);
       } catch {
         setError(t.deleteFailed);
       }
     },
-    [activeSessionId, base, refresh, router, t, workspaceId],
+    [activeSessionId, base, refresh, router, t, view, workspaceId],
   );
 
   const assistantById = useMemo(
@@ -240,13 +245,12 @@ export function ChatSidebarPanel({ workspaceId }: { workspaceId: string }) {
   ) => {
     // Every row names its interlocutor with the assistant's creature icon —
     // sessions are assistant-bound, so "which assistant is this chat with" is
-    // a property of the row, not of the surface. Shared chats are always the
-    // workspace primary.
+    // a property of the row, not of the surface. Shared rows echo their bound
+    // assistant server-side (a room binds ANY workspace assistant at
+    // creation, default the primary).
     const rowAssistant =
-      "startedByUserId" in row
-        ? primary
-        : (row.assistantId ? assistantById.get(row.assistantId) : undefined) ??
-          primary;
+      (row.assistantId ? assistantById.get(row.assistantId) : undefined) ??
+      primary;
     // Unread is a DOT, not a count (multiplayer chat T7): shared rows only,
     // off `last_active_at` vs this device's localStorage watermark. The open
     // room never dots — the surface stamps the watermark as activity lands.

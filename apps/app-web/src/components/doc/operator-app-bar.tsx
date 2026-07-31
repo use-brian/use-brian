@@ -93,8 +93,9 @@ export function OperatorAppBar({
   active: HomeAppEntry | null;
   /**
    * The workspace's configured strip, in order (`workspaces.home_apps`).
-   * Built-ins render first in registry order, then custom apps — user-defined
-   * ordering is deferred.
+   * Rendered as-is: the stored array order IS the strip order, dragged by an
+   * owner/admin in Studio → Mini apps. Nothing here sorts it, so this array is
+   * the only thing that decides what sits where.
    */
   homeApps: readonly HomeAppEntry[];
   /** The workspace's custom apps, for resolving `custom:<id>` entries. */

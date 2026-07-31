@@ -26,7 +26,10 @@
  * primary fill — avatar-fronted assistant rows, streaming caret, Stop while
  * streaming).
  *
- * Layout: `OperatorTopbar` (view tabs + New chat) over transcript + composer.
+ * Layout: `OperatorTopbar` (view tabs + New chat) over transcript + composer;
+ * shared rooms keep a persistent collapsible/resizable right-hand Work Bench
+ * for live work, metadata, and pinned context without adding full-width rows
+ * to the transcript.
  * The session rail lives in the LEFT SIDEBAR panel
  * (`doc/sidebar-panels/chat-sidebar-panel.tsx`), like every other operator
  * app — list in the sidebar, work in the body. The two coordinate through
@@ -36,7 +39,7 @@
  * in the composer chip (defaulting to the workspace primary) and the session
  * sticks to it — sessions are assistant-bound, and `/api/chat` rejects a
  * mismatched send. An open thread resolves and displays its bound assistant;
- * shared workspace chats stay on the primary.
+ * a room binds the assistant picked at creation (default the primary).
  *
  * The open thread lives in the URL (`?s=<sessionId>`), not in component state:
  * that makes a chat linkable, gives back/forward the behaviour a user expects
@@ -80,7 +83,6 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowUp,
   AtSign,
-  BrainCircuit,
   Check,
   ChevronDown,
   Copy,
@@ -159,7 +161,11 @@ const MARKDOWN_CLS =
  * name, which only shared threads carry — the package stays host-agnostic, so
  * per-surface fields live here rather than in its shared type.
  */
-type SurfaceMessage = Message & { senderName?: string };
+type SurfaceMessage = Message & {
+  senderName?: string;
+  /** The ANSWERING assistant per reply (multi-assistant rooms, T9). */
+  senderAssistantId?: string | null;
+};
 
 /** Narrow an SSE `data` payload to an object without trusting its shape. */
 function coercePayload(data: unknown): Record<string, unknown> {
@@ -176,6 +182,35 @@ function mentionsAssistant(text: string, assistantName: string): boolean {
   const name = assistantName.trim().toLowerCase();
   if (!name) return false;
   return text.toLowerCase().includes(`@${name}`);
+}
+
+/**
+ * Which workspace assistant does this message mention? (Multi-assistant
+ * rooms, T9.) The LAST `@Name` in the text wins; on a shared prefix at the
+ * same position the longer name wins ("@Sales EU" over "@Sales"). `null`
+ * when nobody is mentioned — the send is then a post (or an Ask at the
+ * room's own assistant). The server re-validates the pick.
+ */
+function resolveMentionedAssistant<T extends { id: string; name: string }>(
+  text: string,
+  roster: T[],
+): T | null {
+  const lower = text.toLowerCase();
+  let best: { assistant: T; index: number; length: number } | null = null;
+  for (const assistant of roster) {
+    const name = assistant.name.trim().toLowerCase();
+    if (!name) continue;
+    const index = lower.lastIndexOf(`@${name}`);
+    if (index < 0) continue;
+    if (
+      !best ||
+      index > best.index ||
+      (index === best.index && name.length > best.length)
+    ) {
+      best = { assistant, index, length: name.length };
+    }
+  }
+  return best?.assistant ?? null;
 }
 
 /** A pending write confirmation observed by a room VIEWER (T11/D8 — mirrored
@@ -274,6 +309,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const hydratedRef = useRef<string | null>(null);
   /** Accumulated assistant text for the turn, so `stream/finalize` has a body. */
   const turnTextRef = useRef("");
+  /** The assistant ANSWERING my in-flight turn (T9 — `@Name` may pick a
+   *  non-bound assistant); drives the streaming reply's avatar. */
+  const turnAssistantRef = useRef<string | null>(null);
 
   // ── Per-turn activity state (the dock's streaming model, trimmed) ───
   // The chronological build-event log (reasoning runs + tool steps in true
@@ -284,6 +322,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const [researchPhase, setResearchPhase] = useState<ResearchPhase | null>(null);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const turnToolsRef = useRef<ToolUsed[]>([]);
+  const turnWorkerDescriptionsRef = useRef<Map<string, string>>(new Map());
   const eventLogRef = useRef<EventLog>(EMPTY_LOG);
   const eventSeqRef = useRef(0);
   const eventedToolIdsRef = useRef<Set<string>>(new Set());
@@ -304,6 +343,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
 
   const resetTurnActivity = useCallback(() => {
     turnToolsRef.current = [];
+    turnWorkerDescriptionsRef.current = new Map();
     eventLogRef.current = EMPTY_LOG;
     eventSeqRef.current = 0;
     eventedToolIdsRef.current.clear();
@@ -341,7 +381,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // talking to" is a property of the THREAD: a new chat picks its
   // interlocutor in the composer chip and the session sticks to it; an open
   // thread resolves its bound assistant and never switches mid-thread.
-  // Shared workspace chats stay on the primary.
+  // A room binds the assistant picked at creation (default the primary).
   useEffect(() => {
     if (!workspaceId) return;
     let cancelled = false;
@@ -362,8 +402,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  unresolved rows); new chat → the picked one, defaulting to primary. */
   const activeAssistant = useMemo<WorkspaceAssistantSummary | null>(() => {
     if (activeSessionId) {
+      // Rooms bind ANY workspace assistant at creation (default primary) —
+      // the shared row echoes the binding, so mention/Ask labels, avatars
+      // and sends all resolve to the room's own assistant.
       const boundId =
         sessionAssistantRef.current.get(activeSessionId) ??
+        activeShared?.assistantId ??
         personalSessions.find((r) => r.id === activeSessionId)?.assistantId ??
         null;
       if (boundId) {
@@ -378,7 +422,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       );
     }
     return primaryAssistant;
-  }, [activeSessionId, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
+  }, [activeSessionId, activeShared, personalSessions, assistants, pickedAssistantId, primaryAssistant]);
 
   // ── Shared sessions ─────────────────────────────────────────────────
   // The rail itself lives in the sidebar panel; the surface still needs the
@@ -460,6 +504,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           timestamp: new Date(r.timestamp),
           ...(toolsUsed.length > 0 ? { toolsUsed } : {}),
           ...(r.senderName ? { senderName: r.senderName } : {}),
+          ...(r.senderAssistantId ? { senderAssistantId: r.senderAssistantId } : {}),
         };
       })
       .filter((m) => m.text.length > 0 || (m.toolsUsed?.length ?? 0) > 0);
@@ -508,6 +553,9 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   // over this client's POST), so the subscription stays open even while
   // sending.
   const [remoteActive, setRemoteActive] = useState(false);
+  /** The assistant answering the REMOTE turn (from the turn_started /
+   *  snapshot mirror) — viewers render the right avatar live. */
+  const [remoteAssistantId, setRemoteAssistantId] = useState<string | null>(null);
   const [remoteText, setRemoteText] = useState("");
   const [remoteEvents, setRemoteEvents] = useState<BuildEvent[]>([]);
   const [remoteTools, setRemoteTools] = useState<ToolUsed[]>([]);
@@ -517,12 +565,16 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
   const remoteNarratedRef = useRef<Set<string>>(new Set());
   /** Bumped to re-open the stream after a server close (deploy, restart). */
   const [subscribeEpoch, setSubscribeEpoch] = useState(0);
-  /** Bumped by the room stream's `pins_changed` signal — the chip row
+  /** Bumped by the room stream's `pins_changed` signal — Work Bench
    *  refetches through its own loader (signals, never data). */
   const [pinsEpoch, setPinsEpoch] = useState(0);
+  /** The room's working frame is a persistent right rail. Expanded is the
+   *  remembered resizable drawer; collapsed is one icon-only column. */
+  const [workBenchExpanded, setWorkBenchExpanded] = useState(true);
   const isSharedOpen = !!activeShared;
 
   const resetRemoteTurn = useCallback(() => {
+    setRemoteAssistantId(null);
     remoteLogRef.current = EMPTY_LOG;
     remoteToolsRef.current = [];
     remoteNarratedRef.current.clear();
@@ -583,11 +635,17 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (sender && meId && sender === meId) break;
           resetRemoteTurn();
           setRemoteActive(true);
+          if (typeof payload.assistantId === "string") {
+            setRemoteAssistantId(payload.assistantId);
+          }
           break;
         }
         case "snapshot": {
           if (sender && meId && sender === meId) break;
           setRemoteActive(true);
+          if (typeof payload.assistantId === "string") {
+            setRemoteAssistantId(payload.assistantId);
+          }
           setRemoteText(typeof payload.text === "string" ? payload.text : "");
           const reasoning =
             typeof payload.reasoning === "string" ? payload.reasoning : "";
@@ -609,9 +667,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           if (kind === "tool_start" && id && name) {
             if (remoteToolsRef.current.some((tool) => tool.id === id)) break;
             const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
+            const workerId =
+              typeof payload.workerId === "string"
+                ? payload.workerId
+                : undefined;
             remoteToolsRef.current = [
               ...remoteToolsRef.current,
-              { id, name, status: "running", description: seeded.description },
+              {
+                id,
+                name,
+                status: "running",
+                description: seeded.description,
+                ...(workerId ? { workerId } : {}),
+              },
             ];
             setRemoteTools(remoteToolsRef.current);
             remoteLogRef.current = appendStep(
@@ -783,11 +851,19 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     if (startingShared) return;
     setStartingShared(true);
     try {
-      const created = await createWorkspaceSession(workspaceId);
+      // The room binds the assistant picked in the fresh pane's composer
+      // chip (default: the workspace primary). Per-room for its lifetime.
+      const created = await createWorkspaceSession(
+        workspaceId,
+        pickedAssistantId ?? undefined,
+      );
       resetPane();
       setSharedSessions((rows) => [created, ...rows]);
       hydratedRef.current = created.id;
       sessionIdRef.current = created.id;
+      if (created.assistantId) {
+        sessionAssistantRef.current.set(created.id, created.assistantId);
+      }
       selectSession(created.id, "workspace");
       dispatchChatSessionsRefresh(workspaceId);
     } catch {
@@ -795,7 +871,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     } finally {
       setStartingShared(false);
     }
-  }, [resetPane, selectSession, startingShared, t, workspaceId]);
+  }, [pickedAssistantId, resetPane, selectSession, startingShared, t, workspaceId]);
 
   /** Stop the in-flight turn. Aborted streams fire neither onDone nor
    *  onError, so the state resets here (the dock's `handleAbort`). */
@@ -831,8 +907,11 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     // armed Ask affordance). The server re-validates either way, so this
     // only picks the endpoint.
     const isRoom = activeSessionId ? !!activeShared : view === "workspace";
-    const addressed =
-      !isRoom || askArmed || mentionsAssistant(trimmed, interlocutor.name);
+    // Multi-assistant rooms (T9): `@Name` picks WHICH workspace assistant
+    // answers this turn; the Ask affordance asks the room's own assistant.
+    const mentioned = isRoom ? resolveMentionedAssistant(trimmed, assistants) : null;
+    const target = mentioned ?? interlocutor;
+    const addressed = !isRoom || askArmed || mentioned !== null;
     setAskArmed(false);
     setMentionOpen(false);
 
@@ -846,10 +925,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       if (startingShared) return;
       setStartingShared(true);
       try {
-        const created = await createWorkspaceSession(workspaceId);
+        // Bind the room to the hero's picked interlocutor (default primary).
+        const created = await createWorkspaceSession(workspaceId, interlocutor.id);
         sessionIdRef.current = created.id;
         hydratedRef.current = created.id;
         setSharedSessions((rows) => [created, ...rows]);
+        sessionAssistantRef.current.set(created.id, interlocutor.id);
         chat.setSession(created.id);
         selectSession(created.id, "workspace");
         dispatchChatSessionsRefresh(workspaceId);
@@ -899,6 +980,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     setError(null);
     setQueuedNotice(false);
     askedQuestionRef.current = false;
+    turnAssistantRef.current = target.id;
     chat.dispatch({ type: "stream/start" });
     turnTextRef.current = "";
     resetTurnActivity();
@@ -911,7 +993,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       body: {
         message: trimmed,
         workspaceId,
-        assistantId: interlocutor.id,
+        assistantId: target.id,
         appOrigin: APP_ORIGIN,
         // The picked tier rides every turn; the server clamps to plan.
         model,
@@ -933,7 +1015,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
               hydratedRef.current = id;
               // Record the binding so the next turn resolves this thread to
               // the SAME assistant before the rail refetch lands.
-              sessionAssistantRef.current.set(id, interlocutor.id);
+              sessionAssistantRef.current.set(id, target.id);
               chat.setSession(id);
               selectSession(id);
               // The fresh thread is now listable — tell the sidebar rail.
@@ -975,6 +1057,21 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             }
             break;
           }
+          case "worker_start": {
+            // A delegated assistant announces its human-friendly task before
+            // its tool calls. Keep that label on the streamed steps so the
+            // Work Bench can group current progress by assistant.
+            const workerId =
+              typeof payload.workerId === "string" ? payload.workerId : "";
+            const description =
+              typeof payload.description === "string"
+                ? payload.description
+                : undefined;
+            if (workerId && description) {
+              turnWorkerDescriptionsRef.current.set(workerId, description);
+            }
+            break;
+          }
           case "tool_start": {
             const id = typeof payload.id === "string" ? payload.id : "";
             const name = typeof payload.name === "string" ? payload.name : "";
@@ -995,9 +1092,23 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             // Seed the friendliest label we can before the input parses;
             // `tool_input` upgrades it moments later.
             const seeded = describeToolFromInput(name, {}, tChat.toolNarration);
+            const workerId =
+              typeof payload.workerId === "string"
+                ? payload.workerId
+                : undefined;
+            const workerDescription = workerId
+              ? turnWorkerDescriptionsRef.current.get(workerId)
+              : undefined;
             turnToolsRef.current = [
               ...turnToolsRef.current,
-              { id, name, status: "running", description: seeded.description },
+              {
+                id,
+                name,
+                status: "running",
+                description: seeded.description,
+                ...(workerId ? { workerId } : {}),
+                ...(workerDescription ? { workerDescription } : {}),
+              },
             ];
             setToolTimeline(turnToolsRef.current);
             eventLogRef.current = appendStep(
@@ -1136,6 +1247,10 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
             break;
           }
           case "error": {
+            if (payload.code === "assistant_clearance_exceeds_room") {
+              setError(t.assistantClearanceBlocked);
+              break;
+            }
             // Suspended on a question from an earlier turn: restore the
             // answer panel instead of a red error (the dock's recipe).
             if (payload.code === "pending_question_exists") {
@@ -1229,6 +1344,56 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
         : "text-sidebar-foreground/60 hover:text-sidebar-accent-foreground",
     );
 
+  // Work Bench uses the same active turn truth as the transcript. Direct
+  // sends have the richest SSE timeline; followed teammate turns use the
+  // mirrored timeline. A suspended question remains visible as waiting work
+  // because the assistant cannot make further progress without the room.
+  const workBenchTools = chat.state.isStreaming
+    ? toolTimeline
+    : remoteActive
+      ? remoteTools
+      : [];
+  const workBenchWaiting =
+    !chat.state.isStreaming &&
+    !remoteActive &&
+    !!pendingQuestion &&
+    pendingQuestion.sessionId === activeSessionId;
+  const workBenchTurnActive =
+    chat.state.isStreaming || remoteActive || workBenchWaiting;
+  const workBenchRunningTool = workBenchTools.find(
+    (tool) => !tool.workerId && tool.status === "running",
+  );
+  const workBenchCurrentStep = workBenchWaiting
+    ? pendingQuestion?.question ?? tChat.thinking
+    : workBenchRunningTool?.description ??
+      (chat.state.isStreaming && chat.state.streamingText
+        ? tChat.activity.writing
+        : remoteActive && remoteText
+          ? tChat.activity.writing
+          : researchPhase
+            ? tChat.researchStatus[researchPhase]
+            : tChat.thinking);
+
+  /** The reply avatar for a given ANSWERING assistant (multi-assistant
+   *  rooms, T9) — falls back to the thread's bound assistant. */
+  const avatarFor = (senderAssistantId?: string | null) => {
+    const a =
+      (senderAssistantId
+        ? assistants.find((x) => x.id === senderAssistantId)
+        : undefined) ?? activeAssistant;
+    if (!a) return replyAvatar;
+    return (
+      <div className="mt-0.5 shrink-0">
+        <AssistantAvatar
+          id={a.id}
+          name={a.name}
+          iconSeed={a.iconSeed ?? undefined}
+          size="sm"
+        />
+      </div>
+    );
+  };
+
   /** The reply avatar — the open thread's bound assistant, like the dock. */
   const replyAvatar = activeAssistant ? (
     <div className="mt-0.5 shrink-0">
@@ -1281,11 +1446,12 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
    *  a NEW personal chat picks its assistant here and the session sticks to
    *  it (sessions are assistant-bound; the server rejects a mismatched
    *  send). An open thread shows its bound assistant — never a mid-thread
-   *  switch. Shared chats stay on the workspace primary. A single-assistant
+   *  switch. A fresh Workspace pane picks the assistant the new ROOM will
+   *  bind (per-room, for its lifetime). A single-assistant
    *  workspace degrades to the static label. */
   const interlocutorControl =
     activeAssistant &&
-    (!activeSessionId && view === "personal" && assistants.length > 1 ? (
+    (!activeSessionId && assistants.length > 1 ? (
       <Popover open={switcherOpen} onOpenChange={setSwitcherOpen}>
         <PopoverTrigger
           className="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:shadow-none"
@@ -1405,22 +1571,36 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
     [activeSessionId, chat.state.pendingConfirmations, remoteConfirmation, t],
   );
 
-  /** `@` autocomplete (T12 — assistants only): typing `@` (or a partial
-   *  after it) at the end of the input offers the room's assistant; picking
-   *  inserts the full mention the server's detector matches. */
+  /** `@` autocomplete (T12/T9 — assistants only, the WHOLE workspace
+   *  roster): typing `@` (or a partial after it) at the end of the input
+   *  offers every assistant that can answer here; picking one inserts the
+   *  full mention, and that assistant answers the turn. */
   useEffect(() => {
-    if (!paneIsRoom || !activeAssistant) {
+    if (!paneIsRoom || assistants.length === 0) {
       setMentionOpen(false);
       return;
     }
-    setMentionOpen(/(^|\s)@[^@\s]*$/.test(input));
-  }, [input, paneIsRoom, activeAssistant]);
+    setMentionOpen(/(^|\s)@[^@]*$/.test(input));
+  }, [input, paneIsRoom, assistants.length]);
 
-  const insertMention = useCallback(() => {
-    if (!activeAssistant) return;
-    setInput((cur) => cur.replace(/@[^@\s]*$/, `@${activeAssistant.name} `));
+  /** The typed partial after the trailing `@`, for roster filtering. */
+  const mentionPartial = useMemo(() => {
+    const m = input.match(/(^|\s)@([^@]*)$/);
+    return m ? m[2].toLowerCase() : "";
+  }, [input]);
+
+  const mentionCandidates = useMemo(
+    () =>
+      assistants.filter((a) =>
+        a.name.toLowerCase().startsWith(mentionPartial),
+      ),
+    [assistants, mentionPartial],
+  );
+
+  const insertMention = useCallback((name: string) => {
+    setInput((cur) => cur.replace(/@[^@]*$/, `@${name} `));
     setMentionOpen(false);
-  }, [activeAssistant]);
+  }, []);
 
   /** The composer, styled as the app's composite-control box (globals.css
    *  contract): ONE bordered box carrying the focus ring via `focus-within`,
@@ -1438,26 +1618,29 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
       {/* Mention autocomplete — one entry (the room's assistant; human
           mentions are out of scope). Rendered above the box so it never
           shifts the composer. */}
-      {mentionOpen && activeAssistant && (
-        <div className="absolute bottom-full left-2 z-20 mb-1 overflow-hidden rounded-md border border-border bg-popover shadow-md">
-          <button
-            type="button"
-            onMouseDown={(e) => {
-              // mousedown, not click — keep the textarea focused.
-              e.preventDefault();
-              insertMention();
-            }}
-            aria-label={format(t.mentionInsertAria, { name: activeAssistant.name })}
-            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent"
-          >
-            <AssistantAvatar
-              id={activeAssistant.id}
-              name={activeAssistant.name}
-              iconSeed={activeAssistant.iconSeed ?? undefined}
-              size="xs"
-            />
-            <span className="min-w-0 flex-1 truncate">@{activeAssistant.name}</span>
-          </button>
+      {mentionOpen && mentionCandidates.length > 0 && (
+        <div className="absolute bottom-full left-2 z-20 mb-1 max-h-56 w-64 overflow-y-auto rounded-md border border-border bg-popover shadow-md">
+          {mentionCandidates.map((a) => (
+            <button
+              key={a.id}
+              type="button"
+              onMouseDown={(e) => {
+                // mousedown, not click — keep the textarea focused.
+                e.preventDefault();
+                insertMention(a.name);
+              }}
+              aria-label={format(t.mentionInsertAria, { name: a.name })}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-foreground hover:bg-accent"
+            >
+              <AssistantAvatar
+                id={a.id}
+                name={a.name}
+                iconSeed={a.iconSeed ?? undefined}
+                size="xs"
+              />
+              <span className="min-w-0 flex-1 truncate">@{a.name}</span>
+            </button>
+          ))}
         </div>
       )}
       <ChatComposer
@@ -1638,39 +1821,8 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           </div>
         </section>
       ) : (
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        {/* Nobody should be able to mistake a shared thread for a private
-            one. The badge shows whenever the OPEN session is shared, not
-            whenever the Workspace tab is selected. */}
-        {activeShared && (
-          <div className="flex items-center gap-2 border-b border-border bg-muted/40 px-4 py-1.5 text-xs text-muted-foreground">
-            <Users className="size-3.5 shrink-0" aria-hidden />
-            <span>{t.sharedBadge}</span>
-            {activeShared.startedByName && (
-              <span className="truncate">
-                {format(t.startedBy, { name: activeShared.startedByName })}
-              </span>
-            )}
-            {/* D9: capture is always on, and visible - the quiet permanent
-                indicator that room talk flows into the company brain. */}
-            <span
-              className="ml-auto flex shrink-0 items-center gap-1 text-[11px] text-muted-foreground/70"
-              title={t.captureIndicator}
-            >
-              <BrainCircuit className="size-3" aria-hidden />
-              {t.captureIndicator}
-            </span>
-          </div>
-        )}
-        {/* The room's pinned working frame (P1b) — one slim chip row under
-            the header; every assistant turn assembles inside it. */}
-        {activeShared && activeSessionId && (
-          <ChatContextPins
-            sessionId={activeSessionId}
-            workspaceId={workspaceId}
-            refreshKey={pinsEpoch}
-          />
-        )}
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6">
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-5">
             {chat.state.messages.length === 0 &&
@@ -1701,7 +1853,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 </div>
               ) : (
                 <div key={m.id} className="group flex gap-2.5">
-                  {replyAvatar}
+                  {avatarFor(m.senderAssistantId)}
                   <div className="min-w-0 flex-1 space-y-2.5 pt-0.5">
                     {m.toolsUsed?.length ? (
                       <ChatActivitySummary
@@ -1723,7 +1875,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 reasoning/tool steps) above the streaming reply + caret. */}
             {chat.state.isStreaming && (
               <div className="flex gap-2.5">
-                {replyAvatar}
+                {avatarFor(turnAssistantRef.current)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
                   <ChatActivityFeed
                     events={streamingEvents}
@@ -1754,7 +1906,7 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
                 refetched — the snapshot is never kept. */}
             {remoteActive && !chat.state.isStreaming && (
               <div className="flex gap-2.5">
-                {replyAvatar}
+                {avatarFor(remoteAssistantId)}
                 <div className="min-w-0 flex-1 space-y-2 pt-0.5">
                   {remoteEvents.length > 0 || remoteTools.length > 0 ? (
                     <ChatActivityFeed
@@ -1850,6 +2002,22 @@ export function ChatSurface({ workspaceId }: { workspaceId: string }) {
           <div className="mx-auto w-full max-w-3xl">{composerBox}</div>
         </div>
       </section>
+      {activeShared && activeSessionId && (
+        <ChatContextPins
+          sessionId={activeSessionId}
+          workspaceId={workspaceId}
+          refreshKey={pinsEpoch}
+          startedByName={activeShared.startedByName}
+          assistant={activeAssistant}
+          turnActive={workBenchTurnActive}
+          waitingForInput={workBenchWaiting}
+          currentStep={workBenchCurrentStep}
+          tools={workBenchTools}
+          expanded={workBenchExpanded}
+          onExpandedChange={setWorkBenchExpanded}
+        />
+      )}
+      </div>
       )}
     </div>
   );

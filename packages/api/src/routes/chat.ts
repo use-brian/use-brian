@@ -19,7 +19,14 @@ import { recordOverheadUsage } from './_overhead-usage.js'
 import { composeRecoveryMessage } from './_recovery-message.js'
 import { composeEmptyTurnSynthesis } from './_empty-turn-synthesis.js'
 import { resolveReplyText } from './_reply-context.js'
-import { buildSplitSystemPrompt, attachTurnContext, resolveLayer1Prompt, maybeAppendFollowupChips } from './_prompt-builder.js'
+import {
+  attachUserVisibleContext,
+  buildSplitSystemPrompt,
+  formatPrivateRuntimeContext,
+  formatUserVisibleContext,
+  maybeAppendFollowupChips,
+  resolveLayer1Prompt,
+} from './_prompt-builder.js'
 import { type PublishSessionEvent, noopPublishSessionEvent } from '../session-event-port.js'
 import type { InjectExtraTools, ResolveAppSoul } from '../tool-injection-port.js'
 import type { BuildConnectorActionAudit } from '../connector-action-port.js'
@@ -847,19 +854,9 @@ export function buildViewingDeckBlock(deck: {
 }
 
 /**
- * Attach the per-turn `<turn_context>` envelope to the newest user message.
- *
- * Returns the new messages array, or `null` when no plain trailing user
- * message can carry it (empty history, assistant-final resume shapes, or a
- * tool_result-bearing user message) — the caller then falls back to in-prompt
- * placement for that turn.
- *
- * Ephemeral by design: operates on the in-memory copy passed to the query
- * loop; the persisted session row never carries the envelope. That is the
- * cache-prefix invariant this exists for — history bytes stay identical
- * across turns, the system prompt stays byte-stable, and the provider's
- * implicit prompt cache covers both. An empty `turnContext` returns the
- * input unchanged.
+ * The user-visible-context helper lives in `_prompt-builder.ts` so channel
+ * routes can share the same provenance contract without importing this route
+ * and creating a cycle. Re-exported here for existing route-level consumers.
  */
 // Moved to `_prompt-builder.ts` so `channel-pipeline.ts` can use it too
 // (chat.ts imports channel-pipeline, so the reverse import would cycle).
@@ -977,6 +974,25 @@ export function mayResolveRoomConfirmation(params: {
  */
 const roomTurnAddressers = new Map<string, string>()
 
+/**
+ * May this assistant ANSWER in this room? (Multiplayer chat T9.)
+ *
+ * `@AssistantName` picks which workspace assistant answers a turn, but the
+ * room's `effective_clearance` is its members' read floor — an assistant
+ * cleared ABOVE the room would draw on data the room's readers may not see,
+ * so the answering assistant's clearance must not out-rank the room's.
+ * (Equal or lower is fine: no widening.) A NULL room clearance is treated as
+ * 'internal', matching the session-create default.
+ */
+export function mayAssistantAnswerInRoom(params: {
+  assistantClearance: string | null
+  roomClearance: string | null
+}): boolean {
+  const rank = (c: string | null, fallback: number): number =>
+    c === 'public' ? 0 : c === 'internal' ? 1 : c === 'confidential' ? 2 : fallback
+  return rank(params.assistantClearance, 1) <= rank(params.roomClearance, 1)
+}
+
 /** Atomically claim a room session's turn slot. True = we own the turn. */
 async function claimRoomTurn(sessionId: string): Promise<boolean> {
   const result = await query(
@@ -1013,7 +1029,7 @@ async function waitForRoomTurnSlot(
   }
 }
 
-export { attachTurnContext }
+export { attachUserVisibleContext }
 
 /**
  * Pick the sticky `channel_id` used to resolve (or create) a web session when
@@ -1897,10 +1913,45 @@ export function chatRoutes(options: WebChatOptions): Router {
       // (`getUserAssistant` already verified the JWT user has access to
       // `assistant.id`; this just stops a user from naming someone else's
       // session under their own assistant context.)
+      //
+      // EXCEPTION — multi-assistant rooms (multiplayer chat T9): in a
+      // workspace-shared chat, `@AssistantName` picks which workspace
+      // assistant answers THIS turn, so the requested assistant may differ
+      // from the session's binding — provided it lives in the SAME workspace
+      // as the room's assistant (a stale client id must never route another
+      // workspace's assistant in) and its clearance does not out-rank the
+      // room's read floor (`mayAssistantAnswerInRoom`). The turn then runs
+      // entirely AS that assistant: its soul, memory, tools and clearance.
       if (session.assistantId !== assistant.id) {
-        sendEvent('error', { error: 'Session does not belong to this assistant' })
-        res.end()
-        return
+        let roomCrossAssistantOk = false
+        if (isSharedChatSession(session) && assistant.workspaceId) {
+          const boundWs = await query<{ workspaceId: string | null }>(
+            `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+            [session.assistantId],
+          )
+          if (boundWs.rows[0]?.workspaceId === assistant.workspaceId) {
+            if (
+              mayAssistantAnswerInRoom({
+                assistantClearance: assistant.clearance ?? null,
+                roomClearance: session.effectiveClearance,
+              })
+            ) {
+              roomCrossAssistantOk = true
+            } else {
+              sendEvent('error', {
+                code: 'assistant_clearance_exceeds_room',
+                error: 'That assistant is cleared above this room and cannot answer here.',
+              })
+              res.end()
+              return
+            }
+          }
+        }
+        if (!roomCrossAssistantOk) {
+          sendEvent('error', { error: 'Session does not belong to this assistant' })
+          res.end()
+          return
+        }
       }
 
       // Per-user ownership/clearance gate on the resolved session. For a
@@ -2572,7 +2623,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         publishSessionEvent({
           kind: 'turn_started',
           sessionId: session.id,
-          payload: { senderUserId: user.id },
+          payload: { senderUserId: user.id, assistantId: assistant.id },
         })
       }
 
@@ -2660,6 +2711,11 @@ export function chatRoutes(options: WebChatOptions): Router {
       // turns — worse for the model, never fatal for the user.
       let sharedSenderNames: Map<string, string> | undefined
       let sharedParticipants: string[] = []
+      /** Multi-assistant rooms (T9): assistant-id → name, for labeling
+       *  FOREIGN assistant turns at assembly (`toStampedMessages`
+       *  `assistantVoices`) — the answering model must never mistake another
+       *  assistant's words for its own. */
+      let roomAssistantVoices: { names: Map<string, string>; currentAssistantId: string } | undefined
       if (isSharedChatSession(session)) {
         try {
           const senderIds = [
@@ -2678,6 +2734,23 @@ export function chatRoutes(options: WebChatOptions): Router {
             )
             sharedParticipants = [...new Set(sharedSenderNames.values())]
           }
+          const voiceIds = [
+            ...new Set(
+              dbMessages
+                .map((m) => m.senderAssistantId)
+                .filter((id): id is string => Boolean(id) && id !== assistant.id),
+            ),
+          ]
+          if (voiceIds.length > 0) {
+            const voiceRows = await query<{ id: string; name: string }>(
+              `SELECT id, name FROM assistants WHERE id = ANY($1::uuid[])`,
+              [voiceIds],
+            )
+            roomAssistantVoices = {
+              names: new Map(voiceRows.rows.map((r) => [r.id, r.name])),
+              currentAssistantId: assistant.id,
+            }
+          }
         } catch (err) {
           console.warn('[chat] shared-session sender lookup failed:', err)
         }
@@ -2693,6 +2766,7 @@ export function chatRoutes(options: WebChatOptions): Router {
         sessionMessages: dbMessages,
         timezone: user.timezone ?? 'UTC',
         senderNames: sharedSenderNames,
+        assistantVoices: roomAssistantVoices,
         session,
         tier: modelToCompactionTier(resolveModel(requestedModel, userPlan, 'ok')),
         channelClass: 'web',
@@ -2727,8 +2801,8 @@ export function chatRoutes(options: WebChatOptions): Router {
       // Doc tool-result elision (across-turn context-window control).
       // Doc authoring accumulates a full-page outline in every
       // patchPage/getCurrentPage tool_result; the history reloads them on every
-      // turn even though the live page is re-delivered via the turn-context
-      // envelope below. Collapse all but the most-recent doc page-state results
+      // turn even though the live page is re-delivered as user-visible context
+      // below. Collapse all but the most-recent doc page-state results
       // to a stub. Signature-safe (only rewrites unsigned tool_result bodies) and a
       // no-op on non-doc histories, so it runs on every request as
       // defence-in-depth, like the two transforms above. See
@@ -3114,17 +3188,12 @@ export function chatRoutes(options: WebChatOptions): Router {
       let docPageBlockCount = 0
       let docPageVersion = 0
 
-      // Cache-stable split (2026-06-10): the system prompt sent to the
-      // provider carries ONLY the stable sections; every volatile per-turn
-      // section (minute clock, topic hint, session state, episodic context,
-      // reply context, …) is collected into `turnContextParts` and attached
-      // to the newest user message as a <turn_context> block just before the
-      // query loop (see attachTurnContext). Volatile bytes in the system
-      // prompt sit BEFORE the whole history in the provider request, so one
-      // changed byte re-prefilled the entire conversation cold on every
-      // turn — the dominant chat latency, worst on the doc surface where the
-      // Active-doc-page outline bumped its version on every patch. See
-      // docs/architecture/engine/query-loop.md → "Turn-context envelope".
+      // Provenance split (2026-08-01): private runtime metadata stays in the
+      // trusted system channel. Only representations of content actually
+      // visible in the client may prefix the newest user turn. The earlier
+      // cache-first design placed every volatile block in one user-role
+      // envelope; that made hidden headings such as Open commitments a
+      // candidate referent for questions like "呢句咩意思".
       const splitPrompt = buildSplitSystemPrompt({
         basePrompt,
         // Doc page-authoring steering as a skill addendum. On the doc surface:
@@ -3165,20 +3234,18 @@ export function chatRoutes(options: WebChatOptions): Router {
           : null,
       })
       let fullSystemPrompt = splitPrompt.stablePrompt
-      // Per-turn context blocks, delivered via the envelope (NOT the system
-      // prompt — see the cache-stability note above). Sections appended below
-      // push here; the envelope is attached right before the query loop.
-      const turnContextParts: string[] = splitPrompt.turnContext
-        ? [splitPrompt.turnContext]
+      const privateRuntimeContextParts: string[] = splitPrompt.privateRuntimeContext
+        ? [splitPrompt.privateRuntimeContext]
+        : []
+      const userVisibleContextParts: string[] = splitPrompt.userVisibleContext
+        ? [splitPrompt.userVisibleContext]
         : []
 
-      // Shared-chat participants note. Rides the TURN-CONTEXT envelope, never
-      // the system prompt: a per-turn block above the injected tool schemas
-      // breaks the provider's implicit cache prefix and re-bills the whole
-      // conversation as fresh input every message (the prompt-cache-alignment
-      // invariant). Personal sessions push nothing here.
+      // Shared-chat participants are application-derived runtime metadata.
+      // They remain private even though doing so makes this system suffix
+      // change as new participants appear.
       if (isSharedChatSession(session) && sharedParticipants.length > 0) {
-        turnContextParts.push(
+        privateRuntimeContextParts.push(
           [
             '# Shared chat',
             'This conversation is shared with the workspace and several people write in it.',
@@ -3190,9 +3257,9 @@ export function chatRoutes(options: WebChatOptions): Router {
 
       // Pinned room context (multiplayer chat P1b, T15) — the room's working
       // frame, resolved FRESH each turn under the session's clearance. An
-      // index, not inlined content; rides the turn-context envelope, never
-      // the system prompt (prompt-cache alignment). Best-effort: a resolver
-      // failure costs the block, never the turn.
+      // index, not inlined content. The pins are visible on the room surface,
+      // so their representation is valid user-visible context. Best-effort: a
+      // resolver failure costs the block, never the turn.
       if (isRoomSession && assistant.workspaceId) {
         try {
           const pinBlock = await buildPinnedContextBlock({
@@ -3200,7 +3267,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             workspaceId: assistant.workspaceId,
             clearance: session.effectiveClearance,
           })
-          if (pinBlock) turnContextParts.push(pinBlock)
+          if (pinBlock) userVisibleContextParts.push(pinBlock)
         } catch (err) {
           console.warn('[chat] pinned-context resolution failed:', err)
         }
@@ -3210,13 +3277,14 @@ export function chatRoutes(options: WebChatOptions): Router {
       // A dispute-shaped message carrying a figure ("唔係要 look 11萬咩")
       // loads the previous reply's claim provenance so the model re-verifies
       // instead of re-asserting. One indexed read, only on the dispute
-      // shape; rides the turn-context envelope so the cached prompt prefix
-      // stays byte-stable. See grounding-gate.md → "Dispute pre-pass".
+      // shape. This claim ledger is hidden application metadata and therefore
+      // stays in private runtime context. See grounding-gate.md → "Dispute
+      // pre-pass".
       if (typeof message === 'string' && message && matchesDisputedFigure(message)) {
         try {
           const priorClaims = await getClaimsForLatestAssistantMessage(session.id)
           if (priorClaims.length > 0) {
-            turnContextParts.push(buildDisputeContextNote(priorClaims))
+            privateRuntimeContextParts.push(buildDisputeContextNote(priorClaims))
           }
         } catch (err) {
           console.warn('[chat] dispute pre-pass failed, continuing without:', err)
@@ -3310,11 +3378,11 @@ export function chatRoutes(options: WebChatOptions): Router {
                 isEmptyPage,
                 isCommentThread: session.channelType === 'doc_thread',
               })
-            // Rides the turn-context envelope: the outline changes on every
-            // patch (version bump + previews), so keeping it out of the
-            // system prompt is what keeps the cache prefix stable on the doc
-            // surface — the worst offender before the split.
-            turnContextParts.push(activePageBlock)
+            // The open page is visible in the editor and is a valid referent
+            // for "this page". Its representation prefixes the user turn;
+            // the runtime boundary prevents wrapper ids/instructions from
+            // becoming independently addressable content.
+            userVisibleContextParts.push(activePageBlock)
             // Phase 0 capture for the doc-context meter (post-turn emit).
             docLiveOutlineStr = activePageBlock
             docOutlineBlockCount = outline.blocks.length
@@ -3331,7 +3399,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               typeof requestedDocAnchorBlockId === 'string' &&
               requestedDocAnchorBlockId
             ) {
-              turnContextParts.push(
+              userVisibleContextParts.push(
                 `## Insertion anchor\n` +
                 `The user placed their cursor on block \`${requestedDocAnchorBlockId}\` and asked you ` +
                 `to generate content there. You MUST apply the change with \`patchPage\` this turn — ` +
@@ -3368,7 +3436,7 @@ export function chatRoutes(options: WebChatOptions): Router {
             variant: session.channelType === 'doc_thread' ? 'thread' : 'chat',
             currentSessionId: session.id,
           })
-          if (section) turnContextParts.push(section)
+          if (section) userVisibleContextParts.push(section)
         } catch (err) {
           console.error('[chat] doc thread discovery injection failed:', err)
         }
@@ -3395,7 +3463,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const viewedSkill = workspaceSkills.find(
             (s) => s.rowId === requestedViewingSkillRowId && s.state !== 'archived',
           )
-          if (viewedSkill) turnContextParts.push(buildViewingSkillBlock(viewedSkill))
+          if (viewedSkill) userVisibleContextParts.push(buildViewingSkillBlock(viewedSkill))
         } catch (err) {
           console.error('[chat] viewing-skill context injection failed:', err)
         }
@@ -3414,7 +3482,7 @@ export function chatRoutes(options: WebChatOptions): Router {
           const { createDeckStore } = await import('../db/deck-store.js')
           const viewedDeck = await createDeckStore().getSystem(requestedViewingDeckId)
           if (viewedDeck && viewedDeck.workspaceId === assistant.workspaceId) {
-            turnContextParts.push(
+            userVisibleContextParts.push(
               buildViewingDeckBlock({
                 id: viewedDeck.id,
                 title: viewedDeck.title,
@@ -4461,14 +4529,16 @@ export function chatRoutes(options: WebChatOptions): Router {
       // "no info found" before workers had real urlReader content.
       const coordinatorBaseAddendum = COORDINATOR_BASE_ADDENDUM
       const coordinatorResearchAddendum = COORDINATOR_RESEARCH_ADDENDUM
-      // Coordinator addenda are mode-stable → stay on the system prompt.
-      // Preflight findings are per-turn → ride the turn-context envelope
-      // (cache-neutral tail) instead of busting the system-prompt prefix.
+      // Coordinator addenda are mode-stable and stay on the system prompt.
+      // Preflight findings are hidden runtime metadata, so they also stay in
+      // the trusted channel inside the private-runtime suffix.
       let systemPromptWithPreflight = coordinatorMode
         ? `${fullSystemPrompt}\n\n${researchMode ? coordinatorResearchAddendum : coordinatorBaseAddendum}`
         : fullSystemPrompt
       if (!coordinatorMode && preflightContext) {
-        turnContextParts.push(buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''))
+        privateRuntimeContextParts.push(
+          buildPreflightPrompt('', preflightContext).replace(/^\n+/, ''),
+        )
       }
 
       // Run query loop — stream events to client.
@@ -4568,6 +4638,7 @@ export function chatRoutes(options: WebChatOptions): Router {
               ? {
                   reasoning: liveStreamReasoning.slice(-STREAM_REASONING_CAP),
                   senderUserId: user.id,
+                  assistantId: assistant.id,
                 }
               : {}),
           },
@@ -4693,6 +4764,10 @@ export function chatRoutes(options: WebChatOptions): Router {
             sessionId: session.id,
             role: 'assistant',
             content,
+            // The ANSWERING assistant (T9) — in a multi-assistant room this
+            // may differ from the session's binding; per-reply avatars and
+            // foreign-voice assembly labels read it.
+            senderAssistantId: assistant.id,
             attachments:
               turnIdx === lastNonEmptyIdx && outboundAttachments.length > 0
                 ? outboundAttachments
@@ -4792,24 +4867,31 @@ export function chatRoutes(options: WebChatOptions): Router {
         }
       }
 
-      // ── Turn-context envelope ─────────────────────────────────
-      // Attach the per-turn volatile context to the NEWEST user message —
-      // ephemeral, exactly like the retry hint above: the stored DB row stays
-      // clean, so history bytes never change between turns. Keeping these
-      // blocks out of the system prompt keeps the provider's implicit-cache
-      // prefix (system prompt + history) byte-stable across turns: step-0
-      // prefill reads the conversation from cache instead of cold. See
-      // docs/architecture/engine/query-loop.md → "Turn-context envelope".
-      const turnContext = turnContextParts
+      // ── Runtime-context provenance ────────────────────────────
+      // Hidden application metadata is a trusted system suffix. This is a
+      // correctness boundary, not merely a wrapper convention: private
+      // runtime text must never become a user-role candidate referent.
+      const privateRuntimeContext = privateRuntimeContextParts
         .filter((s) => s.trim().length > 0)
         .join('\n\n')
-      const enveloped = attachTurnContext(messages, turnContext)
+      const privateRuntimeBlock = formatPrivateRuntimeContext(privateRuntimeContext)
+      if (privateRuntimeBlock) {
+        systemPromptWithPreflight = `${systemPromptWithPreflight}\n\n${privateRuntimeBlock}`
+      }
+
+      // Only content represented on a visible client surface may prefix the
+      // newest user turn. The persisted DB row remains untouched. Rare resume
+      // shapes without a trailing plain user message retain the marker in the
+      // system channel instead.
+      const userVisibleContext = userVisibleContextParts
+        .filter((s) => s.trim().length > 0)
+        .join('\n\n')
+      const enveloped = attachUserVisibleContext(messages, userVisibleContext)
       if (enveloped) {
         messages = enveloped
-      } else if (turnContext) {
-        // No plain trailing user message to carry the envelope (rare resume
-        // shapes) — fall back to in-prompt placement for this turn only.
-        systemPromptWithPreflight = `${systemPromptWithPreflight}\n\n${turnContext}`
+      } else if (userVisibleContext) {
+        systemPromptWithPreflight =
+          `${systemPromptWithPreflight}\n\n${formatUserVisibleContext(userVisibleContext)}`
       }
 
       // ── Reply evidence (grounding gate) ──
@@ -4822,6 +4904,7 @@ export function chatRoutes(options: WebChatOptions): Router {
       // write-gate stays a workflow-lane behavior.
       const replyEvidence = new EvidenceAccumulator()
       replyEvidence.note(systemPromptWithPreflight)
+      replyEvidence.note(userVisibleContext)
       if (typeof message === 'string') replyEvidence.note(message)
 
       const confirmationResolver = createConfirmationResolver()

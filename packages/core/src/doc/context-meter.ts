@@ -41,11 +41,11 @@ import { DOC_PAGE_STATE_TOOLS } from '../engine/doc-history.js'
 export const LARGE_DOC_RESULT_TOKENS = 2_000
 
 export type DocContextComposition = {
-  /** The stable system prompt actually sent to the provider (Layer 1 + memory
-   *  + skill block). Since the turn-context envelope split (2026-06-10) the
-   *  volatile per-turn blocks — clock, topic hint, live outline, preflight —
-   *  ride the newest user message instead, so they count under
-   *  `messageHistoryTokens`, not here. `skillBlockTokens` /
+  /** The complete system prompt actually sent to the provider (stable Layer 1
+   *  + memory + skill block, followed by private per-turn runtime context).
+   *  Representations of visible surface content, including the live outline,
+   *  prefix the newest user message and count under `messageHistoryTokens`.
+   *  `skillBlockTokens` /
    *  `memoryContextTokens` remain SUB-SLICES of this total (for attribution),
    *  NOT additive components — do not sum them and expect
    *  `systemPromptTokens`. */
@@ -53,9 +53,9 @@ export type DocContextComposition = {
   /** The doc authoring protocol block injected on every doc turn (a
    *  sub-slice of `systemPromptTokens`). */
   skillBlockTokens: number
-  /** The full `# Active doc page` block delivered via the turn-context
-   *  envelope (heading + title + per-block lines + edit-guidance suffix — a
-   *  sub-slice of `messageHistoryTokens` since the envelope split). */
+  /** The full `# Active doc page` block delivered as user-visible context
+   *  (heading + title + per-block lines + edit-guidance suffix — a sub-slice
+   *  of `messageHistoryTokens`). */
   liveOutlineTokens: number
   /** Number of blocks in that live outline. */
   outlineBlockCount: number

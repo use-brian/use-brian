@@ -31,9 +31,14 @@
  */
 
 /**
- * Every built-in operator app, in app-bar (registry) order. The strip renders
- * enabled built-ins in THIS order, then custom apps — user-defined ordering is
- * deferred (chat-miniapp-home-config.md T15 / custom-home-apps.md T12).
+ * Every built-in operator app, in DEFAULT strip order.
+ *
+ * This is where a workspace starts, NOT how the strip renders: the render
+ * order is the stored `home_apps` array order, which an owner/admin drags in
+ * Studio → Mini apps. Nothing here or downstream sorts by this list — it seeds
+ * the default and orders the "Hidden" group in the configurator, and that is
+ * all. `validateHomeApps` accepts any permutation, which is what made
+ * user-defined ordering a client-only change (home-apps.md → "Ordering").
  */
 export const BUILTIN_HOME_APP_KEYS = [
   'page',

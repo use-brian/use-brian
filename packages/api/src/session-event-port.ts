@@ -61,6 +61,9 @@ export type SessionEvent =
         activity: string | null
         reasoning?: string | null
         senderUserId?: string
+        /** The ANSWERING assistant (multi-assistant rooms, T9) — viewers
+         *  render the right avatar for the live turn. */
+        assistantId?: string
       }
     }
   | {
@@ -81,7 +84,7 @@ export type SessionEvent =
   | {
       kind: 'turn_started'
       sessionId: string
-      payload: { senderUserId: string }
+      payload: { senderUserId: string; assistantId?: string }
     }
   | {
       kind: 'turn_completed'

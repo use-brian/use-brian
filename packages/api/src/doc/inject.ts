@@ -134,8 +134,8 @@ export type InjectDocToolsOptions = {
    * Per-turn doc-page anchor. When the chat originates from
    * `apps/app-web` with a page already open, the chat route passes
    * the active `pageId` plus its current `expectedVersion` here. The
-   * outline is built alongside this (in `chat.ts`) and delivered via the
-   * turn-context envelope so the model can address blocks by id. The
+   * outline is built alongside this (in `chat.ts`) and represented in
+   * `<user_visible_context>` so the model can address blocks by id. The
    * `expectedVersion` rides through to the future `patchPage` tool
    * deps for CAS validation. Both null when the turn is doc-mode
    * but no page is open (e.g. the model is about to call `renderPage`

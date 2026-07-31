@@ -81,6 +81,14 @@ export type SessionMessage = {
    */
   senderUserId: string | null
   /**
+   * The answering ASSISTANT per assistant row (migration 390 — the
+   * assistant-side twin of `sender_user_id`). Multi-assistant rooms
+   * (multiplayer chat T9) render per-reply avatars from it and label
+   * foreign-assistant turns at assembly. NULL for human rows and rows
+   * predating the migration (treated as the session's bound assistant).
+   */
+  senderAssistantId: string | null
+  /**
    * Outbound file attachments on assistant messages (migration 273, the
    * `sendFile` tool). Soft references to `workspace_files` rows — rendered
    * as file cards on web; informational parity on messaging rows. `[]` for
@@ -517,6 +525,7 @@ export async function getSessionMessages(
             topic_confidence as "topicConfidence",
             channel_message_id as "channelMessageId",
             sender_user_id as "senderUserId",
+            sender_assistant_id as "senderAssistantId",
             attachments
      FROM session_messages WHERE ${conditions.join(' AND ')}
      ORDER BY sequence_num ASC ${limitClause}`,
@@ -549,11 +558,50 @@ export function toStampedMessages(
   dbMessages: SessionMessage[],
   timezone: string,
   senderNames?: ReadonlyMap<string, string>,
+  /**
+   * Multi-assistant rooms (T9): label FOREIGN assistant turns. When a room
+   * turn runs as assistant X, any assistant row answered by a different
+   * assistant gets a `[Name]:` prefix at assembly — the model must never
+   * mistake another assistant's words for its own. Same seam and reason as
+   * the human stamp: assembly-time only, stored content stays clean. Rows
+   * with a NULL `sender_assistant_id` (legacy, single-voice sessions) are
+   * left untouched.
+   */
+  assistantVoices?: {
+    names: ReadonlyMap<string, string>
+    currentAssistantId: string
+  },
 ): Array<{ role: 'user' | 'assistant' | 'system'; content: unknown }> {
   return dbMessages.map((m) => {
     const base = {
       role: m.role as 'user' | 'assistant' | 'system',
       content: m.content,
+    }
+    if (
+      m.role === 'assistant' &&
+      assistantVoices &&
+      m.senderAssistantId &&
+      m.senderAssistantId !== assistantVoices.currentAssistantId &&
+      Array.isArray(m.content)
+    ) {
+      const name = assistantVoices.names.get(m.senderAssistantId)
+      if (name) {
+        const content = m.content as Array<{ type?: string; text?: string }>
+        for (let i = 0; i < content.length; i++) {
+          const block = content[i]
+          if (block.type === 'text' && typeof block.text === 'string') {
+            return {
+              ...base,
+              content: [
+                ...content.slice(0, i),
+                { ...block, text: `[${name}]: ${block.text}` },
+                ...content.slice(i + 1),
+              ],
+            }
+          }
+        }
+      }
+      return base
     }
     if (m.role !== 'user' || !Array.isArray(m.content)) return base
 
@@ -700,16 +748,18 @@ export async function addSessionMessage(params: {
   topicConfidence?: number | null
   channelMessageId?: string | null
   senderUserId?: string | null
+  /** The answering assistant (assistant rows in multi-assistant rooms — T9). */
+  senderAssistantId?: string | null
   /** Outbound file attachments (assistant rows only — `sendFile`, migration 273). */
   attachments?: SessionMessageAttachment[]
 }): Promise<SessionMessage> {
   const result = await query<SessionMessage>(
     `INSERT INTO session_messages
        (session_id, role, content, sequence_num,
-        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, attachments)
+        reply_to_text, topic_label, topic_confidence, channel_message_id, sender_user_id, sender_assistant_id, attachments)
      VALUES ($1, $2, $3,
        COALESCE((SELECT MAX(sequence_num) FROM session_messages WHERE session_id = $1), 0) + 1,
-       $4, $5, $6, $7, $8, $9
+       $4, $5, $6, $7, $8, $9, $10
      )
      RETURNING id, session_id as "sessionId", role, content,
                sequence_num as "sequenceNum", created_at as "createdAt",
@@ -718,6 +768,7 @@ export async function addSessionMessage(params: {
                topic_confidence as "topicConfidence",
                channel_message_id as "channelMessageId",
                sender_user_id as "senderUserId",
+               sender_assistant_id as "senderAssistantId",
                attachments`,
     [
       params.sessionId,
@@ -728,6 +779,7 @@ export async function addSessionMessage(params: {
       params.topicConfidence ?? null,
       params.channelMessageId ?? null,
       params.senderUserId ?? null,
+      params.senderAssistantId ?? null,
       JSON.stringify(params.attachments ?? []),
     ],
   )

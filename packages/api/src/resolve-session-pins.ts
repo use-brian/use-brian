@@ -26,8 +26,9 @@ import { listSessionPins, PIN_INSTRUCTION_MAX_CHARS, type SessionPin } from './d
  *
  * Tool-awareness rule: the block names pinned DATA, never tool names.
  *
- * The block rides `attachTurnContext` (the per-turn envelope), NEVER the
- * system prompt — graded `invariants/prompt-cache-alignment`.
+ * The block represents pins visible on the room surface and therefore joins
+ * `<user_visible_context>` via `attachUserVisibleContext`. Private runtime
+ * metadata must never share that user-role prefix.
  */
 
 type Clearance = 'public' | 'internal' | 'confidential'
@@ -165,7 +166,7 @@ async function resolvePinLine(
 }
 
 /**
- * Build the room's `# Pinned context` turn-context block, or `null` when the
+ * Build the room's `# Pinned context` user-visible block, or `null` when the
  * session has no pins. Best-effort: any single pin's resolution failure
  * degrades to the "unavailable" line, never the whole block.
  */

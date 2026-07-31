@@ -36,6 +36,17 @@ const taskApi = vi.hoisted(() => ({
   bulkTasks: vi.fn(),
 }));
 
+const guardrailApi = vi.hoisted(() => ({
+  loadTaskCandidates: vi.fn(),
+  acceptTaskCandidate: vi.fn(),
+  dismissTaskCandidate: vi.fn(),
+  loadTaskRules: vi.fn(),
+  loadTaskTombstones: vi.fn(),
+  setTaskRuleStatus: vi.fn(),
+  deleteTaskRule: vi.fn(),
+  deleteTaskTombstone: vi.fn(),
+}));
+
 vi.mock("@/lib/api/tasks", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api/tasks")>();
   return {
@@ -54,9 +65,8 @@ vi.mock("@/lib/api/workspace-roster", () => ({
 // filter-scoped selection, and an unstubbed tray would put a real network call
 // inside `act`.
 vi.mock("@/lib/api/task-guardrails", () => ({
-  loadTaskCandidates: vi.fn().mockResolvedValue([]),
-  acceptTaskCandidate: vi.fn(),
-  dismissTaskCandidate: vi.fn(),
+  ...guardrailApi,
+  describeTaskRulePredicate: vi.fn(() => ""),
 }));
 
 vi.mock("@/components/operator/operator-topbar", () => ({
@@ -148,6 +158,9 @@ beforeEach(() => {
   taskApi.fetchWorkspaceTasks.mockReset();
   taskApi.fetchWorkspaceTasks.mockResolvedValue(rows);
   taskApi.bulkTasks.mockReset();
+  guardrailApi.loadTaskCandidates.mockReset().mockResolvedValue([]);
+  guardrailApi.loadTaskRules.mockReset().mockResolvedValue([]);
+  guardrailApi.loadTaskTombstones.mockReset().mockResolvedValue([]);
   // The surface reads its list through the module-level surface cache
   // ([COMP:app-web/surface-cache]), which deliberately OUTLIVES a mount so a
   // revisit paints instantly. That means one case's rows would still be cached
@@ -164,6 +177,22 @@ afterEach(() => {
 });
 
 describe("[COMP:app-web/tasks-surface] current-filter select all", () => {
+  it("opens task rules from the Tasks top bar", async () => {
+    await renderSurface();
+
+    await act(async () => {
+      buttonNamed("Task rules").click();
+    });
+    expect(navigation.replace).toHaveBeenCalledWith(
+      "/w/workspace-1/tasks?task-settings=rules",
+      { scroll: false },
+    );
+
+    navigation.search = "task-settings=rules";
+    await renderSurface();
+    expect(container!.querySelector('aside[aria-label="Task rules"]')).toBeTruthy();
+  });
+
   it("selects only tasks matching the active URL filter", async () => {
     navigation.search = "assignee=none";
     await renderSurface();

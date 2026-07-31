@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config'
+import { fileURLToPath } from 'node:url'
 
 // `pnpm test:integration` — the DB-backed suites. They exercise the real
 // store SQL against a live Postgres reached through the shared
@@ -9,6 +10,14 @@ import { defineConfig } from 'vitest/config'
 process.env.DATABASE_URL ??= 'postgres:///sidanclaw'
 
 export default defineConfig({
+  server: {
+    fs: {
+      // Match the unit-test config in absorbed (submodule-of-platform) mode:
+      // inlined ESM dependencies can resolve into the superproject's pnpm
+      // store one level above this repo's workspace root.
+      allow: [fileURLToPath(new URL('../../..', import.meta.url))],
+    },
+  },
   test: {
     include: ['src/**/*.integration.test.ts'],
     // A few suites (e.g. provenance, proactive-compaction) run multi-second

@@ -20,6 +20,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   detectRoomAddress,
+  mayAssistantAnswerInRoom,
   mayResolveRoomConfirmation,
   roomTurnAdmission,
   sharedTurnRejection,
@@ -158,6 +159,7 @@ function userRow(
     topicConfidence: null,
     channelMessageId: null,
     senderUserId,
+    senderAssistantId: null,
     attachments: [],
   }
 }
@@ -263,5 +265,45 @@ describe('[COMP:api/room-mechanics] coalesceConsecutiveUserMessages (T4)', () =>
     ]
     const out = coalesceConsecutiveUserMessages(rows)
     expect(out.map((m) => m.role)).toEqual(['user', 'assistant', 'user'])
+  })
+})
+
+describe('[COMP:api/room-mechanics] multi-assistant rooms (T9)', () => {
+  it('an assistant may answer at or below the room clearance, never above', () => {
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'internal' })).toBe(true)
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'public', roomClearance: 'internal' })).toBe(true)
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'internal', roomClearance: 'confidential' })).toBe(true)
+    // A confidential-cleared assistant answering an internal room would draw
+    // on data the room's readers may not see — refused.
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'confidential', roomClearance: 'internal' })).toBe(false)
+    // NULLs collapse to 'internal' (the create-path default).
+    expect(mayAssistantAnswerInRoom({ assistantClearance: null, roomClearance: null })).toBe(true)
+    expect(mayAssistantAnswerInRoom({ assistantClearance: 'confidential', roomClearance: null })).toBe(false)
+  })
+
+  it('labels FOREIGN assistant turns at assembly; the answering assistant keeps its own words unlabeled', () => {
+    const gmRow: SessionMessage = {
+      ...assistantRow('I checked the deck - looks ready.'),
+      senderAssistantId: 'a-gm',
+    }
+    const salesRow: SessionMessage = {
+      ...assistantRow('Pipeline says the deal closes Friday.'),
+      senderAssistantId: 'a-sales',
+    }
+    const legacyRow = assistantRow('An older reply with no voice stamp.')
+    const stamped = toStampedMessages(
+      [gmRow, userRow('thanks both', 'u-alice', '2026-07-31T10:04:00Z'), salesRow, legacyRow],
+      'UTC',
+      NAMES,
+      { names: new Map([['a-gm', 'Gm']]), currentAssistantId: 'a-sales' },
+    )
+    const text = (i: number) =>
+      (stamped[i].content as Array<{ text: string }>)[0].text
+    // Gm's turn is a foreign voice for the Sales-run turn - labeled.
+    expect(text(0)).toBe('[Gm]: I checked the deck - looks ready.')
+    // Sales' own prior turn stays unlabeled (its own words).
+    expect(text(2)).toBe('Pipeline says the deal closes Friday.')
+    // Pre-390 rows (no stamp) are left untouched.
+    expect(text(3)).toBe('An older reply with no voice stamp.')
   })
 })
