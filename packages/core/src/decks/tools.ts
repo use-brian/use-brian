@@ -92,7 +92,9 @@ const LAYOUT_MANUAL =
   "'hero' and 'split' both REQUIRE `image`. Use 'hero' to open or close a section on a strong picture — it shows only the title and " +
   "`subtext`, so put body content on the next slide; use 'split' when the picture and the words carry equal weight (consecutive " +
   "'split' slides mirror sides automatically). " +
-  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 20 per deck).'
+  'Images: prefer `image.path` (a workspace file); `image.url` must be a public http(s) png/jpeg/gif (max 10MB, 20 per deck). ' +
+  "Set `pack: 'editorial'` when the deck should look designed rather than neutral - it restyles every layout (warm paper palette, " +
+  'asymmetric columns, full-bleed dividers, headline cards over hero images). The layouts above are the same either way.'
 
 function preview(appOrigin: string | undefined, workspaceId: string, deckId: string): string | undefined {
   return appOrigin ? `${appOrigin.replace(/\/$/, '')}/w/${workspaceId}/decks/${deckId}` : undefined

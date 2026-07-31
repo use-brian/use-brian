@@ -15,6 +15,15 @@ export type DeckTheme = (typeof DECK_THEMES)[number];
 export const DECK_CHART_TYPES = ['bar', 'line', 'pie', 'doughnut'] as const;
 export type DeckChartType = (typeof DECK_CHART_TYPES)[number];
 
+/**
+ * A pack is an art direction: palette + type treatment + its own set of slide
+ * compositions. It is NOT a color theme — 'editorial' lays a content slide out
+ * as two asymmetric columns with a standing numeral, where 'classic' stacks a
+ * header over a centered body. The model picks a named pack, never geometry.
+ */
+export const DECK_PACKS = ['classic', 'editorial'] as const;
+export type DeckPackId = (typeof DECK_PACKS)[number];
+
 const statSchema = z.object({
   value: z.string().min(1).max(20).describe("The big number, e.g. '$2.1M' or '40%'"),
   label: z.string().min(1).max(60).describe("What it measures, e.g. 'ARR' or 'MoM growth'"),
@@ -170,6 +179,16 @@ export const deckSpecShape = {
     .enum(DECK_THEMES)
     .optional()
     .describe("Preset theme: 'light' (default), 'dark', or 'brand'. Ignored when a reference style is applied."),
+  pack: z
+    .enum(DECK_PACKS)
+    .optional()
+    .describe(
+      "Design pack: 'classic' (default) is the clean corporate look - header over centered body, on white. " +
+        "'editorial' is a designed magazine treatment - warm paper and rust palette, asymmetric two-column slides " +
+        'with a standing slide numeral, full-bleed color dividers, and headline cards floating over hero images. ' +
+        "Pick 'editorial' when the deck should look designed rather than neutral (pitch, launch, brand, board narrative). " +
+        'A pack sets the palette, so it overrides `theme`; a reference style from `styleFromFile` still wins over both.',
+    ),
   slides: z
     .array(deckSlideSchema)
     .min(1)

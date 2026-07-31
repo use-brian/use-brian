@@ -40,7 +40,7 @@ export async function writeDeckPptx(
   style: DeckStyle | null | undefined,
   images: ResolvedImages = new Map(),
 ): Promise<Buffer> {
-  const resolved = resolveDeckStyle(spec.theme, style);
+  const resolved = resolveDeckStyle(spec.theme, style, spec.pack);
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'WIDE', width: DECK_PAGE_W, height: DECK_PAGE_H });
   pptx.layout = 'WIDE';

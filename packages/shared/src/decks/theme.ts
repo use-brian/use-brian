@@ -73,8 +73,36 @@ export const DECK_PRESET_STYLES: Record<DeckTheme, DeckStyle> = {
   },
 };
 
-export function resolveDeckStyle(theme: DeckTheme | undefined, style: DeckStyle | null | undefined): DeckStyle {
-  return style ?? DECK_PRESET_STYLES[theme ?? 'light'];
+/**
+ * Pack palettes. A pack is one art direction, so it has ONE palette rather than
+ * a light/dark/brand matrix — the whole point is a committed look. Warm paper
+ * instead of white is the single largest reason the editorial pack reads as
+ * designed rather than generated: a white background is the default nobody
+ * chose.
+ */
+export const DECK_PACK_STYLES: Record<'editorial', DeckStyle> = {
+  editorial: {
+    background: 'FAF6F0', // warm paper
+    text: '1F1B18', // deep ink
+    muted: '7D7168',
+    accent: 'B4451F', // rust
+    panel: 'F0E7DC',
+    grid: 'DCD0C2',
+    chartCategorical: ['B4451F', '5C6B5A', 'C98A3C', '7A5C4F', '8C6B8A', '4E6472'],
+    headingFont: 'Georgia',
+    bodyFont: 'Calibri',
+  },
+};
+
+/** Precedence: an extracted reference style wins, then the pack, then the theme preset. */
+export function resolveDeckStyle(
+  theme: DeckTheme | undefined,
+  style: DeckStyle | null | undefined,
+  pack?: 'classic' | 'editorial',
+): DeckStyle {
+  if (style) return style;
+  if (pack && pack !== 'classic') return DECK_PACK_STYLES[pack];
+  return DECK_PRESET_STYLES[theme ?? 'light'];
 }
 
 // ---------------------------------------------------------------------------

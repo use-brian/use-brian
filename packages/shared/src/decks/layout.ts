@@ -107,6 +107,7 @@ export interface DeckSlideLayout {
 }
 
 export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  if (spec.pack === 'editorial') return layoutEditorialDeck(spec, style);
   const slides: DeckSlideLayout[] = [layoutTitleSlide(spec, style)];
   // Split slides mirror on how many splits came BEFORE them, not on their page
   // number — splits are rarely adjacent, and two of them landing on the same
@@ -734,4 +735,317 @@ function layoutPieChart(chart: DeckChart, style: DeckStyle, box: DeckBox): DeckP
     });
   });
   return primitives;
+}
+
+// ---------------------------------------------------------------------------
+// Editorial pack
+//
+// A design pack is an ART DIRECTION, not a color theme: its own palette (warm
+// paper + rust, in theme.ts), its own type treatment, and its own slide
+// compositions. Note that it introduces NO new primitives — full-bleed color
+// fields, hairline rules, standing numerals and cards floating over images are
+// all rect + text + image plus paint order, which the engine already had. The
+// gap this closes was art direction, not capability.
+//
+// House rules for this pack, kept consistent across every composition:
+//   - asymmetric grids, never a centered header stacked over a centered body
+//   - a standing slide numeral as the recurring motif, derived from page order
+//     so it costs no schema field
+//   - full-bleed color for dividers and statements; paper for working slides
+//   - rules are hairlines (0.02"), the accent bar is the only heavy mark
+// ---------------------------------------------------------------------------
+
+/** Left column of the editorial working grid; body sits to its right. */
+const ED_COL_X = 4.95;
+const ED_BODY_X = ED_COL_X + 0.95;
+const ED_BODY_W = DECK_PAGE_W - ED_BODY_X - MARGIN;
+
+function layoutEditorialDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  const slides: DeckSlideLayout[] = [edTitleSlide(spec, style)];
+  let splitOrdinal = 0;
+  spec.slides.forEach((slide, i) => {
+    const num = String(i + 1).padStart(2, '0');
+    let out: DeckSlideLayout;
+    switch (slide.layout) {
+      case 'section':
+        out = edSectionSlide(slide, style);
+        break;
+      case 'statement':
+        out = edStatementSlide(slide, style);
+        break;
+      case 'stats':
+        out = edStatsSlide(slide, style, num);
+        break;
+      case 'quote':
+        out = edQuoteSlide(slide, style);
+        break;
+      case 'hero':
+        out = edHeroSlide(slide, style);
+        break;
+      case 'split':
+        out = edSplitSlide(slide, style, splitOrdinal++, num);
+        break;
+      default:
+        out = edContentSlide(slide, style, num);
+    }
+    if (slide.notes) out.notes = slide.notes;
+    slides.push(out);
+  });
+  return slides;
+}
+
+/** The recurring motif: a large accent numeral over a hairline, top of the left column. */
+function edNumeral(style: DeckStyle, num: string): DeckPrimitive[] {
+  return [
+    { kind: 'rect', box: { x: MARGIN, y: 1.35, w: 1.5, h: 0.06 }, fill: style.accent },
+    plainText(num, style.accent, { x: MARGIN, y: 1.5, w: 2.2, h: 1.1 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 46,
+      bold: true,
+    }),
+  ];
+}
+
+/** Full-bleed accent field, paper text. The deck opens on its loudest slide. */
+function edTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 2.5, w: 1.8, h: 0.1 }, fill: style.background },
+    plainText(spec.title, style.background, { x: MARGIN, y: 2.9, w: DECK_PAGE_W - MARGIN * 2 - 1.4, h: 2.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 62,
+      bold: true,
+      valign: 'bottom',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.03,
+    }),
+  ];
+  if (spec.subtitle) {
+    primitives.push(
+      plainText(spec.subtitle, style.background, { x: MARGIN, y: 5.65, w: BODY_W, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 21,
+      }),
+    );
+  }
+  return { background: style.accent, primitives };
+}
+
+/** Full-bleed ink. Different field color from the title slide, so the deck has rhythm. */
+function edSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 3.05, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.background, { x: MARGIN, y: 3.45, w: BODY_W - 1.5, h: 1.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 52,
+      bold: true,
+      valign: 'top',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.05,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: 5.5, w: BODY_W - 1.5, h: 0.7 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 19,
+      }),
+    );
+  }
+  return { background: style.text, primitives };
+}
+
+/** One claim on paper, set large and hung on the left rather than centered. */
+function edStatementSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: MARGIN, y: 2.35, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.8, w: BODY_W - 1.8, h: 2.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 46,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.12,
+    }),
+  ];
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: MARGIN, y: 5.45, w: BODY_W - 2.5, h: 0.8 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 19,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Asymmetric working grid: numeral + title stand in the left column, body to the right. */
+function edContentSlide(slide: DeckSlide, style: DeckStyle, num: string): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    ...edNumeral(style, num),
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.75, w: ED_COL_X - MARGIN - 0.4, h: 2.6 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
+    }),
+    // hairline gutter rule — the only thing separating the columns
+    { kind: 'rect', box: { x: ED_COL_X, y: 1.35, w: 0.014, h: DECK_PAGE_H - 2.5 }, fill: style.grid },
+  ];
+  const bodyBox: DeckBox = { x: ED_BODY_X, y: 1.5, w: ED_BODY_W, h: DECK_PAGE_H - 1.5 - 1.0 };
+  if (slide.chart) {
+    primitives.push(...layoutChart(slide.chart, style, bodyBox));
+  } else if (slide.image) {
+    primitives.push(...layoutImage(slide.image, style, bodyBox));
+  } else if (slide.bullets?.length) {
+    const size = slide.bullets.length <= 4 ? 22 : slide.bullets.length <= 6 ? 19 : 17;
+    primitives.push(bulletBlock(style, slide.bullets, bodyBox, size));
+  }
+  return { background: style.background, primitives };
+}
+
+/**
+ * Numbers on paper under hairlines — no tiles. A boxed tile is the generic
+ * dashboard treatment; a ruled column is what a printed report does, and it
+ * lets the figures themselves carry the slide.
+ */
+function edStatsSlide(slide: DeckSlide, style: DeckStyle, num: string): DeckSlideLayout {
+  const primitives: DeckPrimitive[] = [
+    ...edNumeral(style, num),
+    plainText(slide.title, style.text, { x: MARGIN, y: 2.75, w: BODY_W, h: 0.9 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 30,
+      bold: true,
+      shrinkToFit: true,
+    }),
+  ];
+  const stats: DeckStat[] = slide.stats ?? [];
+  const gap = 0.55;
+  const colW = (BODY_W - gap * (stats.length - 1)) / stats.length;
+  const rowY = 4.15;
+  stats.forEach((stat, i) => {
+    const x = MARGIN + i * (colW + gap);
+    primitives.push(
+      { kind: 'rect', box: { x, y: rowY, w: colW, h: 0.02 }, fill: style.grid },
+      plainText(stat.value, style.accent, { x, y: rowY + 0.3, w: colW, h: 1.35 }, {
+        fontFace: style.headingFont,
+        fontSizePt: 64,
+        bold: true,
+        shrinkToFit: true,
+      }),
+      plainText(stat.label, style.muted, { x, y: rowY + 1.75, w: colW, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 16,
+      }),
+    );
+  });
+  return { background: style.background, primitives };
+}
+
+/** Panel-tinted field so a pull quote reads as a pause in the deck. */
+function edQuoteSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const quote = slide.quote;
+  if (!quote) return { background: style.panel, primitives: [] };
+  const inset = MARGIN + 1.1;
+  const width = DECK_PAGE_W - inset * 2;
+  const primitives: DeckPrimitive[] = [
+    { kind: 'rect', box: { x: inset, y: 2.1, w: 1.8, h: 0.1 }, fill: style.accent },
+    plainText(quote.text, style.text, { x: inset, y: 2.65, w: width, h: 2.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 36,
+      italic: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.3,
+    }),
+  ];
+  if (quote.attribution) {
+    primitives.push(
+      plainText(quote.attribution, style.muted, { x: inset, y: 5.45, w: width, h: 0.5 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 17,
+      }),
+    );
+  }
+  return { background: style.panel, primitives };
+}
+
+/**
+ * Magazine cover: full-bleed image with an opaque paper card OVERLAPPING its
+ * lower left. Overlap is the thing that makes a layout look composed rather
+ * than assembled, and it costs nothing — paint order is already contractual.
+ * The card is opaque for the same reason the classic hero band is: we cannot
+ * inspect the image, so nothing may depend on what is behind the text.
+ */
+function edHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
+  const card: DeckBox = { x: 0.85, y: 3.75, w: 7.9, h: 2.95 };
+  const pad = 0.62;
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: 0, y: 0, w: DECK_PAGE_W, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    { kind: 'rect', box: card, fill: style.background },
+    { kind: 'rect', box: { x: card.x, y: card.y, w: 0.1, h: card.h }, fill: style.accent },
+    plainText(slide.title, style.text, { x: card.x + pad, y: card.y + 0.5, w: card.w - pad * 2, h: 1.4 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 40,
+      bold: true,
+      valign: 'middle',
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.08,
+    }),
+  );
+  if (slide.subtext) {
+    primitives.push(
+      plainText(slide.subtext, style.muted, { x: card.x + pad, y: card.y + 2.0, w: card.w - pad * 2, h: 0.6 }, {
+        fontFace: style.bodyFont,
+        fontSizePt: 18,
+      }),
+    );
+  }
+  return { background: style.background, primitives };
+}
+
+/** Image to the page edge on one side; numeral, title and body on the other. */
+function edSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: number, num: string): DeckSlideLayout {
+  const imageW = 6.1;
+  const imageOnRight = splitOrdinal % 2 === 0;
+  const imageX = imageOnRight ? DECK_PAGE_W - imageW : 0;
+  const textX = imageOnRight ? MARGIN : imageW + 0.85;
+  const textW = DECK_PAGE_W - imageW - MARGIN - 0.85;
+
+  const primitives: DeckPrimitive[] = [];
+  if (slide.image) {
+    primitives.push({
+      kind: 'image',
+      frame: { x: imageX, y: 0, w: imageW, h: DECK_PAGE_H },
+      fit: 'cover',
+      source: { url: slide.image.url, path: slide.image.path },
+    });
+  }
+  primitives.push(
+    { kind: 'rect', box: { x: textX, y: 1.35, w: 1.5, h: 0.06 }, fill: style.accent },
+    plainText(num, style.accent, { x: textX, y: 1.5, w: 2.2, h: 1.0 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 40,
+      bold: true,
+    }),
+    plainText(slide.title, style.text, { x: textX, y: 2.7, w: textW, h: 1.5 }, {
+      fontFace: style.headingFont,
+      fontSizePt: 32,
+      bold: true,
+      shrinkToFit: true,
+      lineSpacingMultiple: 1.1,
+    }),
+  );
+  if (slide.bullets?.length) {
+    primitives.push(bulletBlock(style, slide.bullets, { x: textX, y: 4.35, w: textW, h: 2.3 }, 18, 'top'));
+  }
+  return { background: style.background, primitives };
 }

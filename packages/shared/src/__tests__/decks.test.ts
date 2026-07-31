@@ -7,6 +7,7 @@ import {
   type DeckSpec,
 } from '../decks/spec.js';
 import {
+  DECK_PACK_STYLES,
   DECK_PRESET_STYLES,
   contrastRatio,
   deriveDeckStyle,
@@ -294,6 +295,60 @@ describe('[COMP:decks/layout] Deck layout engine', () => {
     expect(imageX(slides[0])).toBeGreaterThan(0); // first split: image right
     expect(imageX(slides[2])).toBe(0); // second split mirrors, despite a slide between
     expect(imageX(slides[4])).toBe(imageX(slides[0])); // third: back to the right
+  });
+
+  it('gives the editorial pack its own compositions, not a recolour', () => {
+    const base = {
+      title: 'Launch',
+      subtitle: 'Q2',
+      slides: [
+        { title: 'Agenda', bullets: ['a', 'b'] },
+        { title: 'Traction', layout: 'stats' as const, stats: [{ value: '$1M', label: 'ARR' }] },
+      ],
+    };
+    const packStyle = resolveDeckStyle(undefined, null, 'editorial');
+    const classic = layoutDeck(deckSpecSchema.parse(base), style);
+    const editorial = layoutDeck(deckSpecSchema.parse({ ...base, pack: 'editorial' }), packStyle);
+
+    // a pack is an art direction: the title slide runs a full-bleed colour field
+    expect(classic[0].background).toBe(style.background);
+    expect(editorial[0].background).toBe(packStyle.accent);
+    // the standing slide numeral is the editorial motif and has no classic equivalent
+    expect(texts(editorial[1].primitives)).toContain('01');
+    expect(texts(classic[1].primitives)).not.toContain('01');
+    // stats are ruled columns, not filled tiles
+    const panelTiles = (ps: DeckPrimitive[]) =>
+      ps.filter((p) => p.kind === 'rect' && p.fill === packStyle.panel).length;
+    expect(panelTiles(editorial[2].primitives)).toBe(0);
+  });
+
+  it('floats an opaque card over the editorial hero image', () => {
+    const packStyle = resolveDeckStyle(undefined, null, 'editorial');
+    const spec = deckSpecSchema.parse({
+      title: 'Launch',
+      pack: 'editorial',
+      slides: [{ title: 'Meet Brian', layout: 'hero', image: { url: 'https://x.example/h.png' } }],
+    });
+    const [, slide] = layoutDeck(spec, packStyle);
+    const image = slide.primitives.findIndex((p) => p.kind === 'image');
+    const card = slide.primitives.findIndex(
+      (p) => p.kind === 'rect' && p.fill === packStyle.background,
+    );
+    expect(image).toBeGreaterThanOrEqual(0);
+    expect(card).toBeGreaterThan(image); // the card paints OVER the photo
+    // opaque, for the same reason the classic band is: we cannot inspect the image
+    for (const p of slide.primitives) {
+      if (p.kind === 'rect') expect(p.transparency).toBeUndefined();
+    }
+  });
+
+  it('resolves style precedence as extracted > pack > theme', () => {
+    const extracted = { ...DECK_PRESET_STYLES.dark, accent: 'ABCDEF' };
+    expect(resolveDeckStyle('light', extracted, 'editorial')).toBe(extracted);
+    expect(resolveDeckStyle('dark', null, 'editorial').background).toBe(
+      DECK_PACK_STYLES.editorial.background,
+    );
+    expect(resolveDeckStyle('dark', null, 'classic')).toBe(DECK_PRESET_STYLES.dark);
   });
 
   it('renders negative bars below the zero baseline (true range, not clamped)', () => {
