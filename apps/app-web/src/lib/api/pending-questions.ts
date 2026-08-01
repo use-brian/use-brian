@@ -7,10 +7,9 @@
  *
  * Mirrors `apps/web/src/lib/api/pending-questions.ts` (kept as a
  * separate copy the same way the `/api/views/*` SDK is duplicated — see
- * apps/app-web/CLAUDE.md). The worker-summary fetcher is intentionally
- * dropped: the FloatingChat shows a plain "Working on it…" chip instead
- * of the multi-researcher histogram, since doc "ask for a view" turns
- * rarely fan out to background workers.
+ * apps/app-web/CLAUDE.md). The floating doc chat remains visually compact;
+ * Chat's shared-room Work Bench consumes the worker summary to show the
+ * delegated assistants that are currently active.
  *
  * Spec: docs/architecture/engine/askquestion-suspend-resume.md.
  * [COMP:app-web/pending-questions]
@@ -26,6 +25,35 @@ export type PendingQuestion = {
   expiresAt: string | null;
   createdAt: string | null;
 };
+
+export type WorkerRunSummary = {
+  total: number;
+  running: number;
+  completed: number;
+  failed: number;
+  stopped: number;
+  active: Array<{ workerId: string; description: string }>;
+};
+
+export const EMPTY_WORKER_RUN_SUMMARY: WorkerRunSummary = {
+  total: 0,
+  running: 0,
+  completed: 0,
+  failed: 0,
+  stopped: 0,
+  active: [],
+};
+
+export async function fetchWorkerRunSummary(
+  sessionId: string,
+): Promise<WorkerRunSummary> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/worker-runs`,
+  );
+  if (!res.ok) return EMPTY_WORKER_RUN_SUMMARY;
+  const body = (await res.json()) as { summary?: WorkerRunSummary };
+  return body.summary ?? EMPTY_WORKER_RUN_SUMMARY;
+}
 
 export async function fetchPendingQuestion(
   sessionId: string,

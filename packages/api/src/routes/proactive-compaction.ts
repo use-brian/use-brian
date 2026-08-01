@@ -150,6 +150,17 @@ export type ProactiveCompactionParams = {
    */
   senderNames?: ReadonlyMap<string, string>
   /**
+   * Multi-assistant rooms (multiplayer chat T9): `sender_assistant_id` →
+   * display name + the assistant RUNNING this turn. Forwarded verbatim to
+   * `toStampedMessages`, which labels foreign-assistant turns `[Name]:` so
+   * the answering model never mistakes another assistant's words for its
+   * own. Omitted everywhere else. Assembly-time only.
+   */
+  assistantVoices?: {
+    names: ReadonlyMap<string, string>
+    currentAssistantId: string
+  }
+  /**
    * Session row, needed for `compactSummary` (prepended in-memory as a
    * system message) and `compactBoundarySequence` (used as the expected
    * value for the optimistic-concurrency guard).
@@ -287,7 +298,7 @@ export async function runProactiveCompaction(
   params: ProactiveCompactionParams,
 ): Promise<ProactiveCompactionResult> {
   const {
-    sessionMessages, timezone, senderNames, session,
+    sessionMessages, timezone, senderNames, assistantVoices, session,
     tier, provider, systemPrompt,
     assistantId, userId, ownerId, channelType,
     memoryStore, episodicStore, sessionStateStore, analytics,
@@ -303,7 +314,7 @@ export async function runProactiveCompaction(
   // each DB row to one Message). We compute the split on THIS array so
   // the DB-row ↔ in-memory-index mapping stays trivial. Pairing is
   // applied separately, downstream, to each half.
-  const stamped = toStampedMessages(sessionMessages, timezone, senderNames) as Message[]
+  const stamped = toStampedMessages(sessionMessages, timezone, senderNames, assistantVoices) as Message[]
 
   // 2. Prepend the existing compact summary as a system message so the
   // model sees prior context on every turn. `findRecentSplit` treats

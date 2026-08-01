@@ -712,14 +712,18 @@ export function DocSidebar(props: Props) {
 
       {/* Operator app-bar — the Home hub's second tier (Page / Tasks / CRM /
           Feed / Browsers / Chat + the workspace's custom apps), between the
-          icon row and the surface body. WHICH apps show is workspace config. Clicking an app
-          navigates AND persists the per-workspace selection the Home icon
-          resumes. It also carries "My Browser" as a trailing square: that is
-          workspace-wide chrome rather than an operator app, so the strip is
-          rendered unconditionally and `active` may be null (Brain / Studio /
-          Workflow), which hides the app switcher while keeping the browser
-          button reachable from every surface. See operator-app-bar.tsx /
-          lib/operator-apps.ts. */}
+          icon row and the surface body. WHICH apps show, and in WHAT ORDER, is
+          workspace config (`home_apps`, dragged in Studio → Mini apps).
+          Clicking an app navigates AND persists the per-workspace selection the
+          Home icon resumes.
+
+          `active` is null off the operator family (Brain / Studio / Workflow)
+          and the bar then renders NOTHING — there is nothing to switch between
+          there. It once stayed alive to carry a "My Browser" square; that moved
+          to the Browsers surface's own top bar (computer-use.md §5). The
+          consequence worth knowing: an admin configuring the strip in Studio
+          cannot see it, which is why that tab draws its own preview. See
+          operator-app-bar.tsx / lib/operator-apps.ts. */}
       <OperatorAppBar
         workspaceId={workspaceId}
         active={activeOperatorApp}

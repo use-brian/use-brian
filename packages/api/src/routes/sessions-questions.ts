@@ -274,11 +274,11 @@ export function sessionQuestionRoutes(opts: SessionQuestionRouteOptions): Router
   })
 
   // GET /api/sessions/:sessionId/worker-runs — live progress summary.
-  // Polled by the web client at ~2s while the resume worker drives the
-  // continuation turn after an answer / cancel. The shape is a status
-  // histogram + descriptions of currently-running workers so the UI can
-  // render "3 of 5 researchers still working" with per-worker hover
-  // text. Workspace-scoped via the session-ownership gate; the store
+  // Polled by the web clients at ~2s while a worker-backed turn is live
+  // (including app-web's shared-room Work Bench). The shape is a status
+  // histogram + descriptions of currently-running workers so each surface
+  // can show who is still working and on what. Workspace-scoped via the
+  // session-ownership gate; the store
   // itself is system-bypass (workers are server-side infra). See
   // docs/architecture/engine/askquestion-suspend-resume.md.
   router.get('/:sessionId/worker-runs', async (req, res) => {

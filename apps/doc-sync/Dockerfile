@@ -11,6 +11,7 @@ COPY packages/brian-kb/package.json packages/brian-kb/tsconfig.json ./packages/b
 COPY packages/core/package.json packages/core/tsconfig.json ./packages/core/
 COPY packages/channels/package.json packages/channels/tsconfig.json ./packages/channels/
 COPY packages/api/package.json packages/api/tsconfig.json ./packages/api/
+COPY packages/brian-app/package.json packages/brian-app/tsconfig.json ./packages/brian-app/
 COPY packages/doc-model/package.json packages/doc-model/tsconfig.json ./packages/doc-model/
 COPY apps/doc-sync/package.json apps/doc-sync/tsconfig.json ./apps/doc-sync/
 
@@ -24,6 +25,7 @@ COPY packages/brian-kb/src ./packages/brian-kb/src
 COPY packages/core/src ./packages/core/src
 COPY packages/channels/src ./packages/channels/src
 COPY packages/api/src ./packages/api/src
+COPY packages/brian-app/src ./packages/brian-app/src
 COPY packages/doc-model/src ./packages/doc-model/src
 COPY apps/doc-sync/src ./apps/doc-sync/src
 
@@ -45,6 +47,8 @@ COPY packages/brian-kb/package.json ./packages/brian-kb/
 COPY packages/core/package.json ./packages/core/
 COPY packages/channels/package.json ./packages/channels/
 COPY packages/api/package.json ./packages/api/
+COPY packages/brian-app/package.json ./packages/brian-app/
+COPY packages/brian-app/bin ./packages/brian-app/bin
 COPY packages/doc-model/package.json ./packages/doc-model/
 COPY apps/doc-sync/package.json ./apps/doc-sync/
 
@@ -55,6 +59,7 @@ COPY --from=build /app/packages/brian-kb/dist ./packages/brian-kb/dist
 COPY --from=build /app/packages/core/dist ./packages/core/dist
 COPY --from=build /app/packages/channels/dist ./packages/channels/dist
 COPY --from=build /app/packages/api/dist ./packages/api/dist
+COPY --from=build /app/packages/brian-app/dist ./packages/brian-app/dist
 COPY --from=build /app/packages/doc-model/dist ./packages/doc-model/dist
 COPY --from=build /app/apps/doc-sync/dist ./apps/doc-sync/dist
 

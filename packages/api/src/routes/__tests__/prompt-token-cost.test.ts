@@ -51,7 +51,7 @@ afterAll(() => {
     '',
     '══════════════════════════════════════════════════════════════════════',
     '  Per-turn input token cost (approximation: chars ÷ 3.5)',
-    '  Real tool schemas via Zod→JSON transform; real buildFullSystemPrompt.',
+    '  Real tool schemas via Zod→JSON transform; real provenance-aware prompt assembly.',
     '══════════════════════════════════════════════════════════════════════',
     renderAsciiTable(results),
     '',
@@ -106,10 +106,13 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
     // proposeWorkflow's no-pre-asserted-outcomes authoring rule. All three are
     // load-bearing honesty prose (docs/plans/assistant-ability-audit.md §3);
     // fresh-user baseline measured at ~4451.
-    expect(m.promptTokens).toBeLessThan(4_600)
+    // 2026-08-01: bumped 4_600 → 5_200 for the engine-owned runtime
+    // provenance boundary (~330 tokens). It prevents vague user references
+    // from resolving against hidden application metadata.
+    expect(m.promptTokens).toBeLessThan(5_200)
     expect(m.promptTokens).toBeGreaterThan(2_000)
     expect(m.totalTokens).toBeGreaterThan(2_800)
-    expect(m.totalTokens).toBeLessThan(6_000)
+    expect(m.totalTokens).toBeLessThan(6_500)
   })
 
   it('light user (~10 memories, Calendar connector, no skills)', () => {
@@ -150,7 +153,8 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
     // (2026-05-25): power-legacy total = ~11,634 tokens; power total =
     // ~6,379 tokens; saved per turn = ~5,255 tokens (~45%).
     expect(m.totalTokens).toBeGreaterThan(9_000)
-    expect(m.totalTokens).toBeLessThan(14_000)
+    // The provenance boundary raises every scenario by ~330 prompt tokens.
+    expect(m.totalTokens).toBeLessThan(15_000)
     // Compare against `power` for the documented saving.
     const post = results.find((r) => r.id === 'power')
     if (post) {
@@ -173,10 +177,11 @@ describe('[COMP:prompt/token-cost] Per-turn input token cost — realistic user 
     expect(m.totalTokens).toBeLessThan(10_000)
   })
 
-  it('reply-context turn — adds reply block', () => {
+  it('reply-context turn — keeps the visible reply out of trusted system context', () => {
     const m = run('reply-context')
-    expect(m.systemPrompt).toContain('# Reply context')
-    expect(m.systemPrompt).toContain('you (the assistant)')
+    expect(m.systemPrompt).not.toContain('# Reply context')
+    expect(m.userVisibleContext).toContain('# Reply context')
+    expect(m.userVisibleContext).toContain('you (the assistant)')
     expect(m.totalTokens).toBeLessThan(10_000)
   })
 

@@ -43,6 +43,7 @@ function msg(seq: number, role: SessionMessage['role'], content: SessionMessage[
     topicConfidence: null,
     channelMessageId: null,
     senderUserId: null,
+    senderAssistantId: null,
     attachments: [],
   }
 }

@@ -193,10 +193,12 @@ export function AssistantAvatar({
   id: string;
   name: string;
   iconSeed?: number;
-  size?: "sm" | "md" | "lg" | "xl";
+  size?: "xs" | "sm" | "md" | "lg" | "xl";
 }) {
   const seed = iconSeed ?? Array.from(id).reduce((h, c) => ((h << 5) - h + c.charCodeAt(0)) | 0, 0);
-  const s = size === "sm" ? 28 : size === "md" ? 40 : size === "lg" ? 56 : 96;
+  // "xs" is the list-row identity marker (Chat rail) — big enough to read the
+  // creature's silhouette + palette, small enough for a text-sm row.
+  const s = size === "xs" ? 18 : size === "sm" ? 28 : size === "md" ? 40 : size === "lg" ? 56 : 96;
 
   return (
     <svg

@@ -1,15 +1,26 @@
 import { Router } from 'express'
 import { findOrCreateUser, getDefaultAssistant, getUserAssistant, getUserProfilesByIds, getWorkspacePrimaryAssistant } from '../db/users.js'
-import { createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessages, isSharedChatSession, renameSession } from '../db/sessions.js'
+import { addSessionMessage, createWorkspaceChatSession, findSessionByChannel, findSessionById, getSessionMessages, isSharedChatSession, renameSession } from '../db/sessions.js'
 import { query } from '../db/client.js'
 import { resolveUser } from './route-helpers.js'
 import { getWorkspaceRoleSystem, getWorkspaceMembershipWithClearanceSystem } from '../db/workspace-store.js'
 import { canRead } from '@use-brian/core'
 import {
+  type PublishSessionEvent,
   type SessionEvent,
   type SubscribeSessionEvents,
+  noopPublishSessionEvent,
   noopSubscribeSessionEvents,
 } from '../session-event-port.js'
+import {
+  addSessionPin,
+  listSessionPins,
+  removeSessionPin,
+  PIN_KINDS,
+  PIN_INSTRUCTION_MAX_CHARS,
+  type PinKind,
+} from '../db/session-pins-store.js'
+import { resolveSessionPinLabels } from '../resolve-session-pins.js'
 
 /** A session whose read-access we gate (the subset of fields the gate reads). */
 type GatedSession = {
@@ -70,10 +81,35 @@ export type SessionRouteOptions = {
    * the relay no-ops. See oss-local-brain-wedge.md §12.5.
    */
   subscribeSessionEvents?: SubscribeSessionEvents
+  /**
+   * Live session-event bus publish — the room post path (`POST /:id/messages`)
+   * emits `user_message_saved` here so every open viewer fans the post in
+   * live (multiplayer chat T2). No-op when unset (unit tests).
+   */
+  publishSessionEvent?: PublishSessionEvent
+  /**
+   * Room ambient-capture hook (multiplayer chat P2): called fire-and-forget
+   * with every accepted room post AFTER it is persisted + fanned out, so
+   * silent teammate exchange reaches the brain-ingest pipeline. Absent = no
+   * capture (unit tests; hosts that haven't wired the ingestor).
+   */
+  onRoomPost?: (input: {
+    sessionId: string
+    workspaceId: string
+    assistantId: string
+    senderUserId: string
+    senderName: string | null
+    text: string
+    effectiveClearance: string | null
+  }) => void
 }
+
+/** Max characters accepted for one room post (text-only in P1 — T12). */
+const ROOM_POST_MAX_CHARS = 32_000
 
 export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
   const subscribeSessionEvents = opts.subscribeSessionEvents ?? noopSubscribeSessionEvents
+  const publishSessionEvent = opts.publishSessionEvent ?? noopPublishSessionEvent
   const router = Router()
 
   router.get('/', async (req, res) => {
@@ -155,6 +191,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         title: s.title ?? 'New Chat',
         channelId: s.channelId,
         lastActive: s.lastActiveAt,
+        // The minting surface (or null pre-migration). The Chat app's rail
+        // splits on it — chat-origin rows are "Chats", the rest are the
+        // dock's ambient threads under "Other conversations".
+        appOrigin: s.appOrigin,
       })))
     } catch (err) {
       console.error('Sessions list error:', err)
@@ -205,11 +245,13 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         id: string; title: string | null; channelId: string
         lastActiveAt: Date; status: string
         starterUserId: string; effectiveClearance: string | null
+        assistantId: string
       }>(
         `SELECT s.id, s.title, s.channel_id AS "channelId",
                 s.last_active_at AS "lastActiveAt", s.status,
                 s.user_id AS "starterUserId",
-                s.effective_clearance AS "effectiveClearance"
+                s.effective_clearance AS "effectiveClearance",
+                s.assistant_id AS "assistantId"
            FROM sessions s
            JOIN assistants a ON a.id = s.assistant_id
           WHERE a.workspace_id = $1
@@ -243,6 +285,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         startedByUserId: s.starterUserId,
         startedByName: profiles.get(s.starterUserId)?.name ?? null,
         startedByAvatarUrl: profiles.get(s.starterUserId)?.avatarUrl ?? null,
+        // The room's bound assistant — the client's avatar / mention / Ask
+        // labels resolve from it (rooms may bind any workspace assistant at
+        // creation, not just the primary).
+        assistantId: s.assistantId,
       })))
     } catch (err) {
       console.error('Workspace sessions list error:', err)
@@ -269,15 +315,34 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
       const user = await resolveUser(jwtUserId)
       if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
 
-      const { workspaceId } = req.body as { workspaceId?: string }
+      const { workspaceId, assistantId } = req.body as {
+        workspaceId?: string
+        assistantId?: string
+      }
       if (!workspaceId) {
         res.status(400).json({ error: 'Missing workspaceId' })
         return
       }
 
-      // `getWorkspacePrimaryAssistant` is membership-checked, so this single
-      // call is both "which assistant" and "may this user be here".
-      const assistant = await getWorkspacePrimaryAssistant(user.id, workspaceId)
+      // Which assistant the room binds to. The starter may pick ANY
+      // workspace assistant at creation (the binding stays per-room for its
+      // lifetime — per-turn multi-assistant routing is the separate P3
+      // work); omitted → the workspace primary. `getUserAssistant` is the
+      // access check; the workspace guard stops a stale client id from
+      // binding another workspace's assistant into this room.
+      // `getWorkspacePrimaryAssistant` is membership-checked, so the default
+      // path is both "which assistant" and "may this user be here".
+      let assistant: { id: string; workspaceId?: string | null } | null = null
+      if (assistantId) {
+        const candidate = await getUserAssistant(user.id, assistantId)
+        if (!candidate || candidate.workspaceId !== workspaceId) {
+          res.status(403).json({ error: 'Assistant not available in this workspace' })
+          return
+        }
+        assistant = candidate
+      } else {
+        assistant = await getWorkspacePrimaryAssistant(user.id, workspaceId)
+      }
       if (!assistant) {
         res.status(403).json({ error: 'Not a member of this workspace' })
         return
@@ -302,6 +367,7 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         lastActive: session.lastActiveAt,
         status: session.status,
         startedByUserId: user.id,
+        assistantId: session.assistantId,
       })
     } catch (err) {
       console.error('Workspace session create error:', err)
@@ -581,6 +647,10 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
         senderUserId: m.senderUserId,
         senderName: m.senderUserId ? profiles.get(m.senderUserId)?.name ?? null : null,
         senderAvatarUrl: m.senderUserId ? profiles.get(m.senderUserId)?.avatarUrl ?? null : null,
+        // The answering assistant per reply (multi-assistant rooms, T9) —
+        // the client resolves the avatar from its roster. Null on human rows
+        // and pre-390 history (rendered as the session's bound assistant).
+        senderAssistantId: m.senderAssistantId,
         // Outbound file attachments (sendFile, migration 273) — rendered
         // as file cards. Omitted when empty to keep the payload lean.
         attachments: m.attachments.length > 0 ? m.attachments : undefined,
@@ -588,6 +658,254 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     } catch (err) {
       console.error('Messages load error:', err)
       res.status(500).json({ error: 'Failed to load messages' })
+    }
+  })
+
+  /**
+   * POST /api/sessions/:id/messages — the room POST path (multiplayer chat
+   * T2). Body: { message: string }.
+   *
+   * Persists ONE `role='user'` row with `sender_user_id`, emits
+   * `user_message_saved` on the per-session bus so every open viewer fans the
+   * post in live, and runs NO turn — posting is free (D2); the assistant
+   * speaks only when addressed, via `POST /api/chat` (T3). Never busy-gated:
+   * a post during a live turn is accepted and lands as a durable row the next
+   * coalesced assembly reads (T4; rows-not-buffers keeps the §7 steering door
+   * open).
+   *
+   * Shared chat sessions ONLY (`isSharedChatSession`) — a personal chat has
+   * no silent-post semantics, and doc threads / feed drafts keep their own
+   * lifecycle. Write access = read access (`gateSessionRead`): whoever can
+   * read the room can post, attributed.
+   */
+  router.post('/:id/messages', async (req, res) => {
+    try {
+      const jwtUserId = (req as { userId?: string }).userId
+      const user = await resolveUser(jwtUserId)
+      if (!user) { res.status(401).json({ error: 'Unauthorized' }); return }
+
+      const raw = (req.body as { message?: unknown })?.message
+      const text = typeof raw === 'string' ? raw.trim() : ''
+      if (!text) {
+        res.status(400).json({ error: 'Missing message' })
+        return
+      }
+      if (text.length > ROOM_POST_MAX_CHARS) {
+        res.status(400).json({ error: 'Message too long' })
+        return
+      }
+
+      const session = await findSessionById(req.params.id)
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' })
+        return
+      }
+      if (!isSharedChatSession(session)) {
+        res.status(403).json({ error: 'Posting is only available in workspace chats' })
+        return
+      }
+      const denied = await gateSessionRead(user.id, session)
+      if (denied) {
+        res.status(denied.status).json({ error: denied.error })
+        return
+      }
+
+      const stored = await addSessionMessage({
+        sessionId: session.id,
+        role: 'user',
+        content: [{ type: 'text', text }],
+        senderUserId: user.id,
+      })
+      publishSessionEvent({
+        kind: 'user_message_saved',
+        sessionId: session.id,
+        payload: {
+          id: stored.id,
+          sequenceNum: stored.sequenceNum,
+          senderUserId: user.id,
+          content: stored.content,
+        },
+      })
+
+      // Ambient brain capture (P2) — fire-and-forget so a slow or failing
+      // ingest path can never delay the post's 201. The hook resolves the
+      // room's workspace itself when we can't cheaply provide it here.
+      if (opts.onRoomPost) {
+        const wsRow = await query<{ workspaceId: string | null }>(
+          `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+          [session.assistantId],
+        ).catch(() => null)
+        const workspaceId = wsRow?.rows[0]?.workspaceId
+        if (workspaceId) {
+          try {
+            opts.onRoomPost({
+              sessionId: session.id,
+              workspaceId,
+              assistantId: session.assistantId,
+              senderUserId: user.id,
+              senderName: user.name ?? null,
+              text,
+              effectiveClearance: session.effectiveClearance,
+            })
+          } catch (err) {
+            console.error('[sessions] room post capture hook failed:', err)
+          }
+        }
+      }
+
+      res.status(201).json({
+        id: stored.id,
+        sequenceNum: stored.sequenceNum,
+        timestamp: stored.createdAt,
+      })
+    } catch (err) {
+      console.error('Room post error:', err)
+      res.status(500).json({ error: 'Failed to post message' })
+    }
+  })
+
+  // ── Room pins (multiplayer chat P1b, T14/D10) ──────────────────────
+  //
+  // Pins are the room's working frame — references to brain primitives,
+  // URLs, and freeform instructions the assistant assembles inside every
+  // turn (resolution + clearance live at assembly, `resolve-session-pins`).
+  // Write access = post access (`gateSessionRead` on a shared chat), so
+  // whoever can talk in the room can pin, attributed. Changes emit
+  // `pins_changed` on the per-session bus so every viewer's chip row
+  // refetches (signals, never data). Session-generic on the storage side;
+  // shared chat sessions only at the route for now (the room surface is the
+  // first renderer).
+
+  const gatePinAccess = async (req: {
+    userId?: string
+    params: Record<string, string | string[] | undefined>
+  }): Promise<
+    | { ok: true; userId: string; sessionId: string }
+    | { ok: false; status: number; error: string }
+  > => {
+    const jwtUserId = req.userId
+    const user = await resolveUser(jwtUserId)
+    if (!user) return { ok: false, status: 401, error: 'Unauthorized' }
+    const session = await findSessionById(String(req.params.id ?? ''))
+    if (!session) return { ok: false, status: 404, error: 'Session not found' }
+    if (!isSharedChatSession(session)) {
+      return { ok: false, status: 403, error: 'Pins are only available in workspace chats' }
+    }
+    const denied = await gateSessionRead(user.id, session)
+    if (denied) return { ok: false, status: denied.status, error: denied.error }
+    return { ok: true, userId: user.id, sessionId: session.id }
+  }
+
+  router.get('/:id/pins', async (req, res) => {
+    try {
+      const gate = await gatePinAccess(req)
+      if (!gate.ok) { res.status(gate.status).json({ error: gate.error }); return }
+      const pins = await listSessionPins(gate.sessionId)
+      // Chip labels resolve under the SESSION's clearance ceiling — the read
+      // gate already guarantees every reader is at/above it, so a label can
+      // never out-leak the room. `null` label = unavailable chip state.
+      const session = await findSessionById(gate.sessionId)
+      const wsRow = await query<{ workspaceId: string | null }>(
+        `SELECT workspace_id AS "workspaceId" FROM assistants WHERE id = $1`,
+        [session?.assistantId],
+      )
+      const workspaceId = wsRow.rows[0]?.workspaceId
+      const labels = workspaceId
+        ? await resolveSessionPinLabels(pins, workspaceId, session?.effectiveClearance ?? null)
+        : new Map<string, string | null>()
+      const profiles = await getUserProfilesByIds(
+        pins.map((p) => p.addedByUserId).filter((id): id is string => Boolean(id)),
+      )
+      res.json(pins.map((p) => ({
+        id: p.id,
+        kind: p.kind,
+        refId: p.refId,
+        url: p.url,
+        text: p.text,
+        label: labels.get(p.id) ?? null,
+        position: p.position,
+        addedByUserId: p.addedByUserId,
+        addedByName: p.addedByUserId ? profiles.get(p.addedByUserId)?.name ?? null : null,
+        createdAt: p.createdAt,
+      })))
+    } catch (err) {
+      console.error('Pins list error:', err)
+      res.status(500).json({ error: 'Failed to load pins' })
+    }
+  })
+
+  router.post('/:id/pins', async (req, res) => {
+    try {
+      const gate = await gatePinAccess(req)
+      if (!gate.ok) { res.status(gate.status).json({ error: gate.error }); return }
+
+      const body = req.body as { kind?: string; refId?: string; url?: string; text?: string }
+      const kind = body.kind as PinKind
+      if (!kind || !(PIN_KINDS as readonly string[]).includes(kind)) {
+        res.status(400).json({ error: 'Unknown pin kind' })
+        return
+      }
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      let refId: string | null = null
+      let url: string | null = null
+      let text: string | null = null
+      if (kind === 'url') {
+        const raw = typeof body.url === 'string' ? body.url.trim() : ''
+        let parsed: URL | null = null
+        try { parsed = new URL(raw) } catch { parsed = null }
+        if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || raw.length > 2048) {
+          res.status(400).json({ error: 'Invalid URL' })
+          return
+        }
+        url = raw
+      } else if (kind === 'instruction') {
+        const raw = typeof body.text === 'string' ? body.text.trim() : ''
+        if (!raw) { res.status(400).json({ error: 'Missing instruction text' }); return }
+        text = raw.slice(0, PIN_INSTRUCTION_MAX_CHARS)
+      } else {
+        const raw = typeof body.refId === 'string' ? body.refId.trim() : ''
+        if (!UUID_RE.test(raw)) {
+          res.status(400).json({ error: 'Missing or invalid refId' })
+          return
+        }
+        refId = raw
+      }
+
+      const pin = await addSessionPin({
+        sessionId: gate.sessionId,
+        kind,
+        refId,
+        url,
+        text,
+        addedByUserId: gate.userId,
+      })
+      publishSessionEvent({
+        kind: 'pins_changed',
+        sessionId: gate.sessionId,
+        payload: { byUserId: gate.userId },
+      })
+      res.status(201).json({ id: pin.id, kind: pin.kind, position: pin.position })
+    } catch (err) {
+      console.error('Pin add error:', err)
+      res.status(500).json({ error: 'Failed to add pin' })
+    }
+  })
+
+  router.delete('/:id/pins/:pinId', async (req, res) => {
+    try {
+      const gate = await gatePinAccess(req)
+      if (!gate.ok) { res.status(gate.status).json({ error: gate.error }); return }
+      const removed = await removeSessionPin(gate.sessionId, String(req.params.pinId))
+      if (!removed) { res.status(404).json({ error: 'Pin not found' }); return }
+      publishSessionEvent({
+        kind: 'pins_changed',
+        sessionId: gate.sessionId,
+        payload: { byUserId: gate.userId },
+      })
+      res.json({ ok: true })
+    } catch (err) {
+      console.error('Pin remove error:', err)
+      res.status(500).json({ error: 'Failed to remove pin' })
     }
   })
 
@@ -635,6 +953,64 @@ export function sessionRoutes(opts: SessionRouteOptions = {}): Router {
     }
 
     send('status', { status: session.status })
+
+    // Workspace-shared chat sessions get FOLLOW mode (multiplayer chat T13):
+    // the stream stays open regardless of turn state and relays the room's
+    // live events — teammate posts (`user_message_saved`), committed turns
+    // (`assistant_message_saved`), turn lifecycle (`turn_started` /
+    // `turn_completed`), the throttled text/reasoning snapshot (`snapshot`),
+    // the discrete activity mirror (`activity`: tool steps, research status,
+    // pending tool confirmations). Events
+    // are signals + capped data — the client refetches the persisted
+    // transcript at settle. Clearance is already enforced by the
+    // `gateSessionRead` above. A 25s comment ping defeats proxy idle
+    // timeouts.
+    if (isSharedChatSession(session)) {
+      let closed = false
+      const unsubscribeRoom = subscribeSessionEvents({
+        sessionId: req.params.id,
+        userId: jwtUserId,
+        name: null,
+        cb: (event: SessionEvent) => {
+          switch (event.kind) {
+            case 'user_message_saved':
+              send('user_message_saved', event.payload)
+              break
+            case 'assistant_message_saved':
+              send('assistant_message_saved', event.payload)
+              break
+            case 'turn_started':
+              send('turn_started', event.payload)
+              break
+            case 'turn_stream':
+              send('snapshot', event.payload)
+              break
+            case 'turn_activity':
+              send('activity', event.payload)
+              break
+            case 'turn_completed':
+              send('turn_completed', event.payload)
+              break
+            case 'pins_changed':
+              send('pins_changed', event.payload)
+              break
+            default:
+              break
+          }
+        },
+      })
+      const ping = setInterval(() => {
+        if (!res.writableEnded) res.write(': ping\n\n')
+      }, 25_000)
+      ping.unref?.()
+      req.on('close', () => {
+        if (closed) return
+        closed = true
+        clearInterval(ping)
+        unsubscribeRoom()
+      })
+      return
+    }
 
     // Nothing in flight — tell the client immediately so it stops showing a
     // "working…" state and closes the stream.

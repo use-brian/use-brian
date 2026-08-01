@@ -52,8 +52,11 @@ export {
   isBuiltinHomeAppKey,
 } from "@use-brian/shared/home-apps";
 
-/** The built-in operator apps, in app-bar order. Page is the historical
- *  default; Feed holds the 4th slot, Browsers the 5th, Chat the 6th. */
+/** The built-in operator apps, in DEFAULT strip order. Page is the historical
+ *  default; Feed holds the 4th slot, Browsers the 5th, Chat the 6th. This is
+ *  the order a workspace starts at and the order the Studio tab lists the
+ *  hidden apps in — the order the strip actually renders is whatever
+ *  `home_apps` stores, which an admin can drag (`reorderHomeApps`). */
 export const OPERATOR_APP_KEYS = BUILTIN_HOME_APP_KEYS;
 export type OperatorAppKey = HomeAppKey;
 
@@ -136,6 +139,32 @@ export function homeAppFromPathname(
   const customId = customAppIdFromPathname(pathname);
   if (customId) return `custom:${customId}`;
   return operatorAppFromSurface(surface);
+}
+
+/**
+ * Move `from` into `to`'s slot, keeping every other entry's relative order.
+ *
+ * The strip renders `home_apps` in stored array order end to end — nothing
+ * downstream sorts or re-derives it — so a reorder IS just a permutation of
+ * that array. This lives here rather than in the Studio page because two
+ * surfaces read it: the sortable list commits with it on drop, and the Home
+ * preview strip calls it on every drag-over to show where the app would land.
+ *
+ * Either entry missing (a stale drag id) returns a copy unchanged, so a
+ * mismatched drop can never drop or duplicate an app.
+ */
+export function reorderHomeApps<T extends HomeAppEntry>(
+  entries: readonly T[],
+  from: T,
+  to: T,
+): T[] {
+  const next = [...entries];
+  const fromIndex = next.indexOf(from);
+  const toIndex = next.indexOf(to);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return next;
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
 }
 
 /** Per-workspace sticky-selection localStorage key. */
