@@ -14,8 +14,8 @@
  * # What's real and what's approximate
  *
  * Real:
- * - `buildFullSystemPrompt` — same assembly chat.ts / telegram.ts /
- *   channel-pipeline.ts emit.
+ * - `buildFullSystemPrompt` / `buildSplitSystemPrompt` — same provenance-aware
+ *   assembly chat.ts and channel-pipeline.ts emit.
  * - `buildMemoryContext` — same call shape those routes feed it.
  * - Tool schemas loaded from the actual factories (`createBaseTools`,
  *   `createGoogleCalendarTools`, `createGmailTools`,
@@ -62,7 +62,12 @@ import {
   type McpServerConfig,
   type McpSettingsStore,
 } from '@use-brian/core'
-import { buildFullSystemPrompt } from './_prompt-builder.js'
+import {
+  attachUserVisibleContext,
+  buildFullSystemPrompt,
+  buildSplitSystemPrompt,
+  formatPrivateRuntimeContext,
+} from './_prompt-builder.js'
 
 // ── Token helpers ────────────────────────────────────────────────
 
@@ -258,6 +263,8 @@ function minimalPromptArgs() {
 
 export type ScenarioBuild = {
   systemPrompt: string
+  /** Ephemeral visible-context prefix carried with the newest user turn. */
+  userVisibleContext?: string
   tools: Tool[]
 }
 
@@ -450,8 +457,8 @@ export const scenarios: Scenario[] = [
     id: 'reply-context',
     label: 'reply-context turn',
     note: 'Light user + reply block (user replied to a specific earlier message).',
-    build: () => ({
-      systemPrompt: buildFullSystemPrompt({
+    build: () => {
+      const split = buildSplitSystemPrompt({
         ...minimalPromptArgs(),
         memoryContext: buildMemoryContext({
           identityMemories: [identityMem('idaaaaaa', 'Based in Tokyo')],
@@ -462,9 +469,28 @@ export const scenarios: Scenario[] = [
           text: 'Yes, I confirmed the booking for Friday 7pm.',
           fromAssistant: true,
         },
-      }),
-      tools: toolBundles.base(),
-    }),
+      })
+      const enveloped = attachUserVisibleContext(
+        [{ role: 'user', content: '' }],
+        split.userVisibleContext,
+      )
+      if (!enveloped) throw new Error('reply-context scenario could not attach visible context')
+      const content = enveloped[0]?.content ?? ''
+      const userVisibleContext = typeof content === 'string'
+        ? content
+        : content
+          .filter((block) => block.type === 'text')
+          .map((block) => block.text)
+          .join('')
+      return {
+        systemPrompt: [
+          split.stablePrompt,
+          formatPrivateRuntimeContext(split.privateRuntimeContext),
+        ].filter(Boolean).join('\n\n'),
+        userVisibleContext,
+        tools: toolBundles.base(),
+      }
+    },
   },
   {
     id: 'resume-topic',
@@ -505,22 +531,29 @@ export type Measurement = {
   totalTokens: number
   /** The rendered system prompt — kept for assertion-style regression tests. */
   systemPrompt: string
+  /** The rendered user-visible prefix, when the scenario has one. */
+  userVisibleContext: string
 }
 
 export function measureScenario(s: Scenario): Measurement {
   const built = s.build()
   const toolsPayload = JSON.stringify(toDeclarations(built.tools))
+  const userVisibleContext = built.userVisibleContext ?? ''
+  const promptPayload = [built.systemPrompt, userVisibleContext]
+    .filter(Boolean)
+    .join('\n\n')
   return {
     id: s.id,
     label: s.label,
     note: s.note,
     toolCount: built.tools.length,
-    promptChars: built.systemPrompt.length,
+    promptChars: promptPayload.length,
     toolsChars: toolsPayload.length,
-    promptTokens: approxTokens(built.systemPrompt),
+    promptTokens: approxTokens(promptPayload),
     toolTokens: approxTokens(toolsPayload),
-    totalTokens: approxTokens(built.systemPrompt) + approxTokens(toolsPayload),
+    totalTokens: approxTokens(promptPayload) + approxTokens(toolsPayload),
     systemPrompt: built.systemPrompt,
+    userVisibleContext,
   }
 }
 

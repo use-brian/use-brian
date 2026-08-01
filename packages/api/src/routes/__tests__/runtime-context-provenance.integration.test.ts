@@ -49,7 +49,11 @@ describeIf('[COMP:prompt/builder] Runtime-context provenance (live Gemini)', () 
         model: 'gemini-flash',
         systemPrompt,
         messages: messages!,
-        maxTokens: 200,
+        // Gemini 3's reasoning tokens share maxOutputTokens with the visible
+        // answer. Keep LOW thinking and enough headroom for the full Cantonese
+        // translation so this regression measures provenance, not truncation.
+        maxTokens: 1_024,
+        thinkingLevel: 'low',
         temperature: 0,
       }),
     )
