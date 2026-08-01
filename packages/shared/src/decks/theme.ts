@@ -21,6 +21,35 @@ export interface DeckStyle {
   chartCategorical: string[];
   headingFont: string;
   bodyFont: string;
+  /**
+   * Multiplier applied to every type size a pack emits, so a derived reference
+   * can set the deck's typographic WEIGHT without flattening the pack.
+   *
+   * A pack uses a dozen carefully-related sizes; mapping those onto a five-step
+   * token scale would collapse the hierarchy it depends on. Scaling preserves
+   * every ratio and only moves the whole system. Absent = 1 (no change).
+   */
+  typeScale?: number;
+  /**
+   * Whether the reference sets its headings in caps. Only ever used to SUPPRESS
+   * a pack's own caps treatment (`false` = "my reference isn't shouty"); it
+   * never adds caps to a pack that didn't ask for them, because forcing caps
+   * onto a serif face looks worse than leaving it alone.
+   */
+  headingCaps?: boolean;
+}
+
+/**
+ * The headline size the packs are tuned around. A derived reference's largest
+ * step is expressed relative to this to get `typeScale`. All three packs sit in
+ * the 54-62pt range, so this is an approximation with a known small error, not
+ * a measurement.
+ */
+export const DECK_CANONICAL_HEADLINE_PT = 54;
+
+/** Clamped so a bad derivation cannot produce absurd type. */
+export function deckTypeScaleFor(headlinePt: number): number {
+  return Math.min(Math.max(headlinePt / DECK_CANONICAL_HEADLINE_PT, 0.75), 1.25);
 }
 
 /**

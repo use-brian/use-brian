@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import { describe, expect, it } from 'vitest';
-import { deckSpecSchema, DECK_PRESET_STYLES } from '@use-brian/shared/decks';
+import { deckSpecSchema, layoutDeck, resolveDeckStyle, DECK_PRESET_STYLES } from '@use-brian/shared/decks';
 import { isPrivateAddress } from '../image-resolve.js';
 import { derivePackTokens } from '../pack-derive.js';
 import { writeDeckPptx } from '../pptx-writer.js';
@@ -310,5 +310,49 @@ describe('[COMP:decks/pack-derive] Pack derivation from a reference', () => {
 
   it('refuses a non-pptx rather than returning a confident default', async () => {
     await expect(derivePackTokens(Buffer.from('PK not really a deck'))).rejects.toThrow();
+  });
+
+  it('carries type scale and caps on the style, and applies them to the layout', async () => {
+    const { tokens } = await derivePackTokens(await writeDeckPptx(deck('minimal'), null));
+    expect(tokens.style.typeScale).toBeGreaterThan(0);
+    expect(tokens.style.headingCaps).toBe(true);
+
+    // the scale must actually reach the rendered type, or derivation is decorative
+    const spec = deckSpecSchema.parse({ title: 'Scaled', slides: [{ title: 'A slide', bullets: ['one'] }] });
+    const plain = layoutDeck(spec, { ...tokens.style, typeScale: 1 });
+    const scaled = layoutDeck(spec, { ...tokens.style, typeScale: 0.8 });
+    const firstSize = (l: typeof plain) =>
+      (l[1].primitives.find((p) => p.kind === 'text') as { fontSizePt: number }).fontSizePt;
+    expect(firstSize(scaled)).toBeLessThan(firstSize(plain));
+    expect(firstSize(scaled)).toBe(Math.round(firstSize(plain) * 0.8));
+  });
+
+  it('suppresses a pack caps treatment when the reference does not shout', async () => {
+    const spec = deckSpecSchema.parse({ title: 'Quiet Deck', pack: 'minimal', slides: [{ title: 'S', bullets: ['a'] }] });
+    const style = resolveDeckStyle(undefined, null, 'minimal');
+    const shouty = layoutDeck(spec, style);
+    const quiet = layoutDeck(spec, { ...style, headingCaps: false });
+    const coverText = (l: typeof shouty) =>
+      (l[0].primitives.find((p) => p.kind === 'text') as { paragraphs: { runs: { text: string }[] }[] }).paragraphs[0]
+        .runs[0].text;
+    expect(coverText(shouty)).toBe('QUIET DECK');
+    expect(coverText(quiet)).toBe('Quiet Deck');
+  });
+
+  it('degrades to the theme when a reference has no readable slides', async () => {
+    // derivation must never fail where plain extraction would have succeeded
+    const zip = new JSZip();
+    zip.file(
+      'ppt/theme/theme1.xml',
+      `<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements>
+        <a:clrScheme name="x"><a:dk1><a:srgbClr val="101010"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>
+        <a:accent1><a:srgbClr val="CC3366"/></a:accent1></a:clrScheme>
+        <a:fontScheme name="x"><a:majorFont><a:latin typeface="Georgia"/></a:majorFont>
+        <a:minorFont><a:latin typeface="Verdana"/></a:minorFont></a:fontScheme>
+      </a:themeElements></a:theme>`,
+    );
+    const { tokens, notes } = await derivePackTokens(await zip.generateAsync({ type: 'nodebuffer' }));
+    expect(tokens.style.headingFont).toBe('Georgia');
+    expect(notes.join()).toMatch(/no readable slides/);
   });
 });

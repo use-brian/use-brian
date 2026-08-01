@@ -112,7 +112,28 @@ export interface DeckSlideLayout {
   notes?: string;
 }
 
+/**
+ * Applies the resolved style's `typeScale` to every type size in the display
+ * list. One post-pass rather than threading a multiplier through forty call
+ * sites, and it keeps the packs' internal ratios exactly as designed — the
+ * whole system moves together or not at all.
+ */
+function applyTypeScale(slides: DeckSlideLayout[], style: DeckStyle): DeckSlideLayout[] {
+  const k = style.typeScale;
+  if (!k || Math.abs(k - 1) < 0.01) return slides;
+  return slides.map((slide) => ({
+    ...slide,
+    primitives: slide.primitives.map((p) =>
+      p.kind === 'text' ? { ...p, fontSizePt: Math.max(Math.round(p.fontSizePt * k), 6) } : p,
+    ),
+  }));
+}
+
 export function layoutDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
+  return applyTypeScale(layoutDeckUnscaled(spec, style), style);
+}
+
+function layoutDeckUnscaled(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] {
   if (spec.pack === 'editorial') return layoutEditorialDeck(spec, style);
   if (spec.pack === 'minimal') return layoutMinimalDeck(spec, style);
   const slides: DeckSlideLayout[] = [layoutTitleSlide(spec, style)];
@@ -1075,6 +1096,15 @@ function edSplitSlide(slide: DeckSlide, style: DeckStyle, splitOrdinal: number, 
 // is rect + text + image + lineSeg.
 // ---------------------------------------------------------------------------
 
+/**
+ * The minimal pack sets its headlines in caps. A derived reference that does
+ * NOT can suppress that; nothing can add caps to a pack that never asked for
+ * them, because forcing caps onto a serif face looks worse than leaving it be.
+ */
+function packCaps(text: string, style: DeckStyle): string {
+  return style.headingCaps === false ? text : text.toUpperCase();
+}
+
 const MIN_MARGIN = 0.92;
 
 function minPageTag(style: DeckStyle, num: number, total: number): DeckPrimitive {
@@ -1178,7 +1208,7 @@ function layoutMinimalDeck(spec: DeckSpec, style: DeckStyle): DeckSlideLayout[] 
 function minTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
     ...minTriangle(style, MIN_MARGIN + 0.22, 0.6),
-    plainText(spec.title.toUpperCase(), style.text, { x: 3.6, y: 2.45, w: DECK_PAGE_W - 3.6 - MIN_MARGIN, h: 2.15 }, {
+    plainText(packCaps(spec.title, style), style.text, { x: 3.6, y: 2.45, w: DECK_PAGE_W - 3.6 - MIN_MARGIN, h: 2.15 }, {
       fontFace: style.headingFont,
       fontSizePt: 54,
       bold: true,
@@ -1205,7 +1235,7 @@ function minTitleSlide(spec: DeckSpec, style: DeckStyle): DeckSlideLayout {
 /** Divider inverts to a full black field — the black square motif at page scale. */
 function minSectionSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   const primitives: DeckPrimitive[] = [
-    plainText(slide.title.toUpperCase(), style.background, { x: MIN_MARGIN, y: 2.9, w: BODY_W - 1.2, h: 1.9 }, {
+    plainText(packCaps(slide.title, style), style.background, { x: MIN_MARGIN, y: 2.9, w: BODY_W - 1.2, h: 1.9 }, {
       fontFace: style.headingFont,
       fontSizePt: 48,
       bold: true,
@@ -1428,7 +1458,7 @@ function minHeroSlide(slide: DeckSlide, style: DeckStyle): DeckSlideLayout {
   }
   primitives.push(
     { kind: 'rect', box: { x: 0, y: bandY, w: DECK_PAGE_W, h: DECK_PAGE_H - bandY }, fill: style.text },
-    plainText(slide.title.toUpperCase(), style.background, { x: MIN_MARGIN, y: bandY + 0.55, w: BODY_W - 1.0, h: 1.2 }, {
+    plainText(packCaps(slide.title, style), style.background, { x: MIN_MARGIN, y: bandY + 0.55, w: BODY_W - 1.0, h: 1.2 }, {
       fontFace: style.headingFont,
       fontSizePt: 40,
       bold: true,

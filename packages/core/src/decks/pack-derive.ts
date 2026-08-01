@@ -1,5 +1,14 @@
 import JSZip from 'jszip';
-import { DECK_PAGE_H, DECK_PAGE_W, contrastRatio, mix, type DslPackTokens, type DslScale } from '@use-brian/shared/decks';
+import {
+  DECK_CANONICAL_HEADLINE_PT,
+  DECK_PAGE_H,
+  DECK_PAGE_W,
+  contrastRatio,
+  deckTypeScaleFor,
+  mix,
+  type DslPackTokens,
+  type DslScale,
+} from '@use-brian/shared/decks';
 import { extractDeckStyle } from './style-extract.js';
 
 /**
@@ -170,7 +179,13 @@ export async function derivePackTokens(bytes: Uint8Array | Buffer): Promise<Deri
   }
 
   const slideNames = Object.keys(zip.files).filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n));
-  if (!slideNames.length) throw new Error('that file has no slides — is it a .pptx?');
+  // No readable slides is a DEGRADATION, not a failure: fall back to the theme,
+  // which is what extraction did before derivation existed. Derivation must
+  // never fail where plain extraction would have succeeded — a reference whose
+  // slides we cannot parse should still contribute its palette and fonts.
+  if (!slideNames.length) {
+    notes.push('no readable slides — palette, fonts and type scale come from the theme scheme only');
+  }
   const runs: Run[] = [];
   const edges: number[] = [];
   const slideXmls: string[] = [];
@@ -233,6 +248,17 @@ export async function derivePackTokens(bytes: Uint8Array | Buffer): Promise<Deri
   const headingCaps = big.length > 0 && big.filter((r) => r.text === r.text.toUpperCase()).length / big.length > 0.6;
 
   notes.push('chrome (ornaments, recurring marks) is not derived — a derived pack is tokens only');
+
+  // Carried on the style so they survive storage and reach layoutDeck without
+  // new plumbing: `style` is already the jsonb the deck row persists.
+  style.typeScale = deckTypeScaleFor(scale.xl);
+  style.headingCaps = headingCaps;
+  if (Math.abs(style.typeScale - scale.xl / DECK_CANONICAL_HEADLINE_PT) > 0.001) {
+    notes.push(
+      `reference headline is ${scale.xl}pt; type scale clamped to ${style.typeScale.toFixed(2)}x to stay legible`,
+    );
+  }
+  notes.push('margin is measured but not applied — layouts keep their own, so spacing will not match the reference exactly');
 
   return {
     tokens: {

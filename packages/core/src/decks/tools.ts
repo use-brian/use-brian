@@ -13,7 +13,7 @@ import type { FilesApi, FilesContext } from '../workspace-files/api.js'
 import { ctxFor, errorMessage, workspaceGate } from '../workspace-files/tool-helpers.js'
 import { resolveDeckImages } from './image-resolve.js'
 import { writeDeckPptx } from './pptx-writer.js'
-import { extractDeckStyle } from './style-extract.js'
+import { derivePackTokens } from './pack-derive.js'
 
 /**
  * Deck tools — generatePowerpoint / updatePowerpoint / getPowerpoint.
@@ -79,7 +79,10 @@ export interface DeckToolOptions {
 }
 
 const STYLE_SCOPE_NOTE =
-  'Style extraction copies the reference deck\'s COLORS and FONTS onto the standard layouts; it does not clone its slide designs or images.'
+  "Style extraction copies the reference deck's COLORS, FONTS, type SIZE and caps treatment onto the standard layouts. " +
+  'It does NOT clone its slide designs, ornaments, spacing or images, so the result will read as the same art direction ' +
+  'rather than as the same deck. The result carries `styleNotes` listing what could not be measured - relay those to the ' +
+  'user instead of implying the deck matches their reference.'
 
 const LAYOUT_MANUAL =
   "Slide layouts: 'content' (title + bullets and/or a chart or image), 'statement' (one big centered claim), " +
@@ -105,11 +108,17 @@ async function resolveStyle(
   filesApi: FilesApi,
   ctx: FilesContext,
   styleFromFile: string,
-): Promise<{ style: DeckStyle; styleSource: string } | { error: string }> {
+): Promise<{ style: DeckStyle; styleSource: string; notes: string[] } | { error: string }> {
   const read = await filesApi.readBytes(ctx, styleFromFile)
   if (!read.ok) return { error: errorMessage(read.error) }
   try {
-    return { style: await extractDeckStyle(read.value.bytes), styleSource: read.value.file.path }
+    // Full derivation, not just the theme: palette observed from the slides
+    // (most producers leave theme1.xml at the Office default), plus the
+    // reference's type weight and caps treatment. `notes` travels with it so
+    // the model can tell the user what did NOT transfer rather than implying
+    // a full match.
+    const derived = await derivePackTokens(read.value.bytes)
+    return { style: derived.tokens.style, styleSource: read.value.file.path, notes: derived.notes }
   } catch (err) {
     return { error: err instanceof Error ? err.message : 'could not extract a style from that file' }
   }
@@ -189,11 +198,13 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
 
       let style: DeckStyle | null = null
       let styleSource: string | null = null
+      let styleNotes: string[] = []
       if (styleFromFile) {
         const resolved = await resolveStyle(filesApi, ctx, styleFromFile)
         if ('error' in resolved) return { data: resolved.error, isError: true }
         style = resolved.style
         styleSource = resolved.styleSource
+        styleNotes = resolved.notes
       }
 
       const id = randomUUID()
@@ -216,6 +227,9 @@ export function createDeckTools(opts: DeckToolOptions): Tool[] {
           version: row.version,
           slideCount: parsed.data.slides.length + 1,
           styleSource: row.styleSource ?? undefined,
+          // what did NOT transfer from the reference — relay these rather than
+          // letting the user assume their deck matches it
+          styleNotes: styleNotes.length ? styleNotes : undefined,
           previewUrl: preview(appOrigin, ctx.workspaceId, row.id),
         },
       }
