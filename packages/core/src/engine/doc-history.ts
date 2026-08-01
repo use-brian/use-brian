@@ -14,8 +14,8 @@
  * "Token cost", `docs/plans/doc-turn-context-optimization.md`).
  *
  * The key observation that makes elision lossless: the **current** page state is
- * re-delivered fresh every turn (the "Active doc page" block, attached to the
- * newest user message via the turn-context envelope in
+ * re-delivered fresh every turn (the "Active doc page" block, represented as
+ * user-visible context on the newest user message in
  * `packages/api/src/routes/chat.ts`). So a *stale* snapshot sitting in
  * history carries no signal the model can't get from the live injection — it is
  * pure exhaust. We keep the most-recent `keepRecent` page-state results verbatim

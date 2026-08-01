@@ -25,13 +25,20 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronRight, Kanban, ListChecks, Rows3 } from "lucide-react";
+import {
+  ChevronRight,
+  Kanban,
+  ListChecks,
+  Rows3,
+  ShieldCheck,
+} from "lucide-react";
 import { OperatorTopbar } from "@/components/operator/operator-topbar";
 import { cn } from "@/lib/utils";
 import { mutateSurfaceCache, useCachedResource } from "@/lib/surface-cache";
 import { surfaceDataKey } from "@/lib/surface-prefetch";
 import { useT } from "@/lib/i18n/client";
 import { TaskSuggestions } from "@/components/tasks/task-suggestions";
+import { TaskRulesPanel } from "@/components/tasks/task-rules-panel";
 import { format } from "@/lib/i18n/format";
 import { Checkbox } from "@/components/ui/checkbox";
 import { confirmDialog } from "@/components/ui/confirm-dialog";
@@ -111,6 +118,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const taskRulesOpen = searchParams.get("task-settings") === "rules";
 
   // ── Data ──────────────────────────────────────────────────────────────
   // Read through the surface cache: coming back to Tasks paints the last known
@@ -235,6 +243,19 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
   const openTask = useMemo(
     () => (rows ?? []).find((r) => r.id === openTaskId) ?? null,
     [rows, openTaskId],
+  );
+
+  const setTaskRulesOpen = useCallback(
+    (open: boolean) => {
+      const next = new URLSearchParams(searchParams.toString());
+      if (open) next.set("task-settings", "rules");
+      else next.delete("task-settings");
+      const search = next.toString();
+      router.replace(search ? `${pathname}?${search}` : pathname, {
+        scroll: false,
+      });
+    },
+    [pathname, router, searchParams],
   );
 
   // ── Mutations (supersession-aware) ────────────────────────────────────
@@ -515,6 +536,25 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
         app="tasks"
         right={
           <>
+            <button
+              type="button"
+              aria-label={t.guardrails.rulesTitle}
+              aria-pressed={taskRulesOpen}
+              title={t.guardrails.rulesTitle}
+              onClick={() => {
+                setOpenTaskId(null);
+                setTaskRulesOpen(true);
+              }}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12.5px]",
+                taskRulesOpen
+                  ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60",
+              )}
+            >
+              <ShieldCheck className="size-3.5" aria-hidden />
+              <span className="max-lg:hidden">{t.guardrails.rulesTitle}</span>
+            </button>
             {rows !== null && (
               <span className="text-[12.5px] text-sidebar-foreground/70 max-sm:hidden">
                 {format(t.countSummary, {
@@ -916,7 +956,7 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
 
         {/* Task peek panel — floats over the surface; Brain stays one click
             away via its header link. */}
-        {openTask && (
+        {!taskRulesOpen && openTask && (
           <TaskRecordDetail
             workspaceId={workspaceId}
             row={openTask}
@@ -924,6 +964,12 @@ export function TasksSurface({ workspaceId }: { workspaceId: string }) {
             projects={projects}
             commitField={commitField}
             onClose={() => setOpenTaskId(null)}
+          />
+        )}
+        {taskRulesOpen && (
+          <TaskRulesPanel
+            workspaceId={workspaceId}
+            onClose={() => setTaskRulesOpen(false)}
           />
         )}
       </div>

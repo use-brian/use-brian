@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import {
+  attachUserVisibleContext,
   buildFullSystemPrompt,
   buildSplitSystemPrompt,
+  formatPrivateRuntimeContext,
   resolveLayer1Prompt,
   maybeAppendFollowupChips,
 } from '../_prompt-builder.js'
+import type { Message } from '@use-brian/core'
 
 const baseArgs = {
   basePrompt: 'LAYER1_BASE',
@@ -14,20 +17,21 @@ const baseArgs = {
 }
 
 describe('[COMP:prompt/builder] Layer 2 — assistant custom instructions', () => {
-  it('renders Layer 2 immediately after Layer 1 when provided', () => {
+  it('renders Layer 2 immediately after Layer 1 and the engine boundary after stable addenda', () => {
     const out = buildFullSystemPrompt({
       ...baseArgs,
       assistantInstructions: 'Always reply starting with "GM"',
     })
 
     const layer1Idx = out.indexOf('LAYER1_BASE')
+    const boundaryIdx = out.indexOf('# Runtime context boundary')
     const layer2Idx = out.indexOf('# Assistant instructions')
     const memoryIdx = out.indexOf('## Memory Index')
 
     expect(layer1Idx).toBeGreaterThanOrEqual(0)
+    expect(boundaryIdx).toBeGreaterThan(memoryIdx)
     expect(layer2Idx).toBeGreaterThan(layer1Idx)
     expect(memoryIdx).toBeGreaterThan(layer2Idx)
-    // No content appears between Layer 1 and Layer 2 other than block separator.
     expect(out.slice(layer1Idx + 'LAYER1_BASE'.length, layer2Idx)).toBe('\n\n')
     // Layer 2 body renders verbatim under its header.
     expect(out).toContain('# Assistant instructions\nAlways reply starting with "GM"')
@@ -51,8 +55,8 @@ describe('[COMP:prompt/builder] Layer 2 — assistant custom instructions', () =
   })
 })
 
-describe('[COMP:prompt/builder] Cache-aligned block order', () => {
-  it('places the stable prefix (Layer 1 → Layer 2 → memory → skills) before the volatile suffix (datetime → …)', () => {
+describe('[COMP:prompt/builder] Provenance-preserving block order', () => {
+  it('places stable instructions before the private runtime suffix', () => {
     const out = buildFullSystemPrompt({
       ...baseArgs,
       assistantInstructions: 'LAYER2_BODY',
@@ -69,6 +73,7 @@ describe('[COMP:prompt/builder] Cache-aligned block order', () => {
       '# Assistant instructions',
       '## Memory Index',
       '## Skills',
+      '# Runtime context boundary',
       '# User Context',
       '# Relevant topic history',
       '# Group chat',
@@ -106,7 +111,7 @@ describe('[COMP:prompt/builder] Cache-aligned block order', () => {
     expect(topicIdx).toBeGreaterThan(epIdx)
   })
 
-  it('puts datetime (volatile) below memory (stable) for cache alignment', () => {
+  it('puts private datetime context below stable memory', () => {
     const out = buildFullSystemPrompt(baseArgs)
     const memoryIdx = out.indexOf('## Memory Index')
     const datetimeIdx = out.indexOf('# User Context')
@@ -172,17 +177,19 @@ describe('[COMP:prompt/builder] Optional blocks', () => {
   })
 
   it('renders reply context with the assistant/other-user distinction', () => {
-    const fromAssistant = buildFullSystemPrompt({
+    const fromAssistant = buildSplitSystemPrompt({
       ...baseArgs,
       replyContext: { text: 'earlier response', fromAssistant: true },
     })
-    expect(fromAssistant).toContain('you (the assistant)')
+    expect(fromAssistant.userVisibleContext).toContain('you (the assistant)')
+    expect(fromAssistant.stablePrompt).not.toContain('# Reply context')
+    expect(fromAssistant.privateRuntimeContext).not.toContain('# Reply context')
 
-    const fromOther = buildFullSystemPrompt({
+    const fromOther = buildSplitSystemPrompt({
       ...baseArgs,
       replyContext: { text: 'earlier message', fromAssistant: false },
     })
-    expect(fromOther).toContain('another user')
+    expect(fromOther.userVisibleContext).toContain('another user')
   })
 
   it('omits topic hint when confidence is zero or label is "(uncategorized)"', () => {
@@ -368,8 +375,8 @@ describe('[COMP:prompt/builder] maybeAppendFollowupChips — chip addendum gatin
   })
 })
 
-describe('[COMP:prompt/builder] buildSplitSystemPrompt — cache-stable split', () => {
-  it('keeps stablePrompt byte-identical across turns that differ only in volatile sections', () => {
+describe('[COMP:prompt/builder] buildSplitSystemPrompt — provenance split', () => {
+  it('keeps stablePrompt byte-identical while private runtime context changes', () => {
     const turnA = buildSplitSystemPrompt({
       ...baseArgs,
       assistantInstructions: 'Persona',
@@ -384,14 +391,12 @@ describe('[COMP:prompt/builder] buildSplitSystemPrompt — cache-stable split', 
       sessionStateBlock: '# Open commitments\n- (none)',
       episodicContext: '# Relevant topic history\ncooking',
     })
-    // The whole point of the split: per-turn churn must not touch the
-    // system-prompt half, or the provider's implicit-cache prefix (system
-    // prompt + history) breaks on every turn.
     expect(turnA.stablePrompt).toBe(turnB.stablePrompt)
-    expect(turnA.turnContext).not.toBe(turnB.turnContext)
+    expect(turnA.privateRuntimeContext).not.toBe(turnB.privateRuntimeContext)
+    expect(turnA.userVisibleContext).toBe('')
   })
 
-  it('routes volatile sections to turnContext and stable sections to stablePrompt', () => {
+  it('separates stable, private-runtime, and user-visible sections', () => {
     const out = buildSplitSystemPrompt({
       ...baseArgs,
       assistantInstructions: 'Persona',
@@ -404,13 +409,16 @@ describe('[COMP:prompt/builder] buildSplitSystemPrompt — cache-stable split', 
     expect(out.stablePrompt).toContain('# Working on a Doc page')
     expect(out.stablePrompt).toContain('## Memory Index')
     expect(out.stablePrompt).not.toContain('Current date and time')
-    expect(out.turnContext).toContain('Current date and time')
-    expect(out.turnContext).toContain('# Relevant topic history')
-    expect(out.turnContext).toContain('# Reply context')
-    expect(out.turnContext).not.toContain('LAYER1_BASE')
+    expect(out.privateRuntimeContext).toContain('Current date and time')
+    expect(out.privateRuntimeContext).toContain('# Relevant topic history')
+    expect(out.privateRuntimeContext).not.toContain('# Reply context')
+    expect(out.privateRuntimeContext).not.toContain('LAYER1_BASE')
+    expect(out.userVisibleContext).toContain('# Reply context')
+    expect(out.userVisibleContext).toContain('earlier message')
+    expect(out.userVisibleContext).not.toContain('# User Context')
   })
 
-  it('recombines to exactly buildFullSystemPrompt', () => {
+  it('recombines stable and private system sections to exactly buildFullSystemPrompt', () => {
     const args = {
       ...baseArgs,
       assistantInstructions: 'Persona',
@@ -419,6 +427,49 @@ describe('[COMP:prompt/builder] buildSplitSystemPrompt — cache-stable split', 
     }
     const combined = buildFullSystemPrompt(args)
     const split = buildSplitSystemPrompt(args)
-    expect([split.stablePrompt, split.turnContext].join('\n\n')).toBe(combined)
+    expect(
+      [split.stablePrompt, formatPrivateRuntimeContext(split.privateRuntimeContext)]
+        .filter(Boolean)
+        .join('\n\n'),
+    ).toBe(combined)
+  })
+
+  it('never includes a user-visible reply quote in the full system prompt', () => {
+    const combined = buildFullSystemPrompt({
+      ...baseArgs,
+      replyContext: { text: 'ありがとう！', fromAssistant: false },
+    })
+    expect(combined).not.toContain('ありがとう！')
+    expect(combined).not.toContain('# Reply context')
+  })
+
+  it('regression: private notes and a visible Japanese reply never share the user role', () => {
+    const japanese =
+      'ありがとう！明日からいろいろ試してみるよ。わからないことがあったらまた質問するね？'
+    const split = buildSplitSystemPrompt({
+      ...baseArgs,
+      sessionStateBlock:
+        '# Open commitments\n- aspiration-vs-reality\n- map_links\n- restaurant_criteria',
+      replyContext: { text: japanese, fromAssistant: false },
+    })
+    const systemPrompt = [
+      split.stablePrompt,
+      formatPrivateRuntimeContext(split.privateRuntimeContext),
+    ].join('\n\n')
+    const messages = attachUserVisibleContext(
+      [{ role: 'user', content: '呢句咩意思' }] satisfies Message[],
+      split.userVisibleContext,
+    )!
+    const userPayload = (messages[0].content as Array<{ type: string; text?: string }>)
+      .map((block) => block.text ?? '')
+      .join('\n')
+
+    expect(systemPrompt).toContain('# Open commitments')
+    expect(systemPrompt).toContain('<private_runtime_context>')
+    expect(systemPrompt).not.toContain(japanese)
+    expect(userPayload).toContain(japanese)
+    expect(userPayload).not.toContain('# Open commitments')
+    expect(userPayload).not.toContain('aspiration-vs-reality')
+    expect(userPayload.trimEnd().endsWith('呢句咩意思')).toBe(true)
   })
 })

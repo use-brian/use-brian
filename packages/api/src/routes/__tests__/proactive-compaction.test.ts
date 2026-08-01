@@ -272,6 +272,7 @@ function makeSessionMessage(partial: Partial<SessionMessage> & { sequenceNum: nu
     topicConfidence: partial.topicConfidence ?? null,
     channelMessageId: partial.channelMessageId ?? null,
     senderUserId: partial.senderUserId ?? null,
+    senderAssistantId: null,
     attachments: partial.attachments ?? [],
   }
 }

@@ -43,6 +43,23 @@ export type DocSession = {
   channelId: string;
   /** ISO string — server emits a Date which JSON-serialises here. */
   lastActive: string;
+  /**
+   * The surface that minted the session (migrations 187/255), `null` for rows
+   * predating the migration. The Chat app's sidebar rail uses it to demote
+   * ambient dock threads into a collapsed "Other conversations" section —
+   * `'chat'` and legacy `null` count as chat-app sessions, matching the
+   * server's own `?appOrigin=` filter convention.
+   */
+  appOrigin: string | null;
+  /**
+   * The assistant the session is bound to. Stamped CLIENT-SIDE from the
+   * per-assistant fetch (`GET /api/sessions` is assistant-scoped and doesn't
+   * echo it); workspace-shared rows echo it server-side (a room binds ANY
+   * workspace assistant at creation, default the primary). Sessions
+   * are assistant-bound: `/api/chat` rejects a send whose `assistantId`
+   * doesn't match the session's, so the Chat app resolves this per thread.
+   */
+  assistantId?: string;
 };
 
 /**
@@ -75,6 +92,10 @@ export type DocSessionMessage = {
   /** Outbound file attachments (assistant rows only). Absent/empty when none. */
   attachments?: SessionFileAttachment[];
   senderUserId: string | null;
+  /** The ANSWERING assistant per assistant row (multi-assistant rooms, T9;
+   *  migration 390). Null on human rows and pre-390 history — render as the
+   *  session's bound assistant. */
+  senderAssistantId?: string | null;
   /** Sender's display name (`users.name` ?? email), resolved server-side so
    *  the client can attribute *other* members' comments. `null` for assistant
    *  rows and the rare unknown sender (e.g. a deleted user). */
@@ -97,6 +118,7 @@ type RawListRow = {
   title: string;
   channelId: string;
   lastActive: string | Date;
+  appOrigin?: string | null;
 };
 
 type RawMessageRow = {
@@ -106,6 +128,7 @@ type RawMessageRow = {
   timestamp: string | Date;
   attachments?: SessionFileAttachment[];
   senderUserId?: string | null;
+  senderAssistantId?: string | null;
   senderName?: string | null;
   senderAvatarUrl?: string | null;
 };
@@ -160,6 +183,8 @@ export async function fetchLatestSession(opts: {
       title: first.title,
       channelId: first.channelId,
       lastActive: toIso(first.lastActive),
+      appOrigin: first.appOrigin ?? null,
+      assistantId: opts.assistantId,
     };
   } catch {
     // Network / abort / parse — treat as no resume.
@@ -179,7 +204,7 @@ export async function fetchLatestSession(opts: {
  * Returns `[]` on any failure — an empty rail reads as "no history yet", which
  * is the same thing the user does next either way (start a chat).
  */
-export async function listSessions(opts: {
+async function listSessions(opts: {
   workspaceId: string;
   assistantId: string;
   signal?: AbortSignal;
@@ -200,10 +225,40 @@ export async function listSessions(opts: {
       title: r.title,
       channelId: r.channelId,
       lastActive: toIso(r.lastActive),
+      appOrigin: r.appOrigin ?? null,
+      assistantId: opts.assistantId,
     }));
   } catch {
     return [];
   }
+}
+
+/**
+ * The caller's sessions across EVERY given assistant, merged newest-first —
+ * the Chat app's unified rail. One `listSessions` call per assistant (the
+ * list route is assistant-scoped); a workspace holds a handful of assistants,
+ * so the fan-out stays small and the server needs no new query shape. Each
+ * row carries the `assistantId` it was fetched under, which is what lets the
+ * rail show per-thread assistant icons and the surface send with the RIGHT
+ * assistant when an old thread is reopened.
+ */
+export async function listSessionsForAssistants(opts: {
+  workspaceId: string;
+  assistantIds: string[];
+  signal?: AbortSignal;
+}): Promise<DocSession[]> {
+  const lists = await Promise.all(
+    opts.assistantIds.map((assistantId) =>
+      listSessions({
+        workspaceId: opts.workspaceId,
+        assistantId,
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      }),
+    ),
+  );
+  return lists
+    .flat()
+    .sort((a, b) => (a.lastActive < b.lastActive ? 1 : a.lastActive > b.lastActive ? -1 : 0));
 }
 
 /**
@@ -223,6 +278,8 @@ type RawWorkspaceRow = RawListRow & {
   startedByUserId?: string;
   startedByName?: string | null;
   startedByAvatarUrl?: string | null;
+  /** The room's bound assistant (rooms may bind any workspace assistant). */
+  assistantId?: string;
 };
 
 function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
@@ -231,10 +288,14 @@ function toWorkspaceSession(r: RawWorkspaceRow): WorkspaceSession {
     title: r.title,
     channelId: r.channelId,
     lastActive: toIso(r.lastActive),
+    // Shared chats are always `app_origin='chat'` (the isSharedChatSession
+    // predicate) — the server list doesn't bother echoing it.
+    appOrigin: r.appOrigin ?? "chat",
     status: r.status ?? "idle",
     startedByUserId: r.startedByUserId ?? "",
     startedByName: r.startedByName ?? null,
     startedByAvatarUrl: r.startedByAvatarUrl ?? null,
+    ...(r.assistantId ? { assistantId: r.assistantId } : {}),
   };
 }
 
@@ -270,17 +331,45 @@ export async function listWorkspaceSessions(opts: {
  */
 export async function createWorkspaceSession(
   workspaceId: string,
+  /** Bind the room to a specific workspace assistant (default: primary).
+   *  The binding is per-room for its lifetime - per-turn routing is P3. */
+  assistantId?: string,
 ): Promise<WorkspaceSession> {
   const res = await authFetch(`${API_URL}/api/sessions/workspace`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
+    body: JSON.stringify({ workspaceId, ...(assistantId ? { assistantId } : {}) }),
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(body.error ?? `Create failed: ${res.status}`);
   }
   return toWorkspaceSession((await res.json()) as RawWorkspaceRow);
+}
+
+/**
+ * Post into a room WITHOUT running a turn (`POST /api/sessions/:id/messages`
+ * — multiplayer chat T2). Send = post, instantly, for every member; the
+ * assistant replies only when addressed (an ordinary `/api/chat` send).
+ * Never busy-gated.
+ */
+export async function postRoomMessage(
+  sessionId: string,
+  message: string,
+): Promise<{ id: string; sequenceNum: number; timestamp: string }> {
+  const res = await authFetch(
+    `${API_URL}/api/sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    },
+  );
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `Post failed: ${res.status}`);
+  }
+  return (await res.json()) as { id: string; sequenceNum: number; timestamp: string };
 }
 
 /** Rename a session (`PATCH /api/sessions/:id`). Throws on rejection so the
@@ -340,6 +429,7 @@ export async function fetchSessionMessages(
       timestamp: toIso(m.timestamp),
       attachments: Array.isArray(m.attachments) ? m.attachments : [],
       senderUserId: m.senderUserId ?? null,
+      senderAssistantId: m.senderAssistantId ?? null,
       senderName: m.senderName ?? null,
       senderAvatarUrl: m.senderAvatarUrl ?? null,
     }));

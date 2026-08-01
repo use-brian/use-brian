@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachTurnContext } from '../chat.js'
+import { appAssistantForbidsResearch, appAssistantForbidsCoordinator, isAdaptiveResearchEligible, isUserBlocked, sanitizeTitle, buildActivePageInstruction, buildViewingSkillBlock, buildViewingDeckBlock, resolveStickyChannelId, isDocSurface, isAppSurface, attachUserVisibleContext } from '../chat.js'
 import type { Message } from '@use-brian/core'
 
 describe('[COMP:api/chat-route] sanitizeTitle', () => {
@@ -358,43 +358,44 @@ describe('[COMP:api/chat-route] resolveStickyChannelId', () => {
   })
 })
 
-describe('[COMP:api/chat-route] attachTurnContext — turn-context envelope', () => {
-  const ctx = '# User Context\nCurrent date and time: Wednesday, June 10, 2026 at 11:40 PM HKT'
+describe('[COMP:api/chat-route] attachUserVisibleContext — provenance boundary', () => {
+  const ctx = '# Reply context\nありがとう！明日からいろいろ試してみるよ。'
 
-  it('appends the envelope as a trailing text block on a string-content user message', () => {
+  it('prefixes visible context while keeping the actual user message last', () => {
     const messages: Message[] = [
       { role: 'assistant', content: 'hi' },
       { role: 'user', content: 'format this page' },
     ]
-    const out = attachTurnContext(messages, ctx)
+    const out = attachUserVisibleContext(messages, ctx)
     expect(out).not.toBeNull()
     expect(out).not.toBe(messages)
     const last = out![out!.length - 1]
     expect(Array.isArray(last.content)).toBe(true)
     const blocks = last.content as Array<{ type: string; text?: string }>
-    expect(blocks[0]).toEqual({ type: 'text', text: 'format this page' })
-    expect(blocks[1].type).toBe('text')
-    expect(blocks[1].text).toContain('<turn_context>')
-    expect(blocks[1].text).toContain(ctx)
-    expect(blocks[1].text!.trimEnd().endsWith('</turn_context>')).toBe(true)
+    expect(blocks[0].type).toBe('text')
+    expect(blocks[0].text).toContain('<user_visible_context>')
+    expect(blocks[0].text).toContain(ctx)
+    expect(blocks[0].text!.trimEnd().endsWith('</user_visible_context>')).toBe(true)
+    expect(blocks[1]).toEqual({ type: 'text', text: 'format this page' })
     // The input array is untouched — the envelope must never reach the
     // persisted history (cache-prefix invariant).
     expect(typeof messages[1].content).toBe('string')
   })
 
-  it('appends the envelope to an existing content-block array', () => {
+  it('prefixes the envelope to an existing content-block array', () => {
     const messages: Message[] = [
       { role: 'user', content: [{ type: 'text', text: 'hello' }] as Message['content'] },
     ]
-    const out = attachTurnContext(messages, ctx)
+    const out = attachUserVisibleContext(messages, ctx)
     const blocks = out![0].content as Array<{ type: string; text?: string }>
     expect(blocks).toHaveLength(2)
-    expect(blocks[1].text).toContain('<turn_context>')
+    expect(blocks[0].text).toContain('<user_visible_context>')
+    expect(blocks[1].text).toBe('hello')
   })
 
   it('returns null when no plain trailing user message can carry the envelope', () => {
-    expect(attachTurnContext([{ role: 'assistant', content: 'x' }], ctx)).toBeNull()
-    expect(attachTurnContext([], ctx)).toBeNull()
+    expect(attachUserVisibleContext([{ role: 'assistant', content: 'x' }], ctx)).toBeNull()
+    expect(attachUserVisibleContext([], ctx)).toBeNull()
     const toolCarrier: Message[] = [
       {
         role: 'user',
@@ -403,12 +404,25 @@ describe('[COMP:api/chat-route] attachTurnContext — turn-context envelope', ()
         ] as Message['content'],
       },
     ]
-    expect(attachTurnContext(toolCarrier, ctx)).toBeNull()
+    expect(attachUserVisibleContext(toolCarrier, ctx)).toBeNull()
   })
 
-  it('returns the input unchanged for an empty turn context', () => {
+  it('returns the input unchanged for empty visible context', () => {
     const messages: Message[] = [{ role: 'user', content: 'hi' }]
-    expect(attachTurnContext(messages, '')).toBe(messages)
-    expect(attachTurnContext(messages, '   ')).toBe(messages)
+    expect(attachUserVisibleContext(messages, '')).toBe(messages)
+    expect(attachUserVisibleContext(messages, '   ')).toBe(messages)
+  })
+
+  it('regression: "呢句" can target the visible Japanese quote, never hidden runtime notes', () => {
+    const actualQuestion = '呢句咩意思'
+    const messages: Message[] = [{ role: 'user', content: actualQuestion }]
+    const out = attachUserVisibleContext(messages, ctx)
+    const blocks = out![0].content as Array<{ type: string; text?: string }>
+    const userRolePayload = blocks.map((block) => block.text ?? '').join('\n')
+
+    expect(userRolePayload).toContain('ありがとう！')
+    expect(userRolePayload).not.toContain('# Open commitments')
+    expect(userRolePayload).not.toContain('# User Context')
+    expect(blocks.at(-1)?.text).toBe(actualQuestion)
   })
 })

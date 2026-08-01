@@ -12,6 +12,7 @@ import {
   operatorAppPath,
   operatorAppStorageKey,
   readOperatorApp,
+  reorderHomeApps,
   writeOperatorApp,
 } from "../operator-apps";
 
@@ -109,5 +110,60 @@ describe("[COMP:app-web/operator-app-bar] operator app registry", () => {
   it("ignores junk in the cache", () => {
     window.localStorage.setItem(operatorAppStorageKey("w1"), "nonsense");
     expect(readOperatorApp("w1", ["page", "chat"])).toBe("page");
+  });
+});
+
+describe("[COMP:app-web/operator-app-bar] reorderHomeApps", () => {
+  it("moves an entry down into the target's slot", () => {
+    expect(reorderHomeApps(["page", "tasks", "crm", "chat"], "page", "crm")).toEqual([
+      "tasks",
+      "crm",
+      "page",
+      "chat",
+    ]);
+  });
+
+  it("moves an entry up into the target's slot", () => {
+    expect(reorderHomeApps(["page", "tasks", "crm", "chat"], "chat", "tasks")).toEqual([
+      "page",
+      "chat",
+      "tasks",
+      "crm",
+    ]);
+  });
+
+  it("is a permutation: never drops, duplicates, or invents an entry", () => {
+    const before = ["page", "tasks", "crm", "feed", "browsers", "chat"] as const;
+    const after = reorderHomeApps(before, "browsers", "page");
+    expect(after).toHaveLength(before.length);
+    expect([...after].sort()).toEqual([...before].sort());
+    expect(after[0]).toBe("browsers");
+  });
+
+  it("carries a custom app through a reorder of the built-ins around it", () => {
+    expect(reorderHomeApps(["page", "custom:app-1", "chat"], "chat", "page")).toEqual([
+      "chat",
+      "page",
+      "custom:app-1",
+    ]);
+  });
+
+  it("returns a copy unchanged when either end is absent or identical", () => {
+    const before: readonly ("page" | "tasks")[] = ["page", "tasks"];
+    // A stale drag id must not drop or duplicate an app.
+    expect(reorderHomeApps(before, "crm", "page")).toEqual(["page", "tasks"]);
+    expect(reorderHomeApps(before, "page", "crm")).toEqual(["page", "tasks"]);
+    expect(reorderHomeApps(before, "page", "page")).toEqual(["page", "tasks"]);
+    // Copy, not the same reference — callers persist the result.
+    expect(reorderHomeApps(before, "page", "page")).not.toBe(before);
+  });
+
+  it("survives the API round trip: any permutation is a valid strip", () => {
+    // `validateHomeApps` (the write side) rejects duplicates and unknown keys
+    // but not order, which is what makes user-defined ordering a client-only
+    // change. Guard the property the page relies on.
+    const reordered = reorderHomeApps(OPERATOR_APP_KEYS, "chat", "page");
+    expect(new Set(reordered).size).toBe(OPERATOR_APP_KEYS.length);
+    expect(homePath("w-order", reordered)).toBe("/w/w-order/chat");
   });
 });
